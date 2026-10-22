@@ -37,6 +37,7 @@ import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
 import { probePiRpc, unavailablePiCapabilities } from "./pi-rpc.js";
 import { launchTargetStillMatches, listWslDistros, resolveInWsl, resolveInWslCandidates, resolveNativeCandidates, resolvedLaunchIdentity, run, type ResolvedBinary, type ResolvedLaunch } from "./resolve.js";
 import { invalidateStaleNativeInstallation } from "./stale-installation.js";
+import { ProviderHomeLeaseError } from "../provider-home-lease-worker-protocol.js";
 
 const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 20_000;
 const MAX_CONCURRENT_CONFIGURED_ACP_PROBES = 4;
@@ -712,15 +713,22 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
       if (!options.authorize) throw new Error("provider-HOME admission unavailable");
       authorization = await options.authorize({ id: k.id, name: k.name, command: bin.launch.command,
         args: bin.launch.args, driver: k.driver, env: {}, context: { kind: "native" } }, {});
-      } catch {
+      } catch (error) {
         const id = index === 0 ? k.id : `${k.id}-installation-${suffix}`;
         const name = index === 0 ? k.name : `${k.name} (${bin.path})`;
         const unavailable = k.bin === "codex" ? unavailableCodexAgentDefinition(id, name, { kind: "native" })
           : k.bin === "claude" ? unavailableClaudeAgentDefinition(id, name, { kind: "native" })
             : unavailablePiAgentDefinition(id, name, { kind: "native" });
-        nativeSlots[knownIndex]![index] = [{ ...unavailable, command: bin.launch.command,
+        const message = error instanceof ProviderHomeLeaseError
+          ? `Provider HOME ownership blocked discovery. ${error.message}`
+          : "Provider HOME ownership could not be established for discovery. Preserve lease evidence and inspect the runner's recovery diagnostics.";
+        const failure = { code: "probe_failed" as const, message, retryable: true };
+        nativeSlots[knownIndex]![index] = [{ ...unavailable,
+          ...(unavailable.claudeCode ? { claudeCode: { ...unavailable.claudeCode, status: "unsupported" as const, failure } } : {}),
+          ...(unavailable.codexAppServer ? { codexAppServer: { ...unavailable.codexAppServer, status: "unsupported" as const, failure } } : {}),
+          command: bin.launch.command,
           args: bin.launch.args, bin: k.bin, installation, source: "discovered",
-          unavailableReason: "Provider HOME ownership could not be established for discovery. Preserve lease evidence and inspect the runner's recovery diagnostics." }];
+          unavailableReason: message }];
         return;
       }
       const processes: Promise<boolean>[] = [];

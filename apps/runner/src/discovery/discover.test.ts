@@ -23,6 +23,7 @@ import {
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
 import { resolvedLaunchIdentity } from "./resolve.js";
+import { ProviderHomeLeaseError } from "../provider-home-lease-worker-protocol.js";
 
 const testAdmission = { authorize: async () => ({ settle: async (proofs: Promise<boolean>[]) => { await Promise.all(proofs); } }) };
 const probeConfiguredAcpAgent: typeof realProbeConfiguredAcpAgent = (agent, env, options) =>
@@ -99,6 +100,27 @@ test("refused native discovery preserves installation metadata and never execute
   assert.ok(codex.capabilities);
   assert.match(codex.unavailableReason!, /HOME ownership/u);
   assert.doesNotMatch(codex.unavailableReason!, /PRIVATE_LEASE_DIAGNOSTIC/u);
+  assert.throws(() => readFileSync(marker), { code: "ENOENT" });
+});
+
+test("installed native harnesses retain an ownership probe failure instead of reporting missing executables", { skip: process.platform === "win32" }, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-ownership-"));
+  const originalPath = process.env.PATH;
+  t.after(() => { process.env.PATH = originalPath; rmSync(root, { recursive: true, force: true }); });
+  const marker = join(root, "unexpected-provider-start");
+  for (const name of ["claude", "codex"]) writeFileSync(join(root, name), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o700 });
+  process.env.PATH = `${root}:${originalPath ?? "/usr/bin:/bin"}`;
+  const discovered = await discoverAgents({ authorize: async () => { throw new ProviderHomeLeaseError("process_uninspectable"); } });
+  for (const name of ["claude", "codex"]) {
+    const agent = discovered.find(agent => agent.installation?.path === join(root, name));
+    assert.ok(agent);
+    const probe = agent.claudeCode ?? agent.codexAppServer;
+    assert.equal(agent.available, false, "ownership refusal must not admit execution");
+    assert.equal(probe?.status, "unsupported", "the executable exists but its probe could not run");
+    assert.equal(probe?.failure?.code, "probe_failed");
+    assert.match(probe.failure.message, /uninspectable process/);
+    assert.doesNotMatch(probe.failure.message, /not installed|not found/);
+  }
   assert.throws(() => readFileSync(marker), { code: "ENOENT" });
 });
 

@@ -247,6 +247,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
   const probing = agents.length === 0 && runner.agentsRefreshed !== true;
   const verified = runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability");
   const installCommands = agentInstallHints(runner.os).filter((hint) => hint.command);
+  const nativeHarnessListed = listed.some(({ agent }) => agent.driver === "claude-code" || agent.driver === "codex-app-server");
 
   return (
     <DetailSection title="Agents" count={probing ? undefined : agents.length}>
@@ -270,10 +271,13 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
             <State compact title="No Agents Ready" className="machine-agents-empty">
               {verified ? (
                 <>
+                  {listed.length > 0 && <p>Open an agent’s details to resolve its availability, then rediscover.</p>}
+                  {!nativeHarnessListed && <>
                   <p>Install Claude Code or Codex on this machine, then rediscover.</p>
                   {installCommands.map((hint) => (
                     <CodeWell key={hint.name} value={hint.command!} name={`${hint.name} Install Command`} />
                   ))}
+                  </>}
                 </>
               ) : (
                 <p>Update this runner to verify its configured agent availability.</p>

@@ -97,14 +97,17 @@ test("abandoned lease-only, next-only, and disconnected journals recover without
     const lock = writePartialJournal(home, shape);
     const evidence = readdirSync(lock).map((name) => ({ name, bytes: readFileSync(join(lock, name)) }));
     const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
-      pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+      pid: process.pid, hostname: "host-a", isProcessAlive: (pid) => pid === process.pid,
     });
     registry.acquire(request(home));
-    for (const item of evidence) assert.deepEqual(readFileSync(join(lock, item.name)), item.bytes);
+    for (const item of evidence) {
+      if (shape === "lease") assert.equal(existsSync(join(leasePaths(home).root, "mutable-home.recovery.json")), true, "a complete journal enters bounded storage");
+      else assert.deepEqual(readFileSync(join(lock, item.name)), item.bytes);
+    }
     const competitor = new ProviderHomeLeaseRegistry(OWNER_A, {
-      pid: 303, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+      pid: process.pid, hostname: "host-a", isProcessAlive: (pid) => pid === process.pid,
     });
-    assert.throws(() => competitor.acquire(request(home)), /already in use by process 202/);
+    assert.throws(() => competitor.acquire(request(home)), new RegExp(`already in use by process ${process.pid}`));
     registry.releaseAll();
     competitor.acquire(request(home));
     competitor.releaseAll();
@@ -535,13 +538,13 @@ test("a validated stale same-owner legacy lease is migrated and reclaimed withou
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const lock = writeLegacyLease(home);
   const replacement = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+    pid: process.pid, hostname: "host-a", isProcessAlive: () => false,
   });
   replacement.acquire(request(home));
   const entries = readdirSync(lock).sort();
   assert.equal(entries[0], "lease.json", "the legacy ownership evidence is never removed");
-  assert.match(entries[1]!, /^next-11111111-1111-4111-8111-111111111111\.json$/u);
-  assert.equal(journalRecords(home).at(-1)?.pid, 202);
+  assert.ok(entries.includes("protocol-v4.json"), "rollback readers must refuse the bounded format");
+  assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).pid, process.pid);
   replacement.releaseAll();
 });
 
@@ -711,13 +714,13 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
   t.after(() => rmSync(home, { recursive: true, force: true }));
   writeLegacyLease(home);
   const winner = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    pid: process.pid, hostname: "host-a", isProcessAlive: (pid) => pid === process.pid,
   });
   let raced = false;
   const loser = new ProviderHomeLeaseRegistry(OWNER_A, {
     pid: 303,
     hostname: "host-a",
-    isProcessAlive: (pid) => pid === 202,
+    isProcessAlive: (pid) => pid === process.pid,
     beforeTransitionPublishForTest: () => {
       if (!raced) {
         raced = true;
@@ -726,8 +729,9 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
     },
   });
   assert.throws(() => loser.acquire(request(home)), /lease changed during recovery/);
-  assert.equal(journalRecords(home).filter((record) => record.state === "active").length, 1);
-  assert.equal(journalRecords(home).at(-1)?.pid, 202);
+  const selected = JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8"));
+  assert.equal(selected.state, "active");
+  assert.equal(selected.pid, process.pid);
   winner.releaseAll();
 });
 
@@ -1270,7 +1274,7 @@ test("a predecessor modified after publication invalidates its hash-linked succe
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const lock = writeLegacyLease(home);
   const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+    pid: process.pid, hostname: "host-a", isProcessAlive: () => false,
   });
   registry.acquire(request(home));
   writeFileSync(join(lock, "lease.json"), `${readFileSync(join(lock, "lease.json"), "utf8")} `);
@@ -1293,7 +1297,7 @@ test("hard-linked record substitution is detected after the link target is modif
   const alias = join(home, "record-alias");
   linkSync(join(lock, "lease.json"), alias);
   const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+    pid: process.pid, hostname: "host-a", isProcessAlive: () => false,
   });
   registry.acquire(request(home));
   writeFileSync(alias, `${readFileSync(alias, "utf8")} `);

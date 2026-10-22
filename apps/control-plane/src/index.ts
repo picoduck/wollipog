@@ -173,7 +173,7 @@ import {
 } from "./local-device-credential.js";
 import { RemoteAccess } from "./remote-access.js";
 import { registerRemoteAccessRoutes } from "./remote-access-route.js";
-import { probePublicOriginWithFetch, registerHostAdminRoute } from "./host-admin-route.js";
+import { probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness } from "./host-admin-route.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
@@ -2642,6 +2642,7 @@ registerHostAdminRoute(app, {
     status: runner.status,
     version: runner.version,
     protocolVersion: runner.protocolVersion ?? null,
+    harnessReadiness: runnerHarnessReadiness(runner),
   })),
   pairedDeviceCount: () => db.listDevices().length,
   doctor: {

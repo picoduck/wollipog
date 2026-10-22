@@ -77,6 +77,7 @@ function fake(t: { after(fn: () => void): void }, options: {
   };
   let cpRunning = false;
   let runnerRunning = false;
+  let runnerConnections = 0;
   let clock = 0;
   const enabled = new Set<string>();
   const unitState = (unit: string) => {
@@ -102,7 +103,7 @@ function fake(t: { after(fn: () => void): void }, options: {
         publicOrigin: null, dashboard: { webServed: true, pairingHosts: [] },
         database: { path: layout.controlPlaneDb, ready: true }, artifactStore: { path: layout.controlPlaneArtifactDir, ready: true },
         localCredential: { path: layout.controlPlaneLocalTokenFile, safe: true, issues: [] },
-        runners: { registered: online ? 1 : 0, online: online ? 1 : 0, items: online ? [{ runnerId: "box-1", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION }] : [] },
+        runners: { registered: online ? 1 : 0, online: online ? 1 : 0, items: online ? [{ runnerId: "box-1", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION, harnessReadiness: { connectedAt: runnerConnections, refreshed: true, agents: [] } }] : [] },
         devices: { paired: 0 }, warnings: [],
       });
     }
@@ -131,7 +132,7 @@ function fake(t: { after(fn: () => void): void }, options: {
         if (args[args.length - 1] === "enable" || args[args.length - 1] === "disable") return { code: 1, stdout: "", stderr: "Too few arguments." };
         if (args.includes("enable")) for (const unit of args.slice(args.indexOf("enable") + 1)) { enabled.add(unit); rmSync(join(layout.unitDir, `${unit}.disabled`), { force: true }); }
         if (args.includes("disable")) for (const unit of args.slice(args.indexOf("disable") + 1).filter((a) => a !== "--now")) { enabled.delete(unit); if (existsSync(layout.unitDir)) writeFileSync(join(layout.unitDir, `${unit}.disabled`), ""); }
-        if (args.includes("show")) return { code: 0, stdout: unitState(args[args.length - 1]!), stderr: "" };
+        if (args.includes("show")) return { code: 0, stdout: args.includes("--property=Delegate") ? "yes\n" : unitState(args[args.length - 1]!), stderr: "" };
         if (args.includes("restart") || args.includes("start")) {
           const unit = args[args.length - 1]!;
           if (unit === CONTROL_PLANE_UNIT) {
@@ -141,7 +142,7 @@ function fake(t: { after(fn: () => void): void }, options: {
             mkdirSync(join(file, ".."), { recursive: true });
             if (!existsSync(file)) writeFileSync(file, `${LOCAL_TOKEN}\n`, { mode: 0o600 });
           }
-          if (unit === RUNNER_UNIT) runnerRunning = true;
+          if (unit === RUNNER_UNIT) { runnerRunning = true; runnerConnections++; }
           return { code: 0, stdout: "", stderr: "" };
         }
         if (args.includes("disable")) { cpRunning = false; runnerRunning = false; }
@@ -653,6 +654,17 @@ function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolea
   const host: ServiceHost = {
     ...f.host,
     arch: "x64",
+    fetch: async (url, init) => {
+      const response = await f.host.fetch(url, init);
+      if (!url.endsWith("/api/admin/status") || !response.ok) return response;
+      const body = JSON.parse(await response.text());
+      if (!body.runners?.items) return response;
+      const runner = join(f.root, "wollipog-runner");
+      const installed = existsSync(runner) && readFileSync(runner, "utf8") === `runner ${version}`;
+      return { ...response, text: async () => JSON.stringify({ ...body,
+        runners: { ...body.runners, items: body.runners.items.map((item: object) => ({ ...item, version: installed ? version : "0.22.0" })) },
+      }) };
+    },
     fetchJson: async (url) => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: `v${version}`, assets, url }) }),
     download: async (url, sink) => {
       downloads.push(url);
@@ -737,6 +749,76 @@ test("service upgrade stages, verifies, swaps, restarts, and keeps the previous 
   assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], sameHost, again.io), 0);
   assert.equal(JSON.parse(again.stdout()).upgraded, false);
   assert.equal(JSON.parse(again.stdout()).release, "v9.9.9");
+});
+
+test("upgrading a legacy runner unit preserves settings, enables delegation, and rolls it back with a failed generation", { skip: process.platform !== "linux" }, async t => {
+  for (const fail of [false, true]) await t.test(fail ? "rollback" : "success", async t => {
+    const f = fake(t);
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const path = join(f.layout.unitDir, RUNNER_UNIT);
+    const original = readFileSync(path, "utf8").replace("Delegate=yes\n", "") + "\n# local customization\n[Service]\nEnvironment=CUSTOM_VALUE=preserved\n";
+    writeFileSync(path, original); chmodSync(path, 0o640);
+    const fixture = releaseFixture(f);
+    const host: ServiceHost = { ...fixture.host,
+      exec: async (command, args, options) => args[0] === "--version"
+        ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" }
+        : fixture.host.exec(command, args, options),
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!response.ok || !url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fail ? "0.22.0" : fixture.version }) };
+      },
+    };
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), fail ? 1 : 0, io.stdout() + io.stderr());
+    assert.equal(readFileSync(path, "utf8"), fail ? original : `${original.trimEnd()}\n\n[Service]\nDelegate=yes\n`);
+    assert.equal(statSync(path).mode & 0o777, 0o640);
+    if (fail) assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
+  });
+});
+
+test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost previously ready harness", { skip: process.platform !== "linux" }, async t => {
+  for (const problem of ["stale", "pre-restart-inventory", "ownership", "unknown-ownership", "lost", "account-lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
+    const f = fake(t);
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const fixture = releaseFixture(f);
+    const host: ServiceHost = { ...fixture.host,
+      now: problem === "pre-restart-inventory" ? () => fixture.host.now() + 100 : fixture.host.now,
+      exec: async (command, args, options) => args[0] === "--version"
+        ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" }
+        : fixture.host.exec(command, args, options),
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!response.ok || !url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        const installed = readFileSync(join(f.root, "wollipog-runner"), "utf8") === `runner ${fixture.version}`;
+        body.appVersion = installed ? fixture.version : "0.22.0";
+        for (const runner of body.runners.items) {
+          runner.harnessReadiness = {
+            connectedAt: installed && problem === "pre-restart-inventory" ? 50 : installed && problem !== "stale" ? 2 : 1,
+            refreshed: !installed || problem !== "pending",
+            agents: [{ id: "claude", available: problem === "already-blocked" ? false : !installed || problem === "healthy" || problem === "account-lost" || problem === "pre-restart-inventory",
+              ownershipBlocked: problem === "already-blocked" || installed && (problem === "ownership" || problem === "unknown-ownership") }],
+            accounts: [{ id: "account-1", authStatus: installed && problem === "account-lost" ? "unknown" : "authenticated" }],
+          };
+          if (!installed && problem === "unknown-ownership") delete runner.harnessReadiness;
+        }
+        return { ...response, text: async () => JSON.stringify(body) };
+      },
+    };
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), problem === "healthy" || problem === "already-blocked" ? 0 : 1, io.stdout() + io.stderr());
+    if (problem === "already-blocked") {
+      const report = JSON.parse(io.stdout());
+      assert.equal(report.runnerVerification, "fresh-harness-discovery-degraded");
+      assert.match(report.warnings.join(" "), /pre-existing.*ownership/);
+    } else if (problem !== "healthy") {
+      assert.match(io.stdout() + io.stderr(), /failed upgrade readiness.*rolled back/s);
+      if (problem === "account-lost") assert.match(io.stdout() + io.stderr(), /previously signed-in provider account became unavailable/);
+      assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
+    }
+  });
 });
 
 test("service upgrade rolls back when the new control plane does not report the release version, and refuses bad downloads", { skip: process.platform !== "linux" }, async (t) => {

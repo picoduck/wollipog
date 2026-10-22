@@ -3845,7 +3845,16 @@ export interface HostAdminStatusView {
   artifactStore: { path: string; ready: boolean };
   /** Protected local bootstrap credential file audit; `issues` is empty when it is safe. */
   localCredential: { path: string; safe: boolean; issues: string[] };
-  runners: { registered: number; online: number; items: Array<{ runnerId: string; status: string; version: string; protocolVersion: number | null }> };
+  runners: { registered: number; online: number; items: Array<{
+    runnerId: string; status: string; version: string; protocolVersion: number | null;
+    /** Optional additive host-admin projection. No provider paths, accounts, or credentials. */
+    harnessReadiness?: {
+      connectedAt: number | null;
+      refreshed: boolean;
+      agents: Array<{ id: string; available: boolean; ownershipBlocked: boolean }>;
+      accounts?: Array<{ id: string; authStatus: ProviderAccountDefinition["authStatus"] }>;
+    };
+  }> };
   devices: { paired: number };
   warnings: string[];
 }

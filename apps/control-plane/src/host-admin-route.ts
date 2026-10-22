@@ -8,6 +8,7 @@ import {
   type HostAdminCheck,
   type HostAdminDoctorView,
   type HostAdminStatusView,
+  type RunnerView,
 } from "@wollipog/protocol";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { auditProtectedCredentialFile } from "./local-device-credential.js";
@@ -16,6 +17,20 @@ import { APP_RELEASE_VERSION } from "./release-version.js";
 
 export const HOST_ADMIN_FORBIDDEN =
   "host administration requires the local control-plane credential over a direct loopback connection";
+
+/** Content-free upgrade evidence; full agent metadata can contain local paths and environment. */
+export function runnerHarnessReadiness(runner: Pick<RunnerView, "connectedAt" | "agentsRefreshed" | "agents" | "providerAccounts">): NonNullable<HostAdminStatusView["runners"]["items"][number]["harnessReadiness"]> {
+  return {
+    connectedAt: runner.connectedAt,
+    refreshed: runner.agentsRefreshed === true,
+    agents: runner.agents.map(agent => ({
+      id: agent.id,
+      available: agent.available === true,
+      ownershipBlocked: agent.unavailableReason?.startsWith("Provider HOME ownership ") === true,
+    })),
+    accounts: (runner.providerAccounts ?? []).map(account => ({ id: account.id, authStatus: account.authStatus })),
+  };
+}
 
 export interface HostAdminRouteDeps {
   /** Non-null only for the protected bootstrap credential presented over trusted loopback. */
@@ -29,7 +44,7 @@ export interface HostAdminRouteDeps {
   databasePath: string;
   artifactStorePath: string;
   localCredentialPath: string;
-  runners(): Array<{ runnerId: string; status: string; version: string; protocolVersion: number | null }>;
+  runners(): HostAdminStatusView["runners"]["items"];
   pairedDeviceCount(): number;
   now?: () => number;
   /** Doctor inputs (optional so status-only callers stay unchanged). */

@@ -762,7 +762,10 @@ function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 function ioPlan(snapshot: LeaseIoSnapshot, tip: ReadLeaseRecord, jobs: LeaseIoJob[], barrier?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"]) {
-  const tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && !publicationTemporary(entry) && entry.raw.toString("utf8") === tip.raw);
+  const legacy = !snapshot.entries.some(entry => entry.directory === "root" && entry.name === RECOVERY_MARKER);
+  let tipIndex = legacy ? snapshot.entries.findIndex(entry => entry.directory === "lock" && !entry.optional && NEXT_MARKER.test(entry.name) && entry.raw.toString("utf8") === tip.raw) : -1;
+  if (tipIndex < 0) tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && !entry.optional && !publicationTemporary(entry) && entry.raw.toString("utf8") === tip.raw);
+  if (tipIndex < 0) tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "lock" && !entry.optional && NEXT_MARKER.test(entry.name) && entry.raw.toString("utf8") === tip.raw);
   if (tipIndex < 0) throw new Error("acquired immutable tip is unavailable");
   const guard = snapshot.entries.find((entry) => entry.directory === "lock" && entry.name === FORMAT_GUARD)?.raw ?? Buffer.alloc(0);
   return { snapshot, guard, guardTemp: `.provider-home-lease-${randomUUID()}.tmp`, tipIndex,
@@ -1146,7 +1149,10 @@ export class ProviderHomeLeaseRegistry {
       this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json", true);
       readChain(lockDir);
     }
-    const migrationRequired = this.pendingMigrations.has(key) || (() => { const chain = readChain(lockDir); return chain.external && chain.transitions >= LIMITS.hardTransitions - 1; })();
+    const migrationRequired = this.pendingMigrations.has(key) || (() => {
+      const chain = readChain(lockDir);
+      return !chain.external || chain.transitions >= LIMITS.hardTransitions - 1;
+    })();
     if (migrationRequired) this.pendingMigrations.add(key);
     const compacted = this.compactHeld(root, lockDir, record.leaseId);
     if (migrationRequired && !compacted) throw refusal(lockDir, "requires successful bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry");
@@ -1234,6 +1240,10 @@ export class ProviderHomeLeaseRegistry {
     try {
       chain = readChain(lockDir);
     } catch (error) {
+      // A first migration can hold the permanent fence before selecting its
+      // initial anchor. Temporary I/O refusals are not malformed legacy state
+      // and must never enter partial-journal recovery.
+      if (error instanceof LeaseIoError && (error.kind === "busy" || error.kind === "unavailable")) throw error;
       // A published recovery checkpoint is authoritative. Corruption in it or its retained
       // evidence must never trigger another recovery that could erase an ownership boundary.
       try { lstatSync(join(root, RECOVERY_MARKER)); } catch (markerError) {
@@ -1445,10 +1455,22 @@ export class ProviderHomeLeaseRegistry {
         };
         const indexes = (retired: LeaseRetirementEntry[]): number[] => {
           const index = new Map(snapshot.entries.map((entry, i) => [`${entry.directory}/${entry.name}`, i]));
-          return retired.flatMap((entry) => { const i = index.get(`${entry.directory}/${entry.name}`); return i === undefined ? [] : [i]; });
+          const result = retired.flatMap((entry) => { const i = index.get(`${entry.directory}/${entry.name}`); return i === undefined ? [] : [i]; });
+          // Windows retains the last moved inode at this fixed witness. Its
+          // original name may already be absent; carry the selected tuple's
+          // physical witness into the native cleanup manifest as well.
+          const aliasIndex = index.get(`root/${RETIREMENT_ALIAS}`);
+          if (aliasIndex !== undefined && !result.includes(aliasIndex)) {
+            const alias = snapshot.entries[aliasIndex]!;
+            const hash = withSnapshot(snapshot, () => readRecord(join(root, RETIREMENT_ALIAS))).hash;
+            if (retired.some(entry => entry.device === alias.device && entry.inode === alias.inode && entry.hash === hash)) result.push(aliasIndex);
+          }
+          return result;
         };
         let chain = owned();
-        if (!chain.external) return true;
+        // A new journal has no historical successor to checkpoint yet. Its first
+        // release remains bounded; the following acquisition migrates the chain.
+        if (!chain.external && chain.transitions === 0) return true;
         if (chain.retired.some((entry) => snapshot.entries.some((file) => file.directory === entry.directory && file.name === entry.name))) {
           apply(chain, [{ name: "", raw: Buffer.alloc(0), copiesOwner: false, retire: indexes(chain.retired) }]);
           chain = owned();
@@ -1457,33 +1479,85 @@ export class ProviderHomeLeaseRegistry {
         // A completed candidate commits to its prior verified anchor and historical tip. Prove
         // that selecting it leaves this newly acquired Q as the exact active successor first.
         const candidates = snapshot.entries.filter((entry) => entry.directory === "root" && CHECKPOINT_SLOTS.includes(entry.name));
+        const bootstrapCandidates = new Set<string>();
+        if (!chain.anchor && candidates.length) {
+          const genesis = snapshot.entries.find(item => item.directory === "lock" && (GENESIS_MARKER.test(item.name) || item.name === LEGACY_MARKER));
+          const guard = snapshot.entries.find(item => item.directory === "lock" && item.name === FORMAT_GUARD);
+          for (const candidate of candidates) {
+            const pending = withSnapshot(snapshot, () => readRecord(join(root, candidate.name)));
+            const retired = verifyCheckpoint(pending, lockDir);
+            if (pending.record.version !== 4 || !genesis || !guard ||
+                pending.record.checkpoint.previousAnchorHash !== hashText(genesis.raw.toString("utf8")) ||
+                pending.record.checkpoint.previousHistoryHash !== pending.record.checkpoint.previousAnchorHash ||
+                pending.record.ownerHash !== this.ownerHash || pending.record.hostname !== this.hostname ||
+                pending.record.checkpoint.guardHash !== hashText(guard.raw.toString("utf8")) ||
+                pending.record.checkpoint.guardDevice !== guard.device || pending.record.checkpoint.guardInode !== guard.inode ||
+                !chain.evidence.some(item => item.directory === "lock" && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven first checkpoint candidate");
+            withSnapshot(snapshot, () => verifyRetired(root, lockDir, retired));
+            bootstrapCandidates.add(candidate.name);
+          }
+        }
         for (const entry of candidates.slice().reverse()) {
           if (chain.retired.some((item) => item.directory === "root" && item.name === entry.name)) continue;
           const pending = withSnapshot(snapshot, () => readRecord(join(root, entry.name)));
           const retired = verifyCheckpoint(pending, lockDir);
-          if (pending.record.version !== 4 || !chain.anchor || pending.record.checkpoint.previousAnchorHash !== chain.anchor.hash ||
+          if (!chain.anchor) {
+            // Preserve the complete in-lock chain until an anchor is selected.
+            // Exact aliases of the verified successors make the candidate's
+            // hypothetical canonical chain retain this private acquired tip.
+            if (pending.record.version !== 4 || !bootstrapCandidates.has(entry.name)) throw new Error("unproven first checkpoint candidate");
+            let cursor = JSON.parse(pending.record.checkpoint.previousTip) as ProviderHomeLeaseRecord;
+            for (let steps = 0; cursor.leaseId !== chain.tip.record.leaseId; steps++) {
+              if (steps >= LIMITS.migrationEntries) throw new Error("legacy successor migration limit exceeded");
+              const name = `next-${cursor.leaseId}.json`;
+              const source = withSnapshot(snapshot, () => readRecord(join(lockDir, name)));
+              const alias = snapshot.entries.find(item => item.directory === "root" && item.name === name);
+              const original = snapshot.entries.find(item => item.directory === "lock" && item.name === name)!;
+              if (alias) {
+                if (alias.device !== original.device || alias.inode !== original.inode || !alias.raw.equals(original.raw)) throw new Error("legacy successor alias changed");
+                cursor = source.record; continue;
+              }
+              const plan = ioPlan(snapshot, source, [{ name, raw: Buffer.alloc(0), copiesOwner: false, retire: [] }]);
+              const work = applyLeaseIoPlan(plan, 3, remainingBudget()); spendVerificationWork(work.records, work.bytes);
+              snapshot = capture(root); chain = owned();
+              cursor = source.record;
+            }
+          }
+          if (pending.record.version !== 4 || (chain.anchor && pending.record.checkpoint.previousAnchorHash !== chain.anchor.hash) ||
               pending.record.ownerHash !== this.ownerHash || pending.record.hostname !== this.hostname ||
-              !chain.evidence.some((item) => item.directory === "root" && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven completed checkpoint candidate");
+              !chain.evidence.some((item) => item.directory === (chain.anchor ? "root" : "lock") && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven completed checkpoint candidate");
           withSnapshot(snapshot, () => verifyRetired(root, lockDir, retired));
-          const oldAnchor = snapshot.entries.find((item) => item.directory === "root" && item.name === RECOVERY_MARKER)!;
+          const selectedCandidate = snapshot.entries.find(item => item.directory === "root" && item.name === entry.name)!;
+          if (!selectedCandidate.raw.equals(entry.raw)) throw new Error("completed candidate changed during successor migration");
+          const oldAnchor = snapshot.entries.find((item) => item.directory === "root" && item.name === RECOVERY_MARKER);
           const hypothetical = { ...snapshot, entries: snapshot.entries.filter((file) => file.name !== RECOVERY_MARKER || file.directory !== "root")
-            .filter((file) => file !== entry)
+            .filter((file) => file !== selectedCandidate)
             // Selection removes the old anchor's canonical hard link; its two remaining
             // verified mirrors must reflect that physical post-selection count.
-            .map((file) => file.device === oldAnchor.device && file.inode === oldAnchor.inode ? { ...file, links: file.links - 1 } : file)
-            .concat({ ...entry, name: RECOVERY_MARKER }) };
+            .map((file) => oldAnchor && file.device === oldAnchor.device && file.inode === oldAnchor.inode ? { ...file, links: file.links - 1 } : file)
+            .concat({ ...selectedCandidate, name: RECOVERY_MARKER }) };
           const after = withSnapshot(hypothetical, () => readChainAt(lockDir, root));
           if (!sameTip(chain.tip, after.tip)) throw new Error("completed candidate does not preserve the acquired successor");
           apply(chain, [{ name: entry.name, raw: entry.raw, copiesOwner: false, retire: indexes(retired) }]);
           chain = owned(); adopted = true; break;
         }
-        if (chain.transitions < LIMITS.compactAfter && !adopted) return true;
-        if (!isJournalTransition(chain.tip.record) || !chain.anchor) throw new Error("unsupported checkpoint tip");
+        if (chain.external && chain.transitions < LIMITS.compactAfter && !adopted) return true;
+        if (!isJournalTransition(chain.tip.record)) throw new Error("unsupported checkpoint tip");
+        // In-lock journals predate the canonical anchor. They have already passed complete
+        // chain validation and abandonment admission, and this registry owns the exact new
+        // active successor. Keep their genesis as the history root of the first checkpoint.
+        const legacy = !chain.anchor;
+        const historyRoot = chain.anchor ?? withSnapshot(snapshot, () => {
+          const genesis = snapshot.entries.find(entry => entry.directory === "lock" &&
+            (GENESIS_MARKER.test(entry.name) || entry.name === LEGACY_MARKER));
+          if (!genesis) throw new Error("legacy journal genesis is unavailable");
+          return readRecord(join(lockDir, genesis.name));
+        });
         if (!snapshot.entries.some((entry) => entry.directory === "lock" && entry.name === FORMAT_GUARD)) {
           const guard = Buffer.from(`${JSON.stringify({ ...chain.tip.record, version: 4, protocol: "bounded-canonical-checkpoint", fenceBackend: process.platform === "win32" ? "lockfileex" : "flock", previousLeaseId: null, previousRecordHash: null })}\n`);
           apply(chain, [], guard); chain = owned();
         }
-        if (!isJournalTransition(chain.tip.record) || !chain.anchor) throw new Error("unsupported checkpoint tip");
+        if (!isJournalTransition(chain.tip.record)) throw new Error("unsupported checkpoint tip");
         const retired = new Map<string, LeaseRetirementEntry>();
         const add = (entry: LeaseIoEntry, name = entry.name, directory = entry.directory) => {
           retired.set(`${directory}/${name}`, { directory, name, device: entry.device, inode: entry.inode, hash: withSnapshot(snapshot, () => readRecord(join(root, entry.directory === "root" ? "" : "mutable-home.lock", entry.name))).hash });
@@ -1491,14 +1565,23 @@ export class ProviderHomeLeaseRegistry {
         const evidence = new Set(chain.evidence.map((entry) => `${entry.directory}/${entry.name}`));
         const prior = new Set(chain.retired.map((entry) => `${entry.directory}/${entry.name}`));
         for (const entry of snapshot.entries) {
-          if (evidence.has(`${entry.directory}/${entry.name}`) || prior.has(`${entry.directory}/${entry.name}`) || entry.directory === "root" && entry.name === RETIREMENT_ALIAS) {
+          if (legacy && entry.directory === "lock" && entry.name !== FORMAT_GUARD && entry.name !== LEGACY_MARKER ||
+              evidence.has(`${entry.directory}/${entry.name}`) || prior.has(`${entry.directory}/${entry.name}`) || entry.directory === "root" && (entry.name === RETIREMENT_ALIAS || bootstrapCandidates.has(entry.name))) {
             add(entry);
             if (entry.directory === "root" && NEXT_MARKER.test(entry.name) && !snapshot.entries.some((file) => file.directory === "lock" && file.name === entry.name)) {
               add(entry, entry.name, "lock");
             }
           }
         }
-        if (isJournalTransition(chain.anchor.record)) {
+        if (legacy) {
+          // Canonical checkpoints commit to a root-side previous-tip tuple. The exact
+          // in-lock inode supplies that tuple even when its optional root alias never
+          // existed; no missing alias authorizes ownership or evidence retirement.
+          const tipEntry = snapshot.entries.find(entry => entry.directory === "lock" && entry.raw.toString("utf8") === chain.tip.raw);
+          if (!tipEntry) throw new Error("legacy acquired tip is unavailable");
+          add(tipEntry, tipEntry.name, "root");
+        }
+        if (chain.anchor && isJournalTransition(chain.anchor.record)) {
           const anchorEntry = snapshot.entries.find((entry) => entry.directory === "root" && entry.name === RECOVERY_MARKER)!;
           for (const name of ["checkpoint.json", `lease-${chain.anchor.record.leaseId}.json`]) if (!retired.has(`lock/${name}`)) add(anchorEntry, name, "lock");
         }
@@ -1510,13 +1593,15 @@ export class ProviderHomeLeaseRegistry {
         const partial: Omit<LeaseCheckpointProof, "historyHash"> = {
           migration: snapshot.entries.filter((entry) => entry.directory === "root").length >= LIMITS.directoryEntries - 4 ||
             snapshot.entries.filter((entry) => entry.directory === "lock").length >= LIMITS.directoryEntries - 4,
-          previousTip: chain.tip.raw, previousTipHash: chain.tip.hash, previousAnchorHash: chain.anchor.hash,
-          previousHistoryHash: chain.anchor.record.version === 4 ? chain.anchor.record.checkpoint.historyHash : chain.anchor.hash,
+          previousTip: chain.tip.raw, previousTipHash: chain.tip.hash, previousAnchorHash: historyRoot.hash,
+          previousHistoryHash: historyRoot.record.version === 4 ? historyRoot.record.checkpoint.historyHash : historyRoot.hash,
           guardHash: withSnapshot(snapshot, () => readRecord(join(lockDir, FORMAT_GUARD))).hash, guardDevice: guard.device, guardInode: guard.inode,
           retired: [...retired.values()],
         };
         const checkpoint: ProviderHomeLeaseRecordV4 = { ...chain.tip.record, version: 4, previousLeaseId: null, previousRecordHash: null,
-          recoveredEntriesHash: chain.anchor.record.version === 1 ? undefined : chain.anchor.record.recoveredEntriesHash,
+          recoveredEntriesHash: legacy
+            ? recordsHash(historyRoot.record.version === 1 ? [{ name: LEGACY_MARKER, hash: historyRoot.hash }] : [])
+            : historyRoot.record.version === 1 ? undefined : historyRoot.record.recoveredEntriesHash,
           checkpoint: { ...partial, historyHash: checkpointHistory(partial) } };
         const raw = Buffer.from(`${JSON.stringify(checkpoint)}\n`);
         if (raw.length > LIMITS.checkpointBytes) throw new Error("checkpoint byte limit exceeded");

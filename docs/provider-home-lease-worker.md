@@ -23,9 +23,60 @@ No agent RPC, configuration or CLI mode can select worker code or enlarge its li
 | Existing native transaction / fence wait | 120 / 10 seconds |
 | Heartbeat regression bound under normal OS scheduling | 500 ms late |
 
-The existing record, byte, native IPC, migration and retirement budgets remain unchanged.
+The existing byte, native IPC and verification-work budgets remain unchanged. Upgrade migration
+admits at most 4,104 directory entries and 8,208 retirement tuples: the former 4,096-transition
+in-lock writer could leave 4,097 files, and migration needs bounded successor/guard headroom.
 The heartbeat interval, initial-pong grace and missed-pong termination thresholds remain unchanged.
 The dispatch bound does not promise hard real-time behavior when the OS deschedules the runner.
+
+## Upgrade Compatibility and Readiness
+
+A valid in-lock v1/v2 journal enters canonical checkpoint storage on its next acquisition, after
+the complete chain and abandonment evidence pass the existing ownership checks. A fresh genesis
+has no predecessor to checkpoint and stays bounded until the next acquisition. The first migration
+uses the original genesis as its history root, preserves v1 retained evidence, selects a durable
+checkpoint before retiring validated history, and withholds HOME if migration cannot finish.
+It also recovers interrupted first migrations without treating an unselected candidate as ownership
+authority. POSIX and Windows helpers pin the absence of the first anchor until selection and check
+future successors in both journal locations. Unknown, foreign, changed, live, and uninspectable
+ownership evidence still refuses admission. Neither an update nor a rollback deletes the journal.
+
+Runner systemd units include `Delegate=yes`. `service upgrade` adds that setting to an existing
+runner unit while preserving its other directives and file mode, reloads systemd, and verifies the
+effective property so a conflicting drop-in cannot silently defeat it. Failure restores the prior
+unit along with the prior executables. Delegation permits future supervised cgroup evidence; it
+cannot retroactively prove that an older lease's surviving processes have exited.
+
+For a colocated control plane and runner, upgrade success requires the new runner version, a new
+connection, a completed discovery pass since registration, no newly ownership-blocked discovery, and
+continued availability of previously ready agent IDs and previously signed-in provider accounts.
+Registration alone and cached inventory
+cannot satisfy this check. Failure triggers rollback and records the reason in the upgrade journal.
+An ownership block already reported in the pre-upgrade snapshot does not prevent installing a
+recovery update: completion reports `fresh-harness-discovery-degraded`, emits a warning, and records
+the unresolved block in the upgrade journal. A newly blocked or previously ready harness still
+fails readiness and rolls back. An unknown baseline never excuses an ownership block.
+The first upgrade from a control plane predating this projection has an unknown baseline. If a
+legacy ownership block survives that update, the service CLI deliberately refuses a healthy result
+and restores the prior generation. Before retrying, let the actual surviving processes exit or use
+the existing authorized recovery flow with valid process/boot evidence; do not fabricate a baseline
+or delete lease records. This can delay installation of a recovery update on a legacy blocked host.
+`admin status --json` exposes the content-free `runners.items[].harnessReadiness` projection:
+connection time, discovery completion, agent IDs/availability/ownership-blocked flags, and account
+IDs/authentication statuses. These
+answer whether discovery ran after this restart, whether an ownership refusal blocked it, and
+whether a previously available harness or signed-in account regressed; provider paths, environment,
+account labels and credentials are excluded. This is an additive host-admin REST field; it adds no
+runner capability or wire message.
+A runner-only install cannot query its remote control plane through the local bootstrap credential:
+its upgrade reports `runnerVerification: "service-active-only"` and explicitly asks the operator
+to verify harness readiness there.
+
+An installed CLI whose ownership probe cannot run stays visible as **Unavailable**, with the safe
+ownership failure. It is never classified as **Not Installed** or **Update Required**. This does
+not permit a discovery probe or a session to bypass HOME admission. Historical leases without
+adequate lifecycle evidence may still require their actual surviving processes to exit; do not
+delete individual records or infer abandonment from a runner being online.
 
 ## Monotonic Deadline
 

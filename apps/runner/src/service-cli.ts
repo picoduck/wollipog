@@ -30,6 +30,7 @@ import {
   type JsonFetch,
 } from "./release-assets.js";
 import { VERSION } from "./version.js";
+import type { HostAdminStatusView } from "@wollipog/protocol";
 import { ReleaseStaging, StagingOccupiedError, stagingFilesystem, type StagingFilesystem } from "./release-staging.js";
 import { StagingJournal } from "./release-staging-journal.js";
 import {
@@ -849,7 +850,8 @@ function stagingRefusal(error: Error, blocked: StagingOccupiedError, mode: Servi
  * `service upgrade`: download the release's executables and web bundle, prove their digests and
  * versions, swap them in while keeping the previous generation, restart, confirm health, and roll
  * back automatically when the new control plane does not become ready or the runner does not
- * re-register. Configuration, credentials, and data are never touched.
+ * re-register with usable harnesses. Existing runner units gain cgroup delegation;
+ * application configuration, credentials, and data are preserved.
  */
 async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (data: unknown, text: string) => void): Promise<number> {
   const mode = resolveMode(args, host);
@@ -966,6 +968,15 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
 
     const controlPlane = targets.find((target) => target.component === "control-plane");
     const runner = targets.find((target) => target.component === "runner");
+    const runnerId = runner ? (() => { try { return (JSON.parse(host.readFile(layout.runnerConfigFile)) as { runnerId?: string }).runnerId ?? null; } catch { return null; } })() : null;
+    const before = controlPlane && runnerId ? await adminJson<HostAdminStatusView>(host, effective, ["status"]) : null;
+    const previousRunner = before?.data?.runners?.items?.find(item => item.runnerId === runnerId);
+    const previouslyReady = new Set(previousRunner?.harnessReadiness?.agents.filter(agent => agent.available).map(agent => agent.id));
+    const previouslySignedIn = new Set(previousRunner?.harnessReadiness?.accounts?.filter(account => account.authStatus === "authenticated").map(account => account.id));
+    const previouslyBlocked = new Set(previousRunner?.harnessReadiness?.agents.filter(agent => agent.ownershipBlocked && !agent.available).map(agent => agent.id));
+    const readinessWarnings: string[] = [];
+    const unitPath = join(layout.unitDir, RUNNER_UNIT);
+    let unitBackup: { contents: string; mode: number } | null = null;
 
     // Swap: keep exactly one previous generation of each executable and of the web bundle. Every path
     // is recorded before its first mutation, so a swap that fails midway is undone as well.
@@ -987,6 +998,13 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     const aliasPartial = (alias: string) => `${alias}.upgrade-${release.tag}`;
     const rollBack = async (reason: string): Promise<CliError> => {
       const problems: string[] = [];
+      if (unitBackup) {
+        try {
+          host.writeFile(unitPath, unitBackup.contents, unitBackup.mode);
+          const reload = await systemctl(host, mode, ["daemon-reload"]);
+          if (reload.code !== 0) throw new Error(reload.stderr.trim() || "daemon-reload failed");
+        } catch (error) { problems.push(`could not restore ${unitPath}: ${(error as Error).message}`); }
+      }
       for (const entry of [...swapped].reverse()) {
         try {
           // A live generation that was never moved aside is still in place: leave it alone.
@@ -1012,6 +1030,21 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     installing = true;
     journal.note("installing");
     try {
+      if (runner) {
+        const unit = host.readFile(unitPath);
+        if (!/^Delegate=yes\s*$/mu.test(unit)) {
+          const metadata = (host.stagingFilesystem ?? stagingFilesystem).lstat(unitPath);
+          if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.size > 1024n * 1024n) throw new Error("runner unit is not a bounded regular file");
+          unitBackup = { contents: unit, mode: Number(metadata.mode & 0o777n) };
+          // A repeated section preserves every existing command/environment directive.
+          // Drop-ins remain authoritative; effective delegation is verified below.
+          host.writeFile(unitPath, `${unit.trimEnd()}\n\n[Service]\nDelegate=yes\n`, unitBackup.mode);
+          const reload = await systemctl(host, mode, ["daemon-reload"]);
+          if (reload.code !== 0) throw new Error(`daemon-reload failed: ${reload.stderr.trim()}`);
+        }
+        const delegation = await systemctl(host, mode, ["show", "--property=Delegate", "--value", runner.unit]);
+        if (delegation.code !== 0 || delegation.stdout.trim() !== "yes") throw new Error("runner cgroup delegation is disabled; inspect systemd drop-ins for Delegate=no");
+      }
       for (const target of targets) replace(target.path, staged.get(target.component)!, false);
       for (const alias of aliases) {
         host.removeFile(aliasPartial(alias));
@@ -1039,15 +1072,33 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       }
     }
     if (runner) {
+      const runnerRestartStartedAt = host.now();
       const restart = await systemctl(host, mode, ["restart", runner.unit]);
       if (restart.code !== 0) throw await rollBack(`could not restart ${runner.unit}: ${restart.stderr.trim()}`);
-      const runnerId = (() => { try { return (JSON.parse(host.readFile(layout.runnerConfigFile)) as { runnerId?: string }).runnerId ?? null; } catch { return null; } })();
       if (controlPlane && runnerId) {
+        let readinessProblem = "runner did not report fresh harness readiness";
         const online = await waitFor(host, 90_000, async () => {
-          const status = await adminJson<{ runners?: { items?: Array<{ runnerId: string; status: string; version?: string }> } }>(host, effective, ["status"]);
-          return status.data?.runners?.items?.some((item) => item.runnerId === runnerId && item.status === "online") === true;
+          const status = await adminJson<HostAdminStatusView>(host, effective, ["status"]);
+          const current = status.data?.runners?.items?.find(item => item.runnerId === runnerId);
+          if (current?.status !== "online" || current.version !== release.version) return false;
+          const readiness = current.harnessReadiness;
+          if (!readiness?.refreshed || readiness.connectedAt === null || readiness.connectedAt <= runnerRestartStartedAt ||
+              readiness.connectedAt === previousRunner?.harnessReadiness?.connectedAt) return false;
+          if (readiness.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))) {
+            readinessProblem = "provider HOME ownership blocks harness discovery"; return false;
+          }
+          if ([...previouslyReady].some(id => !readiness.agents.some(agent => agent.id === id && agent.available))) {
+            readinessProblem = "a previously ready harness became unavailable"; return false;
+          }
+          if ([...previouslySignedIn].some(id => !readiness.accounts?.some(account => account.id === id && account.authStatus === "authenticated"))) {
+            readinessProblem = "a previously signed-in provider account became unavailable"; return false;
+          }
+          if (readiness.agents.some(agent => agent.ownershipBlocked)) {
+            readinessWarnings.push("A pre-existing provider HOME ownership block remains; inspect recovery diagnostics. The update did not restore that harness.");
+          }
+          return true;
         });
-        if (!online) throw await rollBack(`runner ${runnerId} did not register as online within 90s after the upgrade`);
+        if (!online) throw await rollBack(`runner ${runnerId} failed upgrade readiness within 90s: ${readinessProblem}`);
       } else {
         // A runner-only host reports to a remote control plane this command cannot query; the unit
         // staying active is the readiness signal here.
@@ -1055,7 +1106,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
         if (!active) throw await rollBack(`${runner.unit} did not become active within 30s after the upgrade`);
       }
     }
-    journal.note("verified");
+    journal.note("verified", readinessWarnings.join(" ") || undefined);
     const cleanup = finishStaging();
     if (cleanup) {
       throw new CliError(`upgrade to ${release.tag} completed and is healthy, but ${cleanup}\nNext: wollipog service staging inspect ${modeFlag(mode)}  (read-only); the retained staging blocks the next upgrade until it is recovered.`, 1, {
@@ -1070,11 +1121,14 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
       aliases,
       webDist: stagedWeb ? webDist : null,
       diagnostics: { journal: journal.path, problem: journal.problem },
+      runnerVerification: runner ? controlPlane && runnerId ? readinessWarnings.length ? "fresh-harness-discovery-degraded" : "fresh-harness-discovery" : "service-active-only" : null,
+      warnings: readinessWarnings,
     };
     emit(report, [
       `Upgraded to ${release.tag}: ${targets.map((target) => `${target.component} ${currentVersions.get(target.component) ?? "unknown"} → ${release.version}`).join(", ")}${aliases.length ? `, ${aliases.map((alias) => basename(alias)).join(" and ")} refreshed` : ""}${stagedWeb ? ", web bundle refreshed" : ""}.`,
       `Previous executables kept as ${targets.map((target) => previous(target.path)).join(" and ")}; the next upgrade replaces them.`,
-      controlPlane ? `Control plane healthy${runner ? " and runner online." : "."}` : "Runner active.",
+      controlPlane ? `Control plane healthy${runner && runnerId ? readinessWarnings.length ? "; runner reconnected, with pre-existing harness availability problems." : "; runner reconnected with fresh harness discovery." : "."}` : "Runner active. Harness readiness must be verified on its remote control plane.",
+      ...readinessWarnings.map(warning => `Warning: ${warning}`),
       ...(journal.problem ? [`Warning: ${journal.problem}`] : []),
     ].join("\n"));
     return 0;

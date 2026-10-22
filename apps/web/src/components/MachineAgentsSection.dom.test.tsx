@@ -340,3 +340,28 @@ test("with no agent ready the section says how to install one; while it probes, 
     await probing.unmount();
   }
 });
+
+test("an installed but unavailable harness directs the user to its details instead of reinstalling", async () => {
+  const codex = appServer("codex", "0.155.1");
+  const view = await mount(runner([{ ...codex, available: false,
+    codexAppServer: { status: "unsupported", appServerAvailable: false,
+      failure: { code: "probe_failed", message: "Provider HOME ownership blocked discovery.", retryable: true } },
+    unavailableReason: "Provider HOME ownership blocked discovery." }]));
+  try {
+    const state = view.body.querySelector(".machine-agents-empty")!;
+    assert.match(state.textContent ?? "", /Open an agent’s details to resolve its availability/u);
+    assert.equal(state.querySelectorAll(".code-well").length, 0);
+    assert.ok(rowNamed(view.body, "Codex App Server"));
+  } finally { await view.unmount(); }
+});
+
+test("an unavailable custom agent keeps installation hints when native harnesses are missing", async () => {
+  const view = await mount(runner([{ id: "custom", name: "Custom ACP", command: "custom", args: [], env: {},
+    driver: "acp", available: false, unavailableReason: "The configured probe failed." }]));
+  try {
+    const state = view.body.querySelector(".machine-agents-empty")!;
+    assert.match(state.textContent ?? "", /Open an agent’s details/u);
+    assert.match(state.textContent ?? "", /Install Claude Code or Codex/u);
+    assert.ok(state.querySelector('.code-well button[aria-label="Copy Claude Code Install Command"]'));
+  } finally { await view.unmount(); }
+});
