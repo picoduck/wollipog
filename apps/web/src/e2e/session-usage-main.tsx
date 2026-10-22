@@ -456,6 +456,12 @@ if (params.get("account-switch-failure") === "1") {
 // A launch refused at the provider HOME's lease (#3240): `lease-refusal=<code>`, on the session's
 // account, or with `lease-refusal-account=none` on the Machine's own provider HOME.
 const leaseRefusal = params.get("lease-refusal");
+// Before-evidence replay for worker codes v233 left text-only: no typed refusal is invented.
+if (params.has("lease-legacy-error")) {
+  session.status = "failed";
+  session.providerAccountId = "work-account";
+  session.providerAccountLabel = "Work Account";
+}
 if (leaseRefusal) {
   runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 233);
   session.status = "failed";
@@ -469,6 +475,7 @@ if (leaseRefusal) {
     provider: session.driver === "claude-code" ? "claude" : "codex",
     ...(ownHome ? {} : { providerAccountId: "work-account", providerAccountLabel: "Work Account" }),
     detectedAt: 5,
+    ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
   };
 }
 if (params.get("approval") === "checkpoint") {
@@ -819,6 +826,7 @@ for (let turn = 0; turn < 4; turn += 1) {
     model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
   });
 }
+if (params.has("lease-legacy-error")) payloads.push({ kind: "error", message: params.get("lease-legacy-error")! });
 const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
   id: index + 1,
   sessionId: SESSION_ID,

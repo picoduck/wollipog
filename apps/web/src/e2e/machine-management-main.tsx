@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PERSONAL_ORGANIZATION_ID,
   PROTOCOL_VERSION,
+  isProviderHomeRecoveryCause,
   type AddBoxRequest,
   type BoxView,
   type ControlPlaneToUi,
@@ -183,6 +184,13 @@ const leases: Record<string, ProviderHomeLeaseInspection> = new URLSearchParams(
   "claude-personal": { state: "stale", tipHash: "c".repeat(64), createdAt: "2026-10-14T16:20:00.000Z", sameHost: true, hasEvidence: false, refusal: null },
   "codex-team": { state: "stale", tipHash: "d".repeat(64), createdAt: "2026-10-18T09:05:00.000Z", sameHost: true, hasEvidence: false, refusal: "NO_REBOOT_PROOF" },
 } : {};
+const recoveryCause = new URLSearchParams(window.location.search).get("lease-cause");
+if (isProviderHomeRecoveryCause(recoveryCause) && leases["codex-team"]) {
+  Object.assign(leases["codex-team"], {
+    cause: recoveryCause,
+    blockingProcess: { pid: 4242, startTime: "987654", kind: "uninspectable", cgroupMembership: "unavailable" },
+  });
+}
 // A Windows runner answers no lease inspection, so the lease scenario is a Linux Machine.
 if (Object.keys(leases).length && runner) {
   runner.os = "linux";

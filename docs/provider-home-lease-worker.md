@@ -91,13 +91,32 @@ A refusal crosses the boundary as a fixed code, never as the registry's message,
 reaches the parent. The codes are distinct, and callers receive a `ProviderHomeLeaseError` carrying
 the code:
 
-- `busy`: the recorded process is alive, a process it launched survives, or a publication is in progress.
+- `busy`: contention on an acquisition or publication fence; retry once it is free.
+- `holder_alive`: the recorded runner's PID and start time are still alive.
+- `boundary_survivor`: provider or helper work remains in the recorded cgroup; ownership is
+  retained until the recorded boundary is empty. Preserve the boundary and journal.
+- `process_survivor`: a process carrying the recorded runner's marker survives on the fallback path.
+- `boundary_unverifiable`: the recorded cgroup identity or enclosing unit retirement cannot be proved.
+- `process_uninspectable`, `process_uninspectable_not_delegated`: fallback inspection cannot prove
+  ownership; the second code records that the runner's systemd unit is not delegated. Future leases
+  need a `Delegate=yes` unit; existing leases still need inspectability. Leave unrelated processes alone.
+- `invalid_journal`: the journal is invalid, unsafe or unreadable; preserve every record.
 - `foreign_owner`: a stale lease from another runner or control plane that this owner may not recover.
 - `foreign_host`: a lease recorded on another host.
 - `unavailable`: the helper is unavailable.
 - `refusal`: everything else the registry cannot prove.
 - `profile_unsupported_control_plane`, `profile_unverifiable`, `profile_not_granted` and
   `profile_changed`: a provider-profile refusal before acquisition (see below).
+
+Protocol v235 extends v233's `providerHomeRefusal` with an optional content-free `cause`; it keeps
+the v233 coarse code for older peers. v233-v234 control planes receive only the original shape.
+The session notice distinguishes contention, surviving work, unsupported recovery, authorization
+and unverifiable ownership without exposing process details. An Owner or Admin's account lease
+inspection additionally carries a bounded blocking-process observation when available: PID,
+procfs start time, process kind and membership relative to the recorded cgroup, never command,
+environment, credentials or filesystem paths. These observations are diagnostic snapshots, not
+recovery authority; unavailable diagnostics never weaken the ownership proof. A refused account
+does not poison the worker lane or prevent acquisition of another usable account.
 
 A foreign-owner lease is taken over only through the recovery below. Otherwise its text names that
 cause and the safe options, instead of the generic "could not be proved" refusal.

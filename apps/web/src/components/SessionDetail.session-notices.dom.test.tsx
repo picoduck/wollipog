@@ -447,12 +447,12 @@ test("a busy account offers Restart Session, which restarts the session (#3240)"
   });
   try {
     const notice = fixture.notices()[0]!;
-    assert.equal(notice.getAttribute("aria-label"), "Account In Use");
+    assert.equal(notice.getAttribute("aria-label"), "Account in Use");
     assert.deepEqual(actionNames(notice), ["Restart Session", "Switch Account…"]);
     await act(async () => { fixture.button("Restart Session")!.click(); });
     await flush();
     assert.deepEqual(restarts, [current.id]);
-    assertNoDomNode(fixture.container.querySelector('[aria-label="Account In Use"]'),
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Account in Use"]'),
       "a session starting again no longer shows the refusal");
   } finally {
     await fixture.unmount();
@@ -502,7 +502,7 @@ test("an archived session's refusal offers no ordinary restart, and says to unar
 test("a running session never shows a refusal a summary kept (#3240)", async () => {
   const fixture = await mount(sessionView({ status: "running", providerHomeRefusal: launchRefusal("busy") }));
   try {
-    assertNoDomNode(fixture.container.querySelector('[aria-label="Account In Use"]'));
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Account in Use"]'));
   } finally {
     await fixture.unmount();
   }

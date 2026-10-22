@@ -4283,7 +4283,11 @@ export function metaToSnapshot(
       ? m.providerAccountSwitchFailure ?? null
       : undefined,
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLaunchRefusals")
-      ? { providerHomeRefusal: m.providerHomeRefusal ?? null }
+      ? { providerHomeRefusal: m.providerHomeRefusal
+        ? runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeRecoveryDetails")
+          ? m.providerHomeRefusal
+          : (({ cause: _cause, ...coarse }) => coarse)(m.providerHomeRefusal)
+        : null }
       : {}),
     // Absent before version negotiation and for older control planes; null is "no profile".
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")

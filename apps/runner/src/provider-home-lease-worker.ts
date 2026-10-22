@@ -110,6 +110,7 @@ export function runProviderHomeLeaseWorker(): void {
             ...(found.createdAt && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(found.createdAt) ? { createdAt: found.createdAt } : {}),
             sameHost: found.sameHost === true, hasEvidence: found.hasEvidence === true,
             refusal: found.refusal === null ? null : code(found.refusal ?? null) ?? "refusal",
+            ...(found.blockingProcess ? { blockingProcess: found.blockingProcess } : {}),
           };
         } else if (op.method === "lease_recover") {
           registry.recoverStaleLease(op.home, op.provider, { staleTipHash: op.staleTipHash, authorizationId: op.authorizationId }, op.profile);

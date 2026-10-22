@@ -1,3 +1,5 @@
+import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
+export * from "./provider-home-recovery.js";
 import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
  * Shared protocol types for Wollipog.
@@ -718,7 +720,9 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 233: typed provider-HOME launch refusals (#3240): session snapshots carry
 //      `providerHomeRefusal`, the code of the lease refusal that stopped the session's last launch,
 //      so clients offer a recovery action per code. Older peers omit it and show only the text.
-export const PROTOCOL_VERSION = 233;
+// 235: extend v233 providerHomeRefusal with specific recovery causes and authorized, path-free
+//      lease-inspection process observations (#3585). Older peers retain the original shapes.
+export const PROTOCOL_VERSION = 235;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -979,6 +983,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v233 runner reports the typed provider-HOME lease refusal that stopped a session's launch
    * (#3240). */
   providerHomeLaunchRefusals: 233,
+  /** Specific recovery causes and authorized process diagnostics (#3585). */
+  providerHomeRecoveryDetails: 235,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -3284,6 +3290,8 @@ export const PROVIDER_HOME_LAUNCH_REFUSAL_CODES: readonly ProviderHomeLaunchRefu
  * names the account, never a path. Cleared when the session launches again. */
 export interface ProviderHomeLaunchRefusalView {
   code: ProviderHomeLaunchRefusalCode;
+  /** v235: more specific than the backwards-compatible v233 code. */
+  cause?: ProviderHomeRecoveryCause;
   provider: "claude" | "codex";
   /** The session's bound account; absent when the refused HOME is the runner's own provider HOME. */
   providerAccountId?: string;
@@ -3295,19 +3303,21 @@ export interface ProviderHomeLaunchRefusalView {
 export function validProviderHomeLaunchRefusal(value: unknown): ProviderHomeLaunchRefusalView | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const candidate = value as Record<string, unknown>;
-  const allowed = new Set(["code", "provider", "providerAccountId", "providerAccountLabel", "detectedAt"]);
+  const allowed = new Set(["code", "provider", "providerAccountId", "providerAccountLabel", "detectedAt", "cause"]);
   if (Object.keys(candidate).some((key) => !allowed.has(key))) return null;
-  const { code, provider, providerAccountId, providerAccountLabel, detectedAt } = candidate;
+  const { code, provider, providerAccountId, providerAccountLabel, detectedAt, cause } = candidate;
+  if (Object.hasOwn(candidate, "cause") && (!isProviderHomeRecoveryCause(cause) || PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause] !== code)) return null;
+  const details = isProviderHomeRecoveryCause(cause) ? { cause } : {};
   if (!PROVIDER_HOME_LAUNCH_REFUSAL_CODES.includes(code as ProviderHomeLaunchRefusalCode)) return null;
   if (provider !== "claude" && provider !== "codex") return null;
   if (typeof detectedAt !== "number" || !Number.isFinite(detectedAt) || detectedAt < 0) return null;
   if (providerAccountId === undefined) {
     if (providerAccountLabel !== undefined) return null;
-    return { code: code as ProviderHomeLaunchRefusalCode, provider, detectedAt };
+    return { code: code as ProviderHomeLaunchRefusalCode, provider, ...details, detectedAt };
   }
   if (typeof providerAccountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerAccountId)) return null;
   if (typeof providerAccountLabel !== "string" || !providerAccountLabel.trim() || providerAccountLabel.length > 200) return null;
-  return { code: code as ProviderHomeLaunchRefusalCode, provider, providerAccountId, providerAccountLabel, detectedAt };
+  return { code: code as ProviderHomeLaunchRefusalCode, provider, ...details, providerAccountId, providerAccountLabel, detectedAt };
 }
 
 export type ProviderLoginStatus =
@@ -10427,6 +10437,9 @@ export interface ProviderHomeLeaseInspection {
   hasEvidence?: boolean;
   /** For `stale`: why a recovery would be refused now, or null when it would proceed. */
   refusal?: ProviderHomeLeaseRecoveryCode | null;
+  /** v235: specific recovery cause; process observations are Owner/Admin-only. */
+  cause?: ProviderHomeRecoveryCause;
+  blockingProcess?: ProviderHomeBlockingProcess;
 }
 
 /** Protocol v229 (#3241): read one account HOME's lease state. Creates nothing. */

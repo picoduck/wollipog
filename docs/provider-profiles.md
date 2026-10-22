@@ -207,7 +207,7 @@ A failed or stopped session shows one notice for the code, with the recovery it 
 
 | Code | Notice | Actions |
 | --- | --- | --- |
-| `busy` | **Account In Use** | Restart Session, Switch Account… |
+| `busy` | **Account in Use** | Restart Session, Switch Account… |
 | `foreign_owner` | **Account Locked by Another Runner** | Open Machine Accounts (where an Owner or Admin can **Recover Lease**), Switch Account… |
 | `foreign_host` | **Account in Use on Another Host** | Switch Account…, Open Machine Accounts |
 | `unavailable` | **Lease Helper Unavailable** | Restart Session |

@@ -149,7 +149,8 @@ for (const survivor of [false, true]) test(`replacement runner ${survivor ? "ref
   const recover = () => {
     const result = spawnSync(process.execPath, ["--import", "tsx", fixture, "recover", root, helper], { env, encoding: "utf8", timeout: 30_000 });
     assert.equal(result.status, 0, result.stderr);
-    const outcome = JSON.parse(result.stdout) as { ok: boolean; released?: boolean; code?: string; fallbackUninspectable: boolean };
+    const outcome = JSON.parse(result.stdout) as { ok: boolean; released?: boolean; code?: string; fallbackUninspectable: boolean;
+      inspection?: import("./provider-home-lease-worker-protocol.js").LeaseWorkerInspection };
     assert.equal(outcome.fallbackUninspectable, true, "the unrelated fixture really blocks the legacy scan");
     assert.throws(() => readFileSync(`/proc/${unrelated}/environ`), { code: "EACCES" }, "unrelated process survives recovery untouched");
     return outcome;
@@ -161,7 +162,12 @@ for (const survivor of [false, true]) test(`replacement runner ${survivor ? "ref
     const proof = inspectLeaseCgroup(ready.identity);
     const evidence = assertSurvivor("immediately after boundary proof");
     assert.equal(proof, "populated", `recorded parent must count its live helper recursively: ${evidence}`);
-    assert.equal(recover().code, "boundary_survivor");
+    const refused = recover();
+    assert.equal(refused.code, "boundary_survivor");
+    assert.equal(refused.inspection?.refusal, "boundary_survivor");
+    assert.deepEqual(refused.inspection?.blockingProcess, {
+      pid: survivorPid, startTime: survivorStart, kind: "boundary_member", cgroupMembership: "recorded_boundary",
+    }, "the real worker identifies the surviving boundary helper without command, environment or path");
     assertSurvivor("after replacement refused handoff");
     assert.deepEqual(readFileSync(join(journal, "mutable-home.recovery.json")), original);
     assert.equal(readdirSync(journal).filter((name) => name.startsWith("next-")).length, 0, "refusal appends nothing");

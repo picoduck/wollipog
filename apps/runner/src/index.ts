@@ -1262,6 +1262,7 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   log,
 };
 const providerHomeLeaseCommands: ProviderHomeLeaseCommandDeps = {
+  controlPlaneProtocolVersion: () => controlPlaneProtocolVersion,
   accounts: () => config.providerAccounts,
   inspect: (home) => sessions.inspectProviderHomeLease(home),
   recover: (home, provider, staleTipHash, authorizationId) => sessions.recoverProviderHomeLease(home, provider, staleTipHash, authorizationId),

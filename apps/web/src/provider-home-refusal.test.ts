@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PROVIDER_HOME_LAUNCH_REFUSAL_CODES } from "@wollipog/protocol";
+import { PROVIDER_HOME_LAUNCH_REFUSAL_CODES, PROVIDER_HOME_RECOVERY_CAUSES, PROVIDER_HOME_RECOVERY_CAUSE_CODES } from "@wollipog/protocol";
 import { providerHomeRefusalCopy } from "./provider-home-refusal.js";
 
 test("every launch refusal code has its own state, a short sentence-case body and a recovery", () => {
@@ -36,4 +36,18 @@ test("each refusal offers the action that recovers it", () => {
   assert.deepEqual(actions("profile_not_granted", "Work"), ["open_accounts", "switch_account"], "Adopt as Profile is in the Machine's accounts");
   assert.deepEqual(actions("profile_changed", "Work"), ["switch_account", "open_accounts"]);
   assert.equal(providerHomeRefusalCopy({ code: "busy", provider: "codex" }, undefined).body.includes("Codex sign-in"), true);
+});
+
+test("specific recovery causes have distinct guidance and preserve the journal", () => {
+  const titles = new Set<string>();
+  for (const cause of PROVIDER_HOME_RECOVERY_CAUSES) {
+    const copy = providerHomeRefusalCopy({ code: PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause], cause, provider: "claude" }, "Work");
+    titles.add(copy.title);
+    assert.match(copy.body, /preserve.*journal/iu, cause);
+    assert.doesNotMatch(copy.body, /kill|quarantine|delete|terminate/iu, cause);
+    assert.ok(copy.actions.includes("switch_account"), cause);
+    if (cause === "process_uninspectable_not_delegated") assert.match(copy.body, /systemd unit is not delegated/);
+    if (cause === "process_uninspectable") assert.match(copy.body, /unrelated/);
+  }
+  assert.equal(titles.size, PROVIDER_HOME_RECOVERY_CAUSES.length);
 });

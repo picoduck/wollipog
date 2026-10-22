@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
-import { type RunnerToControlPlane, type SessionSnapshot } from "@wollipog/protocol";
+import { PROVIDER_HOME_RECOVERY_CAUSES, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type RunnerToControlPlane, type SessionSnapshot } from "@wollipog/protocol";
 import { providerHomeLaunchRefusal, providerHomeLaunchRefusalCode } from "./provider-home-launch-refusal.js";
 import { LEASE_WORKER_ERRORS, ProviderHomeLeaseError, type LeaseWorkerError } from "./provider-home-lease-worker-protocol.js";
 import { SessionManager } from "./session-manager.js";
@@ -19,8 +19,8 @@ test("each lease state a launch can meet maps to its launch refusal code; everyt
     process_uninspectable_not_delegated: "unverifiable", invalid_journal: "unverifiable",
     // Not a state of the HOME a person can act on from the session.
     cancelled: undefined, cancel_release_failed: undefined, expired: undefined,
-    profile_unsupported_control_plane: undefined, profile_grant_limit: undefined,
-    stale_tip_changed: undefined, no_reboot_proof: undefined, recovery_unconfirmed: undefined,
+    profile_unsupported_control_plane: "unverifiable", profile_grant_limit: "unverifiable",
+    stale_tip_changed: undefined, no_reboot_proof: "unverifiable", recovery_unconfirmed: undefined,
   };
   for (const [code, launch] of Object.entries(expected) as [LeaseWorkerError, string | undefined][]) {
     assert.equal(providerHomeLaunchRefusalCode(new ProviderHomeLeaseError(code)), launch, code);
@@ -188,4 +188,33 @@ test("a launch preparation refused at the account's lease is reported as the acc
   assert.ok(!errors.some((message) => message.includes("execution isolation unavailable")), errors.join("\n"));
   assert.ok(h.messages.some((message) => message.type === "session_status" && message.status === "failed" &&
     message.detail === LEASE_WORKER_ERRORS.profile_not_granted));
+});
+
+test("specific ownership causes survive preparation and driver-lease launch boundaries", async (t) => {
+  const h = harness(t);
+  for (const stage of [h.preparation, h.driverLease]) {
+    for (const cause of PROVIDER_HOME_RECOVERY_CAUSES) {
+      stage.refuse = cause;
+      h.messages.length = 0;
+      assert.equal(await h.launch(), false, cause);
+      const refusal = h.store.readMeta("refused")?.providerHomeRefusal;
+      assert.equal(refusal?.cause, cause);
+      assert.equal(refusal?.code, PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause]);
+      assert.equal(lastRefusal(h.messages)?.cause, cause);
+      assert.ok(!errorEvents(h.messages).some(message => message.includes("execution isolation")), cause);
+      assert.ok(h.messages.some(message => message.type === "session_status" && message.detail === LEASE_WORKER_ERRORS[cause]), cause);
+    }
+    stage.refuse = undefined;
+  }
+  assert.equal(h.driversCreated(), 0);
+});
+
+test("v233-v234 peers keep the coarse refusal while v235 receives its specific cause", () => {
+  const refusal = { code: "unverifiable" as const, provider: "claude" as const, detectedAt: 1, cause: "process_uninspectable_not_delegated" as const };
+  const meta = baseMeta("/repo", { providerHomeRefusal: refusal });
+  assert.deepEqual(metaToSnapshot(meta, 235).providerHomeRefusal, refusal);
+  for (const version of [233, 234]) {
+    const { cause: _cause, ...coarse } = refusal;
+    assert.deepEqual(metaToSnapshot(meta, version).providerHomeRefusal, coarse);
+  }
 });
