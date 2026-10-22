@@ -282,7 +282,7 @@ let instance: { mount: CgroupLocation; bootId: string; identity: Readonly<LinuxC
  * provider parent. Its retirement can prove that systemd pruned an absent provider parent. */
 export function providerContainmentUnitIdentity(): Readonly<LinuxCgroupIdentity> | undefined { return instance?.unit; }
 
-/** Detached controllers and user-owned shell work keep their lifetime contract, but their HOME
+/** Detached provider controllers keep their lifetime contract, but their HOME
  * cannot be released at shutdown while any of them still occupies the provider parent. */
 export function providerContainmentEmpty(): boolean {
   if (!instance) return true;

@@ -150,6 +150,9 @@ Internal typed causes distinguish `holder_alive`, `boundary_survivor`, `process_
 `invalid_journal`, fixed-helper `unavailable`, and existing profile denials; `busy` remains fence
 contention. Only fixed path-free guidance crosses the worker boundary. This change adds no
 session-status field or protocol-version bump; #3585 can consume these runner-internal causes.
+With #3589's existing v233 launch-refusal view, live-holder/survivor causes map to `busy` and
+unverifiable-boundary/process/journal causes map to `unverifiable`. This compatibility mapping
+adds no protocol values; the internal causes remain distinct for #3585.
 
 The non-delegated guidance names the reason: the runner's systemd unit is not delegated. An
 operator must use `Delegate=yes` for future leases. The live dogfood stack's `Delegate=no` scope

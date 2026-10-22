@@ -6,10 +6,17 @@ import { ProviderHomeLeaseError, type LeaseWorkerError } from "./provider-home-l
  * deadlines and recovery codes are not a state of the HOME, so they stay text only. */
 const LAUNCH_REFUSALS: Partial<Record<LeaseWorkerError, ProviderHomeLaunchRefusalCode>> = {
   busy: "busy",
+  holder_alive: "busy",
+  boundary_survivor: "busy",
+  process_survivor: "busy",
   foreign_owner: "foreign_owner",
   foreign_host: "foreign_host",
   unavailable: "unavailable",
   refusal: "unverifiable",
+  boundary_unverifiable: "unverifiable",
+  process_uninspectable: "unverifiable",
+  process_uninspectable_not_delegated: "unverifiable",
+  invalid_journal: "unverifiable",
   profile_not_granted: "profile_not_granted",
   profile_changed: "profile_changed",
   profile_unverifiable: "profile_unverifiable",
