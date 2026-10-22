@@ -12,8 +12,7 @@ starting point before package-by-package investigation. Find it with
 then inspect that run's jobs. Also read the latest Dependabot Updates run for each affected
 ecosystem and its job log before classifying an uncovered package as an updater gap. List runs
 with `gh run list --workflow "Dependabot Updates" --limit 20 --json databaseId,createdAt,status,conclusion,url`.
-Inspect jobs to identify the
-ecosystem, then read the corresponding log. Distinguish failed updates from queue saturation,
+Inspect jobs to identify the ecosystem, then read the corresponding log. Distinguish failed updates from queue saturation,
 intentional ignores, and release-age exclusions. Record the actual error and proposed retry date;
 an unavailable log is a coverage limit, not evidence that the updater failed.
 If `gh run view <run-id> --log` or `--log-failed` returns empty
@@ -29,7 +28,9 @@ log is a lead, not a replacement for the ground-truth commands below.
   Do this for advisory candidates found through other sources too, even if outdated omits them.
   A registry/version disagreement is a coverage limit until resolved; never recommend a target
   still inside a known affected range merely because outdated calls it Latest. Check the
-  configured Dependabot release-age gate before proposing a retry date.
+  effective release-age gate in repository configuration and the updater log before proposing a
+  retry date. A gate can be supplied by the updater even when no repository cooldown is set:
+  the October 19 npm log passed `--config.minimum-release-age=4320` (three days).
 - `pnpm audit --json` for known advisories. Do not run `pnpm audit --fix`; it changes the tree.
 - For the desktop crate, `cargo update --dry-run --manifest-path apps/desktop/src-tauri/Cargo.toml`
   for the version gap and `cargo audit` (run from `apps/desktop/src-tauri/`) for advisories. Do not
