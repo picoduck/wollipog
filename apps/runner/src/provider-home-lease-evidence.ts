@@ -221,8 +221,14 @@ export function linuxLeaseProcessProbe(
         const item = [...verdicts.values()].find(item => item.verdict === "marked") ??
           [...verdicts.values()].find(item => item.verdict === "uninspectable");
         if (!item) return {};
+        let startTime: string | undefined;
+        if (item.startTime) {
+          testHooks?.afterInspection?.(item.pid);
+          const after = read(item.pid, "stat");
+          if (Buffer.isBuffer(after) && statStartTime(after.toString("utf8")) === item.startTime) startTime = item.startTime;
+        }
         const blockingProcess: ProviderHomeBlockingProcess = {
-          pid: item.pid, ...(item.startTime ? { startTime: item.startTime } : {}),
+          pid: item.pid, ...(startTime ? { startTime } : {}),
           kind: item.verdict === "marked" ? "provider_descendant" : "uninspectable", cgroupMembership: "unavailable",
         };
         return { blockingProcess };
@@ -245,12 +251,7 @@ export function linuxLeaseProcessProbe(
           if (verdicts.has(key)) continue;
           fresh = true;
           const verdict = own === "failed" ? "uninspectable" : inspect(pid);
-          let startTime: string | undefined;
-          if (diagnostics && typeof own !== "string" && START_TIME.test(own[19] ?? "")) {
-            testHooks?.afterInspection?.(pid);
-            const after = read(pid, "stat");
-            if (Buffer.isBuffer(after) && statStartTime(after.toString("utf8")) === own[19]) startTime = own[19];
-          }
+          const startTime = diagnostics && typeof own !== "string" && START_TIME.test(own[19] ?? "") ? own[19] : undefined;
           verdicts.set(key, { pid, verdict, ...(startTime ? { startTime } : {}) });
         }
         // A marked process seen at any point refuses, even if it has exited since.

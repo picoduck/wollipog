@@ -121,6 +121,22 @@ test("a PID reused during fallback inspection never reports the previous identit
   } }, "the observed marker still refuses ownership, but its raced start time is omitted");
 });
 
+test("fallback diagnostics recheck only the reported blocker, preferring marked work to uninspectable processes", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(210, { start: "999", environ: "directory" });
+  proc.add(211, { start: "1000", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  proc.add(212, { start: "1001" });
+  proc.add(213, { start: "1002", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  const rechecked: number[] = [];
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300, { afterInspection: pid => { rechecked.push(pid); } })!;
+  assert.deepEqual(probe.scan(MARKER, "100", true), {
+    marked: [211, 213], uninspectable: [210], blockingProcess: {
+      pid: 211, startTime: "1000", kind: "provider_descendant", cgroupMembership: "unavailable",
+    },
+  });
+  assert.deepEqual(rechecked, [211], "only the reported process incurs the extra diagnostic identity read");
+});
+
 test("a marked process forked after the listing by a listed process that then exits is still found", { skip: process.platform !== "linux" }, (t) => {
   const proc = fakeProc(t);
   proc.add(220, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
