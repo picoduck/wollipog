@@ -42,7 +42,7 @@ function legacyFixture(t: TestContext, transitions: number, holder = missingPid)
   return { home, root, lock };
 }
 
-for (const transitions of [8, 4096]) test(`an upgrade migrates an in-lock legacy journal with ${transitions} transitions before admitting HOME`, { skip: process.platform !== "linux", timeout: 120_000 }, t => {
+for (const transitions of [8, 4096]) test(`an upgrade migrates an in-lock legacy journal with ${transitions} transitions before admitting HOME`, { timeout: 180_000 }, t => {
   const { home, root, lock } = legacyFixture(t, transitions);
   assert.equal(readdirSync(lock).length, transitions + 1);
   const registry = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: error => { throw error; } });
@@ -50,7 +50,7 @@ for (const transitions of [8, 4096]) test(`an upgrade migrates an in-lock legacy
   assert.equal(JSON.parse(readFileSync(join(root, "mutable-home.recovery.json"), "utf8")).version, 4, "old journals must enter bounded checkpoint storage on the first upgrade");
   assert.ok(readdirSync(root).length + readdirSync(lock).length < 16, "migration must retire only verified history after durable checkpoint selection");
   assert.equal(registry.releaseHome(home), true);
-  helperHandoff(home);
+  if (process.platform === "linux") helperHandoff(home);
   const replacement = new ProviderHomeLeaseRegistry("b".repeat(64));
   assert.equal(replacement.acquireHome(home), true, "an orderly upgrade handoff preserves account usability");
   assert.equal(replacement.releaseHome(home), true);

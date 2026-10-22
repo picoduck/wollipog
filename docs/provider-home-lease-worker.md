@@ -55,6 +55,11 @@ An ownership block already reported in the pre-upgrade snapshot does not prevent
 recovery update: completion reports `fresh-harness-discovery-degraded`, emits a warning, and records
 the unresolved block in the upgrade journal. A newly blocked or previously ready harness still
 fails readiness and rolls back. An unknown baseline never excuses an ownership block.
+The first upgrade from a control plane predating this projection has an unknown baseline. If a
+legacy ownership block survives that update, the service CLI deliberately refuses a healthy result
+and restores the prior generation. Before retrying, let the actual surviving processes exit or use
+the existing authorized recovery flow with valid process/boot evidence; do not fabricate a baseline
+or delete lease records. This can delay installation of a recovery update on a legacy blocked host.
 `admin status --json` exposes the content-free `runners.items[].harnessReadiness` projection:
 connection time, discovery completion, and agent IDs/availability/ownership-blocked flags. These
 answer whether discovery ran after this restart, whether an ownership refusal blocked it, and

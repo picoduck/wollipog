@@ -779,7 +779,7 @@ test("upgrading a legacy runner unit preserves settings, enables delegation, and
 });
 
 test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost previously ready harness", { skip: process.platform !== "linux" }, async t => {
-  for (const problem of ["stale", "ownership", "lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
+  for (const problem of ["stale", "ownership", "unknown-ownership", "lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
     const f = fake(t);
     assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
     const fixture = releaseFixture(f);
@@ -798,8 +798,9 @@ test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost pr
             connectedAt: installed && problem !== "stale" ? 2 : 1,
             refreshed: !installed || problem !== "pending",
             agents: [{ id: "claude", available: problem === "already-blocked" ? false : !installed || problem === "healthy",
-              ownershipBlocked: problem === "already-blocked" || installed && problem === "ownership" }],
+              ownershipBlocked: problem === "already-blocked" || installed && (problem === "ownership" || problem === "unknown-ownership") }],
           };
+          if (!installed && problem === "unknown-ownership") delete runner.harnessReadiness;
         }
         return { ...response, text: async () => JSON.stringify(body) };
       },
