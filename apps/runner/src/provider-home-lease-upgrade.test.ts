@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statfsSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
@@ -81,7 +81,8 @@ test("a version-1 lease migrates without discarding its retained ownership proof
 test("an interrupted first migration recovers at every native publication boundary", { timeout: 600_000 }, async t => {
   const boundaries = ["before-guard", "guard-temp-written", "guard-file-durable", "guard-published", "guard-durable",
     "before-candidate", "candidate-written", "candidate-file-durable", "candidate-durable", "before-selection",
-    "selection-published", "selection-durable", "before-retire", "after-retire", "retirement-durable"];
+    "selection-published", "selection-durable", "before-retire", "after-retire", "retirement-durable",
+    ...(process.platform === "win32" ? ["retirement-moved", "retirement-flushed"] : [])];
   for (const boundary of boundaries) {
     const { home, root } = legacyFixture(t, 8);
     const marker = join(home, "ready"), script = join(home, "writer.mts");
@@ -132,5 +133,50 @@ test("an unselected migration fence stays busy instead of entering partial-journ
   holder.kill("SIGKILL"); await closed;
   const registry = new ProviderHomeLeaseRegistry(owner);
   assert.equal(registry.acquireHome(home), true);
+  assert.equal(registry.releaseHome(home), true);
+});
+
+test("repeated first-migration interruptions preserve the original candidate until durable selection", { timeout: 300_000 }, async t => {
+  const { home, root, lock } = legacyFixture(t, 8);
+  async function pause(boundary: string) {
+    const marker = join(home, `ready-${randomUUID()}`), script = join(home, `writer-${randomUUID()}.mts`);
+    writeFileSync(script, `import{ProviderHomeLeaseRegistry}from${JSON.stringify(new URL("./provider-home-lease.ts", import.meta.url).href)};const r=new ProviderHomeLeaseRegistry(${JSON.stringify(owner)},{nativeCheckpointBarrierForTest:{boundary:${JSON.stringify(boundary)},marker:${JSON.stringify(marker)}}});const until=performance.now()+5000;for(;;){try{r.acquireHome(${JSON.stringify(home)});break}catch(e){if(!String(e).includes('publication is in progress')||performance.now()>=until)throw e;await new Promise(r=>setTimeout(r,20))}}`);
+    const child = spawn(process.execPath, ["--import", "tsx", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = ""; child.stdout.on("data", b => { output += b; }); child.stderr.on("data", b => { output += b; });
+    const closed = new Promise(resolve => child.once("close", resolve));
+    t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL"); });
+    const deadline = performance.now() + 60_000;
+    while (!existsSync(marker)) {
+      assert.equal(child.exitCode, null, `${boundary}: ${output}`); assert.ok(performance.now() < deadline, `${boundary}: ${output}`);
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    return async () => { child.kill("SIGKILL"); await closed; };
+  }
+  const first = await pause("candidate-durable");
+  const candidate = join(root, ".mutable-home.checkpoint.pending");
+  let candidateBytes: Buffer, identity: ReturnType<typeof statSync>, history: Map<string, Buffer>;
+  try {
+    candidateBytes = readFileSync(candidate); identity = statSync(candidate);
+    history = new Map(readdirSync(lock).map(name => [name, readFileSync(join(lock, name))]));
+  } finally { await first(); }
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const stop = await pause("before-selection");
+    try {
+      assert.deepEqual(readFileSync(candidate), candidateBytes, "a verified unselected candidate must survive catch-up unchanged");
+      assert.equal(statSync(candidate).ino, identity.ino); assert.equal(statSync(candidate).dev, identity.dev);
+      assert.equal(existsSync(join(root, ".mutable-home.retired")), false, "retirement cannot precede the first selected anchor");
+      assert.equal(existsSync(join(root, "mutable-home.recovery.json")), false);
+      for (const [name, bytes] of history) assert.deepEqual(readFileSync(join(lock, name)), bytes, name);
+    } finally { await stop(); }
+  }
+  const registry = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: error => { throw error; } });
+  const deadline = performance.now() + 5_000;
+  for (;;) {
+    try { assert.equal(registry.acquireHome(home), true); break; }
+    catch (error) {
+      if (!(error instanceof Error) || !error.message.includes("publication is in progress") || performance.now() >= deadline) throw error;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    }
+  }
   assert.equal(registry.releaseHome(home), true);
 });

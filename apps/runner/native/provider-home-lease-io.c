@@ -349,8 +349,9 @@ int main(int argc, char **argv) {
   require(fgetc(stdin) == EOF, "extra lease I/O input");
   if (operation == 1) actor_pid(tip->raw, tip->size);
   if (operation == 2) { require(jobs_count == 1 && !strncmp(jobs[0].name, "next-", 5) && !strcmp(jobs[0].name, future) && !jobs[0].count && jobs[0].size <= 4096, "invalid canonical successor publication"); actor_pid(jobs[0].raw, jobs[0].size); }
-  if (operation == 3) require(jobs_count == 1 && !jobs[0].count && tip->dir == 0 &&
-    (!strcmp(jobs[0].name, tip->name) || !strcmp(jobs[0].name, "checkpoint.json") || !strncmp(jobs[0].name, "lease-", 6)), "invalid canonical mirror publication");
+  if (operation == 3) require(jobs_count == 1 && !jobs[0].count &&
+    (tip->dir == 0 ? (!strcmp(jobs[0].name, tip->name) || !strcmp(jobs[0].name, "checkpoint.json") || !strncmp(jobs[0].name, "lease-", 6)) :
+      !strcmp(jobs[0].name, tip->name) && !strncmp(tip->name, "next-", 5)), "invalid canonical mirror publication");
   struct stat guard_stat; int new_guard = fstatat(lock_fd, GUARD, &guard_stat, AT_SYMLINK_NOFOLLOW) != 0;
   if (new_guard) {
     coherent_filesystem();
@@ -374,14 +375,17 @@ int main(int argc, char **argv) {
   for (uint32_t i = 0; i < count; i++) require(seen[i] || expected[i].optional, "verified lease snapshot evidence disappeared");
   anchor_fd = openat(root_fd, ANCHOR, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   if (anchor_fd < 0) {
-    require(errno == ENOENT && operation == 1 && tip->dir == 1, "selected checkpoint unavailable");
+    require(errno == ENOENT && (operation == 1 || operation == 3) && tip->dir == 1, "selected checkpoint unavailable");
     legacy_anchor_absent = 1;
   } else require(fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
   if (operation == 3) {
+    require(tip->dir == 0 || legacy_anchor_absent, "reverse mirror requires an unselected legacy journal");
     verify_entry(tip, 0); pinned();
-    if (linkat(root_fd, tip->name, lock_fd, jobs[0].name, 0) != 0) { require(errno == EEXIST, "canonical mirror publication failed"); Entry mirror = read_entry(1, jobs[0].name);
-      require(mirror.size == tip->size && !memcmp(mirror.raw, tip->raw, tip->size), "canonical mirror conflicts with immutable source"); free_entry(&mirror); }
-    sync_fd(lock_fd); out8('D'); out32(work_reads); out64(work_bytes); fflush(stdout); return 0;
+    unsigned target = 1 - tip->dir;
+    if (linkat(directory(tip->dir), tip->name, directory(target), jobs[0].name, 0) != 0) { require(errno == EEXIST, "canonical mirror publication failed"); Entry mirror = read_entry(target, jobs[0].name);
+      require(mirror.size == tip->size && !memcmp(mirror.raw, tip->raw, tip->size) &&
+        (tip->dir == 0 || (!strcmp(mirror.dev, tip->dev) && !strcmp(mirror.ino, tip->ino))), "canonical mirror conflicts with immutable source"); free_entry(&mirror); }
+    sync_fd(directory(target)); out8('D'); out32(work_reads); out64(work_bytes); fflush(stdout); return 0;
   }
   int copied = 0; owned(tip, future, copied);
   if (operation == 2) {
