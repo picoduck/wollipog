@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { providerHomeLeaseRefusalKind, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import type { LeaseProcessProbe } from "./provider-home-lease-evidence.js";
 import type { LeaseContainmentEvidence, LeaseContainmentResult } from "./provider-home-lease-containment.js";
+import { LEASE_CHECKPOINT_LIMITS } from "./provider-home-lease-checkpoint.js";
 import { adoptProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileMarker } from "./provider-profile.js";
 
 const previousMask = process.umask(0o077);
@@ -207,24 +208,29 @@ test("versioned boundary recovery retains journal history and profile authorizat
 test("version-5 ownership and recovery remain verifiable through canonical checkpoint compaction", { skip, timeout: 120_000 }, (t) => {
   const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "123" };
   const { home, world } = crashedHome(t, { containment });
-  // The first holder has exited. A same-owner successor uses the same recorded process view and
-  // versioned evidence through enough ordinary releases/acquisitions to publish a checkpoint.
+  // Native checkpoint publication independently correlates the record PID with its real caller.
+  // Simulate process start identities, but retain the real actor PID rather than inventing one.
+  // The separate cgroup test exercises actual different-process replacement.
   world.boundary = "empty";
-  world.running.set(404, "4040");
-  const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 404, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID,
-    runnerMarker: MARKER_B, processProbe: probe(world), containment });
-  for (let turn = 0; turn < 12; turn++) {
+  world.running.set(process.pid, "900001");
+  const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID,
+    runnerMarker: MARKER_B, processProbe: probe(world), containment,
+    onCheckpointFailureForTest: (error) => { throw error; } });
+  let anchor: { version: number; checkpoint?: { previousTip: string } } | undefined;
+  for (let turn = 0; turn < LEASE_CHECKPOINT_LIMITS.hardTransitions; turn++) {
     holder.acquireHome(home, "claude", GRANTED);
+    anchor = JSON.parse(readFileSync(join(leaseRoot(home), "mutable-home.recovery.json"), "utf8")) as typeof anchor;
+    if (anchor?.version === 4) break;
     assert.equal(holder.releaseAll(), true);
   }
-  holder.acquireHome(home, "claude", GRANTED);
-  const raw = readFileSync(join(leaseRoot(home), "mutable-home.recovery.json"), "utf8");
-  const anchor = JSON.parse(raw) as { version: number; checkpoint: { previousTip: string }; process: unknown };
-  assert.equal(anchor.version, 4, "the test actually crosses checkpoint publication");
+  assert.ok(anchor?.version === 4 && anchor.checkpoint, "v5 acquisition must actually publish a checkpoint within the existing growth bound");
   assert.equal(JSON.parse(anchor.checkpoint.previousTip).version, 5, "checkpoint retains the incompatible tip version for old readers");
-  world.running.delete(404);
+  assert.deepEqual(holder.getDiagnostics(), [], "v5 compaction must not silently fall back to an uncompacted chain");
+  // Reuse the real actor PID with a distinct start identity for a fresh registry's recovery.
+  world.running.set(process.pid, "900002");
   world.uninspectable = [444];
-  const next = replacement(world);
+  const next = new ProviderHomeLeaseRegistry(OWNER_B, { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID,
+    runnerMarker: MARKER_B, processProbe: probe(world), onCheckpointFailureForTest: (error) => { throw error; } });
   next.acquireHome(home, "claude", GRANTED);
   assert.equal(next.releaseAll(), true, "a different runner recovers and releases the checkpointed v5 chain");
 });
