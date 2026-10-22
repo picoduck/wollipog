@@ -757,8 +757,10 @@ abandonment. This is an operator input, not independent proof of the host namesp
 proof still runs again at publication.
 
 For a legacy scan blocked only by Linux process visibility, an administrator can temporarily grant
-**only CAP_SYS_PTRACE** to this one maintenance process while retaining the account owner's real
-and effective UID. Do not run the command directly as root (the protected journal must stay owned
+**CAP_SYS_PTRACE and CAP_DAC_READ_SEARCH** to this one maintenance process while retaining the
+account owner's real and effective UID. The first permits process inspection; the second permits
+reading root-owned procfs files such as a nondumpable SSH process's environment (mode 0400). Neither
+capability grants a file-write override. Do not run the command directly as root (the protected journal must stay owned
 by the account user), grant file capabilities to the runner, change SSH permissions, or give the
 long-running runner elevated capabilities. Let any `sudo` launcher exit before scanning: a same-user
 set-ID ancestor is itself protected by the ordinary fallback rules. Privileged inspection does not
