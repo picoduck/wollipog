@@ -784,7 +784,7 @@ test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost pr
     assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
     const fixture = releaseFixture(f);
     const host: ServiceHost = { ...fixture.host,
-      now: problem === "pre-restart-inventory" ? () => 100 : fixture.host.now,
+      now: problem === "pre-restart-inventory" ? () => fixture.host.now() + 100 : fixture.host.now,
       exec: async (command, args, options) => args[0] === "--version"
         ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" }
         : fixture.host.exec(command, args, options),
