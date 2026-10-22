@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -17,6 +17,7 @@ for (const file of ["heartbeat-liveness.integration.test.ts", "malformed-frame-s
     const bin = join(temp, "bin");
     mkdirSync(home);
     mkdirSync(bin);
+    symlinkSync(process.execPath, join(bin, "node"));
     // No real provider or credential is used. Leave the version probe running long enough to
     // overlap the transport test's abrupt runner teardown, exactly as a local installation can.
     const calls = join(temp, "probe-calls.jsonl");
@@ -29,12 +30,13 @@ const parent = process.ppid;
 setInterval(() => { if (process.ppid !== parent) process.exit(0); }, 20).unref();
 setTimeout(() => console.log("0.71.0"), 10000);
 `, { mode: 0o700 });
+    let child: ReturnType<typeof spawn> | undefined;
     try {
       const output: string[] = [];
-      const child = spawn(process.execPath, ["--import", "tsx", "--test", `apps/runner/src/${file}`], {
+      child = spawn(process.execPath, ["--import", "tsx", "--test", `apps/runner/src/${file}`], {
         cwd: REPO_ROOT,
         env: {
-          PATH: [bin, dirname(process.execPath), "/usr/bin", "/bin"].join(delimiter),
+          PATH: [bin, "/usr/bin", "/bin"].join(delimiter),
           HOME: home,
           USERPROFILE: home,
           CODEX_HOME: join(home, "codex"),
@@ -43,14 +45,15 @@ setTimeout(() => console.log("0.71.0"), 10000);
           ANTHROPIC_API_KEY: "synthetic-credential-must-not-be-inherited",
         },
         stdio: ["ignore", "pipe", "pipe"],
+        detached: true,
         timeout: 50_000,
         killSignal: "SIGKILL",
       });
-      child.stdout.on("data", (chunk) => output.push(String(chunk)));
-      child.stderr.on("data", (chunk) => output.push(String(chunk)));
+      child.stdout!.on("data", (chunk) => output.push(String(chunk)));
+      child.stderr!.on("data", (chunk) => output.push(String(chunk)));
       const code = await new Promise<number | null>((done, reject) => {
-        child.once("error", reject);
-        child.once("close", done);
+        child!.once("error", reject);
+        child!.once("close", done);
       });
       assert.equal(code, 0, output.join(""));
       assert.ok(existsSync(calls), "the real runner must reach the synthetic installed Pi probe");
@@ -66,6 +69,12 @@ setTimeout(() => console.log("0.71.0"), 10000);
           `${file} wrote a provider lease into the invoking user's HOME`);
       }
     } finally {
+      // The nested test worker's timeout can bypass its own t.after hooks. Own the POSIX group
+      // so a failed regression cannot strand synthetic runners or probes after deleting HOME.
+      if (child?.pid) {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+      }
       rmSync(temp, { recursive: true, force: true });
     }
   });
