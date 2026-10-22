@@ -56,7 +56,7 @@ for (const transitions of [8, 4096]) test(`an upgrade migrates an in-lock legacy
   assert.equal(replacement.releaseHome(home), true);
 });
 
-test("a maximal legacy journal held by a live owner remains untouched during upgrade", { skip: process.platform !== "linux", timeout: 60_000 }, t => {
+test("a maximal legacy journal held by a live owner remains untouched during upgrade", { timeout: 180_000 }, t => {
   const { home, lock } = legacyFixture(t, 4096, process.pid);
   const before = new Map(readdirSync(lock).map(name => [name, readFileSync(join(lock, name), "utf8")]));
   assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/);
@@ -99,9 +99,38 @@ test("an interrupted first migration recovers at every native publication bounda
     assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /already in use/, boundary);
     child.kill("SIGKILL"); await closed;
     const next = new ProviderHomeLeaseRegistry(owner, { onCheckpointFailureForTest: error => { throw error; } });
-    assert.equal(next.acquireHome(home), true, boundary);
+    const recoveryDeadline = performance.now() + 5_000;
+    for (;;) {
+      try { assert.equal(next.acquireHome(home), true, boundary); break; }
+      catch (error) {
+        if (!(error instanceof Error) || !error.message.includes("publication is in progress") || performance.now() >= recoveryDeadline) throw error;
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+    }
     assert.equal(next.releaseHome(home), true, boundary);
     assert.equal(JSON.parse(readFileSync(join(root, "mutable-home.recovery.json"), "utf8")).version, 4, boundary);
     t.diagnostic(`${process.platform}: first migration recovered at ${boundary}`);
   }
+});
+
+test("an unselected migration fence stays busy instead of entering partial-journal recovery", { skip: process.platform === "win32", timeout: 30_000 }, async t => {
+  const { home, lock } = legacyFixture(t, 8);
+  const record = JSON.parse(readFileSync(join(lock, readdirSync(lock).find(name => name.startsWith("lease-"))!), "utf8"));
+  const guard = join(lock, "protocol-v4.json"), marker = join(home, "fence-ready");
+  writeFileSync(guard, `${JSON.stringify({ ...record, version: 4, protocol: "bounded-canonical-checkpoint", fenceBackend: "flock" })}\n`, { mode: 0o600 });
+  const before = new Map(readdirSync(lock).map(name => [name, readFileSync(join(lock, name), "utf8")]));
+  const holder = spawn("python3", ["-c", `import fcntl,time\nf=open(${JSON.stringify(guard)},'rb')\nfcntl.flock(f,fcntl.LOCK_EX)\nopen(${JSON.stringify(marker)},'w').write('ready')\ntime.sleep(25)\n`], { stdio: ["ignore", "pipe", "pipe"] });
+  const closed = new Promise(resolve => holder.once("close", resolve));
+  t.after(() => { if (holder.exitCode === null && holder.signalCode === null) holder.kill("SIGKILL"); });
+  const deadline = performance.now() + 10_000;
+  while (!existsSync(marker)) {
+    assert.equal(holder.exitCode, null); assert.ok(performance.now() < deadline);
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.throws(() => new ProviderHomeLeaseRegistry(owner).acquireHome(home), /publication is in progress/);
+  assert.deepEqual(new Map(readdirSync(lock).map(name => [name, readFileSync(join(lock, name), "utf8")])), before);
+  holder.kill("SIGKILL"); await closed;
+  const registry = new ProviderHomeLeaseRegistry(owner);
+  assert.equal(registry.acquireHome(home), true);
+  assert.equal(registry.releaseHome(home), true);
 });

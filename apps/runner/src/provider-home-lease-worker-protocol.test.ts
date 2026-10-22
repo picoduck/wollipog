@@ -135,7 +135,9 @@ for (const fault of ["wrong-id", "wrong-epoch", "duplicate", "changed", "unprove
 test("queue bounds include the active receipt and expired queued work never executes", async () => {
   const f = fixture({ pendingLimitForTest: 2, deadlineMsForTest: 60 });
   const active = f.registry.acquireHome("/private/first"); const activeRejected = assert.rejects(active, /worker unavailable/);
-  const queued = f.registry.acquireHome("/private/second"); const queuedRejected = assert.rejects(queued, /worker unavailable|expired/);
+  const queued = f.registry.acquireHome("/private/second");
+  const queuedRejected = assert.rejects(queued, error => error instanceof Error &&
+    (error.message.includes("worker unavailable") || error.message === LEASE_WORKER_ERRORS.expired));
   await assert.rejects(f.registry.acquireHome("/private/third"), /queue is full/);
   f.port.ready(); assert.equal(f.port.sent.length, 1);
   await Promise.all([activeRejected, queuedRejected]);

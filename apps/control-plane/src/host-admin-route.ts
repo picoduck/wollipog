@@ -19,7 +19,7 @@ export const HOST_ADMIN_FORBIDDEN =
   "host administration requires the local control-plane credential over a direct loopback connection";
 
 /** Content-free upgrade evidence; full agent metadata can contain local paths and environment. */
-export function runnerHarnessReadiness(runner: Pick<RunnerView, "connectedAt" | "agentsRefreshed" | "agents">): NonNullable<HostAdminStatusView["runners"]["items"][number]["harnessReadiness"]> {
+export function runnerHarnessReadiness(runner: Pick<RunnerView, "connectedAt" | "agentsRefreshed" | "agents" | "providerAccounts">): NonNullable<HostAdminStatusView["runners"]["items"][number]["harnessReadiness"]> {
   return {
     connectedAt: runner.connectedAt,
     refreshed: runner.agentsRefreshed === true,
@@ -28,6 +28,7 @@ export function runnerHarnessReadiness(runner: Pick<RunnerView, "connectedAt" | 
       available: agent.available === true,
       ownershipBlocked: agent.unavailableReason?.startsWith("Provider HOME ownership ") === true,
     })),
+    accounts: (runner.providerAccounts ?? []).map(account => ({ id: account.id, authStatus: account.authStatus })),
   };
 }
 

@@ -972,6 +972,7 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
     const before = controlPlane && runnerId ? await adminJson<HostAdminStatusView>(host, effective, ["status"]) : null;
     const previousRunner = before?.data?.runners?.items?.find(item => item.runnerId === runnerId);
     const previouslyReady = new Set(previousRunner?.harnessReadiness?.agents.filter(agent => agent.available).map(agent => agent.id));
+    const previouslySignedIn = new Set(previousRunner?.harnessReadiness?.accounts?.filter(account => account.authStatus === "authenticated").map(account => account.id));
     const previouslyBlocked = new Set(previousRunner?.harnessReadiness?.agents.filter(agent => agent.ownershipBlocked && !agent.available).map(agent => agent.id));
     const readinessWarnings: string[] = [];
     const unitPath = join(layout.unitDir, RUNNER_UNIT);
@@ -1087,6 +1088,9 @@ async function upgrade(args: string[], host: ServiceHost, io: ServiceIo, emit: (
           }
           if ([...previouslyReady].some(id => !readiness.agents.some(agent => agent.id === id && agent.available))) {
             readinessProblem = "a previously ready harness became unavailable"; return false;
+          }
+          if ([...previouslySignedIn].some(id => !readiness.accounts?.some(account => account.id === id && account.authStatus === "authenticated"))) {
+            readinessProblem = "a previously signed-in provider account became unavailable"; return false;
           }
           if (readiness.agents.some(agent => agent.ownershipBlocked)) {
             readinessWarnings.push("A pre-existing provider HOME ownership block remains; inspect recovery diagnostics. The update did not restore that harness.");

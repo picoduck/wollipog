@@ -3852,6 +3852,7 @@ export interface HostAdminStatusView {
       connectedAt: number | null;
       refreshed: boolean;
       agents: Array<{ id: string; available: boolean; ownershipBlocked: boolean }>;
+      accounts?: Array<{ id: string; authStatus: ProviderAccountDefinition["authStatus"] }>;
     };
   }> };
   devices: { paired: number };

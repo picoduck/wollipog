@@ -1238,6 +1238,10 @@ export class ProviderHomeLeaseRegistry {
     try {
       chain = readChain(lockDir);
     } catch (error) {
+      // A first migration can hold the permanent fence before selecting its
+      // initial anchor. Temporary I/O refusals are not malformed legacy state
+      // and must never enter partial-journal recovery.
+      if (error instanceof LeaseIoError && (error.kind === "busy" || error.kind === "unavailable")) throw error;
       // A published recovery checkpoint is authoritative. Corruption in it or its retained
       // evidence must never trigger another recovery that could erase an ownership boundary.
       try { lstatSync(join(root, RECOVERY_MARKER)); } catch (markerError) {

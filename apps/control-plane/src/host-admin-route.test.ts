@@ -18,10 +18,10 @@ test("upgrade readiness reports completed discovery and ownership refusals witho
     { id: "claude", name: "Private Account", command: "/private/claude", args: ["secret"], env: { PRIVATE_KEY: "secret" }, available: false,
       unavailableReason: "Provider HOME ownership blocked discovery. Private details stay out of this projection." },
     { id: "codex", name: "Codex", command: "codex", args: [], env: {}, available: true },
-  ] });
+  ], providerAccounts: [{ id: "account-1", label: "Private Account", provider: "claude", authStatus: "authenticated" }] });
   assert.deepEqual(readiness, { connectedAt: 123, refreshed: true, agents: [
     { id: "claude", available: false, ownershipBlocked: true }, { id: "codex", available: true, ownershipBlocked: false },
-  ] });
+  ], accounts: [{ id: "account-1", authStatus: "authenticated" }] });
   assert.equal(runnerHarnessReadiness({ connectedAt: 124, agents: [] }).refreshed, false, "registration alone is not discovery readiness");
 });
 
