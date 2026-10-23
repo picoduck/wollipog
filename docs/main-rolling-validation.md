@@ -20,8 +20,11 @@ The worker workflow has one constant concurrency group with cancellation disable
 That serializes the **entire** worker, including manual reruns that reuse successful
 admission outputs. GitHub keeps one replaceable pending workflow. Full CI's called
 concurrency lane uses the worker's workflow name, so it cannot collide with normal CI.
-The controller and admission share a different, short job lock. Pending controller
-events may coalesce: the next controller reads current main again.
+The controller uses a separate short job lock. Admission never joins that pending
+lane, where a burst of controller events could cancel its waiting job. Atomic state
+updates fence both writers; admission re-reads and retries up to three times when
+the state OID changes. Pending controller events may coalesce: the next controller
+reads current main again.
 
 The worker first runs trusted main workflow-revision code with scoped write access,
 checks its exact run/attempt/claim, and checks the target is an ancestor of current
@@ -31,6 +34,9 @@ production smoke), WebKit and Windows baseline jobs are shared unchanged. Every
 checkout job asserts its actual `git rev-parse HEAD` equals the admitted target.
 Dispatches always use main workflow definitions; arbitrary PR code never sees a
 controller token. Neither workflow interpolates event values into shell source.
+Before adopting any worker or accepting a record, the observer independently proves
+**both** its workflow revision and target are ancestors of the pinned live-main SHA.
+`head_branch: main` alone cannot establish this: a tag can have the same name.
 
 ## Durable State and Recovery
 
@@ -62,7 +68,9 @@ Intent is committed before dispatch. An unknown response causes no immediate ret
 the next reconciliation lists all active worker states before considering a retry
 after ten minutes, using the same claim. Three dispatch attempts exhaust automatic
 recovery and report `dispatch-unknown-operator-required`. Duplicate or delayed workers
-are serialized and must match the current claim before full fan-out. Completed,
+are serialized and must match the current claim before full fan-out. First-attempt
+admission also rejects a target that already has a verified completed verdict, so a
+late duplicate cannot repeat the suite. Completed,
 incomplete attempts retry at most three times per target, then report
 `recovery-limit-operator-required`; a newer main snapshot can make progress. A full
 red verdict is completed work and does not automatically retry forever.
@@ -76,6 +84,8 @@ on one run fails reconciliation and emits a sanitized status. The next scheduled
 invocation tries again. Operators can manually rerun the controller from Actions;
 manual worker reruns retain whole-workflow serialization. Do not edit state to
 manufacture a verdict.
+For a rerun, the stall clock starts at the latest attempt's `run_started_at`, rather
+than the original run's creation time.
 
 ## Identity Contract for Consumers
 
@@ -97,9 +107,15 @@ Each `main-rolling-validation-v1` record contains:
   A green verdict requires every expected job exactly once, every checkout assertion
   successful, and the worker run successful. Cancelled/skipped/missing/unverified
   outcomes are incomplete. A controller success certifies nothing.
+- `mainSnapshotSha`, `workflowAncestryVerified` and `targetAncestryVerified` describe
+  the observer's independent ancestry checks against its pinned live main snapshot.
 - Every retained run attempt, including earlier attempts of a rerun. Measurement reuses
   #3626's `attemptRecord` and `listJobs`. `metrics.consumedRunnerMinutes` remains null
   for reruns with copied job timing, rather than inventing billable duration.
+  Metrics remove the reusable caller prefix before collection and retain original
+  API job names alongside `measurementName`; extra admission dependencies may still
+  leave a critical-path split unmeasured. Failure artifacts prefer the tested target
+  over the dispatcher SHA.
 - `dispatchToVerdictMinutes` and `commitToVerdictMinutes`. The latter is explicitly a
   committer-timestamp proxy for validation lag, not measured push arrival time. Missing
   timing remains null. API records and GitHub retention bound historical recovery.
@@ -110,6 +126,16 @@ All nonterminal statuses are scanned separately, so a burst of newer completed
 runs cannot hide an active worker. Consumers must not interpret this bounded report
 as a complete historical census. Export observed records for a chosen measurement
 window before Actions evidence expires.
+Ordinary controller reconciliation reads at most three recent completed workers
+for current main, plus its previous active pointer and a matching last-verdict
+pointer. Immutable workflow blobs/target commits and ancestry comparisons are shared
+within the invocation. A fixture with unrelated completed history bounds quiet
+reconciliation to 22 API calls (including state and live-main reads), rather than
+re-reading eight full records on every tick. Six scheduled ticks therefore model
+at most 132 calls/hour in that fixture, plus pushes, completions, admission and
+recovery. This is an API-call estimate, not observed token rate-limit usage; confirm
+the controller token's live rate budget during shadow because existing CI monitors
+share repository limits. Transient quota refusal fails closed and waits for recovery.
 
 ## Shadow Verification and Cutover Gate
 

@@ -37,6 +37,10 @@ test("only exact worker checkout proofs and every required job can certify the t
   assert.equal(good.workflowRevision.executedBlobSha, W);
   assert.equal(good.dispatchToVerdictMinutes, 40);
   assert.ok(good.metrics.consumedRunnerMinutes > 0);
+  assert.ok(good.metrics.requiredMinutes > 0);
+  assert.equal(good.metrics.browserShardImbalance.observed, 5);
+  assert.equal(good.jobs[1].name, REQUIRED[1]);
+  assert.equal(good.jobs[1].measurementName, "Browser End-to-End Tests (1)");
   assert.equal(good.suiteVersion.length, 64);
   for (let i = 0; i < REQUIRED.length; i++) {
     const missing = jobs().filter((_, index) => index !== i);
@@ -88,6 +92,8 @@ test("no change, cancelled startup retries, hung runs and dispatch ambiguity hav
   const hung = run({ status: "in_progress", conclusion: null });
   const stalled = plan(state, { active: [hung], records: [] }, B, at(STALLED_MS / 60_000 + 1));
   assert.equal(stalled.dispatch, false); assert.equal(stalled.next.status, "stalled-active-run");
+  const rerun = run({ status: "in_progress", conclusion: null, run_attempt: 2, run_started_at: at(180) });
+  assert.equal(plan(state, { active: [rerun], records: [] }, B, at(181)).next.status, "validating");
   const incomplete = [10, 11, 12].map((id) => record(run({ id, conclusion: "cancelled" }), []));
   assert.equal(plan(state, { active: [], records: incomplete }, A, at(50)).next.status, "recovery-limit-operator-required");
   assert.equal(plan(state, { active: [], records: incomplete }, B, at(50)).dispatch, true);
@@ -95,10 +101,11 @@ test("no change, cancelled startup retries, hung runs and dispatch ambiguity hav
 
 function forge() {
   const data = { oid: null, values: new Map(), trees: new Map(), commits: new Map(), runs: [], jobs: new Map(),
-    dispatches: [], mutations: [], main: A, count: 0, deniedAncestry: false };
+    dispatches: [], mutations: [], requests: [], main: A, count: 0, deniedAncestry: false, deniedRevisions: new Set() };
   const oid = () => (++data.count).toString(16).padStart(40, "0");
   const notFound = () => { const error = new Error("not found"); error.status = 404; throw error; };
   const api = async (path, options = {}) => {
+    data.requests.push(path);
     const { body, method = "GET" } = options;
     if (path === "/graphql") {
       const update = body.variables.input.refUpdates[0];
@@ -125,7 +132,10 @@ function forge() {
       const value = data.values.get(local.split("/").at(-1));
       return { content: Buffer.from(value).toString("base64"), encoding: "base64", size: value.length };
     }
-    if (local.includes("/compare/")) return { merge_base_commit: { sha: data.deniedAncestry ? B : local.split("/").at(-1).split("...")[0] } };
+    if (local.includes("/compare/")) {
+      const source = local.split("/").at(-1).split("...")[0];
+      return { merge_base_commit: { sha: data.deniedAncestry || data.deniedRevisions.has(source) ? "f".repeat(40) : source } };
+    }
     if (local.startsWith("/contents/")) return { sha: W };
     if (local.startsWith("/commits/")) return { commit: { committer: { date: at(-1) } } };
     if (local.endsWith("/dispatches")) { data.dispatches.push(body); if (data.dispatchError) throw data.dispatchError; return null; }
@@ -234,12 +244,63 @@ test("unknown dispatch is not retried in-place, and admission checks run, claim 
   assert.equal(await admit(repository, event, 10, 1, { api }), false);
 });
 
+test("a main-named tag with an untrusted workflow revision cannot certify or block main", async () => {
+  const { data, api } = forge();
+  data.runs = [run()]; data.deniedRevisions.add(W);
+  const result = await reconcile(repository, { api, now: () => at(41), log: () => {} });
+  assert.equal(result.records.length, 0);
+  assert.equal(data.dispatches.length, 1, "real main validation still dispatches");
+  data.oid = null; data.runs = [run({ status: "in_progress", conclusion: null })];
+  const active = await reconcile(repository, { api, now: () => at(42), log: () => {} });
+  assert.equal(active.state.active.runId, null, "untrusted active tag is not adopted as a validation");
+});
+
+test("steady-state reconciliation reads only relevant evidence and stays within its API-call budget", async () => {
+  const { data, api } = forge();
+  data.runs = [run(), ...Array.from({ length: 8 }, (_, i) => run({ id: 20 + i, display_title: `Rolling ${B} ${claimId}` }))];
+  const first = await reconcile(repository, { api, now: () => at(41), log: () => {} });
+  assert.equal(first.records.length, 1);
+  assert.equal(first.records[0].workflowAncestryVerified, true);
+  const before = data.requests.length;
+  await reconcile(repository, { api, now: () => at(42), log: () => {} });
+  assert.ok(data.requests.length - before <= 22, `steady-state REST/GraphQL calls: ${data.requests.length - before}`);
+});
+
 test("errors never log response bodies or token-bearing exception messages", async () => {
   const errors = [];
   const rc = await main(["reconcile"], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "private-token", GITHUB_REF: "refs/heads/main" },
     api: async () => { throw new Error("private-token private response body"); }, error: (line) => errors.push(line) });
   assert.equal(rc, 1); assert.ok(!errors.join("").includes("private-token"));
   assert.deepEqual(JSON.parse(errors[0]), { event: "main_rolling_error", httpStatus: null, status: "reconciliation-required" });
+});
+
+test("a delayed duplicate dispatch cannot repeat an already verified target", async () => {
+  const { data, api } = forge();
+  const initial = await readState(api, repository);
+  await writeState(api, repository, initial, { ...claimed(), active: { ...claimed().active, runId: 11 } });
+  data.runs = [run(), run({ id: 11, status: "in_progress", conclusion: null })];
+  const event = { ref: "refs/heads/main", inputs: { target_sha: A, claim_id: claimId } };
+  assert.equal(await admit(repository, event, 11, 1, { api }), false);
+});
+
+test("admission retries a real state race without discarding the newer pending target", async () => {
+  const { data, api } = forge();
+  await writeState(api, repository, await readState(api, repository), claimed());
+  data.runs = [run({ status: "in_progress", conclusion: null })];
+  let raced = false;
+  const racingApi = async (path, options) => {
+    if (path === "/graphql" && !raced) {
+      raced = true;
+      const current = await readState(api, repository);
+      await writeState(api, repository, current, { ...current.value, pending: { targetSha: B, observedAt: at(2) } });
+    }
+    return api(path, options);
+  };
+  const event = { ref: "refs/heads/main", inputs: { target_sha: A, claim_id: claimId } };
+  assert.equal(await admit(repository, event, 10, 1, { api: racingApi }), true);
+  const final = await readState(api, repository);
+  assert.equal(final.value.active.runId, 10);
+  assert.equal(final.value.pending.targetSha, B);
 });
 
 test("workflow security, exact checkout wiring and original gate contracts remain explicit", () => {
@@ -252,11 +313,12 @@ test("workflow security, exact checkout wiring and original gate contracts remai
   assert.match(worker, /group: main-rolling-full-validation\n  cancel-in-progress: false/);
   for (const text of [controller, worker]) {
     assert.match(text, /permissions: \{\}/);
-    assert.match(text, /group: main-rolling-state\n      cancel-in-progress: false/);
     assert.match(text, /persist-credentials: false/);
     assert.doesNotMatch(text, /pull_request_target|secrets: inherit|download-artifact/);
     for (const shell of text.matchAll(/run: (.+)/g)) assert.ok(!shell[1].includes("${{"));
   }
+  assert.match(controller, /group: main-rolling-state\n      cancel-in-progress: false/);
+  assert.doesNotMatch(worker, /group: main-rolling-state/, "a queued controller must not evict pending worker admission");
   assert.match(worker, /name: Full Validation\n    permissions:\n      contents: read\n    uses: .\/.github\/workflows\/ci.yml/);
   assert.equal((ci.match(/ref: \$\{\{ inputs.target_sha \}\}/g) ?? []).length, 4);
   assert.equal((ci.match(/name: Verify Rolling Checkout/g) ?? []).length, 3);
@@ -264,4 +326,6 @@ test("workflow security, exact checkout wiring and original gate contracts remai
   assert.match(ci, /  push:\n    branches: \[main\]/, "shadow does not remove main fan-out");
   assert.match(ci, /  merge_group:/);
   assert.match(ci, /    needs: \[checks, browser, win32, webkit\]/);
+  assert.match(ci, /CI_EVIDENCE_HEAD: \$\{\{ inputs.target_sha \|\| github.event.pull_request.head.sha \|\| github.sha \}\}/);
+  assert.match(ci, /--head "\$CI_EVIDENCE_HEAD"/);
 });

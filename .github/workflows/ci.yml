@@ -419,6 +419,8 @@ jobs:
         if: ${{ !cancelled() && steps.browser-tests.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 1
+        env:
+          CI_EVIDENCE_HEAD: ${{ inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
         run: >-
           python3 scripts/sanitize-browser-failure-artifacts.py
           --report "${{ runner.temp }}/synthetic-browser-report.json"
@@ -427,7 +429,7 @@ jobs:
           --outcome failure
           --run-id "${{ github.run_id }}" --attempt "${{ github.run_attempt }}"
           --shard "${{ matrix.shard }}"
-          --head "${{ github.event.pull_request.head.sha || github.sha }}"
+          --head "$CI_EVIDENCE_HEAD"
 
       - name: Upload Sanitized Synthetic Browser Failure Artifacts
         if: ${{ !cancelled() && steps.browser-tests.outcome == 'failure' && steps.sanitize-browser-artifacts.outcome == 'success' && steps.sanitize-browser-artifacts.outputs.retained == 'true' }}

@@ -13,15 +13,15 @@ name: Settings-Rows win32 Baselines
 on:
   workflow_call:
     inputs:
-      expected_sha:
-        description: Exact admitted rolling snapshot; empty for ordinary CI
-        type: string
-        default: ''
       ref:
         description: Ref to compare; empty for the calling run's commit.
         type: string
         required: false
         default: ""
+      expected_sha:
+        description: Exact admitted rolling snapshot; empty for ordinary CI
+        type: string
+        default: ''
   workflow_dispatch:
     inputs:
       ref:

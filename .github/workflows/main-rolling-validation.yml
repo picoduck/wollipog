@@ -31,9 +31,6 @@ jobs:
     permissions:
       contents: write
       actions: read
-    concurrency:
-      group: main-rolling-state
-      cancel-in-progress: false
     outputs:
       admitted: ${{ steps.admit.outputs.admitted }}
     steps:

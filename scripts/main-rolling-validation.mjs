@@ -73,7 +73,10 @@ export function validationRecord(repository, run, jobs, blobs) {
   const green = checkedOut && complete && Object.values(outcomes).every((s) => s === "success");
   const red = checkedOut && complete && Object.values(outcomes).some((s) => ["failure", "timed_out"].includes(s)) &&
     Object.values(outcomes).every((s) => ["success", "failure", "timed_out"].includes(s));
-  const record = attemptRecord(repository, run, jobs, { since: run.created_at, until: run.updated_at });
+  // Reuse the collector's ordinary-CI name model, then restore actual API names for evidence.
+  const record = attemptRecord(repository, run, jobs.map((j) => ({ ...j, name: j.name.replace(/^Full Validation \/ /, "") })),
+    { since: run.created_at, until: run.updated_at });
+  record.jobs = record.jobs.map((j, i) => ({ ...j, measurementName: j.name, name: jobs[i].name }));
   return { ...record, ...identity, schema: "main-rolling-validation-v1", testedSha: identity.targetSha,
     sha: identity.targetSha, dispatcherSha: run.head_sha, suiteRevision: identity.targetSha,
     workflowRevision: { sourceSha: run.head_sha, executedBlobSha: blobs.worker, state: "measured" },
@@ -153,18 +156,22 @@ async function readRun(api, repository, id) {
   return run;
 }
 
-async function readRecords(api, repository, run) {
+async function readRecords(api, repository, run, cache = new Map()) {
   const root = `/repos/${repository}`;
+  const immutable = async (path) => {
+    if (!cache.has(path)) cache.set(path, await api(path));
+    return cache.get(path);
+  };
   const paths = { worker: WORKER, ci: ".github/workflows/ci.yml", windows: ".github/workflows/settings-rows-win32.yml" };
   const blobs = {};
   for (const [key, path] of Object.entries(paths)) {
-    const file = await api(`${root}/contents/${path}?ref=${run.head_sha}`);
+    const file = await immutable(`${root}/contents/${path}?ref=${run.head_sha}`);
     if (!SHA.test(file?.sha)) throw new Error("Workflow revision unavailable");
     blobs[key] = file.sha;
   }
   if (run.run_attempt > 10) throw new Error("Worker attempts truncated; operator required");
   const records = [];
-  const target = await api(`${root}/commits/${workerIdentity(run, repository).targetSha}`);
+  const target = await immutable(`${root}/commits/${workerIdentity(run, repository).targetSha}`);
   const targetCommitAt = target?.commit?.committer?.date;
   for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
     const snapshot = await api(`${root}/actions/runs/${run.id}/attempts/${attempt}`);
@@ -182,13 +189,18 @@ async function readRecords(api, repository, run) {
 }
 
 /** All active runs are read independently of the bounded completed-history window. */
-export async function observe(api, repository, state) {
+export async function observe(api, repository, state, { targetSha, report = false, mainSha } = {}) {
+  mainSha ??= (await api(`/repos/${repository}/git/ref/heads/main`))?.object?.sha;
+  if (!SHA.test(mainSha)) throw new Error("Main ancestry unavailable");
+  targetSha ??= mainSha;
   const active = [];
   for (const status of ACTIVE) active.push(...await listRuns(api, repository, `&status=${status}`));
   // Recent completions reconstruct missing/rewritten state. Old no-change evidence is re-read by id.
   const recent = await listRuns(api, repository, "&status=completed", false);
-  const candidates = [...active, ...recent.slice(0, 8)];
-  for (const id of new Set([state.active?.runId, state.lastVerdict?.runId].filter(Boolean))) {
+  const selected = report ? recent.slice(0, 8) : recent.filter((r) => workerIdentity(r, repository)?.targetSha === targetSha).slice(0, 3);
+  const candidates = [...active, ...selected];
+  for (const id of new Set([state.active?.runId,
+    report || state.lastVerdict?.targetSha === targetSha ? state.lastVerdict?.runId : null].filter(Boolean))) {
     if (!candidates.some((r) => r.id === id)) {
       try {
         const run = await api(`/repos/${repository}/actions/runs/${id}`);
@@ -196,9 +208,23 @@ export async function observe(api, repository, state) {
       } catch (error) { if (error?.status !== 404) throw error; }
     }
   }
-  const runs = [...new Map(candidates.filter((r) => workerIdentity(r, repository)).map((r) => [r.id, r])).values()];
+  const runs = [], ancestry = new Map(), cache = new Map();
+  const onMain = async (sha) => {
+    if (!ancestry.has(sha)) {
+      try {
+        const comparison = await api(`/repos/${repository}/compare/${sha}...${mainSha}`);
+        ancestry.set(sha, comparison?.merge_base_commit?.sha === sha);
+      } catch (cause) { if (cause?.status !== 404) throw cause; ancestry.set(sha, false); }
+    }
+    return ancestry.get(sha);
+  };
+  for (const run of new Map(candidates.filter((r) => workerIdentity(r, repository)).map((r) => [r.id, r])).values()) {
+    // A tag named main also has head_branch=main. BOTH workflow source and target must be on main.
+    if (await onMain(run.head_sha) && await onMain(workerIdentity(run, repository).targetSha)) runs.push(run);
+  }
   const records = [];
-  for (const run of runs.filter((r) => r.status === "completed")) records.push(...await readRecords(api, repository, run));
+  for (const run of runs.filter((r) => r.status === "completed")) records.push(...(await readRecords(api, repository, run, cache))
+    .map((r) => ({ ...r, mainSnapshotSha: mainSha, workflowAncestryVerified: true, targetAncestryVerified: true })));
   return { active: runs.filter((r) => ACTIVE.includes(r.status)), records };
 }
 
@@ -216,7 +242,8 @@ export function plan(state, observation, mainSha, now, claimId = randomUUID()) {
     next.active = { targetSha: identity.targetSha, claimId: identity.claimId, runId: active.id,
       claimedAt: active.created_at, dispatchCount: 1, lastDispatchAt: active.created_at };
     next.pending = mainSha === identity.targetSha ? null : next.pending;
-    next.status = Date.parse(now) - Date.parse(active.created_at) > STALLED_MS ? "stalled-active-run" : "validating";
+    const attemptStart = active.run_attempt > 1 && date(active.run_started_at) ? active.run_started_at : active.created_at;
+    next.status = Date.parse(now) - Date.parse(attemptStart) > STALLED_MS ? "stalled-active-run" : "validating";
     return { next, dispatch: false };
   }
   // A known complete verdict is authoritative even if someone edited or removed the state ref.
@@ -244,10 +271,10 @@ export function plan(state, observation, mainSha, now, claimId = randomUUID()) {
 }
 
 export async function reconcile(repository, { api, now = () => new Date().toISOString(), log = console.log } = {}) {
-  const previous = await readState(api, repository);
+  let previous = await readState(api, repository);
   const main = await api(`/repos/${repository}/git/ref/heads/main`);
   if (!SHA.test(main?.object?.sha)) throw new Error("Invalid main head");
-  const observation = await observe(api, repository, previous.value);
+  const observation = await observe(api, repository, previous.value, { mainSha: main.object.sha });
   const decision = plan(previous.value, observation, main.object.sha, now());
   // Avoid retaining a new state commit for every no-change schedule tick.
   let stored = isDeepStrictEqual(decision.next, previous.value) && !previous.recovered
@@ -272,14 +299,27 @@ export async function admit(repository, event, runId, attempt, { api, now = () =
   if (identity.targetSha !== targetSha || identity.claimId !== claimId || run.run_attempt !== attempt) throw new Error("Worker identity mismatch");
   const comparison = await api(`/repos/${repository}/compare/${targetSha}...main`);
   if (comparison?.merge_base_commit?.sha !== targetSha) throw new Error("Target is outside main ancestry");
-  const previous = await readState(api, repository);
+  let previous = await readState(api, repository);
+  if (attempt === 1) {
+    const observation = await observe(api, repository, previous.value, { targetSha });
+    if (observation.records.some((r) => r.targetSha === targetSha && r.verdict !== "incomplete")) return false;
+  }
   // A lost claim is reconstructed by reconciliation, never invented by an arbitrary dispatch.
-  const claim = previous.value.active;
-  if (previous.recovered || claim?.claimId !== claimId || claim.targetSha !== targetSha ||
-      claim.runId !== null && claim.runId !== runId) return false;
-  await writeState(api, repository, previous, { ...previous.value, active: { ...claim, runId },
-    pending: previous.value.pending?.targetSha === targetSha ? null : previous.value.pending, status: "validating" });
-  return true;
+  for (let retry = 0; retry < 3; retry++) {
+    const claim = previous.value.active;
+    if (previous.recovered || claim?.claimId !== claimId || claim.targetSha !== targetSha ||
+        claim.runId !== null && claim.runId !== runId) return false;
+    try {
+      await writeState(api, repository, previous, { ...previous.value, active: { ...claim, runId },
+        pending: previous.value.pending?.targetSha === targetSha ? null : previous.value.pending, status: "validating" });
+      return true;
+    } catch (cause) {
+      const fresh = await readState(api, repository);
+      if (fresh.oid === previous.oid) throw cause;
+      previous = fresh;
+    }
+  }
+  throw new Error("Admission state changed repeatedly; reconcile before retry");
 }
 
 export async function main(argv, { env = process.env, log = console.log, error = console.error, api } = {}) {
@@ -291,7 +331,7 @@ export async function main(argv, { env = process.env, log = console.log, error =
     if (mode === "reconcile" || mode === "report") {
       const result = mode === "reconcile" ? await reconcile(repository, { api, log })
         : { state: (await readState(api, repository)).value };
-      if (mode === "report") log(JSON.stringify(await observe(api, repository, result.state)));
+      if (mode === "report") log(JSON.stringify(await observe(api, repository, result.state, { report: true })));
       if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY,
         `Main rolling validation: ${result.state.status}\n\n\`\`\`json\n${JSON.stringify(result, null, 2)}\n\`\`\`\n`);
     } else if (mode === "admit") {

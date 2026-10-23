@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: write
       actions: write
-    # This lock is shared with the worker's short admission job, never its full suite.
+    # Coalesce controller wakes only. Admission uses CAS without joining this pending lane.
     concurrency:
       group: main-rolling-state
       cancel-in-progress: false
