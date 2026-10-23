@@ -160,7 +160,7 @@ export function unknownHealth(repository, observedAt, reason) {
   return { schema: HEALTH_SCHEMA, repository, observedAt, currentMainSha: null, status: "unknown",
     reasons: [reason], fullCertification: null, latestAttempt: null, latestPassingSnapshot: null,
     unresolvedFailures: [], evidence: [], legacyEvidence: [], backlog: { commits: null, merges: null, mergeCommits: null,
-      oldestUnvalidatedAt: null, oldestUnvalidatedAgeSeconds: null, clock: "committer-time-proxy" } };
+      oldestUnvalidatedAt: null, oldestUnvalidatedAgeSeconds: null, clock: "forge-landing-time", landingEvidence: [] } };
 }
 
 async function pages(api, path, key) {
@@ -556,19 +556,43 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
           if (commits.length >= total) break;
         }
         if (commits.length !== total || new Set(commits.map((commit) => commit.sha)).size !== total) fail("incomplete-commit-pagination");
-        const times = commits.map((commit) => commit?.commit?.committer?.date);
-        if (!times.length || !times.every(timestamp)) fail("commit-time-unavailable");
-        const oldest = new Date(Math.min(...times.map(Date.parse))).toISOString();
         const mergedPullRequests = new Set();
+        const landingEvidence = [];
         for (const commit of commits) {
           const pulls = await api(`${root}/commits/${commit.sha}/pulls?per_page=100`);
           if (!Array.isArray(pulls) || pulls.length >= 100) fail("incomplete-merge-pagination");
-          for (const pull of pulls) if (positive(pull.number) && timestamp(pull.merged_at) && pull.merge_commit_sha === commit.sha &&
-            pull.base?.ref === "main" && pull.base?.repo?.full_name === repository) mergedPullRequests.add(pull.number);
+          const merged = pulls.filter((pull) => positive(pull.number) && timestamp(pull.merged_at) &&
+            Date.parse(pull.merged_at) <= Date.parse(observedAt) && pull.merge_commit_sha === commit.sha &&
+            pull.base?.ref === "main" && pull.base?.repo?.full_name === repository);
+          for (const pull of merged) mergedPullRequests.add(pull.number);
+          if (merged.length) {
+            const first = merged.reduce((a, b) => Date.parse(a.merged_at) <= Date.parse(b.merged_at) ? a : b);
+            landingEvidence.push({ sha: commit.sha, source: "pull-request-merged-at", landedAt: first.merged_at,
+              pullRequest: first.number, url: `https://github.com/${repository}/pull/${first.number}` });
+          } else {
+            // Queue commits can be created long before landing. For a direct main
+            // push, the controller's forge-created push run is a bounded fallback;
+            // its timestamp is a post-landing observation, never a commit clock.
+            const path = ".github/workflows/main-rolling-controller.yml";
+            const body = await api(`${root}/actions/workflows/main-rolling-controller.yml/runs?head_sha=${commit.sha}&event=push&branch=main&per_page=100`);
+            if (!Array.isArray(body?.workflow_runs) || !Number.isSafeInteger(body.total_count) || body.total_count < 0 ||
+                body.total_count !== body.workflow_runs.length || body.total_count >= 100) fail("incomplete-landing-pagination");
+            const runs = body.workflow_runs.filter((run) => positive(run.id) && run.path === path && run.event === "push" &&
+              run.head_sha === commit.sha && run.head_branch === "main" && run.repository?.full_name === repository &&
+              run.head_repository?.full_name === repository && timestamp(run.created_at) &&
+              Date.parse(run.created_at) <= Date.parse(observedAt));
+            if (!runs.length) fail("landing-time-unavailable");
+            const first = runs.reduce((a, b) => Date.parse(a.created_at) <= Date.parse(b.created_at) ? a : b);
+            landingEvidence.push({ sha: commit.sha, source: "main-push-controller-created-at", landedAt: first.created_at,
+              runId: first.id, url: `https://github.com/${repository}/actions/runs/${first.id}` });
+          }
         }
+        if (!landingEvidence.length) fail("landing-time-unavailable");
+        const oldest = new Date(Math.min(...landingEvidence.map((item) => Date.parse(item.landedAt)))).toISOString();
         health.backlog = { ...health.backlog, commits: total, merges: mergedPullRequests.size,
           mergeCommits: commits.filter((commit) => commit.parents?.length > 1).length,
-          oldestUnvalidatedAt: oldest, oldestUnvalidatedAgeSeconds: Math.max(0, (Date.parse(observedAt) - Date.parse(oldest)) / 1000) };
+          oldestUnvalidatedAt: oldest, oldestUnvalidatedAgeSeconds: Math.max(0, (Date.parse(observedAt) - Date.parse(oldest)) / 1000),
+          landingEvidence };
       }
     } else health.reasons.push("no-full-passing-snapshot");
     if (health.latestAttempt?.result === "unknown") health.reasons.push("latest-validation-incomplete");

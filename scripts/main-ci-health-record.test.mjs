@@ -34,7 +34,7 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
   const chain = history;
   runs.filter((run) => run.path === WORKER).forEach((run, index) => { run.run_number ??= index + 1; });
   const data = { runs, currentMain, state, oid: state ? C : null, mutations: [], requests: [],
-    attempts: new Map(), jobSets: new Map(), issues: [], count: 0 };
+    attempts: new Map(), jobSets: new Map(), associatedPulls: new Map(), commitTimes: new Map(), controllerRuns: [], issues: [], count: 0 };
   const oid = () => (++data.count).toString(16).padStart(40, "0");
   const api = async (path, options = {}) => {
     data.requests.push(path);
@@ -70,8 +70,10 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
     if (path.includes("/actions/workflows/") && path.includes("/runs?")) {
       if (path.includes("/main-ci-health.yml/")) return { workflow_runs: [], total_count: 0 };
       const rolling = path.includes("main-rolling-validation.yml");
+      const controller = path.includes("main-rolling-controller.yml");
       const params = new URL("https://api.github.com" + path).searchParams;
-      const selected = data.runs.filter((run) => (rolling ? run.path === WORKER : run.path === ".github/workflows/ci.yml") &&
+      const selected = (controller ? data.controllerRuns : data.runs).filter((run) =>
+        (controller ? true : rolling ? run.path === WORKER : run.path === ".github/workflows/ci.yml") &&
         (!params.get("status") || run.status === params.get("status")) &&
         (!params.get("head_sha") || run.head_sha === params.get("head_sha")) &&
         (!params.get("created") || Date.parse(run.created_at) >= Date.parse(params.get("created").slice(2))));
@@ -96,11 +98,14 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
       const [from, to] = path.split("/compare/")[1].split("?")[0].split("...");
       const i = chain.indexOf(from), j = chain.indexOf(to);
       const commits = i >= 0 && j >= i ? chain.slice(i + 1, j + 1).map((sha) => ({ sha, parents: [{ sha: from }],
-        commit: { committer: { date: at(31) } } })) : [];
+        commit: { committer: { date: data.commitTimes.get(sha) ?? at(31) } } })) : [];
       return { merge_base_commit: { sha: i >= 0 && j >= i ? from : W }, commits, total_commits: commits.length };
     }
-    if (path.includes("/commits/") && path.includes("/pulls?")) return [{ number: chain.indexOf(path.split("/commits/")[1].slice(0, 40)),
-      merged_at: at(31), merge_commit_sha: path.split("/commits/")[1].slice(0, 40), base: { ref: "main", repo: { full_name: repository } } }];
+    if (path.includes("/commits/") && path.includes("/pulls?")) {
+      const sha = path.split("/commits/")[1].slice(0, 40);
+      return data.associatedPulls.get(sha) ?? [{ number: chain.indexOf(sha), merged_at: at(31),
+        merge_commit_sha: sha, base: { ref: "main", repo: { full_name: repository } } }];
+    }
     if (path.includes("/issues?")) return data.issues;
     if (path.includes("/commits/")) return { author: null };
     throw new Error(`Unexpected fake API path ${path}`);
@@ -141,6 +146,75 @@ test("idle caught-up main stays fresh; freshness starts at oldest unvalidated co
   assert.equal(pending.backlog.merges, 2, "squash-merged PRs count even without Git merge parents");
   assert.equal(pending.backlog.oldestUnvalidatedAgeSeconds, 9 * 60);
   assert.equal((await behind.collect({ now: () => at(STALE_MS / 60_000 + 32) })).status, "stale");
+});
+
+test("queue freshness starts at verified PR landing, not the merge group's earlier committer time", async () => {
+  const landed = "2026-10-23T20:01:22.000Z", observed = "2026-10-23T20:05:22.000Z";
+  const f = forge({ currentMain: B });
+  f.data.commitTimes.set(B, "2026-10-23T19:20:07.000Z");
+  f.data.associatedPulls.set(B, [{ number: 3647, merged_at: landed, merge_commit_sha: B,
+    base: { ref: "main", repo: { full_name: repository } } }]);
+  const health = await f.collect({ now: () => observed });
+  assert.equal(health.status, "pending");
+  assert.equal(health.backlog.clock, "forge-landing-time");
+  assert.equal(health.backlog.oldestUnvalidatedAt, landed);
+  assert.equal(health.backlog.oldestUnvalidatedAgeSeconds, 240);
+  assert.equal(health.backlog.landingEvidence[0].pullRequest, 3647);
+  assert.ok(!f.data.requests.some((path) => path.includes("main-rolling-controller.yml/runs")), "PR proof adds no controller census");
+});
+
+test("direct main pushes use the controller's forge-created push run when no PR proves landing", async () => {
+  const f = forge({ currentMain: B }); f.data.associatedPulls.set(B, []);
+  f.data.controllerRuns = [worker(20, B, { path: ".github/workflows/main-rolling-controller.yml", event: "push", created_at: at(35) })];
+  const health = await f.collect();
+  assert.equal(health.status, "pending"); assert.equal(health.backlog.merges, 0);
+  assert.equal(health.backlog.oldestUnvalidatedAgeSeconds, 300);
+  assert.equal(health.backlog.landingEvidence[0].source, "main-push-controller-created-at");
+  assert.equal(health.backlog.landingEvidence[0].runId, 20);
+});
+
+test("freshness uses the oldest verified landing across the complete backlog", async () => {
+  const f = forge({ currentMain: C });
+  for (const [sha, minutes] of [[B, 35], [C, 33]]) f.data.associatedPulls.set(sha, [
+    { number: chain.indexOf(sha), merged_at: at(minutes), merge_commit_sha: sha,
+      base: { ref: "main", repo: { full_name: repository } } }]);
+  const health = await f.collect();
+  assert.equal(health.backlog.oldestUnvalidatedAt, at(33));
+  assert.equal(health.backlog.oldestUnvalidatedAgeSeconds, 420);
+  assert.equal(health.backlog.landingEvidence.length, 2);
+  assert.equal(health.backlog.merges, 2);
+});
+
+test("unmerged, future and foreign PR associations cannot establish a main landing", async () => {
+  for (const extra of [{ merged_at: null }, { merged_at: at(41) }, { merged_at: "invalid" },
+    { merge_commit_sha: A }, { base: { ref: "other", repo: { full_name: repository } } },
+    { base: { ref: "main", repo: { full_name: "other/repo" } } }]) {
+    const f = forge({ currentMain: B });
+    f.data.associatedPulls.set(B, [{ number: 8, merged_at: at(35), merge_commit_sha: B,
+      base: { ref: "main", repo: { full_name: repository } }, ...extra }]);
+    const health = await f.collect();
+    assert.equal(health.status, "unknown"); assert.deepEqual(health.reasons, ["landing-time-unavailable"]);
+    assert.equal(health.backlog.oldestUnvalidatedAt, null);
+  }
+});
+
+test("missing, unrelated, future or incomplete landing evidence stays unknown without using commit time", async () => {
+  for (const extra of [null, { event: "workflow_dispatch" }, { path: ".github/workflows/other.yml" },
+    { head_branch: "other" }, { repository: { full_name: "other/repo" } },
+    { head_repository: { full_name: "fork/repo" } }, { created_at: at(41) }, { created_at: "invalid" }]) {
+    const f = forge({ currentMain: B });
+    f.data.associatedPulls.set(B, [{ number: 8, merged_at: at(35), merge_commit_sha: A,
+      base: { ref: "main", repo: { full_name: repository } } }]);
+    f.data.controllerRuns = extra === null ? [] : [worker(20, B, {
+      path: ".github/workflows/main-rolling-controller.yml", event: "push", created_at: at(35), ...extra })];
+    const health = await f.collect();
+    assert.equal(health.status, "unknown"); assert.deepEqual(health.reasons, ["landing-time-unavailable"]);
+    assert.equal(health.backlog.oldestUnvalidatedAt, null); assert.equal(health.fullCertification, null);
+  }
+  const f = forge({ currentMain: B }); f.data.associatedPulls.set(B, []);
+  const api = async (path, options) => path.includes("main-rolling-controller.yml/runs")
+    ? { workflow_runs: [], total_count: 101 } : f.api(path, options);
+  assert.deepEqual((await collectHealth(repository, { api, now: () => at(40) })).reasons, ["incomplete-landing-pagination"]);
 });
 
 test("skipped, cancelled, partial, duplicate, missing-checkout and omitted-test outcomes never certify", async () => {

@@ -72,7 +72,7 @@ lighter merge gate remains disabled; this issue changes no required check, rules
 | `unresolvedFailures` | Full-worker failures and retained legacy incidents not covered by a verified full descendant. |
 | `evidence` | Rolling records: repository, tested SHA, claim, run/attempt/URL, workflow path/revision/blobs, suite version/revision, checkout/ancestry evidence, exact job/step inventory, result and times. |
 | `legacyEvidence` | Explicit `legacy-main-push` evidence, always `certification: none`; a legacy/fast success cannot certify or resolve rolling health. |
-| `backlog` | Commit and merged-PR counts, Git merge-commit count, oldest unvalidated time/age; null means unknown. |
+| `backlog` | Commit and merged-PR counts, Git merge-commit count, oldest unvalidated landing time/age and its forge evidence; null means unknown. |
 | `status`, `reasons` | `passing`, `failing`, `pending`, `stale` or `unknown`, with allowlisted content-safe diagnostics. |
 
 `passing` requires current-main full certification. `pending` means verified passing ancestry
@@ -81,12 +81,26 @@ the two-hour investigation budget. A full failure remains failing through a pend
 unknown evidence or a stalled validator remains explicit rather than silently reusing green.
 The budget is an investigation threshold, not a guarantee about GitHub scheduling or runner time.
 
-The freshness clock is the oldest unvalidated commit's **committer-time proxy**, not the age of
-the last green run and not measured push arrival. Squash merges from the queue receive a committer
-timestamp when they land, making it the useful freshness anchor for this repository. Once caught
-up, idle main has zero backlog and zero unvalidated age even after weeks without a run. `merges`
-counts associated PRs actually merged into main at each backlog commit, including squash merges;
-`mergeCommits` separately counts commits with multiple parents.
+The freshness clock is the oldest unvalidated commit's **verified landing time**, not its
+committer time or the age of the last green run. A merge-group commit can be created before it
+lands: production commit `784d96e50d4d7bf5ee641d476aa57ccf886fd32b` has committer time
+19:20:07Z on 2026-10-23 but PR #3647 merged at 20:01:22Z. Using commit time would incorrectly
+include 41 minutes of queue residence in its unvalidated age.
+
+For each backlog commit, the existing bounded associated-PR lookup must match the exact merge
+commit SHA, main base and repository. Its forge `merged_at` establishes landing. If no qualifying
+PR exists, a bounded lookup of Main Rolling Controller runs for that exact SHA requires the
+trusted workflow path, push event, main branch, repository identities and a valid forge
+`created_at`. This fallback is a post-landing observation and can understate age by the delay
+between landing and run creation; it survives the #3631 main-push full-CI cutover. No commit clock
+is used as a fallback. Missing, future, malformed or incomplete evidence yields unknown.
+`backlog.clock` is `forge-landing-time`; `backlog.landingEvidence` records each commit's timestamp,
+source and PR/run URL. PR-based timing adds no requests to the existing merge-count lookup;
+direct-push fallback adds at most one bounded controller listing per commit within the same
+48-request invocation cap. Once caught up, idle main has zero backlog and zero unvalidated age
+even after weeks without a run. `merges` counts associated PRs actually merged into main at each
+backlog commit, including squash merges; `mergeCommits` separately counts commits with multiple
+parents.
 
 ## Reruns, Ordering and Recovery
 
