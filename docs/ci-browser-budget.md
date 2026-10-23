@@ -236,11 +236,30 @@ new phases; they do not claim new measurements of test workload or mirror speed.
 The earlier fixture's warm-cache installs are hits of the **browser binary** cache;
 every one still fetched system archives. The incident evidence in #3649 records
 system-package misses reaching both 372–373-second deadlines on October 23.
-No system-package-cache hit has been measured on this draft yet. Record exact
-PR run/attempt/job IDs, restore result, resolve/install/retry/launch durations and
-`--no-download`/zero-archive-fetch log evidence when CI admits this PR. The one
-authorized cache-hit confirmation may rerun the same head; copied successes must
-not count as fresh measurements. Use the existing
+The first admitted PR run measured the following completed setup phases on head
+`92bdd321b9216092412145796e1ef066005a15a9`, run
+[40024588303](https://github.com/picoduck/wollipog/actions/runs/40024588303),
+attempt 1. Durations are seconds from each step's `started_at`/`completed_at`;
+zero means subsecond/rounded by the API, not zero work. Chromium shard 4 and
+WebKit completed successfully. Shard 5's setup completed while its tests were
+still running when these timings were collected; this is setup evidence, not a
+claim that the whole run passed.
+
+| Browser / Job | Package Cache | Resolve | Restore | Install | Retry | Launch | Collect | Save |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| [Chromium Shard 4 / 120657450171](https://github.com/picoduck/wollipog/actions/runs/40024588303/job/120657450171) | Miss | 10 | 0 | 8 | Skipped | 1 | 0 | 1 |
+| [Chromium Shard 5 / 120657450229](https://github.com/picoduck/wollipog/actions/runs/40024588303/job/120657450229) | Reported Exact Hit | 7 | 1 | 6 | Skipped | 0 | Skipped | Skipped |
+| [WebKit / 120657450255](https://github.com/picoduck/wollipog/actions/runs/40024588303/job/120657450255) | Miss | 10 | 0 | 23 | Skipped | 1 | 0 | 2 |
+
+The miss logs report `SYSTEM_CACHE_HIT: false`, 25.9 MB fetched for Chromium and
+117 MB for WebKit, followed by verified launch and saved exact-key entries.
+Shard 5's completed restore/install/launch and skipped collection/save establish
+the reported exact-hit branch through the pinned workflow conditions. Completed
+job logs and the one authorized same-head cache-hit confirmation still need to
+establish the actual zero-archive-fetch path for both browsers. A merge group
+cannot restore PR-scoped entries: its first run remains cold until main seeds
+the cache. Record that distinction in the delivery evidence; do not count copied
+successful jobs from a rerun as fresh measurements. Use the existing
 `merge-queue-wait-report.mjs --all-events --since <UTC> --until <UTC> --json`
 profile and compare with `ci-baseline-2026-10-22.json`; a single PR rerun proves
 the cache path only, not a latency or reliability improvement over that baseline.
