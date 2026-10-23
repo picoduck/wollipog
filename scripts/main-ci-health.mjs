@@ -767,4 +767,8 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = await main(process.argv.slice(2));
+// Finish this module's evaluation before collectHealth dynamically loads the
+// rolling module, which imports githubApi from here. Awaiting main at module
+// scope would make that back-import wait on its own CLI invocation forever.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href)
+  main(process.argv.slice(2)).then((code) => { process.exitCode = code; });
