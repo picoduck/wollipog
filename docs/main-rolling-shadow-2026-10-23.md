@@ -113,7 +113,10 @@ that exact target. This observation establishes idle-after-verdict push admissio
 not completion-driven progress or coalescing; the worker was still active when
 this sample was recorded. No manual wake was used for this sample.
 
-The proposed independent **Main Rolling Relay** must ship and demonstrate live
-completion delivery in shadow before cutover. Its static admission tests establish
-routing and token scope only. A fully missed idle push still requires another
+The proposed independent **Main Rolling Relay** must ship and demonstrate recurring
+live completion delivery in shadow before cutover, including at least two consecutive
+relay-originated controller → worker → relay → controller cycles. A first relay wake
+from a push-originated worker does not test suppression once the relay itself is in
+the chain. Preserve each run ID, event and dispatch linkage. Its static admission
+tests establish routing and token scope only. A fully missed idle push still requires another
 delivered event or an operator's manual controller dispatch.

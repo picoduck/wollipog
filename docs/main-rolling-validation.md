@@ -84,9 +84,11 @@ starts a root generation using the same exact-old-OID fence; recovery from malfo
 state also starts a root. Thus at most 128 state commits remain reachable from this
 ref, with at most 32 run/attempt pointers in a snapshot. GitHub determines when
 unreachable Git objects are collected; compaction is not a promise of byte deletion.
-State commits trigger no CI push (main only); the three existing completion monitors
-filter CI and their own PR/main-push/merge-group event types. This branch executes no
-workflow. See [GitHub's atomic ref-update contract](https://docs.github.com/en/graphql/reference/git#updaterefs).
+State commits trigger no CI push (main only). The completion subscribers are
+`pr-ci-supersede`, `merge-group-cleanup`, `main-ci-health`, and `main-rolling-relay`;
+their PR/main-push/merge-group source-event filters exclude state-branch activity.
+The relay additionally requires the triggering run's head branch to be main.
+This branch executes no workflow. See [GitHub's atomic ref-update contract](https://docs.github.com/en/graphql/reference/git#updaterefs).
 
 Intent is committed before dispatch. An unknown response causes no immediate retry:
 the next reconciliation lists all active worker states before considering a retry
@@ -174,10 +176,15 @@ share repository limits. Transient quota refusal fails closed and waits for reco
 
 ## Shadow Verification and Cutover Gate
 
-The wake repair ships in shadow with legacy main-push CI retained. Verify a live
-relay completion dispatches the controller and reconciliation advances the pending
-target before preparing a separate cutover. If the independent relay also fails to
-receive completions, report the blocker; do not claim automatic progress is fixed.
+The wake repair ships in shadow with legacy main-push CI retained. A first relay
+completion alone does not test the self-origin/chain-suppression hypothesis. Before
+cutover, record at least two consecutive automatic cycles where a relay-started
+controller dispatches a worker, and that worker's completion still produces a relay
+run followed by another controller reconciliation. Cite each run ID, source event
+and dispatch linkage; verify pending targets advance to current main when applicable.
+Natural main traffic must supply the pending work; do not manufacture merges or
+redundant full workers for this test. If relay delivery stops once the relay is in
+the dispatch chain, report the blocker; do not claim recurring progress is fixed.
 Then prepare the separate cutover as a draft, run focused tests and cross-model review,
 and leave it idle while the parent observes natural traffic. Before asking for
 cutover ready admission, record links and exact identities demonstrating:
