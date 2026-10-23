@@ -77,9 +77,12 @@ delivery are unverified; manual recovery alone does not prove periodic or
 completion-driven progress. Do not treat configured event wiring or passing
 fixtures as live delivery evidence.
 
-Before removing main-push fan-out, observe automatic reconciliation and main
-advancing during an active worker, followed by newest-target progress. Preserve
-all observations and export updated records for that larger normal-traffic window.
+Before removing main-push fan-out, observe automatic reconciliation and collect
+the [campaign's ready-admission window](main-rolling-validation.md#shadow-verification-and-cutover-gate):
+five natural completed verdicts including live coalescing, or 24 hours after the
+stage-one merge with at least three natural completed verdicts. Neither threshold
+is met in this initial window. Preserve all observations and export updated records
+for the larger normal-traffic window.
 Do not create unrelated merges, cancel workers, or dispatch duplicate full runs
 to obtain the sample. Review and verify the precise cutover/rollback separately,
 then obtain exact readiness and merge admission. Main-push CI remains the safety

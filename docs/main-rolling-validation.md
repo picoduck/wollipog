@@ -1,11 +1,19 @@
 # Rolling Main Validation
 
 Issue #3631 ships in two stages. The first adds **Main Rolling Controller** and
-**Main Rolling Validation** in parallel with the existing main-push CI. It does not
-change protected checks, rulesets, PR suites, merge-group suites, or alert selection.
-The lighter merge gate remains disabled. The second stage is a separate PR, admitted
-only after the verification below. Until then, main runs both paths and consumes more
-runner time; no savings are claimed from the shadow stage.
+**Main Rolling Validation** in parallel with the existing main-push CI. The second
+removes only `ci.yml`'s main-push trigger: the controller continues receiving every
+main push and dispatches the shared full suite on rolling snapshots. PR suites,
+merge-group suites, protected checks and rulesets retain full validation. The
+lighter merge gate remains disabled.
+
+The cutover can be prepared and independently reviewed as a draft while shadow
+evidence accrues. Preparation does not activate it. Ready admission requires the
+window below, and merge still requires exact-head CI, typed approval and successful
+merge-group CI. Until the cutover actually merges, both main paths remain enabled
+and consume more runner time. No savings are claimed from shadow. The
+[initial shadow observation](main-rolling-shadow-2026-10-23.md) records one completed
+snapshot and its limits.
 
 ## Coordination and Execution
 
@@ -140,8 +148,9 @@ share repository limits. Transient quota refusal fails closed and waits for reco
 
 ## Shadow Verification and Cutover Gate
 
-Before opening the separate cutover PR, record links and exact identities for natural
-main traffic demonstrating:
+Prepare the separate cutover as a draft, run focused tests and cross-model review,
+then leave it idle while the parent observes natural main traffic. Before asking
+for ready admission, record links and exact identities demonstrating:
 
 1. A complete green or red worker verdict with all expected checkout/job outcomes.
    Compare its complete job set with ordinary main CI at the same target where available.
@@ -159,10 +168,32 @@ main traffic demonstrating:
    Have the exact head independently reviewed, pass required CI and merge-group CI,
    and obtain the campaign's exact merge approval and human workflow enqueue.
 
+The campaign's readiness threshold is either:
+
+- Five completed rolling verdicts on natural main traffic, including at least one
+  observation of main advancing during an active worker and subsequent newest-target
+  progress; or
+- At least 24 hours after the stage-one merge (2026-10-24 15:15:07 UTC), with at least
+  three completed rolling verdicts. Report candidly whether coalescing was observed
+  when using this alternative.
+
+Use whichever threshold is met first. Count complete verified success/failure
+verdicts, not cancelled/incomplete runs, controller successes or repeated records
+for the same run attempt. Compare completed versus cancelled/incomplete legacy
+main-push results, runner-minutes and validation lag over exactly the same window.
+Keep missing timings and shadow overhead visible. The threshold does not waive
+operator blockers, evidence of broken automatic progress, review or merge gates.
+Do not spend model turns polling the window: report the reviewed draft and let the
+parent prompt the implementer when enough natural evidence exists.
+
 Only the later cutover PR may remove the main-push full fan-out. Preserve every PR
 and merge-group check and keep the lighter gate disabled. Do not change
 `scripts/main-ci-health.mjs` here; its exact-SHA rolling-health integration is #3632.
-The existing alert monitors ordinary main-push CI during shadow.
+The existing alert monitors ordinary main-push CI during shadow. After cutover, that
+legacy monitor no longer receives main-push CI completions. Until #3632 integrates
+rolling records, absence of that alert says nothing about current rolling health;
+inspect the worker's verified record and outcome directly. This limitation must be
+reported at ready/merge admission, never presented as authoritative health coverage.
 
 ## Rollback
 
@@ -171,10 +202,31 @@ misbehaving. Existing main-push CI remains the safety path. Let any active worke
 finish; no active-cancellation automation is part of rollback. Keep the state ref
 for diagnosis, with no certification authority.
 
-The separate cutover must retain a small revert that restores `push: branches: [main]`
-full CI admission and its existing required aggregator, then disable new controller
-dispatch. Do not remove workflow files while workers are active. Test the restored
-event matrix and full job set locally and observe the restored main-push run's exact
-SHA. A cutover is unfinished until this rollback is reviewed and verification evidence
-and normal-traffic measurements are recorded. No cutover has been performed by the
-shadow implementation.
+After cutover, prepare the rollback in an isolated contributor branch:
+
+```sh
+node scripts/restore-main-push-ci.mjs
+node --test scripts/main-rolling-cutover.test.mjs
+```
+
+The helper restores only `push: branches: [main]` at the cutover marker, preserving
+subsequent PR/merge-group/job edits. It refuses missing/duplicate markers or an
+existing conflicting push trigger; inspect a drifted workflow rather than
+overwriting it with an old whole-file snapshot. The cutover test accepts restored
+mode and verifies the complete event matrix and unchanged full job body. Run the
+other workflow contracts and actionlint too. Review, pass required CI and merge
+the restoration through the ordinary gates. Then verify that the resulting exact
+main SHA has an ordinary successful full main-push run before disabling dispatch:
+
+```sh
+gh workflow disable main-rolling-controller.yml --repo picoduck/wollipog
+```
+
+Do not execute this operational disable merely to test the documentation. Let active
+workers finish, retain the state ref for diagnosis, and do not remove workflow files
+while workers are active. This rollback changes no ruleset, required context, PR
+suite or merge-group suite. To resume rolling after repair, enable the controller
+and reconcile it through the documented manual path before a separately admitted
+cutover. Local source/rollback tests do not prove GitHub event delivery: retain actual
+restoration-run evidence if rollback is used. A cutover is unfinished until rollback
+review and normal-traffic measurements are recorded.
