@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import test from "node:test";
 import {
   ALERT_LABEL, ALERT_TITLE, alertBody, budgetApi, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
@@ -9,6 +12,47 @@ import {
 const repository = "example/project";
 const sha = "a".repeat(40);
 const otherSha = "b".repeat(40);
+
+test("actual CLI settles its worker back-import and emits bounded unknown evidence", () => {
+  const directory = mkdtempSync(join(tmpdir(), "main-health-cli-"));
+  // Exercise the real entry point and module graph, with every network request
+  // intercepted. Imported main() tests cannot expose an entry-point TLA cycle.
+  const preload = `globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    let status = 200, body;
+    if (path === "/rate_limit") body = {};
+    else if (path.endsWith("/issues")) body = [];
+    else if (path.endsWith("/git/ref/heads/ci/main-health-state")) { status = 404; body = {}; }
+    else if (path.endsWith("/git/ref/heads/main")) { status = 503; body = {}; }
+    else if (path.endsWith("/git/trees") || path.endsWith("/git/commits")) body = { sha: "${otherSha}" };
+    else if (path === "/repos/${repository}") body = { node_id: "repo" };
+    else if (path === "/graphql") body = { data: { updateRefs: {} } };
+    else throw new Error("Unexpected fixture request");
+    return new Response(JSON.stringify(body), { status, headers: {
+      "x-ratelimit-limit": "1000", "x-ratelimit-remaining": "900" } });
+  };`;
+  try {
+    for (const mode of ["report", "reconcile"]) {
+      const output = join(directory, mode + ".json");
+      const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(preload),
+        new URL("./main-ci-health.mjs", import.meta.url).pathname, mode], {
+        encoding: "utf8", timeout: 10_000,
+        env: { ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
+          GITHUB_TOKEN: "test-token", GITHUB_EVENT_NAME: "schedule", MAIN_CI_HEALTH_OUTPUT: output },
+      });
+      assert.ifError(child.error); assert.equal(child.signal, null);
+      assert.equal(child.status, mode === "report" ? 1 : 0, child.stderr);
+      assert.doesNotMatch(child.stderr, /unsettled top-level await/);
+      const health = JSON.parse(mode === "report" ? child.stdout : readFileSync(output, "utf8"));
+      assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
+      assert.deepEqual(health.reasons, ["forge-api-unavailable"]);
+      const usage = (child.stdout + child.stderr).split("\n").filter(Boolean)
+        .filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+        .find((entry) => entry.event === "main_ci_health_api_usage");
+      assert.ok(usage); assert.ok(usage.calls <= API_BUDGET); assert.equal(usage.rateLimit, 1000);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 const ciRun = (overrides = {}) => ({
   id: 123, run_attempt: 1, status: "completed", conclusion: "failure", event: "push",
   path: ".github/workflows/ci.yml", head_branch: "main", head_sha: sha,
