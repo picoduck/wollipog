@@ -447,7 +447,7 @@ async function readTimingLogBody(token, repository, jobId, fetchImpl) {
           else truncated = true;
         }
       }
-      if (pending.length > 20_000) pending = "";
+      if (pending.length > 32_000) pending = "";
     }
     const last = parseTiming(pending.trimEnd());
     if (last && summaries.length < 10) summaries.push(last);
