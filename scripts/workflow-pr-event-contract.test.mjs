@@ -268,7 +268,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // after `run:` and skip the suite on whichever legs it excluded — which those legs then reported
   // as success.
   const step = structural.match(
-    /^      - name: Remote-Instance Browser End-to-End Tests\n        id: browser-tests\n        env:\n          PLAYWRIGHT_JSON_OUTPUT_NAME: \$\{\{ runner.temp \}\}\/synthetic-browser-report.json\n          SYNTHETIC_ARTIFACT_FAILURE: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' \|\| 'false' \}\}\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        id: browser-tests\n        env:\n          PLAYWRIGHT_JSON_OUTPUT_NAME: \$\{\{ runner.temp \}\}\/synthetic-browser-report.json\n          SYNTHETIC_ARTIFACT_FAILURE: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' \|\| 'false' \}\}\n        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-\$\{\{ matrix\.shard \}\}\n      - name: /m,
   );
   assert.ok(step,
     "browser: the shard command's step must be exactly its reviewed name/id/env/run shape, followed by the " +
@@ -291,11 +291,9 @@ test("the required CI check aggregates parallel jobs that each own a time budget
 
   const shards = header[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(shards, shards.map((_, index) => index + 1),
-    "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
-  assert.equal(Number(step[1]), shards.length,
-    `browser: --shard=i/${step[1]} against ${shards.length} matrix legs runs the wrong fraction of ` +
-    "the suite. The dangerous direction is silent: fewer legs than the denominator runs a fraction " +
-    "and reports every leg green, because a shard that was never scheduled cannot fail.");
+    "browser: shard projects must be numbered consecutively with no gaps");
+  assert.deepEqual(shards, [1, 2, 3, 4, 5],
+    "browser: retain the five-job envelope; browser-shards.test.mjs compares all project test identities");
 
   assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
     "the browser suites must not share the unit-test job's budget");

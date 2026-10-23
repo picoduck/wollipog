@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { browserShards } from "../playwright.shards.ts";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const evidence = JSON.parse(readFileSync(new URL("./fixtures/browser-ci-timings.json", import.meta.url), "utf8"));
@@ -156,6 +157,24 @@ test("browser budget covers either bounded install path, measured remainder, enf
     assert.ok(result.budget - result.install - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
       `run ${row.runId} shard ${row.shard}: near-bound recovered setup must leave the full remaining workload its reserve`);
   }
+});
+
+test("redistributed sizing includes measured setup, production and cleanup without raising the deadline", () => {
+  const profile = JSON.parse(readFileSync(new URL("./fixtures/browser-shard-profile.json", import.meta.url), "utf8"));
+  for (const { phases } of profile.sources) {
+    assert.ok(Object.values(phases).every((value) => Number.isFinite(value) && value >= 0));
+    assert.equal(phases.activeSeconds, phases.installSeconds + phases.otherSetupSeconds
+      + phases.suiteSeconds + phases.productionSeconds + phases.cleanupSeconds);
+  }
+  const production = profile.sources.reduce((sum, source) => sum + source.phases.productionSeconds, 0);
+  assert.equal(production * 1000, profile.productionDurationMs);
+  const projected = Math.ceil((Math.max(...browserShards().map((group) => group.durationMs)) / 1000
+    + Math.max(...profile.sources.map((source) => source.phases.otherSetupSeconds))
+    + Math.max(...profile.sources.map((source) => source.phases.cleanupSeconds))) / 10) * 10;
+  const result = budgetAccounting(workflow);
+  const conservative = Math.max(projected, result.remainder);
+  assert.ok(result.install + conservative + result.enforcement + result.diagnostics + reserveSeconds <= result.budget,
+    "redistribution must fit the finite budget including diagnostics and reserve; remeasure rather than raise deadlines");
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
