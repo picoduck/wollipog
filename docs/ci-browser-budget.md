@@ -3,11 +3,13 @@
 The #3628 [duration profile and redistribution](ci-browser-shards.md) recalculates
 the projected non-install envelope at 1710 seconds, including shard-1 production.
 The existing measured 2020-second envelope remains the conservative sizing floor
-pending natural redistributed runs: `720 + max(2020, 1710) + 105 + 480 + 180 =
-3505s <= 3540s`. No deadline increases. This supersedes the file-count assignment
-discussion below; historical phase evidence and #2700's delivery criteria remain intact.
+pending natural redistributed runs. Adding #3649's 480 seconds of bounded cache
+and verification phases plus 75 seconds of enforcement gives
+`720 + max(2020, 1710) + 480 + 180 + 480 + 180 = 4060s <= 4080s`.
+The redistribution itself needs no increase; the explicit cache phases derive
+the new finite deadline. Historical phase evidence remains intact.
 
-The browser job retains five shards and a finite **59-minute** budget. The
+The browser job retains five shards and a finite **68-minute** budget. The
 2026-10-18 remeasurement replaces the stale 1,448-second non-install envelope with
 2,016 seconds. The prior 49-minute limit cannot reserve three minutes beyond the
 configured attempts, measured remainder, enforcement and failure diagnostics.
@@ -96,29 +98,34 @@ Production checks and cleanup remain included.
 | --- | --- | --- |
 | Active Install Attempts | 720 | Two configured six-minute attempts on either exclusive path. |
 | Non-Install Work | 2020 | Fresh maximum 2016, rounded upward to ten seconds. |
-| Timeout Enforcement | 105 | 15 per install attempt and diagnostic step, above the observed 12-second overrun. |
+| System-Package Cache and Verification | 480 | Resolve 2m, restore 2m, launch verification 1m, collect 1m, save 2m (#3649). |
+| Timeout Enforcement | 180 | 15 per install attempt, cache/verification phase and diagnostic step, above the observed 12-second overrun. |
 | Failure Diagnostics | 480 | Sanitization/upload: one minute each; linux baseline regeneration: four minutes; upload/summary: one minute each. All five skip on success. |
 | Required Reserve | 180 | Three minutes beyond the full modeled path. |
-| Total | 3505 | 58m25s; rounded up to 59m (3540s). |
+| Total | 4060 | 67m40s; rounded up to 68m (4080s). |
 
-`720 + 2020 + 105 + 480 + 180 = 3505 <= 3540`. Residual modeled reserve is
-**215 seconds** after installs, rounded remainder, enforcement and diagnostics.
-At 49 minutes that residual would be **-385 seconds**. Even the success-only path
-needs `720 + 2020 + 30 + 180 = 2950` seconds, above 49 minutes.
+`720 + 480 + 2020 + 180 + 480 + 180 = 4060 <= 4080`. Residual modeled reserve is
+**200 seconds** after installs, cache/verification, rounded remainder, enforcement and diagnostics.
+At the former 59 minutes the new full model would be short by **520 seconds**.
+Even without failure diagnostics, the new model needs
+`720 + 480 + 2020 + 105 + 180 = 3505` seconds.
 
 Count the cache-hit **or** cache-miss path, not both. A second failed attempt still
-fails. Cold-cache installation and post-job cache save remain unmeasured; attempt
-bounds cover installation, while cache save consumes reserve and has no separate
-step deadline. The 15-second enforcement assumption is not a hosted-runner
+fails. Cold browser-download installation remains unmeasured; attempt bounds
+cover it. System-package cache/verification phases now have separate deadlines;
+the browser-download cache's post-job save still consumes reserve. The
+15-second enforcement assumption is not a hosted-runner
 guarantee. Inert recovery fixtures execute the retry shell with stubs, no real
 apt/dpkg commands, process signals, network or sleeps. Arithmetic near-bound
 replay is not simultaneous worst-case hosted evidence. The remainder is a dated
 snapshot; use natural-run phases and margins to assess workload/setup changes
 and trigger remeasurement, rather than treating the snapshot as a runtime guarantee.
 
-The limit remains below the general 60-minute workflow ceiling. The same five
+The Chromium job has a narrow exception to the general 60-minute workflow ceiling:
+the package cache adds 480 seconds of explicit step bounds and 75 seconds of
+timeout enforcement to the existing measured model. The same five
 concurrent browser jobs perform unchanged normal execution work. A hang can hold
-each runner ten minutes longer than at 49 minutes. Adding shards competes for
+each runner nine minutes longer than at 59 minutes. Adding shards competes for
 more of the shared 20-job pool; rebalancing five needs per-file/test durations
 and a fresh all-shard baseline before justifying a smaller budget. Assertions,
 coverage, flaky handling, test retries, setup recovery, admission, cancellation,
@@ -193,3 +200,42 @@ sizing samples cannot count. The issue stays open until all criteria have eviden
 The separate obsolete-merge-group monitor still stops after 35 minutes or 35
 polls. A near-budget job plus queue wait can outlive it; it fails safely by
 retaining CI. Its deadlines and the queue's outer response window are unchanged.
+
+## Playwright System-Package Cache (#3649)
+
+Chromium and WebKit each resolve the installed Playwright CLI's missing package
+list, then ask apt for the exact archive names, sizes and checksums. Keys include
+the browser, `ImageOS`, `ImageVersion`, Playwright version and a digest of that
+archive set. Mirror URLs and output order do not change the digest. There are no
+prefix restore keys. A hit copies the cached archives into apt's archive directory
+and uses `--no-download`; only browser binaries may still download if their
+separate cache missed. The index update needed to resolve the key still contacts
+the mirror. This removes archive downloads on an exact hit, not all networking.
+
+Resolve, restore, collect and save are optional and bounded. An unsupported
+Playwright dry-run format emits no key and uses the original install. A failed
+restore uses the original install even if it emitted a hit output before failing.
+An incomplete or corrupt archive hit fails its first attempt and enters the
+original network-enabled retry. Both attempts retain their six-minute deadlines
+and process/lock recovery. A real browser launch must succeed before any tests
+or package-cache save. Collection saves only the archives named by the key;
+collection or save failures cannot turn passing tests red.
+
+The WebKit budget is independently derived: two six-minute attempts + eight
+minutes of cache/launch step bounds + 105 seconds enforcement + the dated
+under-four-minute remainder from #3214 + three minutes reserve = **1725 seconds**,
+rounded to **29 minutes**. The Chromium model above includes failure diagnostics
+and the existing dated five-shard remainder. These increases account for explicit
+new phases; they do not claim new measurements of test workload or mirror speed.
+
+The earlier fixture's warm-cache installs are hits of the **browser binary** cache;
+every one still fetched system archives. The incident evidence in #3649 records
+system-package misses reaching both 372–373-second deadlines on October 23.
+No system-package-cache hit has been measured on this draft yet. Record exact
+PR run/attempt/job IDs, restore result, resolve/install/retry/launch durations and
+`--no-download`/zero-archive-fetch log evidence when CI admits this PR. The one
+authorized cache-hit confirmation may rerun the same head; copied successes must
+not count as fresh measurements. Use the existing
+`merge-queue-wait-report.mjs --all-events --since <UTC> --until <UTC> --json`
+profile and compare with `ci-baseline-2026-10-22.json`; a single PR rerun proves
+the cache path only, not a latency or reliability improvement over that baseline.
