@@ -1115,6 +1115,7 @@ packages/test-support/src/bounded-child-process.test.ts	true	remaining
 packages/test-support/src/tsconfig-test-debt.test.ts	true	remaining
 scripts/check-dependabot-stall.test.mjs	true	remaining
 scripts/check-npm-advisories.test.mjs	true	remaining
+scripts/ci-reliability-report.test.mjs	true	remaining
 scripts/ci-timing.test.mjs	true	remaining
 scripts/compatibility-window.integration.test.mjs	true	remaining
 scripts/desktop-update-manifest.test.mjs	true	remaining
@@ -1129,6 +1130,7 @@ scripts/install-runner-headless.test.mjs	true	remaining
 scripts/install-runner-identity.test.mjs	true	remaining
 scripts/linux-release-baseline.test.mjs	true	remaining
 scripts/main-ci-health.test.mjs	true	remaining
+scripts/main-rolling-validation.test.mjs	true	remaining
 scripts/merge-group-cleanup.test.mjs	true	remaining
 scripts/merge-queue-wait-report.test.mjs	true	remaining
 scripts/node-test-plan.test.mjs	true	remaining
