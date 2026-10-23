@@ -87,3 +87,33 @@ Do not create unrelated merges, cancel workers, or dispatch duplicate full runs
 to obtain the sample. Review and verify the precise cutover/rollback separately,
 then obtain exact readiness and merge admission. Main-push CI remains the safety
 path until these gates are satisfied. The lighter merge gate stays disabled.
+
+## Completion Wake Gap and Next Natural Push
+
+The second natural worker,
+[40016012094](https://github.com/picoduck/wollipog/actions/runs/40016012094), tested
+`784d96e50d4d7bf5ee641d476aa57ccf886fd32b` and completed successfully at 20:39:09 UTC.
+Neither this completion nor the first produced a controller `workflow_run` entry.
+Only one scheduled controller appeared between 15:15 and approximately 20:15:
+[40010704406](https://github.com/picoduck/wollipog/actions/runs/40010704406) at 19:20:59.
+The independent health subscriber did receive the second completion at 20:39:24 in
+[40020898293](https://github.com/picoduck/wollipog/actions/runs/40020898293). Its separate
+health-script failure is addressed by [#3651](https://github.com/picoduck/wollipog/pull/3651).
+No controller run entry means the job predicate cannot explain the observed gap;
+GitHub's exact suppression mechanism is unproven. Configured cron is not a recovery
+latency bound, and the durable pending target is not a queued GitHub worker.
+
+The next natural merge, [#3644](https://github.com/picoduck/wollipog/pull/3644), reached
+main as `98accc6be15171f931a90a2f9de602b0048cf330` at 21:02:55 UTC. Its
+[push controller](https://github.com/picoduck/wollipog/actions/runs/40023860676) was
+created at 21:02:56 and succeeded; it dispatched
+[worker 40023903319](https://github.com/picoduck/wollipog/actions/runs/40023903319) at
+21:03:17 with claim `99530ef0-8075-484d-bbff-edc9ba363b76`. Admission succeeded for
+that exact target. This observation establishes idle-after-verdict push admission,
+not completion-driven progress or coalescing; the worker was still active when
+this sample was recorded. No manual wake was used for this sample.
+
+The proposed independent **Main Rolling Relay** must ship and demonstrate live
+completion delivery in shadow before cutover. Its static admission tests establish
+routing and token scope only. A fully missed idle push still requires another
+delivered event or an operator's manual controller dispatch.

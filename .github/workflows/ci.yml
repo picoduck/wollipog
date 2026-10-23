@@ -1,10 +1,10 @@
 name: CI
 
-# Full PR/merge-group safety net. Draft pull requests do not consume hosted runners; moving
+# Fast PR/main safety net. Draft pull requests do not consume hosted runners; moving
 # a pull request to Ready for Review starts this workflow once the change is ready.
 
 on:
-  # Rolling main validation shares every job; PR and merge-group events retain full validation.
+  # Shadow rolling main validation shares every job; existing events keep their exact defaults.
   workflow_call:
     inputs:
       target_sha:
@@ -15,7 +15,8 @@ on:
   merge_group:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  # Rolling main-push cutover; restore with scripts/restore-main-push-ci.mjs.
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       synthetic_failure_artifacts:

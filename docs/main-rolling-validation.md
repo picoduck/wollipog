@@ -1,38 +1,54 @@
 # Rolling Main Validation
 
-Issue #3631 ships in two stages. The first adds **Main Rolling Controller** and
-**Main Rolling Validation** in parallel with the existing main-push CI. The second
-removes only `ci.yml`'s main-push trigger: the controller continues receiving every
-main push and dispatches the shared full suite on rolling snapshots. PR suites,
-merge-group suites, protected checks and rulesets retain full validation. The
-lighter merge gate remains disabled.
+Issue #3631 ships in shadow before a separately gated cutover. **Main Rolling
+Controller** and **Main Rolling Validation** currently run alongside the existing
+main-push full CI. **Main Rolling Relay** adds an independent completion wake;
+it does not activate cutover. PR suites, merge-group suites, protected checks and
+rulesets retain full validation. The lighter merge gate remains disabled.
 
-The cutover can be prepared and independently reviewed as a draft while shadow
-evidence accrues. Preparation does not activate it. Ready admission requires the
-window below, and merge still requires exact-head CI, typed approval and successful
-merge-group CI. Until the cutover actually merges, both main paths remain enabled
-and consume more runner time. No savings are claimed from shadow. The
-[initial shadow observation](main-rolling-shadow-2026-10-23.md) records one completed
-snapshot and its limits.
+Both main paths consume runner time during shadow. No savings are claimed from
+shadow. The [shadow observations](main-rolling-shadow-2026-10-23.md) record measured
+results and gaps in automatic completion delivery. The relay must be verified on
+live completions after merge before a later cutover can be admitted.
 
 ## Coordination and Execution
 
-Pushes to main, worker completion, manual reconciliation, and a ten-minute schedule
-wake a short controller. Every invocation reads live main and the Actions API;
-event order never determines the next target. Main can advance during a full run.
-The active snapshot finishes, then current main replaces all intermediate pending
-snapshots. The schedule recovers missed events; hosted-runner availability and GitHub
-schedule delivery remain external sources of delay. No runner sleeps waiting for work.
+Pushes to main and manual reconciliation wake a short controller. A separate
+**Main Rolling Relay** subscribes to completed **Main Rolling Validation** and
+**CI** workflows. It accepts only same-repository main worker dispatches or main-push
+CI completions, checked by workflow path, source event and repository identity.
+Its only step dispatches the controller on main with a job-scoped `actions: write`
+token. It checks out no code, consumes no artifacts, supplies no target and mutates
+no state. Every controller invocation reads live main and the Actions API; event
+order and relay conclusions never determine certification or the next target.
+Health monitoring remains independent of the relay.
 
-The worker workflow has one constant concurrency group with cancellation disabled.
-That serializes the **entire** worker, including manual reruns that reuse successful
-admission outputs. GitHub keeps one replaceable pending workflow. Full CI's called
-concurrency lane uses the worker's workflow name, so it cannot collide with normal CI.
-The controller uses a separate short job lock. Admission never joins that pending
-lane, where a burst of controller events could cancel its waiting job. Atomic state
-updates fence both writers; admission re-reads and retries up to three times when
-the state OID changes. Pending controller events may coalesce: the next controller
-reads current main again.
+The controller's own worker-completion subscription did not deliver run entries
+for the first two completed workers, while an independent health subscriber did
+receive the second. Its job predicate cannot explain a missing workflow-run entry.
+Self-origin/chain suppression is a hypothesis, not a proven GitHub backend cause;
+the independent relay needs live verification, not just a passing YAML contract.
+See the [observed run links](main-rolling-shadow-2026-10-23.md#completion-wake-gap-and-next-natural-push).
+
+Main can advance during a full run. The controller records one replaceable pending
+target in durable state and **does not dispatch another worker while one is active**.
+After completion, the next delivered reconciliation chooses current main, dropping
+intermediate targets. The worker's constant concurrency group disables cancellation
+and serializes its entire run, including manual reruns reusing admission outputs.
+GitHub's one pending concurrency slot fences duplicate/delayed dispatches; it is
+normally empty and does not itself guarantee another target will start.
+Full CI's called concurrency lane uses the worker's workflow name, so it cannot
+collide with normal CI. The controller has a separate short job lock. Pending
+controller/relay wakes may coalesce; each surviving reconciliation reads live main.
+Admission never joins that pending lane. Atomic state updates fence both writers;
+admission re-reads and retries up to three times when the state OID changes.
+
+Recovery is **event-driven**, not wall-clock bounded. GitHub's configured ten-minute
+cron is best-effort: only one scheduled controller run appeared in the first five
+hours. A fully missed idle push recovers on the next delivered push, completion,
+scheduled event, or an operator's manual dispatch. There is no fixed latency guarantee
+if none arrives, or if GitHub Actions is unavailable. No runner sleeps awaiting work.
+See [GitHub's scheduled-event delivery limits](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule).
 
 The worker first runs trusted main workflow-revision code with scoped write access,
 checks its exact run/attempt/claim, and checks the target is an ancestor of current
@@ -41,7 +57,7 @@ main using the compare API. Only admitted work calls the existing complete CI wi
 production smoke), WebKit and Windows baseline jobs are shared unchanged. Every
 checkout job asserts its actual `git rev-parse HEAD` equals the admitted target.
 Dispatches always use main workflow definitions; arbitrary PR code never sees a
-controller token. Neither workflow interpolates event values into shell source.
+controller token. None of the rolling workflows interpolates event values into shell source.
 Before adopting any worker or accepting a record, the observer independently proves
 **both** its workflow revision and target are ancestors of the pinned live-main SHA.
 `head_branch: main` alone cannot establish this: a tag can have the same name.
@@ -88,8 +104,17 @@ An active run older than two hours reports `stalled-active-run`. The controller
 run. An operator must investigate a hung/queued run; admission resumes only after
 Actions reports it terminal. Controller restarts need no process memory. A missing
 or failed API response, truncated active listing (>1,000 per state), or >10 attempts
-on one run fails reconciliation and emits a sanitized status. The next scheduled
-invocation tries again. Operators can manually rerun the controller from Actions;
+on one run fails reconciliation and emits a sanitized status. The next delivered
+wake tries again; cron delivery is not guaranteed. Operators can dispatch trusted
+reconciliation without creating a duplicate full worker:
+
+```sh
+gh workflow run main-rolling-controller.yml --ref main --repo picoduck/wollipog
+```
+
+Inspect the resulting controller summary, state-ref write and worker identity.
+A successful dispatch response alone does not prove the controller ran. Operators
+can also rerun the controller from Actions;
 manual worker reruns retain whole-workflow serialization. Do not edit state to
 manufacture a verdict.
 For a rerun, the stall clock starts at the latest attempt's `run_started_at`, rather
@@ -101,7 +126,8 @@ than the original run's creation time.
 Actions evidence and emits JSON. Run it with `GITHUB_REPOSITORY`, `GITHUB_TOKEN` and
 `GITHUB_REF=refs/heads/main` in a trusted environment. The controller's step summary
 also includes the records observed during that invocation. No issue or alert is
-opened by this script. #3632 will consume this contract separately.
+opened by this script. The exact-SHA health consumer is documented in
+[Main CI Health](main-ci-health.md); health changes are separate from this wake repair.
 
 Each `main-rolling-validation-v1` record contains:
 
@@ -148,9 +174,13 @@ share repository limits. Transient quota refusal fails closed and waits for reco
 
 ## Shadow Verification and Cutover Gate
 
-Prepare the separate cutover as a draft, run focused tests and cross-model review,
-then leave it idle while the parent observes natural main traffic. Before asking
-for ready admission, record links and exact identities demonstrating:
+The wake repair ships in shadow with legacy main-push CI retained. Verify a live
+relay completion dispatches the controller and reconciliation advances the pending
+target before preparing a separate cutover. If the independent relay also fails to
+receive completions, report the blocker; do not claim automatic progress is fixed.
+Then prepare the separate cutover as a draft, run focused tests and cross-model review,
+and leave it idle while the parent observes natural traffic. Before asking for
+cutover ready admission, record links and exact identities demonstrating:
 
 1. A complete green or red worker verdict with all expected checkout/job outcomes.
    Compare its complete job set with ordinary main CI at the same target where available.
@@ -166,7 +196,7 @@ for ready admission, record links and exact identities demonstrating:
    for ordinary push/PR/merge-group baseline cohorts. Keep shadow overhead separate.
 5. Verify the rollback below in the proposed cutover diff and its source-contract tests.
    Have the exact head independently reviewed, pass required CI and merge-group CI,
-   and obtain the campaign's exact merge approval and human workflow enqueue.
+   and obtain the campaign's exact merge approval before enqueueing.
 
 The campaign's readiness threshold is either:
 
@@ -187,46 +217,24 @@ Do not spend model turns polling the window: report the reviewed draft and let t
 parent prompt the implementer when enough natural evidence exists.
 
 Only the later cutover PR may remove the main-push full fan-out. Preserve every PR
-and merge-group check and keep the lighter gate disabled. Do not change
-`scripts/main-ci-health.mjs` here; its exact-SHA rolling-health integration is #3632.
-The existing alert monitors ordinary main-push CI during shadow. After cutover, that
-legacy monitor no longer receives main-push CI completions. Until #3632 integrates
-rolling records, absence of that alert says nothing about current rolling health;
-inspect the worker's verified record and outcome directly. This limitation must be
-reported at ready/merge admission, never presented as authoritative health coverage.
+and merge-group check and keep the lighter gate disabled. Keep health logic separate;
+see [Main CI Health](main-ci-health.md) for its exact-SHA contract. A green dispatcher
+SHA, stale snapshot or absent alert does not establish current-target health.
 
-## Rollback
+## Shadow Rollback and Later Cutover
 
-During shadow, disable **Main Rolling Controller** through GitHub Actions if it is
-misbehaving. Existing main-push CI remains the safety path. Let any active worker
-finish; no active-cancellation automation is part of rollback. Keep the state ref
-for diagnosis, with no certification authority.
+During shadow, the existing main-push full suite remains the safety path. An operator
+can disable **Main Rolling Relay** and **Main Rolling Controller** through Actions if
+needed. Disabling only the relay leaves push, manual and best-effort scheduled
+controller wakes enabled. Let active workers finish; no active-cancellation automation
+is part of rollback. Keep the untrusted state ref for diagnosis. Do not execute an
+operational disable merely to test these instructions.
 
-After cutover, prepare the rollback in an isolated contributor branch:
-
-```sh
-node scripts/restore-main-push-ci.mjs
-node --test scripts/main-rolling-cutover.test.mjs
-```
-
-The helper restores only `push: branches: [main]` at the cutover marker, preserving
-subsequent PR/merge-group/job edits. It refuses missing/duplicate markers or an
-existing conflicting push trigger; inspect a drifted workflow rather than
-overwriting it with an old whole-file snapshot. The cutover test accepts restored
-mode and verifies the complete event matrix and unchanged full job body. Run the
-other workflow contracts and actionlint too. Review, pass required CI and merge
-the restoration through the ordinary gates. Then verify that the resulting exact
-main SHA has an ordinary successful full main-push run before disabling dispatch:
-
-```sh
-gh workflow disable main-rolling-controller.yml --repo picoduck/wollipog
-```
-
-Do not execute this operational disable merely to test the documentation. Let active
-workers finish, retain the state ref for diagnosis, and do not remove workflow files
-while workers are active. This rollback changes no ruleset, required context, PR
-suite or merge-group suite. To resume rolling after repair, enable the controller
-and reconcile it through the documented manual path before a separately admitted
-cutover. Local source/rollback tests do not prove GitHub event delivery: retain actual
-restoration-run evidence if rollback is used. A cutover is unfinished until rollback
-review and normal-traffic measurements are recorded.
+The later cutover PR must include a focused, reviewed restoration of `ci.yml`'s
+main-push trigger that preserves concurrent PR/merge-group/job changes. Verify its
+rollback locally before activation, then use ordinary required CI, merge-group CI
+and exact typed merge approval. If operational rollback is needed after cutover,
+restore legacy push CI first, verify a successful full run at the resulting exact
+main SHA, and only then disable rolling dispatch while allowing active work to finish.
+No workflow files should be removed while workers are active. Local tests do not
+prove GitHub event delivery: retain actual restoration-run evidence if rollback is used.

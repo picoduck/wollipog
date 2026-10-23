@@ -338,9 +338,7 @@ test("workflow security, exact checkout wiring and original gate contracts remai
   assert.equal((ci.match(/ref: \$\{\{ inputs.target_sha \}\}/g) ?? []).length, 4);
   assert.equal((ci.match(/name: Verify Rolling Checkout/g) ?? []).length, 3);
   assert.equal((windows.match(/name: Verify Rolling Checkout/g) ?? []).length, 2);
-  assert.ok(ci.includes("  push:\n    branches: [main]\n") ||
-    ci.includes("  # Rolling main-push cutover; restore with scripts/restore-main-push-ci.mjs.\n"),
-  "main must retain either the exact rollback trigger or the explicit rolling cutover marker");
+  assert.match(ci, /  push:\n    branches: \[main\]/, "shadow does not remove main fan-out");
   assert.match(ci, /  merge_group:/);
   assert.match(ci, /    needs: \[checks, browser, win32, webkit\]/);
   assert.match(ci, /CI_EVIDENCE_HEAD: \$\{\{ inputs.target_sha \|\| github.event.pull_request.head.sha \|\| github.sha \}\}/);
