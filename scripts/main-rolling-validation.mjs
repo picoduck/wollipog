@@ -197,7 +197,11 @@ export async function observe(api, repository, state, { targetSha, report = fals
   for (const status of ACTIVE) active.push(...await listRuns(api, repository, `&status=${status}`));
   // Recent completions reconstruct missing/rewritten state. Old no-change evidence is re-read by id.
   const recent = await listRuns(api, repository, "&status=completed", false);
-  const selected = report ? recent.slice(0, 8) : recent.filter((r) => workerIdentity(r, repository)?.targetSha === targetSha).slice(0, 3);
+  const selected = report ? recent.slice(0, 8) : [
+    ...recent.filter((r) => workerIdentity(r, repository)?.targetSha === targetSha).slice(0, 3),
+    // A worker may finish before admission records its runId. Its claim still releases old work.
+    ...recent.filter((r) => workerIdentity(r, repository)?.claimId === state.active?.claimId).slice(0, 3),
+  ];
   const candidates = [...active, ...selected];
   for (const id of new Set([state.active?.runId,
     report || state.lastVerdict?.targetSha === targetSha ? state.lastVerdict?.runId : null].filter(Boolean))) {

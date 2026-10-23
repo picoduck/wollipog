@@ -144,7 +144,10 @@ function forge() {
       return { workflow_runs: selected, total_count: selected.length };
     }
     const id = Number(local.split("/")[3]);
-    if (local.endsWith("/jobs")) return { jobs: data.jobs.get(`${id}/${local.split("/")[5]}`) ?? jobs(), total_count: REQUIRED.length };
+    if (local.endsWith("/jobs")) {
+      const result = data.jobs.get(`${id}/${local.split("/")[5]}`) ?? jobs();
+      return { jobs: result, total_count: result.length };
+    }
     if (local.startsWith("/actions/runs/")) {
       const result = data.runs.find((r) => r.id === id);
       return result ? { ...result, ...(local.includes("/attempts/") ? { run_attempt: Number(local.split("/")[5]) } : {}) } : notFound();
@@ -253,6 +256,18 @@ test("a main-named tag with an untrusted workflow revision cannot certify or blo
   data.oid = null; data.runs = [run({ status: "in_progress", conclusion: null })];
   const active = await reconcile(repository, { api, now: () => at(42), log: () => {} });
   assert.equal(active.state.active.runId, null, "untrusted active tag is not adopted as a validation");
+});
+
+test("a completed unadmitted older claim releases the latest pending main target", async () => {
+  const { data, api } = forge();
+  const first = await reconcile(repository, { api, now: () => at(), log: () => {} });
+  assert.equal(first.state.active.runId, null);
+  data.main = B;
+  data.runs = [run({ display_title: `Rolling ${A} ${first.state.active.claimId}`, conclusion: "startup_failure" })];
+  data.jobs.set("10/1", []);
+  const next = await reconcile(repository, { api, now: () => at(11), log: () => {} });
+  assert.equal(next.state.active.targetSha, B);
+  assert.equal(data.dispatches.at(-1).inputs.target_sha, B);
 });
 
 test("steady-state reconciliation reads only relevant evidence and stays within its API-call budget", async () => {

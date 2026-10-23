@@ -127,7 +127,8 @@ runs cannot hide an active worker. Consumers must not interpret this bounded rep
 as a complete historical census. Export observed records for a chosen measurement
 window before Actions evidence expires.
 Ordinary controller reconciliation reads at most three recent completed workers
-for current main, plus its previous active pointer and a matching last-verdict
+for current main and three for its outstanding claim (including a worker that
+finished before admission stored its run ID), plus its previous active pointer and a matching last-verdict
 pointer. Immutable workflow blobs/target commits and ancestry comparisons are shared
 within the invocation. A fixture with unrelated completed history bounds quiet
 reconciliation to 22 API calls (including state and live-main reads), rather than
