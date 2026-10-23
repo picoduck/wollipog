@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  ALERT_LABEL, ALERT_TITLE, alertBody, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
+  ALERT_LABEL, ALERT_TITLE, alertBody, budgetApi, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
+  API_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR,
 } from "./main-ci-health.mjs";
 
 const repository = "example/project";
@@ -162,9 +163,58 @@ test("the transport is bounded, refuses redirects and never echoes the token or 
   assert.ok(REQUEST_MS <= 10_000);
 });
 
-test("the workflow runs trusted default-branch code on main push CI only, serialized, with issue access", () => {
+test("the invocation budget includes failed and concurrent requests and reserves writes", async () => {
+  let calls = 0;
+  const api = budgetApi(async () => { calls++; throw new Error("upstream failed"); });
+  const outcomes = await Promise.allSettled(Array.from({ length: 100 }, () => api("/test")));
+  assert.equal(calls, API_BUDGET - API_WRITE_RESERVE);
+  assert.ok(outcomes.every((outcome) => outcome.status === "rejected"));
+  api.beginWrites();
+  await assert.rejects(api("/test", { method: "POST" }), /api-budget-exhausted/);
+  assert.equal(calls, API_BUDGET - API_WRITE_RESERVE, "an exhausted observation cannot unlock mutations");
+
+  let successful = 0;
+  const writes = budgetApi(async () => { successful++; });
+  await Promise.all(Array.from({ length: API_BUDGET - API_WRITE_RESERVE }, () => writes("/read")));
+  writes.beginWrites();
+  await Promise.all(Array.from({ length: API_WRITE_RESERVE }, () => writes("/write", { method: "POST" })));
+  await assert.rejects(writes("/overflow"), /api-budget-exhausted/);
+  assert.equal(successful, API_BUDGET);
+});
+
+test("quota headers retain counts only and stop further calls at the reserved floor", async () => {
+  let calls = 0;
+  const transport = githubApi("secret-token", async () => {
+    calls++;
+    return { ok: true, status: 200, headers: new Headers({
+      "x-ratelimit-limit": "1000", "x-ratelimit-remaining": String(API_REMAINING_FLOOR),
+      "x-ratelimit-reset": "private-reset", authorization: "secret-token",
+    }), json: async () => ({}) };
+  });
+  const api = budgetApi(transport, { requireHeaders: true });
+  await api("/initial-read");
+  await assert.rejects(api("/write", { method: "POST" }), /api-quota-reserved/);
+  assert.equal(calls, 1);
+  assert.equal(api.budget.rateLimit, 1000);
+  assert.equal(api.budget.rateRemaining, API_REMAINING_FLOOR);
+  assert.doesNotMatch(JSON.stringify(api.budget), /secret-token|private-reset/);
+  const absent = budgetApi(githubApi("secret", async () => ({ ok: true, status: 200, json: async () => ({}) })), { requireHeaders: true });
+  await assert.rejects(absent("/missing-headers"), /rate-limit-unavailable/);
+  let deniedCalls = 0;
+  const denied = budgetApi(async () => {
+    deniedCalls++; const error = new Error("private response"); error.status = 429; throw error;
+  });
+  await assert.rejects(denied("/secondary-limit"), /api-rate-limited/);
+  denied.beginWrites();
+  await assert.rejects(denied("/never-retry", { method: "POST" }), /api-rate-limited/);
+  assert.equal(deniedCalls, 1);
+});
+
+test("the workflow observes only main completions and scheduled/manual recovery, with trusted serialized writes", () => {
   const text = readFileSync(".github/workflows/main-ci-health.yml", "utf8");
-  assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[in_progress, completed\]/);
+  assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[completed\]/);
+  assert.doesNotMatch(text, /\n {2}push:|in_progress/);
+  assert.match(text, /cron: '3,23,43 \* \* \* \*'/);
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha)|download-artifact|pull_request_target|pnpm install/);

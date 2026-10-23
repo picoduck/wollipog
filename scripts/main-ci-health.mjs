@@ -10,6 +10,10 @@ const LATEST = /<!-- main-ci-health latest:(\d+) -->/;
 export const ALERT_TITLE = "Main CI Is Failing";
 export const ALERT_LABEL = "main-ci-red";
 export const REQUEST_MS = 10_000;
+export const API_BUDGET = 48;
+export const API_WRITE_RESERVE = 8;
+export const API_REMAINING_FLOOR = 600;
+export const RECOVERY_API_BUDGET = 12;
 
 export function targetFromEvent(event, repository) {
   const run = event?.workflow_run;
@@ -70,7 +74,7 @@ export function alertBody({ repository, run, jobs, author }) {
 }
 
 export function githubApi(token, fetchImpl = fetch) {
-  return async (path, { method = "GET", body } = {}) => {
+  const api = async (path, { method = "GET", body } = {}) => {
     const response = await fetchImpl("https://api.github.com" + path, {
       method,
       headers: { authorization: `Bearer ${token}`, accept: "application/vnd.github+json", "content-type": "application/json" },
@@ -78,6 +82,11 @@ export function githubApi(token, fetchImpl = fetch) {
       signal: AbortSignal.timeout(REQUEST_MS),
       redirect: "error",
     });
+    const limit = response.headers?.get("x-ratelimit-limit"), remaining = response.headers?.get("x-ratelimit-remaining");
+    if (/^\d+$/.test(limit ?? "") && /^\d+$/.test(remaining ?? "")) {
+      // Preserve the low-water mark even when independent requests finish together.
+      api.rateLimit = { limit: Number(limit), remaining: Math.min(api.rateLimit?.remaining ?? Infinity, Number(remaining)) };
+    } else api.rateLimit = { limit: null, remaining: null };
     // Never print response bodies or exception messages: they are untrusted and
     // may contain credentials. The status code suffices to diagnose and retry.
     if (!response.ok) {
@@ -87,6 +96,37 @@ export function githubApi(token, fetchImpl = fetch) {
     }
     return response.status === 204 ? null : response.json();
   };
+  return api;
+}
+
+/** One invocation owns one budget, including failed requests and all mutations. */
+export function budgetApi(api, { limit = API_BUDGET, reserve = API_WRITE_RESERVE,
+  requireHeaders = false } = {}) {
+  const usage = { limit, reserve, calls: 0, remainingFloor: API_REMAINING_FLOOR,
+    rateLimit: null, rateRemaining: null, reason: null };
+  let writing = false;
+  const stop = (reason) => { usage.reason = reason; fail(reason); };
+  const bounded = async (path, options) => {
+    if (usage.reason) fail(usage.reason);
+    if (usage.rateRemaining !== null && usage.rateRemaining <= API_REMAINING_FLOOR) stop("api-quota-reserved");
+    if (usage.calls >= limit - (writing ? 0 : reserve)) stop("api-budget-exhausted");
+    usage.calls++;
+    let result, error;
+    try { result = await api(path, options); } catch (caught) { error = caught; }
+    const quota = api.rateLimit;
+    if (quota) {
+      usage.rateLimit = quota.limit; usage.rateRemaining = quota.remaining;
+      if (!Number.isSafeInteger(quota.limit) || !Number.isSafeInteger(quota.remaining)) stop("rate-limit-unavailable");
+      if (quota.remaining < API_REMAINING_FLOOR) stop("api-quota-reserved");
+    } else if (requireHeaders) stop("rate-limit-unavailable");
+    if (error?.status === 403 || error?.status === 429) stop("api-rate-limited");
+    if (error) throw error;
+    return result;
+  };
+  bounded.budget = usage;
+  Object.defineProperty(bounded, "rateLimit", { get: () => api.rateLimit });
+  bounded.beginWrites = () => { writing = true; };
+  return bounded;
 }
 
 async function headAuthor(api, repository, run) {
@@ -167,7 +207,8 @@ export async function readHealthState(api, repository) {
 export async function writeHealthState(api, repository, previous, health) {
   const sequence = previous.sequence + 1;
   const runPointers = [...new Set([...(health.status === "unknown" ? previous.pointers ?? [] : []),
-    ...[...health.evidence, ...health.legacyEvidence].map((record) => record.runId)])];
+    ...[...health.evidence, ...health.legacyEvidence].map((record) => record.runId)])]
+    .filter((id) => id !== health.recovery?.rejectedRunId);
   if (runPointers.length > MAX_RECORDS) fail("evidence-limit");
   const compact = previous.recovered || sequence % 128 === 0;
   const root = `/repos/${repository}`;
@@ -344,6 +385,9 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     const seeds = await api(`${root}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&status=completed&per_page=8`);
     if (!Array.isArray(seeds?.workflow_runs)) fail("invalid-pagination");
     for (const candidate of seeds.workflow_runs.slice(0, 8)) {
+      // This sample discovers a positive checkpoint only. Failures are inspected
+      // by the complete window census, not paid for twice before that window exists.
+      if (candidate.conclusion !== "success") continue;
       await inspect(candidate);
       if (records.some((record) => record.certification === "full" && !records.some((other) =>
         other.targetSha === record.targetSha && (other.runId > record.runId || other.runId === record.runId && other.attempt > record.attempt)))) break;
@@ -460,9 +504,11 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       // A newer run at this target can have fallen outside the seed sample.
       // Retry once without any checkpoint so its failures cannot be hidden by a
       // permanently reused old green. The full-history bounds still fail closed.
-      const recovered = await collectHealth(repository, { api, incidentRunId, now, checkpointDisabled: true,
+      const recoveryApi = budgetApi(api, { limit: RECOVERY_API_BUDGET, reserve: 0 });
+      const recovered = await collectHealth(repository, { api: recoveryApi, incidentRunId, now, checkpointDisabled: true,
         pointers: pointers.filter((id) => id !== baseline.runId) });
-      recovered.recovery = { reason: "checkpoint-invalidated", rejectedRunId: baseline.runId };
+      recovered.recovery = { reason: "checkpoint-invalidated", rejectedRunId: baseline.runId,
+        calls: recoveryApi.budget.calls, limit: RECOVERY_API_BUDGET };
       return recovered;
     }
     health.latestPassingSnapshot = passes[0] ?? null;
@@ -556,6 +602,7 @@ export async function reconcile(target, { api, log = console.log, collect = coll
     const previous = persist ? await readHealthState(api, repository) : { pointers: [] };
     const alertPointer = Number(LATEST.exec(issue?.body ?? "")?.[1]);
     const health = await collect(repository, { api, now, incidentRunId: positive(alertPointer) ? alertPointer : null, pointers: [...new Set([...previous.pointers, ...(positive(alertPointer) ? [alertPointer] : [])])] });
+    if (api.budget) health.apiBudget = { ...api.budget };
     if (issue && !positive(alertPointer)) {
       health.status = "unknown"; health.fullCertification = null;
       health.reasons = [...(health.reasons ?? []), "incident-identity-unavailable"];
@@ -563,7 +610,10 @@ export async function reconcile(target, { api, log = console.log, collect = coll
     if (output) writeFileSync(output, JSON.stringify(health, null, 2) + "\n");
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
       `Main regression health: **${health.status}**\n\n\`\`\`json\n${JSON.stringify({ ...health, evidence: undefined, legacyEvidence: undefined })}\n\`\`\`\n`);
-    if (persist) await writeHealthState(api, repository, previous, health);
+    // A stopped budget cannot spend its reserve or mutate an incident. Keep the
+    // unknown artifact; consumers must reverify rather than trust the previous ref.
+    api.beginWrites?.();
+    if (persist && !api.budget?.reason) await writeHealthState(api, repository, previous, health);
     emit("main_ci_health_observed", { status: health.status, mainSha: health.currentMainSha, reasons: health.reasons,
       passingSha: health.latestPassingSnapshot?.testedSha ?? null, backlog: health.backlog });
     if (health.status === "unknown" || health.status === "stale") log(`::warning::Main regression health is ${health.status}; inspect the JSON reasons and docs/main-ci-health.md.`);
@@ -635,10 +685,17 @@ export async function reconcile(target, { api, log = console.log, collect = coll
 }
 
 export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error } = {}) {
+  let bounded;
   try {
     const repository = env.GITHUB_REPOSITORY;
     if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") fail("invalid-environment");
-    api ??= githubApi(env.GITHUB_TOKEN);
+    const injected = Boolean(api);
+    api = bounded = budgetApi(api ?? githubApi(env.GITHUB_TOKEN), {
+      requireHeaders: !injected, reserve: argv[0] === "report" ? 0 : API_WRITE_RESERVE,
+    });
+    // This endpoint is exempt from GitHub's primary rate limit. Low-quota event
+    // wakes therefore stop before spending even an observation read from core.
+    await api("/rate_limit");
     const mode = argv[0] ?? "reconcile";
     if (mode === "report") {
       const previous = await readHealthState(api, repository);
@@ -646,6 +703,7 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
       const incidentRunId = Number(LATEST.exec(issue?.body ?? "")?.[1]);
       const health = await collectHealth(repository, { api, incidentRunId,
         pointers: [...new Set([...previous.pointers, ...(positive(incidentRunId) ? [incidentRunId] : [])])] });
+      health.apiBudget = { ...api.budget };
       if (issue && !positive(incidentRunId)) {
         health.status = "unknown"; health.fullCertification = null;
         health.reasons = [...health.reasons, "incident-identity-unavailable"];
@@ -659,12 +717,21 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
     await reconcile({ repository }, { api, log, output: env.MAIN_CI_HEALTH_OUTPUT, entryPoint: env.GITHUB_EVENT_NAME,
       observationId: positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID() });
     return 0;
-  } catch {
-    if (argv[0] === "report") log(JSON.stringify(unknownHealth(env.GITHUB_REPOSITORY, new Date().toISOString(), "reconciliation-unavailable")));
+  } catch (caught) {
+    const unavailable = unknownHealth(env.GITHUB_REPOSITORY, new Date().toISOString(), caught?.reason ?? "reconciliation-unavailable");
+    if (bounded) unavailable.apiBudget = { ...bounded.budget };
+    if (argv[0] === "report") log(JSON.stringify(unavailable));
     if (env.MAIN_CI_HEALTH_OUTPUT) writeFileSync(env.MAIN_CI_HEALTH_OUTPUT,
-      JSON.stringify(unknownHealth(env.GITHUB_REPOSITORY, new Date().toISOString(), "reconciliation-unavailable")) + "\n");
+      JSON.stringify(unavailable) + "\n");
     error("::warning::Main CI Health could not reconcile; verify forge availability and scoped token permissions.");
     return 1;
+  } finally {
+    if (bounded) {
+      // Keep report stdout a single JSON document. Logs contain counts only;
+      // neither response bodies, reset headers nor credentials are disclosed.
+      const usage = { event: "main_ci_health_api_usage", ...bounded.budget };
+      if (argv[0] === "report") error(JSON.stringify(usage)); else log(JSON.stringify(usage));
+    }
   }
 }
 

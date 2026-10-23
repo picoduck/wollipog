@@ -10,9 +10,10 @@ This page covers how to land such a change safely, and how a red `main` gets not
 
 ## The Main CI Is Failing Alert
 
-`Main CI Health` (`.github/workflows/main-ci-health.yml`) reconciles on main pushes, main CI and
-rolling-worker completions and rerun in-progress events, a twenty-minute recovery schedule, and manual dispatch
-on main. It checks out trusted default-branch code without persisted credentials and runs
+`Main CI Health` (`.github/workflows/main-ci-health.yml`) reconciles on main CI and rolling-worker
+completions, a twenty-minute recovery schedule, and manual dispatch on main. Push and in-progress
+wakes are omitted: reruns are detected on completion or by the schedule. Skipped workflow-run
+jobs consume no observer API calls. It checks out trusted default-branch code without persisted credentials and runs
 `scripts/main-ci-health.mjs`; it never executes the triggering run's code or artifacts. The
 issue-writing job serializes reconciliations. Skipped PR invocations cannot displace main work.
 Repository-level permissions remain read-only; only this trusted job has contents write (for
@@ -118,9 +119,11 @@ is reverified, and a conflicting later attempt invalidates the checkpoint. No pu
 or event arrival time establishes absence of failures.
 If the complete census discovers that a newer run at the same target invalidates the sampled
 checkpoint, the observer retries once with checkpoint selection disabled and the rejected hint
-removed. It reports verified failures and records `recovery.reason: checkpoint-invalidated`,
-instead of repeatedly persisting the old green as an unknown checkpoint. Full-history bounds
-still apply to that recovery attempt.
+removed. Recovery has its own twelve-request cap inside the invocation cap. Incomplete recovery
+returns unknown with `recovery.reason: checkpoint-invalidated`, no active certificate and no alert
+mutation. A persisted recovery drops the rejected hint even when unknown. Full-history bounds
+still apply; a stopped invocation cannot write and leaves the previous ref intact. A later full
+pass or reviewed reconciliation repair may be needed after a long red streak.
 
 Bootstrap examines at most eight recent completions for a positive checkpoint, stopping at a
 verified pass. That sample never proves absence: the subsequent window is enumerated completely,
@@ -156,26 +159,62 @@ health workflow's state write and artifact before claiming production persistenc
 
 First-attempt non-red legacy runs retain explicit uncertified forge metadata without repeatedly
 fetching complete job inventories. They cannot contain an earlier failing attempt. Red legacy
-runs and reruns still load their full evidence. First-attempt in-progress/requested events do
-not request a runner: main pushes, decisive completions, rerun in-progress, and the recovery
-schedule cover meaningful changes.
+runs and reruns still load their full evidence. Only completed workflow events request an eligible
+observation job. The schedule detects a rerun in progress or a missed completion; a main push
+does not add an extra observation.
 
-The 50-main-commit fixture bounds one caught-up observation to fewer than 45 API calls and fewer
-than 12 ancestry comparisons, including checkpoint revalidation, complete window listings and
-active-worker scans. Ordering uses each target's distance from pinned main and adjacent ancestry
-checks; it does not compare every historical pair. An eight-unvalidated-push fixture remains below
-100 calls and loads no legacy-success job inventories. Three scheduled ticks model fewer than
-135 calls per hour while caught up, plus main pushes, decisive event wakes and the separate
-controller's usage. Larger backlogs and bursty traffic cost more; API quota failures remain unknown
-and never close an incident. This is a fixture
-budget, not a live quota or latency measurement. Long unvalidated windows still fail closed at the
-enumeration/evidence bounds instead of silently dropping history.
-Wider diagnostics measured 88 calls at eight unvalidated commits, 312 at forty, and 725 at
-ninety-nine. These are per-observation counts, so the shared repository token can become the
-limiting resource during a long red streak. A 100-dispatcher window (baseline plus 99 commits)
-is the deliberate cap; beyond it the record is unknown. The lighter merge gate remains disabled,
-and a later admission rollout must account for this shared API budget rather than treating these
-limits as unlimited production capacity.
+### Shared API Budget
+
+Every CLI/workflow invocation has a hard **48-request cap**, including failed calls, the quota
+preflight, ref reads/writes, GraphQL and alert calls. Reconciliation reserves eight calls up front
+for the four state-write calls and at most four alert/author/label calls: observation reads stop
+at 40. An exhausted observation cannot unlock that reserve. Read-only reports reserve no writes.
+Checkpoint recovery has a separate twelve-call cap inside the same invocation budget. Existing
+checkpoint hints are reverified and the complete census is restricted to their dispatcher-ancestry
+window; failure seed samples are not loaded merely to discover a positive checkpoint. We never
+replace completeness proof with cached verdicts to save calls.
+
+Before any observation, `GET /rate_limit` supplies authoritative numeric response headers. This
+endpoint is [exempt from GitHub's primary rate limit](https://docs.github.com/en/rest/rate-limit/rate-limit).
+If fewer than **600** requests remain, the invocation stops unknown before any observation read
+or mutation. At exactly 600, the next request is also refused. Every later response refreshes a
+conservative low-water mark; missing/malformed quota headers also stop unknown. Logs expose only
+numeric `x-ratelimit-limit` and `x-ratelimit-remaining` values as `rateLimit`/`rateRemaining`, plus
+request counts, limits and safe reasons in `main_ci_health_api_usage`. Report stdout remains one
+JSON document; its usage log goes to stderr. `apiBudget` in the record is the observation-time
+snapshot; the final usage log includes subsequent writes. No token, response body or reset header
+is logged. Failed requests and concurrent requests count before launch, and there are no retries.
+
+Hourly arithmetic uses the conservative **1,000-request repository token allowance**, without
+assuming Enterprise Cloud. Let C be eligible main-CI completions, R rolling completions, and M
+manual dispatches/read-only reports in that hour. The unconstrained invocation envelope is
+`48 * (3 + C + R + M)`: three scheduled observations cost at most **144** requests, one CI plus
+one worker completion adds at most **96**, for **240/hour** before other traffic. Skipped event
+jobs cost zero observer requests; push/in-progress events add zero invocations. C, R and M are
+not inherently bounded, so the schedule arithmetic alone is not an aggregate guarantee.
+The live floor is the aggregate admission limiter: starting at 1,000 with no other consumers,
+at most about `1000 - 600 + 48 = 448` primary requests are exposed before later observations
+back off, leaving about **552** for the controller/other workflows. Per-response checks normally
+stop earlier, around 600. The 48-call allowance covers an admitted invocation's conservative
+overshoot envelope; serialized workflow jobs avoid simultaneous health invocations. This is
+headroom protection, not an atomic quota reservation: other consumers and GitHub's distributed
+header counters can change the remaining balance. Low-quota wakes make only the primary-exempt
+preflight. Secondary limits still apply; any 403/429 stops this invocation with no retry.
+
+`api-budget-exhausted`, `api-quota-reserved`, `api-rate-limited` and `rate-limit-unavailable` yield unknown, no active
+certificate, and no incident opening or closure. If the budget/floor stops further calls, the
+previous health ref stays unchanged and the current artifact/CLI output explains the unknown
+observation. Consumers must reverify and must not treat the previous cached ref as current proof.
+A smaller recovery may persist unknown while retaining the global write reserve; it still cannot
+mutate an incident. These limits deliberately trade long-backlog availability for controller
+headroom. The lighter merge gate remains disabled.
+
+The earlier unbounded diagnostic fixtures measured 88/312/725 calls at 8/40/99 unvalidated commits;
+they establish why a hard cap is necessary, not current production request counts. Production
+entry-point tests now stop long backlogs at 40 calls with no mutation, verify low-quota wakes use
+only the exempt preflight, and verify caught-up evidence plus CAS persistence fits within 48.
+The 100-dispatcher, pagination and evidence caps still apply independently. Fixtures do not prove
+live quota, scheduling latency or production ref permissions; verify natural post-merge writes.
 
 ## When a Merge Group Fails on Code Your Pull Request Did Not Touch
 

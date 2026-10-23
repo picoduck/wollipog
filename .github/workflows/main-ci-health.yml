@@ -3,9 +3,7 @@ name: Main CI Health
 on:
   workflow_run:
     workflows: [CI, Main Rolling Validation]
-    types: [in_progress, completed]
-  push:
-    branches: [main]
+    types: [completed]
   schedule:
     - cron: '3,23,43 * * * *'
   workflow_dispatch:
@@ -17,7 +15,7 @@ permissions:
 
 jobs:
   reconcile:
-    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || (((github.event.action == 'completed' && github.event.workflow_run.event == 'push' && github.event.workflow_run.path == '.github/workflows/ci.yml') || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.path == '.github/workflows/main-rolling-validation.yml' && (github.event.action == 'completed' || github.event.workflow_run.run_attempt > 1))) && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository))
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || (github.event.action == 'completed' && ((github.event.workflow_run.event == 'push' && github.event.workflow_run.path == '.github/workflows/ci.yml') || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.path == '.github/workflows/main-rolling-validation.yml')) && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository))
     permissions:
       contents: write
       actions: read

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { ALERT_LABEL, ALERT_TITLE, collectHealth, HEALTH_REF, HEALTH_SCHEMA, main, readHealthState, reconcile, STALE_MS, writeHealthState } from "./main-ci-health.mjs";
+import { ALERT_LABEL, ALERT_TITLE, API_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
+  collectHealth, githubApi, HEALTH_REF, HEALTH_SCHEMA, main, readHealthState, reconcile, STALE_MS, writeHealthState } from "./main-ci-health.mjs";
 import { REQUIRED, WORKER } from "./main-rolling-validation.mjs";
 
 const repository = "example/project";
@@ -51,6 +52,7 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
       throw new Error("Unexpected mutation");
     }
     const root = `/repos/${repository}`;
+    if (path === "/rate_limit") return {};
     if (path === root) return { node_id: "repo-id" };
     if (path === `${root}/git/ref/heads/main`) return { object: { sha: data.currentMain } };
     if (path === `${root}/git/ref/heads/ci/main-health-state`) return data.oid ? { object: { sha: data.oid } } : missing();
@@ -405,17 +407,76 @@ test("an alert without its identity marker stays open with explicit unknown diag
   assert.equal(f.data.state.status, "unknown"); assert.ok(f.data.state.reasons.includes("incident-identity-unavailable"));
 });
 
-test("a cached checkpoint invalidated outside the seed sample recovers and reports real failures", async () => {
+test("invalidated checkpoint recovery has its own budget and discards the rejected hint even on unknown", async () => {
   const targets = Array.from({ length: 10 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
   const reds = targets.slice(1, 9).reverse().map((sha, i) => worker(100 + i, sha, { conclusion: "failure" }));
   const runs = [...reds, worker(11, targets[0], { conclusion: "failure" }), worker(10, targets[0])];
   const f = forge({ runs, currentMain: targets.at(-1), history: [W, ...targets] });
   for (const run of runs.filter((run) => run.conclusion === "failure")) makeRed(f, run.id);
   const health = await f.collect({ pointers: [10] });
-  assert.equal(health.status, "failing"); assert.equal(health.fullCertification, null);
+  assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
+  assert.deepEqual(health.reasons, ["api-budget-exhausted"]);
   assert.equal(health.checkpoint, undefined);
   assert.equal(health.recovery.reason, "checkpoint-invalidated");
-  assert.ok(health.unresolvedFailures.some((record) => record.runId === 11));
-  await writeHealthState(f.api, repository, { oid: null, sequence: 0, recovered: true }, health);
+  assert.equal(health.recovery.calls, RECOVERY_API_BUDGET);
+  assert.deepEqual(health.unresolvedFailures, []);
+  await writeHealthState(f.api, repository, { oid: null, sequence: 0, recovered: true, pointers: [10] }, health);
   assert.notEqual((await readHealthState(f.api, repository)).pointers[0], 10, "the rejected checkpoint is not promoted again");
+});
+
+test("the production entry point caps a long backlog and neither opens nor closes an incident on exhaustion", async () => {
+  for (const open of [false, true]) {
+    const targets = Array.from({ length: 41 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
+    const f = forge({ runs: [worker(10, targets[0])], currentMain: targets.at(-1), history: [W, ...targets] });
+    if (open) f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
+      user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:10 -->" }];
+    const output = [];
+    const code = await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+      GITHUB_EVENT_NAME: "schedule" }, api: f.api, log: (line) => output.push(line) });
+    assert.equal(code, 0);
+    const observed = output.filter((line) => line.startsWith("{")).map(JSON.parse);
+    assert.equal(observed.find((entry) => entry.event === "main_ci_health_observed").status, "unknown");
+    assert.equal(observed.at(-1).reason, "api-budget-exhausted");
+    assert.equal(f.data.requests.length, API_BUDGET - API_WRITE_RESERVE);
+    assert.deepEqual(f.data.mutations, []);
+  }
+});
+
+test("low remaining quota backs off before any health or incident mutation and records safe counts", async () => {
+  const f = forge({ runs: [worker(10, A, { conclusion: "failure" })] }); makeRed(f);
+  const api = githubApi("secret-token", async (url, options) => ({ ok: true, status: 200,
+    headers: new Headers({ "x-ratelimit-limit": "1000", "x-ratelimit-remaining": String(API_REMAINING_FLOOR - 1) }),
+    json: () => f.api(new URL(url).pathname + new URL(url).search, options),
+  }));
+  const output = [];
+  const code = await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "secret-token", GITHUB_REF: "refs/heads/main",
+    GITHUB_EVENT_NAME: "schedule" }, api, log: (line) => output.push(line), error: (line) => output.push(line) });
+  assert.equal(code, 1);
+  const usage = output.filter((line) => line.startsWith("{")).map(JSON.parse).at(-1);
+  assert.equal(usage.calls, 1); assert.equal(usage.rateLimit, 1000);
+  assert.equal(usage.rateRemaining, API_REMAINING_FLOOR - 1);
+  assert.equal(usage.reason, "api-quota-reserved");
+  assert.deepEqual(f.data.mutations, []); assert.doesNotMatch(output.join("\n"), /secret-token/);
+  assert.deepEqual(f.data.requests, ["/rate_limit"], "low-quota wakes use only the primary-exempt preflight");
+});
+
+test("a caught-up production observation verifies and persists within the cap, including mutation calls", async () => {
+  const f = forge(); let calls = 0;
+  const api = githubApi("test", async (url, options) => {
+    calls++;
+    const path = new URL(url).pathname + new URL(url).search;
+    return { ok: true, status: 200,
+      headers: new Headers({ "x-ratelimit-limit": "1000", "x-ratelimit-remaining": String(1000 - calls) }),
+      json: () => f.api(path, { ...options, body: options.body ? JSON.parse(options.body) : undefined }),
+    };
+  });
+  const output = [];
+  assert.equal(await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+    GITHUB_EVENT_NAME: "schedule" }, api, log: (line) => output.push(JSON.parse(line)) }), 0);
+  assert.equal(f.data.state.status, "passing");
+  assert.equal(f.data.state.fullCertification.testedSha, A);
+  assert.ok(f.data.mutations.some((mutation) => mutation.path === "/graphql"));
+  const usage = output.at(-1);
+  assert.equal(usage.calls, calls); assert.ok(calls <= API_BUDGET);
+  assert.equal(usage.reason, null); assert.equal(usage.rateRemaining, 1000 - calls);
 });
