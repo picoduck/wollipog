@@ -12,6 +12,12 @@ const causes = ["unresolved", "product-nondeterminism", "environment-sensitivity
 const owners = ["test-maintainer", "product-maintainer", "ci-maintainer"];
 const fail = () => { throw new Error("Invalid or unsupported reliability input"); };
 
+function rejectExclusions(input) {
+  if (!Array.isArray(input?.records) || input.records.length > 10_000 ||
+      input.exclusions !== undefined || input.quarantine !== undefined ||
+      input.records.some((row) => !row || row.exclusions !== undefined || row.quarantine !== undefined)) fail();
+}
+
 // File-scoped candidates, never an asserted error match or a verified root cause.
 export const knownIssueCandidates = [
   { suite: "browser", fileId: identity("apps/web/e2e/command-inbox-projects.spec.ts"), issue: 3517 },
@@ -40,6 +46,7 @@ export function triageDecisions(policy = { version: 1, decisions: [] }) {
 
 /** Advisory projection of existing version-2 attempts. It grants no certification or retry authority. */
 export function reliabilityReport(input, policy) {
+  rejectExclusions(input);
   if (input?.schemaVersion !== 2 || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(input.repository ?? "") ||
       !Array.isArray(input.records) || input.records.length > 10_000 ||
       !Array.isArray(input.windows) || input.windows.length > 100 ||
@@ -111,13 +118,28 @@ export function reliabilityReport(input, policy) {
       candidateIssues: knownIssueCandidates.filter((item) => item.suite === group.suite && item.fileId === group.fileId)
         .map(({ issue }) => ({ issue, match: "file-only-confirm-test-and-symptom" })), observations };
   });
+  // Investigation leads only: matching hashed names do not prove unchanged test dependencies.
+  const crossRevision = new Map();
+  for (const signature of signatures) {
+    const key = JSON.stringify([signature.suite, signature.fileId, signature.testId]);
+    const rows = crossRevision.get(key) ?? [];
+    rows.push(signature);
+    crossRevision.set(key, rows);
+  }
+  const crossRevisionCandidates = [...crossRevision.values()].filter((rows) => rows.length > 1).map((rows) => ({
+    suite: rows[0].suite, fileId: rows[0].fileId, testId: rows[0].testId,
+    suiteRevisions: rows.map((row) => row.suiteRevision),
+    affectedRuns: new Set(rows.flatMap((row) => row.observations.map((observation) => observation.runId))).size,
+    firstSeen: rows.map((row) => row.firstSeen).sort()[0], lastSeen: rows.map((row) => row.lastSeen).sort().at(-1),
+    compatibility: "unverified", nextAction: "confirm-source-compatibility-and-triage",
+  })).filter((row) => row.affectedRuns >= 2);
   return { schemaVersion: 1, repository: input.repository,
     windows: input.windows.map(({ since, until }) => ({ since: new Date(since).toISOString(), until: new Date(until).toISOString() })),
     basis: "observed-identities-only-no-failure-text", certification: "advisory-never-authorizes-merge",
     exclusions: [], sourceIncomplete: Boolean(input.attemptsTruncated || input.pagination?.some((p) => p.truncated)),
     observedAttempts: { first: records.filter((row) => row.attempt === 1).length,
       rerun: records.filter((row) => row.attempt > 1).length },
-    signatures, runOutcomes, rerunRecoveries, coverageGaps: gaps,
+    signatures, crossRevisionCandidates, runOutcomes, rerunRecoveries, coverageGaps: gaps,
     trend: "lower-bound-no-rate-or-cause-inference" };
 }
 
@@ -133,6 +155,8 @@ export async function main(argv, { out = console.log, err = console.error } = {}
     } });
     if (!values.input?.length || values.input.length > 10) fail();
     const reports = await Promise.all(values.input.map(readJson));
+    // Refuse exclusions even in older snapshots that combination would otherwise replace.
+    for (const report of reports) rejectExclusions(report);
     // Reuse #3626's raw-attempt deduplication and explicit source windows.
     const input = reports.length === 1 ? reports[0] : combineReports(reports);
     out(JSON.stringify(reliabilityReport(input, values.triage ? await readJson(values.triage) : undefined), null, 2));

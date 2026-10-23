@@ -51,6 +51,13 @@ The report contains:
   not a hash of an error message. Resolve IDs against the exact source using the
   collector guide. Changed source revisions remain separate; a maintainer must
   establish compatibility before combining signatures across revisions.
+- `crossRevisionCandidates`: the same suite/file/test hashes observed in at least
+  two runs across different tested revisions, with exact revision lists and
+  first/last run-creation times. These are investigation leads explicitly marked
+  `compatibility: unverified`; unchanged hashes do not prove unchanged test
+  dependencies or a common cause. Natural PR/merge-group tested SHAs usually
+  differ, so inspect these candidates as well as exact-revision `recurring` flags
+  for escalation. They never inherit cause annotations or certify compatibility.
 - `runOutcomes`: original failing, cancelled, skipped, unfinished and unmeasured
   attempts, even when a later attempt passes. `rerunRecoveries` labels a passing
   rerun of the same run and head after a failing first attempt as `retry-only`.
@@ -161,6 +168,8 @@ report always emits `exclusions: []`; any supplied top-level report/attempt
 `exclusions` or `quarantine`, or an unknown triage-policy field, fails visibly
 with a nonzero exit and no certification. Expired records are refused just like
 unknown records; this tool cannot activate even an apparently valid exclusion.
+Every raw input and attempt is checked before multi-file deduplication, including
+older snapshots that a newer collection would otherwise replace.
 It does not read or apply skip lists, edit test selection or change CI exit status.
 
 A future exceptional exclusion requires a separately reviewed, explicitly approved

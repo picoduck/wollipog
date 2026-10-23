@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdtemp, writeFile, rm, truncate } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import fc from "fast-check";
 import { TimingSummary, TIMING_MARKER, parseTiming, identity } from "./ci-timing.mjs";
@@ -31,9 +34,66 @@ test("repeated attempts are not recurring runs and changed suite revisions do no
   assert.equal(reliabilityReport(input).signatures[0].recurring, false);
   const changed = fixture();
   changed.records[1].jobs[0].testTiming.summaries[0].context.testedSha = "e".repeat(40);
-  assert.equal(reliabilityReport(changed).signatures.length, 2);
+  const report = reliabilityReport(changed);
+  assert.equal(report.signatures.length, 2);
+  assert.ok(report.signatures.every((row) => !row.recurring && row.triage.cause === "unresolved"));
+  assert.equal(report.crossRevisionCandidates.length, 1);
+  assert.equal(report.crossRevisionCandidates[0].affectedRuns, 2);
+  assert.equal(report.crossRevisionCandidates[0].compatibility, "unverified");
   changed.records[2].sha = "f".repeat(40);
   assert.equal(reliabilityReport(changed).rerunRecoveries.length, 0);
+});
+
+test("CLI combines source windows and latest attempts, loads triage and refuses every supplied exclusion", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ci-reliability-"));
+  try {
+    const older = fixture(), newer = fixture();
+    for (const [index, input] of [older, newer].entries()) {
+      input.collectedAt = "2026-10-22T0" + index + ":00:00Z";
+      input.removals = [];
+      // The real collector records metrics; keep this inert fixture compatible with its combiner.
+      for (const record of input.records) record.metrics = { measuredRunnerMinutes: null };
+    }
+    newer.records[1].state = "passing";
+    const a = join(dir, "a.json"), b = join(dir, "b.json"), triage = join(dir, "triage.json");
+    const summary = summaryOf(older), row = summary.reliability.tests[0];
+    await writeFile(triage, JSON.stringify({ version: 1, decisions: [{ suite: summary.suite,
+      suiteRevision: summary.context.testedSha, fileId: row.fileId, testId: row.testId,
+      cause: "unresolved", owner: "test-maintainer", issue: 3517, reviewPullRequest: 3639,
+      evidence: [{ runId: 101, attempt: 1, jobId: 1011 }] }] }));
+    const outputs = [], errors = [];
+    const io = { out: (text) => outputs.push(JSON.parse(text)), err: (text) => errors.push(text) };
+    const args = ["--input", b, "--input", a, "--triage", triage];
+    await writeFile(a, JSON.stringify(older)); await writeFile(b, JSON.stringify(newer));
+    assert.equal(await main(args, io), 0);
+    assert.deepEqual(outputs[0].observedAttempts, { first: 2, rerun: 1 });
+    assert.equal(outputs[0].windows.length, 2);
+    assert.equal(outputs[0].runOutcomes.length, 1);
+    assert.equal(outputs[0].signatures[0].triage.issue, 3517);
+    for (const input of [older, newer]) for (const target of [input, input.records[0]]) {
+      for (const field of ["exclusions", "quarantine"]) {
+        target[field] = [{ expiresAt: "2000-01-01T00:00:00Z" }];
+        await writeFile(a, JSON.stringify(older)); await writeFile(b, JSON.stringify(newer));
+        assert.equal(await main(args, io), 1);
+        delete target[field];
+      }
+    }
+    assert.equal(outputs.length, 1, "invalid inputs must not print a report");
+    assert.equal(errors.length, 8);
+  } finally { await rm(dir, { recursive: true }); }
+});
+
+test("CLI refuses oversized files and more than ten inputs without publishing output", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ci-reliability-size-"));
+  try {
+    const file = join(dir, "oversized.json");
+    await writeFile(file, "{}");
+    await truncate(file, 32 * 1024 * 1024 + 1);
+    const outputs = [], io = { out: (line) => outputs.push(line), err: () => {} };
+    assert.equal(await main(["--input", file], io), 1);
+    assert.equal(await main(Array.from({ length: 11 }, () => ["--input", file]).flat(), io), 1);
+    assert.deepEqual(outputs, []);
+  } finally { await rm(dir, { recursive: true }); }
 });
 
 test("only explicit reviewed exact-scope assertions change cause and ownership", () => {
