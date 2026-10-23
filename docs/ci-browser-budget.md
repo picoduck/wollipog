@@ -1,5 +1,12 @@
 # Browser CI Budget
 
+The #3628 [duration profile and redistribution](ci-browser-shards.md) recalculates
+the projected non-install envelope at 1710 seconds, including shard-1 production.
+The existing measured 2020-second envelope remains the conservative sizing floor
+pending natural redistributed runs: `720 + max(2020, 1710) + 105 + 480 + 180 =
+3505s <= 3540s`. No deadline increases. This supersedes the file-count assignment
+discussion below; historical phase evidence and #2700's delivery criteria remain intact.
+
 The browser job retains five shards and a finite **59-minute** budget. The
 2026-10-18 remeasurement replaces the stale 1,448-second non-install envelope with
 2,016 seconds. The prior 49-minute limit cannot reserve three minutes beyond the
