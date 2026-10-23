@@ -21,7 +21,7 @@ test("the root test commands bound a hung test instead of waiting forever", () =
   // Node defaults to --test-timeout=0, so an async test that never settles stalls the
   // whole suite. The bound must clear the slowest real test with room for a slower CI
   // runner: the slowest observed test runs ~41s, so 300s is roughly seven times over.
-  for (const script of ["test", "test:watch"]) {
+  for (const script of ["test", "test:watch", "test:full", "test:ci", "test:fast", "test:remaining"]) {
     const match = packageJson.scripts[script].match(/--test-timeout=(\d+)/u);
     assert.ok(match, `${script} must set an explicit --test-timeout`);
     const timeoutMs = Number(match[1]);
@@ -34,4 +34,14 @@ test("the root test commands bound a hung test instead of waiting forever", () =
       `${script}: --test-timeout=${timeoutMs} is too loose to bound a hang usefully`,
     );
   }
+});
+
+test("CI preserves full required coverage rather than selecting only fast contracts", () => {
+  const { scripts } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  assert.match(scripts["test:ci"], /^node scripts\/test-node\.mjs --suite full /);
+  assert.match(scripts["test:fast"], /--suite fast /);
+  assert.match(scripts["test:remaining"], /--suite remaining /);
+  const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  assert.match(workflow, /name: Unit Tests\n\s+run: pnpm test:ci/);
+  assert.doesNotMatch(workflow, /run: pnpm test:(?:fast|remaining)\b/);
 });
