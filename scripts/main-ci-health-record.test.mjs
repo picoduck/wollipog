@@ -10,7 +10,7 @@ const W = "d".repeat(40), A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat
 const chain = [W, A, B, C], claim = "12345678-1234-1234-1234-123456789012";
 const at = (minutes = 0) => new Date(Date.UTC(2026, 9, 23, 12, minutes)).toISOString();
 const worker = (id = 10, target = A, extra = {}) => ({ id, run_attempt: 1,
-  display_title: `Rolling ${target} ${claim}`, path: WORKER, head_sha: W, head_branch: "main",
+  display_title: `Rolling ${target} ${claim}`, path: WORKER, head_sha: target, head_branch: "main",
   event: "workflow_dispatch", status: "completed", conclusion: "success", created_at: at(), updated_at: at(30),
   html_url: `https://github.com/${repository}/actions/runs/${id}`,
   repository: { full_name: repository }, head_repository: { full_name: repository }, ...extra });
@@ -29,7 +29,9 @@ const jobs = (isLegacy = false) => REQUIRED.map((name, index) => ({ id: index + 
   steps: ["Verify Rolling Checkout", ...jobSteps[index]].map((name) => ({ name, conclusion: "success" })) }));
 const missing = () => { const error = new Error("private response body"); error.status = 404; throw error; };
 
-function forge({ runs = [worker()], currentMain = A, state = null } = {}) {
+function forge({ runs = [worker()], currentMain = A, state = null, history = chain } = {}) {
+  const chain = history;
+  runs.filter((run) => run.path === WORKER).forEach((run, index) => { run.run_number ??= index + 1; });
   const data = { runs, currentMain, state, oid: state ? C : null, mutations: [], requests: [],
     attempts: new Map(), jobSets: new Map(), issues: [], count: 0 };
   const oid = () => (++data.count).toString(16).padStart(40, "0");
@@ -60,10 +62,17 @@ function forge({ runs = [worker()], currentMain = A, state = null } = {}) {
     }
     if (path === `${root}/actions/workflows/main-rolling-validation.yml`) return { path: WORKER, created_at: at(-60) };
     if (path.includes("/actions/workflows/") && path.includes("/runs?")) {
+      if (path.includes("/main-ci-health.yml/")) return { workflow_runs: [], total_count: 0 };
       const rolling = path.includes("main-rolling-validation.yml");
-      const selected = data.runs.filter((run) => rolling ? run.path === WORKER : run.path === ".github/workflows/ci.yml");
-      const page = Number(new URL("https://api.github.com" + path).searchParams.get("page"));
-      return { workflow_runs: selected.slice((page - 1) * 100, page * 100), total_count: selected.length };
+      const params = new URL("https://api.github.com" + path).searchParams;
+      const selected = data.runs.filter((run) => (rolling ? run.path === WORKER : run.path === ".github/workflows/ci.yml") &&
+        (!params.get("status") || run.status === params.get("status")) &&
+        (!params.get("head_sha") || run.head_sha === params.get("head_sha")) &&
+        (!params.get("created") || Date.parse(run.created_at) >= Date.parse(params.get("created").slice(2))));
+      if (!rolling && params.get("head_sha") && !selected.length && chain.includes(params.get("head_sha")))
+        return { workflow_runs: [legacy(9000, params.get("head_sha"), { created_at: at(-1) })], total_count: 1 };
+      const page = Number(params.get("page") ?? 1), size = Number(params.get("per_page") ?? 100);
+      return { workflow_runs: selected.slice((page - 1) * size, page * size), total_count: selected.length };
     }
     const match = /\/actions\/runs\/(\d+)(?:\/attempts\/(\d+))?(\/jobs\?.*)?$/.exec(path);
     if (match) {
@@ -106,13 +115,17 @@ test("complete full evidence certifies tested target, separately from dispatch h
   const f = forge(), health = await f.collect();
   assert.equal(health.status, "passing");
   assert.equal(health.fullCertification.testedSha, A);
-  assert.equal(health.fullCertification.dispatcherSha, W);
+  assert.equal(health.fullCertification.dispatcherSha, A);
   assert.equal(health.fullCertification.workflowPath, WORKER);
   assert.equal(health.fullCertification.attempt, 1);
   assert.match(health.fullCertification.suiteVersion, /^[a-f0-9]{64}$/);
   assert.equal(health.fullCertification.inventory.length, REQUIRED.length);
   assert.equal(health.backlog.commits, 0);
   assert.ok(!f.data.requests.some((path) => path.includes("main-rolling-state") || path.includes("artifacts")));
+  const delayed = await forge({ currentMain: B, runs: [worker(10, A, { head_sha: B })] }).collect();
+  assert.equal(delayed.latestPassingSnapshot.testedSha, A);
+  assert.equal(delayed.latestPassingSnapshot.dispatcherSha, B);
+  assert.equal(delayed.fullCertification, null, "dispatch head never becomes the tested snapshot");
 });
 
 test("idle caught-up main stays fresh; freshness starts at oldest unvalidated commit", async () => {
@@ -202,7 +215,7 @@ test("missing evidence, pagination, ancestry, source binding and rerun races fai
     async () => { throw new Error("token private response"); },
   ];
   for (const variant of variants) {
-    const f = forge(), health = await collectHealth(repository, { api: (path) => variant(path, () => f.api(path)), now: () => at(40) });
+    const f = forge({ currentMain: B }), health = await collectHealth(repository, { api: (path) => variant(path, () => f.api(path)), now: () => at(40) });
     assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
     assert.doesNotMatch(JSON.stringify(health), /token private/);
   }
@@ -223,7 +236,7 @@ test("persistence is CAS fenced, compacted, and discarded as certification input
   assert.equal(f.data.mutations.at(-1).body.variables.input.refUpdates[0].name, HEALTH_REF);
   f.data.state = { ...f.data.state, fullCertification: { testedSha: C }, runPointers: [999] };
   const forged = await readHealthState(f.api, repository), unknown = await f.collect({ pointers: forged.pointers });
-  assert.equal(unknown.status, "unknown"); assert.equal(unknown.fullCertification, null);
+  assert.equal(unknown.status, "passing"); assert.equal(unknown.fullCertification.testedSha, A, "a missing cache hint cannot spoof the target or poison valid fresh evidence");
 });
 
 test("report is read-only, schema-versioned JSON; invalid modes are refused", async () => {
@@ -237,7 +250,7 @@ test("a new worker appearing during observation invalidates the old success", as
   const f = forge(); let listings = 0;
   const api = async (path) => {
     const result = await f.api(path);
-    if (path.includes("main-rolling-validation.yml/runs?") && ++listings > 1)
+    if (path.includes("main-rolling-validation.yml/runs?") && path.includes("&created=") && ++listings > 1)
       return { ...result, total_count: 2, workflow_runs: [...result.workflow_runs, worker(20, A, { status: "in_progress", conclusion: null })] };
     return result;
   };
@@ -263,7 +276,7 @@ test("the real observation and persistence path closes only a superseded full in
     user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:10 -->" }];
   assert.equal(await reconcile({ repository }, { api: f.api, log: () => {}, now: () => at(40) }), "closed");
   assert.equal(f.data.state.status, "passing");
-  assert.ok(f.data.state.supersededRunIds.includes(10));
+  assert.ok(f.data.state.resolvedRunIds.includes(10));
   assert.ok(f.data.mutations.some((mutation) => mutation.body?.state === "closed"));
   const red = forge({ runs: [worker(10, A, { conclusion: "failure" })] }); makeRed(red);
   assert.equal(await reconcile({ repository }, { api: red.api, log: () => {}, now: () => at(40) }), "opened");
@@ -280,4 +293,81 @@ test("unknown and fast-success evidence keep an existing full incident open", as
   assert.equal(await main(["report"], { env, api: async () => { throw new Error("private body"); },
     log: (line) => output.push(JSON.parse(line)), error: () => {} }), 1);
   assert.equal(output[0].status, "unknown"); assert.doesNotMatch(JSON.stringify(output), /private body/);
+});
+
+test("50 historical main pushes use a verified checkpoint window and bounded linear API work", async () => {
+  const targets = Array.from({ length: 50 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
+  const runs = targets.map((sha, i) => legacy(i + 100, sha, { created_at: at(i) }));
+  const tip = targets.at(-1);
+  runs.unshift(worker(999, tip, { created_at: at(50) }));
+  const f = forge({ runs, currentMain: tip, history: [W, ...targets] });
+  const health = await f.collect({ now: () => at(80) });
+  assert.equal(health.status, "passing");
+  assert.equal(health.checkpoint.targetSha, tip);
+  assert.equal(health.checkpoint.pushRunId, 149);
+  assert.ok(f.data.requests.filter((path) => path.includes("/compare/")).length < 12);
+  assert.ok(f.data.requests.length < 45, `unexpected API request count ${f.data.requests.length}`);
+  assert.ok(!f.data.requests.some((path) => /\/runs\/1[0-3][0-9](?:\/|$)/.test(path)));
+});
+
+test("invalid non-main dispatches and stale cache hints do not poison healthy evidence", async () => {
+  const f = forge({ runs: [worker(), worker(20, "e".repeat(40))] });
+  const health = await f.collect({ pointers: [999] });
+  assert.equal(health.status, "passing");
+  const retainedIncident = await f.collect({ pointers: [999], incidentRunId: 999 });
+  assert.equal(retainedIncident.status, "unknown", "missing incident evidence remains unknown");
+});
+
+test("startup failures open the existing alert without manufacturing a passing snapshot", async () => {
+  const f = forge({ runs: [legacy(10, A, { conclusion: "startup_failure" })] });
+  f.data.jobSets.set("10:1", []);
+  assert.equal(await reconcile({ repository }, { api: f.api, log: () => {} }), "opened");
+  assert.equal(f.data.state.status, "failing"); assert.equal(f.data.state.fullCertification, null);
+});
+
+test("an incomplete newer incident never closes from an older full pass", async () => {
+  const f = forge({ currentMain: B, runs: [worker(10, A), legacy(20, B, { conclusion: "cancelled" })] });
+  f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
+    user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:20 -->" }];
+  assert.equal(await reconcile({ repository }, { api: f.api, log: () => {}, now: () => at(40) }), "unchanged");
+  assert.ok(!f.data.mutations.some((mutation) => mutation.body?.state === "closed"));
+});
+
+test("late evidence invalidation cannot drive alert mutations", async () => {
+  const f = forge({ runs: [worker(10, A, { conclusion: "failure" })] }); makeRed(f);
+  let reads = 0;
+  const api = (path, options) => path.endsWith("/git/ref/heads/main") && ++reads > 1
+    ? { object: { sha: B } } : f.api(path, options);
+  assert.equal(await reconcile({ repository }, { api, log: () => {} }), "unchanged");
+  assert.equal(f.data.state.status, "unknown"); assert.deepEqual(f.data.state.unresolvedFailures, []);
+  assert.ok(!f.data.mutations.some((mutation) => mutation.path.endsWith("/issues")));
+});
+
+test("deleted or expired worker sequences remain unknown instead of silently certifying", async () => {
+  const f = forge({ runs: [worker(10, A, { run_number: 1 }), worker(30, A, { run_number: 3 })] });
+  const health = await f.collect();
+  assert.equal(health.status, "unknown"); assert.deepEqual(health.reasons, ["worker-history-incomplete"]);
+});
+
+test("read-only report recovers an older incident directly after health-ref loss", async () => {
+  const f = forge({ currentMain: B, runs: [worker(), legacy(20, B, { created_at: at(-100), conclusion: "failure" })] }); makeRed(f, 20);
+  f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
+    user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:20 -->" }];
+  const output = [], env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main" };
+  assert.equal(await main(["report"], { env, api: f.api, log: (line) => output.push(JSON.parse(line)) }), 0);
+  assert.equal(output[0].status, "failing");
+  assert.equal(output[0].unresolvedFailures[0].runId, 20);
+  assert.deepEqual(f.data.mutations, []);
+});
+
+test("a source that had not landed before dispatch cannot establish a checkpoint", async () => {
+  const f = forge();
+  const api = async (path) => {
+    const result = await f.api(path);
+    return path.includes("/runs?branch=main&event=push&head_sha=") && result.workflow_runs?.length
+      ? { ...result, workflow_runs: result.workflow_runs.map((run) => ({ ...run, created_at: at(1) })) } : result;
+  };
+  const health = await collectHealth(repository, { api });
+  assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
+  assert.equal(health.checkpoint, undefined);
 });

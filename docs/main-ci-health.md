@@ -52,7 +52,7 @@ any repository writer can modify it. Readers must call the read-only report to r
 before an admission or release decision:
 
 ```sh
-# Trusted environment; Actions/content read permissions suffice. Prints one JSON document.
+# Trusted environment; Actions/content/issues read access. Prints one JSON document.
 GITHUB_REF=refs/heads/main node scripts/main-ci-health.mjs report
 ```
 
@@ -98,13 +98,35 @@ newer failure. The `rolling-full-v1` coverage contract requires the same complet
 when workflow blob versions change; actual workflow hashes remain recorded as `suiteVersion`.
 Unexpected inventory changes need an explicit observer contract update and remain uncertified.
 
-The health ref supplies only bounded run-ID pointers. Every invocation rebuilds verdicts from
+The health ref supplies only bounded run-ID hints. Every invocation rebuilds verdicts from
 Actions and compare APIs, rechecking current attempts after reading jobs. It never reads
-`ci/main-rolling-state` as health evidence. On health-ref loss, corruption or rewriting it rebuilds
-the rolling-era census from forge listings plus existing incident pointers. The forge's worker
-workflow creation time defines the legacy transition horizon; old incident pointers are included
-regardless. Stopping main-push fan-out in #3631 does not remove rolling certification or make idle
-main stale. Pre-rolling closed incidents are outside the new record's historical scope.
+`ci/main-rolling-state` as health evidence. Both reconciliation and the read-only report recover
+the current incident pointer directly from the issue, even after health-ref loss. A missing
+incident pointer remains unknown; a deleted cache-only hint is discarded once fresh evidence is
+available. Non-main dispatches cannot poison the repository's health.
+
+A freshly verified full pass plus a forge **push** run at the same SHA establishes the census
+window. The push can be from Main CI Health or the transitional CI workflow; it must independently
+match repository, main branch, exact SHA and trusted workflow path. Its creation time, minus one
+minute for timestamp rounding, anchors the window. A dispatch to an old target or tag cannot
+establish that target's landing time. Under main's protected linear history, earlier main targets
+are ancestors of this passing push snapshot. Thus neither a rewritten state ref nor a later
+dispatch to an old target can hide a newer failure by advancing the window. The checkpoint's
+worker certificate and push identity are re-read every time; the stored checkpoint is a hint.
+Eligible workers additionally prove the tested target is an ancestor of the dispatcher revision,
+and that this revision had a forge main-push record no later than dispatch creation. This excludes
+future-main/tag dispatches queued before their source landed; they cannot slip a newer target
+behind the creation-time window. Missing landing evidence stays unknown. Each record retains the
+source push ID and time alongside its workflow revision.
+
+Bootstrap examines at most eight recent completions for a positive checkpoint, stopping at a
+verified pass. That sample never proves absence: the subsequent window is enumerated completely,
+and all active workers are scanned independently before checkpoint selection. Without a positive
+checkpoint, the worker workflow's forge creation time is the transition horizon. Existing incident
+pointers are included regardless of age. Missing worker run-number sequences inside the window
+expose deleted/expired history and remain unknown. Main-push fan-out can stop in #3631: the health
+workflow's main-push metadata supplies subsequent landing anchors. Caught-up idle main stays fresh.
+Pre-rolling closed incidents are outside the new record's historical scope.
 
 All enumerations are bounded: ten 100-item pages per run/job/commit listing, ten attempts per run,
 128 retained attempt records, and fewer than 100 associated PRs per backlog commit. A fully
@@ -127,6 +149,14 @@ pagination, ancestry or permission diagnostics need API/observer repair. Do not 
 or switch credentials to work around unknown evidence. Focused fake-API tests cover these paths;
 they do not prove GitHub scheduler latency or token policy. After landing, inspect the natural
 health workflow's state write and artifact before claiming production persistence is verified.
+
+The 50-main-commit fixture bounds one caught-up observation to fewer than 45 API calls and fewer
+than 12 ancestry comparisons, including checkpoint revalidation, complete window listings and
+active-worker scans. Ordering uses each target's distance from pinned main and adjacent ancestry
+checks; it does not compare every historical pair. Six scheduled ticks model fewer than 270 calls
+per hour in that fixture, plus event wakes and the separate controller's usage. This is a fixture
+budget, not a live quota or latency measurement. Long unvalidated windows still fail closed at the
+enumeration/evidence bounds instead of silently dropping history.
 
 ## When a Merge Group Fails on Code Your Pull Request Did Not Touch
 

@@ -23,7 +23,7 @@ const reconcile = (target, options) => reconcileActual(target, { ...options, per
     const record = run && { runId: run.id, attempt: 1, testedSha: run.head_sha, url: run.html_url,
       certification: run.conclusion === "success" ? "full" : "none",
       inventory: (await options.api(`/repos/${repository}/actions/runs/${run.id}/jobs?fixture`)).jobs };
-    return { status: run?.conclusion === "success" ? "passing" : "failing", evidence: record ? [record] : [], legacyEvidence: [], supersededRunIds: [123],
+    return { status: run?.conclusion === "success" ? "passing" : "failing", evidence: record ? [record] : [], legacyEvidence: [], resolvedRunIds: [123],
       unresolvedFailures: run?.conclusion === "failure" ? [record] : [], latestPassingSnapshot: run?.conclusion === "success" ? record : null };
   } });
 const alert = (latest = 123, overrides = {}) => ({

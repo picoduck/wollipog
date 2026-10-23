@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   reconcile:
-    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || ((github.event.workflow_run.event == 'push' || github.event.workflow_run.event == 'workflow_dispatch') && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository))
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || (((github.event.workflow_run.event == 'push' && github.event.workflow_run.path == '.github/workflows/ci.yml') || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.path == '.github/workflows/main-rolling-validation.yml')) && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository))
     permissions:
       contents: write
       actions: read
