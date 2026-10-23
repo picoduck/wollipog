@@ -83,10 +83,11 @@ export function githubApi(token, fetchImpl = fetch) {
       redirect: "error",
     });
     const limit = response.headers?.get("x-ratelimit-limit"), remaining = response.headers?.get("x-ratelimit-remaining");
+    const bucket = path === "/graphql" ? "graphqlRateLimit" : "rateLimit";
     if (/^\d+$/.test(limit ?? "") && /^\d+$/.test(remaining ?? "")) {
       // Preserve the low-water mark even when independent requests finish together.
-      api.rateLimit = { limit: Number(limit), remaining: Math.min(api.rateLimit?.remaining ?? Infinity, Number(remaining)) };
-    } else api.rateLimit = { limit: null, remaining: null };
+      api[bucket] = { limit: Number(limit), remaining: Math.min(api[bucket]?.remaining ?? Infinity, Number(remaining)) };
+    } else api[bucket] = { limit: null, remaining: null };
     // Never print response bodies or exception messages: they are untrusted and
     // may contain credentials. The status code suffices to diagnose and retry.
     if (!response.ok) {
@@ -103,7 +104,7 @@ export function githubApi(token, fetchImpl = fetch) {
 export function budgetApi(api, { limit = API_BUDGET, reserve = API_WRITE_RESERVE,
   requireHeaders = false } = {}) {
   const usage = { limit, reserve, calls: 0, remainingFloor: API_REMAINING_FLOOR,
-    rateLimit: null, rateRemaining: null, reason: null };
+    rateLimit: null, rateRemaining: null, graphqlLimit: null, graphqlRemaining: null, reason: null };
   let writing = false;
   const stop = (reason) => { usage.reason = reason; fail(reason); };
   const bounded = async (path, options) => {
@@ -119,12 +120,18 @@ export function budgetApi(api, { limit = API_BUDGET, reserve = API_WRITE_RESERVE
       if (!Number.isSafeInteger(quota.limit) || !Number.isSafeInteger(quota.remaining)) stop("rate-limit-unavailable");
       if (quota.remaining < API_REMAINING_FLOOR) stop("api-quota-reserved");
     } else if (requireHeaders) stop("rate-limit-unavailable");
+    const graphql = api.graphqlRateLimit;
+    if (graphql) {
+      usage.graphqlLimit = graphql.limit; usage.graphqlRemaining = graphql.remaining;
+      if (!Number.isSafeInteger(graphql.limit) || !Number.isSafeInteger(graphql.remaining)) stop("rate-limit-unavailable");
+    }
     if (error?.status === 403 || error?.status === 429) stop("api-rate-limited");
     if (error) throw error;
     return result;
   };
   bounded.budget = usage;
   Object.defineProperty(bounded, "rateLimit", { get: () => api.rateLimit });
+  Object.defineProperty(bounded, "graphqlRateLimit", { get: () => api.graphqlRateLimit });
   bounded.beginWrites = () => { writing = true; };
   return bounded;
 }
@@ -183,14 +190,12 @@ export async function readHealthState(api, repository) {
     const ref = await api(`/repos/${repository}/git/ref/heads/ci/main-health-state`);
     oid = ref?.object?.sha;
     if (!SHA.test(oid)) fail("invalid-health-ref");
-    const commit = await api(`/repos/${repository}/git/commits/${oid}`);
-    if (!SHA.test(commit?.tree?.sha)) fail("invalid-health-tree");
-    const tree = await api(`/repos/${repository}/git/trees/${commit.tree.sha}`);
-    const entry = tree?.tree?.find((item) => item.path === "health.json" && item.type === "blob");
     const recovered = { oid, sequence: 0, pointers: [], recovered: true };
-    if (!SHA.test(entry?.sha)) return recovered;
-    const blob = await api(`/repos/${repository}/git/blobs/${entry.sha}`);
-    if (blob?.encoding !== "base64" || !Number.isSafeInteger(blob.size) || blob.size > 2_000_000) return recovered;
+    // Resolve the hint file at the pinned commit in one read, rather than walking
+    // commit/tree/blob. Its contents remain untrusted and never supply verdicts.
+    const blob = await api(`/repos/${repository}/contents/health.json?ref=${oid}`);
+    if (blob?.type !== "file" || !SHA.test(blob.sha) || blob.encoding !== "base64" ||
+        !Number.isSafeInteger(blob.size) || blob.size > 2_000_000) return recovered;
     const data = JSON.parse(Buffer.from(blob.content, "base64").toString("utf8"));
     if (data?.schema !== HEALTH_SCHEMA || data.repository !== repository ||
         !Number.isSafeInteger(data.sequence) || data.sequence < 0 || !Array.isArray(data.runPointers) ||
@@ -246,7 +251,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     const mainSha = (await api(`${root}/git/ref/heads/main`))?.object?.sha;
     if (!SHA.test(mainSha)) fail("main-unavailable");
     health.currentMainSha = mainSha;
-    const immutable = new Map(), positions = new Map([[mainSha, 0]]);
+    const immutable = new Map(), positions = new Map([[mainSha, 0]]), ancestry = new Map();
     const read = async (path) => {
       if (!immutable.has(path)) immutable.set(path, await api(path));
       return immutable.get(path);
@@ -254,11 +259,15 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     const ancestor = async (sha, descendant = mainSha) => {
       if (sha === descendant) return true;
       if (descendant === mainSha && positions.has(sha)) return true;
+      const pair = `${sha}:${descendant}`;
+      if (ancestry.has(pair)) return ancestry.get(pair);
       let comparison;
-      try { comparison = await read(`${root}/compare/${sha}...${descendant}`); }
+      try { comparison = await read(`${root}/compare/${sha}...${descendant}?per_page=100&page=1`); }
       catch (error) { if (error?.status === 404) return false; throw error; }
       if (!SHA.test(comparison?.merge_base_commit?.sha)) fail("ancestry-unavailable");
       const onMain = comparison.merge_base_commit.sha === sha;
+      ancestry.set(pair, onMain);
+      if (onMain) ancestry.set(`${descendant}:${sha}`, false);
       if (onMain && descendant === mainSha) {
         const distance = comparison.ahead_by ?? comparison.total_commits;
         if (!Number.isSafeInteger(distance) || distance < 0) fail("ancestry-unavailable");
@@ -324,7 +333,9 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       inspected.push(run);
       if (!positive(run.run_attempt) || run.run_attempt > 10) fail("attempt-limit");
       for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
-        const snapshot = await api(`${root}/actions/runs/${run.id}/attempts/${attempt}`);
+        // The latest run response is the forge's current attempt snapshot. Older
+        // attempts need their own endpoint; jobs always use an exact attempt URL.
+        const snapshot = attempt === run.run_attempt ? run : await api(`${root}/actions/runs/${run.id}/attempts/${attempt}`);
         if (snapshot?.id !== run.id || snapshot.run_attempt !== attempt || snapshot.head_sha !== run.head_sha ||
             (identity ? workerIdentity(snapshot, repository)?.targetSha !== targetSha ||
               workerIdentity(snapshot, repository)?.claimId !== identity.claimId : !isMainPushRun(snapshot, repository)))
@@ -369,9 +380,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         (identity ? records : legacyRecords).push(record);
         if (records.length + legacyRecords.length > MAX_RECORDS) fail("evidence-limit");
       }
-      const fresh = await api(`${root}/actions/runs/${run.id}`);
-      if (fresh.run_attempt !== run.run_attempt || fresh.status !== run.status || fresh.conclusion !== run.conclusion)
-        fail("run-changed");
+      // All inspected runs are rechecked together after the complete observation.
       inspectedIds.add(run.id);
     }
     const workflow = await api(`${root}/actions/workflows/main-rolling-validation.yml`);
@@ -385,15 +394,13 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     const seeds = await api(`${root}/actions/workflows/main-rolling-validation.yml/runs?branch=main&event=workflow_dispatch&status=completed&per_page=8`);
     if (!Array.isArray(seeds?.workflow_runs)) fail("invalid-pagination");
     for (const candidate of seeds.workflow_runs.slice(0, 8)) {
-      // This sample discovers a positive checkpoint only. Failures are inspected
-      // by the complete window census, not paid for twice before that window exists.
-      if (candidate.conclusion !== "success") continue;
       await inspect(candidate);
       if (records.some((record) => record.certification === "full" && !records.some((other) =>
         other.targetSha === record.targetSha && (other.runId > record.runId || other.runId === record.runId && other.attempt > record.attempt)))) break;
     }
     for (const id of pointers.slice(0, 1)) {
       if (!positive(id)) fail("invalid-pointer");
+      if (inspectedIds.has(id)) continue;
       let hinted;
       try { hinted = await api(`${root}/actions/runs/${id}`); }
       catch (error) { if (error?.status !== 404 || id === incidentRunId) throw error; }
@@ -427,6 +434,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     health.evidenceSince = baseline ? null : workflow.created_at;
     for (const id of pointers.slice(1)) {
       if (!positive(id)) fail("invalid-pointer");
+      if (inspectedIds.has(id)) continue;
       let run;
       try { run = await api(`${root}/actions/runs/${id}`); }
       catch (error) { if (error?.status !== 404 || id === incidentRunId) throw error; }
@@ -539,7 +547,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         const commits = [];
         let total;
         for (let page = 1; page <= 10; page++) {
-          const comparison = await api(`${root}/compare/${passing.targetSha}...${mainSha}?per_page=100&page=${page}`);
+          const comparison = await read(`${root}/compare/${passing.targetSha}...${mainSha}?per_page=100&page=${page}`);
           if (comparison?.merge_base_commit?.sha !== passing.targetSha || !Array.isArray(comparison.commits) ||
               !Number.isSafeInteger(comparison.total_commits) || total !== undefined && total !== comparison.total_commits)
             fail("ancestry-unavailable");

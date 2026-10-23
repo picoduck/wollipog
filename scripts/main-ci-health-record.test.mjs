@@ -56,6 +56,10 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
     if (path === root) return { node_id: "repo-id" };
     if (path === `${root}/git/ref/heads/main`) return { object: { sha: data.currentMain } };
     if (path === `${root}/git/ref/heads/ci/main-health-state`) return data.oid ? { object: { sha: data.oid } } : missing();
+    if (path === `${root}/contents/health.json?ref=${data.oid}`) {
+      const content = JSON.stringify(data.state);
+      return { type: "file", sha: W, encoding: "base64", size: content.length, content: Buffer.from(content).toString("base64") };
+    }
     if (path.startsWith(`${root}/git/commits/`)) return { tree: { sha: B } };
     if (path.startsWith(`${root}/git/trees/`)) return { tree: [{ path: "health.json", type: "blob", sha: W }] };
     if (path.startsWith(`${root}/git/blobs/`)) {
@@ -210,7 +214,6 @@ test("missing evidence, pagination, ancestry, source binding and rerun races fai
     async (path, fallback) => path.includes("/jobs?") ? { jobs: [], total_count: 1 } : fallback(),
     async (path, fallback) => path.includes("/compare/") ? {} : fallback(),
     async (path, fallback) => path.includes("/contents/") ? { sha: A } : fallback(),
-    async (path, fallback) => path.endsWith("/attempts/1") ? worker(10, A, { run_attempt: 2 }) : fallback(),
     async (path, fallback) => path.endsWith("/runs/10") ? worker(10, A, { run_attempt: 2 }) : fallback(),
     async () => { throw new Error("token private response"); },
   ];
@@ -219,6 +222,21 @@ test("missing evidence, pagination, ancestry, source binding and rerun races fai
     assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
     assert.doesNotMatch(JSON.stringify(health), /token private/);
   }
+});
+
+test("older attempt mismatches and reruns starting after job reads invalidate the final observation", async () => {
+  const older = forge({ runs: [worker(10, A, { run_attempt: 2 })] });
+  const invalid = await collectHealth(repository, { api: (path) => path.endsWith("/attempts/1")
+    ? worker(10, A, { run_attempt: 2 }) : older.api(path) });
+  assert.equal(invalid.status, "unknown"); assert.equal(invalid.fullCertification, null);
+  const f = forge();
+  const raced = await collectHealth(repository, { api: async (path) => {
+    const result = await f.api(path);
+    if (path.includes("/jobs?")) f.data.runs[0] = worker(10, A, { run_attempt: 2, status: "in_progress", conclusion: null, run_number: 1 });
+    return result;
+  } });
+  assert.equal(raced.status, "unknown"); assert.equal(raced.fullCertification, null);
+  assert.deepEqual(raced.reasons, ["run-changed"]);
 });
 
 test("persistence is CAS fenced, compacted, and discarded as certification input", async () => {
@@ -478,5 +496,48 @@ test("a caught-up production observation verifies and persists within the cap, i
   assert.ok(f.data.mutations.some((mutation) => mutation.path === "/graphql"));
   const usage = output.at(-1);
   assert.equal(usage.calls, calls); assert.ok(calls <= API_BUDGET);
-  assert.equal(usage.reason, null); assert.equal(usage.rateRemaining, 1000 - calls);
+  assert.equal(usage.reason, null); assert.equal(usage.rateRemaining, 1000 - calls + 1);
+  assert.equal(usage.graphqlRemaining, 1000 - calls);
+});
+
+test("the production entry point persists and alerts on one failing descendant with existing state and legacy red", async () => {
+  for (const includeLegacy of [false, true]) {
+    const f = forge();
+    await writeHealthState(f.api, repository, { oid: null, sequence: 0, recovered: true }, await f.collect());
+    f.data.currentMain = B;
+    f.data.runs.unshift(worker(20, B, { conclusion: "failure", run_number: 2 })); makeRed(f, 20);
+    if (includeLegacy) { f.data.runs.unshift(legacy(30, B, { conclusion: "failure" })); makeRed(f, 30); }
+    f.data.requests.length = 0; f.data.mutations.length = 0;
+    const output = [];
+    const api = includeLegacy ? githubApi("test", async (url, options) => {
+      const path = new URL(url).pathname + new URL(url).search;
+      const graphql = path === "/graphql";
+      return { ok: true, status: 200, headers: new Headers({
+        "x-ratelimit-limit": graphql ? "5000" : "1000", "x-ratelimit-remaining": graphql ? "550" : "900",
+      }), json: () => f.api(path, { ...options, body: options.body ? JSON.parse(options.body) : undefined }) };
+    }) : f.api;
+    assert.equal(await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+      GITHUB_EVENT_NAME: "schedule" }, api, log: (line) => output.push(line) }), 0);
+    assert.equal(f.data.state.status, "failing");
+    assert.ok(f.data.mutations.some((mutation) => mutation.path === `/repos/${repository}/issues`));
+    assert.ok(f.data.requests.length <= API_BUDGET);
+    const usage = JSON.parse(output.at(-1)); assert.equal(usage.reason, null);
+    if (includeLegacy) { assert.equal(usage.rateRemaining, 900); assert.equal(usage.graphqlRemaining, 550); }
+  }
+});
+
+test("a newer same-target failing seed invalidates green without repeatedly exhausting recovery", async () => {
+  const f = forge({ runs: [worker(11, A, { conclusion: "failure" }), worker(10, A)] }); makeRed(f, 11);
+  for (let wake = 0; wake < 2; wake++) {
+    const health = await f.collect();
+    assert.equal(health.status, "failing"); assert.equal(health.fullCertification, null);
+    assert.ok(health.unresolvedFailures.some((failure) => failure.runId === 11));
+    assert.equal(health.recovery, undefined);
+  }
+  f.data.requests.length = 0;
+  assert.equal(await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
+    GITHUB_EVENT_NAME: "schedule" }, api: f.api, log: () => {} }), 0);
+  assert.equal(f.data.state.status, "failing");
+  assert.ok(f.data.mutations.some((mutation) => mutation.path === `/repos/${repository}/issues`));
+  assert.ok(f.data.requests.length <= API_BUDGET);
 });

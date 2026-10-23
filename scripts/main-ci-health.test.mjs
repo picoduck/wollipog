@@ -210,6 +210,23 @@ test("quota headers retain counts only and stop further calls at the reserved fl
   assert.equal(deniedCalls, 1);
 });
 
+test("the shared REST quota floor does not mix in the separate GraphQL bucket", async () => {
+  let calls = 0;
+  const transport = githubApi("test", async (url) => {
+    calls++; const graphql = new URL(url).pathname === "/graphql";
+    return { ok: true, status: 200, headers: new Headers({
+      "x-ratelimit-limit": graphql ? "5000" : "1000", "x-ratelimit-remaining": graphql ? "550" : "900",
+    }), json: async () => ({}) };
+  });
+  const api = budgetApi(transport, { requireHeaders: true });
+  await api("/rate_limit"); api.beginWrites();
+  await api("/graphql", { method: "POST" });
+  await api("/repos/example/project/issues", { method: "POST" });
+  assert.equal(calls, 3); assert.equal(api.budget.rateLimit, 1000); assert.equal(api.budget.rateRemaining, 900);
+  assert.equal(api.budget.graphqlLimit, 5000); assert.equal(api.budget.graphqlRemaining, 550);
+  assert.equal(api.budget.reason, null);
+});
+
 test("the workflow observes only main completions and scheduled/manual recovery, with trusted serialized writes", () => {
   const text = readFileSync(".github/workflows/main-ci-health.yml", "utf8");
   assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[completed\]/);

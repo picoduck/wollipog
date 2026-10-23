@@ -171,8 +171,16 @@ for the four state-write calls and at most four alert/author/label calls: observ
 at 40. An exhausted observation cannot unlock that reserve. Read-only reports reserve no writes.
 Checkpoint recovery has a separate twelve-call cap inside the same invocation budget. Existing
 checkpoint hints are reverified and the complete census is restricted to their dispatcher-ancestry
-window; failure seed samples are not loaded merely to discover a positive checkpoint. We never
-replace completeness proof with cached verdicts to save calls.
+window. Seed failures are inspected too, so a same-target red seed cannot promote an invalid older
+pass into recovery. We never replace completeness proof with cached verdicts to save calls.
+
+Within an observation, verified ancestry comparisons serve the checkpoint window and backlog,
+and known strict ancestry also proves the reverse is false. The mutable hint file is read at its
+pinned commit directly. The current run response supplies its latest attempt identity; older
+attempts use their own endpoint and every job inventory uses an exact attempt URL. Already
+inspected hints are not fetched again. All inspected run identities are still rechecked after
+the full observation, followed by complete listing fingerprints. These savings preserve race
+detection while making an ordinary red transition affordable.
 
 Before any observation, `GET /rate_limit` supplies authoritative numeric response headers. This
 endpoint is [exempt from GitHub's primary rate limit](https://docs.github.com/en/rest/rate-limit/rate-limit).
@@ -180,7 +188,9 @@ If fewer than **600** requests remain, the invocation stops unknown before any o
 or mutation. At exactly 600, the next request is also refused. Every later response refreshes a
 conservative low-water mark; missing/malformed quota headers also stop unknown. Logs expose only
 numeric `x-ratelimit-limit` and `x-ratelimit-remaining` values as `rateLimit`/`rateRemaining`, plus
-request counts, limits and safe reasons in `main_ci_health_api_usage`. Report stdout remains one
+request counts, limits and safe reasons in `main_ci_health_api_usage`. The separate GraphQL
+bucket has its own numeric `graphqlLimit`/`graphqlRemaining` fields; it is never mixed into the
+REST 600-remaining floor. GraphQL errors still prevent further mutation. Report stdout remains one
 JSON document; its usage log goes to stderr. `apiBudget` in the record is the observation-time
 snapshot; the final usage log includes subsequent writes. No token, response body or reset header
 is logged. Failed requests and concurrent requests count before launch, and there are no retries.
@@ -213,6 +223,9 @@ The earlier unbounded diagnostic fixtures measured 88/312/725 calls at 8/40/99 u
 they establish why a hard cap is necessary, not current production request counts. Production
 entry-point tests now stop long backlogs at 40 calls with no mutation, verify low-quota wakes use
 only the exempt preflight, and verify caught-up evidence plus CAS persistence fits within 48.
+They also persist and open the incident for a failing worker one commit after a pass, including
+existing state and a red legacy run. This checks alert availability through the actual budgeted
+entry point, rather than only through unbounded fixture calls to the reconciler.
 The 100-dispatcher, pagination and evidence caps still apply independently. Fixtures do not prove
 live quota, scheduling latency or production ref permissions; verify natural post-merge writes.
 
