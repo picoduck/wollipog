@@ -13,7 +13,8 @@ export async function discoverNodeTests(cwd = process.cwd()) {
   const files = new Set();
   // Node 22.13 supports the single-pattern async glob API (arrays arrived later).
   for (const pattern of NODE_TEST_GLOBS) {
-    for await (const file of glob(pattern, { cwd })) files.add(file.replaceAll("\\", "/"));
+    // Match the native test CLI: dependency trees are never part of discovery.
+    for await (const file of glob(pattern, { cwd, exclude: (name) => name === "node_modules" })) files.add(file.replaceAll("\\", "/"));
   }
   return [...files].sort();
 }

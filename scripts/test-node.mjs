@@ -25,8 +25,11 @@ export async function runNodeTests(files, { concurrency = Math.max(1, availableP
   try {
     // Node's CLI sorts paths again. run({files}) preserves measured scheduling order
     // while retaining the native runner's process isolation, timeout and child reaping.
-    const events = run({ files, concurrency, timeout, isolation: "process", execArgv: ["--import", "tsx"], signal: controller.signal });
-    events.on("test:fail", () => { process.exitCode ||= 1; });
+    const events = run({ files, concurrency, timeout, isolation: "process",
+      execArgv: ["--import", "tsx", `--test-timeout=${timeout}`], signal: controller.signal });
+    // A failing TODO emits test:fail but does not fail the CLI. The native
+    // summary also accounts for failures outside an individual test callback.
+    events.on("test:summary", ({ success }) => { if (!success) process.exitCode ||= 1; });
     const timing = new PassThrough({ objectMode: true });
     const timed = ci ? (async () => {
       for await (const line of timingReporter(timing)) process.stdout.write(line);

@@ -76,7 +76,8 @@ for executing new tests; use `pnpm test:inventory` to inspect the current tree.
 `scripts/node-test-plan.test.mjs` proves disjointness, union equality, unique full
 membership, all six discovery categories and new-file inclusion. It also tests
 real subprocess assertion failures, test timeouts with after-hook cleanup,
-process-global isolation, interruption exit status and worker reaping. No existing
+process-global isolation, interruption exit status and worker reaping. TODO exit
+semantics and dependency-directory exclusions match the native CLI. No existing
 test assertions, OS/engine probes, sandbox availability checks, Git identity,
 timeouts, cleanup hooks or package-manager boundaries change. `test:watch` remains
 the native watch command. CI still runs all files in one full execution, so it
@@ -92,10 +93,21 @@ or that the project's entire unit coverage has been classified as fast.
 
 On Linux with Node 24.18.1 and three-file concurrency, the fast partition passed
 201/201 tests, with no skips or cancellations, in 1.020 seconds reported by the
-native runner. This is a local readiness observation, including file startup;
-it is not hosted timing or a before/after improvement estimate. The five launcher
-and coverage-equivalence contracts passed. The full-suite validation and natural
+native runner. The actual minimum Node 22.13.0 also passed all 201 tests with
+two-file concurrency in 1.628 seconds. This is a local readiness observation, including file startup;
+it is not hosted timing or a before/after improvement estimate. All seven launcher
+and coverage-equivalence contracts passed on Node 24.18.1 and 22.13.0; the affected
+root/timing/aggregation/browser-budget contracts passed with them on Node 24
+(27 total). The full-suite validation and natural
 post-change measurements must be reported with the delivered PR.
+
+Timeout scope itself differs between the native engines: Node 22.13.0 bounds the
+combined file duration, while Node 24 bounds each test. A four-test fixture with
+150ms sequential tests and a 400ms limit reproduces that difference in both the
+CLI and launcher. The timeout/after-hook regression compares against the actual
+native CLI on the running engine, and the worker receives the explicit timeout
+flag. On Node 24 the hanging-test after-hook writes its cleanup marker; on
+22.13 the file deadline kills the worker before that hook, as its CLI does.
 
 An initial synthetic launcher regression fixture inherited an `--eval` entry
 point into workers and briefly produced recursive fixture processes. The fixture
