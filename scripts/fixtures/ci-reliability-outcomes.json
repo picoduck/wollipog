@@ -1,0 +1,170 @@
+{
+  "schemaVersion": 2,
+  "repository": "picoduck/wollipog",
+  "windows": [
+    {
+      "since": "2026-10-20T00:00:00Z",
+      "until": "2026-10-22T00:00:00Z"
+    }
+  ],
+  "records": [
+    {
+      "repository": "picoduck/wollipog",
+      "runId": 101,
+      "attempt": 1,
+      "event": "merge_group",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "state": "failing",
+      "createdAt": "2026-10-20T01:00:00Z",
+      "jobs": [
+        {
+          "id": 1011,
+          "testTiming": {
+            "state": "measured",
+            "summaries": [
+              {
+                "version": 1,
+                "suite": "browser",
+                "count": 2,
+                "failed": 1,
+                "skipped": 0,
+                "cancelled": 0,
+                "unmeasured": 0,
+                "retryOnly": 1,
+                "truncated": false,
+                "context": {
+                  "runId": "101",
+                  "attempt": 1,
+                  "testedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "workflowSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "slowestFiles": [],
+                "slowestTests": [],
+                "reliability": {
+                  "tests": [
+                    {
+                      "fileId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "testId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                      "durationMs": 1,
+                      "state": "failing",
+                      "retry": 0
+                    },
+                    {
+                      "fileId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "testId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                      "durationMs": 1,
+                      "state": "passing",
+                      "retry": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "repository": "picoduck/wollipog",
+      "runId": 102,
+      "attempt": 1,
+      "event": "merge_group",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "state": "failing",
+      "createdAt": "2026-10-21T01:00:00Z",
+      "jobs": [
+        {
+          "id": 1021,
+          "testTiming": {
+            "state": "measured",
+            "summaries": [
+              {
+                "version": 1,
+                "suite": "browser",
+                "count": 2,
+                "failed": 1,
+                "skipped": 0,
+                "cancelled": 0,
+                "unmeasured": 0,
+                "retryOnly": 1,
+                "truncated": false,
+                "context": {
+                  "runId": "102",
+                  "attempt": 1,
+                  "testedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "workflowSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "slowestFiles": [],
+                "slowestTests": [],
+                "reliability": {
+                  "tests": [
+                    {
+                      "fileId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "testId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                      "durationMs": 1,
+                      "state": "failing",
+                      "retry": 0
+                    },
+                    {
+                      "fileId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+                      "testId": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+                      "durationMs": 1,
+                      "state": "passing",
+                      "retry": 1
+                    }
+                  ],
+                  "truncated": false
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "repository": "picoduck/wollipog",
+      "runId": 101,
+      "attempt": 2,
+      "event": "merge_group",
+      "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "state": "passing",
+      "createdAt": "2026-10-20T01:00:00Z",
+      "jobs": [
+        {
+          "id": 1012,
+          "testTiming": {
+            "state": "measured",
+            "summaries": [
+              {
+                "version": 1,
+                "suite": "browser",
+                "count": 2,
+                "failed": 0,
+                "skipped": 0,
+                "cancelled": 0,
+                "unmeasured": 0,
+                "retryOnly": 0,
+                "truncated": false,
+                "context": {
+                  "runId": "101",
+                  "attempt": 2,
+                  "testedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                  "workflowSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                },
+                "slowestFiles": [],
+                "slowestTests": [],
+                "reliability": {
+                  "tests": [],
+                  "truncated": false
+                }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ],
+  "pagination": [],
+  "attemptsTruncated": false
+}

@@ -146,6 +146,11 @@ semantics. Unknown browser outcomes are unmeasured. Partial/cancelled runs may
 never emit a summary. A summary is not a
 complete test inventory or a source of failure text.
 
+The optional bounded reliability projection and its offline triage report are
+documented in [CI Reliability Triage](ci-reliability-triage.md). It preserves
+fast failure identities independently of the slowest-20 timing sample, with
+explicit overflow; it never grants merge or quarantine authority.
+
 File IDs hash repository-relative POSIX paths. Resolve them at the exact suite
 revision with `git ls-files` and SHA-256 of each path (without a trailing newline).
 Node test IDs hash `<fileId>:<line>:<column>:<title>`; browser test IDs hash
