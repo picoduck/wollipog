@@ -13,6 +13,10 @@ name: Settings-Rows win32 Baselines
 on:
   workflow_call:
     inputs:
+      expected_sha:
+        description: Exact admitted rolling snapshot; empty for ordinary CI
+        type: string
+        default: ''
       ref:
         description: Ref to compare; empty for the calling run's commit.
         type: string
@@ -45,6 +49,12 @@ jobs:
           ref: ${{ inputs.ref }}
           # The pull-request checkout is GitHub's test merge commit; its first parent is the base.
           fetch-depth: 2
+
+      - name: Verify Rolling Checkout
+        if: inputs.expected_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       # Compared against the base of the event rather than filtered with `paths:`: a path filter
       # on the workflow would suppress the required check, and `pull_request` and `merge_group`
@@ -102,6 +112,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.expected_sha != ''
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10

@@ -306,7 +306,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
-  // The win32 job is the draft guard, its name and the call, and nothing else. Its path scoping lives
+  // The win32 job is the draft guard, its name, the call and optional snapshot inputs. Its path scoping lives
   // in the called workflow, where a skip is a job the call still reports as a success; a condition
   // here would instead skip the call, which the aggregator rightly reads as a failure.
   const win32 = byId.win32
@@ -314,8 +314,8 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
     .join("\n");
   assert.match(win32,
-    /^  win32:\n    if: [^\n]*\n    name: Settings-Rows win32 Baselines\n    uses: \.\/\.github\/workflows\/settings-rows-win32\.yml$/,
-    "win32: the job must be exactly its guard, its name and the call to the win32 baselines workflow");
+    /^  win32:\n    if: [^\n]*\n    name: Settings-Rows win32 Baselines\n    uses: \.\/\.github\/workflows\/settings-rows-win32\.yml\n    with:\n      ref: \$\{\{ inputs.target_sha \}\}\n      expected_sha: \$\{\{ inputs.target_sha \}\}$/,
+    "win32: the job must retain its guard, name, call and exact rolling snapshot inputs");
   assert.match(byId.check, /needs\.win32\.result/,"the aggregator must inspect the win32 baselines result");
   assert.match(byId.check, /^          report "Settings-Rows win32 Baselines" "\$WIN32_RESULT"$/m,
     "the aggregator must fail when the win32 baselines job did not succeed");

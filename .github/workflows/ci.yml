@@ -4,6 +4,13 @@ name: CI
 # a pull request to Ready for Review starts this workflow once the change is ready.
 
 on:
+  # Shadow rolling main validation shares every job; existing events keep their exact defaults.
+  workflow_call:
+    inputs:
+      target_sha:
+        description: Immutable main snapshot admitted by the rolling controller
+        type: string
+        default: ''
   # Merge queue entries run the same required check on the queued merge group.
   merge_group:
   pull_request:
@@ -48,6 +55,14 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -308,6 +323,14 @@ jobs:
         shard: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -559,6 +582,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Settings-Rows win32 Baselines
     uses: ./.github/workflows/settings-rows-win32.yml
+    with:
+      ref: ${{ inputs.target_sha }}
+      expected_sha: ${{ inputs.target_sha }}
 
   # The specs that opt into WebKit (playwright.webkit.config.ts), which is Safari's engine and both
   # desktop webviews'. It is its own job, beside the Chromium shards rather than inside one, so it
@@ -572,6 +598,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
