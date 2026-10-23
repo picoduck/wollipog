@@ -10,17 +10,24 @@ This page covers how to land such a change safely, and how a red `main` gets not
 
 ## The Main CI Is Failing Alert
 
-`Main CI Health` (`.github/workflows/main-ci-health.yml`) runs after each CI run for a push to
-`main` completes. It checks out trusted default-branch code without persisted credentials, never
-reads the triggering commit or its artifacts, and runs `scripts/main-ci-health.mjs`. One
-reconciliation runs at a time. That limit sits on the eligible job, not the workflow: every CI
-completion starts the workflow, and a skipped pull-request invocation must never replace a pending
-`main` reconciliation.
+`Main CI Health` (`.github/workflows/main-ci-health.yml`) reconciles on main CI and rolling-worker
+completions, a twenty-minute recovery schedule, and manual dispatch on main. Push and in-progress
+wakes are omitted: reruns are detected on completion or by the schedule. Skipped workflow-run
+jobs consume no observer API calls. It checks out trusted default-branch code without persisted credentials and runs
+`scripts/main-ci-health.mjs`; it never executes the triggering run's code or artifacts. The
+issue-writing job serializes reconciliations. Skipped PR invocations cannot displace main work.
+Repository-level permissions remain read-only; only this trusted job has contents write (for
+the health ref), Actions read, and issues write. No new secret, App, PAT or repository setting is
+needed. Neither health-state nor rolling-state pushes match a main-only push trigger.
 
-The script ignores the triggering run's own result. It reads the newest completed `main` push CI run
-with a verdict (`success`, `failure`, `timed_out` or `startup_failure`). Cancelled and skipped runs
-are superseded or filtered work, so they never decide. An out-of-order completion therefore cannot
-flip the alert. Then:
+The event is only a wakeup. Live forge evidence decides the tested target, attempt and verdict.
+Rolling check runs attach to the dispatch-time SHA, which may differ from the tested SHA. The
+observer uses the worker's target/claim run-name identity and successful exact-checkout assertions
+in all nine checkout jobs, independently verifies workflow-source and target ancestry against
+pinned live main, and retains the executed worker, CI and Windows workflow blob identities. It
+checks the workflow-to-checkout input bindings and the complete expected job and test-step
+inventory, including all five browser shards, rendered production smoke, WebKit, engine boundaries
+and bundles. A successful aggregator alone certifies nothing. Then:
 
 - **Red, no alert open:** it opens one issue titled **Main CI Is Failing**, labelled `main-ci-red`
   (created on first use). The issue names the commit, the run and its failing jobs, and mentions
@@ -28,13 +35,199 @@ flip the alert. Then:
   everyone watching the repository.
 - **Red, alert open, a run not yet reported:** it comments with the new run and records it in the
   issue's hidden `latest` marker, so the same run is never reported twice.
-- **Green, alert open:** it comments with the passing run and closes the issue as completed.
+- **Verified full passing descendant, alert open:** only when that pass supersedes every unresolved
+  failure, it comments and closes the issue. Fast/legacy success, partial, cancelled, skipped,
+  synthetic-artifact dispatch, unrelated workflow and missing evidence cannot close a full incident.
 
 Only an open issue with that title and label, written by `github-actions[bot]`, counts as the alert.
-API failures change nothing: the job logs a warning with the HTTP status and fails, and the next
-`main` CI completion tries again. Logs never include API response bodies or tokens. The workflow
-starts working once it lands on `main`. Its tests drive the decision and transport paths against a
-fake API.
+API failures leave an incident open. The JSON health becomes unknown; failed writes leave the
+previous ref intact. Logs never include API response bodies or tokens. Existing `latest` issue
+markers migrate in place; exact run/attempt markers prevent repeated failure comments on schedule
+wakes. The existing alert's run pointer is reverified even when older than the rolling era.
+
+## Exact Snapshot Record and Consumers
+
+The dedicated `refs/heads/ci/main-health-state` ref holds one `health.json`, schema
+`main-ci-health-v1`. It is a queryable observation and recovery index, **not a trust anchor**:
+any repository writer can modify it. Readers must call the read-only report to reverify evidence
+before an admission or release decision:
+
+```sh
+# Trusted environment; Actions/content/issues read access. Prints one JSON document.
+GITHUB_REF=refs/heads/main node scripts/main-ci-health.mjs report
+```
+
+Supply `GITHUB_REPOSITORY` and `GITHUB_TOKEN` through the environment. `report` mutates no ref,
+issue, check or run; an unknown result prints JSON and exits 1. Reconciliation also writes the
+JSON to `MAIN_CI_HEALTH_OUTPUT`, retains a workflow artifact for 30 days, and writes a step summary.
+Artifacts are historical observations, never replacements for live forge revalidation. The
+lighter merge gate remains disabled; this issue changes no required check, ruleset or queue policy.
+
+| Field | Meaning |
+| --- | --- |
+| `currentMainSha`, `observedAt` | Pinned current main and observation time; main is rechecked before returning. |
+| `latestAttempt` | Newest tested target by ancestry, then run ID/attempt for that same target. |
+| `latestPassingSnapshot` | Most recent still-valid exact full passing snapshot; it may lag main. |
+| `fullCertification` | Full certificate for current main only, otherwise null; always inspect overall status too. |
+| `unresolvedFailures` | Full-worker failures and retained legacy incidents not covered by a verified full descendant. |
+| `evidence` | Rolling records: repository, tested SHA, claim, run/attempt/URL, workflow path/revision/blobs, suite version/revision, checkout/ancestry evidence, exact job/step inventory, result and times. |
+| `legacyEvidence` | Explicit `legacy-main-push` evidence, always `certification: none`; a legacy/fast success cannot certify or resolve rolling health. |
+| `backlog` | Commit and merged-PR counts, Git merge-commit count, oldest unvalidated time/age; null means unknown. |
+| `status`, `reasons` | `passing`, `failing`, `pending`, `stale` or `unknown`, with allowlisted content-safe diagnostics. |
+
+`passing` requires current-main full certification. `pending` means verified passing ancestry
+exists with newer unvalidated main commits. `stale` means the oldest unvalidated change exceeds
+the two-hour investigation budget. A full failure remains failing through a pending rerun;
+unknown evidence or a stalled validator remains explicit rather than silently reusing green.
+The budget is an investigation threshold, not a guarantee about GitHub scheduling or runner time.
+
+The freshness clock is the oldest unvalidated commit's **committer-time proxy**, not the age of
+the last green run and not measured push arrival. Squash merges from the queue receive a committer
+timestamp when they land, making it the useful freshness anchor for this repository. Once caught
+up, idle main has zero backlog and zero unvalidated age even after weeks without a run. `merges`
+counts associated PRs actually merged into main at each backlog commit, including squash merges;
+`mergeCommits` separately counts commits with multiple parents.
+
+## Reruns, Ordering and Recovery
+
+A run's latest authoritative attempt replaces its earlier green verdict. Requested/in-progress
+reruns and a new worker at the same target withdraw that target's certificate; terminal incomplete
+attempts leave it unknown. Earlier failing attempts remain unresolved until a complete full pass
+on that target with later run/attempt identity, or a full passing descendant, supersedes them.
+Delayed completion timestamps never outrank target ancestry. A passing ancestor cannot close a
+newer failure. The `rolling-full-v1` coverage contract requires the same complete inventory even
+when workflow blob versions change; actual workflow hashes remain recorded as `suiteVersion`.
+Unexpected inventory changes need an explicit observer contract update and remain uncertified.
+
+The health ref supplies only bounded run-ID hints. Every invocation rebuilds verdicts from
+Actions and compare APIs, rechecking current attempts after reading jobs. It never reads
+`ci/main-rolling-state` as health evidence. Both reconciliation and the read-only report recover
+the current incident pointer directly from the issue, even after health-ref loss. A missing
+incident pointer remains unknown; a deleted cache-only hint is discarded once fresh evidence is
+available. Non-main dispatches cannot poison the repository's health. An incident whose identity
+marker was removed stays open with `incident-identity-unavailable`; restore the verified run ID
+before expecting automatic closure.
+
+A freshly verified full pass establishes an **ancestry window**, not a timestamp cutoff. The
+observer enumerates every main commit from that passing target through pinned current main, then
+queries complete worker/legacy run listings by each exact dispatcher SHA. Eligible workers prove
+the tested target is an ancestor of the dispatcher revision, as well as both being ancestors of
+main. Therefore any newer tested target must have a dispatcher inside this window. A dispatch to
+an old target, a delayed push record, or a completion created before an older-target pass cannot
+hide a newer target's failure. The stored checkpoint is a hint; its complete worker certificate
+is reverified, and a conflicting later attempt invalidates the checkpoint. No push-run timestamp
+or event arrival time establishes absence of failures.
+If the complete census discovers that a newer run at the same target invalidates the sampled
+checkpoint, the observer retries once with checkpoint selection disabled and the rejected hint
+removed. Recovery has its own twelve-request cap inside the invocation cap. Incomplete recovery
+returns unknown with `recovery.reason: checkpoint-invalidated`, no active certificate and no alert
+mutation. A persisted recovery drops the rejected hint even when unknown. Full-history bounds
+still apply; a stopped invocation cannot write and leaves the previous ref intact. A later full
+pass or reviewed reconciliation repair may be needed after a long red streak.
+
+Bootstrap examines at most eight recent completions for a positive checkpoint, stopping at a
+verified pass. That sample never proves absence: the subsequent window is enumerated completely,
+and all active workers are scanned independently before checkpoint selection. Without a positive
+checkpoint, complete bounded rolling history is scanned and the worker workflow's forge creation
+time is the legacy transition horizon. Existing incident
+pointers are included regardless of age. Missing worker run-number sequences inside the window
+expose deleted/expired history and remain unknown. Main-push fan-out can stop in #3631 without
+removing any rolling certification dependency. Caught-up idle main stays fresh.
+Pre-rolling closed incidents are outside the new record's historical scope.
+
+All enumerations are bounded: 100 dispatcher SHAs in an ancestry window, ten 100-item pages per run/job/commit listing, ten attempts per run,
+128 retained attempt records, and fewer than 100 associated PRs per backlog commit. A fully
+passing strict descendant with identical workflow blobs covers older target history without
+reloading its jobs. Truncated/changed listings, inaccessible/deleted evidence, missing source or
+checkout evidence, unsupported workflow binding, unknown ancestry and API failures yield unknown,
+never passing. API retention can limit recovery; no cached success survives missing forge proof.
+If a bound is reached, inspect the diagnostic and extend the observer's bounded reconciliation
+with reviewed code; editing the state ref cannot manufacture a certificate.
+
+Writes use GraphQL `updateRefs` with an exact `beforeOid` fence. A stale writer fails closed.
+Every 128th write, and recovery from malformed state, starts a new root generation; at most 128
+state commits remain reachable. GitHub controls collection of unreachable objects. The state
+branch runs no workflow. Migration does not alter the controller/worker's coordination contract.
+
+For investigation, first inspect `main_ci_health_observed` (main SHA, passing SHA, status, reasons
+and backlog), keyed by `observationId` and the actual `entryPoint`. Then use the record's exact run
+attempt URL and job inventory. `validation-stalled` needs an operator to inspect the worker;
+pagination, ancestry or permission diagnostics need API/observer repair. Do not close an incident
+or switch credentials to work around unknown evidence. Focused fake-API tests cover these paths;
+they do not prove GitHub scheduler latency or token policy. After landing, inspect the natural
+health workflow's state write and artifact before claiming production persistence is verified.
+
+First-attempt non-red legacy runs retain explicit uncertified forge metadata without repeatedly
+fetching complete job inventories. They cannot contain an earlier failing attempt. Red legacy
+runs and reruns still load their full evidence. Only completed workflow events request an eligible
+observation job. The schedule detects a rerun in progress or a missed completion; a main push
+does not add an extra observation.
+
+### Shared API Budget
+
+Every CLI/workflow invocation has a hard **48-request cap**, including failed calls, the quota
+preflight, ref reads/writes, GraphQL and alert calls. Reconciliation reserves eight calls up front
+for the four state-write calls and at most four alert/author/label calls: observation reads stop
+at 40. An exhausted observation cannot unlock that reserve. Read-only reports reserve no writes.
+Checkpoint recovery has a separate twelve-call cap inside the same invocation budget. Existing
+checkpoint hints are reverified and the complete census is restricted to their dispatcher-ancestry
+window. Seed failures are inspected too, so a same-target red seed cannot promote an invalid older
+pass into recovery. We never replace completeness proof with cached verdicts to save calls.
+
+Within an observation, verified ancestry comparisons serve the checkpoint window and backlog,
+and known strict ancestry also proves the reverse is false. The mutable hint file is read at its
+pinned commit directly. The current run response supplies its latest attempt identity; older
+attempts use their own endpoint and every job inventory uses an exact attempt URL. Already
+inspected hints are not fetched again. All inspected run identities are still rechecked after
+the full observation, followed by complete listing fingerprints. These savings preserve race
+detection while making an ordinary red transition affordable.
+
+Before any observation, `GET /rate_limit` supplies authoritative numeric response headers. This
+endpoint is [exempt from GitHub's primary rate limit](https://docs.github.com/en/rest/rate-limit/rate-limit).
+If fewer than **600** requests remain, the invocation stops unknown before any observation read
+or mutation. At exactly 600, the next request is also refused. Every later response refreshes a
+conservative low-water mark; missing/malformed quota headers also stop unknown. Logs expose only
+numeric `x-ratelimit-limit` and `x-ratelimit-remaining` values as `rateLimit`/`rateRemaining`, plus
+request counts, limits and safe reasons in `main_ci_health_api_usage`. The separate GraphQL
+bucket has its own numeric `graphqlLimit`/`graphqlRemaining` fields; it is never mixed into the
+REST 600-remaining floor. GraphQL errors still prevent further mutation. Report stdout remains one
+JSON document; its usage log goes to stderr. `apiBudget` in the record is the observation-time
+snapshot; the final usage log includes subsequent writes. No token, response body or reset header
+is logged. Failed requests and concurrent requests count before launch, and there are no retries.
+
+Hourly arithmetic uses the conservative **1,000-request repository token allowance**, without
+assuming Enterprise Cloud. Let C be eligible main-CI completions, R rolling completions, and M
+manual dispatches/read-only reports in that hour. The unconstrained invocation envelope is
+`48 * (3 + C + R + M)`: three scheduled observations cost at most **144** requests, one CI plus
+one worker completion adds at most **96**, for **240/hour** before other traffic. Skipped event
+jobs cost zero observer requests; push/in-progress events add zero invocations. C, R and M are
+not inherently bounded, so the schedule arithmetic alone is not an aggregate guarantee.
+The live floor is the aggregate admission limiter: starting at 1,000 with no other consumers,
+at most about `1000 - 600 + 48 = 448` primary requests are exposed before later observations
+back off, leaving about **552** for the controller/other workflows. Per-response checks normally
+stop earlier, around 600. The 48-call allowance covers an admitted invocation's conservative
+overshoot envelope; serialized workflow jobs avoid simultaneous health invocations. This is
+headroom protection, not an atomic quota reservation: other consumers and GitHub's distributed
+header counters can change the remaining balance. Low-quota wakes make only the primary-exempt
+preflight. Secondary limits still apply; any 403/429 stops this invocation with no retry.
+
+`api-budget-exhausted`, `api-quota-reserved`, `api-rate-limited` and `rate-limit-unavailable` yield unknown, no active
+certificate, and no incident opening or closure. If the budget/floor stops further calls, the
+previous health ref stays unchanged and the current artifact/CLI output explains the unknown
+observation. Consumers must reverify and must not treat the previous cached ref as current proof.
+A smaller recovery may persist unknown while retaining the global write reserve; it still cannot
+mutate an incident. These limits deliberately trade long-backlog availability for controller
+headroom. The lighter merge gate remains disabled.
+
+The earlier unbounded diagnostic fixtures measured 88/312/725 calls at 8/40/99 unvalidated commits;
+they establish why a hard cap is necessary, not current production request counts. Production
+entry-point tests now stop long backlogs at 40 calls with no mutation, verify low-quota wakes use
+only the exempt preflight, and verify caught-up evidence plus CAS persistence fits within 48.
+They also persist and open the incident for a failing worker one commit after a pass, including
+existing state and a red legacy run. This checks alert availability through the actual budgeted
+entry point, rather than only through unbounded fixture calls to the reconciler.
+The 100-dispatcher, pagination and evidence caps still apply independently. Fixtures do not prove
+live quota, scheduling latency or production ref permissions; verify natural post-merge writes.
 
 ## When a Merge Group Fails on Code Your Pull Request Did Not Touch
 
