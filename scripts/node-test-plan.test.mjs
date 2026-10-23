@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { discoverNodeTests, nodeTestInventory, planNodeTests, profile, NODE_TEST_GLOBS } from "./node-test-plan.mjs";
@@ -47,7 +48,7 @@ test("the largest measured costs run first without changing membership or worker
   for (const file of profile.fastFiles) assert.ok(files.includes(file), `stale fast-file entry: ${file}`);
 });
 
-const runner = resolve("scripts/test-node.mjs");
+const runner = pathToFileURL(resolve("scripts/test-node.mjs")).href;
 function fixture(t, source) {
   const root = mkdtempSync(join(tmpdir(), "node-test-runner-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -110,7 +111,12 @@ test("failing TODO tests preserve the native CLI's successful exit status", (t) 
   assert.equal(native.status, result.status, native.stdout + native.stderr);
 });
 
-test("SIGTERM aborts native file workers and keeps an interrupted exit code", { timeout: 15_000 }, async (t) => {
+test("SIGTERM aborts native file workers and keeps an interrupted exit code", {
+  timeout: 15_000,
+  // Windows terminates abruptly for child.kill("SIGTERM"); it cannot deliver
+  // the POSIX handler whose exit code and worker reaping this test exercises.
+  skip: process.platform === "win32",
+}, async (t) => {
   const file = fixture(t, 'import {test} from "node:test"; import {writeFileSync} from "node:fs"; test("running",async()=>{ writeFileSync(import.meta.filename+".pid",String(process.pid)); await new Promise(()=>setInterval(()=>{},100)); });');
   const child = spawn(process.execPath, childArgs([file], { timeout: 10_000 }), { stdio: "ignore" });
   t.after(() => { if (child.exitCode === null) child.kill("SIGKILL"); });

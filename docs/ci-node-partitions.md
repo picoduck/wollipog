@@ -77,7 +77,7 @@ for executing new tests; use `pnpm test:inventory` to inspect the current tree.
 membership, all six discovery categories and new-file inclusion. It also tests
 real subprocess assertion failures, timeout scope and after-hook behavior matching
 the running engine's native CLI,
-process-global isolation, interruption exit status and worker reaping. TODO exit
+process-global isolation, POSIX interruption exit status and worker reaping. TODO exit
 semantics and dependency-directory exclusions match the native CLI. No existing
 test assertions, OS/engine probes, sandbox availability checks, Git identity,
 timeouts, cleanup hooks or package-manager boundaries change. `test:watch` remains
