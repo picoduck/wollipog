@@ -6,7 +6,7 @@ import test from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 
 const helper = resolve("scripts/playwright-system-packages.sh");
-const linuxOnly = { skip: process.platform === "win32" && "Ubuntu-only apt helper" };
+const linuxOnly = { skip: process.platform !== "linux" && "Ubuntu-only apt helper" };
 
 function fixture(run) {
   const dir = mkdtempSync(join(tmpdir(), "playwright-system-packages-"));

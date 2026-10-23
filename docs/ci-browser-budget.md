@@ -164,7 +164,7 @@ GITHUB_TOKEN=$(gh auth token) node scripts/merge-queue-wait-report.mjs --repo pi
 
 `scripts/workflow-browser-budget.test.mjs` derives both attempt paths and diagnostic
 allowances from the workflow, and the remainder from the fixture. It rejects
-tested reduced budgets through 58 minutes, longer attempts on either path,
+tested reduced budgets through 67 minutes, longer attempts or cache phases,
 omitted production/cleanup, inconsistent sums, and missing or duplicated full-run
 shards. These checks catch lost modeled reserve and inconsistent shard coverage;
 they do not predict the duration of future workloads or require a Git checkout.
@@ -184,7 +184,9 @@ authors must not edit a provenance hash to imply a measurement that never happen
 Local checks and PR/merge-group CI do not complete #2700. Observe **five consecutive
 naturally occurring complete main or merge-group runs containing this change**,
 all five browser shards successful with at least 180 seconds spare:
-`active <= 3360s` at 59 minutes. Read exact first-attempt metadata for each run:
+`active <= 3900s` at the current 68-minute limit. The earlier 59-minute model
+used a 3360-second threshold; its observations are historical, not evidence for
+the revised setup model. Read exact first-attempt metadata for each run:
 
 ```sh
 gh api repos/picoduck/wollipog/actions/runs/<run-id>
@@ -216,7 +218,10 @@ Resolve, restore, collect and save are optional and bounded. An unsupported
 Playwright dry-run format emits no key and uses the original install. A failed
 restore uses the original install even if it emitted a hit output before failing.
 An incomplete or corrupt archive hit fails its first attempt and enters the
-original network-enabled retry. Both attempts retain their six-minute deadlines
+original network-enabled retry. Cache entries are immutable: a successfully
+restored bad entry remains until its key changes or an operator evicts it. Such
+an entry can repeatedly fall back to network installs; no automatic repair is
+claimed. Both attempts retain their six-minute deadlines
 and process/lock recovery. A real browser launch must succeed before any tests
 or package-cache save. Collection saves only the archives named by the key;
 collection or save failures cannot turn passing tests red.
