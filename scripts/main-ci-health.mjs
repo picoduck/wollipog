@@ -211,6 +211,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     };
     const ancestor = async (sha, descendant = mainSha) => {
       if (sha === descendant) return true;
+      if (descendant === mainSha && positions.has(sha)) return true;
       let comparison;
       try { comparison = await read(`${root}/compare/${sha}...${descendant}`); }
       catch (error) { if (error?.status === 404) return false; throw error; }
@@ -226,28 +227,27 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     const records = [], legacyRecords = [], inspected = [], supersededRunIds = [];
     const requiredNames = REQUIRED.map((name) => name.replace(/^Full Validation \/ /, ""));
     const inspectedIds = new Set();
-    async function mainPush(sha) {
-      for (const name of ["main-ci-health.yml", "ci.yml"]) {
-        let payload;
-        try { payload = await read(`${root}/actions/workflows/${name}/runs?branch=main&event=push&head_sha=${sha}&per_page=100`); }
-        catch (error) { if (error?.status === 404) continue; throw error; }
-        if (!Array.isArray(payload?.workflow_runs) || !Number.isSafeInteger(payload.total_count) || payload.total_count >= 100 ||
-            payload.total_count !== payload.workflow_runs.length)
-          fail("checkpoint-push-unavailable");
-        const push = payload.workflow_runs.filter((run) => run.event === "push" && run.head_branch === "main" &&
-          run.path === `.github/workflows/${name}` && run.head_sha === sha && positive(run.id) &&
-          run.repository?.full_name === repository && run.head_repository?.full_name === repository && timestamp(run.created_at))
-          .sort((a, b) => Date.parse(a.created_at) - Date.parse(b.created_at))[0];
-        if (push) return push;
-      }
-      return null;
-    }
-    async function inspect(listed) {
+    async function inspect(listed, listedViaWindow = false) {
       if (inspectedIds.has(listed.id)) return;
-      inspectedIds.add(listed.id);
       const listedIdentity = workerIdentity(listed, repository);
       const isLegacy = isMainPushRun(listed, repository);
       if (!listedIdentity && !isLegacy) return;
+      // First-attempt non-red legacy runs cannot contain an earlier failed attempt,
+      // certify a snapshot, or resolve an incident. Retain their forge metadata
+      // explicitly without repeatedly loading a full job inventory on every wake.
+      if (isLegacy && listed.run_attempt === 1 && !RED.has(listed.conclusion)) {
+        if (!await ancestor(listed.head_sha)) return;
+        legacyRecords.push({ repository, source: "legacy-main-push", runId: listed.id, attempt: 1,
+          testedSha: listed.head_sha, targetSha: listed.head_sha, workflowPath: listed.path,
+          workflowRevision: listed.head_sha, certification: "none", fullJobInventoryVerified: false,
+          suiteVersion: null, inventory: [], status: listed.status, runConclusion: listed.conclusion,
+          result: ACTIVE.has(listed.status) ? "pending" : "unknown", observedAt,
+          url: `https://github.com/${repository}/actions/runs/${listed.id}/attempts/1` });
+        if (!listedViaWindow) inspected.push(listed);
+        inspectedIds.add(listed.id);
+        if (records.length + legacyRecords.length > MAX_RECORDS) fail("evidence-limit");
+        return;
+      }
       const run = await api(`${root}/actions/runs/${listed.id}`);
       const identity = workerIdentity(run, repository);
       if (run.id !== listed.id || run.run_attempt !== listed.run_attempt || run.head_sha !== listed.head_sha ||
@@ -255,13 +255,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         fail("run-changed");
       const targetSha = identity?.targetSha ?? run.head_sha;
       if (!await ancestor(run.head_sha) || !await ancestor(targetSha)) return;
-      let sourcePush = null;
-      if (identity) {
-        if (!await ancestor(targetSha, run.head_sha)) return;
-        sourcePush = await mainPush(run.head_sha);
-        if (!sourcePush) fail("workflow-landing-unavailable");
-        if (Date.parse(sourcePush.created_at) > Date.parse(run.created_at)) return;
-      }
+      if (identity && !await ancestor(targetSha, run.head_sha)) return;
       const blobs = {};
       for (const [key, path] of Object.entries({ ...(identity ? { worker: WORKER_PATH } : {}), ci: CI_PATH, windows: WINDOWS_PATH })) {
         const file = await read(`${root}/contents/${path}?ref=${run.head_sha}`);
@@ -323,7 +317,6 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         const record = { repository, source: identity ? "rolling-full" : "legacy-main-push", targetSha, testedSha: targetSha,
           claimId: identity?.claimId ?? null, runId: run.id, runNumber: run.run_number, attempt, url: `https://github.com/${repository}/actions/runs/${run.id}/attempts/${attempt}`,
           workflowPath: run.path, workflowRevision: run.head_sha, dispatcherSha: run.head_sha,
-          sourcePushRunId: sourcePush?.id ?? (isLegacy ? run.id : null), sourcePushedAt: sourcePush?.created_at ?? run.created_at,
           workflowBlobs: blobs, suiteVersion: createHash("sha256").update(JSON.stringify(blobs)).digest("hex"),
           suiteRevision: targetSha, coverageVersion: identity ? FULL_COVERAGE : "legacy-unverified",
           workflowAncestryVerified: true, targetAncestryVerified: true, checkoutVerified,
@@ -337,6 +330,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       const fresh = await api(`${root}/actions/runs/${run.id}`);
       if (fresh.run_attempt !== run.run_attempt || fresh.status !== run.status || fresh.conclusion !== run.conclusion)
         fail("run-changed");
+      inspectedIds.add(run.id);
     }
     const workflow = await api(`${root}/actions/workflows/main-rolling-validation.yml`);
     if (workflow?.path !== WORKER_PATH || !timestamp(workflow.created_at)) fail("workflow-unavailable");
@@ -355,47 +349,83 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     }
     for (const id of pointers.slice(0, 1)) {
       if (!positive(id)) fail("invalid-pointer");
-      try { await inspect(await api(`${root}/actions/runs/${id}`)); }
+      let hinted;
+      try { hinted = await api(`${root}/actions/runs/${id}`); }
       catch (error) { if (error?.status !== 404 || id === incidentRunId) throw error; }
+      if (hinted) await inspect(hinted);
     }
-    let since = workflow.created_at;
     const possible = records.filter((record) => record.certification === "full" &&
       !records.some((other) => other.targetSha === record.targetSha && (other.runId > record.runId ||
         other.runId === record.runId && other.attempt > record.attempt)));
     possible.sort((a, b) => positions.get(a.targetSha) - positions.get(b.targetSha));
-    for (const pass of possible) {
-        const push = await mainPush(pass.targetSha);
-        if (!push) continue;
-        // A push, unlike a dispatch to an old SHA or a tag called main, proves
-        // when this exact target was main. Include a minute for API timestamp rounding.
-        const cutoff = new Date(Date.parse(push.created_at) - 60_000).toISOString();
-        if (Date.parse(cutoff) > Date.parse(since)) since = cutoff;
-        health.checkpoint = { runId: pass.runId, attempt: pass.attempt, targetSha: pass.targetSha,
-          runNumber: pass.runNumber,
-          pushRunId: push.id, pushWorkflow: push.path, pushedAt: push.created_at };
-        break;
+    const baseline = possible[0];
+    const dispatcherShas = baseline ? [baseline.targetSha] : [];
+    if (baseline && baseline.targetSha !== mainSha) {
+      const commits = []; let total;
+      for (let page = 1; page <= 10; page++) {
+        const comparison = await read(`${root}/compare/${baseline.targetSha}...${mainSha}?per_page=100&page=${page}`);
+        if (comparison?.merge_base_commit?.sha !== baseline.targetSha || !Array.isArray(comparison.commits) ||
+            !Number.isSafeInteger(comparison.total_commits) || total !== undefined && total !== comparison.total_commits) fail("ancestry-unavailable");
+        total = comparison.total_commits; commits.push(...comparison.commits);
+        if (commits.length >= total) break;
+      }
+      if (commits.length !== total || new Set(commits.map((commit) => commit.sha)).size !== total) fail("incomplete-commit-pagination");
+      for (const [index, commit] of commits.entries()) {
+        if (!SHA.test(commit.sha)) fail("ancestry-unavailable");
+        dispatcherShas.push(commit.sha); positions.set(commit.sha, commits.length - index - 1);
+      }
     }
-    health.evidenceSince = since;
+    if (dispatcherShas.length > 100) fail("ancestry-window-limit");
+    if (baseline) health.checkpoint = { runId: baseline.runId, attempt: baseline.attempt,
+      targetSha: baseline.targetSha, runNumber: baseline.runNumber, suiteVersion: baseline.suiteVersion };
+    health.ancestryWindow = { baselineSha: baseline?.targetSha ?? null, mainSha, dispatcherShas };
+    health.evidenceSince = baseline ? null : workflow.created_at;
     for (const id of pointers.slice(1)) {
       if (!positive(id)) fail("invalid-pointer");
-      try {
-        const run = await api(`${root}/actions/runs/${id}`);
+      let run;
+      try { run = await api(`${root}/actions/runs/${id}`); }
+      catch (error) { if (error?.status !== 404 || id === incidentRunId) throw error; }
+      if (run) {
         const target = workerIdentity(run, repository)?.targetSha ?? (isMainPushRun(run, repository) ? run.head_sha : null);
         if (target && id !== incidentRunId && health.checkpoint && target !== health.checkpoint.targetSha &&
             await ancestor(target, health.checkpoint.targetSha)) continue;
         await inspect(run);
-      } catch (error) { if (error?.status !== 404 || id === incidentRunId) throw error; }
+      }
     }
-    const rollingPath = `${root}/actions/workflows/main-rolling-validation.yml/runs?event=workflow_dispatch&created=${encodeURIComponent(">=" + since)}`;
-    const legacyPath = `${root}/actions/workflows/ci.yml/runs?branch=main&event=push&created=${encodeURIComponent(">=" + since)}`;
-    const [rolling, legacy] = await Promise.all([pages(api, rollingPath, "workflow_runs"), pages(api, legacyPath, "workflow_runs")]);
-    // Sequence gaps expose deleted/expired worker evidence within the authoritative
-    // window. Include all dispatch branches so unrelated dispatches cannot create gaps.
-    const numbers = new Set(rolling.map((run) => run.run_number));
-    const lower = health.checkpoint?.runNumber ?? 1;
-    const upper = Math.max(health.checkpoint ? lower : 0, ...numbers);
-    if (!positive(lower) || ![...numbers].every(positive) || upper - lower >= 1000) fail("worker-history-incomplete");
-    for (let number = lower; number <= upper; number++) if (!numbers.has(number)) fail("worker-history-incomplete");
+    // Query by every dispatcher SHA from the verified baseline through main.
+    // Creation/completion times cannot hide a newer target: eligible workers prove
+    // target <= dispatcher, and every dispatcher after the baseline is enumerated.
+    const rollingPaths = baseline ? dispatcherShas.map((sha) =>
+      `${root}/actions/workflows/main-rolling-validation.yml/runs?event=workflow_dispatch&head_sha=${sha}`)
+      : [`${root}/actions/workflows/main-rolling-validation.yml/runs?event=workflow_dispatch`];
+    const legacyPaths = baseline ? dispatcherShas.map((sha) =>
+      `${root}/actions/workflows/ci.yml/runs?branch=main&event=push&head_sha=${sha}`)
+      : [`${root}/actions/workflows/ci.yml/runs?branch=main&event=push&created=${encodeURIComponent(">=" + workflow.created_at)}`];
+    const enumerate = async (paths) => {
+      const result = [];
+      for (const path of paths) {
+        const items = await pages(api, path, "workflow_runs");
+        const selected = new URL("https://api.github.com" + path).searchParams.get("head_sha");
+        if (selected && items.some((run) => run.head_sha !== selected)) fail("dispatcher-query-mismatch");
+        result.push(...items);
+      }
+      return result;
+    };
+    const [rolling, legacy] = await Promise.all([enumerate(rollingPaths), enumerate(legacyPaths)]);
+    const lower = Math.min(health.checkpoint?.runNumber ?? 1, ...rolling.map((run) => run.run_number));
+    if (rolling.length || health.checkpoint) {
+      if (!positive(lower)) fail("worker-history-incomplete");
+      const tail = [];
+      for (let page = 1; page <= 10; page++) {
+        const body = await api(`${root}/actions/workflows/main-rolling-validation.yml/runs?event=workflow_dispatch&per_page=100&page=${page}`);
+        if (!Array.isArray(body?.workflow_runs) || !Number.isSafeInteger(body.total_count)) fail("invalid-pagination");
+        tail.push(...body.workflow_runs);
+        if (tail.some((run) => run.run_number <= lower) || tail.length >= body.total_count) break;
+      }
+      const numbers = new Set(tail.map((run) => run.run_number)), upper = Math.max(lower, ...numbers);
+      if (![...numbers].every(positive) || upper - lower >= 1000) fail("worker-history-incomplete");
+      for (let number = lower; number <= upper; number++) if (!numbers.has(number)) fail("worker-history-incomplete");
+    }
     const fingerprint = (items) => items.map((run) => [run.id, run.run_attempt, run.head_sha, run.status, run.conclusion]).sort((a, b) => a[0] - b[0]);
     const runs = new Map([...rolling, ...legacy].map((run) => [run.id, run]));
     // Active workers are read separately: an old active attempt cannot disappear
@@ -415,7 +445,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       const older = workerIdentity(candidates[index], repository)?.targetSha ?? candidates[index].head_sha;
       if (!await ancestor(older, newer)) fail("incomparable-targets");
     }
-    for (const run of candidates) await inspect(run);
+    for (const run of candidates) await inspect(run, true);
     health.evidence = records; health.legacyEvidence = legacyRecords; health.supersededRunIds = supersededRunIds;
     const rank = async (items) => [...items].sort((a, b) => positions.get(a.targetSha) - positions.get(b.targetSha) || b.runId - a.runId || b.attempt - a.attempt);
     const ordered = await rank(records);
@@ -425,6 +455,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     // A rerun (or a new worker at that target) withdraws the target's old green.
     const passes = [...newestForTarget.values()].filter((record) => record.certification === "full" &&
       !legacyRecords.some((other) => other.targetSha === record.targetSha && other.result === "failing" && other.runId > record.runId));
+    if (baseline && !passes.some((pass) => pass.runId === baseline.runId && pass.attempt === baseline.attempt)) fail("checkpoint-invalidated");
     health.latestPassingSnapshot = passes[0] ?? null;
     health.resolvedRunIds = [...new Set(supersededRunIds)];
     for (const record of [...records, ...legacyRecords]) {
@@ -493,7 +524,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         fail("run-changed");
     }
     const [freshRolling, freshLegacy] = await Promise.all([
-      pages(api, rollingPath, "workflow_runs"), pages(api, legacyPath, "workflow_runs"),
+      enumerate(rollingPaths), enumerate(legacyPaths),
     ]);
     if (JSON.stringify(fingerprint(rolling)) !== JSON.stringify(fingerprint(freshRolling)) ||
         JSON.stringify(fingerprint(legacy)) !== JSON.stringify(fingerprint(freshLegacy))) fail("listing-changed");
@@ -516,6 +547,10 @@ export async function reconcile(target, { api, log = console.log, collect = coll
     const previous = persist ? await readHealthState(api, repository) : { pointers: [] };
     const alertPointer = Number(LATEST.exec(issue?.body ?? "")?.[1]);
     const health = await collect(repository, { api, now, incidentRunId: positive(alertPointer) ? alertPointer : null, pointers: [...new Set([...previous.pointers, ...(positive(alertPointer) ? [alertPointer] : [])])] });
+    if (issue && !positive(alertPointer)) {
+      health.status = "unknown"; health.fullCertification = null;
+      health.reasons = [...(health.reasons ?? []), "incident-identity-unavailable"];
+    }
     if (output) writeFileSync(output, JSON.stringify(health, null, 2) + "\n");
     if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY,
       `Main regression health: **${health.status}**\n\n\`\`\`json\n${JSON.stringify({ ...health, evidence: undefined, legacyEvidence: undefined })}\n\`\`\`\n`);
@@ -602,6 +637,10 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
       const incidentRunId = Number(LATEST.exec(issue?.body ?? "")?.[1]);
       const health = await collectHealth(repository, { api, incidentRunId,
         pointers: [...new Set([...previous.pointers, ...(positive(incidentRunId) ? [incidentRunId] : [])])] });
+      if (issue && !positive(incidentRunId)) {
+        health.status = "unknown"; health.fullCertification = null;
+        health.reasons = [...health.reasons, "incident-identity-unavailable"];
+      }
       log(JSON.stringify(health));
       return health.status === "unknown" ? 1 : 0;
     }

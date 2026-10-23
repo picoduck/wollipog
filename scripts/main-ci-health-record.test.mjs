@@ -69,8 +69,6 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
         (!params.get("status") || run.status === params.get("status")) &&
         (!params.get("head_sha") || run.head_sha === params.get("head_sha")) &&
         (!params.get("created") || Date.parse(run.created_at) >= Date.parse(params.get("created").slice(2))));
-      if (!rolling && params.get("head_sha") && !selected.length && chain.includes(params.get("head_sha")))
-        return { workflow_runs: [legacy(9000, params.get("head_sha"), { created_at: at(-1) })], total_count: 1 };
       const page = Number(params.get("page") ?? 1), size = Number(params.get("per_page") ?? 100);
       return { workflow_runs: selected.slice((page - 1) * size, page * size), total_count: selected.length };
     }
@@ -250,7 +248,7 @@ test("a new worker appearing during observation invalidates the old success", as
   const f = forge(); let listings = 0;
   const api = async (path) => {
     const result = await f.api(path);
-    if (path.includes("main-rolling-validation.yml/runs?") && path.includes("&created=") && ++listings > 1)
+    if (path.includes("main-rolling-validation.yml/runs?") && path.includes("&head_sha=") && ++listings > 1)
       return { ...result, total_count: 2, workflow_runs: [...result.workflow_runs, worker(20, A, { status: "in_progress", conclusion: null })] };
     return result;
   };
@@ -304,7 +302,6 @@ test("50 historical main pushes use a verified checkpoint window and bounded lin
   const health = await f.collect({ now: () => at(80) });
   assert.equal(health.status, "passing");
   assert.equal(health.checkpoint.targetSha, tip);
-  assert.equal(health.checkpoint.pushRunId, 149);
   assert.ok(f.data.requests.filter((path) => path.includes("/compare/")).length < 12);
   assert.ok(f.data.requests.length < 45, `unexpected API request count ${f.data.requests.length}`);
   assert.ok(!f.data.requests.some((path) => /\/runs\/1[0-3][0-9](?:\/|$)/.test(path)));
@@ -360,7 +357,7 @@ test("read-only report recovers an older incident directly after health-ref loss
   assert.deepEqual(f.data.mutations, []);
 });
 
-test("a source that had not landed before dispatch cannot establish a checkpoint", async () => {
+test("push-run delivery timestamps cannot exclude a verified worker", async () => {
   const f = forge();
   const api = async (path) => {
     const result = await f.api(path);
@@ -368,6 +365,42 @@ test("a source that had not landed before dispatch cannot establish a checkpoint
       ? { ...result, workflow_runs: result.workflow_runs.map((run) => ({ ...run, created_at: at(1) })) } : result;
   };
   const health = await collectHealth(repository, { api });
-  assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
-  assert.equal(health.checkpoint, undefined);
+  assert.equal(health.status, "passing"); assert.equal(health.fullCertification.testedSha, A);
+});
+
+test("a delayed push event cannot hide a failing descendant created before an older-target pass", async () => {
+  const f = forge({ currentMain: C, runs: [worker(30, A, { created_at: at(100) }),
+    worker(20, B, { created_at: at(50), conclusion: "failure" }),
+    legacy(10, A, { created_at: at(90) }), legacy(11, B, { created_at: at(40) })] }); makeRed(f, 20);
+  const health = await f.collect({ now: () => at(120) });
+  assert.equal(health.status, "failing"); assert.equal(health.unresolvedFailures[0].testedSha, B);
+  assert.ok(health.ancestryWindow.dispatcherShas.includes(B));
+});
+
+test("eight unvalidated pushes keep the API work bounded and avoid loading legacy-success jobs", async () => {
+  const targets = Array.from({ length: 50 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
+  const runs = targets.map((sha, i) => legacy(i + 100, sha, { created_at: at(i) }));
+  runs.unshift(worker(500, targets[41], { created_at: at(80) }),
+    worker(999, targets.at(-1), { created_at: at(81), status: "in_progress", conclusion: null }));
+  const f = forge({ runs, currentMain: targets.at(-1), history: [W, ...targets] });
+  const health = await f.collect({ now: () => at(90) });
+  assert.equal(health.status, "pending"); assert.equal(health.backlog.commits, 8);
+  assert.ok(f.data.requests.length < 100, `API calls ${f.data.requests.length}`);
+  assert.ok(!f.data.requests.some((path) => /\/runs\/1\d\d\/attempts\//.test(path)));
+});
+
+test("a nested evidence 404 is never swallowed as a stale cache hint", async () => {
+  for (const pointers of [[], [20]]) {
+    const f = forge({ currentMain: B, runs: [worker(), legacy(20, B, { conclusion: "failure" })] }); makeRed(f, 20);
+    const health = await collectHealth(repository, { pointers, api: (path) => path.includes("/contents/") && path.endsWith(`ref=${B}`) ? missing() : f.api(path) });
+    assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
+  }
+});
+
+test("an alert without its identity marker stays open with explicit unknown diagnostics", async () => {
+  const f = forge();
+  f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
+    user: { login: "github-actions[bot]" }, body: "An edited incident with no marker" }];
+  assert.equal(await reconcile({ repository }, { api: f.api, log: () => {} }), "unchanged");
+  assert.equal(f.data.state.status, "unknown"); assert.ok(f.data.state.reasons.includes("incident-identity-unavailable"));
 });

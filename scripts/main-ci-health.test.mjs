@@ -164,7 +164,7 @@ test("the transport is bounded, refuses redirects and never echoes the token or 
 
 test("the workflow runs trusted default-branch code on main push CI only, serialized, with issue access", () => {
   const text = readFileSync(".github/workflows/main-ci-health.yml", "utf8");
-  assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[requested, in_progress, completed\]/);
+  assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[in_progress, completed\]/);
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha)|download-artifact|pull_request_target|pnpm install/);

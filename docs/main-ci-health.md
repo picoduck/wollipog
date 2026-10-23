@@ -11,7 +11,7 @@ This page covers how to land such a change safely, and how a red `main` gets not
 ## The Main CI Is Failing Alert
 
 `Main CI Health` (`.github/workflows/main-ci-health.yml`) reconciles on main pushes, main CI and
-rolling-worker requested/in-progress/completed events, a ten-minute schedule, and manual dispatch
+rolling-worker completions and rerun in-progress events, a twenty-minute recovery schedule, and manual dispatch
 on main. It checks out trusted default-branch code without persisted credentials and runs
 `scripts/main-ci-health.mjs`; it never executes the triggering run's code or artifacts. The
 issue-writing job serializes reconciliations. Skipped PR invocations cannot displace main work.
@@ -103,32 +103,31 @@ Actions and compare APIs, rechecking current attempts after reading jobs. It nev
 `ci/main-rolling-state` as health evidence. Both reconciliation and the read-only report recover
 the current incident pointer directly from the issue, even after health-ref loss. A missing
 incident pointer remains unknown; a deleted cache-only hint is discarded once fresh evidence is
-available. Non-main dispatches cannot poison the repository's health.
+available. Non-main dispatches cannot poison the repository's health. An incident whose identity
+marker was removed stays open with `incident-identity-unavailable`; restore the verified run ID
+before expecting automatic closure.
 
-A freshly verified full pass plus a forge **push** run at the same SHA establishes the census
-window. The push can be from Main CI Health or the transitional CI workflow; it must independently
-match repository, main branch, exact SHA and trusted workflow path. Its creation time, minus one
-minute for timestamp rounding, anchors the window. A dispatch to an old target or tag cannot
-establish that target's landing time. Under main's protected linear history, earlier main targets
-are ancestors of this passing push snapshot. Thus neither a rewritten state ref nor a later
-dispatch to an old target can hide a newer failure by advancing the window. The checkpoint's
-worker certificate and push identity are re-read every time; the stored checkpoint is a hint.
-Eligible workers additionally prove the tested target is an ancestor of the dispatcher revision,
-and that this revision had a forge main-push record no later than dispatch creation. This excludes
-future-main/tag dispatches queued before their source landed; they cannot slip a newer target
-behind the creation-time window. Missing landing evidence stays unknown. Each record retains the
-source push ID and time alongside its workflow revision.
+A freshly verified full pass establishes an **ancestry window**, not a timestamp cutoff. The
+observer enumerates every main commit from that passing target through pinned current main, then
+queries complete worker/legacy run listings by each exact dispatcher SHA. Eligible workers prove
+the tested target is an ancestor of the dispatcher revision, as well as both being ancestors of
+main. Therefore any newer tested target must have a dispatcher inside this window. A dispatch to
+an old target, a delayed push record, or a completion created before an older-target pass cannot
+hide a newer target's failure. The stored checkpoint is a hint; its complete worker certificate
+is reverified, and a conflicting later attempt invalidates the checkpoint. No push-run timestamp
+or event arrival time establishes absence of failures.
 
 Bootstrap examines at most eight recent completions for a positive checkpoint, stopping at a
 verified pass. That sample never proves absence: the subsequent window is enumerated completely,
 and all active workers are scanned independently before checkpoint selection. Without a positive
-checkpoint, the worker workflow's forge creation time is the transition horizon. Existing incident
+checkpoint, complete bounded rolling history is scanned and the worker workflow's forge creation
+time is the legacy transition horizon. Existing incident
 pointers are included regardless of age. Missing worker run-number sequences inside the window
-expose deleted/expired history and remain unknown. Main-push fan-out can stop in #3631: the health
-workflow's main-push metadata supplies subsequent landing anchors. Caught-up idle main stays fresh.
+expose deleted/expired history and remain unknown. Main-push fan-out can stop in #3631 without
+removing any rolling certification dependency. Caught-up idle main stays fresh.
 Pre-rolling closed incidents are outside the new record's historical scope.
 
-All enumerations are bounded: ten 100-item pages per run/job/commit listing, ten attempts per run,
+All enumerations are bounded: 100 dispatcher SHAs in an ancestry window, ten 100-item pages per run/job/commit listing, ten attempts per run,
 128 retained attempt records, and fewer than 100 associated PRs per backlog commit. A fully
 passing strict descendant with identical workflow blobs covers older target history without
 reloading its jobs. Truncated/changed listings, inaccessible/deleted evidence, missing source or
@@ -150,11 +149,20 @@ or switch credentials to work around unknown evidence. Focused fake-API tests co
 they do not prove GitHub scheduler latency or token policy. After landing, inspect the natural
 health workflow's state write and artifact before claiming production persistence is verified.
 
+First-attempt non-red legacy runs retain explicit uncertified forge metadata without repeatedly
+fetching complete job inventories. They cannot contain an earlier failing attempt. Red legacy
+runs and reruns still load their full evidence. First-attempt in-progress/requested events do
+not request a runner: main pushes, decisive completions, rerun in-progress, and the recovery
+schedule cover meaningful changes.
+
 The 50-main-commit fixture bounds one caught-up observation to fewer than 45 API calls and fewer
 than 12 ancestry comparisons, including checkpoint revalidation, complete window listings and
 active-worker scans. Ordering uses each target's distance from pinned main and adjacent ancestry
-checks; it does not compare every historical pair. Six scheduled ticks model fewer than 270 calls
-per hour in that fixture, plus event wakes and the separate controller's usage. This is a fixture
+checks; it does not compare every historical pair. An eight-unvalidated-push fixture remains below
+100 calls and loads no legacy-success job inventories. Three scheduled ticks model fewer than
+135 calls per hour while caught up, plus main pushes, decisive event wakes and the separate
+controller's usage. Larger backlogs and bursty traffic cost more; API quota failures remain unknown
+and never close an incident. This is a fixture
 budget, not a live quota or latency measurement. Long unvalidated windows still fail closed at the
 enumeration/evidence bounds instead of silently dropping history.
 
