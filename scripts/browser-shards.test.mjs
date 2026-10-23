@@ -83,8 +83,10 @@ test("all five CI projects cover every configured development test once with int
   const grouped = identities(report);
   assert.ok(full.length > 0);
   assert.deepEqual(grouped.map((row) => row.key).sort(), full.map((row) => row.key).sort());
-  assert.deepEqual(report.config.projects.map((project) => project.name),
-    Array.from({ length: BROWSER_SHARD_COUNT }, (_, i) => `shard-${i + 1}`));
+  const scheduledProjects = workflow.match(/^  browser:\n[\s\S]*?^        shard: \[([^\]]+)\]$/m)?.[1]
+    .split(",").map((id) => `shard-${id.trim()}`);
+  assert.deepEqual(report.config.projects.map((project) => project.name), scheduledProjects,
+    "every configured project must have exactly one scheduled browser matrix job");
   for (const file of new Set(grouped.map((row) => row.file))) {
     assert.equal(new Set(grouped.filter((row) => row.file === file).map((row) => row.project)).size, 1, file);
   }
