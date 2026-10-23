@@ -232,7 +232,7 @@ jobs:
         run: pnpm typecheck
 
       - name: Unit Tests
-        run: pnpm test
+        run: pnpm test:ci
 
       - name: Verify Delegated Linux Provider Containment
         timeout-minutes: 3
