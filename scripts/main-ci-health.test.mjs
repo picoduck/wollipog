@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  ALERT_LABEL, ALERT_TITLE, alertBody, decide, githubApi, latestDecisiveRun, reconcile, REQUEST_MS, targetFromEvent,
+  ALERT_LABEL, ALERT_TITLE, alertBody, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
 } from "./main-ci-health.mjs";
 
 const repository = "example/project";
@@ -16,6 +16,16 @@ const ciRun = (overrides = {}) => ({
   ...overrides,
 });
 const event = (overrides = {}) => ({ action: "completed", workflow_run: ciRun(overrides) });
+// These fixtures isolate issue transport from forge observation (covered separately).
+const reconcile = (target, options) => reconcileActual(target, { ...options, persist: false,
+  collect: async () => {
+    const run = (await options.api(`/repos/${repository}/actions/workflows/ci.yml/runs?fixture`)).workflow_runs[0];
+    const record = run && { runId: run.id, attempt: 1, testedSha: run.head_sha, url: run.html_url,
+      certification: run.conclusion === "success" ? "full" : "none",
+      inventory: (await options.api(`/repos/${repository}/actions/runs/${run.id}/jobs?fixture`)).jobs };
+    return { status: run?.conclusion === "success" ? "passing" : "failing", evidence: record ? [record] : [], legacyEvidence: [], supersededRunIds: [123],
+      unresolvedFailures: run?.conclusion === "failure" ? [record] : [], latestPassingSnapshot: run?.conclusion === "success" ? record : null };
+  } });
 const alert = (latest = 123, overrides = {}) => ({
   number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
   user: { login: "github-actions[bot]", type: "Bot" },
@@ -48,36 +58,8 @@ test("only a completed same-repository CI run for a main push is eligible", () =
     { path: ".github/workflows/platform-isolation.yml" }, { repository: { full_name: "other/repo" } },
     { head_repository: { full_name: "fork/repo" } }, { head_sha: "bad" },
   ]) assert.throws(() => targetFromEvent(event(changes), repository));
-  assert.throws(() => targetFromEvent({ ...event(), action: "in_progress" }, repository));
+  assert.deepEqual(targetFromEvent({ ...event(), action: "in_progress" }, repository), { repository });
   assert.throws(() => targetFromEvent(event(), "not a repository"));
-});
-
-test("the latest decisive run decides, skipping cancelled and other non-verdict runs", () => {
-  const runs = [
-    ciRun({ id: 130, conclusion: "cancelled" }),
-    ciRun({ id: 129, conclusion: "skipped" }),
-    ciRun({ id: 128, conclusion: "success", head_sha: otherSha }),
-    ciRun({ id: 127, conclusion: "failure" }),
-  ];
-  assert.equal(latestDecisiveRun({ workflow_runs: runs }, repository)?.id, 128);
-  assert.equal(latestDecisiveRun({ workflow_runs: runs.slice(0, 2) }, repository), null, "no verdict, no decision");
-  for (const conclusion of ["failure", "timed_out", "startup_failure"])
-    assert.equal(latestDecisiveRun({ workflow_runs: [ciRun({ conclusion })] }, repository)?.conclusion, conclusion);
-  // A run that is not this repository's main push CI never decides, even when listed first.
-  assert.equal(latestDecisiveRun({ workflow_runs: [ciRun({ id: 140, event: "pull_request" }), ciRun({ id: 1, conclusion: "success" })] }, repository)?.id, 1);
-  assert.equal(latestDecisiveRun({ workflow_runs: [ciRun({ html_url: "https://evil.example/runs/123" })] }, repository), null);
-  assert.equal(latestDecisiveRun(null, repository), null);
-});
-
-test("a red main opens one alert, a new red run comments once, and a green main closes it", () => {
-  const red = ciRun();
-  const green = ciRun({ id: 200, conclusion: "success" });
-  assert.deepEqual(decide(red, null), { action: "open" });
-  assert.deepEqual(decide(red, alert(123)), { action: "none", reason: "already-reported" });
-  assert.deepEqual(decide(ciRun({ id: 150 }), alert(123)), { action: "update" });
-  assert.deepEqual(decide(green, alert(123)), { action: "close" });
-  assert.deepEqual(decide(green, null), { action: "none", reason: "main-green" });
-  assert.deepEqual(decide(null, alert(123)), { action: "none", reason: "no-decisive-run" });
 });
 
 test("the alert names the run, the commit, the failing jobs and what to do, and records the latest run", () => {
@@ -182,7 +164,7 @@ test("the transport is bounded, refuses redirects and never echoes the token or 
 
 test("the workflow runs trusted default-branch code on main push CI only, serialized, with issue access", () => {
   const text = readFileSync(".github/workflows/main-ci-health.yml", "utf8");
-  assert.match(text, /workflows: \[CI\]\s+types: \[completed\]/);
+  assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[requested, in_progress, completed\]/);
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha)|download-artifact|pull_request_target|pnpm install/);
@@ -190,7 +172,7 @@ test("the workflow runs trusted default-branch code on main push CI only, serial
   // level, a skipped pull-request invocation could replace a pending main reconciliation.
   assert.doesNotMatch(text, /^concurrency:/m);
   assert.match(text, /\n {4}concurrency:\n {6}group: main-ci-health\n {6}cancel-in-progress: false/);
-  assert.match(text, /contents: read\s+actions: read\s+issues: write/);
+  assert.match(text, /contents: write\s+actions: read\s+issues: write/);
   assert.match(text, /workflow_run.event == 'push'/);
   assert.match(text, /workflow_run.head_branch == 'main'/);
   assert.match(text, /node scripts\/main-ci-health.mjs/);
