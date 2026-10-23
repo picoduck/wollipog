@@ -116,6 +116,11 @@ an old target, a delayed push record, or a completion created before an older-ta
 hide a newer target's failure. The stored checkpoint is a hint; its complete worker certificate
 is reverified, and a conflicting later attempt invalidates the checkpoint. No push-run timestamp
 or event arrival time establishes absence of failures.
+If the complete census discovers that a newer run at the same target invalidates the sampled
+checkpoint, the observer retries once with checkpoint selection disabled and the rejected hint
+removed. It reports verified failures and records `recovery.reason: checkpoint-invalidated`,
+instead of repeatedly persisting the old green as an unknown checkpoint. Full-history bounds
+still apply to that recovery attempt.
 
 Bootstrap examines at most eight recent completions for a positive checkpoint, stopping at a
 verified pass. That sample never proves absence: the subsequent window is enumerated completely,
@@ -165,6 +170,12 @@ controller's usage. Larger backlogs and bursty traffic cost more; API quota fail
 and never close an incident. This is a fixture
 budget, not a live quota or latency measurement. Long unvalidated windows still fail closed at the
 enumeration/evidence bounds instead of silently dropping history.
+Wider diagnostics measured 88 calls at eight unvalidated commits, 312 at forty, and 725 at
+ninety-nine. These are per-observation counts, so the shared repository token can become the
+limiting resource during a long red streak. A 100-dispatcher window (baseline plus 99 commits)
+is the deliberate cap; beyond it the record is unknown. The lighter merge gate remains disabled,
+and a later admission rollout must account for this shared API budget rather than treating these
+limits as unlimited production capacity.
 
 ## When a Merge Group Fails on Code Your Pull Request Did Not Touch
 

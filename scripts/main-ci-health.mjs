@@ -196,7 +196,8 @@ const EVIDENCE_STEPS = [...CORE_STEPS, "Verify Rolling Checkout", "Remote-Instan
   "Compare Against the Committed win32 Baselines", "Require Every Job to Have Succeeded"];
 
 /** Independent forge reads. Never consume coordination state or uploaded artifacts. */
-export async function collectHealth(repository, { api, pointers = [], incidentRunId = null, now = () => new Date().toISOString() } = {}) {
+export async function collectHealth(repository, { api, pointers = [], incidentRunId = null, checkpointDisabled = false,
+  now = () => new Date().toISOString() } = {}) {
   const observedAt = now(), health = unknownHealth(repository, observedAt, "no-full-evidence");
   try {
     const { workerIdentity, REQUIRED } = await import("./main-rolling-validation.mjs");
@@ -358,7 +359,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       !records.some((other) => other.targetSha === record.targetSha && (other.runId > record.runId ||
         other.runId === record.runId && other.attempt > record.attempt)));
     possible.sort((a, b) => positions.get(a.targetSha) - positions.get(b.targetSha));
-    const baseline = possible[0];
+    const baseline = checkpointDisabled ? null : possible[0];
     const dispatcherShas = baseline ? [baseline.targetSha] : [];
     if (baseline && baseline.targetSha !== mainSha) {
       const commits = []; let total;
@@ -455,7 +456,15 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     // A rerun (or a new worker at that target) withdraws the target's old green.
     const passes = [...newestForTarget.values()].filter((record) => record.certification === "full" &&
       !legacyRecords.some((other) => other.targetSha === record.targetSha && other.result === "failing" && other.runId > record.runId));
-    if (baseline && !passes.some((pass) => pass.runId === baseline.runId && pass.attempt === baseline.attempt)) fail("checkpoint-invalidated");
+    if (baseline && !passes.some((pass) => pass.runId === baseline.runId && pass.attempt === baseline.attempt)) {
+      // A newer run at this target can have fallen outside the seed sample.
+      // Retry once without any checkpoint so its failures cannot be hidden by a
+      // permanently reused old green. The full-history bounds still fail closed.
+      const recovered = await collectHealth(repository, { api, incidentRunId, now, checkpointDisabled: true,
+        pointers: pointers.filter((id) => id !== baseline.runId) });
+      recovered.recovery = { reason: "checkpoint-invalidated", rejectedRunId: baseline.runId };
+      return recovered;
+    }
     health.latestPassingSnapshot = passes[0] ?? null;
     health.resolvedRunIds = [...new Set(supersededRunIds)];
     for (const record of [...records, ...legacyRecords]) {

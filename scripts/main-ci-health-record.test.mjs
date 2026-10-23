@@ -404,3 +404,18 @@ test("an alert without its identity marker stays open with explicit unknown diag
   assert.equal(await reconcile({ repository }, { api: f.api, log: () => {} }), "unchanged");
   assert.equal(f.data.state.status, "unknown"); assert.ok(f.data.state.reasons.includes("incident-identity-unavailable"));
 });
+
+test("a cached checkpoint invalidated outside the seed sample recovers and reports real failures", async () => {
+  const targets = Array.from({ length: 10 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
+  const reds = targets.slice(1, 9).reverse().map((sha, i) => worker(100 + i, sha, { conclusion: "failure" }));
+  const runs = [...reds, worker(11, targets[0], { conclusion: "failure" }), worker(10, targets[0])];
+  const f = forge({ runs, currentMain: targets.at(-1), history: [W, ...targets] });
+  for (const run of runs.filter((run) => run.conclusion === "failure")) makeRed(f, run.id);
+  const health = await f.collect({ pointers: [10] });
+  assert.equal(health.status, "failing"); assert.equal(health.fullCertification, null);
+  assert.equal(health.checkpoint, undefined);
+  assert.equal(health.recovery.reason, "checkpoint-invalidated");
+  assert.ok(health.unresolvedFailures.some((record) => record.runId === 11));
+  await writeHealthState(f.api, repository, { oid: null, sequence: 0, recovered: true }, health);
+  assert.notEqual((await readHealthState(f.api, repository)).pointers[0], 10, "the rejected checkpoint is not promoted again");
+});
