@@ -25,6 +25,8 @@ test("cutover and restored mode retain full PR/queue/called/manual CI", () => {
 });
 
 test("rollback restores the old main-only trigger without changing full job definitions", () => {
+  // This pins rollback preservation. Full inventory is covered by workflow-pr-event-contract;
+  // cutover's base-vs-head job-body comparison is a review check, not a frozen shared-job hash.
   const restored = restoreMainPushCi(cutover);
   assert.deepEqual(events(restored), ["workflow_call", "merge_group", "pull_request", "push", "workflow_dispatch"]);
   assert.match(restored, /  push:\n    branches: \[main\]\n  workflow_dispatch:/);

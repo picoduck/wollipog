@@ -146,7 +146,13 @@ publishes issues or comments automatically.
    highest repair priority and remain blocking until equivalent protection is
    demonstrated. A reproducible product regression or regression shared by main
    blocks the affected certification. Check main's own push CI and existing
-   **Main CI Is Failing** issue before blaming an unrelated queued PR. Preserve
+   **Main CI Is Failing** issue before blaming an unrelated queued PR. After rolling
+   cutover, those legacy results are historical: also list
+   `gh run list --workflow main-rolling-validation.yml --branch main --event workflow_dispatch --limit 5`
+   and inspect the checkout-verified target/outcomes through the rolling report.
+   Compare that target with current main; missing/incomplete evidence, a stale
+   green snapshot, the dispatcher's SHA or an absent legacy alert is not a current
+   pass. See [Main CI Health](main-ci-health.md); #3632 owns alert integration. Preserve
    exact-head and merge-group validation and follow `AGENTS.md` for re-enqueueing.
 4. Assign a same-working-day triage owner for a recurring signature or a queue
    blocker. The owner posts a hypothesis and next action by the next working day.

@@ -1,14 +1,5 @@
 # Main CI Health
 
-Rolling main validation (#3631) is delivered in two stages. During shadow, this
-page's ordinary main-push alert behavior remains in force. The later cutover removes
-only the ordinary `ci.yml` main-push trigger, so this legacy monitor stops receiving
-those completions. Until #3632 integrates exact-SHA rolling records, an absent or
-old **Main CI Is Failing** alert is not evidence of current main health. Inspect the
-verified rolling worker outcomes described in [Rolling Main Validation](main-rolling-validation.md)
-and state that health integration is pending. Rollback restores ordinary main-push
-CI before disabling the rolling controller; the procedure is documented there.
-
 The merge queue tests every entry on top of `main`, so a red `main` fails every queued pull
 request, whatever it changes. Normally nothing reaches `main` without passing the queue. The one
 exception is the `main: merge queue` ruleset's bypass: organization admins can merge without the

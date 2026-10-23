@@ -84,7 +84,15 @@ so expect that wait twice: once on the branch and once after enqueueing.
 **A merge group that fails on a test your pull request does not touch usually means `main` is red.**
 Before investigating your change, check `main`'s own runs
 (`gh run list --workflow ci.yml --branch main --event push --limit 5`) and look for an open
-**Main CI Is Failing** issue. Admin bypasses and security-advisory merges reach `main` without the
+**Main CI Is Failing** issue. After the rolling cutover, that query returns historical runs and the
+legacy alert no longer receives push completions. Also list
+`gh run list --workflow main-rolling-validation.yml --branch main --event workflow_dispatch --limit 5`
+and inspect the checkout-verified target and job outcomes through
+`scripts/main-rolling-validation.mjs report` (see `docs/main-rolling-validation.md`). Compare the
+verified target with current main; a green dispatcher/check attachment, stale snapshot or absent
+alert never establishes current health. Missing or incomplete target evidence is unvalidated,
+not passing. Exact-SHA alert integration belongs to #3632. Admin bypasses and security-advisory
+merges reach `main` without the
 queue, so they can break it. If `main` fails the same test, wait for the fix and re-enqueue the
 unchanged head behind it. Never change your pull request to work around a red `main`. To land a
 change outside the queue, follow `docs/main-ci-health.md`.
