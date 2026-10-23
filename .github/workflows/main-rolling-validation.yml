@@ -1,0 +1,59 @@
+name: Main Rolling Validation
+run-name: Rolling ${{ inputs.target_sha }} ${{ inputs.claim_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Immutable main snapshot to validate
+        type: string
+        required: true
+      claim_id:
+        description: Durable controller claim identity
+        type: string
+        required: true
+
+permissions: {}
+
+# Covers dispatch duplicates AND manual reruns, including rerun-failed-jobs which can reuse
+# successful admission outputs. Never cancel an active full suite. GitHub retains one pending
+# worker; durable reconciliation replaces its target with current main after completion.
+concurrency:
+  group: main-rolling-full-validation
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    if: github.ref == 'refs/heads/main'
+    name: Admit Main Snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: read
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+    steps:
+      # Only trusted workflow-revision code sees the write token. Never check out target here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Admit Durable Claim
+        id: admit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/main-rolling-validation.mjs admit
+
+  validation:
+    if: needs.admit.outputs.admitted == 'true'
+    needs: admit
+    name: Full Validation
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      target_sha: ${{ inputs.target_sha }}
