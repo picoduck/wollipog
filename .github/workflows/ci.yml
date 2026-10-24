@@ -752,6 +752,37 @@ jobs:
       - name: WebKit Browser End-to-End Tests
         run: pnpm test:e2e:webkit
 
+  # Advisory only: no needs edge into the required aggregator and no test is executed twice.
+  # Checkout the event's trusted base; never import the pull request's selector or policy.
+  suite-shadow:
+    if: (github.event_name == 'merge_group' || github.event_name == 'pull_request') && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
+    name: Suite Selection Shadow (Advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Compute Trusted Suite Selection
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA"
+          if test -f scripts/ci-suite-selection.mjs; then
+            node scripts/ci-suite-selection.mjs --base "$BASE_SHA" --head "$TESTED_SHA" --change-head "$CHANGE_HEAD_SHA"
+          else
+            echo 'Trusted suite policy unavailable at this base; full coverage remains required.'
+          fi
+
   check:
     # Report failed, cancelled or skipped dependencies while PR CI is active. !cancelled()
     # lets superseded PR runs cancel this job (#2452), without changing non-PR aggregation.

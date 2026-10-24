@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { readFile } from "node:fs/promises";
 import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
+import { parseSelection, SELECTION_MARKER } from "./ci-suite-selection.mjs";
 import { githubApi } from "./merge-group-cleanup.mjs";
 
 // Splits merge-group CI time into waiting for a runner and executing, so a queue entry that
@@ -430,7 +431,7 @@ async function readTimingLogBody(token, repository, jobId, fetchImpl) {
   if (!response.ok || !response.body) return { state: "unmeasured", reason: `log-http-${response.status}` };
   const reader = response.body.getReader(), decoder = new TextDecoder();
   let bytes = 0, pending = "", truncated = false;
-  const summaries = [];
+  const summaries = [], selections = [];
   try {
     for (;;) {
       const { done, value } = await reader.read();
@@ -440,20 +441,30 @@ async function readTimingLogBody(token, repository, jobId, fetchImpl) {
       pending += decoder.decode(value, { stream: true });
       const lines = pending.split("\n");
       pending = lines.pop();
-      for (const line of lines) if (line.includes(TIMING_MARKER)) {
-        const summary = parseTiming(line.trimEnd());
-        if (summary) {
-          if (summaries.length < 10) summaries.push(summary);
+      for (const line of lines) {
+        if (line.includes(TIMING_MARKER)) {
+          const summary = parseTiming(line.trimEnd());
+          if (summary) {
+            if (summaries.length < 10) summaries.push(summary);
+            else truncated = true;
+          }
+        }
+        if (line.includes(SELECTION_MARKER)) {
+          const selection = parseSelection(line.trimEnd());
+          if (selection && selections.length < 2) selections.push(selection);
           else truncated = true;
         }
       }
-      if (pending.length > 32_000) pending = "";
+      if (pending.length > 768_000) { pending = ""; truncated = true; }
     }
     const last = parseTiming(pending.trimEnd());
     if (last && summaries.length < 10) summaries.push(last);
+    const lastSelection = parseSelection(pending.trimEnd());
+    if (lastSelection && selections.length < 2) selections.push(lastSelection);
   } finally { await reader.cancel(); }
-  return { state: summaries.length ? "measured" : "unmeasured", truncated, summaries,
-    reason: summaries.length ? null : "no-safe-timing-output" };
+  return { state: summaries.length || selections.length ? "measured" : "unmeasured", truncated, summaries,
+    ...(selections.length ? { selections } : {}),
+    reason: summaries.length || selections.length ? null : "no-safe-timing-output" };
 }
 
 export function applyTimingContext(record, summary) {
@@ -594,7 +605,7 @@ export async function main(argv, { env = process.env, fetchImpl = fetch, out = c
       if (matches[0].testTiming.summaries) {
         matches[0].testTiming.summaries = matches[0].testTiming.summaries.filter((summary) =>
           summary.context?.runId === String(record.runId) && summary.context?.attempt === record.attempt);
-        if (!matches[0].testTiming.summaries.length) {
+        if (!matches[0].testTiming.summaries.length && !matches[0].testTiming.selections?.length) {
           matches[0].testTiming.state = "unmeasured";
           matches[0].testTiming.reason = "no-matching-attempt-projection";
         }
