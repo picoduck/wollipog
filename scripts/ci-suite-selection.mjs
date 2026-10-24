@@ -67,13 +67,19 @@ export function gitSelection({ base, head, changeHead = head, event = "local", r
   const fastFiles = JSON.parse(readFileSync(new URL("../docs/ci-node-profile-2026-10-23.json", import.meta.url), "utf8")).fastFiles;
   const policyId = hash(["./ci-suite-policy.mjs", "./ci-suite-selection.mjs", "../docs/ci-node-profile-2026-10-23.json"]
     .map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n"));
-  let diffBase = base, diff;
+  let diffBase = base, diff, baseKnown = false;
   try {
     if (event === "pull_request") diffBase = git(["merge-base", base, changeHead]).trim();
+    else if (changeHead !== head) throw new Error("Mismatched group head");
     // Merge-group base-to-head includes ALL changes in the group. Never select the last PR.
     git(["merge-base", "--is-ancestor", diffBase, changeHead]);
+    if (event === "pull_request") {
+      git(["merge-base", "--is-ancestor", base, head]);
+      git(["merge-base", "--is-ancestor", changeHead, head]);
+    }
+    baseKnown = true;
     diff = { entries: parseDiff(git(["diff", "--no-ext-diff", "--no-textconv", "--name-status", "--no-renames", "-z", diffBase, changeHead], 1024 * 1024)) };
-  } catch { diff = { entries: [], baseKnown: false, complete: false }; }
+  } catch { diff = { entries: [], baseKnown, complete: false }; }
   const tree = git(["ls-tree", "-r", "-z", "--full-tree", head]).split("\0").filter(Boolean).map((entry) => {
     const match = entry.match(/^(\d+) blob ([a-f0-9]{40})\t([\s\S]+)$/);
     return match ? { path: match[3], oid: match[2] } : { path: "", oid: "" };

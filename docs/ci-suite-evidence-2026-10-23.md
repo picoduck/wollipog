@@ -14,7 +14,7 @@ or rerun for sampling. The candidate target remains proposed, not demonstrated.
 | Complete Configured WebKit | 5 launch failures, zero executed assertions | Missing local `libevent-2.1.so.7`; not a product assertion result |
 | Web Production Build | Passed, icon bundle contract passed | Vite build phase: 3.55 s; not whole-command wall time |
 | Runner and Sidecar Bundle-Only Builds | Passed | Whole-command wall time not instrumented |
-| Selection/Report/Trust/Threshold Contracts | 20 passed before final dependency rebase | Inert local exercises; not natural shadow comparisons |
+| Selection/Report/Trust/Threshold Contracts | 22 passed before final dependency rebase | Inert local exercises; not natural shadow comparisons |
 
 The critical Chromium command was:
 
@@ -27,6 +27,18 @@ API validation ran the exact three `FAST_API_FILES` with Node's native test
 runner and the existing 300-second per-file timeout. The runner-channel test
 reported maximum handshake 452 ms, HTTP 540 ms and pong 539 ms across its three
 registrations; no retry or timing assertion was changed.
+
+After rebasing directly onto merged prerequisite
+`85044bee2a50e1d817d6886f3fb632f21d5c9c8b`, the new Node-only suite entry point
+passed **231 tests in 36.830 s** across its 25 files (22 protocol plus three API
+files), emitting the existing `ci-timing-v1` projection. The post-rebase shared
+CI/partition/collector/selection contracts passed **91 tests**. The generated
+inventory contains **1,451 file/group rows**: 1,164 Node files, 280 development
+Chromium files, six production-file groups and one WebKit-file group. Thirty
+Node/development files are in the fixed core; including the always-selected
+production/WebKit groups gives 37 selected file/group rows. These are file/group
+counts, not independent test counts; production uses its existing `@production`
+filter and can share a source file with development coverage.
 
 The local WebKit binary failed while loading a required shared library, before
 any page/assertion. No system packages, hosting stack, browser assertions or test
