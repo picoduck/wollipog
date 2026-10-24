@@ -104,6 +104,18 @@ parents.
 
 ## Reruns, Ordering and Recovery
 
+A verified unexecuted superseded worker is retained in `evidence` with `result: "non-verdict"`,
+`nonVerdictReason: "superseded-worker-attempt"` and `certification: "none"`. The canonical
+`isSupersededWorkerAttempt` helper runs only after worker identity, source/target ancestry,
+workflow bindings and a complete exact-attempt job listing are verified. It recognizes only
+first-attempt completed cancellations with no started jobs/steps, or the explicit successful
+**Skip Superseded Rolling Claim** receipt with no executed/unknown full-suite job.
+These records remain in the complete run-number census and final live revalidation. They cannot
+be `latestAttempt`, replace `newestForTarget`, withdraw a certificate, or supply incident
+resolution. A prior real incident stays open until a verified compatible full pass resolves it.
+This is separate from `supersededRunIds`, which describes covered/resolved history. Started,
+unknown, incomplete and rerun attempts retain the conservative withdrawal behavior below.
+
 A run's latest authoritative attempt replaces its earlier green verdict. Requested/in-progress
 reruns and a new worker at the same target withdraw that target's certificate; terminal incomplete
 attempts leave it unknown. Earlier failing attempts remain unresolved until a complete full pass

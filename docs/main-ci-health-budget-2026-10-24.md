@@ -62,8 +62,10 @@ Runtime policy, with observed REST limit `L`:
 
 The focused production-entry-point fixture matrix covers pending, red and recovery at
 lag zero through five with active-worker overlap. L=5000 consumes 34–59 calls for
-pending, 40–65 for red and 37–67 for recovery, including persistence and incident work.
-The 96 ceiling leaves 27 observation calls above the largest matrix's observation
+pending, 40–65 for red and 38–68 for recovery, including persistence and incident work.
+The non-verdict integration reads complete first-attempt jobs before deciding whether an older
+worker is covered; the recovery matrix uses one additional request compared with #3655's 37–67.
+The 96 ceiling leaves 26 observation calls above the largest matrix's observation
 phase, plus its reserved write capacity. It doubles the old maximum without scaling
 unboundedly for larger token limits. This is a measured fixture envelope, not proof
 that every lag-five production history or rerun fits.
@@ -98,5 +100,51 @@ Rollback this sizing change through a reviewed PR to restore the 48-call/600-flo
 policy; retain the existing observation artifacts and exact forge verification.
 Low-quota wakes still make only the primary-exempt preflight. Never restore availability
 by trusting stored verdicts, increasing credentials, retrying without bounds or enabling
-the lighter merge gate. Add post-merge natural evidence here before claiming the new
-runtime sizing has been exercised with an active worker in production.
+the lighter merge gate. The post-merge observation below demonstrates the new runtime sizing
+with an active natural worker; it does not remove the stated slow-API or long-history limits.
+
+## Post-Merge Production Observation
+
+PR [#3655](https://github.com/picoduck/wollipog/pull/3655) merged at
+`a55a831b62d4ba1b8776f5e05fab5319422e9238` on **2026-10-24 18:22:01Z** after
+successful PR CI and merge-group [40117722743](https://github.com/picoduck/wollipog/actions/runs/40117722743).
+Its first merge group failed on the pre-existing Linux test probe ESRCH race; the unchanged-head
+retry was separately approved and passed. No code was changed to work around that failure.
+
+The post-merge census window is **18:23:07Z–18:23:32Z**, sample size **one** eligible
+observation: authorized main dispatch [40120451028](https://github.com/picoduck/wollipog/actions/runs/40120451028),
+running the merged commit. One of the three authorized census dispatches was used; no production
+traffic or regression was manufactured. The worker overlap itself was natural.
+
+| Measurement | Observed Value |
+| --- | --- |
+| Health observation | 2026-10-24T18:23:15.308Z; pending, no stop reason |
+| Lag | 1 commit / 1 merged PR; landing 18:22:01Z; age 74.308 seconds |
+| Active worker | [40120388345](https://github.com/picoduck/wollipog/actions/runs/40120388345), attempt 1, in progress, target/dispatcher a55a831b62d4ba1b8776f5e05fab5319422e9238 |
+| Verified prior full pass | [40111820679](https://github.com/picoduck/wollipog/actions/runs/40111820679), target 074da66e914728cc51490b0b21928bd1246e6153 |
+| Observation / final calls | 48 / 52, within cap 96 and observation ceiling 88 |
+| Final reads / mutations | 49 / 3 |
+| REST / GraphQL calls | 51 / 1, including the primary-exempt REST preflight |
+| Final REST limit / remaining / floor | 5000 / 4931 / 3000 |
+| Final GraphQL limit / remaining | 5000 / 4985, independent of REST |
+| Health and incident behavior | CAS-persisted pending; no current certificate; no unresolved failures; incident unchanged, none open |
+| Job duration | [120950646769](https://github.com/picoduck/wollipog/actions/runs/40120451028/job/120950646769), 18:23:10Z–18:23:32Z (22 seconds), success |
+
+This common lag-one observation required **48 observation calls**, exceeding the former 40-call
+ceiling while completing under the new policy. Final visible REST headroom is 1931 above the
+reserved floor. The existing five-minute job timeout remains an availability limit under slow API
+responses: neither a 96-request nor the former 48-request ceiling guarantees completion if each
+request approaches its ten-second timeout. This observed job took 22 seconds.
+
+The retained [Actions artifact 12570861625](https://github.com/picoduck/wollipog/actions/runs/40120451028/artifacts/12570861625)
+is 3400 archive bytes, SHA-256
+`fc0fb8a71622262dc4de5532375e3146aae11cc98d753c1f3b45634ee7b38648` (download verified).
+Every serialized observation field matches `health.json` at pinned health-state ref commit
+`ce1802af710471a5ba613bfc3a797369bdbc4bca`, sequence 9. The record's 48-call snapshot
+precedes the four-call persistence phase; final logs contain 52. The correlation is
+`observationId: "40120451028:1"`, `entryPoint: "workflow_dispatch"`.
+
+This adds one post-merge pending/active-worker observation to the seven pre-change natural
+observations above. It proves this production operating point and the writer's scoped quota/CAS
+path, not sustained-load availability, lag-five production behavior or production incident closure.
+Red and incident-closing paths remain fixture evidence in this census window.
