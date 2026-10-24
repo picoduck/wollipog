@@ -28,7 +28,7 @@ export function shadowReport(input) {
     const shadowJobs = (record.jobs ?? []).filter((job) => job.name === "Suite Selection Shadow (Advisory)");
     const rawPlans = shadowJobs.flatMap((job) => job.testTiming?.selections ?? []);
     const plan = rawPlans.length === 1 ? parseSelection(SELECTION_MARKER + JSON.stringify(rawPlans[0])) : null;
-    if (!plan || shadowJobs.length !== 1 || shadowJobs[0].state !== "passing" || shadowJobs[0].testTiming?.truncated ||
+    if (!plan || shadowJobs.length !== 1 || shadowJobs[0].state !== "passing" || shadowJobs[0].testTiming?.truncated || shadowJobs[0].testTiming?.selectionTruncated ||
         record.jobsTruncated || plan.context.runId !== String(record.runId) || plan.context.attempt !== record.attempt ||
         plan.context.event !== record.event || plan.context.baseSha !== plan.context.trustedPolicySha ||
         (record.event === "merge_group" && (plan.context.diffKind !== "combined-merge-group" || plan.context.diffBaseSha !== plan.context.baseSha ||
@@ -42,7 +42,7 @@ export function shadowReport(input) {
     if (jobs.some((matches) => matches.length !== 1)) { gaps.push({ ...source, reason: "missing-or-duplicate-full-job" }); continue; }
     const work = jobs.flat(), summaries = [];
     let incomplete = false, retryOnly = false, interruption = false, selectedFailed = false, fastFailed = false, outsideFailed = false;
-    const failures = [], nonTestFailures = [];
+    const failures = [], nonTestFailures = [], mandatoryFailures = [];
     for (const job of work) {
       const windows = job.name.startsWith("Settings-Rows win32 Baselines /");
       const intentionalWindowsSkip = job.name.endsWith("/ Compare win32 Settings-Rows Baselines") && job.state === "skipped" &&
@@ -79,7 +79,10 @@ export function shadowReport(input) {
         }
       }
       for (const step of job.steps ?? []) if (step.state === "failing") {
-        if (mandatorySteps.includes(step.name)) { selectedFailed = true; fastFailed = true; }
+        if (mandatorySteps.includes(step.name)) {
+          selectedFailed = true; fastFailed = true;
+          mandatoryFailures.push({ jobId: job.id, step: Number.isSafeInteger(step.number) && step.number > 0 ? step.number : null });
+        }
         else if (!/^(Unit Tests|Remote-Instance Browser End-to-End Tests|WebKit Browser End-to-End Tests)$/.test(step.name))
           nonTestFailures.push({ jobId: job.id, step: Number.isSafeInteger(step.number) && step.number > 0 ? step.number : null });
       }
@@ -88,32 +91,41 @@ export function shadowReport(input) {
     if (interruption || nonTestFailures.length) {
       exclusions.push({ ...source, reason: "interruption-or-unresolved-non-test-failure", cause: "unresolved", steps: nonTestFailures }); continue;
     }
-    if (incomplete || !["passing", "failing"].includes(record.state) ||
+    if (!["passing", "failing"].includes(record.state) ||
         (record.state === "passing" && (selectedFailed || outsideFailed || work.some((job) => job.state === "failing"))) ||
         (record.state === "failing" && !selectedFailed && !outsideFailed)) {
       gaps.push({ ...source, reason: "incomplete-full-outcome-or-failure-projection" }); continue;
     }
+    if (incomplete) {
+      gaps.push({ ...source, reason: "incomplete-full-outcome-or-failure-projection" });
+      // A failure can skip mandatory downstream work. Preserve the observed failure/miss
+      // candidate, without manufacturing a subset pass or counting an eligible sample.
+      if (record.state !== "failing" || (!failures.length && !mandatoryFailures.length)) continue;
+    }
     comparisons.push({ ...source, suiteId: plan.suiteId, policyId: plan.policyId, suiteVersion: plan.suiteVersion,
       policyVersion: plan.policyVersion, inventoryId: plan.inventoryId, mode: plan.mode, fallbackReasons: plan.reasons,
       selectedCount: plan.selectedCount, fastCount: plan.fastCount, inventoryCount: plan.inventoryCount,
-      fullOutcome: record.state, projectedFastOutcome: fastFailed ? "failing" : "passing", projectedSelectedOutcome: selectedFailed ? "failing" : "passing",
+      fullOutcome: record.state, eligible: !incomplete,
+      projectedFastOutcome: fastFailed ? "failing" : incomplete ? "unmeasured" : "passing",
+      projectedSelectedOutcome: selectedFailed ? "failing" : incomplete ? "unmeasured" : "passing",
       fastMissedFailureCandidate: record.state === "failing" && !fastFailed && failures.length > 0,
       missedFailureCandidate: record.state === "failing" && !selectedFailed && outsideFailed,
-      failures, observedSkippedTests: summaries.reduce((sum, summary) => sum + summary.skipped, 0),
+      failures, mandatoryFailures, observedSkippedTests: summaries.reduce((sum, summary) => sum + summary.skipped, 0),
       selectedRuntimeMs: null, fullRequiredMinutes: Number.isFinite(record.metrics?.requiredMinutes) && record.metrics.requiredMinutes >= 0 ? record.metrics.requiredMinutes : null,
-      comparisonKind: "subset-projection-not-independent-execution", workingDate: utcWorkingDate(record.createdAt),
+      comparisonKind: incomplete ? "partial-failure-projection" : "subset-projection-not-independent-execution", workingDate: utcWorkingDate(record.createdAt),
       changeHeadSha: plan.context.changeHeadSha,
       changeKey: Number.isSafeInteger(record.pullRequest) && record.pullRequest > 0 ? `pr-${record.pullRequest}` : null });
   }
   const cohorts = [...new Set(comparisons.map((row) => `${row.suiteId}/${row.policyId}`))].map((key) => {
     const rows = comparisons.filter((row) => `${row.suiteId}/${row.policyId}` === key);
     const identified = [], changes = new Set(), heads = new Set();
-    for (const row of [...rows].sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+    for (const row of rows.filter((row) => row.eligible).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       if (!row.changeKey || changes.has(row.changeKey) || heads.has(row.changeHeadSha)) continue;
       identified.push(row); changes.add(row.changeKey); heads.add(row.changeHeadSha);
     }
     const days = new Set(identified.map((row) => row.workingDate).filter(Boolean));
-    return { suiteId: rows[0].suiteId, policyId: rows[0].policyId, projectedSamples: rows.length,
+    return { suiteId: rows[0].suiteId, policyId: rows[0].policyId, projectedSamples: rows.filter((row) => row.eligible).length,
+      partialFailureObservations: rows.filter((row) => !row.eligible).length,
       distinctIdentifiedChanges: changes.size, distinctWorkingDatesUTC: days.size,
       missedFailureCandidates: rows.filter((row) => row.missedFailureCandidate).length,
       fastMissedFailureCandidates: rows.filter((row) => row.fastMissedFailureCandidate).length,
@@ -122,7 +134,8 @@ export function shadowReport(input) {
   });
   return { version: 1, repository: input.repository,
     windows: input.windows.map(({ since, until }) => ({ since: new Date(since).toISOString(), until: new Date(until).toISOString() })), comparisons, cohorts, gaps, exclusions,
-    naturalProjectedSamples: comparisons.length, selectedRuntimeMs: null, certification: "none",
+    naturalProjectedSamples: comparisons.filter((row) => row.eligible).length,
+    partialFailureObservations: comparisons.filter((row) => !row.eligible).length, selectedRuntimeMs: null, certification: "none",
     remainingCriterion: "At least 30 eligible identified changes across five working days, individual triage of exclusions and every miss, and reviewed comparison before readiness." };
 }
 

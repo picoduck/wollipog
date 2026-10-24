@@ -29,7 +29,9 @@ time. The fast command substitutes the explicit fast Node allowlist and critical
 Chromium files. It retains all typechecks, bundles, production smoke and WebKit.
 `--ci` is suitable for a future CI caller; today's required workflow keeps its
 existing parallel full commands. A local plan uses local policy, so it cannot
-certify a pull request's trusted selection.
+certify a pull request's trusted selection. If the checkout differs from the
+requested head, has tracked or untracked changes, or cannot be inspected, the
+local selected command executes full portable coverage and reports no suite ID.
 
 The portable command does not claim to emulate CI's Windows runner, provisioned
 Node/pnpm engine matrix, or delegated system/user-manager Linux containment
@@ -95,7 +97,7 @@ an explicit failure requiring full coverage, never an empty passing plan.
 
 | Input | Behavior |
 | --- | --- |
-| Allowlisted Prose | Only `docs/**/*.md`, root `README.md` and `CONTRIBUTING.md` qualify for the fixed fast contract. Data profiles/inventories under docs do not qualify. |
+| Allowlisted Prose | Only explicit `FAST_PROSE_FILES` qualifies: initially `docs/ci-suite-evidence-2026-10-23.md`, reviewed as having no test/runtime consumer. Unknown Markdown, README/CONTRIBUTING and docs consumed by tests require full coverage. |
 | One App Package | Add all Node partitions (the existing cross-app dependency closure), every Chromium journey and Windows routing. WebKit/production were already mandatory. |
 | Shared, Unknown, Lockfile, CI or Test Configuration | Full contract. This includes shared packages, root scripts, selector/policy/profiles, CSS/assets, manifests and any unrecognized path/extension. |
 | Security, Persistence, Migrations, Execution, Approval | Full contract using the explicit ownership rules above. |
@@ -150,7 +152,10 @@ runs) Windows comparison logs: at most nine selected jobs for one run, below the
 existing ten-job cap. The collector retains its 16 MiB/job redirect/transport
 boundary, ten timing-summary cap and 32,000-character timing-marker limit. The
 additional selection marker is capped at 768,000 characters, 5,000 files and two
-records per job; duplicates cannot become an eligible comparison.
+records per job; duplicates cannot become an eligible comparison. Only a pending
+selection line receives the larger buffer; unrelated lines retain the existing
+32,000-character buffer bound. Invalid marker echoes are ignored. Selection
+overflow uses `selectionTruncated`, separately from legacy timing `truncated`.
 
 ```sh
 # First collect a natural window with selected job IDs as documented in merge-queue-wait.md.
@@ -161,7 +166,7 @@ node scripts/ci-suite-shadow-report.mjs --input /tmp/ci-attempts.json \
 The offline tool reuses the existing collector's deduplication and reliability
 validation. Inputs are capped at ten 32 MiB files. It requires matched run,
 attempt, event, trusted base, exact tested SHA and complete current full-job
-projections. It handles the real nested Windows scope/compare job names and the
+projections for eligible samples. It handles the real nested Windows scope/compare job names and the
 existing intentional Windows skip. It reports full elapsed minutes from the
 collector and each original failing test identity. It never calls a subset's
 observed duration its standalone runtime. `selectedRuntimeMs` stays null.
@@ -176,6 +181,11 @@ never silently counted as passes or automatically assigned an infrastructure
 cause. Missing/truncated/mismatched evidence stays a gap. Intentional test skips
 are counted visibly; all-skipped, cancelled or unmeasured projections are gaps.
 Follow [reliability triage](ci-reliability-triage.md) for actual cause/owner review.
+Failures that skip downstream work are preserved as partial failure observations:
+for example, a shard-1 Chromium failure prevents production smoke, and a typecheck
+failure prevents Node tests. Observed failures and miss candidates remain visible,
+while unknown subset outcomes are `unmeasured`, `eligible` is false and those
+observations never inflate the 30-change/five-working-day denominator.
 
 Cohorts separate exact suite/policy identities. They count distinct identified PRs
 conservatively (unidentified merge-group snapshots do not inflate the change

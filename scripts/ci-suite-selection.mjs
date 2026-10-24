@@ -44,7 +44,8 @@ export function makeSelection({ tree, fastFiles, diff, context, policyId }) {
   const selected = inventory.filter((row) => choice.groups.includes(row.group));
   const fast = inventory.filter((row) => ["node-fast", "browser-critical"].includes(row.group));
   const contractInputs = tree.filter(({ path }) => /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|tsconfig[^/]*\.json|playwright[^/]*\.[cm]?[jt]s)$/.test(path) ||
-    path.startsWith(".github/workflows/") || /^(?:scripts\/(?:ci-|test-|node-test)|docs\/ci-node-profile)/.test(path))
+    path.startsWith(".github/workflows/") || /^apps\/web\/e2e\/.+\.(?:spec|test)\.[cm]?[jt]sx?$/.test(path) ||
+    /^(?:scripts\/(?:ci-|test-|node-test)|docs\/ci-node-profile)/.test(path))
     .map(({ path, oid }) => ({ path, oid })).sort((a, b) => a.path.localeCompare(b.path, "en"));
   const inventoryId = hash(JSON.stringify(inventory.map(({ file, blob, group }) => ({ file, blob, group }))));
   return { version: 1, suiteVersion: SUITE_VERSION, policyVersion: POLICY_VERSION, policyId, inventoryDomain: "node-and-development-chromium",

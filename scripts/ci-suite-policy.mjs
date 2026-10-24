@@ -1,6 +1,8 @@
 // Assurance contract v1. This module has no dependencies on code in the tested revision.
 export const SUITE_VERSION = "fast-required-v1";
 export const POLICY_VERSION = 1;
+// Reviewed prose with no runtime/test consumer. Unknown Markdown is an input, not safe by suffix.
+export const FAST_PROSE_FILES = ["docs/ci-suite-evidence-2026-10-23.md"];
 export const FAST_API_FILES = ["apps/control-plane/src/auth.test.ts", "apps/control-plane/src/authentication-recovery-routes.test.ts",
   "apps/control-plane/src/runner-channel.integration.test.ts"];
 export const CRITICAL_BROWSER_FILES = [
@@ -55,8 +57,7 @@ export function selectGroups({ entries, complete = true, baseKnown = true } = {}
     if (typeof path !== "string" || !/^[A-Za-z0-9_./-]+$/.test(path) || path.split("/").some((part) => !part || part === "." || part === "..")) {
       reasons.add("unknown-path"); continue;
     }
-    // Only prose Markdown is eligible. Profiles, inventories and policy under docs are inputs.
-    if ((path.startsWith("docs/") && path.endsWith(".md")) || ["README.md", "CONTRIBUTING.md"].includes(path)) continue;
+    if (FAST_PROSE_FILES.includes(path)) continue;
     const pkg = path.match(/^apps\/(web|control-plane|runner)\/src\/.+\.[cm]?[jt]sx?$/)?.[1];
     if (/(?:^|\/)(?:shared|fixtures|test-support|test-utils)\//.test(path) ||
         /^apps\/[^/]+\/src\/(?:index|main|App)\.[cm]?[jt]sx?$/.test(path)) reasons.add("shared-config-test-or-unknown-input");

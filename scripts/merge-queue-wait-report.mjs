@@ -430,15 +430,29 @@ async function readTimingLogBody(token, repository, jobId, fetchImpl) {
   const response = await fetchImpl(location, { signal: AbortSignal.timeout(30_000), redirect: "error" });
   if (!response.ok || !response.body) return { state: "unmeasured", reason: `log-http-${response.status}` };
   const reader = response.body.getReader(), decoder = new TextDecoder();
-  let bytes = 0, pending = "", truncated = false;
+  let bytes = 0, pending = "", truncated = false, selectionTruncated = false, droppingLine = false;
   const summaries = [], selections = [];
+  const selectionLine = (line) => {
+    if (!line.includes(SELECTION_MARKER)) return;
+    if (line.length > 768_000) { selectionTruncated = true; return; }
+    const selection = parseSelection(line.trimEnd());
+    if (!selection) return;
+    if (selections.length < 2) selections.push(selection);
+    else selectionTruncated = true;
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
       if (bytes > 16 * 1024 * 1024) { truncated = true; break; }
-      pending += decoder.decode(value, { stream: true });
+      let chunk = decoder.decode(value, { stream: true });
+      if (droppingLine) {
+        const newline = chunk.indexOf("\n");
+        if (newline < 0) continue;
+        chunk = chunk.slice(newline + 1); droppingLine = false;
+      }
+      pending += chunk;
       const lines = pending.split("\n");
       pending = lines.pop();
       for (const line of lines) {
@@ -449,21 +463,20 @@ async function readTimingLogBody(token, repository, jobId, fetchImpl) {
             else truncated = true;
           }
         }
-        if (line.includes(SELECTION_MARKER)) {
-          const selection = parseSelection(line.trimEnd());
-          if (selection && selections.length < 2) selections.push(selection);
-          else truncated = true;
-        }
+        selectionLine(line);
       }
-      if (pending.length > 768_000) { pending = ""; truncated = true; }
+      const selectionPending = pending.includes(SELECTION_MARKER);
+      if (pending.length > (selectionPending ? 768_000 : 32_000)) {
+        if (selectionPending) selectionTruncated = true;
+        pending = ""; droppingLine = true;
+      }
     }
     const last = parseTiming(pending.trimEnd());
     if (last && summaries.length < 10) summaries.push(last);
-    const lastSelection = parseSelection(pending.trimEnd());
-    if (lastSelection && selections.length < 2) selections.push(lastSelection);
+    if (!droppingLine) selectionLine(pending);
   } finally { await reader.cancel(); }
   return { state: summaries.length || selections.length ? "measured" : "unmeasured", truncated, summaries,
-    ...(selections.length ? { selections } : {}),
+    ...(selections.length || selectionTruncated ? { selections, selectionTruncated } : {}),
     reason: summaries.length || selections.length ? null : "no-safe-timing-output" };
 }
 

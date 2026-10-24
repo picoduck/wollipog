@@ -17,6 +17,7 @@ const EXPECTED_GROUP_TEMPLATE =
   "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}";
 const EXPECTED_JOB_GUARD =
   "github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false";
+const EXPECTED_SHADOW_GUARD = `(github.event_name == 'merge_group' || github.event_name == 'pull_request') && (${EXPECTED_JOB_GUARD})`;
 // CI carries the required check, so its pull-request lanes are also per head and never cancel in
 // progress (#3283); pr-ci-supersede.yml stops older heads. The other PR workflows report no
 // required check and keep cancelling, but every workflow shares the same ready/draft lanes.
@@ -47,7 +48,14 @@ function workflowContract(path) {
   }
   // Every job carries the same draft guard. The aggregator adds PR-only !cancelled()
   // admission; non-PR reporting remains unconditional, including on cancellation.
-  const guards = [...new Set(jobGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
+  const requiredGuards = jobGuards.filter((match, index) => {
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite-shadow:") {
+      assert.equal(match[1].trim(), EXPECTED_SHADOW_GUARD, "advisory selection has its explicit PR/merge-group draft guard");
+      return false;
+    }
+    return true;
+  });
+  const guards = [...new Set(requiredGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
   assert.equal(guards.length, 1, `${path}: every job must carry the same draft guard, got ${JSON.stringify(guards)}`);
 
   return {
@@ -69,6 +77,16 @@ function groupExpressions(groupTemplate) {
   assert.ok(match, "concurrency group must retain workflow, ref, and lane segments");
   return { ref: match[1], lane: match[2] };
 }
+
+test("advisory suite selection runs only on admitted PR and merge-group events", () => {
+  const text = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  const expression = text.match(/^  suite-shadow:\n    if: (.+)$/m)?.[1];
+  assert.equal(expression, EXPECTED_SHADOW_GUARD);
+  for (const row of [...EVENT_MATRIX, { name: "merge group", eventName: "merge_group", ref: "refs/heads/gh-readonly-queue/main" }]) {
+    const expected = row.eventName === "merge_group" || (row.eventName === "pull_request" && row.expectedRun);
+    assert.equal(evaluate(expression, githubContext(row)), expected, row.name);
+  }
+});
 
 function evaluate(expression, github) {
   return vm.runInNewContext(expression, { github }, { timeout: 1_000 });
@@ -219,7 +237,10 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "webkit", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "webkit", "suite-shadow", "check"], "CI jobs drifted");
+  assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
+  assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
+  assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
   for (const id of ["checks", "browser", "webkit"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
     assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);

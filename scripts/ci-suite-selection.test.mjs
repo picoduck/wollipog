@@ -7,9 +7,9 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import fc from "fast-check";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { GROUPS, ALWAYS, FAST_API_FILES, CRITICAL_BROWSER_FILES, selectGroups, nodeGroup } from "./ci-suite-policy.mjs";
+import { GROUPS, ALWAYS, FAST_API_FILES, FAST_PROSE_FILES, CRITICAL_BROWSER_FILES, selectGroups, nodeGroup } from "./ci-suite-policy.mjs";
 import { makeSelection, parseDiff, parseSelection, SELECTION_MARKER, suiteInventory, hash } from "./ci-suite-selection.mjs";
-import { suiteCommands } from "./test-suites.mjs";
+import { suiteCommands, localSelection } from "./test-suites.mjs";
 
 const entry = (path, status = "M") => ({ path, status });
 const choose = (...entries) => selectGroups({ entries });
@@ -19,7 +19,7 @@ export const syntheticTree = [...FAST_API_FILES, ...CRITICAL_BROWSER_FILES.map((
   .map((path) => ({ path, oid: "a".repeat(40) }));
 export function syntheticSelection(overrides = {}) {
   return makeSelection({ tree: syntheticTree, fastFiles: ["packages/protocol/src/index.test.ts"],
-    diff: { entries: [entry("docs/example.md")] }, policyId: hash("synthetic-policy"),
+    diff: { entries: [entry(FAST_PROSE_FILES[0])] }, policyId: hash("synthetic-policy"),
     context: { baseSha: "a".repeat(40), diffBaseSha: "a".repeat(40), changeHeadSha: "b".repeat(40),
       testedSha: "b".repeat(40), trustedPolicySha: "a".repeat(40), event: "merge_group", diffKind: "combined-merge-group", runId: "101", attempt: 1 },
     ...overrides });
@@ -43,7 +43,7 @@ test("all uncertain and high-risk inputs explicitly fall back to the complete co
 });
 
 test("docs and package dependency closure retain mandatory journeys, API and production coverage", () => {
-  const docs = choose(entry("docs/guide.md"));
+  const docs = choose(entry(FAST_PROSE_FILES[0]));
   assert.equal(docs.mode, "fast");
   for (const group of [...ALWAYS, "node-fast", "browser-critical"]) assert.ok(docs.groups.includes(group));
   const web = choose(entry("apps/web/src/components/Timeline.tsx", "A"));
@@ -55,7 +55,7 @@ test("docs and package dependency closure retain mandatory journeys, API and pro
 });
 
 test("adding changes never shrinks an already complete nonempty selection", () => {
-  const paths = fc.constantFrom("docs/a.md", "apps/web/src/components/A.tsx", "apps/control-plane/src/format.ts",
+  const paths = fc.constantFrom(FAST_PROSE_FILES[0], "docs/a.md", "apps/web/src/components/A.tsx", "apps/control-plane/src/format.ts",
     "packages/protocol/src/a.ts", "pnpm-lock.yaml", "apps/runner/src/index.ts", "unknown");
   const entries = fc.array(fc.record({ path: paths, status: fc.constantFrom("A", "M", "D", "T") }), { minLength: 1, maxLength: 12 });
   fc.assert(fc.property(entries, entries, (first, added) => {
@@ -82,10 +82,38 @@ test("inventory partitions every newly discovered file and versions changed cont
   assert.notEqual(added.suiteId, original.suiteId);
   const config = syntheticSelection({ tree: [...tree, { path: "playwright.config.ts", oid: "d".repeat(40) }] });
   assert.notEqual(config.suiteId, added.suiteId);
+  const productionOnly = { path: "apps/web/e2e/inbox-lazy.spec.ts", oid: "c".repeat(40) };
+  const before = syntheticSelection({ tree: [...tree, productionOnly] });
+  const after = syntheticSelection({ tree: [...tree, { ...productionOnly, oid: "d".repeat(40) }] });
+  assert.notEqual(after.suiteId, before.suiteId, "production-only tests are part of the suite contract");
   const missing = syntheticSelection({ tree: syntheticTree.slice(1) });
   assert.equal(missing.mode, "full");
   assert.equal(missing.deferredFileIds.length, 0);
   assert.equal(suiteInventory(tree, []).length, tree.length);
+});
+
+test("unknown Markdown and documentation consumed by tests require full coverage", () => {
+  for (const path of ["README.md", "CONTRIBUTING.md", "docs/new-prose.md", "docs/icon-system.md", "docs/RELEASING.md",
+    "docs/worktree-setup.md", "docs/synthetic-browser-failure-artifacts.md", "docs/vite-8-compatibility.md"])
+    assert.equal(choose(entry(path)).mode, "full", path);
+});
+
+test("local selected execution falls back to full for a dirty or different checkout", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "suite-workspace-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const git = (...args) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.invalid");
+  mkdirSync(join(cwd, "scripts")); writeFileSync(join(cwd, "scripts/fixture.test.mjs"), "// fixture\n");
+  git("add", "."); git("commit", "-qm", "base"); const base = git("rev-parse", "HEAD");
+  const clean = localSelection({ base, head: base, cwd });
+  assert.match(clean.suiteId, /^[a-f0-9]{64}$/);
+  writeFileSync(join(cwd, "untracked.md"), "unknown workspace input\n");
+  const dirty = localSelection({ base, head: base, cwd });
+  assert.equal(dirty.suiteId, null); assert.equal(dirty.mode, "full");
+  assert.ok(dirty.reasons.includes("workspace-diff-uncertain"));
+  assert.deepEqual(dirty.groups, Object.keys(GROUPS).sort());
+  git("add", "."); git("commit", "-qm", "different checkout");
+  assert.equal(localSelection({ base, head: base, cwd }).suiteId, null);
 });
 
 test("selection inventory agrees with the independent full Node discovery globs", async () => {

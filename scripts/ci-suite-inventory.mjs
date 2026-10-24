@@ -2,9 +2,9 @@ import { discoverNodeTests, profile } from "./node-test-plan.mjs";
 import { browserFiles } from "../playwright.shards.ts";
 import production from "../playwright.production.config.ts";
 import { WEBKIT_SPECS } from "../playwright.webkit.config.ts";
-import { GROUPS, CRITICAL_BROWSER_FILES, nodeGroup, selectGroups } from "./ci-suite-policy.mjs";
+import { GROUPS, CRITICAL_BROWSER_FILES, FAST_PROSE_FILES, nodeGroup, selectGroups } from "./ci-suite-policy.mjs";
 
-const fast = new Set(selectGroups({ entries: [{ path: "docs/example.md", status: "M" }] }).groups);
+const fast = new Set(selectGroups({ entries: [{ path: FAST_PROSE_FILES[0], status: "M" }] }).groups);
 const rows = (await discoverNodeTests()).map((file) => ({ file, group: nodeGroup(file, profile.fastFiles) }));
 for (const file of browserFiles()) rows.push({ file: `apps/web/e2e/${file}`, group: CRITICAL_BROWSER_FILES.includes(file) ? "browser-critical" : "browser-remaining" });
 if (!Array.isArray(production.testMatch) || !production.testMatch.every((file) => typeof file === "string"))

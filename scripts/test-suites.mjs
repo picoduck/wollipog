@@ -1,10 +1,20 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { CRITICAL_BROWSER_FILES, FAST_API_FILES, nodeGroup, GROUPS } from "./ci-suite-policy.mjs";
 import { gitSelection } from "./ci-suite-selection.mjs";
+
+export function localSelection({ base, head, cwd = process.cwd() }) {
+  const { selection } = gitSelection({ base, head, cwd });
+  try {
+    const git = (args) => execFileSync("git", args, { cwd, encoding: "utf8", timeout: 30_000, maxBuffer: 1024 * 1024, stdio: ["ignore", "pipe", "pipe"] });
+    if (git(["rev-parse", "HEAD"]).trim() === head && git(["status", "--porcelain=v1", "--untracked-files=all"]).trim() === "") return selection;
+  } catch { /* An uncertain workspace must not execute a smaller selection. */ }
+  return { mode: "full", reasons: [...selection.reasons, "workspace-diff-uncertain"],
+    groups: Object.keys(GROUPS).sort(), suiteId: null, certification: "none" };
+}
 
 export function suiteCommands(suite, { groups, ci = false } = {}) {
   if (!["fast", "full", "selected"].includes(suite)) throw new Error("Unknown suite");
@@ -63,7 +73,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     let groups;
     if (values.suite === "selected") {
       if (!values.base || !values.head) throw new Error("Selected suite requires immutable --base and --head SHAs");
-      const { selection } = gitSelection({ base: values.base, head: values.head });
+      const selection = localSelection({ base: values.base, head: values.head });
       groups = selection.groups;
       console.log(JSON.stringify({ mode: selection.mode, reasons: selection.reasons, suiteId: selection.suiteId }));
     }

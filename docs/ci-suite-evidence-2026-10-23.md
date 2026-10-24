@@ -55,6 +55,20 @@ contracts that the portable local command does not emulate.
 
 ## Historical and Natural Comparison
 
+The first valid cross-model review exposed a missed existing workflow contract:
+the advisory job needed explicit admission in `workflow-pr-event-contract` while
+preserving every required job's guard and aggregator edge. Review also led to an
+explicit prose allowlist (unknown/test-consumed Markdown requires full), visible
+partial failure observations when upstream failure skips production/Node work,
+and separate selection-log truncation so legacy timing completeness is unchanged.
+Independent inspection added production-only test blobs to suite identity and
+full portable fallback for a dirty or mismatched local selected checkout.
+All six corrections have focused regression coverage. The review-directed
+workflow/collector/selection/reliability/rolling checks pass **108 tests**; this
+is local mechanism verification, not a natural comparison sample. The complete
+root-script suite then passed **584 tests in 10.641 s**, including the previously
+omitted workflow PR-event contract and all new regression cases.
+
 The stored natural baseline window is half-open UTC
 `2026-10-20T00:00:00Z`–`2026-10-22T00:00:00Z`, collected by the existing
 `merge-queue-wait-report` tooling. Offline suite-shadow evaluation finds zero

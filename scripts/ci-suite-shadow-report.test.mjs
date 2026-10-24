@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { FAST_API_FILES, CRITICAL_BROWSER_FILES } from "./ci-suite-policy.mjs";
+import { FAST_API_FILES, FAST_PROSE_FILES, CRITICAL_BROWSER_FILES } from "./ci-suite-policy.mjs";
 import { makeSelection, hash, SELECTION_MARKER } from "./ci-suite-selection.mjs";
 import { shadowReport } from "./ci-suite-shadow-report.mjs";
 import { readTimingLog } from "./merge-queue-wait-report.mjs";
@@ -9,7 +9,7 @@ import { readTimingLog } from "./merge-queue-wait-report.mjs";
 const testedSha = "b".repeat(40), baseSha = "a".repeat(40);
 const tree = [...FAST_API_FILES, ...CRITICAL_BROWSER_FILES.map((file) => `apps/web/e2e/${file}`), "apps/web/e2e/deferred.spec.ts"]
   .map((path) => ({ path, oid: baseSha }));
-const plan = () => makeSelection({ tree, fastFiles: [], diff: { entries: [{ path: "docs/guide.md", status: "M" }] }, policyId: hash("policy-fixture"),
+const plan = () => makeSelection({ tree, fastFiles: [], diff: { entries: [{ path: FAST_PROSE_FILES[0], status: "M" }] }, policyId: hash("policy-fixture"),
   context: { baseSha, diffBaseSha: baseSha, testedSha, changeHeadSha: testedSha, trustedPolicySha: baseSha,
     runId: "101", attempt: 1, event: "merge_group", diffKind: "combined-merge-group" } });
 const summary = (suite) => ({ version: 1, suite, count: 3, failed: 0, skipped: 0, cancelled: 0, unmeasured: 0, retryOnly: 0, truncated: false,
@@ -78,6 +78,31 @@ test("production failures are always selected even when that file's development 
   const compared = shadowReport(data).comparisons[0];
   assert.equal(compared.projectedSelectedOutcome, "failing");
   assert.equal(compared.missedFailureCandidate, false);
+});
+
+test("shard-1 failures preserve miss candidates when production was skipped", () => {
+  const data = input(); failTest(data, "apps/web/e2e/deferred.spec.ts");
+  data.records[0].jobs[1].testTiming.summaries.pop();
+  data.records[0].jobs[1].steps = [{ number: 20, name: "Rendered Production Browser Smoke", state: "skipped" }];
+  const report = shadowReport(data), compared = report.comparisons[0];
+  assert.equal(compared.missedFailureCandidate, true);
+  assert.equal(compared.projectedSelectedOutcome, "unmeasured");
+  assert.equal(compared.eligible, false);
+  assert.equal(report.partialFailureObservations, 1);
+  assert.equal(report.naturalProjectedSamples, 0);
+  assert.equal(report.cohorts[0].missedFailureCandidates, 1);
+  assert.equal(report.cohorts[0].distinctIdentifiedChanges, 0);
+});
+
+test("mandatory typecheck failure is visible even when Node tests never ran", () => {
+  const data = input(), record = data.records[0], node = record.jobs[0];
+  record.state = "failing"; node.state = "failing"; node.testTiming.summaries = [];
+  node.steps = [{ number: 10, name: "Typecheck", state: "failing" }];
+  const compared = shadowReport(data).comparisons[0];
+  assert.equal(compared.projectedFastOutcome, "failing");
+  assert.equal(compared.projectedSelectedOutcome, "failing");
+  assert.equal(compared.eligible, false);
+  assert.deepEqual(compared.mandatoryFailures, [{ jobId: node.id, step: 10 }]);
 });
 
 test("retry-only, infrastructure candidates, truncation and missing coverage cannot count as eligible passes", () => {
@@ -170,6 +195,30 @@ test("the existing bounded log collector projects safe selection metadata with t
   assert.deepEqual(result.selections, [row]);
   assert.equal(result.state, "measured");
   assert.ok(!JSON.stringify(result).includes("PRIVATE_SENTINEL"));
+});
+
+test("invalid selection echoes and oversized unrelated lines do not truncate legacy timing", async () => {
+  const marker = "ci-timing-v1 " + JSON.stringify(summary("node"));
+  const chunks = ["ci-selection-v1 {bad json\n", "x".repeat(40_000), "x".repeat(800_000), `\n${marker}\n`];
+  const result = await readTimingLog("private-token", "picoduck/wollipog", "101", async (url) => {
+    if (String(url).startsWith("https://api.github.com")) return new Response(null, { status: 302, headers: { location: "https://safe.blob.core.windows.net/job" } });
+    return new Response(new ReadableStream({ start(controller) { for (const chunk of chunks) controller.enqueue(new TextEncoder().encode(chunk)); controller.close(); } }));
+  });
+  assert.equal(result.truncated, false);
+  assert.equal(result.summaries.length, 1);
+  assert.equal(result.selectionTruncated, undefined);
+});
+
+test("oversized selection output has its own truncation flag and cannot yield a sample", async () => {
+  const log = `${SELECTION_MARKER}${"x".repeat(800_000)}\n${SELECTION_MARKER}${JSON.stringify(plan())}\n`;
+  const result = await readTimingLog("private-token", "picoduck/wollipog", "101", async (url) =>
+    String(url).startsWith("https://api.github.com")
+      ? new Response(null, { status: 302, headers: { location: "https://safe.blob.core.windows.net/job" } }) : new Response(log));
+  assert.equal(result.truncated, false);
+  assert.equal(result.selectionTruncated, true);
+  const data = input(); data.records[0].jobs.at(-1).testTiming = result;
+  assert.equal(shadowReport(data).naturalProjectedSamples, 0);
+  assert.equal(shadowReport(data).gaps.length, 1);
 });
 
 test("shadow workflow is advisory, draft guarded and runs base-revision code without dependency installation", () => {
