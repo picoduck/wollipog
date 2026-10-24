@@ -97,7 +97,7 @@ is used as a fallback. Missing, future, malformed or incomplete evidence yields 
 `backlog.clock` is `forge-landing-time`; `backlog.landingEvidence` records each commit's timestamp,
 source and PR/run URL. PR-based timing adds no requests to the existing merge-count lookup;
 direct-push fallback adds at most one bounded controller listing per commit within the same
-48-request invocation cap. Once caught up, idle main has zero backlog and zero unvalidated age
+quota-sized invocation cap (at most 96 requests). Once caught up, idle main has zero backlog and zero unvalidated age
 even after weeks without a run. `merges` counts associated PRs actually merged into main at each
 backlog commit, including squash merges; `mergeCommits` separately counts commits with multiple
 parents.
@@ -179,10 +179,13 @@ does not add an extra observation.
 
 ### Shared API Budget
 
-Every CLI/workflow invocation has a hard **48-request cap**, including failed calls, the quota
-preflight, ref reads/writes, GraphQL and alert calls. Reconciliation reserves eight calls up front
-for the four state-write calls and at most four alert/author/label calls: observation reads stop
-at 40. An exhausted observation cannot unlock that reserve. Read-only reports reserve no writes.
+Every CLI/workflow invocation has a hard cap derived from authoritative REST response headers:
+**`min(96, floor(48 * REST_limit / 1000))` requests**, including failed calls, the quota
+preflight, ref reads/writes, GraphQL and alert calls. It starts at 48 until headers are verified;
+missing headers stop production unknown rather than assuming a larger token allowance.
+Reconciliation reserves eight calls up front for the four state-write calls and at most four
+alert/author/label calls. Observation stops at cap minus eight (40 at a 1000 limit, 88 at 5000).
+An exhausted observation cannot unlock that reserve. Read-only reports reserve no writes.
 Checkpoint recovery has a separate twelve-call cap inside the same invocation budget. Existing
 checkpoint hints are reverified and the complete census is restricted to their dispatcher-ancestry
 window. Seed failures are inspected too, so a same-target red seed cannot promote an invalid older
@@ -192,38 +195,38 @@ Within an observation, verified ancestry comparisons serve the checkpoint window
 and known strict ancestry also proves the reverse is false. The mutable hint file is read at its
 pinned commit directly. The current run response supplies its latest attempt identity; older
 attempts use their own endpoint and every job inventory uses an exact attempt URL. Already
-inspected hints are not fetched again. All inspected run identities are still rechecked after
+inspected hints are not fetched again. A newly resolved pointer supplies its live run response
+without an immediate duplicate lookup. All inspected run identities are still rechecked after
 the full observation, followed by complete listing fingerprints. These savings preserve race
 detection while making an ordinary red transition affordable.
 
 Before any observation, `GET /rate_limit` supplies authoritative numeric response headers. This
 endpoint is [exempt from GitHub's primary rate limit](https://docs.github.com/en/rest/rate-limit/rate-limit).
-If fewer than **600** requests remain, the invocation stops unknown before any observation read
-or mutation. At exactly 600, the next request is also refused. Every later response refreshes a
-conservative low-water mark; missing/malformed quota headers also stop unknown. Logs expose only
+The REST floor is **`max(600, ceil(0.60 * REST_limit))`**: 600 at a 1000 limit, 3000 at 5000.
+Below the floor, the invocation stops unknown before any observation read or mutation. At the
+floor, the next request is also refused. Lower limits reduce the cap; a limit below 600 cannot
+admit observation. Every later response refreshes a conservative low-water mark;
+missing, malformed, impossible or changing quota limits also stop unknown. Logs expose only
 numeric `x-ratelimit-limit` and `x-ratelimit-remaining` values as `rateLimit`/`rateRemaining`, plus
-request counts, limits and safe reasons in `main_ci_health_api_usage`. The separate GraphQL
+request counts, limits and safe reasons in `main_ci_health_api_usage`. `readCalls`/`mutationCalls`
+and `restCalls`/`graphqlCalls` partition the calls by method and quota respectively, including
+failures. The usage event carries the observation's entry point and correlation ID. The separate GraphQL
 bucket has its own numeric `graphqlLimit`/`graphqlRemaining` fields; it is never mixed into the
-REST 600-remaining floor. GraphQL errors still prevent further mutation. Report stdout remains one
+REST floor. GraphQL errors and malformed GraphQL quota still prevent further mutation. Report stdout remains one
 JSON document; its usage log goes to stderr. `apiBudget` in the record is the observation-time
 snapshot; the final usage log includes subsequent writes. No token, response body or reset header
 is logged. Failed requests and concurrent requests count before launch, and there are no retries.
 
-Hourly arithmetic uses the conservative **1,000-request repository token allowance**, without
-assuming Enterprise Cloud. Let C be eligible main-CI completions, R rolling completions, and M
-manual dispatches/read-only reports in that hour. The unconstrained invocation envelope is
-`48 * (3 + C + R + M)`: three scheduled observations cost at most **144** requests, one CI plus
-one worker completion adds at most **96**, for **240/hour** before other traffic. Skipped event
-jobs cost zero observer requests; push/in-progress events add zero invocations. C, R and M are
-not inherently bounded, so the schedule arithmetic alone is not an aggregate guarantee.
-The live floor is the aggregate admission limiter: starting at 1,000 with no other consumers,
-at most about `1000 - 600 + 48 = 448` primary requests are exposed before later observations
-back off, leaving about **552** for the controller/other workflows. Per-response checks normally
-stop earlier, around 600. The 48-call allowance covers an admitted invocation's conservative
-overshoot envelope; serialized workflow jobs avoid simultaneous health invocations. This is
-headroom protection, not an atomic quota reservation: other consumers and GitHub's distributed
-header counters can change the remaining balance. Low-quota wakes make only the primary-exempt
-preflight. Secondary limits still apply; any 403/429 stops this invocation with no retry.
+Let C be eligible main-CI completions, R rolling completions, and M manual dispatches/read-only
+reports per hour. With cap B, the unconstrained envelope is `B * (3 + C + R + M)`:
+three schedules and one CI/worker completion each give at most 240 calls at B=48 or 480 at B=96.
+Skipped jobs and push/in-progress events add zero invocations. C, R and M are not inherently
+bounded. The live floor F limits aggregate admission: conservatively `REST_limit - F + B`
+exposed calls, leaving `F - B` shared headroom (552 at limit 1000, 2904 at 5000). Per-response
+checks normally stop near F; serialized jobs avoid simultaneous health invocations. This is
+not an atomic quota reservation: other consumers and GitHub's distributed header counters
+can change the balance. Low-quota wakes make only the primary-exempt preflight. Secondary
+limits still apply; any 403/429 stops this invocation with no retry.
 
 `api-budget-exhausted`, `api-quota-reserved`, `api-rate-limited` and `rate-limit-unavailable` yield unknown, no active
 certificate, and no incident opening or closure. If the budget/floor stops further calls, the
@@ -235,13 +238,16 @@ headroom. The lighter merge gate remains disabled.
 
 The earlier unbounded diagnostic fixtures measured 88/312/725 calls at 8/40/99 unvalidated commits;
 they establish why a hard cap is necessary, not current production request counts. Production
-entry-point tests now stop long backlogs at 40 calls with no mutation, verify low-quota wakes use
+entry-point tests stop long backlogs at their observation ceiling with no mutation, verify low-quota wakes use
 only the exempt preflight, and verify caught-up evidence plus CAS persistence fits within 48.
 They also persist and open the incident for a failing worker one commit after a pass, including
-existing state and a red legacy run. This checks alert availability through the actual budgeted
-entry point, rather than only through unbounded fixture calls to the reconciler.
+existing state and a red legacy run. The quota-sized matrix covers lag zero through five,
+active-worker overlap, full failures and verified recovery/closure at the production entry point.
 The 100-dispatcher, pagination and evidence caps still apply independently. Fixtures do not prove
 live quota, scheduling latency or production ref permissions; verify natural post-merge writes.
+See the [bounded production census, sizing evidence, operating envelope and rollback](main-ci-health-budget-2026-10-24.md).
+It records a natural lag-one budget exhaustion despite 4979/5000 REST remaining, two completed
+lag-one active-worker observations, and the limits of its red/incident-recovery evidence.
 
 ## When a Merge Group Fails on Code Your Pull Request Did Not Touch
 

@@ -6,7 +6,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import test from "node:test";
 import {
   ALERT_LABEL, ALERT_TITLE, alertBody, budgetApi, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
-  API_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR,
+  API_BUDGET, API_MAX_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
 } from "./main-ci-health.mjs";
 
 const repository = "example/project";
@@ -269,6 +269,57 @@ test("the shared REST quota floor does not mix in the separate GraphQL bucket", 
   assert.equal(calls, 3); assert.equal(api.budget.rateLimit, 1000); assert.equal(api.budget.rateRemaining, 900);
   assert.equal(api.budget.graphqlLimit, 5000); assert.equal(api.budget.graphqlRemaining, 550);
   assert.equal(api.budget.reason, null);
+});
+
+test("runtime REST limits size bounded observations while preserving shared headroom", async () => {
+  for (const [limit, remaining, cap, floor] of [[500, 500, 24, 600], [1000, 900, 48, 600],
+    [1500, 1400, 72, 900], [2000, 1900, 96, 1200], [5000, 4800, 96, 3000], [15000, 14000, 96, 9000]]) {
+    const transport = githubApi("test", async () => ({ ok: true, status: 200,
+      headers: new Headers({ "x-ratelimit-limit": String(limit), "x-ratelimit-remaining": String(remaining) }),
+      json: async () => ({}) }));
+    const api = budgetApi(transport, { requireHeaders: true });
+    if (remaining < floor) await assert.rejects(api("/rate_limit"), /api-quota-reserved/);
+    else {
+      await api("/rate_limit");
+      for (let i = 1; i < cap - API_WRITE_RESERVE; i++) await api("/read");
+      await assert.rejects(api("/overflow"), /api-budget-exhausted/);
+      api.beginWrites();
+      await assert.rejects(api("/cannot-unlock", { method: "POST" }), /api-budget-exhausted/);
+    }
+    assert.equal(api.budget.limit, cap); assert.ok(cap <= API_MAX_BUDGET);
+    assert.equal(api.budget.remainingFloor, floor);
+    assert.equal(api.budget.mutationCalls, 0);
+    assert.equal(api.budget.calls, api.budget.readCalls);
+    const recovery = budgetApi(transport, { limit: RECOVERY_API_BUDGET, reserve: 0 });
+    await recovery("/read").catch(() => {});
+    assert.equal(recovery.budget.limit, RECOVERY_API_BUDGET, "nested recovery never scales up");
+  }
+});
+
+test("missing, invalid or changing quotas cannot enlarge a budget or permit mutations", async () => {
+  for (const quotas of [[null], [["0", "0"]], [["5000", "5001"]], [["5000", "4800"], ["1000", "900"]],
+    [["5000", "4800"], ["5000", "5001"]],
+    [["5000", "4800"], null], [["5000", "4800"], ["5000", "2999"]]]) {
+    let calls = 0;
+    const transport = githubApi("test", async () => {
+      const pair = quotas[Math.min(calls++, quotas.length - 1)];
+      return { ok: true, status: 200, headers: new Headers(pair ? {
+        "x-ratelimit-limit": pair[0], "x-ratelimit-remaining": pair[1] } : {}), json: async () => ({}) };
+    });
+    const api = budgetApi(transport, { requireHeaders: true });
+    if (quotas.length > 1) await api("/rate_limit");
+    await assert.rejects(api("/read"), /rate-limit-unavailable|api-quota-reserved/);
+    api.beginWrites();
+    await assert.rejects(api("/never-write", { method: "POST" }), /rate-limit-unavailable|api-quota-reserved/);
+    assert.equal(calls, quotas.length); assert.equal(api.budget.mutationCalls, 0);
+  }
+  const missingGraphql = budgetApi(githubApi("test", async (url) => ({ ok: true, status: 200,
+    headers: new Headers(new URL(url).pathname === "/graphql" ? {} : {
+      "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "4800" }), json: async () => ({}) })), { requireHeaders: true });
+  await missingGraphql("/rate_limit"); missingGraphql.beginWrites();
+  await assert.rejects(missingGraphql("/graphql", { method: "POST" }), /rate-limit-unavailable/);
+  await assert.rejects(missingGraphql("/no-incident", { method: "POST" }), /rate-limit-unavailable/);
+  assert.equal(missingGraphql.budget.restCalls, 1); assert.equal(missingGraphql.budget.graphqlCalls, 1);
 });
 
 test("the workflow observes only main completions and scheduled/manual recovery, with trusted serialized writes", () => {

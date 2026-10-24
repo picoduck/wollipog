@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { ALERT_LABEL, ALERT_TITLE, API_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
+import { ALERT_LABEL, ALERT_TITLE, API_BUDGET, API_MAX_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
   collectHealth, githubApi, HEALTH_REF, HEALTH_SCHEMA, main, readHealthState, reconcile, STALE_MS, writeHealthState } from "./main-ci-health.mjs";
 import { REQUIRED, WORKER } from "./main-rolling-validation.mjs";
 
@@ -517,19 +517,23 @@ test("invalidated checkpoint recovery has its own budget and discards the reject
 });
 
 test("the production entry point caps a long backlog and neither opens nor closes an incident on exhaustion", async () => {
-  for (const open of [false, true]) {
+  for (const quota of [1000, 5000]) for (const open of [false, true]) {
     const targets = Array.from({ length: 41 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
     const f = forge({ runs: [worker(10, targets[0])], currentMain: targets.at(-1), history: [W, ...targets] });
     if (open) f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
       user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:10 -->" }];
+    const api = githubApi("test", async (url, options) => ({ ok: true, status: 200,
+      headers: new Headers({ "x-ratelimit-limit": String(quota), "x-ratelimit-remaining": String(quota - 100) }),
+      json: () => f.api(new URL(url).pathname + new URL(url).search,
+        { ...options, body: options.body ? JSON.parse(options.body) : undefined }) }));
     const output = [];
     const code = await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main",
-      GITHUB_EVENT_NAME: "schedule" }, api: f.api, log: (line) => output.push(line) });
+      GITHUB_EVENT_NAME: "schedule" }, api, log: (line) => output.push(line) });
     assert.equal(code, 0);
     const observed = output.filter((line) => line.startsWith("{")).map(JSON.parse);
     assert.equal(observed.find((entry) => entry.event === "main_ci_health_observed").status, "unknown");
     assert.equal(observed.at(-1).reason, "api-budget-exhausted");
-    assert.equal(f.data.requests.length, API_BUDGET - API_WRITE_RESERVE);
+    assert.equal(f.data.requests.length, (quota === 5000 ? API_MAX_BUDGET : API_BUDGET) - API_WRITE_RESERVE);
     assert.deepEqual(f.data.mutations, []);
   }
 });
@@ -614,4 +618,47 @@ test("a newer same-target failing seed invalidates green without repeatedly exha
   assert.equal(f.data.state.status, "failing");
   assert.ok(f.data.mutations.some((mutation) => mutation.path === `/repos/${repository}/issues`));
   assert.ok(f.data.requests.length <= API_BUDGET);
+});
+
+test("quota-sized production observations handle lag zero through five with active workers and incidents", async (t) => {
+  for (let lag = 0; lag <= 5; lag++) for (const mode of ["pending", "red", "recovery"]) {
+    await t.test(`${mode}, lag ${lag}`, async () => {
+      const targets = Array.from({ length: lag + 3 }, (_, i) => (i + 1000).toString(16).padStart(40, "0"));
+      const baseline = targets[1], currentMain = targets[lag + 1];
+      const runs = [worker(20, baseline), worker(30, lag ? currentMain : targets[0], {
+        status: "in_progress", conclusion: null, run_started_at: new Date().toISOString() })];
+      if (mode === "red") runs.push(worker(25, currentMain, { conclusion: "failure", run_number: 2 }));
+      if (mode === "recovery") runs.push(worker(10, targets[0], { conclusion: "failure", run_number: 1 }));
+      runs.sort((a, b) => b.id - a.id);
+      // Run numbers represent contiguous creation order, independently of target order.
+      [...runs].sort((a, b) => a.id - b.id).forEach((run, index) => { run.run_number = index + 1; });
+      const f = forge({ runs, currentMain, history: [W, ...targets] });
+      for (const [index, sha] of targets.entries()) f.data.associatedPulls.set(sha, [{ number: index + 1,
+        merged_at: new Date(Date.now() - 60_000).toISOString(), merge_commit_sha: sha,
+        base: { ref: "main", repo: { full_name: repository } } }]);
+      if (mode !== "pending") makeRed(f, mode === "red" ? 25 : 10);
+      if (mode === "recovery") f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE,
+        labels: [{ name: ALERT_LABEL }], user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:10 -->" }];
+      const api = githubApi("test", async (url, options) => {
+        const path = new URL(url).pathname + new URL(url).search;
+        return { ok: true, status: 200,
+          headers: new Headers({ "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "4800" }),
+          json: () => f.api(path, { ...options, body: options.body ? JSON.parse(options.body) : undefined }) };
+      });
+      const output = [];
+      assert.equal(await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test",
+        GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "schedule" }, api,
+        log: (line) => output.push(line), error: (line) => output.push(line) }), 0);
+      const usage = JSON.parse(output.at(-1));
+      assert.equal(usage.reason, null, JSON.stringify(usage));
+      assert.ok(usage.calls <= usage.limit);
+      assert.equal(usage.calls, usage.restCalls + usage.graphqlCalls);
+      assert.equal(usage.calls, usage.readCalls + usage.mutationCalls);
+      assert.equal(f.data.state.status, mode === "red" ? "failing" : lag ? "pending" : "passing", JSON.stringify(f.data.state.reasons));
+      assert.equal(f.data.state.backlog.commits, mode === "red" && lag === 0 ? null : lag);
+      if (mode === "red") assert.ok(f.data.mutations.some((m) => m.path.endsWith("/issues")), "opens the full failure");
+      if (mode === "recovery") assert.ok(f.data.mutations.some((m) => m.body?.state === "closed"), "verified passing descendant closes the incident");
+      t.diagnostic(`${mode} lag=${lag}: ${usage.calls}/${usage.limit}, reads=${usage.readCalls}, mutations=${usage.mutationCalls}`);
+    });
+  }
 });
