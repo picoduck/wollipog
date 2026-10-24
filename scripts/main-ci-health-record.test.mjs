@@ -662,3 +662,116 @@ test("quota-sized production observations handle lag zero through five with acti
     });
   }
 });
+
+const skippedClaimJobs = () => [{ id: 90, name: "Admit Main Snapshot", status: "completed", conclusion: "success",
+  started_at: at(), steps: [{ name: "Skip Superseded Rolling Claim", conclusion: "success" }] },
+{ id: 91, name: "Full Validation", status: "completed", conclusion: "skipped", steps: [] }];
+
+test("verified unexecuted workers retain certificates and remain distinct from covered history", async () => {
+  for (const receipt of [false, true]) for (const target of [A, B]) {
+    const f = forge({ currentMain: target, runs: [worker(11, target, {
+      run_number: 2, conclusion: receipt ? "success" : "cancelled" }), worker(10, A, { run_number: 1 })] });
+    f.data.jobSets.set("11:1", receipt ? skippedClaimJobs() : []);
+    const health = await f.collect();
+    assert.equal(health.status, target === A ? "passing" : "pending", JSON.stringify(health.reasons));
+    assert.equal(health.latestAttempt.runId, 10);
+    assert.equal(health.latestPassingSnapshot.runId, 10);
+    assert.equal(health.fullCertification?.runId ?? null, target === A ? 10 : null);
+    assert.equal(health.checkpoint.runId, 10);
+    const evidence = health.evidence.find((record) => record.runId === 11);
+    assert.equal(evidence.result, "non-verdict");
+    assert.equal(evidence.nonVerdictReason, "superseded-worker-attempt");
+    assert.equal(evidence.certification, "none");
+    assert.equal(health.supersededRunIds.includes(11), false, "unexecuted work is not covered/resolved history");
+    assert.equal(health.resolvedRunIds.includes(11), false, "a non-verdict supplies no incident resolution");
+    assert.ok(f.data.requests.filter((path) => path.endsWith("/actions/runs/11")).length >= 2,
+      "the non-verdict run still receives live identity and final race revalidation");
+  }
+});
+
+test("unexecuted workers cannot replace or close a prior real full incident", async () => {
+  for (const receipt of [false, true]) {
+    const f = forge({ runs: [worker(11, A, { run_number: 2, conclusion: receipt ? "success" : "cancelled" }),
+      worker(10, A, { run_number: 1, conclusion: "failure" })] });
+    f.data.jobSets.set("11:1", receipt ? skippedClaimJobs() : []); makeRed(f, 10);
+    f.data.issues = [{ number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
+      user: { login: "github-actions[bot]" }, body: "<!-- main-ci-health latest:10 -->" }];
+    const output = [];
+    assert.equal(await main([], { env: { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test",
+      GITHUB_REF: "refs/heads/main", GITHUB_EVENT_NAME: "schedule" }, api: f.api,
+      log: (line) => output.push(line) }), 0);
+    assert.equal(f.data.state.status, "failing");
+    assert.equal(f.data.state.latestAttempt.runId, 10);
+    assert.equal(f.data.state.unresolvedFailures[0].runId, 10);
+    assert.equal(f.data.state.evidence.find((record) => record.runId === 11).result, "non-verdict");
+    assert.equal(f.data.mutations.some((mutation) => mutation.path.includes("/issues")), false);
+    assert.ok(output.some((line) => line.includes('"reason":"already-reported"')));
+  }
+});
+
+test("an unexecuted older target is retained even when a verified descendant covers it", async () => {
+  const f = forge({ runs: [worker(10, A, { run_number: 2 }),
+    worker(9, W, { head_sha: A, run_number: 1, conclusion: "cancelled" })] });
+  f.data.jobSets.set("9:1", []);
+  const health = await f.collect();
+  assert.equal(health.status, "passing");
+  assert.equal(health.latestAttempt.runId, 10);
+  assert.equal(health.evidence.find((record) => record.runId === 9).result, "non-verdict");
+  assert.equal(health.supersededRunIds.includes(9), false);
+  assert.equal(health.resolvedRunIds.includes(9), false);
+});
+
+test("superseded-looking workers require source and target ancestry before reading their jobs", async () => {
+  const outside = "f".repeat(40);
+  for (const [source, target] of [[outside, A], [A, outside]]) {
+    const f = forge({ runs: [worker(11, target, { head_sha: source, run_number: 2, conclusion: "cancelled" }),
+      worker(10, A, { run_number: 1 })] });
+    f.data.jobSets.set("11:1", []);
+    const health = await f.collect();
+    assert.equal(health.status, "passing");
+    assert.equal(health.evidence.some((record) => record.runId === 11), false);
+    assert.equal(f.data.requests.some((path) => path.includes("/actions/runs/11/attempts/1/jobs")), false);
+  }
+});
+
+test("started, unknown and rerun attempts still withdraw an older same-target certificate", async () => {
+  for (const [attempts, items] of [[1, [{ id: 90, name: "Admit Main Snapshot", started_at: at(), steps: [] }]],
+    [1, [...skippedClaimJobs(), { id: 92, name: "Full Validation / Unknown Suite", conclusion: null }]],
+    [2, []]]) {
+    const f = forge({ runs: [worker(11, A, { run_number: 2, run_attempt: attempts, conclusion: "cancelled" }),
+      worker(10, A, { run_number: 1 })] });
+    for (let attempt = 1; attempt <= attempts; attempt++) f.data.jobSets.set(`11:${attempt}`, items);
+    const health = await f.collect();
+    assert.equal(health.status, "unknown");
+    assert.equal(health.fullCertification, null);
+    assert.equal(health.latestPassingSnapshot, null);
+    assert.equal(health.evidence.find((record) => record.runId === 11 && record.attempt === attempts).result, "unknown");
+    if (attempts === 2) assert.deepEqual(health.evidence.filter((record) => record.runId === 11)
+      .map((record) => [record.attempt, record.result]), [[1, "unknown"], [2, "unknown"]],
+    "a rerun retains conservative evidence for every attempt");
+  }
+});
+
+test("non-verdict classification cannot bypass complete jobs, workflow binding or the run-number census", async () => {
+  for (const mode of ["partial-jobs", "workflow", "missing-run"]) {
+    const f = forge({ runs: [worker(11, A, { run_number: mode === "missing-run" ? 3 : 2, conclusion: "cancelled" }),
+      worker(10, A, { run_number: 1 })] });
+    f.data.jobSets.set("11:1", []);
+    let jobReads = 0;
+    const health = await f.collect({ api: async (path, options) => {
+      if (path.includes("/actions/runs/11/attempts/1/jobs")) {
+        jobReads++;
+        if (mode === "partial-jobs") return { total_count: 1, jobs: [] };
+      }
+      const result = await f.api(path, options);
+      if (mode === "workflow" && path.includes(`/contents/${WORKER}?`))
+        return { ...result, content: Buffer.from("unsupported worker").toString("base64") };
+      return result;
+    } });
+    assert.equal(health.status, "unknown");
+    assert.equal(health.fullCertification, null);
+    assert.deepEqual(health.reasons, [mode === "partial-jobs" ? "incomplete-pagination"
+      : mode === "workflow" ? "unsupported-workflow-contract" : "worker-history-incomplete"]);
+    if (mode === "workflow") assert.equal(jobReads, 0, "source binding must precede classification");
+  }
+});

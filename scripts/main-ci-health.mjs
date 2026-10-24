@@ -1,6 +1,7 @@
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
+import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 
 const SHA = /^[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -340,14 +341,20 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
           if (!bindings.every((binding) => source.includes(binding))) fail("unsupported-workflow-contract");
         }
       }
+      // A superseded first attempt is retained as explicit non-verdict evidence,
+      // even when a later full pass covers its target. Classify only after the
+      // identity/ancestry/workflow checks above and a complete exact-attempt listing.
+      const firstJobs = identity && run.run_attempt === 1
+        ? await pages(api, `${root}/actions/runs/${run.id}/attempts/1/jobs?filter=all`, "jobs") : null;
+      const firstNonVerdict = firstJobs && isSupersededWorkerAttempt(run, firstJobs);
       let covered = false;
       for (const pass of records.filter((record) => record.certification === "full" &&
-        !records.some((other) => other.targetSha === record.targetSha && (other.runId > record.runId ||
+        !records.some((other) => other.result !== "non-verdict" && other.targetSha === record.targetSha && (other.runId > record.runId ||
           other.runId === record.runId && other.attempt > record.attempt)))) {
         if (targetSha !== pass.targetSha && await ancestor(targetSha, pass.targetSha) &&
             Object.entries(blobs).every(([key, value]) => pass.workflowBlobs[key] === value)) { covered = true; break; }
       }
-      if (covered) { supersededRunIds.push(run.id); return; }
+      if (covered && !firstNonVerdict) { supersededRunIds.push(run.id); return; }
       inspected.push(run);
       if (!positive(run.run_attempt) || run.run_attempt > 10) fail("attempt-limit");
       for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
@@ -358,7 +365,8 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
             (identity ? workerIdentity(snapshot, repository)?.targetSha !== targetSha ||
               workerIdentity(snapshot, repository)?.claimId !== identity.claimId : !isMainPushRun(snapshot, repository)))
           fail("attempt-changed");
-        const jobs = await pages(api, `${root}/actions/runs/${run.id}/attempts/${attempt}/jobs?filter=all`, "jobs");
+        const jobs = firstJobs ?? await pages(api, `${root}/actions/runs/${run.id}/attempts/${attempt}/jobs?filter=all`, "jobs");
+        const nonVerdict = Boolean(identity && run.run_attempt === 1 && isSupersededWorkerAttempt(snapshot, jobs));
         const prefix = identity ? "Full Validation / " : "";
         const inventory = requiredNames.map((name) => {
           name = prefix + name;
@@ -391,7 +399,9 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
           workflowBlobs: blobs, suiteVersion: createHash("sha256").update(JSON.stringify(blobs)).digest("hex"),
           suiteRevision: targetSha, coverageVersion: identity ? FULL_COVERAGE : "legacy-unverified",
           workflowAncestryVerified: true, targetAncestryVerified: true, checkoutVerified,
-          certification: fullSuccess ? "full" : "none", inventory, result: fullSuccess ? "passing" : failure ? "failing"
+          certification: fullSuccess && !nonVerdict ? "full" : "none", inventory,
+          ...(nonVerdict ? { nonVerdictReason: "superseded-worker-attempt" } : {}),
+          result: nonVerdict ? "non-verdict" : fullSuccess ? "passing" : failure ? "failing"
             : ACTIVE.has(snapshot.status) ? "pending" : "unknown", status: snapshot.status,
           observedAt, createdAt: snapshot.created_at, startedAt: snapshot.run_started_at ?? null,
           completedAt: snapshot.status === "completed" && timestamp(snapshot.updated_at) ? snapshot.updated_at : null };
@@ -414,7 +424,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     for (const candidate of seeds.workflow_runs.slice(0, 8)) {
       await inspect(candidate);
       if (records.some((record) => record.certification === "full" && !records.some((other) =>
-        other.targetSha === record.targetSha && (other.runId > record.runId || other.runId === record.runId && other.attempt > record.attempt)))) break;
+        other.result !== "non-verdict" && other.targetSha === record.targetSha && (other.runId > record.runId || other.runId === record.runId && other.attempt > record.attempt)))) break;
     }
     for (const id of pointers.slice(0, 1)) {
       if (!positive(id)) fail("invalid-pointer");
@@ -425,7 +435,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       if (hinted) await inspect(hinted, false, hinted);
     }
     const possible = records.filter((record) => record.certification === "full" &&
-      !records.some((other) => other.targetSha === record.targetSha && (other.runId > record.runId ||
+      !records.some((other) => other.result !== "non-verdict" && other.targetSha === record.targetSha && (other.runId > record.runId ||
         other.runId === record.runId && other.attempt > record.attempt)));
     possible.sort((a, b) => positions.get(a.targetSha) - positions.get(b.targetSha));
     const baseline = checkpointDisabled ? null : possible[0];
@@ -519,7 +529,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     for (const run of candidates) await inspect(run, true);
     health.evidence = records; health.legacyEvidence = legacyRecords; health.supersededRunIds = supersededRunIds;
     const rank = async (items) => [...items].sort((a, b) => positions.get(a.targetSha) - positions.get(b.targetSha) || b.runId - a.runId || b.attempt - a.attempt);
-    const ordered = await rank(records);
+    const ordered = await rank(records.filter((record) => record.result !== "non-verdict"));
     health.latestAttempt = ordered[0] ?? null;
     const newestForTarget = new Map();
     for (const record of ordered) if (!newestForTarget.has(record.targetSha)) newestForTarget.set(record.targetSha, record);
@@ -539,7 +549,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     }
     health.latestPassingSnapshot = passes[0] ?? null;
     health.resolvedRunIds = [...new Set(supersededRunIds)];
-    for (const record of [...records, ...legacyRecords]) {
+    for (const record of [...records, ...legacyRecords].filter((record) => record.result !== "non-verdict")) {
       for (const pass of passes) if (await ancestor(record.targetSha, pass.targetSha) &&
         (record.targetSha !== pass.targetSha || pass.runId > record.runId || pass.runId === record.runId && pass.attempt >= record.attempt)) {
         health.resolvedRunIds.push(record.runId); break;
