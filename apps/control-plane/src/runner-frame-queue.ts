@@ -9,6 +9,7 @@ import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 const INVENTORY_BYPASS_TYPES = new Set([
   "heartbeat", "agent_control_credential", "policy_hook_credential",
   "policy_hook_decision_recorded", "workflow_action_admission_recorded", "workflow_action_reconciliation_result",
+  "gitlab_merge_preflight_result",
   "git_result", "session_history_result", "session_history_page_result", "reprocess_session_result",
   "list_external_sessions_result", "adopt_session_result", "list_directory_result", "list_session_files_result",
   "read_session_file_result", "search_workspace_references_result", "create_workspace_reference_result",

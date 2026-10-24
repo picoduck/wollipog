@@ -8,9 +8,10 @@ import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaig
 import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
+import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -295,6 +296,7 @@ import {
   worktreeHead,
   mergedWorktreePullRequestForBranch,
   worktreePullRequestState,
+  changeRequestProvider,
   worktreeDiff,
   WorktreeCleanupJournal,
   type WorktreeCleanupRecord,
@@ -996,6 +998,22 @@ const RETAINED_REF_RECLAIM_BATCH_SIZE = 8;
 const WORKTREE_PR_DISCOVERY_CANDIDATES_PER_RECONCILIATION = 8;
 const WORKTREE_PR_DISCOVERY_CONCURRENCY = 4;
 const WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS = 30 * 60 * 1_000;
+
+/** How a typed merge's forge proof reads its change request: `gh` or `glab` from the URL, and for
+ * GitLab the child agent's own environment, so the proof uses the login that ran the merge (#3602).
+ * GitHub reads keep the runner's environment, as before. */
+export function forgeProofOptions(
+  meta: SessionMeta,
+  url: string,
+  agentEnv?: (meta: SessionMeta) => Record<string, string>,
+): { context: AgentContext; provider: ReturnType<typeof changeRequestProvider>; env?: Record<string, string> } {
+  const provider = changeRequestProvider(url);
+  return {
+    context: meta.context,
+    provider,
+    ...(provider === "gitlab" && agentEnv ? { env: agentEnv(meta) } : {}),
+  };
+}
 
 /** The only linkage shape that may stand in for a vanished upstream during safe cleanup: a
  * terminal merged state carrying a forge-verified head OID. Anything else — an open or closed
@@ -18150,6 +18168,28 @@ export class SessionManager {
       meta.executionTarget?.workspaceStrategy === "worktree", this.executionIsolation);
   }
 
+  /** v236 (#3602): check a GitLab `pr_merge` snapshot against GitLab through the child session's
+   * own `glab` login and context before the control plane arms it. Read-only; a refusal is a fixed
+   * sentence, never `glab` output. */
+  async gitlabMergePreflight(
+    message: GitLabMergePreflightMessage,
+    options: { glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<GitLabMergePreflightResultMessage> {
+    const base = { type: "gitlab_merge_preflight_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    const cwd = meta ? meta.worktreePath ?? meta.repoPath : null;
+    if (!meta || !cwd) {
+      return { ...base, ok: false, refusal: "unavailable", reason: "The session has no repository on this runner to check from." };
+    }
+    try {
+      const result = await gitlabMergePreflight(message,
+        options.glab ?? contextGlabRunner(meta.context, cwd, options.agentEnv?.(meta) ?? {}));
+      return result.ok ? { ...base, ok: true } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
+    } catch {
+      return { ...base, ok: false, refusal: "unavailable", reason: "GitLab could not be checked." };
+    }
+  }
+
   /** Read-only GitHub status of the pull requests a campaign's work items name (#2417 slice 8),
    * through this runner's `gh` login in the root Orchestrator's repository context, and GitLab
    * merge requests through its `glab` login when the control plane asks for them (#3600). Only
@@ -18301,6 +18341,9 @@ export class SessionManager {
     sessionId: string,
     value: unknown,
     protocolVersion?: number | null,
+    /** The child agent's runner-local environment, so a GitLab proof reads with the same glab login
+     * that ran the merge (#3602). GitHub reads keep the runner's own environment. */
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<{
     accepted: boolean;
     occurrenceId: string;
@@ -18355,7 +18398,7 @@ export class SessionManager {
         forge = await this.resolveWorktreePullRequestState(
           root,
           pullRequestUrl,
-          { context: claudeMeta.context, provider: "github" },
+          forgeProofOptions(claudeMeta, pullRequestUrl, options.agentEnv),
         );
         if (forge) break;
       }
@@ -18482,7 +18525,7 @@ export class SessionManager {
     const forge = await this.resolveWorktreePullRequestState(
       meta.worktreePath ?? meta.repoPath,
       raw.pullRequestUrl as string,
-      { context: meta.context, provider: "github" },
+      forgeProofOptions(meta, raw.pullRequestUrl as string, options.agentEnv),
     );
     if (forge?.state !== "merged" || forge.headOid?.toLowerCase() !== raw.expectedHeadSha) {
       return fail(occurrenceId, "forge did not prove the exact approved head was merged");
