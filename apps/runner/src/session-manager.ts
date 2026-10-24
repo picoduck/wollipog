@@ -9104,10 +9104,12 @@ export class SessionManager {
         return false;
       }
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver construction failed", launchGeneration);
-      this.emitEvent(sessionId, { kind: "error", message: `agent process could not be created: ${errText(error)}` });
-      this.emitStatus(sessionId, "failed", errText(error));
-      // Only the driver's own lease acquisition can refuse with a lease code here.
+      // Only the driver's own lease acquisition can refuse with a lease code here. Keep the
+      // established prefix: older web clients use it to recognize account failures in transcripts.
       const refusal = !driverConstructionStarted ? providerHomeLaunchRefusal(error, meta) : undefined;
+      const prefix = refusal ? "provider account unavailable" : "agent process could not be created";
+      this.emitEvent(sessionId, { kind: "error", message: `${prefix}: ${errText(error)}` });
+      this.emitStatus(sessionId, "failed", errText(error));
       if (refusal) this.recordProviderHomeRefusal(sessionId, refusal);
       return false;
     }

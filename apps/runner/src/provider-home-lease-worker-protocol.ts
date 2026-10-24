@@ -70,13 +70,13 @@ export interface LeaseWorkerInspection {
 }
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
-  holder_alive: "Provider HOME's recorded runner is still alive; ownership is retained while that runner is alive. Preserve the lease journal.",
-  boundary_survivor: "A provider or helper, including a detached provider review controller, survives in the recorded provider-HOME boundary; ownership is retained until the recorded boundary is empty. Wait for that work to finish before retrying. Preserve the boundary and journal.",
-  process_survivor: "A process launched by the recorded provider-HOME runner survives; ownership is retained until its process boundary is empty and every potentially related process is inspectable. Preserve the lease journal.",
-  boundary_unverifiable: "Provider HOME's recorded cgroup path and inode could not be verified, or its recorded enclosing delegated unit has not retired. Preserve the boundary and journal. Lifecycle proof does not cover deliberate same-user cgroup migration by provider code.",
-  process_uninspectable: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable (legacy lease or unavailable containment); every potentially related process must be inspectable. Launch future runners in a delegated Linux cgroup v2 unit; preserve the journal.",
-  process_uninspectable_not_delegated: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable because the runner's systemd unit is not delegated. An operator must launch future runners in a Delegate=yes unit; existing leases still require the process scan. Preserve the journal.",
-  invalid_journal: "Provider HOME's lease journal is invalid or cannot be verified; preserve all records and restore inspectability before retrying. Do not remove individual records.",
+  holder_alive: "Another Wollipog runner is using this account. Wait for its work to finish, then try again, or choose another account.",
+  boundary_survivor: "A program from an earlier session is still using this account. Wait for that work to finish, then try again, or choose another account.",
+  process_survivor: "A program started by an earlier Wollipog runner is still using this account. Wait for that work to finish, then try again, or choose another account.",
+  boundary_unverifiable: "Wollipog can't confirm that an earlier session has finished using this account. Choose another account for now, or ask the person who manages this machine to check it.",
+  process_uninspectable: "Wollipog can't check whether another program is still using this account. Choose another account for now, or save your work and restart the machine before trying again.",
+  process_uninspectable_not_delegated: "Wollipog can't safely unlock this account because it can't check a running program. Choose another account for now, or save your work and restart the machine before trying again.",
+  invalid_journal: "Wollipog can't read or verify this account's recovery records. Choose another account and ask the person who manages this machine to check the recovery details.",
   busy: "Provider HOME is already in use; retry after the current owner or publication finishes.",
   unavailable: "Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
   foreign_owner: "Provider HOME has a stale lease from another runner or control plane whose recorded process has exited; Wollipog does not take over another owner's lease automatically. Use a separate provider account HOME for this runner, or quarantine the entire provider-home-leases-v1 directory only after proving no provider process or runner uses this HOME, and do not remove individual records.",
@@ -85,13 +85,13 @@ export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   cancelled: "Provider-HOME lease acquisition was cancelled.",
   cancel_release_failed: "Cancelled provider-HOME acquisition could not be exactly released; preserve all evidence and restart only after proving the HOME unused.",
   expired: "Provider-HOME lease operation exceeded its finite deadline; preserve all evidence.",
-  profile_unsupported_control_plane: "This provider profile needs a newer control plane. Update the control plane, then retry.",
+  profile_unsupported_control_plane: "This version of Wollipog can't approve access to this account. Update the Wollipog server, then try again.",
   profile_unverifiable: "This provider profile's identity marker is unreadable or uses a newer format, so it was not used. Update the runner, or ask an Owner or Admin to check the profile.",
   profile_not_granted: "This provider profile is not granted to this control plane. An Owner or Admin must grant access on this Machine before it can be used.",
   profile_changed: "This provider HOME no longer holds the profile that this account or session recorded, so it was not used. Restore the original directory or adopt the replacement explicitly.",
-  profile_grant_limit: "This provider profile already records the maximum number of control-plane grants. Revoke an unused grant before granting another control plane.",
+  profile_grant_limit: "Too many Wollipog servers already have access to this account. An Owner or Admin needs to remove an unused server's access before adding this one.",
   stale_tip_changed: "This provider HOME's lease is no longer the stale lease that was authorized for recovery. Inspect it again before authorizing a recovery.",
-  no_reboot_proof: "This stale provider HOME lease was written during the current boot and records no process evidence, so it can be recovered only after the host restarts.",
+  no_reboot_proof: "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.",
   recovery_unconfirmed: "The provider HOME lease recovery may have been recorded but could not be confirmed. Inspect the lease again before retrying.",
 };
 /** A worker refusal with its typed code, so callers can choose a recovery action without parsing text. */

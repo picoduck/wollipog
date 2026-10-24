@@ -13,6 +13,7 @@ import { statusMeta } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { activeSessionConflict } from "./active-session-conflict.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
+import { Modal } from "./common.js";
 import { AddProviderAccountDialog, providerLoginRunning, providerName } from "./AddProviderAccountDialog.js";
 import { MoreHorizontalIcon, SignInIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
@@ -40,23 +41,23 @@ const ADOPTION_FAILED_DEFAULT = "The provider profile could not be adopted.";
 /** Why a stale lease cannot be recovered (#3241), as the disabled menu item's reason and the
  * refusal notice. */
 export const LEASE_RECOVERY_REFUSALS: Readonly<Record<string, string>> = {
-  TIP_CHANGED: "The lease changed after it was checked. Reopen this machine to check it again.",
-  NO_REBOOT_PROOF: "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.",
-  HOME_IN_USE: "The runner that holds this lease, or a process it started, is still running.",
-  FOREIGN_HOST: "This lease belongs to a runner on another host.",
+  TIP_CHANGED: "The account lock changed after it was checked. Reopen this machine to check it again.",
+  NO_REBOOT_PROOF: "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.",
+  HOME_IN_USE: "Another runner or a program it started is still using this account. Wait for its work to finish, then try again.",
+  FOREIGN_HOST: "This account is locked by a runner on another machine. Use another account on this machine.",
   PROFILE_REFUSED: "This account's provider profile does not grant this control plane access.",
-  UNSUPPORTED_HOME: "This account's HOME has no lease that can be recovered here.",
-  UNVERIFIABLE: "The lease could not be verified, so it was left unchanged.",
+  UNSUPPORTED_HOME: "This account has no lock that can be recovered here.",
+  UNVERIFIABLE: "Wollipog could not check whether this account is still in use. Choose another account and ask the person who manages this machine to check it.",
 };
 
 /** This response comes only from the Owner/Admin inspection route. */
 export function providerHomeLeaseDescription(lease: ProviderHomeLeaseInspection): string | undefined {
   const guidance = lease.cause ? providerHomeRecoveryCauseCopy(lease.cause, "this account").body
     : lease.refusal ? LEASE_RECOVERY_REFUSALS[lease.refusal] ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE : undefined;
-  return guidance ? guidance + (lease.blockingProcess ? ` ${providerHomeBlockingProcessCopy(lease.blockingProcess)}` : "") : undefined;
+  return guidance;
 }
 
-/** The sentence-case message for a failed Adopt as Profile, Revoke Access or Recover Lease request. */
+/** The sentence-case message for a failed Adopt as Profile, Revoke Access or Recover Account request. */
 export function providerProfileErrorMessage(cause: unknown, action: "adopt" | "revoke" | "recover"): string {
   if (!(cause instanceof ApiError)) return cause instanceof Error ? cause.message : String(cause);
   if (action === "recover") {
@@ -294,6 +295,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const headingId = `provider-accounts-${useId().replace(/:/g, "")}`;
   const offlineId = `${headingId}-offline`;
   const [adding, setAdding] = useState(false);
+  const [recoveryDetails, setRecoveryDetails] = useState<{ runnerId: string; accountId: string } | null>(null);
   const [busy, setBusy] = useState<Readonly<Record<string, BusyAction>>>({});
   const [notice, setNotice] = useState<SectionNotice | null>(null);
   const supported = runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
@@ -308,11 +310,13 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   // Stale lease recovery (#3241): an Owner or Admin sees each account's lease on an online v229 machine.
   const leaseActions = canManageProfiles && canManage && online && runnerSupportsProtocol(runner.protocolVersion, "providerHomeLeaseRecovery");
   const [leases, setLeases] = useState<Readonly<Record<string, ProviderHomeLeaseInspection>>>({});
+  const detailsAccount = recoveryDetails?.runnerId === runner.runnerId ? accounts.find(account => account.id === recoveryDetails.accountId) : undefined;
+  const detailsLease = detailsAccount ? leases[detailsAccount.id] : undefined;
   const accountKey = accounts.map((account) => account.id).join("\n");
   const inspectLease = (accountId: string, isCurrent: () => boolean = () => true) =>
     api.inspectProviderHomeLease(runner.runnerId, accountId).then(
       (inspection) => { if (isCurrent()) setLeases((current) => ({ ...current, [accountId]: inspection })); },
-      // A failed inspection shows nothing: Recover Lease is offered only for a known stale lease.
+      // A failed inspection shows nothing: Recover Account is offered only for a known stale lease.
       () => { if (isCurrent()) setLeases(({ [accountId]: _dropped, ...rest }) => rest); },
     );
   useEffect(() => {
@@ -465,14 +469,13 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
 
   const recover = async (account: ProviderAccountDefinition, lease: ProviderHomeLeaseInspection, reopen: () => void) => {
     const recorded = lease.createdAt ? new Date(lease.createdAt) : null;
-    const when = recorded && !Number.isNaN(recorded.getTime()) ? `Lease recorded ${recorded.toLocaleString()}` : undefined;
+    const when = recorded && !Number.isNaN(recorded.getTime()) ? `Locked since ${recorded.toLocaleString()}` : undefined;
     const approved = await confirm({
-      title: "Recover Lease",
-      message: "Another runner left this account's HOME leased and no longer holds it. Recovering hands the HOME back to this machine " +
-        "once it confirms that runner and every process it started have stopped, or that the machine restarted since.",
+      title: "Recover Account",
+      message: "An earlier Wollipog runner left this account locked. Wollipog will unlock it only after checking that no earlier session is still using it.",
       // The record's time is a row of its own, so neither it nor the account's label is truncated.
       detailRows: [...accountRows(account), ...(when ? [{ label: when }] : [])],
-      confirmLabel: "Recover Lease",
+      confirmLabel: "Recover Account",
       tone: "danger",
       back: backToMenu(reopen),
     });
@@ -480,7 +483,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     await runProfileAction(account, "recover", async () => {
       try {
         await api.recoverProviderHomeLease(runner.runnerId, account.id, lease.tipHash!);
-        showToast("Lease recovered.", { tone: "success" });
+        showToast("Account unlocked.", { tone: "success" });
       } finally {
         void inspectLease(account.id);
       }
@@ -504,9 +507,13 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     }
     const lease = leases[account.id];
     if (leaseActions && lease?.state === "stale") {
+      if (lease.cause || lease.blockingProcess) items.push({
+        label: "View Recovery Details…",
+        onClick: () => setRecoveryDetails({ runnerId: runner.runnerId, accountId: account.id }),
+      });
       const refusal = providerHomeLeaseDescription(lease);
       items.push({
-        label: "Recover Lease…",
+        label: "Recover Account…",
         danger: true,
         ...(refusal ? { disabled: true, description: refusal } : {}),
         onClick: (reopen) => void recover(account, lease, reopen),
@@ -587,8 +594,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
                 provider={account.provider}
                 profile={account.profile ? PROFILE_ACCESS[account.profile.access] : undefined}
                 lease={leaseActions && leases[account.id]?.state === "stale" ? {
-                  label: "Stale Lease",
-                  title: providerHomeLeaseDescription(leases[account.id]!),
+                  label: "Recovery Needed",
+                  title: providerHomeLeaseDescription(leases[account.id]!) ?? "An earlier Wollipog runner left this account locked. Choose Recover Account in its menu to try unlocking it.",
                 } : undefined}
                 status={status}
                 actions={canManage && (
@@ -631,6 +638,17 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
             );
           })}
         </div>
+      )}
+      {leaseActions && detailsAccount && detailsLease && (
+        <Modal title="Account Recovery Details" description={masked(detailsAccount.label)} size="sm"
+          onClose={() => setRecoveryDetails(null)}
+          footer={<button type="button" className="btn" onClick={() => setRecoveryDetails(null)}>Close</button>}>
+          <p>{providerHomeLeaseDescription(detailsLease)}</p>
+          <p className="muted">Technical information for the person who manages this machine:</p>
+          <p>Recovery Code: <code>{detailsLease.cause ?? detailsLease.refusal ?? "unknown"}</code></p>
+          {detailsLease.blockingProcess && <p>{providerHomeBlockingProcessCopy(detailsLease.blockingProcess)}</p>}
+          <p>Keep the account's files and lease journal intact. Do not stop unrelated programs to bypass this check.</p>
+        </Modal>
       )}
       {adding && (
         <AddProviderAccountDialog
