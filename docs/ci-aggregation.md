@@ -3,12 +3,15 @@
 `Typecheck, Test & Sidecar Bundle` is the protected required context in
 `.github/workflows/ci.yml`. Its `check` job waits for `checks`, `browser`, the
 `win32` reusable workflow, `webkit`, and the optional PR `suite_plan`. The four
-work results must be `success`. With the default-off routing switch disabled,
+work results must be `success`. With the routing variable absent or ordinarily off,
 the plan must be `skipped` with no output; an activated PR requires a successful
 plan with an explicit `full` or `fast` output. Failure, cancellation, missing or
 unknown output and unexpected skipping produce a failing shell exit with a named
 diagnostic. [The exact proposed assurance contract](ci-pr-assurance.md) requires
 separate human activation approval; merging its machinery activates nothing.
+GitHub's case-insensitive expression matching admits a plan for case variants of
+`enabled`, but exact raw shell checks force those variants to full and reject a
+fast aggregate. The absent/ordinary off state still adds no executed jobs.
 
 Full coverage remains five browser shards on every event while routing is off,
 and always on merge groups, main, manual dispatch and reusable rolling validation.

@@ -31,7 +31,9 @@ have queue-entry-to-merge p50 **110.73 min**, p90 **310.67 min**, maximum
 **336.48 min**. This excludes ejected/unmerged attempts and is distinct from
 merge-group CI creation-to-required-result latency.
 
-Reproduce the cohort table directly:
+Recompute overall outcome counts with the CLI (its latency columns include all
+measured outcome classes; the passing-only columns above use
+`eventSummary(...).cohorts[].byState.passing.measures`):
 
 ```sh
 node scripts/merge-queue-wait-report.mjs --input docs/ci-baseline-2026-10-22.json
@@ -43,8 +45,9 @@ records, so it cannot certify the fast subset or isolate routing's causal effect
 Retain suite/workflow/tested identities and workload/capacity changes in later
 comparisons. Do not mix outcome classes or average daily percentiles.
 
-The [proposed contract](ci-pr-assurance.md) remains inactive. Disabled routing adds
-zero executed jobs. Proposed fast routing removes four Chromium jobs and adds one
+The [proposed contract](ci-pr-assurance.md) remains inactive. Absent/ordinary off
+routing adds zero executed jobs (case variants of `enabled` add one full-fallback
+planning job). Proposed fast routing removes four Chromium jobs and adds one
 routing job, net **three fewer jobs**. Actual standalone fast runner minutes,
 critical-path latency, plan overhead, queue effect and cancellation changes are
 **unmeasured**. The existing #3629 local/profile measurements are contextual

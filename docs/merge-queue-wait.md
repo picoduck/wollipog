@@ -42,6 +42,9 @@ and maximum for:
   the settings-rows comparison) follows the last job of the same call to finish
   before it was created. Activated PR checks/browser may also depend on the optional
   `PR Suite Routing` job; its execution is counted as execution, not queue wait.
+  A skipped routing job with known creation/completion timestamps is a zero-execution
+  dependency anchor, so its scheduling delay is retained without inventing runner time.
+  Missing or ambiguous anchor timestamps leave the split unmeasured.
   The advisory suite shadow is never a required dependency. A run with a job created
   late for any other reason is counted as unmeasured rather than guessed.
 - **Critical path waiting:** the rest of the time to the required result.

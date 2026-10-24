@@ -37,7 +37,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'pull_request' }}
 
 jobs:
-  # Opt-in only. With the variable absent/off, this consumes no runner and all work stays full.
+  # Opt-in only. Absent/ordinary off values consume no runner. Case variants admit this job,
+  # but the exact shell check below forces full coverage; only lowercase enabled permits fast.
   # Non-PR events never enter selection, including merge groups and rolling validation.
   suite_plan:
     if: github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
@@ -59,12 +60,17 @@ jobs:
       - name: Compute Trusted PR Route
         id: plan
         env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           TESTED_SHA: ${{ github.sha }}
           CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           # A fetch/selector error explicitly chooses full. Setup/job failures remain failures.
-          if git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA" && test -f scripts/ci-pr-routing.mjs; then
+          # GitHub expression equality ignores case; only this exact shell match permits fast.
+          if [ "$ROUTING_SWITCH" != enabled ]; then
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'Routing switch is not exactly enabled; full coverage required.'
+          elif git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA" && test -f scripts/ci-pr-routing.mjs; then
             node scripts/ci-pr-routing.mjs
           else
             echo 'mode=full' >> "$GITHUB_OUTPUT"
@@ -283,9 +289,10 @@ jobs:
 
       - name: Unit Tests
         env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
-          if [ "$PR_FAST" = true ]; then
+          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
             node scripts/test-suites.mjs --node-only --groups node-fast --ci
           else
             pnpm test:ci
@@ -485,9 +492,10 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/synthetic-browser-report.json
           SYNTHETIC_ARTIFACT_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' || 'false' }}
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
-          if [ "$PR_FAST" = true ]; then
+          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
             pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
           else
             pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}
@@ -845,6 +853,7 @@ jobs:
     steps:
       - name: Require Every Job to Have Succeeded
         env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && 'true' || 'false' }}
           PLAN_RESULT: ${{ needs.suite_plan.result }}
           PLAN_MODE: ${{ needs.suite_plan.outputs.mode }}
@@ -864,7 +873,10 @@ jobs:
           if [ "$ROUTING_ENABLED" = true ]; then
             report "PR Suite Routing" "$PLAN_RESULT"
             case "$PLAN_MODE" in
-              full|fast) ;;
+              full) ;;
+              fast) if [ "$ROUTING_SWITCH" != enabled ]; then
+                echo '::error::Fast routing requires the exact lowercase enabled switch'; status=1
+              fi ;;
               *) echo "::error::PR Suite Routing returned missing or unknown mode '$PLAN_MODE'"; status=1 ;;
             esac
           elif [ "$ROUTING_ENABLED" != false ] || [ "$PLAN_RESULT" != skipped ] || [ -n "$PLAN_MODE" ]; then

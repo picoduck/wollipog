@@ -7,6 +7,13 @@ misspelled and all other values mean off. The implementation agent must not
 create, set or change this variable, including for live tests. Activation is a
 human policy decision, separate from implementation/merge approval.
 
+GitHub expression equality is case-insensitive. `Enabled`, `ENABLED` and other
+case variants therefore admit one short planning job, but a case-sensitive raw
+shell check returns **full** before invoking the selector. The work shells and
+aggregate also enforce the exact lowercase value before fast coverage can pass.
+This is an overhead exception only: case variants never activate reduced
+assurance. Missing/ordinary off values and every non-PR event add no executed job.
+
 ## Exact Required-Context Contract
 
 The workflow remains `CI` at `.github/workflows/ci.yml`. The single protected
@@ -75,8 +82,10 @@ context, deleted/renamed paths, security/approval/persistence/runner changes,
 cross-package edits and unknown paths all retain full coverage. The aggregator
 rejects an active plan's missing/unknown output even if every work job succeeds.
 
-With routing off or on a non-PR event, the plan must be explicitly `skipped` with
-no output. Any other result is rejected. This is the one newly expected job skip;
+With a missing/ordinary off value or on a non-PR event, the plan must be explicitly
+`skipped` with no output. Case variants require successful planning and explicit
+`full` output; `fast` is rejected by the raw shell check. Any other result is
+rejected. This is the one newly expected job skip;
 work-job skips remain errors. With routing enabled, plan and all four existing
 work-job results must be `success`. Failed, missing, cancelled, unexpectedly
 skipped and unknown results cannot pass. Selection is a two-mode fixed command
@@ -106,10 +115,16 @@ The existing synthetic-artifact probe remains opt-in, default false, and full.
 Do not dispatch extra runs for measurement or during a prohibited CI window.
 
 **Rollback:** the authorized human/operator deletes `CI_PR_SUITE_ROUTING` or sets
-it to any value other than exactly `enabled`. New events and subsequent attempts
-return to full PR work. Do not infer what an in-flight run saw during a variable
-change: inspect its plan/work evidence, and require a subsequent full run if
-assurance is uncertain. No workflow/ruleset/check-name migration is needed.
+it to any value other than exactly `enabled`. Start a **new PR CI run**, for example
+with a new push, to establish full rollback coverage. Re-running failed jobs
+retains the earlier successful plan/output and selected matrix. It cannot expand
+a prior one-job fast matrix into five full shards; the aggregate rejects this
+stale plan after rollback rather than passing partial coverage. A re-run-all-jobs
+attempt counts as full evidence only after verifying a skipped plan, all five
+full Chromium shards and the full Node command. If expansion is retained, use a
+new PR event. Do not infer what an in-flight run saw during a variable change.
+No workflow/ruleset/check-name migration is needed. Normal reruns under an
+unchanged switch retain the existing workflow behavior.
 
 Before activation, put this exact assurance contract in the implementing PR,
 request the campaign's typed `implementation_question`, and obtain the human's
@@ -119,12 +134,13 @@ before an authorized operator changes it. Read the variable back afterward.
 
 ## Job Count and Runner-Minute Accounting
 
-Disabled routing adds **zero executed jobs**: the optional plan is skipped; the
+Missing/ordinary off routing adds **zero executed jobs**: the optional plan is skipped; the
 existing full work jobs and advisory shadow are unchanged. A full PR has five
 Chromium jobs. An activated fast PR replaces these with one and adds one routing
 job: **net three fewer executed jobs** (four browser jobs removed, one plan added).
 An activated full-fallback PR adds one routing job, with no removed work jobs.
-Merge groups/main/manual/reusable validation add zero executed jobs.
+Case-variant off values add one planning job but remove no full work. Merge
+groups/main/manual/reusable validation add zero executed jobs for every value.
 
 The plan's five-minute timeout bounds its execution after runner admission;
 checkout/network/setup failure still blocks the active PR. Its actual elapsed

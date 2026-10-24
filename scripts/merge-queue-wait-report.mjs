@@ -93,7 +93,13 @@ export function runMetrics(run, jobs) {
   const work = executed.filter((job) => job !== aggregator);
   const waits = executed.map((job) => minutes(job.created_at, job.started_at)).filter((value) => value !== null);
   const requiredMinutes = aggregator ? minutes(run.created_at, aggregator.completed_at) : null;
-  const path = aggregator ? criticalPath(run, aggregator, work) : null;
+  // Disabled routing is a real dependency despite consuming no runner. Its known completion
+  // anchors delayed work creation. Do not interpret skipped-job API start placeholders as
+  // execution: a skipped anchor contributes exactly zero, and missing times stay unmeasured.
+  const skippedRouting = jobs.filter((job) => job.name === "PR Suite Routing" && job.conclusion === "skipped" &&
+    minutes(job.created_at, job.completed_at) !== null);
+  const anchors = skippedRouting.length === 1 ? skippedRouting.map((job) => ({ ...job, started_at: job.completed_at })) : [];
+  const path = aggregator ? criticalPath(run, aggregator, [...work, ...anchors]) : null;
   const executionMinutes = path ? path.reduce((sum, job) => sum + minutes(job.started_at, job.completed_at), 0) : null;
   return {
     id: run.id,
@@ -268,7 +274,8 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const missing = projected.filter((job) => job.state !== "skipped" && job.executionMinutes === null).length;
   const shards = projected.filter((job) => /^Browser End-to-End Tests \([1-5]\)$/.test(job.name));
   const shardTimes = shards.map((job) => job.executionMinutes).filter(Number.isFinite);
-  const split = runMetrics(run, jobs.filter(jobHasStarted));
+  const split = runMetrics(run, jobs.filter((job) => jobHasStarted(job) ||
+    job.name === "PR Suite Routing" && job.conclusion === "skipped"));
   return {
     repository, event: run.event, sha: run.head_sha ?? null,
     testedSha: run.event === "pull_request" ? null : run.head_sha ?? null,

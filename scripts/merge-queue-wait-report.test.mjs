@@ -108,6 +108,30 @@ test("routing is sequential execution and advisory shadow work cannot become a r
   assert.equal(nested.criticalExecutionMinutes, 14, "Windows remains independent of routing");
 });
 
+test("skipped routing anchors delayed full work without counting its API start placeholder as execution", () => {
+  const work = [job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
+    job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)];
+  for (const placeholder of [null, 0, 1]) {
+    const metrics = runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, placeholder, 1, "skipped"), ...work]);
+    assert.equal(metrics.criticalExecutionMinutes, 13, "12 browser + 1 aggregate; skipped plan executes nothing");
+    assert.equal(metrics.criticalWaitMinutes, 3);
+    assert.equal(metrics.longestExecutionMinutes, 12);
+  }
+  assert.equal(runMetrics(run(10, 1, 16), work).criticalExecutionMinutes, null, "do not guess a missing anchor");
+  assert.equal(runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, null, null, "skipped"), ...work])
+    .criticalExecutionMinutes, null, "missing skip completion stays unmeasured");
+  assert.equal(runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, 0, 1, "skipped"),
+    job("PR Suite Routing", 0, 0, 1, "skipped"), ...work]).criticalExecutionMinutes, null, "duplicate anchors are ambiguous");
+  const collected = attemptRecord(repository, run(10, 1, 16), [
+    { ...job("PR Suite Routing", 0, 0, 1, "skipped"), status: "completed", steps: [] },
+    ...work.map((item) => ({ ...item, status: "completed", steps: [{ name: "Executed Work", conclusion: "success",
+      started_at: item.started_at, completed_at: item.completed_at }] })),
+  ], {});
+  assert.equal(collected.metrics.criticalExecutionMinutes, 13, "attempt collection must preserve the skipped dependency");
+  assert.equal(collected.metrics.criticalWaitMinutes, 3);
+  assert.equal(collected.jobs[0].executionMinutes, null, "anchor is never charged runner minutes");
+});
+
 test("the assumed dependency structure matches the CI workflow files", () => {
   // Checks/browser wait for optional PR routing. Windows/WebKit stay independent, and only the
   // aggregator consumes all required work. The advisory shadow never supplies a required result.

@@ -276,9 +276,10 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
   const matrixExpression = "${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}";
   const routedRun = [
+    "          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}",
     `          PR_FAST: ${fastExpression}`,
     "        run: |",
-    '          if [ "$PR_FAST" = true ]; then',
+    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
     "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts",
     "          else",
     "            pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}",

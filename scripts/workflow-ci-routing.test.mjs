@@ -15,7 +15,12 @@ const shellOf = (text, name) => text.split(`      - name: ${name}\n`)[1].match(/
 function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize") {
   const context = { github: { event_name: event, event: { action, pull_request: { draft } } },
     vars: { CI_PR_SUITE_ROUTING: variable }, needs: { suite_plan: { outputs: { mode } } },
-    cancelled: () => cancelled, fromJSON: JSON.parse };
+    cancelled: () => cancelled, fromJSON: JSON.parse,
+    ghaEqual: (a, b) => typeof a === "string" && typeof b === "string" ? a.toUpperCase() === b.toUpperCase() : a == b };
+  // GitHub's documented ==/!= ignore string case. JS's native equality concealed a real
+  // activation-contract bug. This fixture models only the workflow's actual operands.
+  value = value.replace(/([A-Za-z_][\w.]*)\s*(==|!=)\s*('[^']*')/g,
+    (_, left, op, right) => `${op === "!=" ? "!" : ""}ghaEqual(${left}, ${right})`);
   return vm.runInNewContext(value.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), context, { timeout: 1000 });
 }
 const fast = expression(job("checks"), "PR_FAST");
@@ -23,12 +28,14 @@ const matrix = expression(job("browser"), "shard");
 const enabled = expression(job("check"), "ROUTING_ENABLED");
 const admission = expression(job("suite_plan"), "if");
 const states = ["success", "failure", "cancelled", "skipped", "", "unexpected"];
-const variables = ["", "false", "disabled", "Enabled", "true", "enabled ", "enabled"];
+const variables = ["", "false", "disabled", "Enabled", "ENABLED", "true", "enabled ", "enabled"];
 
-test("off and malformed switches preserve the full work set; non-PR events ignore every switch", () => {
+test("off switches preserve full work; case-variant plan admission cannot change non-PR coverage", () => {
+  assert.equal(evaluate("${{ vars.CI_PR_SUITE_ROUTING == 'enabled' }}", "pull_request", "Enabled"), true,
+    "the expression model must reproduce GitHub's case-insensitive equality");
   for (const event of ["pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call"]) {
     for (const variable of variables) for (const mode of ["", "full", "fast", "unknown"]) {
-      const active = event === "pull_request" && variable === "enabled";
+      const active = event === "pull_request" && variable.toLowerCase() === "enabled";
       assert.equal(evaluate(admission, event, variable, mode), active);
       assert.equal(evaluate(enabled, event, variable, mode), String(active));
       assert.equal(evaluate(fast, event, variable, mode), String(active && mode === "fast"));
@@ -48,19 +55,20 @@ test("off and malformed switches preserve the full work set; non-PR events ignor
 
 test("the actual aggregate requires an active plan's success and unambiguous output", () => {
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
-  for (const active of [false, true]) for (const plan of states) for (const mode of ["", "full", "fast", "affected", "unknown"]) {
+  for (const variable of variables) for (const plan of states) for (const mode of ["", "full", "fast", "affected", "unknown"]) {
     const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
-      ROUTING_ENABLED: String(active), PLAN_RESULT: plan, PLAN_MODE: mode,
+      ROUTING_SWITCH: variable, ROUTING_ENABLED: String(variable.toLowerCase() === "enabled"), PLAN_RESULT: plan, PLAN_MODE: mode,
       CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
     } });
     assert.ifError(run.error);
-    const pass = active ? plan === "success" && ["full", "fast"].includes(mode) : plan === "skipped" && mode === "";
-    assert.equal(run.status, pass ? 0 : 1, `${active}/${plan}/${mode}`);
+    const pass = variable.toLowerCase() === "enabled" ? plan === "success" && (mode === "full" || variable === "enabled" && mode === "fast")
+      : plan === "skipped" && mode === "";
+    assert.equal(run.status, pass ? 0 : 1, `${variable}/${plan}/${mode}`);
   }
   for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT"]) {
     for (const result of states.filter((state) => state !== "success")) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
-        ROUTING_ENABLED: "true", PLAN_RESULT: "success", PLAN_MODE: mode,
+        ROUTING_SWITCH: "enabled", ROUTING_ENABLED: "true", PLAN_RESULT: "success", PLAN_MODE: mode,
         CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", [key]: result,
       } });
       assert.ifError(run.error);
@@ -69,19 +77,37 @@ test("the actual aggregate requires an active plan's success and unambiguous out
   }
 });
 
+test("the actual plan shell checks exact casing before invoking Git or the selector", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "ci-plan-switch-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const shell = shellOf(job("suite_plan"), "Compute Trusted PR Route");
+  const stub = 'git() { echo "git-called"; }; node() { echo "node-called"; echo mode=fast >> "$GITHUB_OUTPUT"; };\n';
+  for (const raw of variables) {
+    const output = join(cwd, "output");
+    writeFileSync(output, "");
+    const run = spawnSync("bash", ["-e", "-c", stub + shell], { encoding: "utf8", timeout: 1000,
+      env: { ROUTING_SWITCH: raw, GITHUB_OUTPUT: output, TESTED_SHA: "fixture", CHANGE_HEAD_SHA: "fixture" } });
+    assert.ifError(run.error);
+    assert.equal(run.status, 0);
+    assert.equal(readFileSync(output, "utf8"), raw === "enabled" ? "mode=fast\n" : "mode=full\n");
+    assert.equal(run.stdout.includes("git-called"), raw === "enabled");
+    assert.equal(run.stdout.includes("node-called"), raw === "enabled");
+  }
+});
+
 test("both actual execution branches preserve commands, propagate errors and never accept author arguments", () => {
   const stub = 'pnpm() { printf "pnpm %s\\n" "$*"; return "$STUB_EXIT"; }; node() { printf "node %s\\n" "$*"; return "$STUB_EXIT"; };\n';
-  for (const isFast of [false, true]) for (const exit of [0, 7]) for (const [id, name] of [
+  for (const isFast of [false, true]) for (const raw of ["enabled", "Enabled", "ENABLED", ""]) for (const exit of [0, 7]) for (const [id, name] of [
     ["checks", "Unit Tests"], ["browser", "Remote-Instance Browser End-to-End Tests"],
   ]) {
     const shell = shellOf(job(id), name).replaceAll("${{ matrix.shard }}", "1");
     const run = spawnSync("bash", ["-e", "-c", stub + shell], { encoding: "utf8", timeout: 1000,
-      env: { PR_FAST: String(isFast), STUB_EXIT: String(exit) } });
+      env: { ROUTING_SWITCH: raw, PR_FAST: String(isFast), STUB_EXIT: String(exit) } });
     assert.ifError(run.error);
     assert.equal(run.status, exit);
-    if (id === "checks") assert.equal(run.stdout.trim(), isFast
+    if (id === "checks") assert.equal(run.stdout.trim(), isFast && raw === "enabled"
       ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci" : "pnpm test:ci");
-    else assert.equal(run.stdout.trim(), isFast
+    else assert.equal(run.stdout.trim(), isFast && raw === "enabled"
       ? "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
       : "pnpm test:e2e --config playwright.ci.config.ts --project=shard-1");
   }
