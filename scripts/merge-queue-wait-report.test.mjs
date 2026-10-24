@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   applyTimingContext, attemptRecord, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
-  AGGREGATOR, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
+  AGGREGATOR, compareReports, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
 } from "./merge-queue-wait-report.mjs";
 
 const repository = "example/project";
@@ -90,12 +90,54 @@ test("a late job with no known dependency leaves the split unmeasured rather tha
   assert.equal(summarize([metrics], [], 120).criticalPathUnmeasured, 1);
 });
 
+test("routing is sequential execution and advisory shadow work cannot become a required dependency", () => {
+  const metrics = runMetrics(run(8, 1, 21), [
+    job("PR Suite Routing", 0, 2, 4),
+    job("Browser End-to-End Tests (1)", 4, 7, 20),
+    job("Suite Selection Shadow (Advisory)", 0, 19, 20.5),
+    job(AGGREGATOR, 20, 20, 21),
+  ]);
+  assert.equal(metrics.criticalExecutionMinutes, 16);
+  assert.equal(metrics.criticalWaitMinutes, 5);
+  const nested = runMetrics(run(9, 1, 14), [
+    job("PR Suite Routing", 0, 0, 2),
+    job("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 0, 0, 5),
+    job("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 5, 5, 13),
+    job(AGGREGATOR, 13, 13, 14),
+  ]);
+  assert.equal(nested.criticalExecutionMinutes, 14, "Windows remains independent of routing");
+});
+
+test("skipped routing anchors delayed full work without counting its API start placeholder as execution", () => {
+  const work = [job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
+    job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)];
+  for (const placeholder of [null, 0, 1]) {
+    const metrics = runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, placeholder, 1, "skipped"), ...work]);
+    assert.equal(metrics.criticalExecutionMinutes, 13, "12 browser + 1 aggregate; skipped plan executes nothing");
+    assert.equal(metrics.criticalWaitMinutes, 3);
+    assert.equal(metrics.longestExecutionMinutes, 12);
+  }
+  assert.equal(runMetrics(run(10, 1, 16), work).criticalExecutionMinutes, null, "do not guess a missing anchor");
+  assert.equal(runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, null, null, "skipped"), ...work])
+    .criticalExecutionMinutes, null, "missing skip completion stays unmeasured");
+  assert.equal(runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, 0, 1, "skipped"),
+    job("PR Suite Routing", 0, 0, 1, "skipped"), ...work]).criticalExecutionMinutes, null, "duplicate anchors are ambiguous");
+  const collected = attemptRecord(repository, run(10, 1, 16), [
+    { ...job("PR Suite Routing", 0, 0, 1, "skipped"), status: "completed", steps: [] },
+    ...work.map((item) => ({ ...item, status: "completed", steps: [{ name: "Executed Work", conclusion: "success",
+      started_at: item.started_at, completed_at: item.completed_at }] })),
+  ], {});
+  assert.equal(collected.metrics.criticalExecutionMinutes, 13, "attempt collection must preserve the skipped dependency");
+  assert.equal(collected.metrics.criticalWaitMinutes, 3);
+  assert.equal(collected.jobs[0].executionMinutes, null, "anchor is never charged runner minutes");
+});
+
 test("the assumed dependency structure matches the CI workflow files", () => {
-  // Only the aggregator has needs in ci.yml, and the settings-rows call is the only called workflow,
-  // whose comparison needs only its change detection.
+  // Checks/browser wait for optional PR routing. Windows/WebKit stay independent, and only the
+  // aggregator consumes all required work. The advisory shadow never supplies a required result.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
-  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [checks, browser, win32, webkit]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit\]\n/);
+  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: suite_plan", "needs: suite_plan", "needs: [checks, browser, win32, webkit, suite_plan]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, suite_plan\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);
@@ -361,6 +403,27 @@ test("combined reports deduplicate boundaries and compute percentiles from raw r
   const cohort = combined.summary.cohorts.find((row) => row.event === "merge_group" && row.attemptClass === "first");
   assert.deepEqual(cohort.measures.requiredMinutes, { measured: 4, median: 2, p90: 100, max: 100 });
   assert.throws(() => combineReports([report([], at(0)), { ...report([], at(1)), repository: "other/repo" }]));
+});
+
+test("before/after comparisons keep natural windows, outcomes and incomplete evidence separate", () => {
+  const row = (id, conclusion) => attemptRecord(repository, { ...run(id, 1), conclusion, head_sha: "a".repeat(40) }, [], {});
+  const report = (records, since, until) => ({ schemaVersion: 2, repository, collectedAt: until,
+    windows: [{ since, until }], records, removals: [], pagination: [], queueEpisodes: [],
+    attemptsTruncated: false, removalsTruncated: false });
+  const before = report([row(1, "success"), row(2, "cancelled")], at(0), at(10));
+  const after = report([row(3, "failure")], at(10), at(20));
+  const result = compareReports(before, after);
+  assert.equal(result.before.cohorts.find((c) => c.event === "merge_group" && c.attemptClass === "first").cancellationFraction, 0.5);
+  assert.equal(result.after.records, 1);
+  assert.equal(result.after.mergedQueueLatencyMinutes.measured, 0);
+  assert.equal(result.after.cohorts[2].passing.requiredMinutes.measured, 0);
+  assert.equal(compareReports(before, { ...after, attemptsTruncated: true }).after.incomplete, true);
+  assert.throws(() => compareReports(before, { ...after, repository: "other/project" }), /same repository/);
+  assert.throws(() => compareReports(before, { ...after, windows: [{ since: at(9), until: at(20) }] }), /nonoverlapping/);
+  assert.throws(() => compareReports(before, { ...after, records: before.records }), /repeats a run/);
+  assert.throws(() => compareReports(before, { ...after, windows: [{}] }), /valid windows/);
+  assert.throws(() => options(["--repo", repository, "--baseline", "before.json"]), /offline/);
+  assert.equal(options(["--input", "after.json", "--baseline", "before.json"]).baseline, "before.json");
 });
 
 test("queue-to-merge measures only a surviving enqueue, without attributing an old entry", async () => {

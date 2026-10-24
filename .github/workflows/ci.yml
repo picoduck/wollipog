@@ -37,12 +37,53 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'pull_request' }}
 
 jobs:
+  # Opt-in only. Absent/ordinary off values consume no runner. Case variants admit this job,
+  # but the exact shell check below forces full coverage; only lowercase enabled permits fast.
+  # Non-PR events never enter selection, including merge groups and rolling validation.
+  suite_plan:
+    if: github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
+    name: PR Suite Routing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Compute Trusted PR Route
+        id: plan
+        env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A fetch/selector error explicitly chooses full. Setup/job failures remain failures.
+          # GitHub expression equality ignores case; only this exact shell match permits fast.
+          if [ "$ROUTING_SWITCH" != enabled ]; then
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'Routing switch is not exactly enabled; full coverage required.'
+          elif git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA" && test -f scripts/ci-pr-routing.mjs; then
+            node scripts/ci-pr-routing.mjs
+          else
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'PR routing unavailable; full coverage required.'
+          fi
+
   # The required status context "Typecheck, Test & Sidecar Bundle" is the `check` job below. It
   # only aggregates: the work runs in parallel jobs with their own time budgets, because the
   # browser end-to-end suite alone takes ~19 minutes and was crowding the single 30-minute job
   # (a merge-queue run that hits the budget is cancelled and the PR silently leaves the queue).
   checks:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    needs: suite_plan
     name: Typecheck, Unit Tests & Bundles
     runs-on: ubuntu-24.04
     # Everything except the video decoder install took a median of 539 seconds and at most 771 over
@@ -247,7 +288,15 @@ jobs:
         run: pnpm typecheck
 
       - name: Unit Tests
-        run: pnpm test:ci
+        env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+        run: |
+          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            node scripts/test-suites.mjs --node-only --groups node-fast --ci
+          else
+            pnpm test:ci
+          fi
 
       - name: Verify Delegated Linux Provider Containment
         timeout-minutes: 3
@@ -292,7 +341,8 @@ jobs:
         run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
 
   browser:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    needs: suite_plan
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
     # A recovered install timeout plus passing tests exhausted the old budget (#2700).
@@ -321,7 +371,7 @@ jobs:
         # Projects partition the live file inventory by measured duration, keeping files intact.
         # The inventory contract pins these five jobs to all five projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: [1, 2, 3, 4, 5]
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -442,7 +492,14 @@ jobs:
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/synthetic-browser-report.json
           SYNTHETIC_ARTIFACT_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' || 'false' }}
-        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+        run: |
+          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
+          else
+            pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}
+          fi
 
       # Upload only projected allowlisted captures from this failed shard. The original test step
       # is never continued-on-error: missing captures, sanitizer failure and upload failure cannot
@@ -792,10 +849,14 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [checks, browser, win32, webkit]
+    needs: [checks, browser, win32, webkit, suite_plan]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && 'true' || 'false' }}
+          PLAN_RESULT: ${{ needs.suite_plan.result }}
+          PLAN_MODE: ${{ needs.suite_plan.outputs.mode }}
           CHECKS_RESULT: ${{ needs.checks.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
           WIN32_RESULT: ${{ needs.win32.result }}
@@ -809,6 +870,18 @@ jobs:
               *) echo "::error::$1 ended with result '$2'"; status=1 ;;
             esac
           }
+          if [ "$ROUTING_ENABLED" = true ]; then
+            report "PR Suite Routing" "$PLAN_RESULT"
+            case "$PLAN_MODE" in
+              full) ;;
+              fast) if [ "$ROUTING_SWITCH" != enabled ]; then
+                echo '::error::Fast routing requires the exact lowercase enabled switch'; status=1
+              fi ;;
+              *) echo "::error::PR Suite Routing returned missing or unknown mode '$PLAN_MODE'"; status=1 ;;
+            esac
+          elif [ "$ROUTING_ENABLED" != false ] || [ "$PLAN_RESULT" != skipped ] || [ -n "$PLAN_MODE" ]; then
+            echo "::error::Unexpected PR Suite Routing admission or output"; status=1
+          fi
           report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
           report "Settings-Rows win32 Baselines" "$WIN32_RESULT"
