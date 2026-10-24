@@ -79,9 +79,9 @@ test("reporter adapters emit only completed synthetic event projections", async 
   assert.ok(!JSON.stringify(browser.summary.result()).includes("PRIVATE_SENTINEL"));
 });
 
-test("CI Node command preserves ordinary test inventory and timeout", () => {
+test("CI Node command uses full discovery and the safe timing reporter", () => {
   const { scripts } = JSON.parse(readFileSync("package.json", "utf8"));
-  const diagnostic = scripts["test:ci"].replace(/ --test-reporter(?:-destination)?=[^ ]+/g, "");
-  assert.equal(diagnostic, scripts.test);
+  assert.equal(scripts["test:ci"], scripts["test:full"] + " --ci");
+  assert.match(scripts["test:ci"], /--suite full --test-timeout=300000 --ci$/);
   assert.match(readFileSync(".github/workflows/ci.yml", "utf8"), /name: Unit Tests\n\s+run: pnpm test:ci/);
 });
