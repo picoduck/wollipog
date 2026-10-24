@@ -21,7 +21,7 @@
   "devDependencies": {
     "@types/node": "^26.6.2",
     "@wollipog/test-support": "workspace:*",
-    "tsx": "^4.23.13",
+    "tsx": "^4.23.15",
     "typescript": "^5.7.3"
   }
 }
