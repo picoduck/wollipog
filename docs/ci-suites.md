@@ -40,8 +40,10 @@ There is no new required fast job and no platform waiver.
 
 [The file inventory](ci-suite-inventory-2026-10-23.tsv) is a dated snapshot, not
 an execution allowlist. Regenerate with `pnpm ci:suite-inventory >
-docs/ci-suite-inventory-2026-10-23.tsv`. The existing root Node discovery globs
-and [browser shard inventory contract](ci-browser-shards.md) remain independent
+docs/ci-suite-inventory-2026-10-23.tsv`. Each compact `group:` reason reference
+resolves to the group table below and the versioned `GROUPS` contract, avoiding
+duplicated prose in every file row. The existing root Node discovery globs and
+[browser shard inventory contract](ci-browser-shards.md) remain independent
 oracles. New Node files enter full discovery automatically; unlisted files go to
 their package's deferred partition. New browser files enter the complete
 Chromium inventory automatically. Fast allowlists cannot remove them from full
@@ -52,9 +54,9 @@ fast runner refuses an incomplete mandatory inventory.
 | Group | Risk | Selection and Deferral Reason |
 | --- | --- | --- |
 | `node-fast` | Protocol, API, Enforcement | All 22 #3627 protocol files, authentication primitives/recovery API, and real-server runner-channel integration always run. The latter preserves #2601 coverage even for a web-only change. |
-| `node-web` | Presentation, Approval | All web unit/DOM files for a web source change; otherwise deferred unless full fallback. |
-| `node-control-plane` | Security, Persistence | Entire backend partition for control-plane changes, with the runner partition as a dependency closure; otherwise deferred. High-risk paths fall back to full. |
-| `node-runner` | Execution, Enforcement | Entire runner partition for backend changes; every runner source change itself falls back to full. |
+| `node-web` | Presentation, Approval | All web unit/DOM files for any app source change; deferred only by the fixed fast candidate. |
+| `node-control-plane` | Security, Persistence | Entire backend partition for any app source change because tests import web state and runner services. High-risk paths fall back to full. |
+| `node-runner` | Execution, Enforcement | Entire runner partition for any app source change because tests import backend services and web identity; runner source changes themselves fall back to full. |
 | `node-other` | Shared Contracts | Root/tooling, desktop, shared-package files accompany any app source change; otherwise deferred. Direct changes fall back to full. |
 | `browser-critical` | Critical Journeys | Authentication recovery, new-session choices, request surfaces, issue closure and conversation handoff always run. File fixtures/serial groups stay intact. |
 | `browser-remaining` | Cross-Component | Every other Chromium file for app source changes; deferred only for allowlisted prose-only changes. |
@@ -64,7 +66,15 @@ fast runner refuses an incomplete mandatory inventory.
 | Engine Boundaries | Runtime Compatibility | Deferred by the portable fast candidate; config/toolchain changes force full CI coverage. |
 | Windows Baselines | Platform Compatibility | Selected for app changes/full fallback; the existing called workflow retains its own diff-based scope/compare behavior. Deferred by the prose fast candidate. |
 
-The browser-wide closure is deliberately coarse. There is no assertion that
+The browser-wide and Node-wide closures are deliberately coarse. Existing
+`apps/runner/src/worktree.test.ts` imports web worktree identity;
+`apps/control-plane/src/ingest-rollback-recovery.test.ts` imports the web store;
+and backend/runner tests import each other's services. Ordinary app-source
+changes therefore select **all portable test coverage**. Only the separately
+identified engine/privileged checks may be deferred by an ordinary affected
+plan; high-risk/shared/uncertain edits still select the entire CI contract.
+There is no claimed app-code latency reduction in this initial policy.
+There is no assertion that
 component filenames identify all impacted journeys. Security/approval paths
 (`auth`, `approv`, `permission`, `workflow`, `campaign`, `sandbox`, `containment`,
 `cgroup`, `security`, `secret`, `credential`, `provider-home`, `provider-account`),
@@ -86,7 +96,7 @@ an explicit failure requiring full coverage, never an empty passing plan.
 | Input | Behavior |
 | --- | --- |
 | Allowlisted Prose | Only `docs/**/*.md`, root `README.md` and `CONTRIBUTING.md` qualify for the fixed fast contract. Data profiles/inventories under docs do not qualify. |
-| One App Package | Add that package's dependency closure, every Chromium journey and Windows routing. WebKit/production were already mandatory. |
+| One App Package | Add all Node partitions (the existing cross-app dependency closure), every Chromium journey and Windows routing. WebKit/production were already mandatory. |
 | Shared, Unknown, Lockfile, CI or Test Configuration | Full contract. This includes shared packages, root scripts, selector/policy/profiles, CSS/assets, manifests and any unrecognized path/extension. |
 | Security, Persistence, Migrations, Execution, Approval | Full contract using the explicit ownership rules above. |
 | Cross-Package | Full contract, even if each individual path might permit reduced coverage. |
@@ -114,8 +124,8 @@ this issue does not activate that route.
 
 Every `ci-selection-v1` record includes `suiteVersion`, `policyVersion`, `policyId`
 (trusted policy/selector/profile content), `suiteId` (group contract, allowlists,
-tested workflow/config/command inputs), `inventoryId` (test paths/blobs/groups),
-tested revision, counts, selected/deferred hashed file identities, reasons and
+tested workflow/config/command inputs and test inventory), `inventoryId` (test paths/blobs/groups),
+tested revision, counts, fast/selected/deferred hashed file identities, reasons and
 `certification: none`. Changed contracts cannot reuse the same cohort; inventory
 and tested revisions remain available for compatibility review. Human-readable
 file paths stay in the local inventory, not the shadow marker.
@@ -156,7 +166,7 @@ existing intentional Windows skip. It reports full elapsed minutes from the
 collector and each original failing test identity. It never calls a subset's
 observed duration its standalone runtime. `selectedRuntimeMs` stays null.
 
-`projectedSelectedOutcome` is a **subset projection**, not independent execution.
+`projectedFastOutcome` and `projectedSelectedOutcome` are **subset projections**, not independent executions.
 Full passes imply no observed subset failure under that full execution. A full
 failure outside selected files is a **missed-failure candidate**, requiring
 investigation; changed scheduling, fixture isolation and omitted subsequent

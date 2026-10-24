@@ -55,6 +55,18 @@ test("known selected failures and missed-failure candidates remain individual ex
   assert.equal(missed.failures[0].fileId, hash("apps/web/e2e/deferred.spec.ts"));
 });
 
+test("an affected journey can detect a failure that the fixed fast set would miss", () => {
+  const data = input(), previous = data.records[0].jobs.at(-1).testTiming.selections[0];
+  data.records[0].jobs.at(-1).testTiming.selections[0] = makeSelection({ tree, fastFiles: [], policyId: previous.policyId,
+    context: previous.context, diff: { entries: [{ path: "apps/web/src/components/Timeline.tsx", status: "M" }] } });
+  failTest(data, "apps/web/e2e/deferred.spec.ts");
+  const compared = shadowReport(data).comparisons[0];
+  assert.equal(compared.projectedFastOutcome, "passing");
+  assert.equal(compared.projectedSelectedOutcome, "failing");
+  assert.equal(compared.fastMissedFailureCandidate, true);
+  assert.equal(compared.missedFailureCandidate, false);
+});
+
 test("production failures are always selected even when that file's development group is deferred", () => {
   const data = input();
   const record = data.records[0], job = record.jobs.find((row) => row.name === "Browser End-to-End Tests (1)");
@@ -102,12 +114,49 @@ test("reruns cannot inflate changes and suite/policy identities never share a co
   assert.equal(shadowReport(rerun).exclusions[0].reason, "rerun-not-an-independent-change");
 });
 
+test("the long-window threshold requires 30 independent identified changes across five working dates", () => {
+  const data = input(), original = data.records[0];
+  data.windows = [{ since: "2026-10-19T00:00:00Z", until: "2026-10-24T00:00:00Z" }];
+  data.records = Array.from({ length: 30 }, (_, index) => {
+    const record = structuredClone(original), sha = (index + 1000).toString(16).padStart(40, "0");
+    record.runId = 101 + index; record.pullRequest = 200 + index; record.sha = sha; record.testedSha = sha;
+    record.createdAt = `2026-10-${19 + index % 5}T01:00:00Z`;
+    for (const job of record.jobs) {
+      job.id += index * 100;
+      for (const summary of job.testTiming?.summaries ?? []) { summary.context.runId = String(record.runId); summary.context.testedSha = sha; }
+      for (const selection of job.testTiming?.selections ?? []) {
+        selection.context.runId = String(record.runId); selection.context.testedSha = sha; selection.context.changeHeadSha = sha;
+      }
+    }
+    return record;
+  });
+  assert.equal(shadowReport(data).cohorts[0].sampleThresholdMet, true);
+  assert.equal(shadowReport(data).certification, "none");
+  for (const record of data.records) record.pullRequest = 123;
+  const repeated = shadowReport(data).cohorts[0];
+  assert.equal(repeated.distinctIdentifiedChanges, 1);
+  assert.equal(repeated.distinctWorkingDatesUTC, 1);
+  assert.equal(repeated.sampleThresholdMet, false);
+});
+
 test("baseline absence is unmeasured and unsupported exclusions are rejected before evaluation", () => {
   const baseline = JSON.parse(readFileSync(new URL("../docs/ci-baseline-2026-10-22.json", import.meta.url)));
   assert.equal(shadowReport(baseline).naturalProjectedSamples, 0);
   assert.ok(shadowReport(baseline).gaps.length);
   const data = input(); data.exclusions = [];
   assert.throws(() => shadowReport(data));
+});
+
+test("unknown runtime, window, revision and step metadata cannot leak arbitrary input", () => {
+  const data = input();
+  data.windows[0].privateInput = "PRIVATE_SENTINEL";
+  data.records[0].metrics.requiredMinutes = { privateInput: "PRIVATE_SENTINEL" };
+  assert.equal(shadowReport(data).comparisons[0].fullRequiredMinutes, null);
+  assert.ok(!JSON.stringify(shadowReport(data)).includes("PRIVATE_SENTINEL"));
+  data.records[0].jobs[0].steps.push({ name: "Install Dependencies", number: { privateInput: "PRIVATE_SENTINEL" }, state: "failing" });
+  assert.ok(!JSON.stringify(shadowReport(data)).includes("PRIVATE_SENTINEL"));
+  data.records[0].jobs.pop(); data.records[0].testedSha = { privateInput: "PRIVATE_SENTINEL" };
+  assert.ok(!JSON.stringify(shadowReport(data)).includes("PRIVATE_SENTINEL"));
 });
 
 test("the existing bounded log collector projects safe selection metadata with the same redirect boundary", async () => {

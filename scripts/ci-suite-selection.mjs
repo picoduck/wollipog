@@ -42,14 +42,17 @@ export function makeSelection({ tree, fastFiles, diff, context, policyId }) {
     choice.groups = Object.keys(GROUPS).sort();
   }
   const selected = inventory.filter((row) => choice.groups.includes(row.group));
+  const fast = inventory.filter((row) => ["node-fast", "browser-critical"].includes(row.group));
   const contractInputs = tree.filter(({ path }) => /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|tsconfig[^/]*\.json|playwright[^/]*\.[cm]?[jt]s)$/.test(path) ||
     path.startsWith(".github/workflows/") || /^(?:scripts\/(?:ci-|test-|node-test)|docs\/ci-node-profile)/.test(path))
     .map(({ path, oid }) => ({ path, oid })).sort((a, b) => a.path.localeCompare(b.path, "en"));
+  const inventoryId = hash(JSON.stringify(inventory.map(({ file, blob, group }) => ({ file, blob, group }))));
   return { version: 1, suiteVersion: SUITE_VERSION, policyVersion: POLICY_VERSION, policyId, inventoryDomain: "node-and-development-chromium",
-    suiteId: hash(JSON.stringify({ version: SUITE_VERSION, groups: GROUPS, fastFiles, api: FAST_API_FILES, critical: CRITICAL_BROWSER_FILES, contractInputs })),
-    inventoryId: hash(JSON.stringify(inventory.map(({ file, blob, group }) => ({ file, blob, group })))),
+    suiteId: hash(JSON.stringify({ version: SUITE_VERSION, groups: GROUPS, fastFiles, api: FAST_API_FILES, critical: CRITICAL_BROWSER_FILES, contractInputs, inventoryId })),
+    inventoryId,
     context, ...choice,
-    inventoryCount: inventory.length, selectedCount: selected.length,
+    inventoryCount: inventory.length, selectedCount: selected.length, fastCount: fast.length,
+    fastFileIds: fast.map((row) => row.fileId).sort(),
     selectedFileIds: selected.map((row) => row.fileId).sort(),
     deferredFileIds: inventory.filter((row) => !choice.groups.includes(row.group)).map((row) => row.fileId).sort(),
     groupCounts: Object.fromEntries(Object.keys(GROUPS).map((group) => [group, inventory.filter((row) => row.group === group).length])),
@@ -95,6 +98,8 @@ export function parseSelection(line) {
   if (row?.version !== 1 || row.suiteVersion !== SUITE_VERSION || row.policyVersion !== POLICY_VERSION || row.inventoryDomain !== "node-and-development-chromium" ||
       ![row.policyId, row.suiteId, row.inventoryId].every(digest) || !["fast", "affected", "full"].includes(row.mode) ||
       !count(row.inventoryCount) || !row.inventoryCount || !count(row.selectedCount) || !row.selectedCount || !ids(row.selectedFileIds) || !ids(row.deferredFileIds) ||
+      !count(row.fastCount) || !row.fastCount || !ids(row.fastFileIds) || row.fastCount !== row.fastFileIds.length ||
+      row.fastFileIds.some((id) => !row.selectedFileIds.includes(id)) ||
       row.selectedCount !== row.selectedFileIds.length || row.inventoryCount !== row.selectedCount + row.deferredFileIds.length ||
       row.selectedFileIds.some((id) => row.deferredFileIds.includes(id)) ||
       !Array.isArray(row.groups) || row.groups.length > Object.keys(GROUPS).length || row.groups.some((group) => !Object.hasOwn(GROUPS, group)) ||
@@ -106,6 +111,7 @@ export function parseSelection(line) {
       Object.keys(GROUPS).some((group) => !count(row.groupCounts[group])) ||
       Object.values(row.groupCounts).reduce((sum, count) => sum + count, 0) !== row.inventoryCount ||
       row.groups.reduce((sum, group) => sum + row.groupCounts[group], 0) !== row.selectedCount ||
+      row.groupCounts["node-fast"] + row.groupCounts["browser-critical"] !== row.fastCount ||
       ![row.context?.baseSha, row.context?.diffBaseSha, row.context?.changeHeadSha, row.context?.testedSha, row.context?.trustedPolicySha].every(sha) ||
       !["pull_request", "merge_group", "push", "local"].includes(row.context.event) ||
       !["combined-merge-group", "pr-merge-base", "base-to-head"].includes(row.context.diffKind) ||
@@ -113,10 +119,10 @@ export function parseSelection(line) {
       !(row.context.attempt === null || (Number.isSafeInteger(row.context.attempt) && row.context.attempt > 0)) ||
       row.certification !== "none" || row.selectedRuntimeMs !== null) return null;
   const { version, suiteVersion, policyVersion, policyId, suiteId, inventoryId, mode, reasons, risks, groups,
-    inventoryCount, selectedCount, selectedFileIds, deferredFileIds, groupCounts } = row;
+    inventoryCount, selectedCount, fastCount, fastFileIds, selectedFileIds, deferredFileIds, groupCounts } = row;
   const { baseSha, diffBaseSha, changeHeadSha, testedSha, trustedPolicySha, event, diffKind, runId, attempt } = row.context;
   return { version, suiteVersion, policyVersion, policyId, suiteId, inventoryId, inventoryDomain: "node-and-development-chromium", mode, reasons, risks, groups,
-    inventoryCount, selectedCount, selectedFileIds, deferredFileIds, groupCounts,
+    inventoryCount, selectedCount, fastCount, fastFileIds, selectedFileIds, deferredFileIds, groupCounts,
     context: { baseSha, diffBaseSha, changeHeadSha, testedSha, trustedPolicySha, event, diffKind, runId, attempt },
     selectedRuntimeMs: null, runtimeReason: "compute-only-shadow-no-second-suite", certification: "none" };
 }

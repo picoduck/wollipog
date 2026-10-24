@@ -3,6 +3,7 @@ import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, copyFileSy
 import { tmpdir } from "node:os";
 import { glob } from "node:fs/promises";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import fc from "fast-check";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
@@ -78,6 +79,7 @@ test("inventory partitions every newly discovered file and versions changed cont
   assert.equal(added.inventoryCount, original.inventoryCount + 2);
   assert.equal(added.inventoryCount, added.selectedCount + added.deferredFileIds.length);
   assert.notEqual(added.inventoryId, original.inventoryId);
+  assert.notEqual(added.suiteId, original.suiteId);
   const config = syntheticSelection({ tree: [...tree, { path: "playwright.config.ts", oid: "d".repeat(40) }] });
   assert.notEqual(config.suiteId, added.suiteId);
   const missing = syntheticSelection({ tree: syntheticTree.slice(1) });
@@ -131,6 +133,28 @@ test("stable full command retains dynamic Node, Chromium, WebKit and production 
   for (const name of ["typecheck", "test:e2e", "test:e2e:production", "test:e2e:webkit"]) assert.ok(full.some(({ command }) => command.includes(name)));
   const fast = suiteCommands("fast");
   assert.deepEqual(fast.find(({ command }) => command.includes("test:e2e")).command.slice(2), CRITICAL_BROWSER_FILES);
+});
+
+test("suite command execution preserves argv, CI semantics and the first failed command", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "suite-command-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const trace = join(cwd, "trace.jsonl"), pnpm = join(cwd, "pnpm.cjs");
+  const fixture = `require('node:fs').appendFileSync(process.env.SUITE_TRACE, JSON.stringify({ argv: process.argv.slice(2), ci: process.env.CI, synthetic: process.env.SYNTHETIC_ARTIFACT_FAILURE }) + '\\n'); if (process.env.SUITE_FAIL === 'yes') process.exit(7);`;
+  writeFileSync(pnpm, fixture);
+  mkdirSync(join(cwd, "scripts"));
+  writeFileSync(join(cwd, "scripts/test-suites.mjs"), `import { appendFileSync } from 'node:fs'; appendFileSync(process.env.SUITE_TRACE, JSON.stringify({ argv: process.argv.slice(2), ci: process.env.CI, synthetic: process.env.SYNTHETIC_ARTIFACT_FAILURE }) + '\\n');`);
+  const command = [fileURLToPath(new URL("./test-suites.mjs", import.meta.url)), "--suite=fast", "--ci"];
+  const env = { ...process.env, npm_execpath: pnpm, SUITE_TRACE: trace, SYNTHETIC_ARTIFACT_FAILURE: "true", CI: "" };
+  execFileSync(process.execPath, command, { cwd, env, encoding: "utf8", timeout: 10_000 });
+  const observed = readFileSync(trace, "utf8").trim().split("\n").map((line) => JSON.parse(line));
+  assert.equal(observed.length, 8);
+  assert.ok(observed.every((row) => row.ci === "true" && row.synthetic === "false"));
+  assert.deepEqual(observed[0].argv, ["typecheck"]);
+  assert.ok(observed[1].argv.includes("--node-only"));
+  writeFileSync(trace, "");
+  assert.throws(() => execFileSync(process.execPath, command, { cwd, env: { ...env, SUITE_FAIL: "yes" },
+    encoding: "utf8", timeout: 10_000, stdio: ["ignore", "pipe", "pipe"] }));
+  assert.equal(readFileSync(trace, "utf8").trim().split("\n").length, 1);
 });
 
 test("trusted base selector ignores a malicious head policy and combines both group changes", (t) => {

@@ -13,4 +13,4 @@ for (const file of production.testMatch) rows.push({ file: `apps/web/e2e/${file}
 for (const file of WEBKIT_SPECS) rows.push({ file: `apps/web/e2e/${file}`, group: "webkit" });
 console.log("file\tgroup\trisk\tfast\tfull\treason");
 for (const { file, group } of rows.sort((a, b) => a.file.localeCompare(b.file, "en") || a.group.localeCompare(b.group, "en")))
-  console.log([file, group, GROUPS[group].risk, fast.has(group) ? "selected" : "deferred", "included", GROUPS[group].reason].join("\t"));
+  console.log([file, group, GROUPS[group].risk, fast.has(group) ? "selected" : "deferred", "included", `group:${group}`].join("\t"));

@@ -11,9 +11,9 @@ export const CRITICAL_BROWSER_FILES = [
 export const ALWAYS = ["typecheck", "web-build", "runner-bundle", "control-plane-bundle", "production", "webkit"];
 export const GROUPS = {
   "node-fast": { risk: "contract", reason: "Reviewed protocol partition plus authentication and real-server runner-channel API contracts are always selected." },
-  "node-web": { risk: "presentation-and-approval", reason: "All web unit/DOM contracts when the web package changes; deferred otherwise." },
-  "node-control-plane": { risk: "security-and-persistence", reason: "Backend changes require both server and runner contracts; deferred for unrelated packages." },
-  "node-runner": { risk: "execution-and-enforcement", reason: "Backend changes require both runner and server contracts; deferred for unrelated packages." },
+  "node-web": { risk: "presentation-and-approval", reason: "All app source changes select every Node partition because tests cross app boundaries; deferred only by the fixed fast candidate." },
+  "node-control-plane": { risk: "security-and-persistence", reason: "Control-plane tests import web state and runner execution; app source changes select the entire Node closure." },
+  "node-runner": { risk: "execution-and-enforcement", reason: "Runner tests import control-plane services and web identity; app source changes select the entire Node closure." },
   "node-other": { risk: "shared-contract", reason: "Protocol, test support, root tooling and desktop contracts require full fallback when affected." },
   "browser-critical": { risk: "critical-journey", reason: "Authentication recovery, session creation, decisions, issue closure and handoff always run." },
   "browser-remaining": { risk: "cross-component", reason: "All Chromium journeys for any app-package source change; deferred only for documentation." },
@@ -70,9 +70,10 @@ export function selectGroups({ entries, complete = true, baseKnown = true } = {}
   const fallback = reasons.size > 0;
   const groups = new Set([...ALWAYS, "node-fast", "browser-critical"]);
   if (fallback) Object.keys(GROUPS).forEach((group) => groups.add(group));
-  else if (packages.has("web")) { groups.add("node-web"); groups.add("node-other"); groups.add("browser-remaining"); groups.add("windows-baselines"); }
   else if (packages.size) {
-    groups.add("node-control-plane"); groups.add("node-runner"); groups.add("node-other"); groups.add("browser-remaining"); groups.add("windows-baselines");
+    // Existing tests cross app boundaries (runner -> web identity, control-plane -> web store,
+    // runner <-> control-plane). Until a narrower graph is verified, take their full closure.
+    for (const group of ["node-web", "node-control-plane", "node-runner", "node-other", "browser-remaining", "windows-baselines"]) groups.add(group);
   }
   return { mode: fallback ? "full" : packages.size ? "affected" : "fast",
     reasons: [...reasons].sort(), risks: [...risks].sort(), groups: [...groups].sort() };
