@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
+  campaignRepositoryLocation,
   isOrchestratorOnlyCapabilities,
   POLICY_HOOK_ABANDONMENT_MS,
   PACED_VIDEO_REVIEW_MIN_PROTOCOL,
@@ -17,6 +18,8 @@ import {
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
+import { waitForMergeRequest } from "./merge-request-wait.js";
 import {
   parsePullRequestRef,
   PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS,
@@ -103,6 +106,8 @@ export interface McpDeps {
   controlPlaneProtocolVersion?: number;
   /** Read-only `gh` for `wait_pull_request`; defaults to this process's own `gh` login. */
   gh?: GhRunner;
+  /** Read-only `glab` for a GitLab `wait_pull_request` (#3602); defaults to this process's own login. */
+  glab?: GlabRunner;
   /** `wait_pull_request`'s read grace when a caller already spent part of it (CLI repository discovery). */
   pullRequestReadGraceMs?: number;
 }
@@ -2191,15 +2196,15 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_pull_request",
-    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
+    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. A GitLab merge request (a merge request URL, or <gitlab-host>/group/project!iid) is read through this runner's glab login instead: it returns when its head pipeline (the merged-results pipeline where the project runs them) or its merge-train pipeline finishes, it leaves the train, merges, closes, or its head moves; only a successful pipeline passes, and a skipped or manual one returns \"checks_blocked\". Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
     inputSchema: {
       type: "object",
       properties: {
         pullRequest: {
           type: "string",
-          description: "Pull request number (with repository), owner/name#number, or a github.com pull request URL.",
+          description: "Pull request number (with repository), owner/name#number, a github.com pull request URL, a GitLab merge request URL, or <gitlab-host>/group/project!iid.",
         },
-        repository: { type: "string", description: "GitHub owner/name; required with a bare number." },
+        repository: { type: "string", description: "GitHub owner/name, or a GitLab project with its host (<gitlab-host>/group/project); required with a bare number." },
         headSha: { type: "string", description: "The reviewed head; a different head returns outcome \"head_changed\"." },
         timeoutMs: {
           type: "integer",
@@ -2222,6 +2227,21 @@ export const TOOLS: McpTool[] = [
       const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
       if ("error" in ref) return errorResult(ref.error);
       if (args?.headSha !== undefined && typeof args.headSha !== "string") return errorResult("headSha must be a string");
+      if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+        const waited = await waitForMergeRequest({
+          ...ref,
+          ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
+          ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
+          ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+        }, {
+          glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+          ...(deps.now ? { now: deps.now } : {}),
+          ...(deps.sleep ? { sleep: deps.sleep } : {}),
+          ...(deps.signal ? { signal: deps.signal } : {}),
+          ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+        });
+        return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+      }
       const result = await waitForPullRequest({
         ...ref,
         ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),

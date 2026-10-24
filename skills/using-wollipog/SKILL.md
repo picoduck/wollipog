@@ -26,7 +26,7 @@ wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
-wollipog pr wait <number|owner/name#number|url> [--head <sha>] [--timeout <ms>] --json
+wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
 wollipog review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path> [--full-reason <text>] --json
 wollipog review session get <review-session-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
@@ -223,6 +223,11 @@ position and state, failed jobs with run links, and whether it merged.
 - Required checks come from the base branch's rules. One that has not been reported yet is
   `pending`, never passing, so the wait does not end early the way `gh pr checks --required --watch`
   does while an aggregator check is unreported. A base with no required checks returns at once.
+- A GitLab merge request works the same way: pass its URL, `<gitlab-host>/group/project!<iid>`, or
+  the IID with the project including its host as the repository. The runner reads it through this
+  machine's `glab` login and returns when its head pipeline or merge-train pipeline finishes, it
+  leaves the train, merges, closes, or its head moves. Only a successful pipeline passes; a skipped
+  pipeline, or one waiting for a manual action, returns `checks_blocked`.
 - Use the longest timeout one call can survive in your harness (up to 3 hours) and call again on
   `timeout`. A background shell command that wakes you on exit can use the maximum; an MCP call or
   foreground command must finish inside the harness's tool-call limit.
