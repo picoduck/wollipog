@@ -53,6 +53,10 @@ function workflowContract(path) {
       assert.equal(match[1].trim(), EXPECTED_SHADOW_GUARD, "advisory selection has its explicit PR/merge-group draft guard");
       return false;
     }
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite_plan:") {
+      assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
+      return false;
+    }
     return true;
   });
   const guards = [...new Set(requiredGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
@@ -66,6 +70,8 @@ function workflowContract(path) {
 }
 
 function unwrapAggregatorGuard(expression) {
+  const work = expression.match(/^\$\{\{ !cancelled\(\) && \((.+)\) \}\}$/);
+  if (work) return work[1];
   const wrapped = expression.match(/^\$\{\{\s*\(github\.event_name != 'pull_request' \|\| !cancelled\(\)\)\s*&&\s*\((.+)\)\s*\}\}$/);
   return wrapped ? wrapped[1].trim() : expression;
 }
@@ -237,13 +243,14 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "webkit", "suite-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "checks", "browser", "win32", "webkit", "suite-shadow", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
   for (const id of ["checks", "browser", "webkit"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
-    assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
+    if (id === "webkit") assert.doesNotMatch(byId[id], /^    needs:/m);
+    else assert.match(byId[id], /^    needs: suite_plan$/m, `${id}: only routing may precede parallel work`);
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
 
@@ -264,7 +271,26 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // forecloses spellings nobody has thought of yet, including inserting a key ANYWHERE rather than
   // only where the last bypass happened to put it. Changing the job then means editing this
   // expectation by hand, which is the reviewable act the guard exists to force.
+  // Assert the exact new routing text before normalising to the established full shard shape.
+  // workflow-ci-routing.test.mjs executes these same expressions and both actual shell branches.
+  const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
+  const matrixExpression = "${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const routedRun = [
+    "          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}",
+    `          PR_FAST: ${fastExpression}`,
+    "        run: |",
+    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
+    "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts",
+    "          else",
+    "            pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}",
+    "          fi",
+  ].join("\n");
+  assert.ok(byId.browser.includes(`        shard: ${matrixExpression}\n`));
+  assert.ok(byId.browser.includes(routedRun));
   const structural = byId.browser
+    .replace("    needs: suite_plan\n", "")
+    .replace(matrixExpression, "[1, 2, 3, 4, 5]")
+    .replace(routedRun, "        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}")
     .split("\n")
     .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
     .join("\n");
@@ -320,7 +346,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit, suite_plan\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
