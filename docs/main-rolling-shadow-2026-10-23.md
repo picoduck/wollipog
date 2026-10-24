@@ -120,3 +120,19 @@ from a push-originated worker does not test suppression once the relay itself is
 the chain. Preserve each run ID, event and dispatch linkage. Its static admission
 tests establish routing and token scope only. A fully missed idle push still requires another
 delivered event or an operator's manual controller dispatch.
+
+## Post-Relay Live Result
+
+Shadow relay PR [#3648](https://github.com/picoduck/wollipog/pull/3648) is verified MERGED as `723ce352d57ff72812dfb00e5e8c6182b6b33e2b` at 2026-10-24 15:03:08 UTC. Its [merge-group run 40102698714](https://github.com/picoduck/wollipog/actions/runs/40102698714) passed; exact reviewed head was `e61003621f2078f172ca814f8804ba0659de8461`. Legacy main-push full CI remains enabled.
+
+**Live result: cutover is still blocked.** Worker [40105230793](https://github.com/picoduck/wollipog/actions/runs/40105230793) completed successfully at 15:37:06 with all exact-checkout/job evidence verified. Main had advanced naturally to `11de60a49e1fb14462cdeff25a8053303b6469de` during that worker. No relay/controller completion entry appeared then. The next relay [40108449808](https://github.com/picoduck/wollipog/actions/runs/40108449808) appeared at 15:45:45, three seconds after [legacy CI 40105798151](https://github.com/picoduck/wollipog/actions/runs/40105798151) completed, and shared its `github-merge-queue[bot]` actor; the worker's actor was `github-actions[bot]`. That relay dispatched [controller 40108454729](https://github.com/picoduck/wollipog/actions/runs/40108454729), whose persisted claim `33d1921c-dca8-43ac-990e-1b2b285fb47f` matches new [worker 40108478451](https://github.com/picoduck/wollipog/actions/runs/40108478451). This proves relay dispatch/pending-target progress after legacy completion, not recurring worker-completion progress. No manual wake or manufactured merge was used.
+
+Correction to the earlier health-subscriber inference: historic health run40020898293 at20:39:24 followed canceled legacy run40015972562 at20:39:22 and shared its merge-queue actor. It did not establish worker-completion delivery. This behavior is consistent with the [published GITHUB_TOKEN-dispatch/workflow_run reproduction](https://github.com/orgs/community/discussions/48748) and [GitHub's general generated-event restrictions](https://docs.github.com/en/actions/concepts/security/github_token). The internal cause remains an inference; the missing worker wake and legacy dependency are directly observed. The required two consecutive relay-originated worker cycles remain **0/2 verified**.
+
+Measurement window 2026-10-23 15:15:07 through 2026-10-24 15:51:23 UTC, reusing #3626's attemptRecord/listJobs and the rolling exact-evidence observer: seven completed rolling verdicts, all success with verified checkouts, **1,287.03 known runner-minutes**. One newer worker remains active and its unfinished execution is excluded from that sum. Over the same window, eight legacy push runs produced four success, two failure, two cancelled, **1,328.93 runner-minutes**. All included terminal attempts are first attempts with no missing job timing. Rolling dispatch-to-verdict min/median/max: **33.68/34.27/46.42 min**; successful legacy push-created-to-required-result: **33.70/34.31/40.45 min**. These are Actions execution sums, not billing invoices, exclude controller/relay overhead, and are different completed-target counts; no causal savings claim. The numeric natural-traffic threshold is met, but the automatic-progress blocker prevents cutover.
+
+
+The next repair uses a durable native pending worker. Before cutover, verify two
+consecutive natural pending-to-active transitions without legacy-CI dependency,
+and health classification of unexecuted cancelled pending workers as non-verdicts.
+Static fake-queue tests are not live proof of either requirement.

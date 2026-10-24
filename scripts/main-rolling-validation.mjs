@@ -5,6 +5,9 @@ import { isDeepStrictEqual } from "node:util";
 import { githubApi } from "./main-ci-health.mjs";
 import { attemptRecord, listJobs } from "./merge-queue-wait-report.mjs";
 
+import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
+export { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
+
 export const STATE_REF = "refs/heads/ci/main-rolling-state";
 export const WORKER = ".github/workflows/main-rolling-validation.yml";
 export const MAX_HISTORY = 32;
@@ -30,24 +33,33 @@ const date = (s) => typeof s === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:
 const STATUSES = new Set(["initializing", "validating", "stalled-active-run", "current-target-completed", "dispatch-unknown-operator-required",
   "dispatch-outcome-unknown", "recovery-limit-operator-required", "claimed"]);
 class InvalidState extends Error {}
+class StateConflict extends Error {}
 
 export function emptyState(repository) {
-  return { version: 1, repository, sequence: 0, active: null, pending: null, lastVerdict: null, records: [], status: "initializing" };
+  return { version: 2, repository, sequence: 0, active: null, pending: null, lastVerdict: null, records: [], status: "initializing" };
 }
+
+const validClaim = (c) => c && SHA.test(c.targetSha) && UUID.test(c.claimId) && date(c.claimedAt) &&
+  Number.isSafeInteger(c.dispatchCount) && c.dispatchCount >= 0 && c.dispatchCount <= 3 &&
+  (c.lastDispatchAt === null || date(c.lastDispatchAt)) && (c.runId === null || positive(c.runId));
+const cleanClaim = (c) => c && Object.fromEntries(
+  ["targetSha", "claimId", "claimedAt", "runId", "dispatchCount", "lastDispatchAt"].map((key) => [key, c[key]]));
+const matches = (claim, run, repository) => {
+  const identity = workerIdentity(run, repository);
+  return Boolean(claim && identity && claim.claimId === identity.claimId && claim.targetSha === identity.targetSha);
+};
+const decisive = (r) => r.verdict === "success" || r.verdict === "failure";
+const latestAttempt = (records, targetSha) => records.filter((r) => r.targetSha === targetSha && r.verdict !== "superseded")
+  .sort((a, b) => b.runId - a.runId || b.attempt - a.attempt)[0];
 
 /** Coordination hints only. Even a schema-valid ref can have been rewritten by a writer. */
 export function validState(s, repository) {
-  const target = (t) => t === null || t && SHA.test(t.targetSha) && date(t.observedAt);
-  return s?.version === 1 && s.repository === repository && Number.isSafeInteger(s.sequence) && s.sequence >= 0 &&
-    target(s.pending) && (s.active === null || s.active && SHA.test(s.active.targetSha) &&
-      UUID.test(s.active.claimId) && date(s.active.claimedAt) &&
-      Number.isSafeInteger(s.active.dispatchCount) && s.active.dispatchCount >= 0 && s.active.dispatchCount <= 3 &&
-      (s.active.lastDispatchAt === null || date(s.active.lastDispatchAt)) &&
-      (s.active.runId === null || positive(s.active.runId))) &&
+  return s?.version === 2 && s.repository === repository && Number.isSafeInteger(s.sequence) && s.sequence >= 0 &&
+    (s.active === null || validClaim(s.active)) && (s.pending === null || validClaim(s.pending) &&
+      date(s.pending.observedAt) && (s.pending.priorRunId === null || positive(s.pending.priorRunId))) &&
     (s.lastVerdict === null || positive(s.lastVerdict?.runId) && SHA.test(s.lastVerdict.targetSha)) &&
     Array.isArray(s.records) && s.records.length <= MAX_HISTORY && s.records.every((r) =>
-      positive(r?.runId) && positive(r.attempt) && SHA.test(r.targetSha)) &&
-    STATUSES.has(s.status);
+      positive(r?.runId) && positive(r.attempt) && SHA.test(r.targetSha)) && STATUSES.has(s.status);
 }
 
 export function workerIdentity(run, repository) {
@@ -70,6 +82,7 @@ export function validationRecord(repository, run, jobs, blobs) {
     step.name === "Verify Rolling Checkout" && step.conclusion === "success"));
   const complete = REQUIRED.every((name) => unique(name)?.status === "completed");
   const outcomes = Object.fromEntries(REQUIRED.map((name) => [name, unique(name)?.conclusion ?? "missing"]));
+  const superseded = isSupersededWorkerAttempt(run, jobs);
   const green = checkedOut && complete && Object.values(outcomes).every((s) => s === "success");
   const red = checkedOut && complete && Object.values(outcomes).some((s) => ["failure", "timed_out"].includes(s)) &&
     Object.values(outcomes).every((s) => ["success", "failure", "timed_out"].includes(s));
@@ -82,9 +95,9 @@ export function validationRecord(repository, run, jobs, blobs) {
     workflowRevision: { sourceSha: run.head_sha, executedBlobSha: blobs.worker, state: "measured" },
     suiteVersion: createHash("sha256").update(JSON.stringify(blobs)).digest("hex"), workflowBlobs: blobs,
     checkoutVerified: checkedOut, requiredOutcomes: outcomes,
-    verdict: run.status === "completed" && green && run.conclusion === "success" ? "success"
+    verdict: superseded ? "superseded" : run.status === "completed" && green && run.conclusion === "success" ? "success"
       : run.status === "completed" && ["failure", "timed_out"].includes(run.conclusion) && red ? "failure" : "incomplete",
-    dispatchToVerdictMinutes: run.status === "completed" && date(run.updated_at)
+    dispatchToVerdictMinutes: !superseded && run.status === "completed" && date(run.updated_at)
       ? (Date.parse(run.updated_at) - Date.parse(run.created_at)) / 60_000 : null };
 }
 
@@ -101,14 +114,26 @@ export async function readState(api, repository) {
     if (!SHA.test(entry?.sha)) throw new InvalidState("Missing state blob");
     const blob = await api(`${root}/git/blobs/${entry.sha}`);
     if (blob.encoding !== "base64" || blob.size > 512_000) throw new InvalidState("Invalid state blob");
-    const value = JSON.parse(Buffer.from(blob.content, "base64").toString("utf8"));
+    let value = JSON.parse(Buffer.from(blob.content, "base64").toString("utf8"));
+    const migrated = value?.version === 1;
+    if (migrated) {
+      const pending = value.pending;
+      if (pending !== null && !(pending && SHA.test(pending.targetSha) && date(pending.observedAt)))
+        throw new InvalidState("Invalid legacy pending target");
+      value = { ...value, version: 2, pending: null };
+      if (!validState(value, repository)) throw new InvalidState("Invalid legacy state");
+      // Unacknowledged old intent remains intent; an observed legacy active run is retained.
+      if (value.active?.runId === null) value = { ...value, active: null,
+        pending: { ...value.active, observedAt: value.active.claimedAt, priorRunId: null } };
+    }
     if (!validState(value, repository)) throw new InvalidState("Invalid state schema");
-    // Discard unknown fields; the ref is not a safe place to source arbitrary log content.
-    const active = value.active && Object.fromEntries(["targetSha", "claimId", "claimedAt", "runId", "dispatchCount", "lastDispatchAt"].map((k) => [k, value.active[k]]));
-    const pending = value.pending && { targetSha: value.pending.targetSha, observedAt: value.pending.observedAt };
+    const active = cleanClaim(value.active);
+    const pending = value.pending && { ...cleanClaim(value.pending), observedAt: value.pending.observedAt,
+      priorRunId: value.pending.priorRunId };
     const lastVerdict = value.lastVerdict && { targetSha: value.lastVerdict.targetSha, runId: value.lastVerdict.runId };
     return { oid, value: { ...emptyState(repository), sequence: value.sequence, active, pending, lastVerdict,
-      records: value.records.map((r) => ({ runId: r.runId, attempt: r.attempt, targetSha: r.targetSha })), status: value.status }, recovered: false };
+      records: value.records.map((r) => ({ runId: r.runId, attempt: r.attempt, targetSha: r.targetSha })), status: value.status },
+      recovered: false, migrated };
   } catch (error) {
     // Only an absent ref or malformed state is recoverable. Auth/network failures must stop us.
     if (error?.status !== 404 && !(error instanceof InvalidState) && !(error instanceof SyntaxError)) throw error;
@@ -135,7 +160,7 @@ export async function writeState(api, repository, previous, value) {
     variables: { input: { repositoryId: repo.node_id, refUpdates: [{ name: STATE_REF,
       beforeOid: previous.oid ?? ZERO, afterOid: commit.sha, force: Boolean(previous.oid && compact) }] } },
   } });
-  if (result?.errors?.length || !result?.data?.updateRefs) throw new Error("Rolling state compare-and-swap refused");
+  if (result?.errors?.length || !result?.data?.updateRefs) throw new StateConflict("Rolling state compare-and-swap refused");
   return { oid: commit.sha, value, recovered: false };
 }
 
@@ -179,10 +204,11 @@ async function readRecords(api, repository, run, cache = new Map()) {
         workerIdentity(snapshot, repository)?.targetSha !== workerIdentity(run, repository)?.targetSha) throw new Error("Changed worker attempt");
     const { jobs, truncated } = await listJobs(api, repository, run.id, attempt);
     if (truncated) throw new Error("Worker jobs truncated");
-    records.push({ ...validationRecord(repository, snapshot, jobs, blobs),
+    const record = validationRecord(repository, snapshot, jobs, blobs);
+    records.push({ ...record,
       targetCommitAt: date(targetCommitAt) ? targetCommitAt : null,
       // A committer timestamp is an explicit proxy, not a measured push-arrival timestamp.
-      commitToVerdictMinutes: date(targetCommitAt) && date(snapshot.updated_at) && snapshot.status === "completed"
+      commitToVerdictMinutes: date(targetCommitAt) && date(snapshot.updated_at) && snapshot.status === "completed" && record.verdict !== "superseded"
         ? Math.max(0, (Date.parse(snapshot.updated_at) - Date.parse(targetCommitAt)) / 60_000) : null });
   }
   return records;
@@ -200,10 +226,11 @@ export async function observe(api, repository, state, { targetSha, report = fals
   const selected = report ? recent.slice(0, 8) : [
     ...recent.filter((r) => workerIdentity(r, repository)?.targetSha === targetSha).slice(0, 3),
     // A worker may finish before admission records its runId. Its claim still releases old work.
-    ...recent.filter((r) => workerIdentity(r, repository)?.claimId === state.active?.claimId).slice(0, 3),
+    ...[...new Set([state.active?.claimId, state.pending?.claimId].filter(Boolean))].flatMap((claim) =>
+      recent.filter((r) => workerIdentity(r, repository)?.claimId === claim).slice(0, 1)),
   ];
   const candidates = [...active, ...selected];
-  for (const id of new Set([state.active?.runId,
+  for (const id of new Set([state.active?.runId, state.pending?.runId, state.pending?.priorRunId,
     report || state.lastVerdict?.targetSha === targetSha ? state.lastVerdict?.runId : null].filter(Boolean))) {
     if (!candidates.some((r) => r.id === id)) {
       try {
@@ -232,67 +259,95 @@ export async function observe(api, repository, state, { targetSha, report = fals
   return { active: runs.filter((r) => ACTIVE.includes(r.status)), records };
 }
 
-/** Pure transition: event order is irrelevant; current main and forge observations decide. */
-export function plan(state, observation, mainSha, now, claimId = randomUUID()) {
+/** Pure transition. Native concurrency owns execution; only admission promotes pending intent. */
+export function plan(state, observation, mainSha, now, claimId = randomUUID(), recovering = false) {
   const records = [...observation.records].sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt) || b.attempt - a.attempt);
-  const decisive = records.find((r) => r.verdict !== "incomplete");
-  const next = { ...state, lastVerdict: decisive ? { runId: decisive.runId, targetSha: decisive.targetSha } : null,
-    records: records
-    .slice(0, MAX_HISTORY).map((r) => ({ runId: r.runId, attempt: r.attempt, targetSha: r.targetSha })),
-    pending: { targetSha: mainSha, observedAt: state.pending?.targetSha === mainSha ? state.pending.observedAt : now } };
-  const active = observation.active.sort((a, b) => a.id - b.id)[0];
-  if (active) {
-    const identity = workerIdentity(active, state.repository);
-    next.active = { targetSha: identity.targetSha, claimId: identity.claimId, runId: active.id,
-      claimedAt: active.created_at, dispatchCount: 1, lastDispatchAt: active.created_at };
-    next.pending = mainSha === identity.targetSha ? null : next.pending;
-    const attemptStart = active.run_attempt > 1 && date(active.run_started_at) ? active.run_started_at : active.created_at;
-    next.status = Date.parse(now) - Date.parse(attemptStart) > STALLED_MS ? "stalled-active-run" : "validating";
+  const verdict = records.find((r) => decisive(r) && latestAttempt(records, r.targetSha) === r);
+  const next = { ...state, lastVerdict: verdict ? { runId: verdict.runId, targetSha: verdict.targetSha } : null,
+    records: records.slice(0, MAX_HISTORY).map((r) => ({ runId: r.runId, attempt: r.attempt, targetSha: r.targetSha })) };
+  const live = [...observation.active].sort((a, b) => (b.status === "in_progress") - (a.status === "in_progress") || a.id - b.id);
+  const activeRun = live.find((run) => matches(state.active, run, state.repository));
+  if (activeRun) next.active = { ...state.active, runId: activeRun.id };
+  // A manual rerun can reuse a successful admission output. The native group still
+  // serializes it; track its actual occupancy and stall clock without cancelling it.
+  const rerunning = live.find((run) => run.run_attempt > 1 && run.status === "in_progress");
+  if (rerunning && !matches(next.active, rerunning, state.repository)) {
+    const identity = workerIdentity(rerunning, state.repository);
+    next.active = { targetSha: identity.targetSha, claimId: identity.claimId, claimedAt: rerunning.created_at,
+      runId: rerunning.id, dispatchCount: 1, lastDispatchAt: rerunning.created_at };
+  }
+  if (recovering) {
+    const running = live.find((run) => run.status === "in_progress");
+    if (running) {
+      const identity = workerIdentity(running, state.repository);
+      next.active = { targetSha: identity.targetSha, claimId: identity.claimId, claimedAt: running.created_at,
+        runId: running.id, dispatchCount: 1, lastDispatchAt: running.created_at };
+    }
+    const queued = live.filter((run) => run !== running && workerIdentity(run, state.repository)?.targetSha === mainSha).at(-1);
+    if (queued) {
+      const identity = workerIdentity(queued, state.repository);
+      next.pending = { targetSha: identity.targetSha, claimId: identity.claimId, claimedAt: queued.created_at,
+        runId: queued.id, dispatchCount: 1, lastDispatchAt: queued.created_at, observedAt: now,
+        priorRunId: running?.id ?? null };
+    }
+  }
+  const activeFinished = next.active && records.some((r) => r.claimId === next.active.claimId);
+  if (activeFinished && !live.some((run) => matches(next.active, run, state.repository))) next.active = null;
+  const active = live.find((run) => matches(next.active, run, state.repository));
+  const attemptStart = active && (active.run_attempt > 1 && date(active.run_started_at) ? active.run_started_at : active.created_at);
+  const stalled = active && Date.parse(now) - Date.parse(attemptStart) > STALLED_MS;
+  // A known full verdict or a currently admitted run at live main needs no successor.
+  if (decisive(latestAttempt(records, mainSha) ?? {}) || active && next.active.targetSha === mainSha) {
+    next.pending = null; next.status = active ? stalled ? "stalled-active-run" : "validating" : "current-target-completed";
     return { next, dispatch: false };
   }
-  // A known complete verdict is authoritative even if someone edited or removed the state ref.
-  if (observation.records.some((r) => r.targetSha === mainSha && r.verdict !== "incomplete")) {
-    next.active = null; next.pending = null; next.status = "current-target-completed";
+  const incomplete = records.filter((r) => r.targetSha === mainSha && r.verdict === "incomplete");
+  if (incomplete.length >= 3) {
+    next.pending = null; next.status = "recovery-limit-operator-required";
     return { next, dispatch: false };
   }
-  const prior = state.active;
-  const finished = prior && observation.records.some((r) => r.claimId === prior.claimId);
-  if (prior && !finished && !prior.runId) {
-    next.active = prior;
-    next.pending = mainSha === prior.targetSha ? null : next.pending;
-    const due = !prior.lastDispatchAt || Date.parse(now) - Date.parse(prior.lastDispatchAt) >= RETRY_MS;
-    next.status = prior.dispatchCount >= 3 ? "dispatch-unknown-operator-required" : "dispatch-outcome-unknown";
-    return { next, dispatch: due && prior.dispatchCount < 3 };
+  let pending = next.pending;
+  const finished = pending && records.some((r) => r.claimId === pending.claimId);
+  const existing = pending && live.find((run) => matches(pending, run, state.repository));
+  if (!pending || pending.targetSha !== mainSha || finished && !existing) {
+    // The prior run is a terminal-evidence fence, not a timer or a state-ref certificate.
+    pending = { targetSha: mainSha, claimId, claimedAt: now, runId: null, dispatchCount: 0,
+      lastDispatchAt: null, observedAt: now, priorRunId: live[0]?.id ?? next.active?.runId ?? null };
   }
-  const failures = observation.records.filter((r) => r.targetSha === mainSha && r.verdict === "incomplete");
-  if (failures.length >= 3) {
-    next.active = null; next.status = "recovery-limit-operator-required";
+  if (existing && matches(pending, existing, state.repository)) pending = { ...pending, runId: existing.id };
+  next.pending = pending;
+  if (existing && matches(pending, existing, state.repository)) {
+    next.status = stalled ? "stalled-active-run" : "validating";
     return { next, dispatch: false };
   }
-  next.active = { targetSha: mainSha, claimId, claimedAt: now, runId: null, dispatchCount: 0, lastDispatchAt: null };
-  next.pending = null; next.status = "claimed";
-  return { next, dispatch: true };
+  const due = !pending.lastDispatchAt || Date.parse(now) - Date.parse(pending.lastDispatchAt) >= RETRY_MS;
+  next.status = pending.dispatchCount >= 3 ? "dispatch-unknown-operator-required"
+    : pending.dispatchCount ? "dispatch-outcome-unknown" : "claimed";
+  return { next, dispatch: due && pending.dispatchCount < 3 };
 }
 
 export async function reconcile(repository, { api, now = () => new Date().toISOString(), log = console.log } = {}) {
-  let previous = await readState(api, repository);
-  const main = await api(`/repos/${repository}/git/ref/heads/main`);
-  if (!SHA.test(main?.object?.sha)) throw new Error("Invalid main head");
-  const observation = await observe(api, repository, previous.value, { mainSha: main.object.sha });
-  const decision = plan(previous.value, observation, main.object.sha, now());
-  // Avoid retaining a new state commit for every no-change schedule tick.
-  let stored = isDeepStrictEqual(decision.next, previous.value) && !previous.recovered
-    ? previous : await writeState(api, repository, previous, decision.next);
-  if (decision.dispatch) {
-    // Persist intent BEFORE dispatch. Unknown network outcomes are never retried in this invocation.
-    stored = await writeState(api, repository, stored, { ...stored.value, status: "dispatch-outcome-unknown",
-      active: { ...stored.value.active, dispatchCount: stored.value.active.dispatchCount + 1, lastDispatchAt: now() } });
-    await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/dispatches`, {
-      method: "POST", body: { ref: "main", inputs: { target_sha: stored.value.active.targetSha, claim_id: stored.value.active.claimId } },
+  for (let retry = 0; retry < 3; retry++) {
+    const previous = await readState(api, repository);
+    const main = await api(`/repos/${repository}/git/ref/heads/main`);
+    if (!SHA.test(main?.object?.sha)) throw new Error("Invalid main head");
+    const observation = await observe(api, repository, previous.value, { mainSha: main.object.sha });
+    const decision = plan(previous.value, observation, main.object.sha, now(), randomUUID(), previous.recovered);
+    const value = decision.dispatch ? { ...decision.next, status: "dispatch-outcome-unknown",
+      pending: { ...decision.next.pending, dispatchCount: decision.next.pending.dispatchCount + 1, lastDispatchAt: now() } }
+      : decision.next;
+    let stored;
+    try {
+      // One fenced commit records the complete intent BEFORE the only network dispatch.
+      stored = isDeepStrictEqual(value, previous.value) && !previous.recovered && !previous.migrated
+        ? previous : await writeState(api, repository, previous, value);
+    } catch (cause) { if (cause instanceof StateConflict && retry < 2) continue; throw cause; }
+    if (decision.dispatch) await api(`/repos/${repository}/actions/workflows/main-rolling-validation.yml/dispatches`, {
+      method: "POST", body: { ref: "main", inputs: { target_sha: stored.value.pending.targetSha, claim_id: stored.value.pending.claimId } },
     });
+    log(JSON.stringify({ event: "main_rolling_reconciled", recovered: previous.recovered, ...stored.value }));
+    return { state: stored.value, records: observation.records };
   }
-  log(JSON.stringify({ event: "main_rolling_reconciled", recovered: previous.recovered, ...stored.value }));
-  return { state: stored.value, records: observation.records };
 }
 
 export async function admit(repository, event, runId, attempt, { api, now = () => new Date().toISOString() } = {}) {
@@ -303,27 +358,37 @@ export async function admit(repository, event, runId, attempt, { api, now = () =
   if (identity.targetSha !== targetSha || identity.claimId !== claimId || run.run_attempt !== attempt) throw new Error("Worker identity mismatch");
   const comparison = await api(`/repos/${repository}/compare/${targetSha}...main`);
   if (comparison?.merge_base_commit?.sha !== targetSha) throw new Error("Target is outside main ancestry");
-  let previous = await readState(api, repository);
-  if (attempt === 1) {
-    const observation = await observe(api, repository, previous.value, { targetSha });
-    if (observation.records.some((r) => r.targetSha === targetSha && r.verdict !== "incomplete")) return false;
-  }
-  // A lost claim is reconstructed by reconciliation, never invented by an arbitrary dispatch.
   for (let retry = 0; retry < 3; retry++) {
-    const claim = previous.value.active;
-    if (previous.recovered || claim?.claimId !== claimId || claim.targetSha !== targetSha ||
-        claim.runId !== null && claim.runId !== runId) return false;
-    try {
-      await writeState(api, repository, previous, { ...previous.value, active: { ...claim, runId },
-        pending: previous.value.pending?.targetSha === targetSha ? null : previous.value.pending, status: "validating" });
-      return true;
-    } catch (cause) {
-      const fresh = await readState(api, repository);
-      if (fresh.oid === previous.oid) throw cause;
-      previous = fresh;
+    const previous = await readState(api, repository);
+    if (previous.recovered) return false;
+    const pending = previous.value.pending;
+    const claim = pending?.claimId === claimId && pending.targetSha === targetSha ? pending : null;
+    // An unchanged run may rerun its admission; a newer pending claim fences old reruns.
+    const rerun = attempt > 1 && !pending && matches(previous.value.active, run, repository) && previous.value.active.runId === runId;
+    if (!claim && !rerun) return false;
+    const observation = await observe(api, repository, previous.value, { targetSha });
+    const alreadyDone = attempt === 1 && decisive(latestAttempt(observation.records, targetSha) ?? {});
+    const priors = new Set([previous.value.active?.runId, claim?.priorRunId, claim?.runId].filter((id) => id && id !== runId));
+    let terminal = true;
+    for (const id of priors) {
+      // Missing, rewritten or still-active predecessor evidence never authorizes promotion.
+      const prior = await readRun(api, repository, id);
+      if (prior.status !== "completed" || !observation.records.some((record) =>
+          record.runId === id && record.attempt === prior.run_attempt)) terminal = false;
+      if (id === previous.value.active?.runId && !matches(previous.value.active, prior, repository)) terminal = false;
+      if (id === claim?.runId && !matches(claim, prior, repository)) terminal = false;
     }
+    if (observation.active.some((other) => other.id !== runId && other.status === "in_progress")) terminal = false;
+    try {
+      if (alreadyDone || !terminal) {
+        if (claim) await writeState(api, repository, previous, { ...previous.value, pending: null });
+        return false;
+      }
+      await writeState(api, repository, previous, { ...previous.value,
+        active: { ...cleanClaim(claim ?? previous.value.active), runId }, pending: null, status: "validating" });
+      return true;
+    } catch (cause) { if (cause instanceof StateConflict && retry < 2) continue; throw cause; }
   }
-  throw new Error("Admission state changed repeatedly; reconcile before retry");
 }
 
 export async function main(argv, { env = process.env, log = console.log, error = console.error, api } = {}) {
