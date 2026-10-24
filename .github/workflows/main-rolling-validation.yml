@@ -17,7 +17,7 @@ permissions: {}
 
 # Covers dispatch duplicates AND manual reruns, including rerun-failed-jobs which can reuse
 # successful admission outputs. Never cancel an active full suite. GitHub retains one pending
-# worker; durable reconciliation replaces its target with current main after completion.
+# worker. The controller dispatches the durable pending claim before active completion.
 concurrency:
   group: main-rolling-full-validation
   cancel-in-progress: false
@@ -30,7 +30,7 @@ jobs:
     timeout-minutes: 5
     permissions:
       contents: write
-      actions: read
+      actions: write
     outputs:
       admitted: ${{ steps.admit.outputs.admitted }}
     steps:
@@ -47,6 +47,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/main-rolling-validation.mjs admit
+      - name: Confirm Current Rolling Claim
+        if: steps.admit.outputs.admitted == 'true'
+        run: echo 'Current rolling claim admitted.'
+      - name: Skip Superseded Rolling Claim
+        if: steps.admit.outputs.admitted != 'true'
+        run: echo 'Superseded claim; full validation was not admitted.'
+      - name: Wake After Superseded Admission
+        if: steps.admit.outputs.admitted != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY"
 
   validation:
     if: needs.admit.outputs.admitted == 'true'
