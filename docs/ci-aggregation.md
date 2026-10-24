@@ -1,10 +1,21 @@
 # Required CI Aggregation
 
 `Typecheck, Test & Sidecar Bundle` is the protected required context in
-`.github/workflows/ci.yml`. Its `check` job waits for `checks`, all five `browser`
-shards, the `win32` reusable workflow, and the `webkit` job. It succeeds only when
-all four dependency results are `success`; failure, cancellation, unexpected skipping,
-and unknown results produce a failing shell exit with a named diagnostic.
+`.github/workflows/ci.yml`. Its `check` job waits for `checks`, `browser`, the
+`win32` reusable workflow, `webkit`, and the optional PR `suite_plan`. The four
+work results must be `success`. With the default-off routing switch disabled,
+the plan must be `skipped` with no output; an activated PR requires a successful
+plan with an explicit `full` or `fast` output. Failure, cancellation, missing or
+unknown output and unexpected skipping produce a failing shell exit with a named
+diagnostic. [The exact proposed assurance contract](ci-pr-assurance.md) requires
+separate human activation approval; merging its machinery activates nothing.
+
+Full coverage remains five browser shards on every event while routing is off,
+and always on merge groups, main, manual dispatch and reusable rolling validation.
+Only an activated, trusted allowlisted prose fast PR uses one critical Chromium
+job and the fast Node group. All other coverage stays mandatory. Checks/browser
+wait for optional routing and use `!cancelled()` plus the same draft guard so an
+expected disabled plan skip cannot skip full work. WebKit/Windows stay independent.
 
 For PR runs, the job condition uses `!cancelled()` with the existing draft guard.
 [GitHub's expression reference](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
@@ -104,7 +115,7 @@ Run the dedicated source contract and aggregation fixtures:
 
 ```sh
 node --import tsx --test scripts/workflow-pr-event-contract.test.mjs scripts/workflow-ci-aggregation.test.mjs \
-  scripts/pr-ci-supersede.test.mjs
+  scripts/workflow-ci-routing.test.mjs scripts/pr-ci-supersede.test.mjs
 ```
 
 The aggregation fixtures evaluate the actual job condition using inert status

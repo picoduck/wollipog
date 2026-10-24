@@ -16,6 +16,17 @@ GITHUB_TOKEN=$(gh auth token) node scripts/merge-queue-wait-report.mjs --repo pi
 The window defaults to the last 48 hours. `--timeout-minutes` should match the
 ruleset's `check_response_timeout_minutes` for that window.
 
+For an offline before/after comparison of natural traffic, use
+`--input post.json --baseline docs/ci-baseline-2026-10-22.json --json`. Both inputs
+must be version-2 all-event reports for the same repository with explicit ordered,
+nonoverlapping windows and no repeated run attempts. The added `comparison`
+keeps outcome classes, first attempts/reruns, missing timing and truncation
+separate, with passing feedback/required latency, cancellations, measured elapsed
+runner minutes and surviving queue-entry-to-merge latency. This is observational
+evidence, not a causal speedup or billing estimate. Compare compatible suite and
+workload identities; see [PR assurance routing](ci-pr-assurance.md) for activation
+and the still-required post-activation comparison.
+
 For each completed merge-group CI run created in the window, it reads the jobs of
 that run's first attempt, the one the queue waited on. A rerun copies the earlier
 attempt's finished jobs with new creation times, so a later attempt's timeline
@@ -29,7 +40,9 @@ and maximum for:
   `ci.yml`'s structure, which a test pins to the workflow files: the aggregator
   follows the last of its dependencies to finish, a called workflow's job (such as
   the settings-rows comparison) follows the last job of the same call to finish
-  before it was created, and no other job has dependencies. A run with a job created
+  before it was created. Activated PR checks/browser may also depend on the optional
+  `PR Suite Routing` job; its execution is counted as execution, not queue wait.
+  The advisory suite shadow is never a required dependency. A run with a job created
   late for any other reason is counted as unmeasured rather than guessed.
 - **Critical path waiting:** the rest of the time to the required result.
 - **Longest job wait for a runner**, **aggregator wait after dependencies**,

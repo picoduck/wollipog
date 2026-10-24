@@ -48,13 +48,18 @@ const callerOf = (job) => job.name.includes(" / ") ? job.name.slice(0, job.name.
 
 /**
  * The jobs `job` can depend on, from ci.yml's structure: the aggregator needs every other
- * top-level job, no other top-level job has needs, and a called workflow's jobs need only jobs of
- * the same call. The jobs API does not name dependencies; a test pins this to the workflow files.
+ * required work job. Activated PR checks/browser work also waits for PR Suite Routing. A called
+ * workflow's jobs depend only on jobs of the same call. Advisory shadow work is never a dependency.
+ * Older runs have no routing job. The jobs API does not name dependencies; tests pin this model.
  */
 function dependencyCandidates(job, work, aggregator) {
-  if (job === aggregator) return work;
+  const requiredWork = work.filter((other) => other.name !== "Suite Selection Shadow (Advisory)");
+  if (job === aggregator) return requiredWork;
+  if (job.name === "PR Suite Routing") return [];
+  const routed = job.name === "Typecheck, Unit Tests & Bundles" || /^Browser End-to-End Tests \([1-5]\)$/.test(job.name);
+  const routing = routed ? requiredWork.filter((other) => other.name === "PR Suite Routing") : [];
   const caller = callerOf(job);
-  return caller === null ? [] : work.filter((other) => other !== job && callerOf(other) === caller);
+  return caller === null ? routing : work.filter((other) => other !== job && callerOf(other) === caller);
 }
 
 /**
@@ -513,6 +518,32 @@ export function combineReports(reports) {
 
 const fixed = (value) => value === null ? "—" : value.toFixed(1);
 
+/** Compare independently collected natural windows; never combine before and after samples. */
+export function compareReports(before, after) {
+  before = combineReports([before]);
+  after = combineReports([after]);
+  if ([before, after].some((report) => !report.windows.length || report.windows.some((window) =>
+    !Number.isFinite(Date.parse(window.since)) || !Number.isFinite(Date.parse(window.until)) ||
+    Date.parse(window.since) >= Date.parse(window.until)))) throw new ReportError("Comparison requires explicit valid windows");
+  if (before.repository !== after.repository || before.windows.some((a) => after.windows.some((b) =>
+    Date.parse(a.until) > Date.parse(b.since))))
+    throw new ReportError("Comparison requires the same repository and ordered, nonoverlapping windows");
+  const identity = (row) => `${row.repository}/${row.runId}/${row.attempt}`;
+  const previous = new Set(before.records.map(identity));
+  if (after.records.some((row) => previous.has(identity(row)))) throw new ReportError("Comparison repeats a run attempt");
+  const project = (report) => ({ windows: report.windows, records: report.records.length,
+    incomplete: report.attemptsTruncated || report.removalsTruncated || report.pagination.some((page) => page.truncated),
+    cohorts: report.summary.cohorts.map((row) => ({ event: row.event, attemptClass: row.attemptClass,
+      records: row.records, states: row.states,
+      cancellationFraction: row.records ? row.states.cancelled / row.records : null,
+      passing: row.byState.passing.measures, measuredRunnerMinutes: row.measuredRunnerMinutes,
+      jobsTruncated: row.jobsTruncated })),
+    mergedQueueLatencyMinutes: distribution(report.queueEpisodes.map((row) => row.minutes)),
+  });
+  return { before: project(before), after: project(after),
+    interpretation: "Observational windows, not causal speedup or activation approval. Passing latency, all-state cancellations and measured elapsed runner minutes are separate; missing timing is unmeasured, not zero. Queue latency covers merged episodes only. Review workload and suite identities before comparing." };
+}
+
 export function markdown(report) {
   if (report.schemaVersion === 2) return eventMarkdown(report);
   const { summary } = report;
@@ -549,6 +580,7 @@ export function eventMarkdown(report) {
     "", `Pagination: ${JSON.stringify(report.pagination)}; attempts truncated: ${report.attemptsTruncated}; removals truncated: ${report.removalsTruncated}.`,
     `Retry-only run outcomes: ${report.summary.retryOnlyRuns.length}. Missing timing is unmeasured; measured runner minutes can be a lower bound.`,
     "Billing unavailable. Validation lag not yet measurable (#3631/#3632). Historical per-test timing requires the safe log projection.",
+    ...(report.comparison ? ["", "Before/after natural-window comparison:", "```json", JSON.stringify(report.comparison, null, 2), "```"] : []),
   ].join("\n");
 }
 
@@ -565,6 +597,7 @@ export function options(argv, now = new Date()) {
         json: { type: "boolean", default: false },
         "all-events": { type: "boolean", default: false },
         input: { type: "string", multiple: true },
+        baseline: { type: "string" },
         "timing-job": { type: "string", multiple: true },
         "assumed-usd-per-minute": { type: "string" },
       },
@@ -582,6 +615,7 @@ export function options(argv, now = new Date()) {
   const since = values.since === undefined ? until - 48 * 60 * MINUTE : parse("--since", values.since);
   const timeoutMinutes = Number(values["timeout-minutes"]);
   if (!values.input && !REPOSITORY.test(values.repo ?? "")) throw new ReportError("--repo <owner>/<name> is required");
+  if (values.baseline && !values.input) throw new ReportError("--baseline requires offline --input post-window.json");
   if (since >= until) throw new ReportError("--since must be before --until");
   if (!Number.isFinite(timeoutMinutes) || timeoutMinutes <= 0) throw new ReportError("--timeout-minutes must be positive");
   if (values["timing-job"] && (!values["all-events"] || values["timing-job"].length > 10 ||
@@ -593,6 +627,7 @@ export function options(argv, now = new Date()) {
   return {
     repository: values.repo, since: new Date(since).toISOString(), until: new Date(until).toISOString(), timeoutMinutes, json: values.json,
     ...(values["all-events"] ? { allEvents: true } : {}), ...(values.input ? { input: values.input } : {}),
+    ...(values.baseline ? { baseline: values.baseline } : {}),
     ...(values["timing-job"] ? { timingJobs: values["timing-job"] } : {}),
     ...(assumedRate !== null ? { assumedRate } : {}),
   };
@@ -604,6 +639,7 @@ export async function main(argv, { env = process.env, fetchImpl = fetch, out = c
     const opts = options(argv);
     if (opts.input) {
       const report = combineReports(await Promise.all(opts.input.map(async (path) => JSON.parse(await readFile(path, "utf8")))));
+      if (opts.baseline) report.comparison = compareReports(JSON.parse(await readFile(opts.baseline, "utf8")), report);
       out(opts.json ? JSON.stringify(report, null, 2) : markdown(report));
       return 0;
     }
