@@ -20,6 +20,13 @@ const diagnosticSteps = [
   "Tell the Author How to Commit the linux Baselines",
 ];
 const reserveSeconds = 180;
+const systemCacheSteps = [
+  "Resolve Playwright Chromium System Packages",
+  "Restore Playwright Chromium System Packages",
+  "Verify Playwright Chromium Launch",
+  "Collect Playwright Chromium System Packages",
+  "Save Playwright Chromium System Packages",
+];
 // The recorded six-minute timeout took 372 seconds. Round its 12-second overrun up to 15
 // for EACH attempt, including a near-bound successful retry. This is a sizing assumption,
 // not a promise about GitHub's timeout enforcement; natural-run observation is still required.
@@ -76,14 +83,15 @@ function budgetAccounting(source, rows = evidence.samples) {
   // Cache hit/miss are mutually exclusive; each active path includes its own first AND retry.
   const install = Math.max(...attemptPaths.map((attempts) => attempts.reduce((sum, value) => sum + value, 0)));
   const remainder = Math.ceil(measuredRemainder(rows) / 10) * 10;
-  const enforcement = (Math.max(...attemptPaths.map((attempts) => attempts.length)) + diagnosticSteps.length)
+  const cache = systemCacheSteps.reduce((seconds, name) => seconds + stepSeconds(namedStep(job, name)), 0);
+  const enforcement = (Math.max(...attemptPaths.map((attempts) => attempts.length)) + diagnosticSteps.length + systemCacheSteps.length)
     * enforcementSecondsPerAttempt;
   const diagnostics = diagnosticSteps.reduce((seconds, name) => seconds + stepSeconds(namedStep(job, name)), 0);
-  const required = install + remainder + enforcement + reserveSeconds + diagnostics;
+  const required = install + cache + remainder + enforcement + reserveSeconds + diagnostics;
   assert.ok(budget >= required,
     `browser: ${budget}s must cover ${install}s attempts + ${remainder}s measured remainder + ` +
-    `${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${reserveSeconds}s reserve (needs ${required}s)`);
-  return { budget, install, remainder, enforcement, diagnostics, required };
+    `${cache}s cache/verify + ${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${reserveSeconds}s reserve (needs ${required}s)`);
+  return { budget, install, cache, remainder, enforcement, diagnostics, required };
 }
 
 function withBudget(minutes) {
@@ -148,18 +156,18 @@ test("recent sizing evidence covers five natural full runs and rejects incomplet
 
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 3540, install: 720, remainder: 2020, enforcement: 105, diagnostics: 480, required: 3505 });
+  assert.deepEqual(result, { budget: 4080, install: 720, cache: 480, remainder: 2020, enforcement: 180, diagnostics: 480, required: 4060 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
     "the sizing assumption must cover the observed enforcement overrun");
   for (const row of evidence.samples) {
-    assert.ok(result.budget - result.install - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
+    assert.ok(result.budget - result.install - result.cache - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
       `run ${row.runId} shard ${row.shard}: near-bound recovered setup must leave the full remaining workload its reserve`);
   }
 });
 
-test("redistributed sizing includes measured setup, production and cleanup without raising the deadline", () => {
+test("redistributed sizing retains the measured floor and accounts for the bounded cache phases", () => {
   const profile = JSON.parse(readFileSync(new URL("./fixtures/browser-shard-profile.json", import.meta.url), "utf8"));
   for (const { phases } of profile.sources) {
     assert.ok(Object.values(phases).every((value) => Number.isFinite(value) && value >= 0));
@@ -173,16 +181,17 @@ test("redistributed sizing includes measured setup, production and cleanup witho
     + Math.max(...profile.sources.map((source) => source.phases.cleanupSeconds))) / 10) * 10;
   const result = budgetAccounting(workflow);
   const conservative = Math.max(projected, result.remainder);
-  assert.ok(result.install + conservative + result.enforcement + result.diagnostics + reserveSeconds <= result.budget,
-    "redistribution must fit the finite budget including diagnostics and reserve; remeasure rather than raise deadlines");
+  assert.ok(result.install + result.cache + conservative + result.enforcement + result.diagnostics + reserveSeconds <= result.budget,
+    "redistribution must fit the finite budget including cache phases, diagnostics and reserve; remeasure workload changes");
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 40, 48, 49, 50, 55, 58]) {
+  for (const minutes of [25, 40, 48, 49, 50, 55, 58, 59, 67]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
-  for (const name of paths.flatMap((name) => [name, `Retry ${name}`])) {
-    assert.throws(() => budgetAccounting(withAttemptBound(name, 7)), /must cover/, `${name}: lost reserve`);
+  for (const name of [...paths.flatMap((name) => [name, `Retry ${name}`]), ...systemCacheSteps]) {
+    const minutes = stepSeconds(namedStep(browserJob(workflow), name)) / 60 + 1;
+    assert.throws(() => budgetAccounting(withAttemptBound(name, minutes)), /must cover/, `${name}: lost reserve`);
   }
   const original = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(original.activeSeconds > 25 * 60, "replay the observed recovered install and passing suite against the old limit");

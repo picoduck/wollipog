@@ -531,6 +531,7 @@ test("both Playwright installs time out and retry once after clearing the stalle
   ];
 
   for (const [name, id, cacheHit, command, cache = "playwright-cache"] of installs) {
+    const browser = command.endsWith("webkit") ? "webkit" : "chromium";
     const index = steps.findIndex((step) => step.startsWith(`${name}\n`));
     assert.notEqual(index, -1, `${name}: step is missing`);
     assert.equal(steps[index], [
@@ -539,7 +540,9 @@ test("both Playwright installs time out and retry once after clearing the stalle
       `        if: steps.${cache}.outputs.cache-hit ${cacheHit} 'true'`,
       "        continue-on-error: true",
       "        timeout-minutes: 6",
-      `        run: ${command}`,
+      "        env:",
+      `          SYSTEM_CACHE_HIT: \${{ steps.playwright-${browser}-packages-cache.outcome == 'success' && steps.playwright-${browser}-packages-cache.outputs.cache-hit || 'false' }}`,
+      `        run: bash scripts/playwright-system-packages.sh install ${browser} ${cacheHit === "!=" ? "browser" : "system"}`,
     ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
     assert.equal(steps[index + 1], [
       `Retry ${name}`,
@@ -552,6 +555,68 @@ test("both Playwright installs time out and retry once after clearing the stalle
       `          ${command}`,
     ].join("\n"), `${name}: retry must immediately follow, clear the stalled attempt, and fail the job on a second failure`);
   }
+});
+
+test("Playwright system package caches pin exact keys, optional failures and verified pre-test ordering", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
+  for (const [browser, jobId, nextJob, suite, installNames] of [
+    ["chromium", "browser", "win32", "Remote-Instance Browser End-to-End Tests",
+      ["Install Playwright Browser", "Install Playwright System Dependencies"]],
+    ["webkit", "webkit", "check", "WebKit Browser End-to-End Tests",
+      ["Install Playwright WebKit", "Install Playwright WebKit System Dependencies"]],
+  ]) {
+    const job = ci.slice(ci.indexOf(`\n  ${jobId}:\n`), ci.indexOf(`\n  ${nextJob}:\n`));
+    const steps = job.split(/^      - name: /m).slice(1)
+      .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
+    const label = browser === "chromium" ? "Playwright Chromium" : "Playwright WebKit";
+    const id = `playwright-${browser}-packages`;
+    const path = `~/.cache/playwright-${browser}-packages`;
+    const key = `\${{ steps.${id}-resolve.outputs.key }}`;
+    const action = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
+    const names = [`Resolve ${label} System Packages`, `Restore ${label} System Packages`,
+      installNames[0], `Retry ${installNames[0]}`, installNames[1], `Retry ${installNames[1]}`,
+      `Verify ${label} Launch`, `Collect ${label} System Packages`, `Save ${label} System Packages`];
+    const first = steps.findIndex((step) => step.startsWith(`${names[0]}\n`));
+    assert.ok(first >= 0);
+    assert.deepEqual(steps.slice(first, first + names.length).map((step) => step.split("\n")[0]), names);
+    assert.equal(steps[first + names.length].split("\n")[0], suite,
+      "cache phases and real browser launch must finish before tests");
+    const expected = [
+      [names[0], `        id: ${id}-resolve`, "        continue-on-error: true", "        timeout-minutes: 2",
+        "        env:", "          PLAYWRIGHT_VERSION: \${{ steps.playwright-version.outputs.version }}",
+        `        run: bash scripts/playwright-system-packages.sh resolve ${browser}`],
+      [names[1], `        id: ${id}-cache`, `        if: steps.${id}-resolve.outputs.key != ''`,
+        "        continue-on-error: true", "        timeout-minutes: 2",
+        `        uses: actions/cache/restore@${action} # v6.1.0`, "        with:",
+        `          path: ${path}`, `          key: ${key}`],
+      [names[6], "        timeout-minutes: 1", `        run: node scripts/verify-playwright-browser.mjs ${browser}`],
+      [names[7], `        id: ${id}-collect`,
+        `        if: steps.${id}-resolve.outputs.key != '' && (steps.${id}-cache.outcome != 'success' || steps.${id}-cache.outputs.cache-hit != 'true')`,
+        "        continue-on-error: true", "        timeout-minutes: 1",
+        `        run: bash scripts/playwright-system-packages.sh collect ${browser}`],
+      [names[8], `        if: steps.${id}-collect.outcome == 'success'`,
+        "        continue-on-error: true", "        timeout-minutes: 2",
+        `        uses: actions/cache/save@${action} # v6.1.0`, "        with:",
+        `          path: ${path}`, `          key: ${key}`],
+    ];
+    for (const [index, lines] of [[0, expected[0]], [1, expected[1]], [6, expected[2]], [7, expected[3]], [8, expected[4]]]) {
+      assert.equal(steps[first + index], lines.join("\n"),
+        `${names[index]}: exact-key caching must be bounded and optional; verification must fail closed`);
+    }
+    if (browser === "webkit") {
+      const overhead = expected.reduce((minutes, lines) =>
+        minutes + Number(lines.find((line) => line.includes("timeout-minutes:")).split(": ")[1]), 0);
+      const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+      // #3214's dated remainder was under four minutes. Include enforcement on all seven
+      // active bounded steps, plus the same three-minute reserve as Chromium.
+      assert.ok(budget * 60 >= 12 * 60 + overhead * 60 + 7 * 15 + 4 * 60 + 180);
+    }
+  }
+  const helper = readFileSync(resolve(process.cwd(), "scripts/playwright-system-packages.sh"), "utf8");
+  assert.match(helper, /pnpm exec playwright install-deps --dry-run "\$browser"/);
+  assert.match(helper, /--print-uris --no-install-recommends "\$\{packages\[@\]\}"/);
+  assert.match(helper, /cut -d ' ' -f 2- "\$manifest" \| sort \| sha256sum/);
+  assert.match(helper, /key=playwright-system-v1-\$browser-\$ImageOS-\$ImageVersion-\$PLAYWRIGHT_VERSION-\$digest/);
 });
 
 test("the unit-test job's video decoder install is cached, retries once, and every step fits its budget", () => {
@@ -817,9 +882,12 @@ test("every workflow job bounds its own runtime", () => {
       const timeout = body.match(/^ {4}timeout-minutes: (\d+)$/m);
 
       assert.ok(timeout, `${path}: job "${heading[1]}" must set timeout-minutes`);
+      // #3649 adds 8m of bounded cache/verification phases plus 75s enforcement to
+      // the measured Chromium model. Only this job may exceed the general ceiling.
+      const maximum = path === WORKFLOWS[0] && heading[1] === "browser" ? 68 : MAX_TIMEOUT_MINUTES;
       assert.ok(
-        Number(timeout[1]) <= MAX_TIMEOUT_MINUTES,
-        `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${MAX_TIMEOUT_MINUTES}`,
+        Number(timeout[1]) <= maximum,
+        `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${maximum}`,
       );
     }
   }
