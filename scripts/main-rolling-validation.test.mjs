@@ -554,3 +554,13 @@ test("generated main bursts preserve active work and admit only the newest pendi
     assert.ok(!data.requests.some((path) => path.endsWith("/cancel")));
   }), { numRuns: 200, examples: [[[B]], [[B, B, B]], [[B, C, W, B]]] });
 });
+
+test("manual reruns with copied admission are tracked as the active owner and report a stall", () => {
+  const manual = run({ id: 19, run_attempt: 2, status: "in_progress", conclusion: null,
+    run_started_at: at(180) });
+  const result = plan(emptyState(repository), { active: [manual], records: [] }, B, at(301), nextClaim);
+  assert.equal(result.next.active.runId, 19);
+  assert.equal(result.next.pending.targetSha, B); assert.equal(result.next.pending.priorRunId, 19);
+  assert.equal(result.next.status, "stalled-active-run");
+  assert.equal(result.dispatch, true, "a pending successor may wait, but active execution is never cancelled");
+});

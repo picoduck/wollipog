@@ -321,7 +321,7 @@ export function plan(state, observation, mainSha, now, claimId = randomUUID(), r
     return { next, dispatch: false };
   }
   const due = !pending.lastDispatchAt || Date.parse(now) - Date.parse(pending.lastDispatchAt) >= RETRY_MS;
-  next.status = pending.dispatchCount >= 3 ? "dispatch-unknown-operator-required"
+  next.status = stalled ? "stalled-active-run" : pending.dispatchCount >= 3 ? "dispatch-unknown-operator-required"
     : pending.dispatchCount ? "dispatch-outcome-unknown" : "claimed";
   return { next, dispatch: due && pending.dispatchCount < 3 };
 }
@@ -333,7 +333,8 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
     if (!SHA.test(main?.object?.sha)) throw new Error("Invalid main head");
     const observation = await observe(api, repository, previous.value, { mainSha: main.object.sha });
     const decision = plan(previous.value, observation, main.object.sha, now(), randomUUID(), previous.recovered);
-    const value = decision.dispatch ? { ...decision.next, status: "dispatch-outcome-unknown",
+    const value = decision.dispatch ? { ...decision.next,
+      status: decision.next.status === "stalled-active-run" ? "stalled-active-run" : "dispatch-outcome-unknown",
       pending: { ...decision.next.pending, dispatchCount: decision.next.pending.dispatchCount + 1, lastDispatchAt: now() } }
       : decision.next;
     let stored;
