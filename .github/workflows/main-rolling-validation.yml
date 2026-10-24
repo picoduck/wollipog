@@ -47,6 +47,9 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/main-rolling-validation.mjs admit
+      - name: Confirm Current Rolling Claim
+        if: steps.admit.outputs.admitted == 'true'
+        run: echo 'Current rolling claim admitted.'
       - name: Skip Superseded Rolling Claim
         if: steps.admit.outputs.admitted != 'true'
         run: echo 'Superseded claim; full validation was not admitted.'

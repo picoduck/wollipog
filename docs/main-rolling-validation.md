@@ -34,6 +34,14 @@ manual reconciliation. Admission and controller CAS conflicts retry at most thre
 times from fresh state. Admission never joins the controller's short pending lane.
 No controller path invokes an active-run cancellation API.
 
+Unsafe predecessor evidence is different from supersession: admission fails with
+`predecessor-evidence-operator-required`, so its default-success receipt/wake steps
+do not run. This prevents a persistent fence failure causing a dispatch/reject/wake
+loop. Reconciliation discards missing or contradicted pointer hints using Actions.
+For an active-at-main shortcut it also requires a current admission acknowledgement
+or actual suite execution, never just an in-progress run or a ref's active label.
+An unadmitted draining run can therefore have a native successor already queued.
+
 **Main Rolling Relay** remains an opportunistic legacy main-push CI completion wake.
 It demonstrated relay-to-controller dispatch, not worker-completion delivery, and
 is **not load-bearing** for native pending progress. The controller's own worker
@@ -141,6 +149,13 @@ A successful dispatch response alone does not prove the controller ran. Operator
 can also rerun the controller from Actions;
 manual worker reruns retain whole-workflow serialization. Do not edit state to
 manufacture a verdict.
+An operator's rerun waiting in the native pending slot is also replaceable by a
+newer controller dispatch. A cancelled rerun remains incomplete and withdraws its
+earlier certificate; it is never a superseded first-attempt non-verdict. Prefer
+manual controller reconciliation to request fresh current-main validation. Copied
+successful admission output in a failed-job rerun does not bypass native execution
+serialization; it can still validate an older target and supplies no current-main
+certificate unless the exact latest-attempt evidence satisfies the health contract.
 For a rerun, the stall clock starts at the latest attempt's `run_started_at`, rather
 than the original run's creation time.
 

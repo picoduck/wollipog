@@ -11,6 +11,7 @@ const claimId = "12345678-1234-1234-1234-123456789012";
 const nextClaim = "22345678-1234-1234-1234-123456789012";
 const at = (minutes = 0) => new Date(Date.UTC(2026, 9, 22, 10, minutes)).toISOString();
 const run = (overrides = {}) => ({ id: 10, run_attempt: 1, display_title: `Rolling ${A} ${claimId}`, path: WORKER,
+  admissionVerified: true,
   head_sha: W, head_branch: "main", event: "workflow_dispatch", status: "completed", conclusion: "success",
   repository: { full_name: repository }, head_repository: { full_name: repository }, created_at: at(),
   run_started_at: at(1), updated_at: at(40), html_url: `https://github.com/${repository}/actions/runs/10`, ...overrides });
@@ -146,7 +147,7 @@ function forge() {
       if (data.nativeQueue) {
         const busy = data.runs.some((r) => r.status === "in_progress");
         for (const r of data.runs.filter((r) => r.status === "pending")) {
-          r.status = "completed"; r.conclusion = "cancelled"; data.jobs.set(`${r.id}/1`, []);
+          r.status = "completed"; r.conclusion = "cancelled"; data.jobs.set(`${r.id}/${r.run_attempt}`, []);
         }
         data.runs.push(run({ id: ++data.nextRunId, display_title: `Rolling ${body.inputs.target_sha} ${body.inputs.claim_id}`,
           status: busy ? "pending" : "in_progress", conclusion: null }));
@@ -402,9 +403,9 @@ test("pending promotion requires authoritative terminal evidence for the predece
   const a = data.runs.at(-1); await admit(repository, eventFor(a), a.id, 1, { api });
   data.main = B; await reconcile(repository, { api, now: () => at(2), log: () => {} });
   const b = data.runs.at(-1);
-  assert.equal(await admit(repository, eventFor(b), b.id, 1, { api }), false);
+  await assert.rejects(admit(repository, eventFor(b), b.id, 1, { api }), /predecessor/i);
   assert.equal((await readState(api, repository)).value.active.runId, a.id);
-  assert.equal((await readState(api, repository)).value.pending, null, "reject stale promotion intent so the wake can safely enqueue again");
+  assert.equal((await readState(api, repository)).value.status, "predecessor-evidence-operator-required");
 });
 
 test("lost coordination reconstructs the admitted owner and native queued claim before promotion", async () => {
@@ -507,7 +508,7 @@ test("rewritten predecessor hints or untrusted predecessor ancestry cannot autho
     const b = data.runs.at(-1); data.finish(a);
     if (poison === "identity") a.display_title = `Rolling ${C} ${nextClaim}`;
     else data.deniedRevisions.add(A); // predecessor target fails the independent main-ancestry check
-    assert.equal(await admit(repository, eventFor(b), b.id, 1, { api }), false, poison);
+    await assert.rejects(admit(repository, eventFor(b), b.id, 1, { api }), /predecessor/i, poison);
   }
 });
 
@@ -563,4 +564,87 @@ test("manual reruns with copied admission are tracked as the active owner and re
   assert.equal(result.next.pending.targetSha, B); assert.equal(result.next.pending.priorRunId, 19);
   assert.equal(result.next.status, "stalled-active-run");
   assert.equal(result.dispatch, true, "a pending successor may wait, but active execution is never cancelled");
+});
+
+test("state recovery queues a successor for an unadmitted current-main run before it drains", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  const unadmitted = run({ status: "in_progress", conclusion: null });
+  data.runs = [unadmitted];
+  data.jobs.set("10/1", [{ name: "Admit Main Snapshot", status: "in_progress", steps: [] }]);
+  assert.equal(await admit(repository, eventFor(unadmitted), 10, 1, { api }), false);
+  const repair = await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  assert.equal(repair.state.pending.targetSha, A);
+  const queued = data.runs.at(-1); assert.equal(queued.status, "pending");
+  data.jobs.set("10/1", [{ name: "Admit Main Snapshot", steps: [
+    { name: "Skip Superseded Rolling Claim", conclusion: "success" }] }]);
+  data.finish(unadmitted);
+  assert.equal(queued.status, "in_progress");
+  assert.equal(await admit(repository, eventFor(queued), queued.id, 1, { api }), true);
+});
+
+test("unadmitted whole-rerun occupancy at main cannot suppress native pending repair", () => {
+  const current = run({ run_attempt: 2, status: "in_progress", conclusion: null, admissionVerified: false });
+  const result = plan(emptyState(repository), { active: [current], records: [] }, A, at(50), nextClaim);
+  assert.equal(result.dispatch, true); assert.equal(result.next.pending.targetSha, A);
+  assert.equal(result.next.pending.priorRunId, current.id);
+});
+
+test("persistent predecessor rejection cannot create an automatic superseded wake loop", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await writeState(api, repository, await readState(api, repository), {
+    ...claimed(), active: { ...claimed().active, claimId: nextClaim } });
+  data.runs = [run()]; data.main = B;
+  await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  const pending = data.runs.at(-1);
+  // Persistent missing terminal evidence must fail the admission step, so the
+  // default-success Skip/Wake steps cannot recursively start more controllers.
+  const held = run({ id: 55, status: "in_progress", conclusion: null });
+  const stored = await readState(api, repository);
+  await writeState(api, repository, stored, { ...stored.value,
+    active: { ...claimed().active, runId: 55 }, pending: { ...stored.value.pending, priorRunId: 55 } });
+  data.runs.push(held);
+  await assert.rejects(admit(repository, eventFor(pending), pending.id, 1, { api }), /predecessor/i);
+  const stopped = await readState(api, repository);
+  assert.equal(stopped.value.status, "predecessor-evidence-operator-required");
+  assert.equal(stopped.value.pending.claimId, eventFor(pending).inputs.claim_id);
+});
+
+test("reconciliation discards a schema-valid active pointer whose forge identity was rewritten", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await writeState(api, repository, await readState(api, repository), {
+    ...claimed(), active: { ...claimed().active, claimId: nextClaim } });
+  data.runs = [run()]; data.main = B;
+  const result = await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  assert.equal(result.state.active, null);
+  const b = data.runs.at(-1);
+  assert.equal(await admit(repository, eventFor(b), b.id, 1, { api }), true);
+});
+
+test("receipt, acknowledgement and wake are bound to real admission outputs and permissions", () => {
+  const source = readFileSync(new URL("../.github/workflows/main-rolling-validation.yml", import.meta.url), "utf8");
+  const binding = (text) => {
+    const admission = text.split("  admit:\n")[1]?.split("\n  validation:")[0];
+    assert.match(admission, /permissions:\n      contents: write\n      actions: write/);
+    assert.match(admission, /name: Confirm Current Rolling Claim\n        if: steps.admit.outputs.admitted == 'true'/);
+    assert.match(admission, /name: Skip Superseded Rolling Claim\n        if: steps.admit.outputs.admitted != 'true'/);
+    assert.match(admission, /name: Wake After Superseded Admission\n        if: steps.admit.outputs.admitted != 'true'/);
+    assert.match(admission, /gh workflow run main-rolling-controller.yml --ref main --repo "\$GITHUB_REPOSITORY"/);
+    assert.match(text, /validation:\n    if: needs.admit.outputs.admitted == 'true'/);
+  };
+  binding(source);
+  assert.throws(() => binding(source.replace("Skip Superseded Rolling Claim", "Renamed Receipt")));
+  assert.throws(() => binding(source.replace("Wake After Superseded Admission", "Removed Wake")));
+  assert.throws(() => binding(source.replace("actions: write", "actions: read")));
+});
+
+test("an operator rerun in the replaceable pending slot remains an incomplete rerun if displaced", async () => {
+  const { data, api } = forge(); data.nativeQueue = true;
+  await reconcile(repository, { api, now: () => at(), log: () => {} });
+  const a = data.runs.at(-1); await admit(repository, eventFor(a), a.id, 1, { api });
+  const manual = run({ id: 60, run_attempt: 2, status: "pending", conclusion: null });
+  data.runs.push(manual); data.main = B;
+  await reconcile(repository, { api, now: () => at(2), log: () => {} });
+  assert.equal(a.status, "in_progress"); assert.equal(manual.conclusion, "cancelled");
+  assert.equal(record(manual, []).verdict, "incomplete");
+  assert.equal(data.runs.at(-1).status, "pending");
 });
