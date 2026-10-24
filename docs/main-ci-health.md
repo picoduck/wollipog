@@ -115,6 +115,7 @@ be `latestAttempt`, replace `newestForTarget`, withdraw a certificate, or supply
 resolution. A prior real incident stays open until a verified compatible full pass resolves it.
 This is separate from `supersededRunIds`, which describes covered/resolved history. Started,
 unknown, incomplete and rerun attempts retain the conservative withdrawal behavior below.
+Once a run has been rerun, every retained attempt uses that conservative classification.
 
 A run's latest authoritative attempt replaces its earlier green verdict. Requested/in-progress
 reruns and a new worker at the same target withdraw that target's certificate; terminal incomplete

@@ -366,7 +366,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
               workerIdentity(snapshot, repository)?.claimId !== identity.claimId : !isMainPushRun(snapshot, repository)))
           fail("attempt-changed");
         const jobs = firstJobs ?? await pages(api, `${root}/actions/runs/${run.id}/attempts/${attempt}/jobs?filter=all`, "jobs");
-        const nonVerdict = Boolean(identity && isSupersededWorkerAttempt(snapshot, jobs));
+        const nonVerdict = Boolean(identity && run.run_attempt === 1 && isSupersededWorkerAttempt(snapshot, jobs));
         const prefix = identity ? "Full Validation / " : "";
         const inventory = requiredNames.map((name) => {
           name = prefix + name;

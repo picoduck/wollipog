@@ -746,6 +746,9 @@ test("started, unknown and rerun attempts still withdraw an older same-target ce
     assert.equal(health.fullCertification, null);
     assert.equal(health.latestPassingSnapshot, null);
     assert.equal(health.evidence.find((record) => record.runId === 11 && record.attempt === attempts).result, "unknown");
+    if (attempts === 2) assert.deepEqual(health.evidence.filter((record) => record.runId === 11)
+      .map((record) => [record.attempt, record.result]), [[1, "unknown"], [2, "unknown"]],
+    "a rerun retains conservative evidence for every attempt");
   }
 });
 
