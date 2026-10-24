@@ -11,6 +11,7 @@ export const ALERT_TITLE = "Main CI Is Failing";
 export const ALERT_LABEL = "main-ci-red";
 export const REQUEST_MS = 10_000;
 export const API_BUDGET = 48;
+export const API_MAX_BUDGET = 96;
 export const API_WRITE_RESERVE = 8;
 export const API_REMAINING_FLOOR = 600;
 export const RECOVERY_API_BUDGET = 12;
@@ -84,7 +85,10 @@ export function githubApi(token, fetchImpl = fetch) {
     });
     const limit = response.headers?.get("x-ratelimit-limit"), remaining = response.headers?.get("x-ratelimit-remaining");
     const bucket = path === "/graphql" ? "graphqlRateLimit" : "rateLimit";
-    if (/^\d+$/.test(limit ?? "") && /^\d+$/.test(remaining ?? "")) {
+    if (/^\d+$/.test(limit ?? "") && /^\d+$/.test(remaining ?? "") &&
+        Number.isSafeInteger(Number(limit)) && Number(limit) > 0 &&
+        Number.isSafeInteger(Number(remaining)) && Number(remaining) <= Number(limit) &&
+        (!api[bucket] || api[bucket].limit === Number(limit))) {
       // Preserve the low-water mark even when independent requests finish together.
       api[bucket] = { limit: Number(limit), remaining: Math.min(api[bucket]?.remaining ?? Infinity, Number(remaining)) };
     } else api[bucket] = { limit: null, remaining: null };
@@ -101,29 +105,41 @@ export function githubApi(token, fetchImpl = fetch) {
 }
 
 /** One invocation owns one budget, including failed requests and all mutations. */
-export function budgetApi(api, { limit = API_BUDGET, reserve = API_WRITE_RESERVE,
+export function budgetApi(api, { limit, reserve = API_WRITE_RESERVE,
   requireHeaders = false } = {}) {
-  const usage = { limit, reserve, calls: 0, remainingFloor: API_REMAINING_FLOOR,
+  const adaptive = limit === undefined;
+  const usage = { limit: limit ?? API_BUDGET, reserve, calls: 0, readCalls: 0, mutationCalls: 0,
+    restCalls: 0, graphqlCalls: 0, remainingFloor: API_REMAINING_FLOOR,
     rateLimit: null, rateRemaining: null, graphqlLimit: null, graphqlRemaining: null, reason: null };
   let writing = false;
   const stop = (reason) => { usage.reason = reason; fail(reason); };
   const bounded = async (path, options) => {
     if (usage.reason) fail(usage.reason);
-    if (usage.rateRemaining !== null && usage.rateRemaining <= API_REMAINING_FLOOR) stop("api-quota-reserved");
-    if (usage.calls >= limit - (writing ? 0 : reserve)) stop("api-budget-exhausted");
+    if (usage.rateRemaining !== null && usage.rateRemaining <= usage.remainingFloor) stop("api-quota-reserved");
+    if (usage.calls >= usage.limit - (writing ? 0 : reserve)) stop("api-budget-exhausted");
     usage.calls++;
+    usage[(options?.method ?? "GET") === "GET" ? "readCalls" : "mutationCalls"]++;
+    usage[path === "/graphql" ? "graphqlCalls" : "restCalls"]++;
     let result, error;
     try { result = await api(path, options); } catch (caught) { error = caught; }
     const quota = api.rateLimit;
     if (quota) {
       usage.rateLimit = quota.limit; usage.rateRemaining = quota.remaining;
-      if (!Number.isSafeInteger(quota.limit) || !Number.isSafeInteger(quota.remaining)) stop("rate-limit-unavailable");
-      if (quota.remaining < API_REMAINING_FLOOR) stop("api-quota-reserved");
+      if (!Number.isSafeInteger(quota.limit) || quota.limit <= 0 || !Number.isSafeInteger(quota.remaining) ||
+          quota.remaining < 0 || quota.remaining > quota.limit) stop("rate-limit-unavailable");
+      if (adaptive) {
+        // Scale only from authoritative REST headers, bounded independently of
+        // token size. Explicit recovery budgets never grow with the quota.
+        usage.limit = Math.min(API_MAX_BUDGET, Math.floor(API_BUDGET * quota.limit / 1000));
+      }
+      usage.remainingFloor = Math.max(API_REMAINING_FLOOR, Math.ceil(quota.limit * 0.6));
+      if (quota.remaining < usage.remainingFloor) stop("api-quota-reserved");
     } else if (requireHeaders) stop("rate-limit-unavailable");
     const graphql = api.graphqlRateLimit;
     if (graphql) {
       usage.graphqlLimit = graphql.limit; usage.graphqlRemaining = graphql.remaining;
-      if (!Number.isSafeInteger(graphql.limit) || !Number.isSafeInteger(graphql.remaining)) stop("rate-limit-unavailable");
+      if (!Number.isSafeInteger(graphql.limit) || graphql.limit <= 0 || !Number.isSafeInteger(graphql.remaining) ||
+          graphql.remaining < 0 || graphql.remaining > graphql.limit) stop("rate-limit-unavailable");
     }
     if (error?.status === 403 || error?.status === 429) stop("api-rate-limited");
     if (error) throw error;
@@ -278,7 +294,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
     const records = [], legacyRecords = [], inspected = [], supersededRunIds = [];
     const requiredNames = REQUIRED.map((name) => name.replace(/^Full Validation \/ /, ""));
     const inspectedIds = new Set();
-    async function inspect(listed, listedViaWindow = false) {
+    async function inspect(listed, listedViaWindow = false, liveRun = null) {
       if (inspectedIds.has(listed.id)) return;
       const listedIdentity = workerIdentity(listed, repository);
       const isLegacy = isMainPushRun(listed, repository);
@@ -299,7 +315,9 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         if (records.length + legacyRecords.length > MAX_RECORDS) fail("evidence-limit");
         return;
       }
-      const run = await api(`${root}/actions/runs/${listed.id}`);
+      // A pointer was just resolved through this exact live run endpoint. Reuse
+      // that response, but retain the independent end-of-observation recheck.
+      const run = liveRun ?? await api(`${root}/actions/runs/${listed.id}`);
       const identity = workerIdentity(run, repository);
       if (run.id !== listed.id || run.run_attempt !== listed.run_attempt || run.head_sha !== listed.head_sha ||
           (listedIdentity ? !identity || identity.targetSha !== listedIdentity.targetSha || identity.claimId !== listedIdentity.claimId : !isMainPushRun(run, repository)))
@@ -404,7 +422,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
       let hinted;
       try { hinted = await api(`${root}/actions/runs/${id}`); }
       catch (error) { if (error?.status !== 404 || id === incidentRunId) throw error; }
-      if (hinted) await inspect(hinted);
+      if (hinted) await inspect(hinted, false, hinted);
     }
     const possible = records.filter((record) => record.certification === "full" &&
       !records.some((other) => other.targetSha === record.targetSha && (other.runId > record.runId ||
@@ -442,7 +460,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
         const target = workerIdentity(run, repository)?.targetSha ?? (isMainPushRun(run, repository) ? run.head_sha : null);
         if (target && id !== incidentRunId && health.checkpoint && target !== health.checkpoint.targetSha &&
             await ancestor(target, health.checkpoint.targetSha)) continue;
-        await inspect(run);
+        await inspect(run, false, run);
       }
     }
     // Query by every dispatcher SHA from the verified baseline through main.
@@ -718,6 +736,8 @@ export async function reconcile(target, { api, log = console.log, collect = coll
 
 export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error } = {}) {
   let bounded;
+  const entryPoint = env.GITHUB_EVENT_NAME ?? "cli";
+  const observationId = positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID();
   try {
     const repository = env.GITHUB_REPOSITORY;
     if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") fail("invalid-environment");
@@ -746,8 +766,7 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
     if (mode !== "reconcile") fail("unsupported-mode");
     if (env.GITHUB_EVENT_NAME === "workflow_run") targetFromEvent(JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")), repository);
     else if (!["schedule", "workflow_dispatch", "push"].includes(env.GITHUB_EVENT_NAME)) fail("unsupported-event");
-    await reconcile({ repository }, { api, log, output: env.MAIN_CI_HEALTH_OUTPUT, entryPoint: env.GITHUB_EVENT_NAME,
-      observationId: positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID() });
+    await reconcile({ repository }, { api, log, output: env.MAIN_CI_HEALTH_OUTPUT, entryPoint, observationId });
     return 0;
   } catch (caught) {
     const unavailable = unknownHealth(env.GITHUB_REPOSITORY, new Date().toISOString(), caught?.reason ?? "reconciliation-unavailable");
@@ -761,7 +780,7 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
     if (bounded) {
       // Keep report stdout a single JSON document. Logs contain counts only;
       // neither response bodies, reset headers nor credentials are disclosed.
-      const usage = { event: "main_ci_health_api_usage", ...bounded.budget };
+      const usage = { event: "main_ci_health_api_usage", entryPoint, observationId, ...bounded.budget };
       if (argv[0] === "report") error(JSON.stringify(usage)); else log(JSON.stringify(usage));
     }
   }
