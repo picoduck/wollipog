@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { readFile } from "node:fs/promises";
 import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
+import { parseSelection, SELECTION_MARKER } from "./ci-suite-selection.mjs";
 import { githubApi } from "./merge-group-cleanup.mjs";
 
 // Splits merge-group CI time into waiting for a runner and executing, so a queue entry that
@@ -429,31 +430,54 @@ async function readTimingLogBody(token, repository, jobId, fetchImpl) {
   const response = await fetchImpl(location, { signal: AbortSignal.timeout(30_000), redirect: "error" });
   if (!response.ok || !response.body) return { state: "unmeasured", reason: `log-http-${response.status}` };
   const reader = response.body.getReader(), decoder = new TextDecoder();
-  let bytes = 0, pending = "", truncated = false;
-  const summaries = [];
+  let bytes = 0, pending = "", truncated = false, selectionTruncated = false, droppingLine = false;
+  const summaries = [], selections = [];
+  const selectionLine = (line) => {
+    if (!line.includes(SELECTION_MARKER)) return;
+    if (line.length > 768_000) { selectionTruncated = true; return; }
+    const selection = parseSelection(line.trimEnd());
+    if (!selection) return;
+    if (selections.length < 2) selections.push(selection);
+    else selectionTruncated = true;
+  };
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       bytes += value.byteLength;
       if (bytes > 16 * 1024 * 1024) { truncated = true; break; }
-      pending += decoder.decode(value, { stream: true });
+      let chunk = decoder.decode(value, { stream: true });
+      if (droppingLine) {
+        const newline = chunk.indexOf("\n");
+        if (newline < 0) continue;
+        chunk = chunk.slice(newline + 1); droppingLine = false;
+      }
+      pending += chunk;
       const lines = pending.split("\n");
       pending = lines.pop();
-      for (const line of lines) if (line.includes(TIMING_MARKER)) {
-        const summary = parseTiming(line.trimEnd());
-        if (summary) {
-          if (summaries.length < 10) summaries.push(summary);
-          else truncated = true;
+      for (const line of lines) {
+        if (line.includes(TIMING_MARKER)) {
+          const summary = parseTiming(line.trimEnd());
+          if (summary) {
+            if (summaries.length < 10) summaries.push(summary);
+            else truncated = true;
+          }
         }
+        selectionLine(line);
       }
-      if (pending.length > 32_000) pending = "";
+      const selectionPending = pending.includes(SELECTION_MARKER);
+      if (pending.length > (selectionPending ? 768_000 : 32_000)) {
+        if (selectionPending) selectionTruncated = true;
+        pending = ""; droppingLine = true;
+      }
     }
     const last = parseTiming(pending.trimEnd());
     if (last && summaries.length < 10) summaries.push(last);
+    if (!droppingLine) selectionLine(pending);
   } finally { await reader.cancel(); }
-  return { state: summaries.length ? "measured" : "unmeasured", truncated, summaries,
-    reason: summaries.length ? null : "no-safe-timing-output" };
+  return { state: summaries.length || selections.length ? "measured" : "unmeasured", truncated, summaries,
+    ...(selections.length || selectionTruncated ? { selections, selectionTruncated } : {}),
+    reason: summaries.length || selections.length ? null : "no-safe-timing-output" };
 }
 
 export function applyTimingContext(record, summary) {
@@ -594,7 +618,7 @@ export async function main(argv, { env = process.env, fetchImpl = fetch, out = c
       if (matches[0].testTiming.summaries) {
         matches[0].testTiming.summaries = matches[0].testTiming.summaries.filter((summary) =>
           summary.context?.runId === String(record.runId) && summary.context?.attempt === record.attempt);
-        if (!matches[0].testTiming.summaries.length) {
+        if (!matches[0].testTiming.summaries.length && !matches[0].testTiming.selections?.length) {
           matches[0].testTiming.state = "unmeasured";
           matches[0].testTiming.reason = "no-matching-attempt-projection";
         }
