@@ -1506,7 +1506,7 @@ test("two installations of one agent name their folder on the second line, not i
   }
 });
 
-test("Set Up Agents in Connections closes New Session and opens the machines in Connections (#2953)", async () => {
+test("Set Up Agents in Connections closes New Session and opens the selected machine (#2953)", async () => {
   domWindow.localStorage.clear();
   const fixture = await mountFixture({ runners: [setupRunner] });
   try {
@@ -1520,6 +1520,20 @@ test("Set Up Agents in Connections closes New Session and opens the machines in 
     assert.equal(input.getAttribute("aria-activedescendant"), footer.id, "End reaches the footer action");
     await act(async () => { pressComboboxKey(input, "Enter"); });
     assert.equal(dialogCloses.count, closesBefore + 1, "New Session is asked to close");
+    assert.deepEqual(navigated, [{ name: "runners", section: "machines", machineId: setupRunner.runnerId }]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Open Connections falls back to the machine list when no machine is selected", async () => {
+  domWindow.localStorage.clear();
+  const fixture = await mountFixture({ runners: [], projects: [] });
+  try {
+    navigated.length = 0;
+    const closesBefore = dialogCloses.count;
+    await act(async () => { buttonNamed(fixture.container, "Open Connections")!.click(); });
+    assert.equal(dialogCloses.count, closesBefore + 1);
     assert.deepEqual(navigated, [{ name: "runners", section: "machines" }]);
   } finally {
     await unmountFixture(fixture);
