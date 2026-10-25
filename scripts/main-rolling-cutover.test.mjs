@@ -39,6 +39,9 @@ test("rollback restores main-only push and preserves every other byte, including
 test("rollback refuses ambiguous or drifted events without guessing", () => {
   for (const source of [workflow.replace(CUTOVER_MARKER, ""), workflow.replace(CUTOVER_MARKER, CUTOVER_MARKER.repeat(2)),
     workflow.replace(CUTOVER_MARKER, "  push: [main]\n"), workflow.replace(CUTOVER_MARKER, "  push:\n    branches: [other]\n"),
+    workflow.replace(CUTOVER_MARKER, '  "push":\n    branches: [other]\n' + CUTOVER_MARKER),
+    workflow.replace(CUTOVER_MARKER, "  'push':\n    branches: [other]\n" + CUTOVER_MARKER),
+    workflow.replace(CUTOVER_MARKER, "  workflow_dispatch:\n" + CUTOVER_MARKER),
     workflow.replace(CUTOVER_MARKER, push + "    paths: [docs/**]\n"), workflow + "\non:\n  push:\n",
     workflow.replace("  merge_group:\n", ""), workflow.replace("on:\n", "on: [pull_request]\n")]) {
     assert.throws(() => restoreMainPushCI(source));

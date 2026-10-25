@@ -10,6 +10,10 @@ export function restoreMainPushCI(source) {
   const headers = [...source.matchAll(/^on:\n((?:[ \t].*\n|\n)*)/gm)];
   if (headers.length !== 1) throw new Error("Expected one canonical workflow event mapping");
   const [header] = headers, events = header[1];
+  const keys = [...events.matchAll(/^  ([^\s#].*)$/gm)].map(match => match[1]);
+  if (keys.some(key => !/^(workflow_call|merge_group|pull_request|workflow_dispatch|push):$/.test(key)) ||
+      new Set(keys).size !== keys.length)
+    throw new Error("Event keys differ from the reviewed canonical mapping; review before restoring");
   if (!/^  merge_group:\n/m.test(events) || !/^  pull_request:\n/m.test(events) || !/^  workflow_call:\n/m.test(events))
     throw new Error("Required PR, merge-group or rolling event is missing");
   const pushes = [...events.matchAll(/^  push:[^\n]*\n(?:[ \t]{4}.*\n|\n|  #.*\n)*/gm)];

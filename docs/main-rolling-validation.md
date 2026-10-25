@@ -223,9 +223,15 @@ recovery. This is an API-call estimate, not observed token rate-limit usage; con
 the controller token's live rate budget during shadow because existing CI monitors
 share repository limits. Transient quota refusal fails closed and waits for recovery.
 
-## Shadow Verification and Cutover Gate
+## Historical Shadow Verification and Cutover Gate
 
-The native pending repair ships in shadow with legacy main-push CI retained and
+This section records the rollout gate used before this cutover, rather than the
+current trigger state. The [native pending evidence](main-rolling-native-evidence-2026-10-25.md)
+demonstrates the two natural handoffs and reports the unobserved live supersession
+case for exact ready-admission assessment. The current path and executable rollback
+are described above and below. Historical requirements are retained for audit.
+
+The native pending repair shipped in shadow with legacy main-push CI retained and
 the health non-verdict consumer integrated. Before cutover, record **two consecutive
 natural cycles** where a dispatched pending worker starts automatically after its
 active predecessor completes, without requiring legacy CI, cron or a controller
@@ -273,7 +279,7 @@ operator blockers, evidence of broken automatic progress, review or merge gates.
 Do not spend model turns polling the window: report the reviewed draft and let the
 parent prompt the implementer when enough natural evidence exists.
 
-Only the later cutover PR may remove the main-push full fan-out. Preserve every PR
+The separate cutover PR was the only stage allowed to remove main-push full fan-out. Preserve every PR
 and merge-group check and keep the lighter gate disabled. Keep health logic separate;
 see [Main CI Health](main-ci-health.md) for its exact-SHA contract. A green dispatcher
 SHA, stale snapshot or absent alert does not establish current-target health.
