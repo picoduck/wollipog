@@ -278,7 +278,8 @@ test("overlapping ensure and close for one session settle in order, leaving one 
   for (let attempt = 0; attempt < 50 && pipes() > before; attempt++) {
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
   }
-  assert.equal(pipes(), before, "every listener this test started is closed");
+  assert.ok(pipes() <= before, "every listener this test started is closed (older clients may also have closed)");
+  await assert.rejects(requestManagedWorktreeGuardVerdict(again, payload("git status")));
 });
 
 test("a socket path that cannot be bound is refused before anything is created", async () => {
@@ -371,9 +372,11 @@ test("an abstract socket answers from the runner's memory and writes nothing", {
   assert.ok((await requestManagedWorktreeGuardVerdict(one, remove)).stdout.includes(MANAGED_WORKTREE_REFUSAL));
   // A live refresh is simply the next read of memory.
   lists.set("s_one", []);
+  host.refreshMemoryProtections("s_one");
   assert.deepEqual(await requestManagedWorktreeGuardVerdict(one, remove), { stdout: "", stderr: "", exitCode: 0 });
   // No list at all is an invalidated guard: a refusal.
   lists.delete("s_one");
+  host.refreshMemoryProtections("s_one");
   const invalidated = await requestManagedWorktreeGuardVerdict(one, payload("git status"));
   assert.equal(invalidated.exitCode, 2);
 
