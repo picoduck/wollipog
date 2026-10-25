@@ -40,6 +40,7 @@ import {
   codexGuardArgsActive,
   codexGuardCommandString,
   codexGuardConfigOverride,
+  codexGuardHashTrustVersionSupported,
   codexGuardLaunchArgs,
   codexGuardTrustOverride,
   codexHookTrustVerdict,
@@ -1383,7 +1384,7 @@ export function refreshClaudeGuardProtections(
 }
 
 export interface CodexGuardProvisioning {
-  /** The argv this spawn must use: the override and trust bypass appended when the guard is active. */
+  /** The argv proven for this spawn, using hash trust or the TUI-only legacy bypass. */
   args: string[];
   /** Whether the guard really is in `args`, read back from the argv itself. */
   guardActive: boolean;
@@ -1412,6 +1413,8 @@ export async function provisionCodexGuard(
     protections: readonly ManagedWorktreeProtection[];
     /** The TUI's working directory, where Codex resolves project-scoped hooks. */
     cwd: string;
+    /** Only a TUI can fall back to the legacy bypass: it is inert on app-server. */
+    entryPoint?: "structured" | "tui";
     platform?: NodeJS.Platform;
     /** Seam for tests: prove the guard sidecar actually refuses before relying on it. */
     verifyGuardLaunch?: typeof verifyManagedWorktreeGuardLaunch;
@@ -1440,7 +1443,11 @@ export async function provisionCodexGuard(
   // A runner-owned override left in the argv would claim a guard this spawn has not proved.
   const arrived = withoutCodexGuardArgs(spec.args);
   const isolate = config.isolateForeignHooks === true;
-  const args = isolate ? withoutCodexHooksFeatureDisable(arrived) : arrived;
+  const isTui = config.entryPoint === "tui";
+  // Caller-supplied bypasses survive inactive provisioning. A successful hash-trust launch
+  // replaces one explicitly and logs its mechanism; a legacy fallback carries exactly one.
+  const clean = withoutCodexGuardArgs(arrived, true);
+  const args = isolate ? withoutCodexHooksFeatureDisable(clean) : clean;
   const inactive = (reason: string): CodexGuardProvisioning => {
     log(`Codex managed worktree guard ${spec.sessionId}: ${reason}`);
     return { args: arrived, guardActive: false, reason };
@@ -1506,11 +1513,13 @@ export async function provisionCodexGuard(
   } catch (error) {
     return inactive(`the guard could not be provisioned (${(error as Error).message})`);
   }
-  // Enumerate with the same flags the TUI will carry. This proves Codex installs the runner's hook
-  // in THIS build and decides whether the invocation-wide trust bypass is acceptable at all.
+  let codexVersion: string | undefined;
   const readInventory = (probe: Parameters<typeof readCodexHookInventory>[0]) => {
     if (config.readHookInventory) config.onProcess?.(Promise.resolve(false));
-    return (config.readHookInventory ?? readCodexHookInventory)({ ...probe, onProcess: config.onProcess });
+    codexVersion = undefined;
+    return (config.readHookInventory ?? readCodexHookInventory)({
+      ...probe, onProcess: config.onProcess, onVersion: (version) => { codexVersion = version; },
+    });
   };
   let entries: CodexHookEntry[];
   try {
@@ -1518,58 +1527,95 @@ export async function provisionCodexGuard(
   } catch (error) {
     return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
   }
-  // Trust the runner's own hook by hash (#1499). `--dangerously-bypass-hook-trust` is what a TUI
-  // and `codex exec` honour; measured on codex-cli 0.155.1 it does NOTHING on `codex app-server`,
-  // where an enabled-but-untrusted hook is skipped without a word. The hash is Codex's own digest
-  // of the hook's definition, so it can only come from this first enumeration.
-  // A hook Codex never installed has no hash either, and "no content hash" would be the wrong
-  // cause to report for it, so presence is judged on its own first and keeps its own message.
   if (!entries.some((entry) => entry.command === guardCommand)) {
     return inactive("Codex did not install the runner's PreToolUse hook");
   }
-  const trustOverride = codexGuardTrustOverride(entries, guardCommand);
-  if (!trustOverride) {
-    return inactive("Codex reported no content hash for the runner's PreToolUse hook, so it cannot be trusted");
-  }
-  let launchArgs = args;
-  if (isolate) {
-    // Every enabled hook that is not the runner's is switched off for this invocation, and the
-    // result is READ BACK rather than assumed: the override's spelling is what makes it work.
-    const foreign = entries.filter((entry) => entry.enabled && entry.command !== guardCommand);
-    // A key the override cannot spell (a control character) is a hook that cannot be switched
-    // off from argv, so the launch keeps the preset's own flag rather than failing outright.
-    if (foreign.length > 0) {
+
+  const disabledForeignKeys = new Set<string>();
+  const isolatedArgs = (): string[] => {
+    for (const entry of entries) {
+      if (entry.enabled && entry.command !== guardCommand) disabledForeignKeys.add(entry.key);
+    }
+    // Keep prior disables when switching mechanisms: the latest inventory may already show
+    // those hooks off only because the previous probe carried this override.
+    try {
+      return disabledForeignKeys.size > 0
+        ? [...args, "-c", codexHookStateDisableOverride([...disabledForeignKeys])]
+        : args;
+    } catch (error) {
+      throw new Error(`its foreign Codex hooks could not be disabled for this launch (${(error as Error).message})`);
+    }
+  };
+  const provisioned = (
+    guarded: string[], mechanism: "trusted-hash" | "legacy-bypass",
+    fallbackReason?: "unmeasured_version" | "hash_verification_failed",
+  ): CodexGuardProvisioning => {
+    log(JSON.stringify({
+      event: "codex_managed_worktree_guard_provisioned",
+      sessionId: spec.sessionId,
+      entryPoint: config.entryPoint ?? "structured",
+      mechanism,
+      codexVersion: codexVersion ?? null,
+      replacedExplicitBypass: arrived.includes("--dangerously-bypass-hook-trust") && mechanism === "trusted-hash",
+      ...(fallbackReason ? { fallbackReason } : {}),
+    }));
+    return { args: guarded, guardActive: true };
+  };
+
+  // The version pin selects the TUI mechanism only. Structured hash-trust admission retains
+  // main's inventory read-back contract on every version; it can never use the inert bypass.
+  let hashFailure = `codex-cli ${codexVersion ?? "unknown"} is outside the measured TUI hash-trust range`;
+  let hashAttempted = false;
+  if (!isTui || codexGuardHashTrustVersionSupported(codexVersion)) {
+    hashAttempted = true;
+    try {
+      const trustOverride = codexGuardTrustOverride(entries, guardCommand);
+      if (!trustOverride) throw new Error("Codex reported no content hash for the runner's PreToolUse hook, so it cannot be trusted");
+      const launchArgs = isolate ? isolatedArgs() : args;
       try {
-        launchArgs = [...args, "-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))];
+        entries = await readInventory(codexHookInventoryProbe(
+          { ...spec, args: launchArgs }, config.cwd, override, undefined, trustOverride,
+        ));
       } catch (error) {
-        return inactive(`its foreign Codex hooks could not be disabled for this launch (${(error as Error).message})`);
+        throw new Error(`its Codex hook inventory could not be re-enumerated (${(error as Error).message})`);
       }
+      if (isTui && !codexGuardHashTrustVersionSupported(codexVersion)) {
+        throw new Error("the Codex version changed or became unknown during hash-trust verification");
+      }
+      const inventory = isolate
+        ? codexHookIsolationVerdict(entries, guardCommand)
+        : codexHookInventoryVerdict(entries, guardCommand);
+      if (!inventory.ok) throw new Error(inventory.reason);
+      const trusted = codexHookTrustVerdict(entries, guardCommand, !isTui);
+      if (!trusted.ok) throw new Error(trusted.reason);
+      const guarded = codexGuardLaunchArgs(launchArgs, override, trustOverride);
+      if (!codexGuardArgsActive(guarded, override, trustOverride)) {
+        throw new Error("a later hooks.PreToolUse override in the launch arguments would replace the guard");
+      }
+      return provisioned(guarded, "trusted-hash");
+    } catch (error) {
+      hashFailure = (error as Error).message;
     }
   }
-  // ONE re-enumeration, carrying everything this launch will carry: the isolation override when
-  // there is one, and the trust override always. Both verdicts are then read off the same
-  // authoritative inventory, and the isolate path costs no more probes than it did before.
+  if (!isTui) return inactive(hashFailure);
+
+  // Availability fallback for TUIs only. The invocation-wide bypass must not un-gate ANY foreign
+  // hook: disable them by exact key and verify the complete inventory before carrying the flag.
   try {
+    const launchArgs = isolatedArgs();
     entries = await readInventory(codexHookInventoryProbe(
-      { ...spec, args: launchArgs }, config.cwd, override, undefined, trustOverride,
+      { ...spec, args: launchArgs }, config.cwd, override,
     ));
+    const inventory = codexHookIsolationVerdict(entries, guardCommand);
+    if (!inventory.ok) throw new Error(inventory.reason);
+    const guarded = codexGuardLaunchArgs(launchArgs, override, undefined, "legacy-bypass");
+    if (!codexGuardArgsActive(guarded, override, undefined, "legacy-bypass")) {
+      throw new Error("the launch arguments do not retain the legacy guard and hook-trust bypass");
+    }
+    return provisioned(guarded, "legacy-bypass", hashAttempted ? "hash_verification_failed" : "unmeasured_version");
   } catch (error) {
-    return inactive(`its Codex hook inventory could not be re-enumerated (${(error as Error).message})`);
+    return inactive(`hash trust failed (${hashFailure}); legacy TUI bypass failed (${(error as Error).message})`);
   }
-  const inventory = isolate
-    ? codexHookIsolationVerdict(entries, guardCommand)
-    : codexHookInventoryVerdict(entries, guardCommand);
-  if (!inventory.ok) return inactive(inventory.reason);
-  // The trust override is not taken on faith either: a stale or mistyped hash leaves the hook
-  // untrusted, which Codex acts on silently, so the guard would otherwise be claimed and absent.
-  const trusted = codexHookTrustVerdict(entries, guardCommand);
-  if (!trusted.ok) return inactive(trusted.reason);
-  const guarded = codexGuardLaunchArgs(launchArgs, override, trustOverride);
-  if (!codexGuardArgsActive(guarded, override, trustOverride)) {
-    return inactive("a later hooks.PreToolUse override in the launch arguments would replace the guard");
-  }
-  log(`Codex managed worktree guard ${spec.sessionId}: provisioned (${protectionsFile})`);
-  return { args: guarded, guardActive: true };
 }
 
 /**

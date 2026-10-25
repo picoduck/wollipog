@@ -1,11 +1,14 @@
 /**
  * Measure whether a Codex `PreToolUse` hook actually runs, and still denies an already-APPROVED
- * escalated command, under `codex app-server` (#1499).
+ * escalated command, under `codex app-server` (#1499), and measure hash trust on exec/TUI (#1488).
  *
- *   pnpm probe:codex-guard-hook            # needs a real `codex` on PATH; nothing else
+ *   pnpm probe:codex-guard-hook            # real `codex`, Git, POSIX shell and Python 3 (PTY)
+ *   pnpm probe:codex-guard-hook --cli-only # exec + real TUI, including foreign-hook controls
+ *   pnpm probe:codex-guard-hook --exec-only
+ *   pnpm probe:codex-guard-hook --tui-only
  *   CODEX_BIN=/path/to/codex pnpm probe:codex-guard-hook
  *
- * This is NOT part of `pnpm test`: it spawns a real `codex app-server` and takes about a minute.
+ * This is NOT part of `pnpm test`: it spawns real Codex entry points and takes about a minute.
  * It is the evidence behind `codexGuardTrustOverride`, `codexHookTrustVerdict`, and the reviewer
  * gate in `buildCodexTurnParams`, kept runnable so a future codex-cli is re-measured, not re-argued.
  *
@@ -20,15 +23,20 @@
  *      with an escalation this client accepts, and with `approvalsReviewer: "auto_review"`. The
  *      denial lands BEFORE the approval is raised, so a protected command never becomes a prompt.
  *
- * Nothing here reaches the real network or a real model: the model is a scripted local
+ * The CLI matrix proves a matching hash fires and allows/denies, while foreign untrusted hooks
+ * stay gated. Untrusted/stale-hash controls skip ours; a bypass control fires both hooks. TUI
+ * onboarding explicitly continues WITHOUT trusting hooks. Each CLI case checks an execution file,
+ * invocation logs and deny evidence; a timeout or missing turn is a failure.
+ *
+ * Nothing here reaches the external network or a real model: the model is a scripted local
  * Responses-API server behind a throwaway `CODEX_HOME`, and the "guard" is a stand-in hook that
  * writes the same deny payload `managedWorktreeGuardDenyPayload` writes and logs every invocation,
  * so "never fired" is always distinguishable from "fired and allowed".
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execFileSync, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -68,6 +76,17 @@ const CASES: Case[] = [
 
 interface Fixture { repo: string; codexHome: string; hook: string; hookLog: string; modelPort: number }
 
+/** Never inherit a provider home, credential, Git config, or app-server endpoint from the host. */
+function probeEnv(fixture: Fixture): NodeJS.ProcessEnv {
+  return {
+    PATH: process.env.PATH, HOME: fixture.codexHome, CODEX_HOME: fixture.codexHome,
+    XDG_CONFIG_HOME: fixture.codexHome, XDG_DATA_HOME: fixture.codexHome,
+    XDG_STATE_HOME: fixture.codexHome, XDG_CACHE_HOME: fixture.codexHome,
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+    PROBE_KEY: "scripted-local-provider", TERM: "xterm-256color", LANG: "C.UTF-8",
+  };
+}
+
 function listen(server: Server): Promise<number> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve((server.address() as { port: number }).port));
@@ -79,7 +98,7 @@ function message(text: string): Json {
 }
 
 /** One scripted agent turn, plus scripted Guardian verdicts on the same provider. */
-function modelServer(state: { tool: Json | null; calls: number }): Server {
+function modelServer(state: { tool: Json | null; calls: number; input: string }): Server {
   return createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
@@ -87,6 +106,7 @@ function modelServer(state: { tool: Json | null; calls: number }): Server {
       let body: Json = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Json; } catch { /* keep {} */ }
       const guardian = String(body.model ?? "").startsWith("codex-auto-review");
+      if (!guardian) state.input += JSON.stringify(body.input);
       const step = guardian ? -1 : state.calls++;
       const item: Json = guardian
         ? message(JSON.stringify({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "scripted" }))
@@ -119,7 +139,7 @@ function runTurn(
 ): Promise<string> {
   const child = spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
-    env: { ...process.env, CODEX_HOME: fixture.codexHome, PROBE_KEY: "x" },
+    env: probeEnv(fixture),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
   });
@@ -195,7 +215,7 @@ function runTurn(
 function readInventory(fixture: Fixture, args: readonly string[]): Promise<Json[]> {
   const child = spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
-    env: { ...process.env, CODEX_HOME: fixture.codexHome, PROBE_KEY: "x" },
+    env: probeEnv(fixture),
     stdio: ["pipe", "pipe", "ignore"],
     detached: true,
   });
@@ -227,6 +247,7 @@ function readInventory(fixture: Fixture, args: readonly string[]): Promise<Json[
         if (!line) continue;
         let msg: Json & { id?: unknown; result?: Json };
         try { msg = JSON.parse(line); } catch { continue; }
+        if (msg.id === 1 && process.env.PROBE_DEBUG) process.stderr.write(`initialize: ${JSON.stringify(msg.result)}\n`);
         if (msg.id !== 2) continue;
         const groups = ((msg.result ?? {}).data ?? []) as { hooks?: Json[] }[];
         finish(groups.flatMap((group) => group.hooks ?? []));
@@ -243,6 +264,158 @@ function hookArgs(fixture: Fixture): string[] {
   return ["-c", `hooks.PreToolUse=[{matcher="${MATCHER}",hooks=[{type="command",command="/bin/bash ${fixture.hook}"}]}]`];
 }
 
+/** A real interactive terminal, including the cursor-position handshake Codex requires. */
+function runCliTurn(fixture: Fixture, args: string[], entry: "exec" | "tui"): Promise<string> {
+  const common = [...args, "-a", "never", "-s", "danger-full-access"];
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    let stopping = false;
+    let ending = "";
+    let stop: () => void = () => {};
+    const finish = (suffix = "") => {
+      if (stopping || settled) return;
+      stopping = true;
+      ending = suffix;
+      stop();
+    };
+    const complete = (suffix = "") => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(output + ending + suffix);
+    };
+    const timer = setTimeout(() => finish("\nTIMED OUT"), TURN_TIMEOUT_MS);
+    if (entry === "exec") {
+      const child = spawn(CODEX, [...common, "exec", "--json", "go"], {
+        cwd: fixture.repo, env: probeEnv(fixture), stdio: ["ignore", "pipe", "pipe"], detached: true,
+      });
+      stop = () => killTree(child);
+      child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+      child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+      child.on("error", (error) => complete(`\nSPAWN FAILED: ${error.message}`));
+      child.on("close", (code) => complete(code === 0 ? "" : `\nEXIT ${code}`));
+    } else {
+      // Python's standard-library PTY avoids a native node-pty build prerequisite for this probe.
+      const terminal = spawn("python3", ["-u", "-c", PTY_DRIVER,
+        CODEX, ...common, "--no-alt-screen", "go"], {
+        cwd: fixture.repo, env: probeEnv(fixture), stdio: ["ignore", "pipe", "pipe"],
+      });
+      stop = () => { terminal.kill("SIGTERM"); };
+      terminal.stdout.on("data", (chunk: Buffer) => {
+        if (process.env.PROBE_DEBUG) process.stderr.write(chunk);
+        output += chunk.toString();
+        if (output.replace(/\x1b\[[0-9;?]*[A-Za-z]/gu, "").includes("finished")) finish();
+      });
+      terminal.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
+      terminal.on("error", (error) => complete(`\nSPAWN FAILED: ${error.message}`));
+      terminal.on("close", (code) => complete(`\nEXIT ${code}`));
+    }
+  });
+}
+
+const PTY_DRIVER = String.raw`
+import fcntl, os, pty, signal, struct, sys, termios, time
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvpe(sys.argv[1], sys.argv[1:], os.environ)
+def stop(*_):
+    try: os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError: pass
+    os.waitpid(pid, 0)
+    sys.exit(0)
+signal.signal(signal.SIGTERM, stop)
+fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
+pending = b""
+skipped_review = False
+try:
+    while True:
+        data = os.read(fd, 65536)
+        if not data: break
+        os.write(1, data)
+        pending += data
+        if b"Hooks need review" in pending and not skipped_review:
+            # Continue without granting trust to either hook. Existing hash trust must suffice.
+            time.sleep(0.2)
+            os.write(fd, b"3")
+            time.sleep(0.2)
+            os.write(fd, b"\r")
+            skipped_review = True
+        for query, answer in [(b"\x1b[6n", b"\x1b[1;1R"), (b"\x1b[c", b"\x1b[?1;2c")]:
+            if query in pending:
+                os.write(fd, answer)
+                pending = pending.replace(query, b"")
+        pending = pending[-16384:]
+except OSError:
+    pass
+stop()
+`;
+
+/** Controls prove silent skipping separately from a hook that fires and allows the command. */
+async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; calls: number; input: string }): Promise<number> {
+  const foreignLog = join(fixture.codexHome, "foreign-calls.log");
+  const foreignHook = join(fixture.codexHome, "foreign.sh");
+  const executed = join(fixture.repo, "executed");
+  writeFileSync(foreignHook, `#!/bin/sh\ncat >/dev/null\nprintf 'call\\n' >> '${foreignLog}'\n`, { mode: 0o755 });
+  const args = ["-c", `hooks.PreToolUse=[{matcher="${MATCHER}",hooks=[` +
+    `{type="command",command="/bin/bash ${fixture.hook}"},` +
+    `{type="command",command="/bin/sh ${foreignHook}"}]}]`];
+  const inventory = await readInventory(fixture, args);
+  const ours = inventory.find((hook) => String(hook.command ?? "").includes(fixture.hook));
+  const foreign = inventory.find((hook) => String(hook.command ?? "").includes(foreignHook));
+  if (!ours?.currentHash || !ours.key || foreign?.trustStatus !== "untrusted") {
+    throw new Error("CLI measurement cannot identify its own hash and the foreign untrusted hook");
+  }
+  const override = (hash: string) => `hooks.state={${JSON.stringify(ours.key)}={trusted_hash=${JSON.stringify(hash)}}}`;
+  const trustedArgs = [...args, "-c", override(String(ours.currentHash))];
+  const isolatedBypassArgs = [...args, "-c",
+    `hooks.state={${JSON.stringify(foreign.key)}={enabled=false}}`, "--dangerously-bypass-hook-trust"];
+  const readback = await readInventory(fixture, trustedArgs);
+  if (readback.find((hook) => hook.key === ours.key)?.trustStatus !== "trusted" ||
+      readback.find((hook) => hook.key === foreign.key)?.trustStatus !== "untrusted") {
+    throw new Error("CLI measurement trust read-back did not confirm trusted own / untrusted foreign hooks");
+  }
+  process.stdout.write("\nCLI inventory read-back: own=trusted, foreign=untrusted, bypass absent\n");
+  const isolated = await readInventory(fixture, isolatedBypassArgs);
+  if (isolated.find((hook) => hook.key === foreign.key)?.enabled !== false ||
+      isolated.find((hook) => hook.key === ours.key)?.enabled !== true) {
+    throw new Error("Legacy fallback inventory did not confirm foreign disabled / own enabled");
+  }
+  let failures = 0;
+  for (const entry of ["exec", "tui"] as const) {
+    if (process.argv.includes("--exec-only") && entry !== "exec") continue;
+    if (process.argv.includes("--tui-only") && entry !== "tui") continue;
+    for (const test of [
+      { name: "untrusted", args, protected: true, calls: 0, foreign: 0, ran: true },
+      { name: "matching hash, deny", args: trustedArgs, protected: true, calls: 1, foreign: 0, ran: false },
+      { name: "matching hash, allow", args: trustedArgs, protected: false, calls: 1, foreign: 0, ran: true },
+      { name: "stale hash", args: [...args, "-c", override("stale")], protected: true, calls: 0, foreign: 0, ran: true },
+      { name: "bypass control", args: [...args, "--dangerously-bypass-hook-trust"], protected: false, calls: 1, foreign: 1, ran: true },
+      { name: "isolated bypass, deny", args: isolatedBypassArgs, protected: true, calls: 1, foreign: 0, ran: false },
+      { name: "isolated bypass, allow", args: isolatedBypassArgs, protected: false, calls: 1, foreign: 0, ran: true },
+    ]) {
+      writeFileSync(fixture.hookLog, "");
+      writeFileSync(foreignLog, "");
+      rmSync(executed, { force: true });
+      model.calls = 0;
+      model.input = "";
+      model.tool = { cmd: `echo ${test.protected ? MARKER : "BENIGN-OK"} > '${executed}'`, yield_time_ms: 1000 };
+      const output = await runCliTurn(fixture, test.args, entry);
+      const calls = readFileSync(fixture.hookLog, "utf8").split("\n").filter(Boolean).length;
+      const foreignCalls = readFileSync(foreignLog, "utf8").split("\n").filter(Boolean).length;
+      const ran = existsSync(executed);
+      const denied = model.input.includes("MANAGED_WORKTREE_REFUSAL");
+      const ok = calls === test.calls && foreignCalls === test.foreign && ran === test.ran &&
+        (test.ran || denied) && model.calls >= 2 && !output.includes("TIMED OUT");
+      if (!ok) failures++;
+      process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${entry} · ${test.name}: own×${calls} foreign×${foreignCalls} ran=${ran} denied=${denied} model×${model.calls}\n`);
+      if (!ok || process.env.PROBE_DEBUG) process.stderr.write(output.slice(-6000) + "\n");
+      if (output.includes("TIMED OUT")) throw new Error(`${entry} did not complete a real turn`);
+    }
+  }
+  return failures;
+}
+
 async function main(): Promise<number> {
   const root = mkdtempSync(join(tmpdir(), "wollipog-guard-hook-probe-"));
   const fixture: Fixture = {
@@ -252,7 +425,7 @@ async function main(): Promise<number> {
     hookLog: join(root, "hook-calls.log"),
     modelPort: 0,
   };
-  const model = { tool: null as Json | null, calls: 0 };
+  const model = { tool: null as Json | null, calls: 0, input: "" };
   const models = modelServer(model);
   let failures = 0;
   try {
@@ -267,14 +440,19 @@ async function main(): Promise<number> {
       `"permissionDecision":"deny","permissionDecisionReason":"MANAGED_WORKTREE_REFUSAL: probe"}}'\n` +
       "    exit 0\n    ;;\nesac\nexit 0\n", { mode: 0o755 });
     writeFileSync(fixture.hookLog, "");
-    await gitInit(fixture.repo);
+    await gitInit(fixture);
+    process.stdout.write(execFileSync(CODEX, ["--version"], { env: probeEnv(fixture), encoding: "utf8", timeout: 30_000 }));
 
     fixture.modelPort = await listen(models);
     writeFileSync(join(fixture.codexHome, "config.toml"),
       'model = "probe-model"\nmodel_provider = "probe"\napproval_policy = "on-request"\n\n' +
       '[model_providers.probe]\nname = "Probe"\n' +
       `base_url = "http://127.0.0.1:${fixture.modelPort}/v1"\n` +
-      'wire_api = "responses"\nenv_key = "PROBE_KEY"\n');
+      'wire_api = "responses"\nenv_key = "PROBE_KEY"\n' +
+      `\n[projects.${JSON.stringify(fixture.repo)}]\ntrust_level = "trusted"\n`);
+
+    failures += await cliMeasurements(fixture, model);
+    if (process.argv.includes("--cli-only") || process.argv.includes("--exec-only") || process.argv.includes("--tui-only")) return failures ? 1 : 0;
 
     // The hash is Codex's own digest of the hook's definition, so it is read rather than computed.
     const installed = await readInventory(fixture, hookArgs(fixture));
@@ -306,17 +484,25 @@ async function main(): Promise<number> {
           : {}),
       };
       model.calls = 0;
+      model.input = "";
       const args = testCase.trust === "none"
         ? []
         : testCase.trust === "bypass"
           ? [...hookArgs(fixture), "--dangerously-bypass-hook-trust"]
           : [...hookArgs(fixture), "-c", trustOverride];
       const output = await runTurn(
-        fixture, args, testCase.guardian ? { approvalsReviewer: "auto_review" } : {}, true,
+        fixture, args, {
+          ...(testCase.guardian ? { approvalsReviewer: "auto_review" } : {}),
+          // No sandbox is needed to measure hook trust, and this also works on a host where
+          // unprivileged namespaces are unavailable. Escalated cases still request approval.
+          ...(!testCase.escalate ? { sandboxPolicy: { type: "dangerFullAccess" } } : {}),
+        }, true,
       );
       const calls = readFileSync(fixture.hookLog, "utf8").split("\n").filter(Boolean).length;
-      const denied = output === "declined" || output === "no command ran";
-      const ok = (testCase.expect === "denied" ? denied : !denied) && calls === testCase.hookCalls;
+      const denied = model.input.includes("MANAGED_WORKTREE_REFUSAL") &&
+        (output === "declined" || output === "no command ran");
+      const ran = output === (testCase.protected ? MARKER : "BENIGN-OK");
+      const ok = (testCase.expect === "denied" ? denied : ran) && calls === testCase.hookCalls && model.calls >= 2;
       if (!ok) failures++;
       process.stdout.write(
         `${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(50)} ` +
@@ -327,7 +513,7 @@ async function main(): Promise<number> {
     rmSync(root, { recursive: true, force: true });
   }
   process.stdout.write(failures === 0
-    ? `\nAll ${CASES.length + 1} checks matched the recorded measurement.\n`
+    ? `\nAll CLI cases and ${CASES.length + 1} app-server checks matched the recorded measurement.\n`
     : `\n${failures} check(s) did NOT match. Codex's hook behaviour has moved; re-read ADR 0012 ` +
       "before changing code.\n");
   return failures === 0 ? 0 : 1;
@@ -336,12 +522,13 @@ async function main(): Promise<number> {
 const FIXTURE_TIMEOUT_MS = 30_000;
 
 /** The throwaway repository, bounded and stripped of the developer's own Git configuration. */
-function gitInit(repo: string): Promise<void> {
+function gitInit(fixture: Fixture): Promise<void> {
+  const { repo } = fixture;
   const run = (args: string[]): Promise<void> => new Promise((resolve, reject) => {
     const child: ChildProcess = spawn("git", [
       "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
       "-c", "user.email=probe@example.invalid", "-c", "user.name=probe", ...args,
-    ], { cwd: repo, stdio: "ignore", detached: true });
+    ], { cwd: repo, env: probeEnv(fixture), stdio: "ignore", detached: true });
     const timer = setTimeout(() => {
       killTree(child);
       reject(new Error(`git ${args[0]} did not finish within ${FIXTURE_TIMEOUT_MS}ms`));
