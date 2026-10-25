@@ -27,6 +27,7 @@ import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js"
  */
 
 import { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns, type ConversationHandoffDraft } from "@wollipog/protocol";
+import { providerConversationHome } from "./provider-conversation-home.js";
 import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
@@ -13196,6 +13197,14 @@ export class SessionManager {
       if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
         return refuse("operation_in_progress", "The interrupted provider turn is still settling. Try again in a moment.");
       }
+      let conversationHome = meta.providerConversationHome ?? meta.providerCredentialHome;
+      if (!conversationHome && meta.agentSessionId) {
+        try { conversationHome = await providerConversationHome(meta); }
+        catch {
+          return refuse("not_resumable", "The original saved provider conversation could not be located for an account switch.");
+        }
+      }
+      // Resolving a default home can cross a context boundary; recheck both card and binding after it.
       const current = this.store.readMeta(sessionId);
       const currentBlock = this.openProviderAuthenticationCard(current, recoveryRequestId);
       if (!current || !currentBlock || currentBlock.recoveryId !== block.recoveryId) {
@@ -13227,7 +13236,7 @@ export class SessionManager {
         providerAccountProvider: target.provider,
         providerCredentialHome: target.credentialHome,
         providerProfileId: target.profileId,
-        providerConversationHome: current.providerConversationHome ?? current.providerCredentialHome,
+        providerConversationHome: conversationHome,
         pendingProviderAccountId: undefined,
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,

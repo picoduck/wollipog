@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDriverKind, RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import type { ProviderAuthObservation, ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
+import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import { SessionManager, type ProviderAccountResolver } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -37,7 +38,7 @@ type HomeState = { observations: ProviderAuthObservation[]; email?: string | nul
 function fakeController(homes: Record<string, HomeState>) {
   const probes: string[] = [];
   const observe = (meta: SessionMeta): ProviderAuthObservation => {
-    const home = meta.env.CLAUDE_CONFIG_DIR ?? "<none>";
+    const home = meta.env.CLAUDE_CONFIG_DIR ?? (meta.env.HOME ? join(meta.env.HOME, ".claude") : "<none>");
     probes.push(home);
     const state = homes[home];
     if (!state) return { status: "unknown" };
@@ -45,7 +46,7 @@ function fakeController(homes: Record<string, HomeState>) {
   };
   const controller: ProviderAuthRecoveryController = {
     describe: (meta) => ({
-      id: `scope:${meta.env.CLAUDE_CONFIG_DIR ?? "<none>"}`,
+      id: `scope:${meta.env.CLAUDE_CONFIG_DIR ?? (meta.env.HOME ? join(meta.env.HOME, ".claude") : "<none>")}`,
       provider: "claude",
       canStartLogin: false,
       configuredCredential: false,
@@ -150,7 +151,7 @@ function harness(
     undefined,
     [],
     (meta: SessionMeta) => {
-      meta.env = meta.providerCredentialHome ? { CLAUDE_CONFIG_DIR: meta.providerCredentialHome } : {};
+      meta.env = meta.providerCredentialHome ? { CLAUDE_CONFIG_DIR: meta.providerCredentialHome, HOME: root } : { HOME: root };
     },
     undefined,
     undefined,
@@ -162,7 +163,9 @@ function harness(
   (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount =
     (spec: SessionLaunchSpec) => accounts[spec.providerAccountId as keyof typeof accounts];
   // These fake providers model identity checks and lifecycle; they do not create CLI transcripts.
-  (manager as unknown as { transferAccountTranscript: () => Promise<void> }).transferAccountTranscript = async () => {};
+  const transfers: Array<{ source: string; target: string }> = [];
+  (manager as unknown as { transferAccountTranscript: (context: unknown, id: string, source: string, target: string) => Promise<void> }).transferAccountTranscript =
+    async (_context, _id, source, target) => { transfers.push({ source, target }); };
   return {
     root,
     store,
@@ -174,6 +177,8 @@ function harness(
     probes,
     manager,
     controller,
+    homes,
+    transfers,
     cleanup: () => {
       manager.shutdownAll();
       rmSync(root, { recursive: true, force: true });
@@ -607,8 +612,10 @@ for (const race of [false, true]) test(`authentication continuation respects a b
 
 function unbind(h: ReturnType<typeof harness>) {
   // This is a fake credential context throughout: no real provider home is read or probed.
+  h.homes[join(h.root, ".claude")] = h.homes["/claude/work"]!;
   h.store.patchMeta(SESSION, { providerAccountId: undefined, providerAccountLabel: undefined,
-    providerAccountProvider: undefined });
+    providerAccountProvider: undefined, providerCredentialHome: undefined, providerConversationHome: undefined,
+    env: { HOME: h.root, CLAUDE_CONFIG_DIR: join(h.root, ".claude") } });
 }
 
 test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine account", async () => {
@@ -629,6 +636,8 @@ test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine ac
     assert.equal(meta.providerAccountId, "claude-personal");
     assert.equal(meta.providerCredentialIdentityId, "identity-personal");
     assert.equal(meta.providerAuthBlock, undefined);
+    assert.deepEqual(h.transfers, [{ source: join(h.root, ".claude"), target: "/claude/personal" }],
+      "the default transcript store must be transferred before resuming under the new account");
   } finally { h.cleanup(); }
 });
 
@@ -713,6 +722,56 @@ test("unbound recovery refuses a card replaced during the target probe", async (
     };
     assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, "recovery_changed");
     assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+    assert.deepEqual(h.prompts, []);
+  } finally { h.cleanup(); }
+});
+
+
+test("default-sign-in selection copies only the real saved conversation before its retained work resumes", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] } });
+  try {
+    unbind(h);
+    const source = join(h.root, ".claude");
+    const target = join(h.root, "added-account");
+    const project = join(source, "projects", "workspace");
+    mkdirSync(project, { recursive: true });
+    mkdirSync(target);
+    writeFileSync(join(project, "claude-conversation.jsonl"), "saved conversation\n");
+    writeFileSync(join(project, "unrelated.jsonl"), "another conversation\n");
+    writeFileSync(join(source, ".credentials.json"), "synthetic credential sentinel\n");
+    h.homes[target] = { observations: [{ status: "authenticated", identityId: "identity-personal" }] };
+    const internals = h.manager as unknown as {
+      resolveProviderAccount: ProviderAccountResolver;
+      transferAccountTranscript: typeof transferClaudeAccountTranscript;
+    };
+    internals.resolveProviderAccount = () => ({ ...accounts["claude-personal"], credentialHome: target });
+    internals.transferAccountTranscript = transferClaudeAccountTranscript;
+    const requestId = await parkOnMismatch(h);
+    assert.deepEqual(await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null), { ok: true });
+    await h.manager.providerAuthSelections.get(SESSION);
+    await waitFor(() => h.prompts.length === 1, "the saved conversation did not resume");
+    assert.equal(readFileSync(join(target, "projects", "workspace", "claude-conversation.jsonl"), "utf8"), "saved conversation\n");
+    assert.equal(existsSync(join(target, "projects", "workspace", "unrelated.jsonl")), false);
+    assert.equal(existsSync(join(target, ".credentials.json")), false);
+    assert.equal(readFileSync(join(project, "claude-conversation.jsonl"), "utf8"), "saved conversation\n");
+    assert.equal(h.prompts[0]?.home, target);
+    assert.equal(h.store.readMeta(SESSION)?.providerConversationHome, target);
+  } finally { h.cleanup(); }
+});
+
+
+test("default-sign-in recovery refuses an ambiguous original transcript home before changing the binding", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    h.store.patchMeta(SESSION, { env: { CLAUDE_CONFIG_DIR: "relative-home" } });
+    assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, "not_resumable");
+    assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+    assert.deepEqual(h.transfers, []);
     assert.deepEqual(h.prompts, []);
   } finally { h.cleanup(); }
 });
