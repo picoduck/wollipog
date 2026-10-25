@@ -16,6 +16,29 @@ export const API_MAX_BUDGET = 96;
 export const API_WRITE_RESERVE = 8;
 export const API_REMAINING_FLOOR = 600;
 export const RECOVERY_API_BUDGET = 12;
+export const WORKER_HANDOFF_WAIT_MS = 180_000;
+
+/** Wake provenance only. Full checkout, ancestry and verdict verification still happens below. */
+export async function awaitWorkerTerminal(repository, { runId, attempt }, { api,
+  clock = () => performance.now(), sleep = ms => new Promise(resolve => setTimeout(resolve, ms)) } = {}) {
+  if (!REPOSITORY.test(repository) || !positive(runId) || !positive(attempt) || attempt > 10) fail("invalid-worker-handoff");
+  const { workerIdentity } = await import("./main-rolling-validation.mjs");
+  const started = clock(), deadline = started + WORKER_HANDOFF_WAIT_MS;
+  let polls = 0, targetSha = null;
+  while (polls < 6 && clock() + REQUEST_MS <= deadline) {
+    const run = await api(`/repos/${repository}/actions/runs/${runId}`);
+    polls++;
+    const identity = workerIdentity(run, repository);
+    if (!identity || run.id !== runId || run.run_attempt !== attempt) fail("worker-handoff-identity-changed");
+    targetSha = identity.targetSha;
+    if (run.status === "completed") return { runId, attempt, targetSha, status: "completed",
+      polls, waitedMs: clock() - started, observedAt: new Date().toISOString() };
+    if (!ACTIVE.has(run.status)) fail("worker-handoff-status-unknown");
+    await sleep(Math.max(0, Math.min(30_000, deadline - clock())));
+  }
+  return { runId, attempt, targetSha, status: "pending", polls, waitedMs: clock() - started,
+    observedAt: new Date().toISOString() };
+}
 
 export function targetFromEvent(event, repository) {
   const run = event?.workflow_run;
@@ -654,14 +677,16 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
 }
 
 export async function reconcile(target, { api, log = console.log, collect = collectHealth, persist = true,
-  output, now = () => new Date().toISOString(), entryPoint = "cli", observationId = randomUUID() }) {
+  output, now = () => new Date().toISOString(), entryPoint = "cli", observationId = randomUUID(), workerHandoff = null }) {
   const { repository } = target;
   const emit = (event, fields = {}) => log(JSON.stringify({ event, entryPoint, observationId, ...fields }));
   try {
     const issue = await readAlert(api, repository);
     const previous = persist ? await readHealthState(api, repository) : { pointers: [] };
     const alertPointer = Number(LATEST.exec(issue?.body ?? "")?.[1]);
-    const health = await collect(repository, { api, now, incidentRunId: positive(alertPointer) ? alertPointer : null, pointers: [...new Set([...previous.pointers, ...(positive(alertPointer) ? [alertPointer] : [])])] });
+    const health = await collect(repository, { api, now, incidentRunId: positive(alertPointer) ? alertPointer : null, pointers: [...new Set([...previous.pointers,
+      ...(positive(alertPointer) ? [alertPointer] : []), ...(workerHandoff ? [workerHandoff.runId] : [])])] });
+    if (workerHandoff) health.workerHandoff = workerHandoff;
     if (api.budget) health.apiBudget = { ...api.budget };
     if (issue && !positive(alertPointer)) {
       health.status = "unknown"; health.fullCertification = null;
@@ -675,7 +700,7 @@ export async function reconcile(target, { api, log = console.log, collect = coll
     api.beginWrites?.();
     if (persist && !api.budget?.reason) await writeHealthState(api, repository, previous, health);
     emit("main_ci_health_observed", { status: health.status, mainSha: health.currentMainSha, reasons: health.reasons,
-      passingSha: health.latestPassingSnapshot?.testedSha ?? null, backlog: health.backlog });
+      passingSha: health.latestPassingSnapshot?.testedSha ?? null, backlog: health.backlog, workerHandoff });
     if (health.status === "unknown" || health.status === "stale") log(`::warning::Main regression health is ${health.status}; inspect the JSON reasons and docs/main-ci-health.md.`);
     const failure = health.unresolvedFailures[0];
     const pass = health.latestPassingSnapshot;
@@ -744,8 +769,9 @@ export async function reconcile(target, { api, log = console.log, collect = coll
   }
 }
 
-export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error } = {}) {
-  let bounded;
+export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error,
+  waitForWorker = awaitWorkerTerminal } = {}) {
+  let bounded, workerHandoff;
   const entryPoint = env.GITHUB_EVENT_NAME ?? "cli";
   const observationId = positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID();
   try {
@@ -776,10 +802,19 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
     if (mode !== "reconcile") fail("unsupported-mode");
     if (env.GITHUB_EVENT_NAME === "workflow_run") targetFromEvent(JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")), repository);
     else if (!["schedule", "workflow_dispatch", "push"].includes(env.GITHUB_EVENT_NAME)) fail("unsupported-event");
-    await reconcile({ repository }, { api, log, output: env.MAIN_CI_HEALTH_OUTPUT, entryPoint, observationId });
+    const runId = env.MAIN_CI_HEALTH_WORKER_RUN_ID ?? "", attempt = env.MAIN_CI_HEALTH_WORKER_ATTEMPT ?? "";
+    if (runId || attempt) {
+      if (env.GITHUB_EVENT_NAME !== "workflow_dispatch" || !/^[1-9]\d{0,15}$/.test(runId) ||
+          !/^[1-9]\d?$/.test(attempt) || !positive(Number(runId)) || Number(attempt) > 10) fail("invalid-worker-handoff");
+      workerHandoff = await waitForWorker(repository, { runId: Number(runId), attempt: Number(attempt) }, { api });
+      if (workerHandoff.status !== "completed") fail("worker-handoff-pending");
+      log(JSON.stringify({ event: "main_ci_health_worker_terminal", ...workerHandoff }));
+    }
+    await reconcile({ repository }, { api, log, output: env.MAIN_CI_HEALTH_OUTPUT, entryPoint, observationId, workerHandoff });
     return 0;
   } catch (caught) {
     const unavailable = unknownHealth(env.GITHUB_REPOSITORY, new Date().toISOString(), caught?.reason ?? "reconciliation-unavailable");
+    if (workerHandoff) unavailable.workerHandoff = workerHandoff;
     if (bounded) unavailable.apiBudget = { ...bounded.budget };
     if (argv[0] === "report") log(JSON.stringify(unavailable));
     if (env.MAIN_CI_HEALTH_OUTPUT) writeFileSync(env.MAIN_CI_HEALTH_OUTPUT,

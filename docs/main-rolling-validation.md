@@ -52,6 +52,18 @@ GitHub's [generated-event restriction](https://docs.github.com/en/actions/concep
 and a [primary dispatched-run reproduction](https://github.com/orgs/community/discussions/48748)
 are consistent with the observation; the internal service cause remains an inference.
 
+The worker's final **Wake Main CI Health** job now explicitly dispatches health
+on main with its exact run ID/attempt, independently of completion subscribers.
+It uses only Actions write and no checkout. Health waits on that exact attempt
+for at most three minutes within its unchanged 48/96 API allowance, then independently
+observes the full result; timeout or identity drift records unknown and changes no
+incident. This terminal handoff preserves deduplicated alerting without relying
+on sparse cron. It is being verified in shadow with legacy main-push CI retained.
+A never-started superseded native pending run has no terminal job; the next
+admitted worker's health census retains it as a non-verdict. Successful skipped
+admissions may execute only the known receipt-only health wake job and remain
+non-verdicts. Unexpected jobs/steps and reruns stay conservative.
+
 A fully missed idle push has no pending worker. It recovers on the next delivered
 push, legacy completion, best-effort scheduled event or manual controller dispatch.
 The ten-minute cron has delivered sparsely and provides no fixed latency bound.
@@ -223,6 +235,12 @@ terminal/start times, admission evidence and tested SHAs. A post-legacy-CI contr
 wake does not satisfy the gate. Natural traffic must supply pending work; do not
 manufacture merges, cancel active validation or dispatch redundant suites for proof.
 Failure of native progression or health classification blocks cutover.
+The two natural handoffs are documented in the
+[October 25 evidence](main-rolling-native-evidence-2026-10-25.md). Cutover is additionally
+blocked until a live worker terminal dispatch wakes health, whose structured record
+observes that exact attempt terminal while legacy CI is still enabled. Native
+handoff evidence does not prove prompt alert delivery; no natural supersession
+sample is required by the controlling campaign's assessment.
 Then prepare the separate cutover as a draft, run focused tests and cross-model review,
 and leave it idle while the parent observes natural traffic. Before asking for
 cutover ready admission, record links and exact identities demonstrating:

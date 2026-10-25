@@ -20,6 +20,33 @@ Repository-level permissions remain read-only; only this trusted job has content
 the health ref), Actions read, and issues write. No new secret, App, PAT or repository setting is
 needed. Neither health-state nor rolling-state pushes match a main-only push trigger.
 
+Rolling workers also end with **Wake Main CI Health**, an `always()` job after
+admission and full validation. It has only Actions write, checks out no code and
+dispatches this trusted workflow on main with its numeric run ID and attempt.
+Delivery has two bounded 30-second attempts and structured success/failure output.
+The control job is allowed to fail without changing the worker's full-test verdict;
+failed delivery remains a visible job warning/failure requiring manual recovery.
+This explicit dispatch avoids relying on `workflow_run` delivery from GITHUB_TOKEN
+workers; legacy main-push CI remains enabled while this repair is verified in shadow.
+
+Dispatch can arrive before the worker is terminal. The health entry point first
+uses its normal quota preflight, then polls only that exact worker, at most six
+reads and three minutes including request time. Identity or attempt drift fails
+closed. Those reads share the existing 48/96 invocation budget and reserved writes;
+neither the cap nor the quota floor increases. The job envelope is eight minutes:
+three for waiting plus the prior five-minute observation envelope. A wait timeout
+retains an unknown artifact with `worker-handoff-pending` and makes no ref/incident
+mutation. The terminal receipt is provenance, never certification: the normal
+collector independently verifies checkout, ancestry, test inventory and verdict.
+Its run ID is included as an explicit evidence pointer and `workerHandoff` records
+the exact terminal attempt in output and structured observation logs.
+
+Native pending workers cancelled before receiving any job cannot execute a terminal
+dispatch. A later admitted worker's wake performs the complete census, retaining
+those cancellations as non-verdicts. Schedule and manual dispatch remain recovery
+paths for denied/lost dispatches and provider/API outages; they provide no fixed
+delivery guarantee. Duplicate or coalesced health wakes retain incident deduplication.
+
 The event is only a wakeup. Live forge evidence decides the tested target, attempt and verdict.
 Rolling check runs attach to the dispatch-time SHA, which may differ from the tested SHA. The
 observer uses the worker's target/claim run-name identity and successful exact-checkout assertions
