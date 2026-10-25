@@ -77,6 +77,15 @@ The independent live read-only health collector reported current main
 This diagnostic scan used 177 GET requests without production quota admission;
 it verifies classification evidence, not the production job's budget or wake latency.
 
+The controlling campaign accepted both handoffs without requiring a natural
+supersession sample. However, removing legacy CI would also remove health's only
+observed prompt wake: cron delivered 11 times in roughly 40 hours with multi-hour
+gaps. Cutover therefore remains blocked on a separate live terminal-dispatch proof.
+The prerequisite shadow repair retains legacy CI, dispatches health from the worker's
+final job, and makes health await that exact terminal attempt within its existing
+API allowance. Neither handoff timing nor this diagnostic health scan proves that
+new dispatch route; retain its worker and health run IDs after the shadow merge.
+
 **No pending worker was superseded in this window.** Therefore no live worker
 non-verdict was available to compare with health; the observed non-verdict count
 is zero, rather than a claimed classification success. Natural traffic demonstrated

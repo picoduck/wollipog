@@ -82,12 +82,9 @@ See `docs/ci-aggregation.md` for the exact predicate and verification limits.
 so expect that wait twice: once on the branch and once after enqueueing.
 
 **A merge group that fails on a test your pull request does not touch usually means `main` is red.**
-Before investigating your change, check `main`'s rolling workers
-(`gh run list --workflow main-rolling-validation.yml --branch main --event workflow_dispatch --limit 5`)
-and look for an open **Main CI Is Failing** issue. The run title names the tested target; its
-dispatcher SHA can differ. Verify exact checkout/outcomes with the read-only health report in
-`docs/main-ci-health.md`; historical `ci.yml` push runs stop at the rolling cutover and cannot
-describe current main. Admin bypasses and security-advisory merges reach `main` without the
+Before investigating your change, check `main`'s own runs
+(`gh run list --workflow ci.yml --branch main --event push --limit 5`) and look for an open
+**Main CI Is Failing** issue. Admin bypasses and security-advisory merges reach `main` without the
 queue, so they can break it. If `main` fails the same test, wait for the fix and re-enqueue the
 unchanged head behind it. Never change your pull request to work around a red `main`. To land a
 change outside the queue, follow `docs/main-ci-health.md`.

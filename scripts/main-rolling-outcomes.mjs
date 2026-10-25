@@ -7,7 +7,11 @@ export function isSupersededWorkerAttempt(run, jobs) {
   if (run?.status !== "completed" || run.run_attempt !== 1 || !Array.isArray(jobs)) return false;
   if (run.conclusion === "cancelled" && jobs.every((job) => !job.started_at && !job.steps?.length)) return true;
   const admission = jobs.filter((job) => job.name === "Admit Main Snapshot");
+  if (jobs.filter(job => job.name === "Wake Main CI Health").length > 1) return false;
   const noOtherWork = jobs.every((job) => job.name === "Admit Main Snapshot" ||
+    job.name === "Wake Main CI Health" && job.status === "completed" &&
+      ["success", "failure", "cancelled", "skipped", "timed_out"].includes(job.conclusion) &&
+      (job.steps ?? []).every(step => ["Set up job", "Dispatch Exact Worker Health", "Complete job"].includes(step.name)) ||
     (job.name === "Full Validation" || job.name?.startsWith("Full Validation / ")) &&
     job.conclusion === "skipped" && !job.steps?.length);
   return noOtherWork && admission.length === 1 && admission[0].steps?.some((step) =>

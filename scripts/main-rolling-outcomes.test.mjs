@@ -30,3 +30,16 @@ test("explicit rejection receipt is valid only with no executed or unknown suite
     steps: [{ ...marker.steps[0], conclusion: "skipped" }] }]), false);
   assert.equal(isSupersededWorkerAttempt({ ...done, run_attempt: 2 }, [marker]), false);
 });
+
+test("known terminal health dispatch overhead does not turn a skipped claim into a verdict", () => {
+  const done = { ...run, conclusion: "success" };
+  const wake = { name: "Wake Main CI Health", status: "completed", conclusion: "success", steps: [
+    { name: "Set up job", conclusion: "success" }, { name: "Dispatch Exact Worker Health", conclusion: "success" },
+    { name: "Complete job", conclusion: "success" }] };
+  assert.ok(isSupersededWorkerAttempt(done, [marker, wake]));
+  assert.ok(isSupersededWorkerAttempt({ ...done, conclusion: "failure" }, [marker, { ...wake, conclusion: "failure" }]));
+  assert.equal(isSupersededWorkerAttempt(done, [marker, wake, wake]), false);
+  assert.equal(isSupersededWorkerAttempt(done, [marker, { ...wake, conclusion: null }]), false);
+  assert.equal(isSupersededWorkerAttempt(done, [marker, { ...wake, steps: [...wake.steps, { name: "Unit Tests", conclusion: "success" }] }]), false);
+  assert.equal(isSupersededWorkerAttempt({ ...done, run_attempt: 2 }, [marker, wake]), false);
+});
