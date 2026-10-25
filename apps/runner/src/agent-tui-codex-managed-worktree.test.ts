@@ -210,7 +210,7 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
     const override = overrideArgument(launch.args);
     assert.ok(override);
     assert.ok(codexGuardArgsActive(launch.args, override));
-    assert.ok(launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
     // The catalog's own -c is kept, ahead of the runner's.
     assert.deepEqual(launch.args.slice(0, 2), ["-c", 'model="gpt-5-codex"']);
     // Durable metadata must not move under launch provisioning.
@@ -249,28 +249,23 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
   });
 });
 
-test("a foreign enabled-but-untrusted hook refuses the Codex TUI and names the hook", async () => {
+test("a foreign enabled-but-untrusted hook keeps its gate beside the trusted Codex guard", async () => {
   await withDir(async (dir) => {
     const foreign = "/home/u/.codex/config.toml:pre_tool_use:0:0";
-    await assert.rejects(
-      prepareAgentTuiLaunch(meta(), dependencies(dir, {
+    const launch = await prepareAgentTuiLaunch(meta(), dependencies(dir, {
         inventory: (probe) => [
           runnerHookEntry(probe),
           { key: foreign, enabled: true, trustStatus: "untrusted", command: "/home/u/hook.sh" },
-          // Trusted, managed, and disabled hooks are not un-gated by the bypass and do not count.
+          // Foreign trust states do not affect the runner's own hash trust.
           { key: "trusted", enabled: true, trustStatus: "trusted", command: "/t.sh" },
           { key: "managed", enabled: true, trustStatus: "managed", command: "/m.sh" },
           { key: "off", enabled: false, trustStatus: "untrusted", command: "/o.sh" },
         ],
-      })),
-      (error: Error) => {
-        assert.match(error.message, /Native TUI is unavailable/u);
-        assert.ok(error.message.includes(foreign));
-        assert.match(error.message, /Trust them in Codex \(\/hooks\) or disable them/u);
-        assert.doesNotMatch(error.message, /trusted,|managed,|\boff\b/u);
-        return true;
-      },
-    );
+      }));
+    assert.ok(launch);
+    assert.equal(launch.managedWorktreeGuard?.active, true);
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.ok(!stateOverrideOf(launch.args)?.includes(foreign));
   });
 });
 
@@ -321,20 +316,17 @@ test("with nothing to protect, a foreign untrusted hook neither refuses the Code
     }));
 
     assert.ok(launch);
-    // Exactly the launch this person had before #1438: their untrusted hook stays gated.
-    assert.deepEqual(launch.args, source.args);
+    // The guard is now available without lifting the foreign hook's trust gate.
     assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
-    assert.equal(launch.managedWorktreeGuard?.active, false);
-    assert.ok(launch.managedWorktreeGuard?.reason?.includes(foreign));
+    assert.equal(launch.managedWorktreeGuard?.active, true);
+    assert.ok(!stateOverrideOf(launch.args)?.includes(foreign));
 
-    // That TUI cannot be given the guard later, so the first worktree is announced, once.
+    // The already-guarded TUI needs no reopen notice for its first worktree.
     const registry = new UnguardedAgentTuiRegistry();
     assert.equal(registry.opened("shell-1", "s1377", launch.managedWorktreeGuard, 0), null);
     assert.equal(registry.protectionsChanged("other-session", 1), null);
     const notice = registry.protectionsChanged("s1377", 1);
-    assert.ok(notice);
-    assert.match(notice, /Close the TUI and open it again/u);
-    assert.ok(notice.includes(foreign));
+    assert.equal(notice, null);
     assert.equal(registry.protectionsChanged("s1377", 2), null);
   });
 });
@@ -366,13 +358,12 @@ test("the reopen notice is for an unguarded, still-open TUI only (#1438)", () =>
   assert.equal(registry.protectionsChanged("s4", 1), unguardedAgentTuiNotice("why"));
 });
 
-test("a modified (re-hashed) hook counts as untrusted", () => {
+test("a modified foreign hook does not prevent trusting only the runner's hook", () => {
   const verdict = codexHookInventoryVerdict([
     { key: "ours", enabled: true, trustStatus: "untrusted", command: "guard" },
     { key: "edited", enabled: true, trustStatus: "modified", command: "/e.sh" },
   ], "guard");
-  assert.equal(verdict.ok, false);
-  assert.deepEqual(!verdict.ok && verdict.foreignUntrusted, ["edited"]);
+  assert.deepEqual(verdict, { ok: true });
 });
 
 for (const trustStatus of ["untrusted", "modified"] as const) {
@@ -504,10 +495,12 @@ test("a stale runner override is replaced, never duplicated, and a later user ov
     const override = overrideArgument(first.args)!;
     assert.ok(codexGuardArgsActive(again.args, override));
     assert.equal(again.args.filter((arg) => arg.startsWith("hooks.PreToolUse=")).length, 1);
-    assert.equal(again.args.filter((arg) => arg === CODEX_HOOK_TRUST_BYPASS_FLAG).length, 1);
+    assert.equal(again.args.filter((arg) => arg === CODEX_HOOK_TRUST_BYPASS_FLAG).length, 0);
 
     assert.equal(codexGuardArgsActive([...first.args, "--config", "hooks.PreToolUse=[]"], override), false);
-    assert.equal(codexGuardArgsActive(first.args.filter((arg) => arg !== CODEX_HOOK_TRUST_BYPASS_FLAG), override), false);
+    assert.equal(codexGuardArgsActive([...first.args, CODEX_HOOK_TRUST_BYPASS_FLAG], override), false);
+    const retired = await prepareAgentTuiLaunch(meta({ args: [...first.args, CODEX_HOOK_TRUST_BYPASS_FLAG] }), dependencies(dir));
+    assert.ok(retired && !retired.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
   });
 });
 
@@ -523,7 +516,8 @@ test("guard flags go before an option terminator, and a prompt after it is never
     assert.deepEqual(launch.args.slice(terminator), ["--", "--disable=hooks please"]);
     const override = overrideArgument(launch.args)!;
     assert.ok(launch.args.indexOf(override) < terminator);
-    assert.ok(launch.args.indexOf(CODEX_HOOK_TRUST_BYPASS_FLAG) < terminator);
+    assert.ok(launch.args.indexOf(stateOverrideOf(launch.args)!) < terminator);
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
     assert.ok(codexGuardArgsActive(launch.args, override));
     // The prompt text is not replayed into the probe as an option.
     assert.deepEqual(harness.probes[0]!.args, ["app-server", "-c", "a=1", "-c", override]);
@@ -590,14 +584,14 @@ test("the probe replays every accepted spelling and follows -C/--cd (review CR-1
 });
 
 /** A stand-in app-server that answers initialize and hooks/list over stdio. */
-function fakeAppServer(dir: string, reply: string): CodexHookInventoryProbe {
+function fakeAppServer(dir: string, reply: string, userAgent: unknown = "wollipog-runner/0.163.0 (test)"): CodexHookInventoryProbe {
   const script = join(dir, "fake-app-server.mjs");
   writeFileSync(script, `
 import { createInterface } from "node:readline";
 const rl = createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   const message = JSON.parse(line);
-  if (message.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: {} }) + "\\n");
+  if (message.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: ${JSON.stringify(userAgent)} } }) + "\\n");
   if (message.id === 2 && message.method === "hooks/list" && message.params.cwds[0] === ${JSON.stringify(dir)}) {
     process.stdout.write("not json\\n");
     process.stdout.write(${JSON.stringify(reply)} + "\\n");
@@ -646,7 +640,28 @@ test("the inventory client reads hooks/list over stdio and fails closed on anyth
   });
 });
 
-const installedCodex = spawnSync("codex", ["--version"], { encoding: "utf8" });
+test("hook inventory refuses unmeasured, prerelease, malformed and missing CLI versions", async () => {
+  await withDir(async (dir) => {
+    for (const userAgent of [
+      "wollipog-runner/0.162.1 (test)", "wollipog-runner/0.163.1 (test)",
+      "wollipog-runner/0.164.0 (test)", "wollipog-runner/0.163.0-beta (test)",
+      "wollipog-runner/0.163.00 (test)", "other/0.163.0 (test)", null, 163,
+    ]) {
+      await assert.rejects(readCodexHookInventory(fakeAppServer(dir,
+        JSON.stringify({ id: 2, result: { data: [] } }), userAgent)),
+      /requires measured codex-cli >=0\.163\.0 <0\.163\.1/u);
+    }
+  });
+});
+
+function isolatedCodexEnv(home: string): NodeJS.ProcessEnv {
+  return { PATH: process.env.PATH, HOME: home, CODEX_HOME: home, XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home, XDG_STATE_HOME: home, XDG_CACHE_HOME: home };
+}
+
+const versionHome = mkdtempSync(join(tmpdir(), "wollipog-codex-version-"));
+const installedCodex = spawnSync("codex", ["--version"], { encoding: "utf8", env: isolatedCodexEnv(versionHome) });
+rmSync(versionHome, { recursive: true, force: true });
 
 test("against the installed codex, the override installs an enabled session-flags hook", {
   skip: installedCodex.status !== 0 ? "codex is not installed" : false,
@@ -658,7 +673,7 @@ test("against the installed codex, the override installs an enabled session-flag
     const launch = { command: "/bin/true", args: [MANAGED_WORKTREE_GUARD_MODE, "--protections", join(dir, "p.json")] };
     const override = codexGuardConfigOverride(launch);
     const entries = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: [], env: { CODEX_HOME: home } }, dir, override,
+      { command: "codex", args: [] }, dir, override, isolatedCodexEnv(home),
     ));
     assert.deepEqual(codexHookInventoryVerdict(entries, codexGuardCommandString(launch)), { ok: true });
     const ours = entries.find((entry) => entry.command === codexGuardCommandString(launch));
@@ -667,7 +682,7 @@ test("against the installed codex, the override installs an enabled session-flag
 
     // `--disable=hooks` in the launch turns the guard off; the replayed probe must see that.
     const disabled = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: ["--disable=hooks"], env: { CODEX_HOME: home } }, dir, override,
+      { command: "codex", args: ["--disable=hooks"] }, dir, override, isolatedCodexEnv(home),
     ));
     assert.equal(codexHookInventoryVerdict(disabled, codexGuardCommandString(launch)).ok, false);
     // An attached `-c` hook the user supplied is seen, and counted as foreign.
@@ -675,13 +690,13 @@ test("against the installed codex, the override installs an enabled session-flag
       {
         command: "codex",
         args: ['-chooks.PostToolUse=[{hooks=[{type="command",command="/x/attached.sh"}]}]'],
-        env: { CODEX_HOME: home },
       },
       dir,
       override,
+      isolatedCodexEnv(home),
     ));
     const verdict = codexHookInventoryVerdict(attached, codexGuardCommandString(launch));
-    assert.equal(verdict.ok, false);
+    assert.equal(verdict.ok, true);
   });
 });
 
@@ -887,15 +902,15 @@ test("against the installed codex, a foreign hook is disabled for the invocation
     const override = codexGuardConfigOverride(launch);
     const ours = codexGuardCommandString(launch);
     const entries = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: [], env: { CODEX_HOME: home } }, dir, override,
+      { command: "codex", args: [] }, dir, override, isolatedCodexEnv(home),
     ));
     const foreign = entries.filter((entry) => entry.enabled && entry.command !== ours);
     assert.equal(foreign.length, 1);
     assert.equal(foreign[0]!.source, "user");
     assert.equal(codexHookIsolationVerdict(entries, ours).ok, false);
     const disabled = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: ["-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))], env: { CODEX_HOME: home } },
-      dir, override,
+      { command: "codex", args: ["-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))] },
+      dir, override, isolatedCodexEnv(home),
     ));
     assert.deepEqual(codexHookIsolationVerdict(disabled, ours), { ok: true });
     assert.equal(disabled.find((entry) => entry.key === foreign[0]!.key)?.enabled, false);

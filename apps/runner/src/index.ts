@@ -1129,9 +1129,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     // human, which is exactly the behaviour it had before this. The runner says which it got.
     //
     // Provisioned LAST, after everything that rewrites `meta.args`: `provisionAgentControl` runs
-    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path, which drops
-    // `--dangerously-bypass-hook-trust` and then appends the preset's own arguments, so a guard
-    // proved before it would be a proof about a different argv than the one that launches.
+    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path and appends its own arguments.
+    // A guard proved before it would describe a different argv than the one that launches.
     let codexLaunchArgs: string[] | undefined;
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
       // Prepare the exact plugin inventory before guard enumeration, without persisting default

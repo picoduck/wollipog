@@ -32,7 +32,7 @@ const GUARD_OVERRIDE =
 const TRUST_OVERRIDE =
   'hooks.state={"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:abc"}}';
 const BYPASS = "--dangerously-bypass-hook-trust";
-const GUARDED = ["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE, BYPASS];
+const GUARDED = ["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE];
 
 function reviewerFor(protectManagedWorktrees: boolean, guardActive: boolean): unknown {
   return buildCodexTurnParams(
@@ -111,12 +111,9 @@ test("both halves are required, because the hook override alone is unfalsifiable
   assert.equal(codexGuardActiveInArgs([]), false);
 });
 
-test("stripping the trust bypass after provisioning disarms the derived guard", () => {
-  // `stripOrchestratorLaunchArgs` drops the bypass flag for a non-Claude driver. The flag is inert
-  // on `app-server` and load-bearing on a TUI and `codex exec`, but either way its removal means
-  // the argv is no longer the one provisioning proved, so both derivations must agree it is not
-  // guarded rather than one of them vouching for it.
-  assert.equal(codexGuardActiveInArgs(["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE]), false);
+test("hash trust needs no bypass, and adding a bypass invalidates the proof", () => {
+  assert.equal(codexGuardActiveInArgs(GUARDED), true);
+  assert.equal(codexGuardActiveInArgs([...GUARDED, BYPASS]), false);
 });
 
 test("a later foreign override of either dotted path disarms the guard", () => {

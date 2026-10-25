@@ -1,42 +1,21 @@
 /**
- * Codex's form of the managed-worktree guard (#1377).
+ * Codex's form of the managed-worktree guard (#1377), updated by #1488.
  *
- * Codex's worktree protection has always lived in the structured driver: `buildCodexTurnParams`
- * narrows `danger-full-access` while a runner-owned worktree is live, and the driver decides each
- * approval through `commandTargetsManagedWorktree`. A TUI runs no driver, so neither exists there
- * and a Codex TUI launch carried no protection at all.
+ * Current trust contract (codex-cli 0.163.0, 2026-10-25): a matching trusted_hash runs the guard
+ * on the real TUI, exec and app-server without a trust bypass. A foreign untrusted hook stays
+ * gated; a stale hash silently skips ours. scripts/codex-guard-hook-probe.ts records both hook
+ * calls and execution outcomes. Provisioning reads currentHash, trusts only our hook key, then
+ * reads back enabled + trusted. Inventory initialization also proves the measured version range.
+ * Unsupported versions or failed read-back produce no guard. The bypass is stripped from old
+ * launch arguments. ADR 0012 records the controls and the three retired bypass residuals.
  *
- * Codex does have a provider-side interception point that survives an argv-only launch, and it is
- * the same shape Claude's is. Measured against codex-cli 0.155.1 on this machine (2026-09-18), in
- * a throwaway `CODEX_HOME` against a throwaway repository and worktree:
+ * The provider-side interception point survives an argv-only launch, unlike the structured
+ * driver's approval-time veto. Its Claude-shaped PreToolUse payload and hookSpecificOutput deny
+ * document let both providers use the same managed-worktree guard sidecar. A hook that cannot
+ * START still fails open in Codex; verifyManagedWorktreeGuardLaunch and cwdIndependentExecArgv
+ * remain necessary independently of hash trust. ADR 0012 retains the historical measurements.
  *
- *   - `hooks` is a STABLE feature, on with no configuration (`codex features list`), and
- *     `PreToolUse` is one of its events.
- *   - The `PreToolUse` stdin payload is Claude-shaped: `tool_name` (`Bash` for a shell call,
- *     `apply_patch` for an edit), `tool_input.command`, `cwd`, `permission_mode`. A deny is the
- *     same `hookSpecificOutput` document `managedWorktreeGuardDenyPayload` already writes, and
- *     exit 2 with a reason on stderr also blocks. So the runner's existing `--managed-worktree-guard`
- *     sidecar needs no Codex-specific decision logic.
- *   - A hook can be installed from argv alone: `-c hooks.PreToolUse=[...]`, which `hooks/list`
- *     reports with source `sessionFlags`. `-c` is a top-level flag the interactive TUI accepts,
- *     and hooks from different sources MERGE, so the runner's hook is added to the user's own
- *     rather than replacing them.
- *   - Trust gates it, and an untrusted hook is skipped SILENTLY: with the override in place and no
- *     trust bypass, `git worktree remove <worktree>` ran and the worktree was removed without the
- *     hook process ever starting. `--dangerously-bypass-hook-trust` (also top-level) is what makes
- *     a session-flags hook run; no way to persist trust for one was found, and `hooks.managed_dir`
- *     is a managed/MDM key that `-c` does not honour.
- *   - End to end with the real sidecar: `git status --short` ran, and the issue's
- *     `git worktree remove <worktree>` was refused with `Command blocked by PreToolUse hook:`
- *     followed by `MANAGED_WORKTREE_REFUSAL`, leaving the worktree in place.
- *   - The Claude fail-open hole is present here too: a sidecar that cannot START is reported as a
- *     failed hook and the tool call PROCEEDS. `verifyManagedWorktreeGuardLaunch` and
- *     `cwdIndependentExecArgv` already cover that and are provider-independent.
- *
- * The trust bypass is per-invocation rather than per-hook, so this module does not simply set it:
- * it first enumerates the launch's effective hook inventory and refuses to use the bypass when any
- * hook other than the runner's own would be un-gated by it. That enumeration doubles as the Codex
- * half of the launch self-test, because a runner hook that does not appear in the inventory —
+ * Enumeration also remains the Codex half of the launch self-test: a runner hook absent from it —
  * a `--disable hooks`, a future config-schema change, a quoting mistake — is a guard that would
  * never have run.
  */
@@ -53,12 +32,15 @@ import {
 /** Codex drivers whose TUI launch is the interactive `codex` CLI. */
 export const CODEX_GUARD_DRIVERS: ReadonlySet<string> = new Set(["codex", "codex-app-server"]);
 
-/**
- * Codex runs an ENABLED hook only when it is trusted, and a session-flags hook can never be. This
- * flag lifts that requirement for one invocation — for every enabled hook, not just the runner's —
- * which is why `codexHookInventoryVerdict` refuses when the inventory holds a foreign untrusted one.
- */
+/** Retired runner flag: stripped when old launch arguments are prepared again. */
 export const CODEX_HOOK_TRUST_BYPASS_FLAG = "--dangerously-bypass-hook-trust";
+
+/** Only 0.163.0 has the full TUI/exec/foreign-hook matrix measured; do not extrapolate patches. */
+export const CODEX_GUARD_TRUST_VERSION_RANGE = ">=0.163.0 <0.163.1";
+
+function measuredHookTrustVersion(userAgent: unknown): boolean {
+  return typeof userAgent === "string" && /^wollipog-runner\/0\.163\.0 \(/u.test(userAgent);
+}
 
 const CODEX_GUARD_OVERRIDE_PREFIX = "hooks.PreToolUse=";
 /** Config overrides carry the same value in either spelling; both are scanned. */
@@ -77,8 +59,6 @@ const CODEX_PROFILE_FLAGS: ReadonlySet<string> = new Set(["-p", "--profile"]);
 const CODEX_UNPROBEABLE_FLAGS: ReadonlySet<string> = new Set(["--remote", "--worktree"]);
 /** `-C`/`--cd` moves the directory Codex resolves project-scoped hooks from. */
 const CODEX_CWD_FLAGS: ReadonlySet<string> = new Set(["-C", "--cd"]);
-/** Trust states under which Codex runs an enabled hook without the invocation-wide bypass. */
-const CODEX_TRUSTED_STATUSES: ReadonlySet<string> = new Set(["trusted", "managed"]);
 const CODEX_HOOK_INVENTORY_TIMEOUT_MS = 20_000;
 
 /** A TOML basic string. Control characters are refused rather than escaped: no path the runner
@@ -146,6 +126,7 @@ export function withoutCodexGuardArgs(args: readonly string[]): string[] {
   const { options, rest } = splitAtOptionTerminator(args);
   const result: string[] = [];
   for (let index = 0; index < options.length; index++) {
+    if (options[index] === CODEX_HOOK_TRUST_BYPASS_FLAG) continue;
     const value = options[index + 1];
     if (CODEX_CONFIG_FLAGS.has(options[index]!) && value !== undefined &&
         value.startsWith(CODEX_GUARD_OVERRIDE_PREFIX) && value.includes(MANAGED_WORKTREE_GUARD_MODE)) {
@@ -171,8 +152,7 @@ function splitAtOptionTerminator(args: readonly string[]): { options: string[]; 
 /**
  * The argv this spawn must use. The override goes LAST, so no earlier override of the same dotted
  * path can replace it; whether it took effect is not assumed but read from the hook inventory.
- * The trust bypass is added only when absent, so a launch that already carried the user's own
- * copy keeps exactly one.
+ * Retired trust bypass flags are removed: trust belongs to the runner hook's hash alone.
  */
 export function codexGuardLaunchArgs(
   args: readonly string[],
@@ -196,11 +176,7 @@ export function codexGuardLaunchArgs(
     options.push(arrived[index]!);
   }
   const result = [...options, "-c", override];
-  // Both trust mechanisms travel, because they cover different entry points: the bypass flag is
-  // what a TUI and `codex exec` honour, and the hash override is the only one `codex app-server`
-  // honours. Neither is taken on faith — the inventory read-back is what decides `guardActive`.
   if (trustOverride) result.push("-c", trustOverride);
-  if (!result.includes(CODEX_HOOK_TRUST_BYPASS_FLAG)) result.push(CODEX_HOOK_TRUST_BYPASS_FLAG);
   return [...result, ...rest];
 }
 
@@ -240,19 +216,14 @@ export function codexGuardActiveInArgs(args: readonly string[]): boolean {
   for (let index = 0; index < options.length; index++) {
     if (disablesCodexHooksFeature(options[index]!, options[index + 1]) > 0) return false;
   }
-  // The bypass flag is required here for the same reason `codexGuardArgsActive` requires it: the
-  // two derivations must agree, or a launch is guarded by one and unguarded by the other. It is
-  // inert on `app-server` and load-bearing on a TUI and `codex exec`, and anything that strips it
-  // after provisioning — `stripOrchestratorLaunchArgs` does — has changed the argv out from under
-  // the proof, so the safe reading is that this launch is no longer the one that was proven.
-  return guard && trust && options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
+  return guard && trust && !options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
 }
 
 /**
  * Whether the guard really is in this argv, read from the argv itself rather than inferred.
  *
  * It has to be the LAST `hooks.PreToolUse` override present — a later one, in any spelling,
- * replaces it — and the trust bypass has to be there, without which Codex skips the hook silently.
+ * replaces it — and a trust override must remain present, with no invocation-wide bypass.
  */
 export function codexGuardArgsActive(
   args: readonly string[],
@@ -278,7 +249,7 @@ export function codexGuardArgsActive(
     }
   }
   return options[last] === override && CODEX_CONFIG_FLAGS.has(options[last - 1]!) &&
-    options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
+    codexGuardActiveInArgs(options);
 }
 
 export interface CodexHookEntry {
@@ -296,17 +267,13 @@ export interface CodexHookEntry {
 
 export type CodexHookInventoryVerdict =
   | { ok: true }
-  | { ok: false; reason: string; foreignUntrusted?: string[] };
-
-/** How many offending hooks a refusal names before summarising the rest. */
-const CODEX_NAMED_HOOK_LIMIT = 5;
+  | { ok: false; reason: string };
 
 /**
  * Judge an enumerated hook inventory for one guarded launch.
  *
- * Two independent facts have to hold. The runner's own hook must be present and enabled, which is
- * what proves the `-c` override actually installed it in THIS Codex build. And no OTHER enabled
- * hook may be untrusted, because the bypass the runner is about to pass would run that one too.
+ * Presence and enablement are checked here; codexHookTrustVerdict checks our trust separately.
+ * Foreign hooks keep Codex's own trust gate because this launch carries no trust bypass.
  */
 export function codexHookInventoryVerdict(
   entries: readonly CodexHookEntry[],
@@ -318,21 +285,6 @@ export function codexHookInventoryVerdict(
   }
   if (!ours.every((entry) => entry.enabled)) {
     return { ok: false, reason: "Codex reports the runner's PreToolUse hook as disabled" };
-  }
-  const foreign = entries.filter((entry) =>
-    entry.command !== guardCommand && entry.enabled && !CODEX_TRUSTED_STATUSES.has(entry.trustStatus));
-  if (foreign.length > 0) {
-    const named = foreign.slice(0, CODEX_NAMED_HOOK_LIMIT).map((entry) => entry.key).join(", ");
-    const more = foreign.length > CODEX_NAMED_HOOK_LIMIT
-      ? ` and ${foreign.length - CODEX_NAMED_HOOK_LIMIT} more`
-      : "";
-    return {
-      ok: false,
-      foreignUntrusted: foreign.map((entry) => entry.key),
-      reason: `the Codex hook trust bypass the guard needs would also run ${foreign.length} enabled ` +
-        `but untrusted hook(s) the runner does not own: ${named}${more}. Trust them in Codex ` +
-        "(/hooks) or disable them, then open the TUI again",
-    };
   }
   return { ok: true };
 }
@@ -371,11 +323,11 @@ const CODEX_HOOK_STATE_OVERRIDE_PREFIX = "hooks.state=";
 /**
  * The `-c hooks.state=…` override that TRUSTS the runner's own hook for one invocation.
  *
- * `--dangerously-bypass-hook-trust` is what a Codex TUI or `codex exec` uses for this, and measured
+ * Historically `--dangerously-bypass-hook-trust` was used on a TUI or `codex exec`, and measured
  * on codex-cli 0.155.1 it has NO EFFECT on `codex app-server`: the same argv that fired the hook
  * and blocked under `codex exec` did nothing at all under `app-server` — no hook process, no bypass
- * warning, no error, and `hooks/list` still reporting the hook `enabled` and `untrusted`. That is
- * the documented silent skip, and it is why a structured launch trusts by hash instead.
+ * warning, no error, and `hooks/list` still reporting the hook `enabled` and `untrusted`. Hash trust
+ * now covers all three entry points, measured at 0.163.0; no guarded launch carries that bypass.
  *
  * The hash is Codex's own digest of the hook's definition, so it moves with the hook's command
  * string and matcher and cannot be computed here. It is read from the launch's own inventory and
@@ -394,11 +346,8 @@ export function codexGuardTrustOverride(entries: readonly CodexHookEntry[], guar
 /**
  * Whether the runner's own hook is enabled AND trusted in this inventory.
  *
- * `codexHookInventoryVerdict` deliberately checks only that the runner's hook is present and
- * enabled, and checks trust for FOREIGN hooks. That was sufficient while the bypass flag carried
- * the runner's own hook. Where the bypass does nothing, "enabled" is not enough: an enabled,
- * untrusted hook is skipped without a word, so a launch that stopped here would report a guard it
- * does not have.
+ * Presence and enablement alone cannot prove execution: an enabled, untrusted hook is silently
+ * skipped. Require the session-flags hook to read back trusted after applying the hash override.
  */
 export function codexHookTrustVerdict(
   entries: readonly CodexHookEntry[],
@@ -408,7 +357,7 @@ export function codexHookTrustVerdict(
   if (ours.length === 0) {
     return { ok: false, reason: "Codex did not install the runner's PreToolUse hook" };
   }
-  const untrusted = ours.filter((entry) => !CODEX_TRUSTED_STATUSES.has(entry.trustStatus));
+  const untrusted = ours.filter((entry) => entry.trustStatus !== "trusted");
   if (untrusted.length > 0) {
     return {
       ok: false,
@@ -593,6 +542,7 @@ export async function readCodexHookInventory(
       );
       timer.unref?.();
       let buffered = "";
+      let versionVerified = false;
       const finish = (settle: () => void) => { clearTimeout(timer); settle(); };
       child.on("error", (error) => finish(() => reject(
         new Error(`the Codex hook inventory probe failed: ${error.message}`))));
@@ -612,7 +562,23 @@ export async function readCodexHookInventory(
           } catch {
             continue;
           }
+          if ((message as { id?: unknown }).id === 1) {
+            const userAgent = (message as { result?: { userAgent?: unknown } }).result?.userAgent;
+            if (!measuredHookTrustVersion(userAgent)) {
+              finish(() => reject(new Error(
+                `Codex hook trust requires measured codex-cli ${CODEX_GUARD_TRUST_VERSION_RANGE}; ` +
+                "the inventory server reported an unsupported or missing version",
+              )));
+              return;
+            }
+            versionVerified = true;
+            continue;
+          }
           if ((message as { id?: unknown }).id !== 2) continue;
+          if (!versionVerified) {
+            finish(() => reject(new Error("Codex hook inventory arrived without a verified CLI version")));
+            return;
+          }
           try {
             finish(() => resolve(parseHookEntries(message)));
           } catch (error) {

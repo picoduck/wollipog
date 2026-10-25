@@ -1506,8 +1506,8 @@ export async function provisionCodexGuard(
   } catch (error) {
     return inactive(`the guard could not be provisioned (${(error as Error).message})`);
   }
-  // Enumerate with the same flags the TUI will carry. This proves Codex installs the runner's hook
-  // in THIS build and decides whether the invocation-wide trust bypass is acceptable at all.
+  // Enumerate with the same flags the TUI will carry. The client also verifies the measured CLI
+  // version range before accepting this build's inventory (#1488).
   const readInventory = (probe: Parameters<typeof readCodexHookInventory>[0]) => {
     if (config.readHookInventory) config.onProcess?.(Promise.resolve(false));
     return (config.readHookInventory ?? readCodexHookInventory)({ ...probe, onProcess: config.onProcess });
@@ -1518,9 +1518,8 @@ export async function provisionCodexGuard(
   } catch (error) {
     return inactive(`its Codex hook inventory could not be enumerated (${(error as Error).message})`);
   }
-  // Trust the runner's own hook by hash (#1499). `--dangerously-bypass-hook-trust` is what a TUI
-  // and `codex exec` honour; measured on codex-cli 0.155.1 it does NOTHING on `codex app-server`,
-  // where an enabled-but-untrusted hook is skipped without a word. The hash is Codex's own digest
+  // Trust only the runner's own hook by hash (#1499, #1488), measured without a bypass on all
+  // three entry points at 0.163.0. The hash is Codex's own digest
   // of the hook's definition, so it can only come from this first enumeration.
   // A hook Codex never installed has no hash either, and "no content hash" would be the wrong
   // cause to report for it, so presence is judged on its own first and keeps its own message.

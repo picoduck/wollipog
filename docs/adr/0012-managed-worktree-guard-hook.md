@@ -308,9 +308,75 @@ entry point where the flag does nothing, the pair returned `guardActive: true` f
 silently skipped. Nothing wired the guard to an app-server before this, so that was latent rather
 than live, and it is closed by requiring the runner's own hook to come back trusted.
 
-Whether `trusted_hash` alone also suffices on the TUI and `codex exec` paths, letting the bypass be
-retired there too, is #1488 and is NOT measured here: both mechanisms travel on those launches, and
-the read-back is what decides.
+This measurement did not cover hash trust alone on TUI/exec. The 2026-10-25 measurement below
+settles #1488 and supersedes the earlier bypass requirement on those entry points.
+
+## Measurements: Hash Trust Without a TUI or Exec Bypass (codex-cli 0.163.0, Linux, 2026-10-25)
+
+`pnpm probe:codex-guard-hook` now measures all three entry points. `--cli-only`, `--exec-only`,
+and `--tui-only` select the new matrix for the consolidated re-measurement work in #1498.
+The TUI is the real interactive `codex --no-alt-screen` in a Python 3 standard-library PTY,
+including terminal handshakes. The same five cases also passed with `--no-daemon`; the committed
+probe uses the default daemon behavior that production launches use. No real account is used:
+HOME, CODEX_HOME and XDG roots point
+to throwaway directories, Git ignores host configuration, and a scripted loopback Responses
+provider supplies the command. The provider receives no inherited credentials. Shell commands
+write only a fixture execution marker. The hook logs every invocation and returns the same
+PreToolUse deny document as the real sidecar for protected commands.
+
+The initial `hooks/list` supplies our hook's key and `currentHash`; a second read with the override
+confirms **our hook trusted, foreign hook enabled and untrusted**. The same arguments then run on
+exec and TUI, with the hook-trust bypass absent except in the explicit positive control. The TUI
+asks to review the foreign untrusted hook: the PTY selects **Continue without trusting**, never
+**Trust all and continue**. This does not revoke the runner hook's existing hash trust.
+
+| Arguments / Command | Exec: Own / Foreign Calls | TUI: Own / Foreign Calls | Command Result |
+| --- | --- | --- | --- |
+| no trust override, protected | 0 / 0 | 0 / 0 | executed |
+| matching hash, protected | 1 / 0 | 1 / 0 | denied with `MANAGED_WORKTREE_REFUSAL`; execution marker absent |
+| matching hash, benign | 1 / 0 | 1 / 0 | executed |
+| stale hash, protected | 0 / 0 | 0 / 0 | executed |
+| bypass control, benign | 1 / 1 | 1 / 1 | executed |
+
+Each completed case checks hook logs, the execution marker and provider/terminal deny evidence.
+Thus **did not fire**, **fired and allowed**, and **fired and denied** have distinct evidence.
+The positive control proves the foreign hook could fire in the same fixture; its zero calls with
+matching-hash trust are a trust gate, not a matcher or launch failure. The earlier app-server
+matrix remains in this entry point, including trusted denial before client/Guardian approval.
+No-escalation cases use a sandbox-free fixture so host namespace availability cannot masquerade
+as hook denial; escalated cases still exercise approval.
+
+**Decision:** every newly provisioned Codex launch trusts only the runner's key by hash. It no
+longer adds `--dangerously-bypass-hook-trust`, and removes retired copies from persisted launch
+arguments before probing or launching. Ordinary foreign untrusted hooks may remain enabled and
+keep Codex's own gate. Orchestrator launches still disable every foreign hook, including trusted
+ones, and read that isolation back. The sidecar launch self-test and both inventory passes remain.
+
+The supported range is deliberately **`>=0.163.0 <0.163.1`**, the single measured release. The
+inventory connection's `initialize.userAgent` must identify that release before `hooks/list`
+is accepted. A missing, malformed, prerelease, older or newer version produces no proven guard.
+The runner's hook must then read back **enabled and trusted**; stale/mistyped hashes fail closed.
+A TUI owning a managed worktree is refused without that proof. The existing unguarded-TUI notice
+and structured driver's human-approval fallback remain for failed provisioning. This range does
+not claim support for unmeasured intervening versions merely because app-server worked at 0.155.1.
+
+The three residuals recorded on #1488 on 2026-09-25 are resolved for these provisioned launches:
+
+- **Inventory-to-launch bypass window: gone.** There is no invocation-wide bypass to un-gate a
+  newly appearing foreign hook. The enabled foreign hook in the matrix remains untrusted and
+  never fires. A changed runner hook hash likewise fails its own trust gate. Inventory remains a
+  point-in-time observation; this retires the bypass risk, not all possible configuration races.
+- **“Same OS user” justification: gone.** Safety no longer relies on that inaccurate claim about
+  writers in group-shared checkouts. No bypass-writable-directory permission check is needed for
+  this retired mechanism. Trusted foreign hooks keep their ordinary Codex semantics.
+- **Authenticated TUI under the bypass: gone as a shipping requirement.** These launches carry
+  no bypass. The real TUI reached and completed turns against the local provider with hash trust,
+  without the bypass warning. Behavior with a real authenticated account under the retired flag
+  remains unmeasured and is not needed to justify this launch path.
+
+The hook's existing fail-open-on-startup-error limitation and the runner's shared sidecar
+self-test are unaffected. No real credentials, external provider, or authenticated-user UI
+behavior are inferred from this fixture.
 
 ## Measurements: Codex Permission Profiles (codex-cli 0.155.1, this machine, 2026-09-19)
 
@@ -600,8 +666,8 @@ project with a `.codex/config.toml` one, over `hooks/list`:
 - Under `--strict-config`, which the preset passes, both overrides are accepted.
 - Not needed here but recorded: `-c 'hooks.state={"<session-flags key>"={trusted_hash="<currentHash>"}}'`
   makes the runner's session-flags hook report `trustStatus: trusted` in the inventory. Whether
-  Codex then RUNS it without `--dangerously-bypass-hook-trust` was not measured. If it does, the
-  invocation-wide bypass #1377 had to accept could be retired for every Codex TUI, and #1377's
+  Codex then RUNS it without `--dangerously-bypass-hook-trust` was not measured at that time.
+  The 2026-10-25 #1488 measurement above now proves it on TUI/exec and retires that bypass. #1377's
   "no way to persist trust for a session-flags hook" was one spelling short.
 
 End to end against the real `CODEX_HOME` (read-only; credentials used the ordinary way), with
@@ -1125,17 +1191,16 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   TUI as well. The tripwire, the compromise marker, and the launch self-test are shared with
   Claude's.
 
-  A session-flags hook is never trusted, and Codex skips an untrusted hook silently, so the
-  launch has to carry `--dangerously-bypass-hook-trust`. That flag un-gates EVERY enabled hook for
-  the invocation, not just the runner's. So before launching, the runner enumerates the effective
+  Amended by #1488: a session-flags hook is trusted by a matching `trusted_hash`, verified by
+  inventory read-back on the measured CLI version range above. No trust bypass is carried.
+  Before launching, the runner enumerates the effective
   hook inventory (`codex app-server` → `hooks/list`, replaying the launch's own `-c`/`--config`/
   `--enable`/`--disable` flags in every spelling Codex accepts — `--disable=hooks` turns every hook
   off and `-cVALUE` adds one — plus the guard override, in the directory the TUI resolves
-  project-scoped hooks from, which a `-C`/`--cd` in the launch moves) and passes the flag
-  only when the runner's hook is present, enabled, and the sole enabled hook that is neither
-  `trusted` nor `managed`. Otherwise the TUI is refused for a session that owns a runner-created
-  worktree, with an error that names the offending hooks and says to trust (`/hooks`) or disable
-  them. The same enumeration is the Codex half of the self-test: a runner hook absent from the
+  project-scoped hooks from, which a `-C`/`--cd` in the launch moves), reads our hash, then proves
+  our hook enabled and trusted in a second enumeration. Foreign untrusted hooks keep their own
+  trust gate. Failed proof refuses a TUI that owns a runner-created worktree.
+  The same enumeration is the Codex half of the self-test: a runner hook absent from the
   inventory (`--disable hooks`, a changed config schema, a quoting mistake) is a guard that would
   never have run. Enumeration that fails, times out, or reports a hook discovery error refuses;
   so does a launch carrying a
@@ -1200,13 +1265,12 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   measured rather than assumed (see "Measurements (codex-cli 0.155.1, this machine, 2026-09-19):
   guarding every Codex TUI"), and is small.
 
-  The #1377 hook-trust rule is unchanged and is applied to every launch: the bypass is passed only
-  when the runner's hook is present, enabled, and the sole enabled hook that is neither `trusted`
-  nor `managed`. What differs with nothing to protect is the consequence of failing it. A session
+  The #1488 hash-trust rule is applied to every launch. What differs with nothing to protect is
+  the consequence of failed proof. A session
   that owns a worktree is still REFUSED the TUI. One that owns none is opened as it was before
   #1438 — the same argv, no override, no bypass, so a person's own untrusted hooks stay gated
   exactly as Codex gates them — because refusing a TUI to protect nothing would take the TUI away
-  from everyone who keeps an untrusted hook, a profile, or a `--remote`. The same holds for every
+  from everyone who keeps an unprobeable profile or a `--remote`. The same holds for every
   other reason the guard cannot be provisioned.
 
   That leaves a TUI running without the guard, which the first worktree cannot reach. It cannot be
@@ -1224,19 +1288,10 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
 
   - The notice is tamper-evident best effort like everything else here: it tells the person, and
     does not stop the unguarded TUI from touching the new worktree in the meantime.
-  - The inventory probe and the trust bypass now apply to every Codex TUI launch, so the
-    check-not-a-pin window below does too, including for sessions that own no worktree. It grants
-    nothing new there for the same reason it grants nothing new anywhere else.
-  - The inventory is a check, not a pin: a hook configuration written between the probe's answer
-    and the TUI's start is loaded by the TUI under the trust bypass. Codex offers no flag that
-    restricts an invocation to the hooks it was shown, so the window cannot be closed from the
-    runner, only narrowed. It is accepted because it grants nothing new: a hook appearing in that
-    window needs an active writer running as the same OS user, which can already run that code
-    directly, while the hooks the trust gate exists for — ones acquired passively, such as a cloned
-    repository's project hooks — are present before the probe and are refused.
-  - Everything above rests on Codex hook behaviour measured at codex-cli 0.155.1. The inventory
-    check fails closed if a later build stops installing the hook, but not if one changes how a
-    deny is honoured.
+  - The old inventory-to-launch bypass window and its “same OS user” justification were retired
+    by #1488; see the three residual dispositions in the 2026-10-25 measurement above.
+  - Hash trust is admitted only on codex-cli `>=0.163.0 <0.163.1`. Unknown CLI versions fail
+    closed, even when their inventory still looks compatible. Re-measure before widening it.
 
   Amended by #1473: **the Orchestrator preset is guarded, for both providers, and its list is
   every runner-created worktree on the runner.** The preset excluded user hooks in a way that
@@ -1265,7 +1320,7 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
     not the runner's by key for that invocation (`-c hooks.state={…}` in the inline-table spelling
     that works), enumerates again, and requires that NO other hook is enabled — trusted ones
     included, which the ordinary #1377 verdict admits and the preset's isolation does not. Only
-    then does it carry the bypass. A launch that cannot prove it is opened exactly as the preset
+    then does it carry hash trust for the guard alone. A launch that cannot prove it is opened exactly as the preset
     wrote it, `--disable hooks` and all, and is refused when there is a worktree to protect, by the
     unchanged #1337 rule. The probe is no longer paid for a fixed answer: with hooks on, its
     answer decides.
