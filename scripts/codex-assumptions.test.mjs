@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { collectResult, guardRangeResult, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
