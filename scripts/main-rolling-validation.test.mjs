@@ -368,7 +368,7 @@ test("workflow security, exact checkout wiring and original gate contracts remai
   assert.equal((ci.match(/ref: \$\{\{ inputs.target_sha \}\}/g) ?? []).length, 4);
   assert.equal((ci.match(/name: Verify Rolling Checkout/g) ?? []).length, 3);
   assert.equal((windows.match(/name: Verify Rolling Checkout/g) ?? []).length, 2);
-  assert.match(ci, /  push:\n    branches: \[main\]/, "shadow does not remove main fan-out");
+  assert.match(controller, /on:\n  push:\n    branches: \[main\]/, "main pushes retain the authoritative rolling controller");
   assert.match(ci, /  merge_group:/);
   assert.match(ci, /    needs: \[checks, browser, win32, webkit, suite_plan\]/);
   assert.match(ci, /CI_EVIDENCE_HEAD: \$\{\{ inputs.target_sha \|\| github.event.pull_request.head.sha \|\| github.sha \}\}/);
