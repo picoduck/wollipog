@@ -462,7 +462,7 @@ async function main(): Promise<number> {
     // Installed older/newer catalogs offer apply_patch under different model families. These
     // select fixture tool metadata only: every response still comes from our loopback script.
     const minor = Number(versionOutput.match(/codex-cli 0\.(\d+)\./u)?.[1]);
-    const fixtureModel = minor < 160 ? "gpt-5.4" : "gpt-6.1-sol";
+    const fixtureModel = minor < 158 ? "gpt-5.4" : minor < 160 ? "gpt-6-sol" : "gpt-6.1-sol";
 
     fixture.modelPort = await listen(models);
     writeFileSync(join(fixture.codexHome, "config.toml"),
