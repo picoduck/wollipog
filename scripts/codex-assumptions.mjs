@@ -19,6 +19,10 @@ export const PROBES = [
 ];
 export const EXCLUSIONS = [{ command: "probe:codex-inference-transport", reason: "Requires real account authentication and external model traffic; excluded from this credential-free suite. Optional transport diagnostics are measured separately; real WebSocket success is never inferred." }];
 
+export function parseVersion(output) {
+  return output.match(/^codex-cli (\d+\.\d+\.\d+(?:[-+][\w.-]+)?)(?=\s|$)/m)?.[1] ?? null;
+}
+
 export function reportExit(results) {
   return results.some(r => r.status === "could not run") ? 2 : results.some(r => r.status === "changed") ? 1 : 0;
 }
@@ -29,8 +33,10 @@ export function collectResult(probe, execution) {
   });
   const valid = events.length > 0 && events.every(e => ["unchanged", "changed", "could not run", "optional drift"].includes(e.status) &&
     typeof e.assumption === "string" && typeof e.observed === "string" && typeof e.documentation === "string" && (e.status !== "optional drift" || e.optional === true));
-  const status = execution.unavailable || !valid || events.length < (probe.minimum ?? 1) || execution.code === 2 || events.some(e => e.status === "could not run") ? "could not run" :
-    execution.code !== 0 || events.some(e => e.status === "changed") ? "changed" : events.some(e => e.status === "optional drift") ? "optional drift" : "unchanged";
+  const changed = events.some(e => e.status === "changed");
+  const status = execution.unavailable || !valid || (!changed && events.length < (probe.minimum ?? 1)) || ![0, 1].includes(execution.code) ||
+    (execution.code === 1 && !changed) || events.some(e => e.status === "could not run") ? "could not run" :
+    changed ? "changed" : events.some(e => e.status === "optional drift") ? "optional drift" : "unchanged";
   return { probe: probe.id, status, assumptions: valid ? events.map(({ event, ...value }) => value) : [],
     observed: status === "could not run" ? "missing/incompatible binary, sandbox, timeout, dependency or incomplete probe result" : "see measured assumptions",
     documentation: probe.documentation };
@@ -107,7 +113,7 @@ export async function main(args = process.argv.slice(2)) {
     const binary = process.env.CODEX_BIN || "codex";
     const env = { ...isolatedProbeEnv(join(scratch, "home")), CODEX_BIN: binary.includes("/") && !isAbsolute(binary) ? resolve(binary) : binary };
     const versionRun = await execute(env.CODEX_BIN, ["--version"], env, scratch, 30_000);
-    report.version = versionRun.code === 0 && !versionRun.unavailable ? versionRun.stdout.match(/^codex-cli (\d+\.\d+\.\d+(?:[-+][\w.-]+)?)/m)?.[1] ?? null : null;
+    report.version = versionRun.code === 0 && !versionRun.unavailable ? parseVersion(versionRun.stdout) : null;
     // An incomplete fresh report replaces yesterday's green before doing any long-running work.
     writeReport(reportDir, report);
     for (const probe of PROBES) {
@@ -122,11 +128,12 @@ export async function main(args = process.argv.slice(2)) {
     }
     if (report.version && !interrupted) {
       const finalVersion = await execute(env.CODEX_BIN, ["--version"], env, scratch, 30_000);
-      if (finalVersion.code !== 0 || finalVersion.unavailable || !finalVersion.stdout.includes(`codex-cli ${report.version}\n`)) {
+      if (finalVersion.code !== 0 || finalVersion.unavailable || parseVersion(finalVersion.stdout) !== report.version) {
         for (const result of report.results) { result.status = "could not run"; result.observed = "CLI changed or became unavailable during measurement; mixed-version results are not a pass"; }
       }
     }
     report.guardTrust = guardRangeResult(report.version, report.results.find(r => r.probe === "guard"));
+    if (report.guardTrust.status === "measured OK, range can be widened") console.warn(`WARNING: codex-cli ${report.version} measured OK outside ${CODEX_GUARD_TRUST_VERSION_RANGE}; review widening the guard trust range.`);
     report.exitCode = reportExit(report.results);
     report.complete = true;
     report.completedAt = new Date().toISOString();

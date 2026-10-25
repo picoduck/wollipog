@@ -36,6 +36,8 @@ import { createServer, type Server } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
   ORCHESTRATOR_ENV_KEY,
@@ -46,6 +48,14 @@ import {
 import { isolatedProbeEnv, unavailableProbeOutput, probeResult, ownProbeProcess } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
+
+export function withoutMcpApproval(entry: string): string {
+  const unapproved = entry
+    .replace(/, "tools" = \{ "wait_pull_request" = \{ "approval_mode" = "approve" \} \}/u, "")
+    .replace(/, "default_tools_approval_mode" = "approve"/u, "");
+  if (unapproved === entry) throw new Error("MCP approval control could not remove the grant");
+  return unapproved;
+}
 
 type Json = Record<string, unknown>;
 
@@ -292,7 +302,7 @@ async function main(): Promise<number> {
     if (process.argv.includes("--without-approval")) {
       // Measured on codex-cli 0.162.1: without the per-tool approval, Guardian reviews the call
       // with one model request before it starts (and `on-request` without Guardian asks the human).
-      const unapproved = entry.replace(/, "tools" = \{ "wait_pull_request" = \{ "approval_mode" = "approve" \} \}/u, "");
+      const unapproved = withoutMcpApproval(entry);
       cases.push([`same entry without the per-tool approval · ${seconds}s wait`, unapproved,
         { completed: true, reviewed: true }]);
     }
@@ -316,7 +326,7 @@ async function main(): Promise<number> {
   return failures === 0 ? 0 : 1;
 }
 
-main().then((code) => { process.exitCode = code; }, (error: unknown) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().then((code) => { process.exitCode = code; }, (error: unknown) => {
   probeResult("MCP wait matrix", "could not run", "fixture or compatible app-server unavailable", "docs/DRIVERS.md; skills/using-wollipog/SKILL.md");
   process.exitCode = 2;
 });

@@ -36,6 +36,7 @@ export function isolatedProbeEnv(home: string): NodeJS.ProcessEnv {
 }
 
 export type ProbeStatus = "unchanged" | "changed" | "could not run";
+export class RecordedAssumptionChanged extends Error {}
 
 export function unavailableProbeOutput(output: string): boolean {
   return /TIMED OUT|SPAWN FAILED|STDIN FAILED|No permissions to create new namespace|bwrap:|sandbox.*(?:unavailable|failed to)|operation not permitted.*(?:namespace|sandbox)/iu.test(output) ||

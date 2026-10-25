@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { test } from "node:test";
-import { collectResult, guardRangeResult, reportExit, reportFresh, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
+import { collectResult, guardRangeResult, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
 import { CASES, hardeningRestorable } from "../apps/runner/scripts/codex-escalation-probe.ts";
+import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.ts";
+import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
 const probe = { id: "fixture", documentation: "old-measurement.md" };
 function execution(status = "unchanged", extra = {}) {
@@ -23,6 +25,26 @@ test("changed assumptions and unavailable probes are distinct and both fail; opt
   assert.equal(changed.status, "changed"); assert.equal(reportExit([changed]), 1);
   assert.equal(optional.status, "optional drift"); assert.equal(reportExit([optional]), 0);
   assert.equal(collectResult(probe, execution("optional drift")).status, "could not run");
+  for (const code of [null, 137, 3, 1]) assert.equal(collectResult(probe, { ...execution(), code }).status, "could not run");
+  assert.equal(collectResult({ ...probe, minimum: 2 }, execution()).status, "could not run");
+  assert.equal(collectResult({ ...probe, minimum: 2 }, execution("changed")).status, "changed");
+});
+
+test("version rechecks compare semantic versions across harmless output formatting", () => {
+  for (const output of ["codex-cli 0.163.0", "codex-cli 0.163.0 (build)", "codex-cli 0.163.0\r\n", "warning\ncodex-cli 0.163.0\n"]) assert.equal(parseVersion(output), "0.163.0");
+  assert.equal(parseVersion("codex-cli unavailable"), null);
+});
+
+test("both real MCP entry kinds lose their approval grant in the negative control, retaining the timeout", () => {
+  for (const builder of [additiveCodexMcpServerArg, sessionCodexMcpServerArg]) {
+    const approved = builder({ command: "node", args: ["stub.cjs"], env: {} });
+    const unapproved = withoutMcpApproval(approved);
+    assert.notEqual(unapproved, approved);
+    assert.ok(!unapproved.includes('"approval_mode"'));
+    assert.ok(!unapproved.includes('"default_tools_approval_mode"'));
+    assert.ok(unapproved.includes(`"tool_timeout_sec" = ${CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC}`));
+  }
+  assert.throws(() => withoutMcpApproval("unrecognized entry"), /could not remove/);
 });
 
 test("sandbox startup failure is not mistaken for a measured filesystem denial", () => {
@@ -98,6 +120,27 @@ test("missing binary writes a complete failing report rather than passing or cla
     assert.equal(report.version, null); assert.equal(report.complete, true); assert.equal(report.exitCode, 2);
     assert.ok(report.results.every(r => r.status === "could not run"));
     assert.equal(report.guardTrust.status, "could not run");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("a successful hooks/list response with a changed consumed shape is drift, not binary unavailability", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "codex-inventory-test-"));
+  try {
+    const binary = join(dir, "codex.cjs");
+    writeFileSync(binary, `#!/usr/bin/env node
+if(process.argv.includes('--version')) { console.log('codex-cli 0.163.0'); process.exit(0); }
+require('node:readline').createInterface({input:process.stdin}).on('line',line => {
+ const m=JSON.parse(line); if(m.id===undefined)return;
+ console.log(JSON.stringify({id:m.id,result:m.method==='hooks/list'?{data:[{hooks:[{key:42,enabled:true,trustStatus:'untrusted'}]}]}:{}}));
+});
+`, { mode: 0o755 });
+    const result = spawnSync(process.execPath, ["--import", "tsx", "apps/runner/scripts/codex-guard-hook-probe.ts"], {
+      encoding: "utf8", timeout: 20000, env: { ...process.env, CODEX_BIN: binary },
+    });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stdout, /"status":"changed"/);
+    assert.match(result.stdout, /key, enabled or trustStatus shape/);
+    assert.match(result.stdout, /docs\/adr\/0012-managed-worktree-guard-hook.md/);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
