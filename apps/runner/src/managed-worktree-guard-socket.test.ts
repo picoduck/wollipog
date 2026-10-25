@@ -276,7 +276,7 @@ test("overlapping ensure and close for one session settle in order, leaving one 
   await Promise.all([host.ensure("s_race"), host.close("s_race")]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.equal((host as any).servers.size, 0);
-  assert.equal(liveWorkers.size, 0);
+  assert.equal(liveWorkers.size, 1, "closing one listener retains the single shared worker");
   assert.equal(statSync(managedWorktreeGuardSocketDirectory(configDir, "s_race"), { throwIfNoEntry: false }), undefined);
   const [, , again] = await Promise.all([host.close("s_race"), host.ensure("s_race"), host.ensure("s_race")]);
   assert.equal(liveWorkers.size, 1);

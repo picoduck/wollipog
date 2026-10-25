@@ -32,7 +32,7 @@ import {
 } from "./managed-worktree-protection.js";
 import { servePolicyHookRelay } from "./policy-hook.js";
 import type { PolicyHookRelayRequest } from "./policy-hook-relay.js";
-import { GuardSocketWorker, type GuardSocketWorkerFactory } from "./managed-worktree-guard-worker-client.js";
+import { GuardSocketWorker, GuardSocketWorkerHost, type GuardSocketWorkerFactory } from "./managed-worktree-guard-worker-client.js";
 import { isSafeSessionFileId } from "./session-file-id.js";
 import { buildBwrapArgs, type SpawnIsolation } from "./spawn.js";
 
@@ -115,6 +115,7 @@ const ABSTRACT_NAME_RANDOM_BYTES = 24;
  * socket-mode guard.
  */
 export class ManagedWorktreeGuardSockets {
+  private readonly workerHost: GuardSocketWorkerHost;
   private readonly servers = new Map<string, {
     server: GuardSocketWorker;
     kind: GuardSocketKind;
@@ -141,7 +142,7 @@ export class ManagedWorktreeGuardSockets {
     /** Answers a relayed manager policy hook event on an `abstract` socket (#1472). */
     private readonly policyHookRelay: PolicyHookRelayHandler = servePolicyHookRelay,
     private readonly workerFactoryForTest?: GuardSocketWorkerFactory,
-  ) {}
+  ) { this.workerHost = new GuardSocketWorkerHost(this.workerFactoryForTest); }
 
   private serialized<T>(sessionId: string, operation: () => Promise<T>): Promise<T> {
     const next = (this.pending.get(sessionId) ?? Promise.resolve()).then(operation, operation);
@@ -181,11 +182,11 @@ export class ManagedWorktreeGuardSockets {
   }
 
   private async listen(sessionId: string, address: string, protectionsFile?: string): Promise<GuardSocketWorker> {
-    return GuardSocketWorker.listen({
+    return this.workerHost.listen({
       address, guardStateDirectory: resolve(this.configDir), platform: this.platform, protectionsFile,
     }, () => this.memoryProtections(sessionId),
     (notify) => subscribeManagedWorktreeGuardMemory(sessionId, notify),
-    (request, signal) => this.policyHookRelay(sessionId, request, signal), this.workerFactoryForTest);
+    (request, signal) => this.policyHookRelay(sessionId, request, signal));
   }
 
   private async ensureNow(sessionId: string, kind: GuardSocketKind): Promise<string> {
@@ -246,6 +247,8 @@ export class ManagedWorktreeGuardSockets {
 
   async closeAll(): Promise<void> {
     const sessions = new Set([...this.servers.keys(), ...this.pending.keys()]);
+    // Whole-host shutdown cannot wait for a synchronous judge to process close acknowledgements.
+    await this.workerHost.closeAll();
     await Promise.all([...sessions].map((sessionId) => this.close(sessionId)));
   }
 }

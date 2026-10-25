@@ -10,7 +10,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { claudeHookSessionProtectionsPath, refreshClaudeGuardProtections, removeClaudeHookFiles, seedManagedWorktreeGuardMemory } from "./hook-settings.js";
 import { ManagedWorktreeGuardSockets } from "./managed-worktree-guard-socket.js";
 import { managedWorktreeGuardDecision, managedWorktreeGuardOutcome, requestManagedWorktreeGuardVerdict, writeManagedWorktreeGuardProtections } from "./managed-worktree-guard.js";
-import { GuardSocketWorker, createGuardSocketWorker, type GuardSocketWorkerFactory } from "./managed-worktree-guard-worker-client.js";
+import { GuardSocketWorkerHost, createGuardSocketWorker, type GuardSocketWorkerFactory } from "./managed-worktree-guard-worker-client.js";
 import { GuardWorkerProtectionList } from "./managed-worktree-guard-worker.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import { buildSync } from "esbuild";
@@ -168,7 +168,9 @@ test("startup error, exit, timeout and malformed worker replies never provision 
     () => new Worker("require('node:worker_threads').parentPort.postMessage({kind:'ready',address:'/other'})", { eval: true }),
   ];
   for (const factory of factories) {
-    await assert.rejects(GuardSocketWorker.listen(options, () => [], () => () => {}, async () => "", factory, 100));
+    const workerHost = new GuardSocketWorkerHost(factory, 100);
+    try { await assert.rejects(workerHost.listen(options, () => [], () => () => {}, async () => "")); }
+    finally { await workerHost.closeAll(); }
   }
 });
 
@@ -196,7 +198,7 @@ test("a stalled verdict worker times out into refusal independently of main", { 
   const loader = createRequire(import.meta.url).resolve("tsx/cjs");
   const entry = fileURLToPath(new URL("./managed-worktree-guard-worker.ts", import.meta.url));
   const host = new ManagedWorktreeGuardSockets(root, () => [], process.platform, async () => "", (data, transferList) => {
-    worker = new Worker(`require('node:worker_threads').parentPort.on('message',()=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0));require(${JSON.stringify(loader)});require(${JSON.stringify(entry)});`,
+    worker = new Worker(`require('node:worker_threads').parentPort.on('message',message=>{if(message.stall)Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0)});require(${JSON.stringify(loader)});require(${JSON.stringify(entry)});`,
       { eval: true, execArgv: [], workerData: data, transferList });
     return worker;
   });
@@ -214,17 +216,24 @@ test("an unknown published version refuses through the real worker socket", { sk
   const root = mkdtempSync(join(tmpdir(), "wg-version-"));
   let version: Int32Array | undefined;
   const host = new ManagedWorktreeGuardSockets(root, () => [], "linux", async () => "", (data, transfers) => {
-    version = new Int32Array(data.version);
-    return createGuardSocketWorker(data, transfers);
+    const worker = createGuardSocketWorker(data, transfers);
+    const post = worker.postMessage.bind(worker);
+    worker.postMessage = (value, transferList) => {
+      if (value?.kind === "open" && value.listenerId === 1) version = new Int32Array(value.version);
+      post(value, transferList);
+    };
+    return worker;
   });
   try {
     const address = await host.ensure("s_version", "abstract");
+    const sibling = await host.ensure("s_version_sibling", "abstract");
     Atomics.add(version!, 0, 1); // Simulate a lost update: the old empty list must not allow.
     const reply = blockedCall(address, root);
     assert.equal(reply.status, 0, reply.stderr);
     const verdict = JSON.parse(reply.stdout);
     assert.equal(verdict.exitCode, 2);
     assert.match(verdict.stderr, /unknown guard protection list version/u);
+    assert.equal((await requestManagedWorktreeGuardVerdict(sibling, hook("git status"))).exitCode, 0, "version channels are listener-bound");
   } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -263,11 +272,13 @@ test("the standalone CJS worker bundle serves the same guard without source load
     const verdict = await requestManagedWorktreeGuardVerdict(address, hook(`cat ${root}/state`));
     assert.match(verdict.stdout, /"permissionDecision":"deny"/u);
     assert.equal(blockedCall(address, root).status, 0);
-    await assert.rejects(GuardSocketWorker.listen({
-      address: join(root, "missing", "sock"), guardStateDirectory: root, platform: process.platform,
-      protectionsFile: join(root, "unused"),
-    }, () => [], () => () => {}, async () => "", (workerData, transferList) =>
-      new Worker(code, { eval: true, execArgv: [], workerData, transferList })), /worker failed/u);
+    const broken = new GuardSocketWorkerHost((workerData, transferList) => new Worker(code, { eval: true, execArgv: [], workerData, transferList }));
+    try {
+      await assert.rejects(broken.listen({
+        address: join(root, "missing", "sock"), guardStateDirectory: root, platform: process.platform,
+        protectionsFile: join(root, "unused"),
+      }, () => [], () => () => {}, async () => ""), /worker failed/u);
+    } finally { await broken.closeAll(); }
   } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -306,5 +317,55 @@ test("a transient accept error preserves the listening worker", { skip: process.
     writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(root, "s_accept"), []);
     const address = await host.ensure("s_accept");
     assert.equal((await requestManagedWorktreeGuardVerdict(address, hook("git status"))).exitCode, 0);
+  } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("30 session listeners share one worker and closing a session preserves its siblings", { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wg-shared-"));
+  const workers: Worker[] = [];
+  const host = new ManagedWorktreeGuardSockets(root, session => [{ worktreePath: `/trees/${session}`, repoPath: "/repo" }],
+    "linux", async session => session, (data, transfers) => {
+      const worker = createGuardSocketWorker(data, transfers); workers.push(worker); return worker;
+    });
+  try {
+    const addresses = await Promise.all(Array.from({ length: 30 }, (_, i) => host.ensure(`s_${i}`, "abstract")));
+    assert.equal(workers.length, 1, "session count must not allocate more isolates");
+    assert.equal(new Set(addresses).size, 30);
+    for (let i = 0; i < addresses.length; i++) {
+      const own = await requestManagedWorktreeGuardVerdict(addresses[i]!, hook(`git worktree remove /trees/s_${i}`));
+      const sibling = await requestManagedWorktreeGuardVerdict(addresses[i]!, hook(`git worktree remove /trees/s_${(i + 1) % 30}`));
+      assert.match(own.stdout, /"permissionDecision":"deny"/u);
+      assert.deepEqual(sibling, { stdout: "", stderr: "", exitCode: 0 });
+    }
+    await host.close("s_0");
+    await assert.rejects(requestManagedWorktreeGuardVerdict(addresses[0]!, hook("git status")));
+    assert.equal((await requestManagedWorktreeGuardVerdict(addresses[1]!, hook("git status"))).exitCode, 0);
+    assert.equal(workers.length, 1);
+  } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const failure of ["exit", "malformed reply"] as const) test(`shared worker ${failure} closes every listener, drops proofs and recovers on next ensure`, { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wg-epoch-"));
+  const workers: Worker[] = [];
+  const host = new ManagedWorktreeGuardSockets(root, () => [], "linux", async () => "", (data, transfers) => {
+    const worker = createGuardSocketWorker(data, transfers); workers.push(worker); return worker;
+  });
+  try {
+    const one = await host.ensure("s_one", "abstract"), two = await host.ensure("s_two", "abstract");
+    host.markProven("s_one", one); host.markProven("s_two", two);
+    if (failure === "exit") await workers[0]!.terminate();
+    else {
+      workers[0]!.emit("message", { kind: "not a valid worker reply" });
+      await new Promise<void>(resolve => workers[0]!.once("exit", () => resolve()));
+    }
+    assert.equal(host.isProven("s_one", one), false);
+    assert.equal(host.isProven("s_two", two), false);
+    for (const address of [one, two]) await assert.rejects(requestManagedWorktreeGuardVerdict(address, hook("git status")));
+    const nextOne = await host.ensure("s_one", "abstract"), nextTwo = await host.ensure("s_two", "abstract");
+    assert.equal(workers.length, 2, "one replacement worker serves both recovered sessions");
+    assert.notEqual(nextOne, one); assert.notEqual(nextTwo, two);
+    assert.equal(host.isProven("s_one", nextOne), false);
+    assert.equal(host.isProven("s_two", nextTwo), false);
+    for (const address of [nextOne, nextTwo]) assert.equal((await requestManagedWorktreeGuardVerdict(address, hook("git status"))).exitCode, 0);
   } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
 });
