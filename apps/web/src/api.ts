@@ -952,7 +952,7 @@ export function createApiClient(transport: ApiTransport) {
     ),
   selectAuthenticationAccount: (
     id: string,
-    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null },
   ) =>
     req<SelectProviderAuthenticationAccountResponse>(
       `/api/sessions/${encodeURIComponent(id)}/authentication/account`,

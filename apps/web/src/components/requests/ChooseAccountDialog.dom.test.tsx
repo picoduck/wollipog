@@ -115,7 +115,9 @@ async function renderDialog({
   accounts = [WORK, PERSONAL, OLD, MAYBE] as readonly Option[],
   runnerOverrides = {} as Partial<RunnerView>,
   select,
+  sessionOverrides = {} as Partial<SessionView>,
 }: {
+  sessionOverrides?: Partial<SessionView>;
   accounts?: readonly Option[];
   runnerOverrides?: Partial<RunnerView>;
   select?: (providerAccountId: string) => Promise<void>;
@@ -146,7 +148,7 @@ async function renderDialog({
       root.render(
         <ApiProvider client={client}>
           <ChooseAccountDialog
-            session={session}
+            session={{ ...session, ...sessionOverrides }}
             approval={approval}
             runner={currentRunner}
             runnerOnline
@@ -502,4 +504,20 @@ test("with no other account the dialog says who can add one and offers Open Conn
   } finally {
     await view.unmount();
   }
+});
+
+
+test("a default-sign-in session chooses an added account with an explicit unbound expectation", async () => {
+  const view = await renderDialog({
+    sessionOverrides: { providerAccountId: undefined, providerAccountLabel: undefined },
+    accounts: [{ ...WORK, availability: "available" }, PERSONAL, OLD, MAYBE],
+  });
+  try {
+    assert.ok(view.radio("Claude Work"));
+    assert.match(view.row("Claude Old")!.textContent!, /Sign-In Required/);
+    assert.match(view.row("Claude Maybe")!.textContent!, /Status Unknown/);
+    await act(async () => { view.button("Use Account")!.click(); await tick(); await tick(); });
+    assert.deepEqual(view.selections, [{ requestId: CARD, providerAccountId: "claude-work", expectedProviderAccountId: null }]);
+    assert.deepEqual(view.results, [{ kind: "selected" }]);
+  } finally { await view.unmount(); }
 });

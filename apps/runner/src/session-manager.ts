@@ -12597,7 +12597,12 @@ export class SessionManager {
       config: meta.config,
     });
     if (!account) throw new Error(`provider account '${providerAccountId}' is not configured`);
-    if (!meta.providerAccountProvider || account.provider !== meta.providerAccountProvider) {
+    const provider = meta.driver === "claude-code" ? "claude"
+      : meta.driver === "codex" || meta.driver === "codex-app-server" ? "codex" : null;
+    // Default-sign-in sessions have no stored account provider. The driver remains authoritative;
+    // a stored binding, when present, must agree too.
+    if (!provider || account.provider !== provider ||
+        (meta.providerAccountProvider !== undefined && account.provider !== meta.providerAccountProvider)) {
       throw new Error("the selected account belongs to a different provider");
     }
     return account;
@@ -13068,7 +13073,7 @@ export class SessionManager {
     sessionId: string,
     recoveryRequestId: string,
     providerAccountId: string,
-    expectedProviderAccountId: string,
+    expectedProviderAccountId: string | null,
     resolvedBy?: unknown,
   ): Promise<{ ok: boolean; code?: ProviderAuthenticationAccountSelectionError; error?: string }> {
     // Who chose the account (#2783), named on this session's resolution only; a malformed value is
@@ -13086,7 +13091,9 @@ export class SessionManager {
       return refuse("operation_in_progress", "A provider sign-in is in progress. Finish or cancel it first.");
     }
     if (!controller) return refuse("account_unavailable", "Authentication recovery is unavailable on this runner.");
-    if (meta.providerAccountId !== expectedProviderAccountId) {
+    if ((expectedProviderAccountId !== null &&
+        (typeof expectedProviderAccountId !== "string" || !expectedProviderAccountId)) ||
+        (meta.providerAccountId ?? null) !== expectedProviderAccountId) {
       return refuse(
         "account_changed",
         "The session's configured account changed while this card was open. Review the updated card.",
@@ -13194,7 +13201,7 @@ export class SessionManager {
       if (!current || !currentBlock || currentBlock.recoveryId !== block.recoveryId) {
         return refuse("recovery_changed", "This Authentication Required card changed while the account was checked. Review the latest card.");
       }
-      if (current.providerAccountId !== expectedProviderAccountId) {
+      if ((current.providerAccountId ?? null) !== expectedProviderAccountId) {
         return refuse(
           "account_changed",
           "The session's configured account changed while this card was open. Review the updated card.",

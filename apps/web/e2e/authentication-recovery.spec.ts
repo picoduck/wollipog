@@ -413,3 +413,25 @@ test.describe("touch phone, typing then tapping the card (#2675)", () => {
       .toEqual([{ requestId: "provider-auth:recovery-e2e", optionId: "auth:accept-current" }]);
   });
 });
+
+
+for (const theme of ["dark", "light"] as const) {
+  for (const size of [{ name: "desktop", width: 1440, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+    test(`default sign-in: choose an added account ${size.name} ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width: size.width, height: size.height });
+      const card = await open(page, `scenario=default-sign-in&theme=${theme}&width=${size.width}&height=${size.height}`);
+      await expect(fact(card, "This Session Uses")).toContainText("Machine Default Sign-In");
+      const dialog = await openChooser(page, card);
+      await expect(dialog.getByRole("radio")).toHaveCount(4);
+      await expect(accountRow(dialog, "Team Pilot")).toContainText("Sign-In Required");
+      await expect(accountRow(dialog, "Lab Sandbox")).toContainText("Status Unknown");
+      await dialog.getByRole("radio", { name: /^Personal Max/ }).check();
+      await dialog.getByRole("button", { name: "Use Account" }).click();
+      await expect(dialog).toBeHidden();
+      await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.selections())).toEqual([{
+        requestId: "provider-auth:recovery-e2e", providerAccountId: "claude-personal", expectedProviderAccountId: null,
+      }]);
+      expect(await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.decisions())).toEqual([]);
+    });
+  }
+}

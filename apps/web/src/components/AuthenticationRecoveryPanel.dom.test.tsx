@@ -83,7 +83,7 @@ const accounts: ProviderAuthenticationAccountOption[] = [
 
 function client(options: {
   identity?: ProviderAuthenticationCurrentIdentity;
-  select?: (input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string }) => Promise<void>;
+  select?: (input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null }) => Promise<void>;
 } = {}) {
   const calls = { identity: 0, accounts: 0, selections: [] as unknown[], signIns: [] as unknown[] };
   const value = {
@@ -102,7 +102,7 @@ function client(options: {
     },
     selectAuthenticationAccount: async (
       _id: string,
-      input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+      input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null },
     ) => {
       calls.selections.push(input);
       await options.select?.(input);
@@ -430,8 +430,8 @@ test("the account panel applies only to open provider recovery, not to retained-
 
 test("Choose Another Account… applies only where the session can switch accounts", () => {
   assert.equal(authenticationAccountChoiceApplies(session(), approval, runner()), true);
-  assert.equal(authenticationAccountChoiceApplies(session({ providerAccountId: undefined }), approval, runner()), false,
-    "a session on the machine's default sign-in has no account to switch from (#1743)");
+  assert.equal(authenticationAccountChoiceApplies(session({ providerAccountId: undefined }), approval, runner()), true,
+    "a session on the machine's default sign-in can choose an added account (#1743)");
   assert.equal(authenticationAccountChoiceApplies(session(), {
     ...approval,
     options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" }],

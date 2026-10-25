@@ -553,7 +553,7 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
       ["Dismiss Recovery", "Choose Another Account…", "Start Sign-In (primary)"], true],
     ["signed out on the machine's default sign-in", recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]),
       { providerAccountId: undefined, providerAccountLabel: undefined },
-      ["Dismiss Recovery", "Start Sign-In (primary)"], true],
+      ["Dismiss Recovery", "Choose Another Account…", "Start Sign-In (primary)"], true],
     ["read-only", recovery([AUTH.revalidate, AUTH.dismiss]), {},
       ["Dismiss Recovery", "Choose Another Account…", "Retry (primary)"], false],
     ["sign-in methods", methods, { driver: "acp" }, ["Cancel Sign-In", "Start Sign-In (primary)"], false],
@@ -703,16 +703,27 @@ test("a child's sign-in in the Requests panel reads the child's harness and acco
   }
 });
 
-test("a child on the machine default reads Machine Default Sign-In under a parent bound to an account (#2714)", async () => {
+test("a child on the machine default chooses with its own unbound state, never the parent binding (#1743, #2714)", async () => {
+  const selections: unknown[] = [];
   const view = await childSignIn(
     { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" },
     { driver: "claude-code" },
+    { selectAuthenticationAccount: async (sessionId, input) => {
+      selections.push({ sessionId, input });
+      return { accepted: true as const };
+    } },
   );
   try {
     assert.match(factValue(view.container, "This Session Uses") ?? "", /^Machine Default Sign-In/);
     assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/);
-    assert.equal([...view.container.querySelectorAll(".request-card-foot button")]
-      .some((button) => button.textContent === "Choose Another Account…"), false, "an unbound child has no account to switch from");
+    const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+      .find((button) => button.textContent === "Choose Another Account…");
+    assert.ok(choose);
+    await act(async () => { choose.click(); await tick(); await tick(); });
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    assert.deepEqual(selections, [{ sessionId: "session-child", input: {
+      requestId: "provider-auth:card", providerAccountId: "claude-personal", expectedProviderAccountId: null,
+    } }]);
   } finally {
     await view.unmount();
   }

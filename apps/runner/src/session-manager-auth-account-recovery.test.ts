@@ -173,6 +173,7 @@ function harness(
     callbacks: () => latestCallbacks,
     probes,
     manager,
+    controller,
     cleanup: () => {
       manager.shutdownAll();
       rmSync(root, { recursive: true, force: true });
@@ -600,5 +601,118 @@ for (const race of [false, true]) test(`authentication continuation respects a b
       assert.equal(entry.queue.length, 1, "the raced continuation stays queued behind the handoff");
       assert.equal(h.manager.sessionSnapshots()[0]!.queueHold?.kind, "worktree_rebind");
     }
+  } finally { h.cleanup(); }
+});
+
+
+function unbind(h: ReturnType<typeof harness>) {
+  // This is a fake credential context throughout: no real provider home is read or probed.
+  h.store.patchMeta(SESSION, { providerAccountId: undefined, providerAccountLabel: undefined,
+    providerAccountProvider: undefined });
+}
+
+test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine account", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const before = h.probes.length;
+    assert.deepEqual(await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null), { ok: true });
+    assert.equal(h.probes[before], "/claude/personal");
+    await h.manager.providerAuthSelections.get(SESSION);
+    await waitFor(() => h.prompts.length === 1, "retained work did not resume");
+    assert.deepEqual(h.prompts, [{ home: "/claude/personal", text: "hello", resumeId: "claude-conversation" }]);
+    const meta = h.store.readMeta(SESSION)!;
+    assert.equal(meta.providerAccountId, "claude-personal");
+    assert.equal(meta.providerCredentialIdentityId, "identity-personal");
+    assert.equal(meta.providerAuthBlock, undefined);
+  } finally { h.cleanup(); }
+});
+
+for (const phase of ["before", "during"] as const) {
+  for (const initiallyBound of [false, true]) {
+    test(`selection rejects ${initiallyBound ? "bound to unbound" : "unbound to bound"} changes ${phase} the probe`, async () => {
+      const h = harness({
+        "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+        "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+      });
+      try {
+        if (!initiallyBound) unbind(h);
+        const requestId = await parkOnMismatch(h);
+        const change = () => initiallyBound ? unbind(h) : h.store.patchMeta(SESSION, { providerAccountId: "claude-work" });
+        if (phase === "before") change();
+        else {
+          const revalidate = h.controller.revalidate;
+          h.controller.revalidate = async (...args) => { const result = await revalidate(...args); change(); return result; };
+        }
+        const response = await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", initiallyBound ? "claude-work" : null);
+        assert.equal(response.code, "account_changed");
+        assert.deepEqual(h.prompts, []);
+        assert.equal(h.store.readMeta(SESSION)?.pendingApproval?.requestId, requestId);
+      } finally { h.cleanup(); }
+    });
+  }
+}
+
+test("unbound selection never treats missing or empty expectations as permission to skip checks", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] } });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const before = h.probes.length;
+    for (const expected of [undefined, "", false]) {
+      const response = await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", expected as unknown as null);
+      assert.equal(response.code, "account_changed");
+    }
+    for (const account of ["unknown-other-machine", "codex-work"]) {
+      assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, account, null)).code, "account_unavailable");
+    }
+    assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, `${requestId}:stale`, "claude-personal", null)).code, "recovery_changed");
+    assert.equal(h.probes.length, before);
+    assert.deepEqual(h.prompts, []);
+  } finally { h.cleanup(); }
+});
+
+
+for (const [observation, code] of [
+  [{ status: "unauthenticated" }, "sign_in_required"],
+  [{ status: "unknown" }, "status_unknown"],
+  [{ status: "authenticated" }, "status_unknown"],
+] as const) {
+  test(`unbound recovery refuses an unverified target: ${observation.status} without identity`, async () => {
+    const h = harness({
+      "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+      "/claude/personal": { observations: [observation] },
+    });
+    try {
+      unbind(h);
+      const requestId = await parkOnMismatch(h);
+      assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, code);
+      assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+      assert.deepEqual(h.prompts, []);
+    } finally { h.cleanup(); }
+  });
+}
+
+test("unbound recovery refuses a card replaced during the target probe", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const revalidate = h.controller.revalidate;
+    h.controller.revalidate = async (...args) => {
+      const result = await revalidate(...args);
+      h.store.patchMeta(SESSION, { pendingApproval: null, providerAuthBlock: undefined });
+      return result;
+    };
+    assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, "recovery_changed");
+    assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+    assert.deepEqual(h.prompts, []);
   } finally { h.cleanup(); }
 });
