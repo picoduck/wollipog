@@ -1540,6 +1540,20 @@ test("Open Connections falls back to the machine list when no machine is selecte
   }
 });
 
+test("Open Connections falls back to the machine list when the selected location's machine was deleted", async () => {
+  domWindow.localStorage.clear();
+  const fixture = await mountFixture({ runners: [], projects: [project] }, {
+    projectId: project.id, projectLocationId: project.locations[0]!.id,
+  });
+  try {
+    navigated.length = 0;
+    await act(async () => { buttonNamed(fixture.container, "Open Connections")!.click(); });
+    assert.deepEqual(navigated, [{ name: "runners", section: "machines" }]);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("no agent text in New Session names the mechanism (#2953)", async () => {
   domWindow.localStorage.clear();
   const mechanism = /native host|ACP stdio|stdio|rediscover|runner host/iu;
