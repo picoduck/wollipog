@@ -29,6 +29,8 @@ import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { codexPermissionProfileOverrides } from "../src/codex-permission-profile.js";
 import { isolatedProbeEnv, unavailableProbeOutput, probeResult, probeExit, GUARD_DOCUMENTATION, ownProbeProcess, type ProbeStatus } from "./codex-probe-support.js";
 
@@ -53,7 +55,7 @@ interface Case {
   expect: "network" | "noNetwork" | "markerRead" | "denied" | "declined";
 }
 
-const CASES: Case[] = [
+export const CASES: Case[] = [
   // The regression itself: the same approved escalation, on each sandbox.
   { name: "legacy · escalation accepted · network", command: "network", escalate: true, sandbox: "legacy", decision: "accept", expect: "network" },
   { name: "profile · escalation accepted · network", command: "network", escalate: true, sandbox: "profile", decision: "accept", expect: "noNetwork" },
@@ -246,7 +248,7 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
   });
 }
 
-function verdict(testCase: Case, output: string, marker: string): boolean {
+export function verdict(testCase: Case, output: string, marker: string): boolean {
   switch (testCase.expect) {
     case "network": return output.includes(NETWORK_BODY);
     case "noNetwork": return output.includes("NETBLOCKED") && !output.includes(NETWORK_BODY);
@@ -254,6 +256,15 @@ function verdict(testCase: Case, output: string, marker: string): boolean {
     case "denied": return /Permission denied|Operation not permitted/.test(output) && !output.includes(marker);
     case "markerRead": return output.includes(marker);
   }
+}
+
+export function hardeningRestorable(outputs: Map<string, string>, marker: string): boolean {
+  return CASES.every(testCase => {
+    const output = outputs.get(testCase.name);
+    if (output === undefined || unavailableProbeOutput(output)) return false;
+    return testCase.sandbox === "profile" && testCase.escalate && testCase.expect === "noNetwork"
+      ? output.includes(NETWORK_BODY) : verdict(testCase, output, marker);
+  });
 }
 
 /* --------------------------------------------------------------------------------------------
@@ -316,12 +327,7 @@ async function main(): Promise<number> {
       const shown = output.replace(fixture.marker, "<MARKER>").slice(0, 60);
       process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(44)} ${testCase.expect.padEnd(11)} ${JSON.stringify(shown)}\n`);
     }
-    const restored = CASES.filter(c => c.sandbox === "profile" && c.escalate && c.expect === "noNetwork")
-      .every(c => outputs.get(c.name)?.includes(NETWORK_BODY));
-    const denialHolds = CASES.filter(c => c.expect === "denied").every(c => verdict(c, outputs.get(c.name) ?? "", fixture.marker));
-    const controlsHold = CASES.filter(c => !(c.sandbox === "profile" && c.escalate && c.expect === "noNetwork"))
-      .every(c => verdict(c, outputs.get(c.name) ?? "", fixture.marker) && !unavailableProbeOutput(outputs.get(c.name) ?? ""));
-    if (restored && denialHolds && controlsHold) {
+    if (hardeningRestorable(outputs, fixture.marker)) {
       probeResult("provider-mode permission-profile deny withheld by #1336", "changed",
         "approved escalations retain network and directory denial still holds; withheld hardening is re-enablable through a reviewed code change", GUARD_DOCUMENTATION);
     }
@@ -376,7 +382,7 @@ function gitInit(repo: string, home: string): Promise<void> {
     .then(() => run(["commit", "-qm", "init"]));
 }
 
-main().then((code) => { process.exitCode = code; }, (error: unknown) => {
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().then((code) => { process.exitCode = code; }, (error: unknown) => {
   probeResult("permission profile escalation matrix", "could not run", "fixture or compatible app-server unavailable", GUARD_DOCUMENTATION);
   process.exitCode = 2;
 });

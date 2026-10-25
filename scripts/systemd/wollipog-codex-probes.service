@@ -15,4 +15,3 @@ TimeoutStopSec=15s
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=wollipog-codex-probes
-

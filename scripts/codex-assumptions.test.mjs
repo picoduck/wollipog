@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { collectResult, guardRangeResult, reportExit, reportFresh, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
+import { CASES, hardeningRestorable } from "../apps/runner/scripts/codex-escalation-probe.ts";
 
 const probe = { id: "fixture", documentation: "old-measurement.md" };
 function execution(status = "unchanged", extra = {}) {
@@ -29,6 +30,24 @@ test("sandbox startup failure is not mistaken for a measured filesystem denial",
   assert.equal(unavailableProbeOutput("TIMED OUT"), true);
   assert.equal(unavailableProbeOutput("cat: fixture: Permission denied"), false);
   assert.equal(unavailableProbeOutput("NETBLOCKED"), false);
+});
+
+test("withheld hardening becomes re-enablable only with retained network and every denial/approval control", () => {
+  const marker = "fixture-marker";
+  const outputs = new Map(CASES.map(c => [c.name, c.expect === "denied" ? "Permission denied" :
+    c.expect === "declined" ? "declined" : c.expect === "markerRead" ? marker :
+      c.expect === "network" || c.escalate ? "NETOK!!" : "NETBLOCKED"]));
+  assert.equal(hardeningRestorable(outputs, marker), true);
+  for (const c of CASES) {
+    const incomplete = new Map(outputs); incomplete.delete(c.name);
+    assert.equal(hardeningRestorable(incomplete, marker), false, `missing control ${c.name}`);
+  }
+  const denied = CASES.find(c => c.expect === "denied");
+  const namespaceFailure = new Map(outputs); namespaceFailure.set(denied.name, "bwrap: Operation not permitted");
+  assert.equal(hardeningRestorable(namespaceFailure, marker), false);
+  const approved = CASES.find(c => c.sandbox === "profile" && c.escalate && c.expect === "noNetwork");
+  const stillBroken = new Map(outputs); stillBroken.set(approved.name, "NETBLOCKED");
+  assert.equal(hardeningRestorable(stillBroken, marker), false);
 });
 
 test("a successful unknown-version guard measurement proposes widening without changing admission", () => {
