@@ -23,6 +23,9 @@ needed. Neither health-state nor rolling-state pushes match a main-only push tri
 Rolling workers also end with **Wake Main CI Health**, an `always()` job after
 admission and full validation. It has only Actions write, checks out no code and
 dispatches this trusted workflow on main with its numeric run ID and attempt.
+Delivery has two bounded 30-second attempts and structured success/failure output.
+The control job is allowed to fail without changing the worker's full-test verdict;
+failed delivery remains a visible job warning/failure requiring manual recovery.
 This explicit dispatch avoids relying on `workflow_run` delivery from GITHUB_TOKEN
 workers; legacy main-push CI remains enabled while this repair is verified in shadow.
 

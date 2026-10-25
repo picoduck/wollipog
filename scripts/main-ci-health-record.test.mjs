@@ -600,6 +600,20 @@ test("a terminal worker dispatch observes and persists its exact run within the 
   assert.equal(output.at(-1).calls, calls); assert.ok(calls <= API_BUDGET);
 });
 
+test("noncritical health-delivery failure cannot erase a green certificate or mask a red suite", async () => {
+  for (const red of [false, true]) {
+    const f = forge({ runs: [worker(10, A, { conclusion: red ? "failure" : "success" })] });
+    const inventory = jobs();
+    if (red) inventory[0].conclusion = "failure";
+    inventory.push({ id: 99, name: "Wake Main CI Health", status: "completed", conclusion: "failure",
+      steps: [{ name: "Dispatch Exact Worker Health", conclusion: "failure" }] });
+    f.data.jobSets.set("10:1", inventory);
+    const health = await f.collect();
+    assert.equal(health.status, red ? "failing" : "passing");
+    assert.equal(health.fullCertification?.runId ?? null, red ? null : 10);
+  }
+});
+
 test("terminal handoff preserves failure alerting and exact-run deduplication", async () => {
   const f = forge({ runs: [worker(10, A, { conclusion: "failure" })] });
   const failed = jobs(); failed[0].conclusion = "failure";

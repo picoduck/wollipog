@@ -11,7 +11,8 @@ export function isSupersededWorkerAttempt(run, jobs) {
   const noOtherWork = jobs.every((job) => job.name === "Admit Main Snapshot" ||
     job.name === "Wake Main CI Health" && job.status === "completed" &&
       ["success", "failure", "cancelled", "skipped", "timed_out"].includes(job.conclusion) &&
-      (job.steps ?? []).every(step => ["Set up job", "Dispatch Exact Worker Health", "Complete job"].includes(step.name)) ||
+      (job.steps ?? []).every(step => ["Set up job", "Dispatch Exact Worker Health", "Retry Exact Worker Health",
+        "Record Health Dispatch Delivery", "Complete job"].includes(step.name)) ||
     (job.name === "Full Validation" || job.name?.startsWith("Full Validation / ")) &&
     job.conclusion === "skipped" && !job.steps?.length);
   return noOtherWork && admission.length === 1 && admission[0].steps?.some((step) =>

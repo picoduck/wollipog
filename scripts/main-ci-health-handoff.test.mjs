@@ -83,9 +83,12 @@ test("worker terminal job dispatches health with literal command and scoped toke
   assert.match(wake, /if: always\(\) && github.ref == 'refs\/heads\/main'/);
   assert.match(wake, /needs: \[admit, validation\]/);
   assert.match(wake, /permissions:\n      actions: write/);
-  assert.doesNotMatch(wake, /checkout@|contents:|issues:|download-artifact|continue-on-error/);
+  assert.match(wake, /^    continue-on-error: true$/m, "a delivery failure must not poison the full regression verdict");
+  assert.doesNotMatch(wake, /checkout@|contents:|issues:|download-artifact/);
   assert.match(wake, /WORKER_RUN_ID: \$\{\{ github.run_id \}\}/);
   assert.match(wake, /WORKER_ATTEMPT: \$\{\{ github.run_attempt \}\}/);
-  const shell = wake.match(/run: (.+)/)?.[1];
-  assert.equal(shell, 'gh workflow run main-ci-health.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"');
+  const shells = [...wake.matchAll(/run: (timeout .+)/g)].map(match => match[1]);
+  assert.deepEqual(shells, Array(2).fill('timeout 30 gh workflow run main-ci-health.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"'));
+  assert.match(wake, /if: steps.dispatch.outcome == 'failure'/);
+  assert.match(wake, /"event":"main_ci_health_wake","delivery":"failed"/);
 });
