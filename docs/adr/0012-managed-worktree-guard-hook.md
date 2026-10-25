@@ -369,8 +369,10 @@ add `--dangerously-bypass-hook-trust`. Disables from an attempted hash-trust iso
 retained when switching mechanisms. A newly discovered enabled foreign hook in the final read
 refuses the fallback. If neither mechanism can be verified, a TUI with managed worktrees is
 refused; the existing notice still covers a TUI with nothing yet to protect. Both mechanisms keep
-the sidecar launch self-test. Launch logs identify `mechanism=trusted-hash` or `legacy-bypass`,
-the observed version (or `unknown`), and the fallback reason. Caller-supplied bypasses survive
+the sidecar launch self-test. Structured `codex_managed_worktree_guard_provisioned` events identify
+the session, TUI/structured entry point, `trusted-hash` or `legacy-bypass` mechanism, observed
+version (or null), and bounded fallback reason (`unmeasured_version` or `hash_verification_failed`).
+They contain no hook commands, paths, provider credentials or raw provider error text. Caller-supplied bypasses survive
 inactive provisioning; a successful hash-trust launch explicitly logs replacing one.
 
 **Structured app-server admission remains version-independent, as on main.** It trusts by hash

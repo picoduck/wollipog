@@ -129,6 +129,11 @@ interface Harness {
   logs: string[];
 }
 
+function guardEvent(logs: string[]): Record<string, unknown> | undefined {
+  return logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((event) => event.event === "codex_managed_worktree_guard_provisioned");
+}
+
 function dependencies(
   configDir: string,
   options: {
@@ -210,7 +215,10 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
 
     assert.ok(launch);
     // The guard is observable in the argv the TUI launches with, never inferred.
-    assert.ok(harness.logs.some((line) => line.includes("mechanism=trusted-hash")));
+    assert.deepEqual(guardEvent(harness.logs), {
+      event: "codex_managed_worktree_guard_provisioned", sessionId: "s1377", entryPoint: "tui",
+      mechanism: "trusted-hash", codexVersion: "0.163.0", replacedExplicitBypass: false,
+    });
     const override = overrideArgument(launch.args);
     assert.ok(override);
     assert.ok(codexGuardArgsActive(launch.args, override));
@@ -678,7 +686,11 @@ for (const version of ["0.155.0", "0.163.1", "0.164.0", null]) {
       assert.equal(codexGuardActiveInArgs(launch.args), false, "a structured driver cannot claim this TUI-only guard");
       assert.equal(harness.probes.length, 2);
       assert.ok(harness.probes.every((probe) => !probe.args.some((arg) => arg.includes("trusted_hash"))));
-      assert.ok(harness.logs.some((line) => line.includes("mechanism=legacy-bypass") && line.includes(`codexVersion=${version ?? "unknown"}`)));
+      assert.deepEqual(guardEvent(harness.logs), {
+        event: "codex_managed_worktree_guard_provisioned", sessionId: "s1377", entryPoint: "tui",
+        mechanism: "legacy-bypass", codexVersion: version, replacedExplicitBypass: false,
+        fallbackReason: "unmeasured_version",
+      });
     });
   });
 }
@@ -697,7 +709,8 @@ test("a TUI whose hash read-back fails falls back while preserving all prior for
     assert.equal(harness.probes.length, 3);
     assert.ok(harness.probes[1]!.args.some((arg) => arg.includes("trusted_hash")));
     assert.ok(harness.probes[2]!.args.some((arg) => arg.includes('"foreign"={enabled=false}')));
-    assert.ok(harness.logs.some((line) => line.includes("mechanism=legacy-bypass") && line.includes("still reports")));
+    assert.equal(guardEvent(harness.logs)?.mechanism, "legacy-bypass");
+    assert.equal(guardEvent(harness.logs)?.fallbackReason, "hash_verification_failed");
   });
 });
 

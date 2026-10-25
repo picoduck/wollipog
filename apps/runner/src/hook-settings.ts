@@ -1546,19 +1546,28 @@ export async function provisionCodexGuard(
       throw new Error(`its foreign Codex hooks could not be disabled for this launch (${(error as Error).message})`);
     }
   };
-  const provisioned = (guarded: string[], mechanism: "trusted-hash" | "legacy-bypass", fallbackReason?: string): CodexGuardProvisioning => {
-    log(`Codex managed worktree guard ${spec.sessionId}: provisioned mechanism=${mechanism} ` +
-      `codexVersion=${codexVersion ?? "unknown"}` +
-      (arrived.includes("--dangerously-bypass-hook-trust") && mechanism === "trusted-hash"
-        ? " (replaced the launch's explicit hook-trust bypass)" : "") +
-      (fallbackReason ? ` fallbackReason=${fallbackReason}` : "") + ` (${protectionsFile})`);
+  const provisioned = (
+    guarded: string[], mechanism: "trusted-hash" | "legacy-bypass",
+    fallbackReason?: "unmeasured_version" | "hash_verification_failed",
+  ): CodexGuardProvisioning => {
+    log(JSON.stringify({
+      event: "codex_managed_worktree_guard_provisioned",
+      sessionId: spec.sessionId,
+      entryPoint: config.entryPoint ?? "structured",
+      mechanism,
+      codexVersion: codexVersion ?? null,
+      replacedExplicitBypass: arrived.includes("--dangerously-bypass-hook-trust") && mechanism === "trusted-hash",
+      ...(fallbackReason ? { fallbackReason } : {}),
+    }));
     return { args: guarded, guardActive: true };
   };
 
   // The version pin selects the TUI mechanism only. Structured hash-trust admission retains
   // main's inventory read-back contract on every version; it can never use the inert bypass.
   let hashFailure = `codex-cli ${codexVersion ?? "unknown"} is outside the measured TUI hash-trust range`;
+  let hashAttempted = false;
   if (!isTui || codexGuardHashTrustVersionSupported(codexVersion)) {
+    hashAttempted = true;
     try {
       const trustOverride = codexGuardTrustOverride(entries, guardCommand);
       if (!trustOverride) throw new Error("Codex reported no content hash for the runner's PreToolUse hook, so it cannot be trusted");
@@ -1603,7 +1612,7 @@ export async function provisionCodexGuard(
     if (!codexGuardArgsActive(guarded, override, undefined, "legacy-bypass")) {
       throw new Error("the launch arguments do not retain the legacy guard and hook-trust bypass");
     }
-    return provisioned(guarded, "legacy-bypass", hashFailure);
+    return provisioned(guarded, "legacy-bypass", hashAttempted ? "hash_verification_failed" : "unmeasured_version");
   } catch (error) {
     return inactive(`hash trust failed (${hashFailure}); legacy TUI bypass failed (${(error as Error).message})`);
   }
