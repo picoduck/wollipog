@@ -80,11 +80,11 @@ it verifies classification evidence, not the production job's budget or wake lat
 The controlling campaign accepted both handoffs without requiring a natural
 supersession sample. However, removing legacy CI would also remove health's only
 observed prompt wake: cron delivered 11 times in roughly 40 hours with multi-hour
-gaps. Cutover therefore remains blocked on a separate live terminal-dispatch proof.
-The prerequisite shadow repair retains legacy CI, dispatches health from the worker's
+gaps. That blocked cutover until the separate live terminal-dispatch proof below passed.
+The prerequisite shadow repair retained legacy CI, dispatches health from the worker's
 final job, and makes health await that exact terminal attempt within its existing
 API allowance. Neither handoff timing nor this diagnostic health scan proves that
-new dispatch route; retain its worker and health run IDs after the shadow merge.
+new dispatch route; the following post-merge observation verifies it independently.
 
 **No pending worker was superseded in this window.** Therefore no live worker
 non-verdict was available to compare with health; the observed non-verdict count
@@ -102,3 +102,40 @@ re-read from Actions while GitHub retains them. Coordination refs and uploaded
 observations never replace independent checkout/job verification. Completion wake
 delivery and cron remain best-effort; an entirely missed idle push needs another
 delivered event or manual reconciliation. See the [operating runbook and rollback](main-rolling-validation.md).
+
+## Live Terminal Health Handoff
+
+The shadow prerequisite [#3666](https://github.com/picoduck/wollipog/pull/3666)
+merged as `aeca0addbbb154ddfdab8565f0169e0a0d8a1da5` at
+2026-10-25 18:13:40 UTC with legacy main-push CI still enabled. Its natural rolling
+worker [40220253814](https://github.com/picoduck/wollipog/actions/runs/40220253814),
+attempt 1, checked out that exact target and workflow revision. Its claim is
+`fcc2dace-3b7f-4654-8cb2-29e586518b79`. All ten required outcomes and all nine
+checkout assertions succeeded. The run completed successfully at 18:47:19 UTC.
+
+Its actions-write-only **Wake Main CI Health** job
+[121258114379](https://github.com/picoduck/wollipog/actions/runs/40220253814/job/121258114379)
+dispatched health at 18:47:14–18:47:16 UTC; delivery recording succeeded and the retry
+was skipped. Health run
+[40222903522](https://github.com/picoduck/wollipog/actions/runs/40222903522)
+has event `workflow_dispatch`, created at 18:47:16 UTC before the worker became
+terminal. Its exact-attempt wait observed run `40220253814`, attempt 1, completed
+at 18:47:24.898 UTC (one poll, 148 ms waiting). At 18:47:34.441 UTC its normal
+independent collector certified that worker and target as fully passing, with
+zero backlog commits, merges or oldest-unvalidated age.
+
+The successful health run's final usage record contains **42 total API calls**:
+37 reads and 5 mutations (41 REST and 1 GraphQL), inside the unchanged 96-call
+checkpoint allowance and 8-call write reserve. The REST remainder was 4900 of
+5000, above the 3000 floor, with no budget-stop reason. The earlier persisted
+observation captured 36 calls before final persistence; it is not the total.
+Fail-closed identity, bounded three-minute waiting, and 48/96 budget logic remained
+active. A bounded read-only watcher made 33 polls with no errors to collect this
+proof; no manual dispatch or synthetic traffic was used.
+
+This proves the prompt explicit terminal handoff with legacy CI still on. Health
+observed the worker independently instead of relying on a legacy completion or
+best-effort cron. Together with both native pending handoffs above, it resolves
+the observed alert-wake blocker before removing legacy main-push fan-out. GitHub
+event delivery still has no fixed SLA; failed terminal delivery is reported by
+the isolated wake job and does not turn a green validation result red.
