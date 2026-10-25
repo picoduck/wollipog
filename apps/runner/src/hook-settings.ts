@@ -1145,7 +1145,34 @@ const guardSockets = new Map<string, string>();
  * so nothing a same-user process can reach decides a verdict. A session with no entry has no list,
  * and its socket refuses every call — which is what an invalidated guard means here.
  */
-const guardMemoryLists = new Map<string, ManagedWorktreeProtection[]>();
+const guardMemoryListeners = new Map<string, Set<() => void>>();
+/** A worker subscribes only to its session; publication finishes before each map mutation returns. */
+export function subscribeManagedWorktreeGuardMemory(sessionId: string, notify: () => void): () => void {
+  const listeners = guardMemoryListeners.get(sessionId) ?? new Set<() => void>();
+  listeners.add(notify);
+  guardMemoryListeners.set(sessionId, listeners);
+  return () => {
+    listeners.delete(notify);
+    if (!listeners.size) guardMemoryListeners.delete(sessionId);
+  };
+}
+class GuardMemoryLists extends Map<string, ManagedWorktreeProtection[]> {
+  override set(sessionId: string, protections: ManagedWorktreeProtection[]): this {
+    super.set(sessionId, protections);
+    for (const notify of guardMemoryListeners.get(sessionId) ?? []) notify();
+    return this;
+  }
+  override delete(sessionId: string): boolean {
+    const removed = super.delete(sessionId);
+    for (const notify of guardMemoryListeners.get(sessionId) ?? []) notify();
+    return removed;
+  }
+  override clear(): void {
+    super.clear();
+    for (const listeners of guardMemoryListeners.values()) for (const notify of listeners) notify();
+  }
+}
+const guardMemoryLists = new GuardMemoryLists();
 /**
  * The real settings documents of those same launches, keyed by the resolved settings path the
  * persisted `--settings` argument names. `prepareClaudeHookArgs` hands Claude one of them INLINE, so
@@ -1245,7 +1272,8 @@ export function managedWorktreeGuardMemoryProtections(sessionId: string): Manage
   if (!protections || compromisedGuardSessions.has(sessionId)) {
     throw new Error("the runner holds no protected worktree list for this session");
   }
-  return protections;
+  // Callers cannot mutate authority behind the publisher's back.
+  return protections.map(entry => ({ ...entry }));
 }
 
 /** Testing seam: forget every remembered guard-state digest and compromise marker. */

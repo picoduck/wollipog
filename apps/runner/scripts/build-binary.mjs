@@ -58,6 +58,15 @@ await build({
   outfile: leaseWorker, legalComments: "none", logLevel: "info",
 });
 
+// The guard owns its listener as well as classification off the daemon's main event loop.
+const guardWorker = join(buildDir, "managed-worktree-guard-worker.cjs");
+await build({
+  entryPoints: [join(runner, "src", "managed-worktree-guard-worker.ts")],
+  bundle: true, platform: "node", format: "cjs", target: "node24",
+  define: { "import.meta.url": "undefined" },
+  outfile: guardWorker, legalComments: "none", logLevel: "info",
+});
+
 // Linux adoption moves files with a fixed renameat2(RENAME_NOREPLACE) helper. It is linked
 // statically so the SEA runs on any Linux libc, and it is compiled before the bundle-only exit so
 // CI's bundle check proves the exact release build.
@@ -102,7 +111,10 @@ if (process.argv.includes("--bundle-only")) {
 // 2) Node SEA blob.
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
-const assets = { "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker };
+const assets = {
+  "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker,
+  "wollipog/managed-worktree-guard-worker-v1": guardWorker,
+};
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
 if (process.platform === "linux") assets["wollipog/linux-cgroup-launch"] = cgroupLaunchHelper;
