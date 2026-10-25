@@ -26,15 +26,14 @@ export function authenticationRecoveryPanelApplies(session: SessionView, approva
     (session.driver === "claude-code" || session.driver === "codex" || session.driver === "codex-app-server");
 }
 
-/** The session can recover with another account added to its Machine: it is bound to one, and the
- * runner can list and switch them. The card's Choose Another Account… appears only then; #1743
- * widens it to sessions on the Machine's default sign-in without changing the dialog. */
+/** Both bound and Machine-default sessions can recover with a compatible account on their
+ * Machine when the runner supports selection and no sign-in is in progress. */
 export function authenticationAccountChoiceApplies(
   session: SessionView,
   approval: PendingApproval,
   runner: RunnerView | undefined,
 ): boolean {
-  return authenticationRecoveryPanelApplies(session, approval) && !!session.providerAccountId &&
+  return authenticationRecoveryPanelApplies(session, approval) &&
     !approval.options.some((option) => option.optionId === "auth:cancel") &&
     runnerSupportsProtocol(runner?.protocolVersion, "providerAuthenticationAccountRecovery");
 }

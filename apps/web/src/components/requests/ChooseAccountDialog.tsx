@@ -248,7 +248,7 @@ export function ChooseAccountDialog({
 
   const submit = async () => {
     const account = selected;
-    if (submittingRef.current || !account || signedOutChoice || !session.providerAccountId) return;
+    if (submittingRef.current || !account || signedOutChoice) return;
     submittingRef.current = true;
     setSubmitting(true);
     setRowError(null);
@@ -256,7 +256,7 @@ export function ChooseAccountDialog({
       await api.selectAuthenticationAccount(session.id, {
         requestId: approval.requestId,
         providerAccountId: account.id,
-        expectedProviderAccountId: session.providerAccountId,
+        expectedProviderAccountId: session.providerAccountId ?? null,
       });
       submittingRef.current = false;
       onDone({ kind: "selected" });

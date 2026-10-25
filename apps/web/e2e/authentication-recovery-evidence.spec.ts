@@ -117,3 +117,30 @@ for (const size of SIZES) {
     }
   }
 }
+
+
+// #1743: compare the same default-sign-in fixture against the original and updated chooser gate.
+for (const size of SIZES) {
+  for (const theme of ["dark", "light"] as const) {
+    test(`default-sign-in ${size.name} ${theme}`, async ({ page }) => {
+      await page.setViewportSize({ width: size.width, height: size.height });
+      await page.goto(`/authentication-recovery-e2e.html?scenario=default-sign-in&theme=${theme}&width=${size.width}&height=${size.height}`);
+      const card = page.locator(".request-dock .request-card").first();
+      await expect(card).toContainText("Machine Default Sign-In");
+      await expect(card).toContainText("2m ago");
+      if (prefix === "before") {
+        const more = card.getByRole("button", { name: "More Choices" });
+        if (size.name === "phone" && await more.isVisible()) await more.click();
+        await expect(page.getByRole("button", { name: "Choose Another Account…" })).toHaveCount(0);
+        await expect(page.getByRole("menuitem", { name: "Choose Another Account…" })).toHaveCount(0);
+      } else {
+        await chooseAnotherAccount(page, card);
+        const dialog = page.getByRole("dialog", { name: "Choose Another Account" });
+        await expect(dialog.getByRole("radio")).toHaveCount(4);
+        await expect(dialog).toContainText("Sign-In Required");
+        await expect(dialog).toContainText("Status Unknown");
+      }
+      await capture(page, `default-sign-in-${size.name}-${theme}`);
+    });
+  }
+}

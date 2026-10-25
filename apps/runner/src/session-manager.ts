@@ -27,6 +27,7 @@ import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js"
  */
 
 import { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns, type ConversationHandoffDraft } from "@wollipog/protocol";
+import { providerConversationHome } from "./provider-conversation-home.js";
 import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import { transferCodexAccountTranscript } from "./codex-account-transcript.js";
 import type { ClaudeLiveUsage } from "./drivers/claude-usage-accounting.js";
@@ -12597,7 +12598,12 @@ export class SessionManager {
       config: meta.config,
     });
     if (!account) throw new Error(`provider account '${providerAccountId}' is not configured`);
-    if (!meta.providerAccountProvider || account.provider !== meta.providerAccountProvider) {
+    const provider = meta.driver === "claude-code" ? "claude"
+      : meta.driver === "codex" || meta.driver === "codex-app-server" ? "codex" : null;
+    // Default-sign-in sessions have no stored account provider. The driver remains authoritative;
+    // a stored binding, when present, must agree too.
+    if (!provider || account.provider !== provider ||
+        (meta.providerAccountProvider !== undefined && account.provider !== meta.providerAccountProvider)) {
       throw new Error("the selected account belongs to a different provider");
     }
     return account;
@@ -13068,7 +13074,7 @@ export class SessionManager {
     sessionId: string,
     recoveryRequestId: string,
     providerAccountId: string,
-    expectedProviderAccountId: string,
+    expectedProviderAccountId: string | null,
     resolvedBy?: unknown,
   ): Promise<{ ok: boolean; code?: ProviderAuthenticationAccountSelectionError; error?: string }> {
     // Who chose the account (#2783), named on this session's resolution only; a malformed value is
@@ -13086,7 +13092,9 @@ export class SessionManager {
       return refuse("operation_in_progress", "A provider sign-in is in progress. Finish or cancel it first.");
     }
     if (!controller) return refuse("account_unavailable", "Authentication recovery is unavailable on this runner.");
-    if (meta.providerAccountId !== expectedProviderAccountId) {
+    if ((expectedProviderAccountId !== null &&
+        (typeof expectedProviderAccountId !== "string" || !expectedProviderAccountId)) ||
+        (meta.providerAccountId ?? null) !== expectedProviderAccountId) {
       return refuse(
         "account_changed",
         "The session's configured account changed while this card was open. Review the updated card.",
@@ -13125,11 +13133,21 @@ export class SessionManager {
       let probe: SessionMeta;
       let targetScope: ProviderCredentialScope | null;
       let observation: ProviderAuthObservation;
+      let conversationHome = meta.providerConversationHome ?? meta.providerCredentialHome;
       // The target account's preparation reference (#3238): it covers the preparation and, with
       // the probe's own reference, its status command; settled once that command is done.
       const preparationHome = this.launchPreparationProviderHome();
       try {
         try {
+          if (!conversationHome && meta.agentSessionId) {
+            // Saved env is intentionally empty. Prepare the original binding to honor the
+            // runner-local agent's provider directory before preparing the chosen account.
+            const original = await this.providerAuthenticationProbeMeta(meta, undefined, preparationHome);
+            try { conversationHome = await providerConversationHome(original); }
+            catch {
+              return refuse("not_resumable", "The original saved provider conversation could not be located for an account switch.");
+            }
+          }
           probe = await this.providerAuthenticationProbeMeta(meta, target, preparationHome);
         } catch (error) {
           if (!preparationIsCurrent() && this.isProviderPreparationCancellation(error)) {
@@ -13189,12 +13207,14 @@ export class SessionManager {
       if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
         return refuse("operation_in_progress", "The interrupted provider turn is still settling. Try again in a moment.");
       }
+      // Original-home resolution and the chosen-account probe may cross context boundaries;
+      // recheck both card and binding after all preparation and status work settles.
       const current = this.store.readMeta(sessionId);
       const currentBlock = this.openProviderAuthenticationCard(current, recoveryRequestId);
       if (!current || !currentBlock || currentBlock.recoveryId !== block.recoveryId) {
         return refuse("recovery_changed", "This Authentication Required card changed while the account was checked. Review the latest card.");
       }
-      if (current.providerAccountId !== expectedProviderAccountId) {
+      if ((current.providerAccountId ?? null) !== expectedProviderAccountId) {
         return refuse(
           "account_changed",
           "The session's configured account changed while this card was open. Review the updated card.",
@@ -13220,7 +13240,7 @@ export class SessionManager {
         providerAccountProvider: target.provider,
         providerCredentialHome: target.credentialHome,
         providerProfileId: target.profileId,
-        providerConversationHome: current.providerConversationHome ?? current.providerCredentialHome,
+        providerConversationHome: conversationHome,
         pendingProviderAccountId: undefined,
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,

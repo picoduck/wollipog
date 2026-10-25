@@ -6635,8 +6635,9 @@ export interface ProviderAuthenticationAccountOptionsResponse {
 export interface SelectProviderAuthenticationAccountRequest {
   requestId: string;
   providerAccountId: string;
-  /** The session's configured account when the card was rendered; a change fails closed. */
-  expectedProviderAccountId: string;
+  /** The configured account when rendered, or explicit null for Machine default sign-in.
+   * Required: missing or empty values never skip the stale-binding check. */
+  expectedProviderAccountId: string | null;
 }
 
 export interface SelectProviderAuthenticationAccountResponse {
@@ -10322,7 +10323,8 @@ export interface SelectProviderAuthenticationAccountMessage {
   sessionId: string;
   recoveryRequestId: string;
   providerAccountId: string;
-  expectedProviderAccountId: string;
+  /** Explicit null means the session was unbound when the card opened. */
+  expectedProviderAccountId: string | null;
   /** Who chose the account (#2783), recorded on this session's `auth:select-account` resolution
    * only, as `resolve_permission`'s v211 field is. Absent from older control planes; older runners
    * ignore it. Such selections name nobody. */

@@ -21,6 +21,7 @@ import "../styles.css";
 /** Real-browser SessionDetail with a sign-in card (#1649, #2198), one scenario per state the
  * runner can put it in:
  * - `email` (default): signed in as a different account than the session uses (Use Current Account);
+ * - `default-sign-in`: the same, without an added-account binding (#1743);
  * - `no-email`: the same, but the provider reports no email;
  * - `signed-out`: nobody is signed in and the runner can start a sign-in (Start Sign-In);
  * - `not-manager`: signed out, for a viewer who cannot manage the Machine;
@@ -260,7 +261,7 @@ const session = {
   tokensOut: 1337,
   costUsd: 0.42,
   adopted: false,
-  ...(methods ? {} : { providerAccountId: "claude-work", providerAccountLabel: "Work Subscription" }),
+  ...(methods || scenario === "default-sign-in" ? {} : { providerAccountId: "claude-work", providerAccountLabel: "Work Subscription" }),
 } as unknown as SessionView;
 
 const events: SessionEvent[] = [
@@ -348,7 +349,7 @@ const client = {
   authenticationAccounts: async () => ({ accounts: [...accountOptions] }),
   selectAuthenticationAccount: async (
     _id: string,
-    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null },
   ) => {
     selections.push(input);
     if (scenario === "refused") {
