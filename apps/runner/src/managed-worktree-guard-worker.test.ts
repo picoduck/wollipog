@@ -14,6 +14,7 @@ import { GuardSocketWorkerHost, createGuardSocketWorker, type GuardSocketWorkerF
 import { GuardWorkerProtectionList } from "./managed-worktree-guard-worker.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import { buildSync } from "esbuild";
+import { requestPolicyHookRelay } from "./policy-hook-relay.js";
 
 const hook = (command: string) => JSON.stringify({ tool_name: "Bash", cwd: "/trees/one", tool_input: { command } });
 
@@ -277,7 +278,7 @@ test("the standalone CJS worker bundle serves the same guard without source load
       await assert.rejects(broken.listen({
         address: join(root, "missing", "sock"), guardStateDirectory: root, platform: process.platform,
         protectionsFile: join(root, "unused"),
-      }, () => [], () => () => {}, async () => ""), /worker failed/u);
+      }, () => [], () => () => {}, async () => ""), /listener could not listen/u);
     } finally { await broken.closeAll(); }
   } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -367,5 +368,48 @@ for (const failure of ["exit", "malformed reply"] as const) test(`shared worker 
     assert.equal(host.isProven("s_one", nextOne), false);
     assert.equal(host.isProven("s_two", nextTwo), false);
     for (const address of [nextOne, nextTwo]) assert.equal((await requestManagedWorktreeGuardVerdict(address, hook("git status"))).exitCode, 0);
+  } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("closing a parked relay never invalidates a sibling's listener or proof", { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wg-park-"));
+  let count = 0, park = () => {};
+  const parked = new Promise<void>(resolve => { park = resolve; });
+  const host = new ManagedWorktreeGuardSockets(root, () => [], "linux", async (_session, _request, signal) => {
+    park();
+    await new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+    return "aborted";
+  }, (data, transfers) => { count++; return createGuardSocketWorker(data, transfers); });
+  try {
+    const one = await host.ensure("s_park", "abstract"), two = await host.ensure("s_sibling", "abstract");
+    host.markProven("s_sibling", two);
+    const refused = assert.rejects(requestPolicyHookRelay(one, { key: "k", event: "PreToolUse", input: "{}" }));
+    await parked;
+    await host.close("s_park");
+    await refused;
+    for (let i = 0; i < 3; i++) assert.equal((await requestManagedWorktreeGuardVerdict(two, hook("git status"))).exitCode, 0);
+    assert.equal(host.isProven("s_sibling", two), true);
+    assert.equal(count, 1);
+  } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("one listener's bind failure preserves every listening sibling", { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wg-bind-"));
+  let count = 0;
+  const host = new ManagedWorktreeGuardSockets(root, () => [], "linux", async () => "", (data, transfers) => {
+    count++;
+    const worker = createGuardSocketWorker(data, transfers), post = worker.postMessage.bind(worker);
+    worker.postMessage = (value, transferList) => {
+      post(value?.kind === "open" && value.listenerId === 2 ? { ...value, address: join(root, "missing", "sock") } : value, transferList);
+    };
+    return worker;
+  });
+  try {
+    const good = await host.ensure("s_good", "abstract");
+    host.markProven("s_good", good);
+    await assert.rejects(host.ensure("s_bad"));
+    assert.equal((await requestManagedWorktreeGuardVerdict(good, hook("git status"))).exitCode, 0);
+    assert.equal(host.isProven("s_good", good), true);
+    assert.equal(count, 1);
   } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
 });

@@ -42,7 +42,7 @@ export class GuardWorkerProtectionList {
 if (parentPort) {
   if (workerData?.protocol !== 1) throw new Error("invalid guard worker startup");
   const port = parentPort;
-  const listeners = new Map<number, { server: Server; connections: Set<Socket>; updates: MessagePort;
+  const listeners = new Map<number, { server: Server; connections: Set<Socket>; updates: MessagePort; closing: boolean;
     pending: Map<number, { resolve: (output: string) => void; reject: () => void }> }>();
   let lastListenerId = 0;
 
@@ -69,7 +69,11 @@ if (parentPort) {
           pending.set(requestId, { resolve, reject });
           signal.addEventListener("abort", () => {
             pending.delete(requestId);
-            port.postMessage({ kind: "abandon", listenerId: data.listenerId, requestId });
+            // Socket close callbacks can run AFTER server.close's acknowledgement. A listener
+            // being retired must never emit another routing frame for its forgotten identity.
+            if (listeners.get(data.listenerId)?.closing === false) {
+              port.postMessage({ kind: "abandon", listenerId: data.listenerId, requestId });
+            }
             reject(new Error("sidecar disconnected"));
           }, { once: true });
           port.postMessage({ kind: "relay", listenerId: data.listenerId, requestId, request: JSON.parse(policyHookRelayRequest(request)) });
@@ -77,11 +81,19 @@ if (parentPort) {
         () => memory?.verify(),
       );
     });
-    listeners.set(data.listenerId, { server, connections, updates: data.updates, pending });
-    // Startup/listener failure exits the shared worker: all its listeners then refuse. A transient
-    // accept error on a still-listening socket preserves the old per-connection behavior.
-    server.on("error", (error) => { if (!server.listening) throw error; });
+    listeners.set(data.listenerId, { server, connections, updates: data.updates, pending, closing: false });
+    let didListen = false;
+    server.on("error", (error) => {
+      if (server.listening) return; // A transient accept error still affects only that call.
+      if (didListen) throw error; // An unexpected runtime listener failure fails the worker closed.
+      // A bind failure is this listener's provisioning failure, not a shared-worker crash.
+      listeners.delete(data.listenerId);
+      data.updates.close();
+      server.close(() => {});
+      port.postMessage({ kind: "listenFailed", listenerId: data.listenerId });
+    });
     server.listen(managedWorktreeGuardSocketAddress(data.address, data.platform), () => {
+      didListen = true;
       port.postMessage({ kind: "listening", listenerId: data.listenerId, address: data.address });
     });
   }
@@ -96,6 +108,7 @@ if (parentPort) {
     if (!listener && reply.kind === "relayAnswer") return;
     if (!listener) throw new Error("unknown guard listener");
     if (reply.kind === "close") {
+      listener.closing = true;
       for (const socket of listener.connections) socket.destroy();
       listener.updates.close();
       listener.server.close(() => {

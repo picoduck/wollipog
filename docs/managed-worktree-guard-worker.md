@@ -36,15 +36,17 @@ process and is never persisted to a provider-accessible file.
 
 ## Failure and Lifetime
 
-Startup error, premature exit, a malformed control reply, or a 30-second startup timeout prevents
-provisioning. A worker failure closes **all** its listeners and outstanding connections and
+Worker startup error, premature exit, a malformed control reply, or a 30-second startup timeout
+prevents provisioning. A single listener's bind error refuses only that listener and preserves
+its siblings. A worker failure closes **all** its listeners and outstanding connections and
 invalidates all their self-test proofs. The next `ensure` waits for actual termination, creates
 one replacement worker and re-proves each recovered listener. Session close destroys only that
 listener's connections and waits for its close acknowledgement; a 30-second close timeout
 terminates the shared worker. Whole-host shutdown terminates directly, so even a stuck judge
-cannot prevent shutdown. Both paths abort affected relayed asks. A hung worker cannot disable
-the independent sidecar timeout. There is
-no in-process fallback or allow-on-error path. As before, a transient accept error on a listener
+cannot prevent shutdown. Retired listeners stop posting relay routing frames before destroying
+their sockets, including abandonment callbacks that run after the close acknowledgement. Both
+paths abort affected relayed asks. A hung worker cannot disable the independent sidecar timeout.
+There is no in-process fallback or allow-on-error path. As before, a transient accept error on a listener
 that remains open drops the affected call without tearing down subsequent calls. Memory-list
 validation uses the same document normalization/version as file mode, including optional pins.
 
@@ -86,8 +88,8 @@ without a TypeScript loader, matching the standalone worker asset.
 | --- | ---: | ---: | ---: | ---: |
 | Initial Per-Session, Source | 19.0 | 178.1 | 528.9 | 30 |
 | Initial Per-Session, Compiled JS | 15.2 | 122.3 | 360.0 | 30 |
-| Shared, Source | 20.6 | 21.0 | 22.3 | 1 |
-| Shared, Compiled JS | 15.8 | 16.9 | 24.4 | 1 |
+| Shared, Source | 21.2 | 21.8 | 22.9 | 1 |
+| Shared, Compiled JS | 14.8 | 15.6 | 23.1 | 1 |
 
 Reproduce the current source measurement:
 

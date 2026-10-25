@@ -116,6 +116,9 @@ class GuardWorkerEpoch {
       if (!listener) throw new Error("unknown guard listener reply");
       if (reply.kind === "listening" && reply.address === listener.options.address && !listener.listening && !listener.closed) {
         listener.markListening();
+      } else if (reply.kind === "listenFailed" && !listener.listening && !listener.closed) {
+        this.listeners.delete(listener.listenerId);
+        listener.failListening(new Error("guard verdict listener could not listen"));
       } else if (reply.kind === "closed" && listener.closed) {
         this.listeners.delete(listener.listenerId);
         listener.acknowledgeClose();
@@ -229,6 +232,11 @@ export class GuardSocketWorker {
     this.dispose();
     this.rejectReady(error);
     void this.epoch.close().then(() => this.resolveClosed());
+  }
+  failListening(error: Error): void {
+    this.dispose();
+    this.rejectReady(error);
+    this.resolveClosed();
   }
   close(): Promise<void> {
     if (this.closing) return this.closing;
