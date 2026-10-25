@@ -738,8 +738,13 @@ test("structured admission remains version-independent and never falls back to t
 test("the inventory version proof admits measured versions independently of the originator", async () => {
   await withDir(async (dir) => {
     for (const version of ["0.155.1", "0.157.0", "0.158.0", "0.159.0", "0.159.2", "0.160.0", "0.162.1", "0.163.0"]) {
-      assert.deepEqual(await readCodexHookInventory(fakeAppServer(dir,
-        JSON.stringify({ id: 2, result: { data: [] } }), `codex_cli_rs/${version} (test)`)), []);
+      let observed: string | undefined;
+      assert.deepEqual(await readCodexHookInventory({ ...fakeAppServer(dir,
+        JSON.stringify({ id: 2, result: { data: [] } }), `codex_cli_rs/${version} (test)`),
+        onVersion: (value) => { observed = value; },
+      }), []);
+      assert.equal(observed, version);
+      assert.equal(codexGuardHashTrustVersionSupported(observed), true);
     }
   });
 });
