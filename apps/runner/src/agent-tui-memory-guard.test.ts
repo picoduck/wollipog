@@ -118,6 +118,7 @@ function dependencies(
         protections,
         verifyGuardLaunch: () => ({ ok: true as const }),
         readCodexHookInventory: async (probe: CodexHookInventoryProbe): Promise<CodexHookEntry[]> => {
+          probe.onVersion?.("0.163.0");
           // Modelled on the measured transition: untrusted until the probe's argv names the hash
           // (#1499), which is what the runner reads back before claiming the guard.
           const key = "/<session-flags>/config.toml:pre_tool_use:0:0";

@@ -5,9 +5,11 @@
  * on the real TUI, exec and app-server without a trust bypass. A foreign untrusted hook stays
  * gated; a stale hash silently skips ours. scripts/codex-guard-hook-probe.ts records both hook
  * calls and execution outcomes. Provisioning reads currentHash, trusts only our hook key, then
- * reads back enabled + trusted. Inventory initialization also proves the measured version range.
- * Unsupported versions or failed read-back produce no guard. The bypass is stripped from old
- * launch arguments. ADR 0012 records the controls and the three retired bypass residuals.
+ * reads back enabled + trusted. TUIs prefer hash trust within the measured version range; outside
+ * it or on failed read-back they may use the legacy bypass only after disabling every foreign
+ * hook by key and verifying isolation. The bypass is inert on app-server, whose existing hash
+ * admission remains version-independent. Failed proof never claims a guard. ADR 0012 records
+ * the controls and the three residuals that remain open on the legacy TUI fallback path.
  *
  * The provider-side interception point survives an argv-only launch, unlike the structured
  * driver's approval-time veto. Its Claude-shaped PreToolUse payload and hookSpecificOutput deny
@@ -32,14 +34,25 @@ import {
 /** Codex drivers whose TUI launch is the interactive `codex` CLI. */
 export const CODEX_GUARD_DRIVERS: ReadonlySet<string> = new Set(["codex", "codex-app-server"]);
 
-/** Retired runner flag: stripped when old launch arguments are prepared again. */
+/** Invocation-wide trust, restricted to the verified TUI fallback. Inert on app-server. */
 export const CODEX_HOOK_TRUST_BYPASS_FLAG = "--dangerously-bypass-hook-trust";
 
-/** Only 0.163.0 has the full TUI/exec/foreign-hook matrix measured; do not extrapolate patches. */
-export const CODEX_GUARD_TRUST_VERSION_RANGE = ">=0.163.0 <0.163.1";
+/** Full matrix measured at 0.155.1, 0.157.0, 0.158.0, 0.159.0, 0.159.2, 0.160.0, 0.162.1, 0.163.0. */
+export const CODEX_GUARD_TRUST_VERSION_RANGE = ">=0.155.1 <0.163.1";
 
-function measuredHookTrustVersion(userAgent: unknown): boolean {
-  return typeof userAgent === "string" && /^wollipog-runner\/0\.163\.0 \(/u.test(userAgent);
+function hookTrustVersion(userAgent: unknown): string | undefined {
+  // The originator can be overridden by Codex's caller; it is not part of the version proof.
+  return typeof userAgent === "string"
+    ? /^\S+\/((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)) \(/u.exec(userAgent)?.[1]
+    : undefined;
+}
+
+export function codexGuardHashTrustVersionSupported(version: string | undefined): boolean {
+  if (!version || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(version)) return false;
+  const parts = version?.split(".").map(Number);
+  return parts?.length === 3 && parts.every(Number.isSafeInteger) && parts[0] === 0 &&
+    parts[1]! >= 155 && parts[1]! <= 163 &&
+    (parts[1] !== 155 || parts[2]! >= 1) && (parts[1] !== 163 || parts[2] === 0);
 }
 
 const CODEX_GUARD_OVERRIDE_PREFIX = "hooks.PreToolUse=";
@@ -122,11 +135,11 @@ function declaresPreToolUseHooks(argument: string): boolean {
  * catalog-supplied `-c` alone. Recognised by the re-entry mode inside it, the same way a
  * runner-owned Claude settings file is recognised by declaring the guard.
  */
-export function withoutCodexGuardArgs(args: readonly string[]): string[] {
+export function withoutCodexGuardArgs(args: readonly string[], stripTrustBypass = false): string[] {
   const { options, rest } = splitAtOptionTerminator(args);
   const result: string[] = [];
   for (let index = 0; index < options.length; index++) {
-    if (options[index] === CODEX_HOOK_TRUST_BYPASS_FLAG) continue;
+    if (stripTrustBypass && options[index] === CODEX_HOOK_TRUST_BYPASS_FLAG) continue;
     const value = options[index + 1];
     if (CODEX_CONFIG_FLAGS.has(options[index]!) && value !== undefined &&
         value.startsWith(CODEX_GUARD_OVERRIDE_PREFIX) && value.includes(MANAGED_WORKTREE_GUARD_MODE)) {
@@ -152,14 +165,16 @@ function splitAtOptionTerminator(args: readonly string[]): { options: string[]; 
 /**
  * The argv this spawn must use. The override goes LAST, so no earlier override of the same dotted
  * path can replace it; whether it took effect is not assumed but read from the hook inventory.
- * Retired trust bypass flags are removed: trust belongs to the runner hook's hash alone.
+ * Hash trust replaces a caller's bypass only on a proven guarded launch. Legacy TUI fallback
+ * carries exactly one bypass; callers must have verified every foreign hook disabled first.
  */
 export function codexGuardLaunchArgs(
   args: readonly string[],
   override: string,
   trustOverride?: string,
+  mechanism: "trusted-hash" | "legacy-bypass" = "trusted-hash",
 ): string[] {
-  const { options: arrived, rest } = splitAtOptionTerminator(withoutCodexGuardArgs(args));
+  const { options: arrived, rest } = splitAtOptionTerminator(withoutCodexGuardArgs(args, true));
   // `hooks.state` is a dotted path where the LAST `-c` replaces the whole table, so a prior
   // override naming a key this one also names would be superseded anyway; dropping it keeps the
   // runner's own from stacking across re-preparation. One naming only OTHER hooks is a person's
@@ -177,6 +192,7 @@ export function codexGuardLaunchArgs(
   }
   const result = [...options, "-c", override];
   if (trustOverride) result.push("-c", trustOverride);
+  if (mechanism === "legacy-bypass") result.push(CODEX_HOOK_TRUST_BYPASS_FLAG);
   return [...result, ...rest];
 }
 
@@ -223,12 +239,14 @@ export function codexGuardActiveInArgs(args: readonly string[]): boolean {
  * Whether the guard really is in this argv, read from the argv itself rather than inferred.
  *
  * It has to be the LAST `hooks.PreToolUse` override present — a later one, in any spelling,
- * replaces it — and a trust override must remain present, with no invocation-wide bypass.
+ * replaces it. Hash trust requires its override and no bypass. A TUI fallback explicitly selects
+ * legacy-bypass; the structured driver's codexGuardActiveInArgs never accepts that mechanism.
  */
 export function codexGuardArgsActive(
   args: readonly string[],
   override: string,
   trustOverride?: string,
+  mechanism: "trusted-hash" | "legacy-bypass" = "trusted-hash",
 ): boolean {
   const { options } = splitAtOptionTerminator(args);
   let last = -1;
@@ -248,8 +266,13 @@ export function codexGuardArgsActive(
       return false;
     }
   }
+  for (let index = 0; index < options.length; index++) {
+    if (disablesCodexHooksFeature(options[index]!, options[index + 1]) > 0) return false;
+  }
   return options[last] === override && CODEX_CONFIG_FLAGS.has(options[last - 1]!) &&
-    codexGuardActiveInArgs(options);
+    (mechanism === "legacy-bypass"
+      ? options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG)
+      : codexGuardActiveInArgs(options));
 }
 
 export interface CodexHookEntry {
@@ -327,7 +350,7 @@ const CODEX_HOOK_STATE_OVERRIDE_PREFIX = "hooks.state=";
  * on codex-cli 0.155.1 it has NO EFFECT on `codex app-server`: the same argv that fired the hook
  * and blocked under `codex exec` did nothing at all under `app-server` — no hook process, no bypass
  * warning, no error, and `hooks/list` still reporting the hook `enabled` and `untrusted`. Hash trust
- * now covers all three entry points, measured at 0.163.0; no guarded launch carries that bypass.
+ * covers all three entry points on the measured releases. Only a TUI can fall back to the bypass.
  *
  * The hash is Codex's own digest of the hook's definition, so it moves with the hook's command
  * string and matcher and cannot be computed here. It is read from the launch's own inventory and
@@ -352,12 +375,15 @@ export function codexGuardTrustOverride(entries: readonly CodexHookEntry[], guar
 export function codexHookTrustVerdict(
   entries: readonly CodexHookEntry[],
   guardCommand: string,
+  /** Preserve main's structured admission for a managed copy of the same guard command. */
+  allowManaged = false,
 ): CodexHookInventoryVerdict {
   const ours = entries.filter((entry) => entry.command === guardCommand);
   if (ours.length === 0) {
     return { ok: false, reason: "Codex did not install the runner's PreToolUse hook" };
   }
-  const untrusted = ours.filter((entry) => entry.trustStatus !== "trusted");
+  const untrusted = ours.filter((entry) =>
+    entry.trustStatus !== "trusted" && !(allowManaged && entry.trustStatus === "managed"));
   if (untrusted.length > 0) {
     return {
       ok: false,
@@ -405,6 +431,8 @@ export interface CodexHookInventoryProbe extends CodexProbeObserver {
   args: string[];
   cwd: string;
   env: NodeJS.ProcessEnv;
+  /** Observe the server version without restricting structured hash-trust admission (#1499). */
+  onVersion?(version: string | undefined): void;
 }
 
 /**
@@ -492,7 +520,7 @@ function parseHookEntries(payload: unknown): CodexHookEntry[] {
   const entries: CodexHookEntry[] = [];
   for (const group of data as HooksListEntry[]) {
     // A discovery error means part of the inventory is unknown, and an unknown hook is not
-    // evidence that the runner's is the only one the trust bypass would run.
+    // evidence that either trust mechanism is safe to provision.
     if (Array.isArray(group.errors) && group.errors.length > 0) {
       const paths = group.errors.map((error) => String(error?.path ?? "unknown")).slice(0, 3).join(", ");
       throw new Error(`hooks/list reported hook discovery errors (${paths})`);
@@ -542,7 +570,6 @@ export async function readCodexHookInventory(
       );
       timer.unref?.();
       let buffered = "";
-      let versionVerified = false;
       const finish = (settle: () => void) => { clearTimeout(timer); settle(); };
       child.on("error", (error) => finish(() => reject(
         new Error(`the Codex hook inventory probe failed: ${error.message}`))));
@@ -564,21 +591,11 @@ export async function readCodexHookInventory(
           }
           if ((message as { id?: unknown }).id === 1) {
             const userAgent = (message as { result?: { userAgent?: unknown } }).result?.userAgent;
-            if (!measuredHookTrustVersion(userAgent)) {
-              finish(() => reject(new Error(
-                `Codex hook trust requires measured codex-cli ${CODEX_GUARD_TRUST_VERSION_RANGE}; ` +
-                "the inventory server reported an unsupported or missing version",
-              )));
-              return;
-            }
-            versionVerified = true;
+            const version = hookTrustVersion(userAgent);
+            probe.onVersion?.(version);
             continue;
           }
           if ((message as { id?: unknown }).id !== 2) continue;
-          if (!versionVerified) {
-            finish(() => reject(new Error("Codex hook inventory arrived without a verified CLI version")));
-            return;
-          }
           try {
             finish(() => resolve(parseHookEntries(message)));
           } catch (error) {

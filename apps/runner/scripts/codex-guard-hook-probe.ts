@@ -368,12 +368,19 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
   }
   const override = (hash: string) => `hooks.state={${JSON.stringify(ours.key)}={trusted_hash=${JSON.stringify(hash)}}}`;
   const trustedArgs = [...args, "-c", override(String(ours.currentHash))];
+  const isolatedBypassArgs = [...args, "-c",
+    `hooks.state={${JSON.stringify(foreign.key)}={enabled=false}}`, "--dangerously-bypass-hook-trust"];
   const readback = await readInventory(fixture, trustedArgs);
   if (readback.find((hook) => hook.key === ours.key)?.trustStatus !== "trusted" ||
       readback.find((hook) => hook.key === foreign.key)?.trustStatus !== "untrusted") {
     throw new Error("CLI measurement trust read-back did not confirm trusted own / untrusted foreign hooks");
   }
   process.stdout.write("\nCLI inventory read-back: own=trusted, foreign=untrusted, bypass absent\n");
+  const isolated = await readInventory(fixture, isolatedBypassArgs);
+  if (isolated.find((hook) => hook.key === foreign.key)?.enabled !== false ||
+      isolated.find((hook) => hook.key === ours.key)?.enabled !== true) {
+    throw new Error("Legacy fallback inventory did not confirm foreign disabled / own enabled");
+  }
   let failures = 0;
   for (const entry of ["exec", "tui"] as const) {
     if (process.argv.includes("--exec-only") && entry !== "exec") continue;
@@ -384,6 +391,8 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
       { name: "matching hash, allow", args: trustedArgs, protected: false, calls: 1, foreign: 0, ran: true },
       { name: "stale hash", args: [...args, "-c", override("stale")], protected: true, calls: 0, foreign: 0, ran: true },
       { name: "bypass control", args: [...args, "--dangerously-bypass-hook-trust"], protected: false, calls: 1, foreign: 1, ran: true },
+      { name: "isolated bypass, deny", args: isolatedBypassArgs, protected: true, calls: 1, foreign: 0, ran: false },
+      { name: "isolated bypass, allow", args: isolatedBypassArgs, protected: false, calls: 1, foreign: 0, ran: true },
     ]) {
       writeFileSync(fixture.hookLog, "");
       writeFileSync(foreignLog, "");

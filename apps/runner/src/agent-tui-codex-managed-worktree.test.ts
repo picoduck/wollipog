@@ -27,6 +27,7 @@ import {
   codexGuardActiveInArgs,
   codexGuardCommandString,
   codexGuardConfigOverride,
+  codexGuardHashTrustVersionSupported,
   codexHookInventoryProbe,
   codexHookInventoryVerdict,
   codexHookIsolationVerdict,
@@ -135,6 +136,7 @@ function dependencies(
     inventory?: (probe: CodexHookInventoryProbe) => CodexHookEntry[] | Promise<CodexHookEntry[]>;
     selfTest?: { ok: true } | { ok: false; reason: string };
     platform?: NodeJS.Platform;
+    version?: string | null;
   } = {},
   harness: Harness = { probes: [], logs: [] },
 ) {
@@ -155,6 +157,7 @@ function dependencies(
           // managed-worktree-guard.test.ts runs the real sidecar launch probe.
           verifyGuardLaunch: () => options.selfTest ?? { ok: true as const },
           readCodexHookInventory: async (probe) => {
+            probe.onVersion?.(options.version === undefined ? "0.163.0" : options.version ?? undefined);
             harness.probes.push(probe);
             return options.inventory ? options.inventory(probe) : [runnerHookEntry(probe)];
           },
@@ -207,6 +210,7 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
 
     assert.ok(launch);
     // The guard is observable in the argv the TUI launches with, never inferred.
+    assert.ok(harness.logs.some((line) => line.includes("mechanism=trusted-hash")));
     const override = overrideArgument(launch.args);
     assert.ok(override);
     assert.ok(codexGuardArgsActive(launch.args, override));
@@ -640,16 +644,102 @@ test("the inventory client reads hooks/list over stdio and fails closed on anyth
   });
 });
 
-test("hook inventory refuses unmeasured, prerelease, malformed and missing CLI versions", async () => {
+test("unmeasured inventory versions remain readable, but cannot select TUI hash trust", async () => {
   await withDir(async (dir) => {
     for (const userAgent of [
-      "wollipog-runner/0.162.1 (test)", "wollipog-runner/0.163.1 (test)",
+      "wollipog-runner/0.155.0 (test)", "wollipog-runner/0.163.1 (test)",
       "wollipog-runner/0.164.0 (test)", "wollipog-runner/0.163.0-beta (test)",
-      "wollipog-runner/0.163.00 (test)", "other/0.163.0 (test)", null, 163,
+      "wollipog-runner/0.163.00 (test)", "malformed", null, 163,
     ]) {
-      await assert.rejects(readCodexHookInventory(fakeAppServer(dir,
-        JSON.stringify({ id: 2, result: { data: [] } }), userAgent)),
-      /requires measured codex-cli >=0\.163\.0 <0\.163\.1/u);
+      let observed: string | undefined;
+      assert.deepEqual(await readCodexHookInventory({ ...fakeAppServer(dir,
+        JSON.stringify({ id: 2, result: { data: [] } }), userAgent),
+        onVersion: (version) => { observed = version; },
+      }), []);
+      assert.equal(codexGuardHashTrustVersionSupported(observed), false);
+    }
+  });
+});
+
+for (const version of ["0.155.0", "0.163.1", "0.164.0", null]) {
+  test(`a TUI on ${version ?? "unknown version"} verifies foreign-hook isolation before its legacy bypass`, async () => {
+    await withDir(async (dir) => {
+      const harness: Harness = { probes: [], logs: [] };
+      const launch = await prepareAgentTuiLaunch(meta(), dependencies(dir, {
+        version,
+        inventory: (probe) => [runnerHookEntry(probe), {
+          key: "foreign", command: "/foreign.sh", trustStatus: "untrusted",
+          enabled: !probe.args.some((arg) => arg.includes('"foreign"={enabled=false}')),
+        }],
+      }, harness));
+      assert.ok(launch?.managedWorktreeGuard?.active);
+      assert.ok(launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+      assert.ok(codexGuardArgsActive(launch.args, overrideArgument(launch.args)!, undefined, "legacy-bypass"));
+      assert.equal(codexGuardActiveInArgs(launch.args), false, "a structured driver cannot claim this TUI-only guard");
+      assert.equal(harness.probes.length, 2);
+      assert.ok(harness.probes.every((probe) => !probe.args.some((arg) => arg.includes("trusted_hash"))));
+      assert.ok(harness.logs.some((line) => line.includes("mechanism=legacy-bypass") && line.includes(`codexVersion=${version ?? "unknown"}`)));
+    });
+  });
+}
+
+test("a TUI whose hash read-back fails falls back while preserving all prior foreign-hook disables", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const launch = await prepareAgentTuiLaunch(orchestratorMeta(), orchestratorDependencies(dir, {
+      inventory: (probe) => [{ ...runnerHookEntry(probe), trustStatus: "untrusted" }, {
+        key: "foreign", command: "/foreign.sh", trustStatus: "trusted",
+        enabled: !probe.args.some((arg) => arg.includes('"foreign"={enabled=false}')),
+      }],
+    }, harness));
+    assert.ok(launch?.managedWorktreeGuard?.active);
+    assert.ok(launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.equal(harness.probes.length, 3);
+    assert.ok(harness.probes[1]!.args.some((arg) => arg.includes("trusted_hash")));
+    assert.ok(harness.probes[2]!.args.some((arg) => arg.includes('"foreign"={enabled=false}')));
+    assert.ok(harness.logs.some((line) => line.includes("mechanism=legacy-bypass") && line.includes("still reports")));
+  });
+});
+
+test("a TUI is refused if neither hash trust nor legacy-bypass isolation can be verified", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    await assert.rejects(prepareAgentTuiLaunch(meta(), dependencies(dir, {
+      inventory: (probe) => [{ ...runnerHookEntry(probe), trustStatus: "untrusted" },
+        { key: "foreign", command: "/foreign.sh", trustStatus: "untrusted", enabled: true }],
+    }, harness)), /hash trust failed.*legacy TUI bypass failed.*foreign/u);
+    assert.equal(harness.probes.length, 3);
+  });
+});
+
+test("structured admission remains version-independent and never falls back to the inert bypass", async () => {
+  await withDir(async (dir) => {
+    const source = meta();
+    const read = async (probe: CodexHookInventoryProbe) => {
+      probe.onVersion?.("0.999.0");
+      return [runnerHookEntry(probe)];
+    };
+    const config = { protections: PROTECTED, cwd: REPO, verifyGuardLaunch: () => ({ ok: true as const }), readHookInventory: read };
+    const guarded = await provisionCodexGuard(source, config, () => {}, hookHost(dir));
+    assert.equal(guarded.guardActive, true);
+    assert.ok(!guarded.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    const managed = await provisionCodexGuard(source, {
+      ...config, readHookInventory: async (probe) => [{ ...runnerHookEntry(probe), trustStatus: "managed" }],
+    }, () => {}, hookHost(dir));
+    assert.equal(managed.guardActive, true, "main's managed-trust structured admission is preserved");
+    const inactive = await provisionCodexGuard({ ...source, args: [CODEX_HOOK_TRUST_BYPASS_FLAG] }, {
+      ...config, readHookInventory: async () => { throw new Error("unavailable"); },
+    }, () => {}, hookHost(dir));
+    assert.equal(inactive.guardActive, false);
+    assert.deepEqual(inactive.args, [CODEX_HOOK_TRUST_BYPASS_FLAG], "inactive preparation preserves caller-supplied flags");
+  });
+});
+
+test("the inventory version proof admits measured versions independently of the originator", async () => {
+  await withDir(async (dir) => {
+    for (const version of ["0.155.1", "0.157.0", "0.158.0", "0.159.0", "0.159.2", "0.160.0", "0.162.1", "0.163.0"]) {
+      assert.deepEqual(await readCodexHookInventory(fakeAppServer(dir,
+        JSON.stringify({ id: 2, result: { data: [] } }), `codex_cli_rs/${version} (test)`)), []);
     }
   });
 });
@@ -818,7 +908,7 @@ test("a Codex Orchestrator TUI whose foreign hook stays enabled keeps --disable 
       inventory: (probe) => [runnerHookEntry(probe), stubborn],
     }, harness));
     assert.ok(launch);
-    assert.equal(harness.probes.length, 2, "the disable override was tried and read back");
+    assert.equal(harness.probes.length, 3, "hash trust and the legacy fallback both verify isolation");
     assert.equal(launch.managedWorktreeGuard?.active, false);
     assert.match(launch.managedWorktreeGuard?.reason ?? "", /Orchestrator launch/u);
     assert.ok(launch.managedWorktreeGuard?.reason?.includes(stubborn.key));
@@ -868,7 +958,7 @@ test("an ordinary Codex TUI still admits a trusted foreign hook and never rewrit
     // reports as such — it is not rewritten for them.
     assert.ok(launch instanceof Error);
     assert.match(launch.message, /reports the runner's PreToolUse hook as disabled/u);
-    assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");
+    assert.equal(harness.probes.length, 3, "both mechanisms observe the disabled runner hook");
     assert.ok(hasHooksDisable(harness.probes[0]!.args));
   });
 });

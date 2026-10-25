@@ -311,7 +311,12 @@ than live, and it is closed by requiring the runner's own hook to come back trus
 This measurement did not cover hash trust alone on TUI/exec. The 2026-10-25 measurement below
 settles #1488 and supersedes the earlier bypass requirement on those entry points.
 
-## Measurements: Hash Trust Without a TUI or Exec Bypass (codex-cli 0.163.0, Linux, 2026-10-25)
+## Measurements: Hash Trust Without a TUI or Exec Bypass (codex-cli 0.155.1–0.163.0, Linux, 2026-10-25)
+
+The complete hash-trust matrix passed on installed releases **0.155.1, 0.157.0, 0.158.0, 0.159.0,
+0.159.2, 0.160.0, 0.162.1 and 0.163.0**. These measurements widen the TUI preference range to
+`>=0.155.1 <0.163.1`. Versions outside it use the verified legacy TUI fallback below rather than
+turning a routine CLI upgrade into a TUI outage. No real provider homes or credentials were used.
 
 `pnpm probe:codex-guard-hook` now measures all three entry points. `--cli-only`, `--exec-only`,
 and `--tui-only` select the new matrix for the consolidated re-measurement work in #1498.
@@ -337,6 +342,11 @@ asks to review the foreign untrusted hook: the PTY selects **Continue without tr
 | matching hash, benign | 1 / 0 | 1 / 0 | executed |
 | stale hash, protected | 0 / 0 | 0 / 0 | executed |
 | bypass control, benign | 1 / 1 | 1 / 1 | executed |
+| isolated bypass, protected | 1 / 0 | 1 / 0 | denied; execution marker absent |
+| isolated bypass, benign | 1 / 0 | 1 / 0 | executed |
+
+The two isolated-bypass cases were added when retaining the legacy fallback and passed on both
+0.155.1 and 0.163.0. They verify foreign-hook disabling by key and actual hook execution together.
 
 Each completed case checks hook logs, the execution marker and provider/terminal deny evidence.
 Thus **did not fire**, **fired and allowed**, and **fired and denied** have distinct evidence.
@@ -346,33 +356,45 @@ matrix remains in this entry point, including trusted denial before client/Guard
 No-escalation cases use a sandbox-free fixture so host namespace availability cannot masquerade
 as hook denial; escalated cases still exercise approval.
 
-**Decision:** every newly provisioned Codex launch trusts only the runner's key by hash. It no
-longer adds `--dangerously-bypass-hook-trust`, and removes retired copies from persisted launch
-arguments before probing or launching. Ordinary foreign untrusted hooks may remain enabled and
-keep Codex's own gate. Orchestrator launches still disable every foreign hook, including trusted
-ones, and read that isolation back. The sidecar launch self-test and both inventory passes remain.
+**Decision:** a TUI prefers trust for the runner's key alone by hash on
+**`>=0.155.1 <0.163.1`**, read from the inventory connection's `initialize.userAgent` independently
+of its caller-selected originator prefix. The hook must read back **enabled and trusted** on the
+second inventory pass, and the launch carries no bypass. Ordinary foreign untrusted hooks keep
+Codex's own gate. Orchestrator launches still disable every foreign hook and verify that isolation.
 
-The supported range is deliberately **`>=0.163.0 <0.163.1`**, the single measured release. The
-inventory connection's `initialize.userAgent` must identify that release before `hooks/list`
-is accepted. A missing, malformed, prerelease, older or newer version produces no proven guard.
-The runner's hook must then read back **enabled and trusted**; stale/mistyped hashes fail closed.
-A TUI owning a managed worktree is refused without that proof. The existing unguarded-TUI notice
-and structured driver's human-approval fallback remain for failed provisioning. This range does
-not claim support for unmeasured intervening versions merely because app-server worked at 0.155.1.
+For an out-of-range, missing, malformed or prerelease version, or if hash-trust read-back fails,
+the **TUI-only legacy fallback** disables every enabled foreign hook by exact key, then reads the
+inventory back and requires our hook enabled and every foreign hook disabled. Only then does it
+add `--dangerously-bypass-hook-trust`. Disables from an attempted hash-trust isolation pass are
+retained when switching mechanisms. A newly discovered enabled foreign hook in the final read
+refuses the fallback. If neither mechanism can be verified, a TUI with managed worktrees is
+refused; the existing notice still covers a TUI with nothing yet to protect. Both mechanisms keep
+the sidecar launch self-test. Launch logs identify `mechanism=trusted-hash` or `legacy-bypass`,
+the observed version (or `unknown`), and the fallback reason. Caller-supplied bypasses survive
+inactive provisioning; a successful hash-trust launch explicitly logs replacing one.
 
-The three residuals recorded on #1488 on 2026-09-25 are resolved for these provisioned launches:
+**Structured app-server admission remains version-independent, as on main.** It trusts by hash
+and requires inventory read-back (including main's existing acceptance of managed trust); it
+never claims a guard from the inert bypass. Failure keeps
+the driver's existing human-approval fallback. The new version range selects a TUI mechanism,
+not a new restriction on the already-shipped #1499 structured path.
 
-- **Inventory-to-launch bypass window: gone.** There is no invocation-wide bypass to un-gate a
-  newly appearing foreign hook. The enabled foreign hook in the matrix remains untrusted and
-  never fires. A changed runner hook hash likewise fails its own trust gate. Inventory remains a
-  point-in-time observation; this retires the bypass risk, not all possible configuration races.
-- **“Same OS user” justification: gone.** Safety no longer relies on that inaccurate claim about
-  writers in group-shared checkouts. No bypass-writable-directory permission check is needed for
-  this retired mechanism. Trusted foreign hooks keep their ordinary Codex semantics.
-- **Authenticated TUI under the bypass: gone as a shipping requirement.** These launches carry
-  no bypass. The real TUI reached and completed turns against the local provider with hash trust,
-  without the bypass warning. Behavior with a real authenticated account under the retired flag
-  remains unmeasured and is not needed to justify this launch path.
+The three residuals from #1488's 2026-09-25 comment are **gone on hash-trust launches, still open
+on the legacy TUI fallback**:
+
+- **Inventory-to-launch bypass window:** the matrix proves an enabled foreign untrusted hook
+  stays gated under hash trust. Under fallback, a hook configuration appearing after the final
+  inventory read can still load under the invocation-wide bypass. The inventory is a check,
+  not a pin; disabling all enumerated foreign hooks does not close that window.
+- **“Same OS user” wording:** no writer-identity assumption is needed on the hash path. The old
+  fallback justification was imprecise: a writer with group/ACL permissions in a shared checkout
+  can also change a hook folder. No ownership or writability check has been added. This remains
+  an accepted legacy-path limitation, not a claim that all writers share the runner's OS user.
+- **Authenticated TUI under the bypass:** real local-provider TUI turns completed under both
+  mechanisms. The fallback positive control demonstrates that the bypass lifts trust for both
+  hooks; isolated bypass cases verify that disabled foreign hooks stay off. A TUI authenticated
+  to a real provider under the bypass remains unmeasured; no real credentials were used to fill
+  that evidence gap. Hash-trust launches carry no bypass, so that residual does not apply there.
 
 The hook's existing fail-open-on-startup-error limitation and the runner's shared sidecar
 self-test are unaffected. No real credentials, external provider, or authenticated-user UI
@@ -667,7 +689,7 @@ project with a `.codex/config.toml` one, over `hooks/list`:
 - Not needed here but recorded: `-c 'hooks.state={"<session-flags key>"={trusted_hash="<currentHash>"}}'`
   makes the runner's session-flags hook report `trustStatus: trusted` in the inventory. Whether
   Codex then RUNS it without `--dangerously-bypass-hook-trust` was not measured at that time.
-  The 2026-10-25 #1488 measurement above now proves it on TUI/exec and retires that bypass. #1377's
+  The 2026-10-25 #1488 measurement proves it on TUI/exec and makes the bypass a TUI fallback. #1377's
   "no way to persist trust for a session-flags hook" was one spelling short.
 
 End to end against the real `CODEX_HOME` (read-only; credentials used the ordinary way), with
@@ -1192,7 +1214,8 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   Claude's.
 
   Amended by #1488: a session-flags hook is trusted by a matching `trusted_hash`, verified by
-  inventory read-back on the measured CLI version range above. No trust bypass is carried.
+  inventory read-back on the measured TUI version range above. The verified legacy TUI fallback
+  remains available outside that range or on failed hash read-back; structured admission is unchanged.
   Before launching, the runner enumerates the effective
   hook inventory (`codex app-server` → `hooks/list`, replaying the launch's own `-c`/`--config`/
   `--enable`/`--disable` flags in every spelling Codex accepts — `--disable=hooks` turns every hook
@@ -1288,10 +1311,11 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
 
   - The notice is tamper-evident best effort like everything else here: it tells the person, and
     does not stop the unguarded TUI from touching the new worktree in the meantime.
-  - The old inventory-to-launch bypass window and its “same OS user” justification were retired
-    by #1488; see the three residual dispositions in the 2026-10-25 measurement above.
-  - Hash trust is admitted only on codex-cli `>=0.163.0 <0.163.1`. Unknown CLI versions fail
-    closed, even when their inventory still looks compatible. Re-measure before widening it.
+  - The inventory-to-launch bypass window, group-shared-writer limitation and authenticated TUI
+    evidence gap remain on the legacy fallback, and are gone on the hash-trust path. See the
+    three residual dispositions in the 2026-10-25 measurement above.
+  - TUI hash trust is preferred on codex-cli `>=0.155.1 <0.163.1`. Other versions require verified
+    legacy fallback isolation; if both mechanisms fail, guarded TUI launch is refused.
 
   Amended by #1473: **the Orchestrator preset is guarded, for both providers, and its list is
   every runner-created worktree on the runner.** The preset excluded user hooks in a way that
