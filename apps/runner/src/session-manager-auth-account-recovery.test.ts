@@ -103,6 +103,7 @@ function harness(
     providerCredentialHome: "/claude/work",
     providerCredentialIdentityId: "identity-work",
   });
+  const defaultLaunchEnv = { HOME: root, CLAUDE_CONFIG_DIR: join(root, "agent-home") };
   const sent: RunnerToControlPlane[] = [];
   const logs: string[] = [];
   const prompts: Array<{ home: string; text: string; resumeId?: string }> = [];
@@ -151,7 +152,7 @@ function harness(
     undefined,
     [],
     (meta: SessionMeta) => {
-      meta.env = meta.providerCredentialHome ? { CLAUDE_CONFIG_DIR: meta.providerCredentialHome, HOME: root } : { HOME: root };
+      meta.env = meta.providerCredentialHome ? { CLAUDE_CONFIG_DIR: meta.providerCredentialHome, HOME: root } : { ...defaultLaunchEnv };
     },
     undefined,
     undefined,
@@ -178,6 +179,7 @@ function harness(
     manager,
     controller,
     homes,
+    defaultLaunchEnv,
     transfers,
     cleanup: () => {
       manager.shutdownAll();
@@ -612,10 +614,10 @@ for (const race of [false, true]) test(`authentication continuation respects a b
 
 function unbind(h: ReturnType<typeof harness>) {
   // This is a fake credential context throughout: no real provider home is read or probed.
-  h.homes[join(h.root, ".claude")] = h.homes["/claude/work"]!;
+  h.homes[join(h.root, "agent-home")] = h.homes["/claude/work"]!;
   h.store.patchMeta(SESSION, { providerAccountId: undefined, providerAccountLabel: undefined,
     providerAccountProvider: undefined, providerCredentialHome: undefined, providerConversationHome: undefined,
-    env: { HOME: h.root, CLAUDE_CONFIG_DIR: join(h.root, ".claude") } });
+    env: {} });
 }
 
 test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine account", async () => {
@@ -627,6 +629,7 @@ test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine ac
     unbind(h);
     const requestId = await parkOnMismatch(h);
     const before = h.probes.length;
+    assert.deepEqual(h.store.readMeta(SESSION)?.env, {}, "runner-local launch env is never persisted");
     assert.deepEqual(await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null), { ok: true });
     assert.equal(h.probes[before], "/claude/personal");
     await h.manager.providerAuthSelections.get(SESSION);
@@ -636,7 +639,7 @@ test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine ac
     assert.equal(meta.providerAccountId, "claude-personal");
     assert.equal(meta.providerCredentialIdentityId, "identity-personal");
     assert.equal(meta.providerAuthBlock, undefined);
-    assert.deepEqual(h.transfers, [{ source: join(h.root, ".claude"), target: "/claude/personal" }],
+    assert.deepEqual(h.transfers, [{ source: join(h.root, "agent-home"), target: "/claude/personal" }],
       "the default transcript store must be transferred before resuming under the new account");
   } finally { h.cleanup(); }
 });
@@ -731,7 +734,7 @@ test("default-sign-in selection copies only the real saved conversation before i
   const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] } });
   try {
     unbind(h);
-    const source = join(h.root, ".claude");
+    const source = join(h.root, "agent-home");
     const target = join(h.root, "added-account");
     const project = join(source, "projects", "workspace");
     mkdirSync(project, { recursive: true });
@@ -768,7 +771,7 @@ test("default-sign-in recovery refuses an ambiguous original transcript home bef
   try {
     unbind(h);
     const requestId = await parkOnMismatch(h);
-    h.store.patchMeta(SESSION, { env: { CLAUDE_CONFIG_DIR: "relative-home" } });
+    h.defaultLaunchEnv.CLAUDE_CONFIG_DIR = "relative-home";
     assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, "not_resumable");
     assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
     assert.deepEqual(h.transfers, []);

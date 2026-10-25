@@ -13133,11 +13133,21 @@ export class SessionManager {
       let probe: SessionMeta;
       let targetScope: ProviderCredentialScope | null;
       let observation: ProviderAuthObservation;
+      let conversationHome = meta.providerConversationHome ?? meta.providerCredentialHome;
       // The target account's preparation reference (#3238): it covers the preparation and, with
       // the probe's own reference, its status command; settled once that command is done.
       const preparationHome = this.launchPreparationProviderHome();
       try {
         try {
+          if (!conversationHome && meta.agentSessionId) {
+            // Saved env is intentionally empty. Prepare the original binding to honor the
+            // runner-local agent's provider directory before preparing the chosen account.
+            const original = await this.providerAuthenticationProbeMeta(meta, undefined, preparationHome);
+            try { conversationHome = await providerConversationHome(original); }
+            catch {
+              return refuse("not_resumable", "The original saved provider conversation could not be located for an account switch.");
+            }
+          }
           probe = await this.providerAuthenticationProbeMeta(meta, target, preparationHome);
         } catch (error) {
           if (!preparationIsCurrent() && this.isProviderPreparationCancellation(error)) {
@@ -13197,14 +13207,8 @@ export class SessionManager {
       if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
         return refuse("operation_in_progress", "The interrupted provider turn is still settling. Try again in a moment.");
       }
-      let conversationHome = meta.providerConversationHome ?? meta.providerCredentialHome;
-      if (!conversationHome && meta.agentSessionId) {
-        try { conversationHome = await providerConversationHome(meta); }
-        catch {
-          return refuse("not_resumable", "The original saved provider conversation could not be located for an account switch.");
-        }
-      }
-      // Resolving a default home can cross a context boundary; recheck both card and binding after it.
+      // Original-home resolution and the chosen-account probe may cross context boundaries;
+      // recheck both card and binding after all preparation and status work settles.
       const current = this.store.readMeta(sessionId);
       const currentBlock = this.openProviderAuthenticationCard(current, recoveryRequestId);
       if (!current || !currentBlock || currentBlock.recoveryId !== block.recoveryId) {
