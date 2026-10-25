@@ -30,13 +30,15 @@ by the aggregator shell while the PR workflow remains active. Whole-workflow
 cancellation permits the PR aggregator to be cancelled with its obsolete run.
 The cancellation term is `(github.event_name != 'pull_request' || !cancelled())`:
 non-PR runs retain unconditional aggregation, including after cancellation.
-This preserves the prior merge-group and main-push failure-reporting behavior
+This preserves merge-group and reusable rolling-main failure-reporting behavior
 instead of extending the PR cancellation change to those events.
 
 Draft PRs remain excluded. `ready_for_review` still runs even with a stale draft
 payload, and delayed draft events retain their separate concurrency lane.
 Workflow name, PR number or ref, and draft/active lane still define concurrency,
-so unrelated PRs, main pushes, and distinct merge-group refs remain independent.
+so unrelated PRs and distinct merge-group refs remain independent. Main-push full
+validation now uses the separate rolling worker's native active/pending lane; its
+reusable CI call does not share ordinary CI's concurrency group.
 Merge-group runs retain the same cancellation admission, dependency checks and required name.
 The separate obsolete-merge-group monitor and CI permissions are unchanged.
 

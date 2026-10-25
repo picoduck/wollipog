@@ -10,9 +10,15 @@ This page covers how to land such a change safely, and how a red `main` gets not
 
 ## The Main CI Is Failing Alert
 
-`Main CI Health` (`.github/workflows/main-ci-health.yml`) reconciles on main CI and rolling-worker
-completions, a twenty-minute recovery schedule, and manual dispatch on main. Push and in-progress
-wakes are omitted: reruns are detected on completion or by the schedule. Skipped workflow-run
+Main's full regression path is **Main Rolling Validation**; `ci.yml` retains full PR/merge-group,
+manual and reusable validation, with its legacy main-push fan-out retired. See the
+[cutover evidence and rollback](main-rolling-validation.md#rollback).
+`Main CI Health` (`.github/workflows/main-ci-health.yml`) subscribes to main CI and rolling-worker
+completions, a best-effort recovery schedule, and manual dispatch on main. Delivered legacy main-CI
+completions have woken health; dispatched-worker completion delivery has not been established.
+After cutover, an idle health observation can therefore depend on best-effort schedule or manual
+dispatch. Native pending worker progress is independent of those health wakes. No fixed event or
+cron delivery bound is promised. Push and in-progress wakes are omitted. Skipped workflow-run
 jobs consume no observer API calls. It checks out trusted default-branch code without persisted credentials and runs
 `scripts/main-ci-health.mjs`; it never executes the triggering run's code or artifacts. The
 issue-writing job serializes reconciliations. Skipped PR invocations cannot displace main work.
@@ -267,10 +273,15 @@ lag-one active-worker observations, and the limits of its red/incident-recovery 
 Check `main` before you investigate the pull request:
 
 ```bash
-gh run list --workflow ci.yml --branch main --event push --limit 5
+gh run list --workflow main-rolling-validation.yml --branch main --event workflow_dispatch --limit 5
 ```
 
-If `main`'s own runs fail the same test, or a **Main CI Is Failing** issue is open, the pull request
+The run title's `Rolling <target-SHA> <claim>` names the tested target. A dispatch-time
+`headSha` or green controller is not certification; use the read-only health report above to
+verify checkout, ancestry and complete outcomes. Legacy `ci.yml` push history is frozen at the
+cutover and is useful only for historical comparison or an explicitly restored rollback.
+
+If `main`'s verified rolling run fails the same test, or a **Main CI Is Failing** issue is open, the pull request
 is not at fault. Find the pull request fixing `main` (or open one), wait for it, then add the
 unchanged head back to the queue behind it. The queue tests each entry on top of the entries ahead of
 it, so yours runs with the fix. Merge authorization for an unchanged head carries over.
@@ -303,18 +314,23 @@ public before it lands, which in practice means a security fix prepared in a tem
 
    `user.useConfigOnly` stops Git guessing an identity from the host name, so a test that relies on
    one fails here as it does in CI. Tests that set their own identity are unaffected.
-**Right after merging**, watch CI for the commit that landed, not just the newest run. GitHub can
-take a moment to list the push's run, and until then the newest run is the previous commit's:
+**Right after merging**, inspect rolling validation for the commit that landed. GitHub can
+take a moment to dispatch the worker, and until then the newest run can test an older target:
 
 ```bash
-sha=$(git ls-remote origin refs/heads/main | cut -f1)   # the commit the merge produced
-until run=$(gh run list --workflow ci.yml --branch main --event push --commit "$sha" \
-    --json databaseId --jq '.[0].databaseId // empty') && [ -n "$run" ]; do sleep 15; done
-gh run watch "$run" --exit-status
+git ls-remote origin refs/heads/main   # record the commit that landed
+gh run list --workflow main-rolling-validation.yml --branch main --event workflow_dispatch \
+  --limit 10 --json databaseId,displayTitle,status,conclusion
+gh run watch RUN_ID --exit-status
 ```
 
-`--exit-status` makes the watch fail when the run fails. A cancelled run is not a pass either: if a
-later push cancelled it, watch that push's run instead.
+Choose the run by its target in `displayTitle`, never by `--commit` (the dispatcher SHA).
+If newer main traffic coalesces the original target away, inspect the read-only health report
+for a verified full passing descendant containing that change. `--exit-status` reports workflow
+failure; a successful admission-only superseded run still supplies no certificate. Verify the
+target's checkout and full job inventory through health before calling main green. If no worker
+appears, inspect controller status and request trusted manual reconciliation as documented in
+the [rolling runbook](main-rolling-validation.md); an absent run is not pending evidence.
 
 **If it fails**, fix forward. Open a pull request with the fix and put it at the front of the queue,
 so the entries already waiting test on top of it:
