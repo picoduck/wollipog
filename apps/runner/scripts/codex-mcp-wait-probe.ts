@@ -43,6 +43,7 @@ import {
   additiveCodexMcpServerArg,
   sessionCodexMcpServerArg,
 } from "../src/orchestrator-preset.js";
+import { isolatedProbeEnv, unavailableProbeOutput, probeResult, ownProbeProcess } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 
@@ -152,12 +153,12 @@ function runTurn(entry: string, root: string, timeoutMs: number): Promise<Measur
     toolStarted: null, toolCompleted: null, toolStatus: "never started", toolOutput: "",
     approvalRequests: 0, turnEnded: "no turn",
   };
-  const child = spawn(CODEX, ["-c", entry, "app-server"], {
+  const child = ownProbeProcess(spawn(CODEX, ["-c", entry, "app-server"], {
     cwd: join(root, "repo"),
-    env: { ...process.env, CODEX_HOME: join(root, "codex-home"), PROBE_KEY: "x" },
+    env: isolatedProbeEnv(join(root, "codex-home")),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-  });
+  }));
   return new Promise<Measurement>((resolve) => {
     let settled = false;
     const finish = (ended: string) => {
@@ -242,6 +243,10 @@ async function measure(name: string, entry: string, seconds: number, root: strin
   const guardian = state.requests.filter((request) => request.guardian).length;
   const ok = state.toolCall !== null && result.approvalRequests === 0 && completed === expect.completed &&
     (expect.reviewed ? guardian > 0 : guardian === 0 && during.length === 0);
+  probeResult(`MCP wait: ${name}`, unavailableProbeOutput(result.turnEnded) || result.toolStarted === null
+    ? "could not run" : ok ? "unchanged" : "changed",
+    `blocked=${blocked ?? "unknown"}s; completed=${completed}; modelRequestsDuringWait=${during.length}; guardianRequests=${guardian}; clientApprovals=${result.approvalRequests}`,
+    "docs/DRIVERS.md; skills/using-wollipog/SKILL.md");
   process.stdout.write([
     `${ok ? "ok  " : "FAIL"}  ${name}`,
     `      tool called as: ${state.toolCall ? JSON.stringify(state.toolCall) : "(not offered in the model request)"}`,
@@ -312,6 +317,6 @@ async function main(): Promise<number> {
 }
 
 main().then((code) => { process.exitCode = code; }, (error: unknown) => {
-  process.stderr.write(`${String(error)}\n`);
-  process.exitCode = 1;
+  probeResult("MCP wait matrix", "could not run", "fixture or compatible app-server unavailable", "docs/DRIVERS.md; skills/using-wollipog/SKILL.md");
+  process.exitCode = 2;
 });

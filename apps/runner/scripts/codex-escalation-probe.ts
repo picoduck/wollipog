@@ -23,13 +23,14 @@
  *     runner's real one.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { codexPermissionProfileOverrides } from "../src/codex-permission-profile.js";
+import { isolatedProbeEnv, unavailableProbeOutput, probeResult, probeExit, GUARD_DOCUMENTATION, ownProbeProcess, type ProbeStatus } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 const TURN_TIMEOUT_MS = 90_000;
@@ -144,6 +145,7 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
     : `cat ${join(fixture.hookDir, "verdict.json")} 2>&1 | head -1`;
   model.tool = {
     cmd: command,
+    shell: "/bin/sh", login: false,
     yield_time_ms: 5000,
     ...(testCase.escalate ? { sandbox_permissions: "require_escalated", justification: "the probe needs it" } : {}),
   };
@@ -157,12 +159,12 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
   // Its own process group, like the runner's own probes: the configured command may be a wrapper
   // that starts the real `codex` without `exec`, and killing only the wrapper leaks one app-server
   // per case.
-  const child = spawn(CODEX, [...args, "app-server"], {
+  const child = ownProbeProcess(spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
-    env: { ...process.env, CODEX_HOME: fixture.codexHome, PROBE_KEY: "x" },
+    env: isolatedProbeEnv(fixture.codexHome),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-  });
+  }));
 
   return new Promise<string>((resolve) => {
     let settled = false;
@@ -271,12 +273,25 @@ async function main(): Promise<number> {
   const model = { tool: null as Json | null, guardian: "allow" as "allow" | "deny", calls: 0 };
   const models = modelServer(model);
   let failures = 0;
+  const statuses: ProbeStatus[] = [];
+  const outputs = new Map<string, string>();
   try {
     mkdirSync(fixture.repo, { recursive: true });
     mkdirSync(fixture.codexHome, { recursive: true });
     mkdirSync(fixture.hookDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(fixture.hookDir, "verdict.json"), fixture.marker, { mode: 0o600 });
-    await gitInit(fixture.repo);
+    await gitInit(fixture.repo, fixture.codexHome);
+
+    // Prove the host can execute Codex's sandbox before spending thirteen turn timeouts.
+    // A denied namespace is an environment failure, never a network/deny measurement.
+    const sandbox = process.platform === "linux" ? spawnSync(CODEX,
+      ["sandbox", "linux", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"],
+      { cwd: fixture.repo, env: isolatedProbeEnv(fixture.codexHome), encoding: "utf8", timeout: 15_000 }) : null;
+    if (!sandbox || sandbox.error || sandbox.status !== 0 || !sandbox.stdout.includes("PROBE_SANDBOX_READY")) {
+      probeResult("permission profile escalation matrix", "could not run",
+        "Codex Linux sandbox cannot execute a benign control command on this host; no escalation assumption measured", GUARD_DOCUMENTATION);
+      return 2;
+    }
 
     fixture.networkPort = await listen(net);
     const modelPort = await listen(models);
@@ -289,9 +304,26 @@ async function main(): Promise<number> {
     for (const testCase of CASES) {
       const output = await runCase(testCase, fixture, model);
       const ok = verdict(testCase, output, fixture.marker);
+      outputs.set(testCase.name, output);
+      const status = unavailableProbeOutput(output) ? "could not run" : ok ? "unchanged" : "changed";
+      statuses.push(status);
+      probeResult(`permission profile: ${testCase.name}`, status,
+        unavailableProbeOutput(output) ? "sandbox or CLI could not execute the fixture command" :
+          output.includes(NETWORK_BODY) ? "network retained" : output.includes("NETBLOCKED") ? "network blocked" :
+            output.includes(fixture.marker) ? "denied marker readable" : verdict(testCase, output, fixture.marker) ? testCase.expect : "unexpected command result",
+        GUARD_DOCUMENTATION);
       if (!ok) failures++;
       const shown = output.replace(fixture.marker, "<MARKER>").slice(0, 60);
       process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(44)} ${testCase.expect.padEnd(11)} ${JSON.stringify(shown)}\n`);
+    }
+    const restored = CASES.filter(c => c.sandbox === "profile" && c.escalate && c.expect === "noNetwork")
+      .every(c => outputs.get(c.name)?.includes(NETWORK_BODY));
+    const denialHolds = CASES.filter(c => c.expect === "denied").every(c => verdict(c, outputs.get(c.name) ?? "", fixture.marker));
+    const controlsHold = CASES.filter(c => !(c.sandbox === "profile" && c.escalate && c.expect === "noNetwork"))
+      .every(c => verdict(c, outputs.get(c.name) ?? "", fixture.marker) && !unavailableProbeOutput(outputs.get(c.name) ?? ""));
+    if (restored && denialHolds && controlsHold) {
+      probeResult("provider-mode permission-profile deny withheld by #1336", "changed",
+        "approved escalations retain network and directory denial still holds; withheld hardening is re-enablable through a reviewed code change", GUARD_DOCUMENTATION);
     }
   } finally {
     net.close();
@@ -308,7 +340,7 @@ async function main(): Promise<number> {
         "Codex's sandbox behaviour was measured here.\n"
       : `\n${failures} of ${CASES.length} cases did NOT match. Codex's behaviour has moved; re-read ` +
         "ADR 0012 before changing code.\n");
-  return failures === 0 ? 0 : 1;
+  return probeExit(statuses);
 }
 
 const FIXTURE_TIMEOUT_MS = 30_000;
@@ -321,12 +353,12 @@ const FIXTURE_TIMEOUT_MS = 30_000;
  * would otherwise hang the fixture before any per-case timeout exists — and `main`'s `finally`,
  * which removes the temporary tree, would never run.
  */
-function gitInit(repo: string): Promise<void> {
+function gitInit(repo: string, home: string): Promise<void> {
   const run = (args: string[]): Promise<void> => new Promise((resolve, reject) => {
-    const child: ChildProcess = spawn("git", [
+    const child: ChildProcess = ownProbeProcess(spawn("git", [
       "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
       "-c", "user.email=probe@example.invalid", "-c", "user.name=probe", ...args,
-    ], { cwd: repo, stdio: "ignore", detached: true });
+    ], { cwd: repo, env: isolatedProbeEnv(home), stdio: "ignore", detached: true }));
     const timer = setTimeout(() => {
       killTree(child);
       reject(new Error(`git ${args[0]} did not finish within ${FIXTURE_TIMEOUT_MS}ms`));
@@ -345,6 +377,6 @@ function gitInit(repo: string): Promise<void> {
 }
 
 main().then((code) => { process.exitCode = code; }, (error: unknown) => {
-  process.stderr.write(`${String(error)}\n`);
-  process.exitCode = 1;
+  probeResult("permission profile escalation matrix", "could not run", "fixture or compatible app-server unavailable", GUARD_DOCUMENTATION);
+  process.exitCode = 2;
 });
