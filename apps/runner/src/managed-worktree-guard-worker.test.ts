@@ -263,5 +263,48 @@ test("the standalone CJS worker bundle serves the same guard without source load
     const verdict = await requestManagedWorktreeGuardVerdict(address, hook(`cat ${root}/state`));
     assert.match(verdict.stdout, /"permissionDecision":"deny"/u);
     assert.equal(blockedCall(address, root).status, 0);
+    await assert.rejects(GuardSocketWorker.listen({
+      address: join(root, "missing", "sock"), guardStateDirectory: root, platform: process.platform,
+      protectionsFile: join(root, "unused"),
+    }, () => [], () => () => {}, async () => "", (workerData, transferList) =>
+      new Worker(code, { eval: true, execArgv: [], workerData, transferList })), /worker failed/u);
+  } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("an empty optional branch pin keeps the file and memory verdicts identical", { skip: process.platform !== "linux" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wg-empty-pin-"));
+  const protections = [{ worktreePath: "/trees/one", repoPath: "/repo", pinnedBranch: "" }];
+  const host = new ManagedWorktreeGuardSockets(root, () => protections);
+  try {
+    writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(root, "s_empty"), protections);
+    const file = await host.ensure("s_empty");
+    const memory = await host.ensure("s_memory", "abstract");
+    const input = hook("git status");
+    const expected = managedWorktreeGuardOutcome(managedWorktreeGuardDecision(input, () => protections, root));
+    assert.equal(expected.exitCode, 0);
+    assert.deepEqual(await requestManagedWorktreeGuardVerdict(file, input), expected);
+    assert.deepEqual(await requestManagedWorktreeGuardVerdict(memory, input), expected);
+  } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a transient accept error preserves the listening worker", { skip: process.platform === "win32" }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wg-accept-"));
+  const loader = createRequire(import.meta.url).resolve("tsx/cjs");
+  const entry = fileURLToPath(new URL("./managed-worktree-guard-worker.ts", import.meta.url));
+  const host = new ManagedWorktreeGuardSockets(root, () => [], process.platform, async () => "", (workerData, transferList) =>
+    new Worker(`
+      const net = require('node:net'); const original = net.createServer;
+      net.createServer = (...args) => {
+        const server = original(...args);
+        server.once('listening', () => queueMicrotask(() => server.emit('error', Object.assign(new Error('transient accept error'), {code:'EMFILE'}))));
+        return server;
+      };
+      require('node:module').syncBuiltinESMExports();
+      require(${JSON.stringify(loader)}); require(${JSON.stringify(entry)});
+    `, { eval: true, execArgv: [], workerData, transferList }));
+  try {
+    writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(root, "s_accept"), []);
+    const address = await host.ensure("s_accept");
+    assert.equal((await requestManagedWorktreeGuardVerdict(address, hook("git status"))).exitCode, 0);
   } finally { await host.closeAll(); rmSync(root, { recursive: true, force: true }); }
 });

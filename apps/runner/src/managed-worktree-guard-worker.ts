@@ -1,6 +1,6 @@
 import { createServer, type Socket } from "node:net";
 import { parentPort, receiveMessageOnPort, workerData, type MessagePort } from "node:worker_threads";
-import { managedWorktreeGuardSocketAddress, parseManagedWorktreeGuardProtections, readManagedWorktreeGuardProtections } from "./managed-worktree-guard.js";
+import { managedWorktreeGuardProtectionsDocument, managedWorktreeGuardSocketAddress, parseManagedWorktreeGuardProtections, readManagedWorktreeGuardProtections } from "./managed-worktree-guard.js";
 import { serveVerdict } from "./managed-worktree-guard-transport.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import type { GuardSocketWorkerData } from "./managed-worktree-guard-worker-client.js";
@@ -18,8 +18,9 @@ export class GuardWorkerProtectionList {
     const value = message as { version?: unknown; protections?: unknown } | null;
     if (!value || !Number.isSafeInteger(value.version) || (value.version as number) !== this.current + 1 ||
         (value.version as number) >= 0x7fffffff) throw new Error("unknown guard protection list version");
+    if (value.protections !== null && !Array.isArray(value.protections)) throw new Error("invalid guard protection list");
     const protections = value.protections === null ? null :
-      parseManagedWorktreeGuardProtections(JSON.stringify({ version: 1, protections: value.protections }));
+      parseManagedWorktreeGuardProtections(managedWorktreeGuardProtectionsDocument(value.protections));
     this.protections = protections;
     this.current = value.version as number;
   }
@@ -69,8 +70,9 @@ if (parentPort) {
     }),
     () => memory?.verify(),
   ));
-  // Startup or runtime listener failure exits this worker. No fallback judge or allow exists.
-  server.on("error", (error) => { throw error; });
+  // A startup/listener failure exits the worker. Like the old in-process server, a transient
+  // accept error on a still-listening socket drops that call without destroying later calls.
+  server.on("error", (error) => { if (!server.listening) throw error; });
   server.listen(managedWorktreeGuardSocketAddress(data.address, data.platform), () => {
     port.postMessage({ kind: "ready", address: data.address });
   });

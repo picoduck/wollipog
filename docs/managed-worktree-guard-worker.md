@@ -39,7 +39,9 @@ provisioning. A runtime worker failure closes its listener and outstanding conne
 invalidates its self-test proof. Shutdown terminates the worker and aborts relayed asks, and every
 shutdown caller waits for that termination. An `ensure` after worker loss creates a new listener
 and must prove it again. A hung worker cannot disable the independent sidecar timeout. There is
-no in-process fallback or allow-on-error path.
+no in-process fallback or allow-on-error path. As before, a transient accept error on a listener
+that remains open drops the affected call without tearing down subsequent calls. Memory-list
+validation uses the same document normalization/version as file mode, including optional pins.
 
 The production sidecar timeout remains 30 seconds (`MANAGED_WORKTREE_GUARD_SOCKET_TIMEOUT_MS`);
 its documented code contract treats a slower local read/classification as a stuck runner and
