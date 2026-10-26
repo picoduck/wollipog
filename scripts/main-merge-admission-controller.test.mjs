@@ -47,6 +47,32 @@ test("incomplete census, unavailable control state, moved main and unknown healt
   }
 });
 
+test("malformed failure collections still produce auditable holds instead of aborting the cycle", async () => {
+  for (const failures of [{}, "unavailable", [null]]) {
+    const plan = await cycle({ health: { ...health(), status: "unknown", unresolvedFailures: failures } });
+    assert.equal(plan.decisions.length, 1);
+    assert.equal(plan.decisions[0].decision, "hold");
+    assert.equal(plan.decisions[0].plannedBlockLatencyMs, null);
+    assert.doesNotThrow(() => failureFingerprint({ unresolvedFailures: failures }));
+  }
+});
+
+test("fresh authoritative age-budget overruns permit only an exact repair; stale observations never do", async () => {
+  const h = health();
+  h.status = "stale";
+  h.reasons = ["oldest-unvalidated-change-exceeds-budget"];
+  h.latestPassingSnapshot.testedSha = head; h.latestPassingSnapshot.targetSha = head;
+  h.backlog = { clock: "forge-landing-time", commits: 1, merges: 1,
+    oldestUnvalidatedAt: at(-8000), oldestUnvalidatedAgeSeconds: 8000 };
+  const g = { ...grant(), failureFingerprint: failureFingerprint(h) };
+  assert.equal((await cycle({ health: h })).decisions[0].decision, "hold");
+  assert.equal((await cycle({ health: h, grant: g, verifyAuthority, verifyChecks })).decisions[0].decision, "authorized-repair-eligible");
+  for (const changed of [{ ...h, observedAt: at(-120) }, { ...h, reasons: [...h.reasons, "validation-stalled"] }]) {
+    const changedGrant = { ...g, failureFingerprint: failureFingerprint(changed) };
+    assert.equal((await cycle({ health: changed, grant: changedGrant, verifyAuthority, verifyChecks })).decisions[0].decision, "hold");
+  }
+});
+
 test("only the exact operator-authorized repair with verified fast/failing-scenario checks is exceptional", async () => {
   const g = grant();
   const plan = await cycle({ health: red(), grant: g, verifyAuthority, verifyChecks });

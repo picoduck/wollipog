@@ -65,9 +65,14 @@ head/base/integration, passing fast checks and failing scenarios; normal review
 and merge authority remain required. The callbacks must never treat a label,
 prompt, cached receipt or a claimed `approved` field as authority.
 
-Even an exact grant cannot substitute for unknown, stale, foreign or incomplete
+Even an exact grant cannot substitute for unknown, expired, foreign or incomplete
 health. The repair path requires a fresh authoritative known-failure or budget
 overrun report, verified failure identities and intact baseline/backlog evidence.
+The observer's `stale` status is eligible for this exception only when its sole
+reason is `oldest-unvalidated-change-exceeds-budget`, the observation itself is
+fresh, and the admission age limit is independently exceeded. This is a verified
+age-budget hold; expired observations and missing or stalled validation still
+cannot authorize a repair.
 The code-only writer also refuses an unavailable clock before any status request.
 
 New PR and group SHAs are separate integration identities. A PR-stage decision
@@ -134,7 +139,7 @@ workflow dispatch, exceptional merge or status write was manufactured.
 
 The recorded local rehearsal planned a block **1,000 ms after the fixture failure**
 and **0 ms after the fixture observation-expiry boundary**. Measured computation
-was 0.475 ms and 0.101 ms respectively. Virtual failure/expiry timestamps and real
+was 0.501 ms and 0.097 ms respectively in the latest local repeat. Virtual failure/expiry timestamps and real
 CPU duration are separate measurements; these values are not live detection or
 forge invalidation latency. The proposed 60-second reevaluation interval gives
 only a conditional decision envelope: next delivered cycle plus API observation
@@ -149,6 +154,22 @@ queries**, with zero state changes. REST remaining was 4976/5000 (floor 3000),
 GraphQL remaining 4733/5000; the 96-call cap was unchanged. This proves the live
 census and default-deny operating point, not natural queue-group membership,
 status-writing permissions, sustained cost or live enforcement.
+
+A repeat at **2026-10-26T15:42:05.482Z**, after the first policy slice merged,
+verified a complete stable census of **45 targets** and planned **45 holds** for
+unconfigured control state. Main was `5f6743109ea487503f08a701c10714c7b702b937`;
+the independent health report at 15:41:49.353Z was pending with one unvalidated
+commit and passing snapshot run `40280462697`. The cycle used **39 API calls:
+37 REST reads and 2 read-only GraphQL queries**, zero state changes, REST
+remaining 4908/5000 and GraphQL remaining 4849/5000. This used the existing CLI
+login through an adapter that rejects every state-writing request; it does not
+establish future workflow-token permissions or operator trust-provider readiness.
+
+The local compatibility run passed **729 scripts tests**, including the complete
+inert rehearsal, against an unchanged temporary copy of #3678's provisional shared
+helper (SHA-256 `4c8835528f432f9e44a9cd7084ba15f2d2785f42079a88dad3337ec3994ffdf8`).
+That temporary helper was removed, not included in this slice. Repeat validation
+against the actual merged dependency before opening the recovery PR.
 
 A later campaign merge-group observation illustrates the scheduling limitation.
 Run [40318437984](https://github.com/picoduck/wollipog/actions/runs/40318437984),

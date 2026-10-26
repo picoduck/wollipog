@@ -21,7 +21,7 @@ export function failureFingerprint(health) {
   return hash({ main: health?.currentMainSha ?? null, status: health?.status ?? "unknown",
     reasons: Array.isArray(health?.reasons) ? [...health.reasons].sort() : ["unavailable"],
     failures: (Array.isArray(health?.unresolvedFailures) ? health.unresolvedFailures : []).map(f =>
-      [f.runId, f.attempt, f.testedSha]).sort((a, b) => a[0] - b[0] || a[1] - b[1]) });
+      [f?.runId, f?.attempt, f?.testedSha]).sort((a, b) => a[0] - b[0] || a[1] - b[1]) });
 }
 
 /** `verifyAuthority` is a future operator-owned trust boundary, never a PR field.
@@ -34,13 +34,19 @@ export async function authorizedRepair(entry, health, grant, { now, verifyAuthor
   // cannot replace unavailable health. Recheck the ordinary evidence contract
   // after removing only its known-failure veto, retaining baseline/backlog proof.
   const failures = health?.unresolvedFailures;
-  if (!["failing", "pending"].includes(health?.status) || !Array.isArray(health?.reasons) || health.reasons.length ||
+  // A fresh observer's "stale" verdict can identify a verified landing-age
+  // overrun. It does not make an expired observation or stalled evidence usable.
+  const ageOverrun = health?.status === "stale" && health?.reasons?.length === 1 &&
+    health.reasons[0] === "oldest-unvalidated-change-exceeds-budget";
+  if ((!ageOverrun && !["failing", "pending"].includes(health?.status)) || !Array.isArray(health?.reasons) ||
+      (!ageOverrun && health.reasons.length) ||
       !Array.isArray(failures) || (health.status === "failing" ? !failures.length : failures.length) ||
       !failures.every(f => f?.repository === entry.repository && positive(f.runId) && positive(f.attempt) &&
         SHA.test(f.testedSha ?? "") && f.targetSha === f.testedSha && f.result === "failing" &&
         f.targetAncestryVerified === true && f.workflowAncestryVerified === true)) return null;
   const baseline = evaluateAdmission({ integration: entry, now, health: { ...health,
-    status: health.backlog?.commits === 0 ? "passing" : "pending", unresolvedFailures: [] } });
+    status: health.backlog?.commits === 0 ? "passing" : "pending", reasons: [], unresolvedFailures: [] } });
+  if (ageOverrun && !baseline.reasons.includes("unvalidated-age-limit")) return null;
   if (baseline.reasons.some(reason => !["unvalidated-age-limit", "unvalidated-backlog-limit"].includes(reason))) return null;
   const snapshot = structuredClone({ entry, grant, fingerprint: failureFingerprint(health) });
   const { grant: g } = snapshot;
@@ -131,7 +137,8 @@ export async function planAdmissionCycle({ repository, census, health, control, 
       repair ? Date.parse(repair.expiresAt) : Infinity,
       !repair && date(health?.backlog?.oldestUnvalidatedAt)
         ? Date.parse(health.backlog.oldestUnvalidatedAt) + POLICY.maxUnvalidatedAgeSeconds * 1000 : Infinity)).toISOString();
-    const failureTimes = (health?.unresolvedFailures ?? []).map(f => f.completedAt).filter(date).map(Date.parse);
+    const failureTimes = (Array.isArray(health?.unresolvedFailures) ? health.unresolvedFailures : [])
+      .map(f => f?.completedAt).filter(date).map(Date.parse);
     const trigger = failureTimes.length ? Math.min(...failureTimes) :
       ordinary.reasons.includes("health-observation-expired") && date(health?.observedAt)
         ? Date.parse(health.observedAt) + POLICY.maxObservationAgeSeconds * 1000 :
