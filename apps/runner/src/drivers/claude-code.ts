@@ -2272,8 +2272,12 @@ export class ClaudeCodeDriver implements Driver {
         });
         this.pendingBackgroundTasks.delete(id);
         this.unverifiedBackgroundTaskIds.delete(id);
-        this.endedBackgroundTaskIds.add(id);
-        if (task.toolUseId) this.endedBackgroundTaskIds.add(`tool:${task.toolUseId}`);
+        // Agent/workflow ids can be resumed after completion. Only non-resumable jobs need
+        // protection from the trailing stopped report or markerless shell output file.
+        if (task.launchType !== "agent" && task.launchType !== "workflow") {
+          this.endedBackgroundTaskIds.add(id);
+          if (task.toolUseId) this.endedBackgroundTaskIds.add(`tool:${task.toolUseId}`);
+        }
         changed = true;
       }
     }

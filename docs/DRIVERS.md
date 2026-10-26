@@ -518,6 +518,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   receipts. A receipt settles it as already finished with its actual terminal status, without
   attributing a stop to the requester. A concurrent live report or transport replacement invalidates
   that read; a bare successful `stop_task` response still proves nothing.
+  Receipt-settled agent/workflow ids remain resumable. A later unexpected provider exit does not
+  revive a shell job whose termination was already observed; it orphans only jobs without terminal
+  evidence, while the killed shell's result remains due through its normal continuation.
   A report that carries out a runner stop already answered `unconfirmed` is marked
   `stopConfirmedLate`, so the job keeps the actor who asked (#1849); while a model `TaskStop` call
   naming the task is outstanding, that call counts as the cause and no actor is recorded.

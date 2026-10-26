@@ -508,6 +508,39 @@ test("an unrequested agent kill still belongs to orphan recovery (#3204)", async
   } finally { h.driver.dispose({ forceImmediate: true }); }
 });
 
+test("a receipt-settled agent can be resumed under the same provider id (#3204)", async () => {
+  const h = harness();
+  try {
+    const turn = h.driver.prompt("launch an agent");
+    await nextTask();
+    const child = h.spawned[0];
+    frame(child, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_agent", name: "Task", input: { run_in_background: true } }] } });
+    taskStarted(child, "agent", "toolu_agent");
+    frame(child, { type: "result", subtype: "success" });
+    assert.equal(await turn, "end_turn");
+    (h.driver as any).applyBackgroundInspection({
+      incompleteArtifacts: [], terminalTaskIds: new Set(["agent"]), terminalTaskStatuses: new Map([["agent", "completed"]]),
+    });
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, []);
+    frame(child, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_resume", name: "Task", input: { resume: "agent", run_in_background: true } }] } });
+    taskStarted(child, "agent", "toolu_resume");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["agent"]);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("a persistent exit after a shell kill orphans only siblings without terminal evidence (#3204)", async () => {
+  const h = harness();
+  try {
+    const child = await launchTwoTasks(h);
+    killedReport(child, "shell-2", "toolu_shell");
+    child.emit("close", 1);
+    assert.deepEqual(h.background.flatMap(update => update.terminalJobs ?? [])
+      .map(job => [job.id, job.status, job.continuationRequired]), [["shell-2", "killed", true]]);
+    assert.equal(h.background.at(-1)?.state, "orphaned");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1"]);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
 test("a live task report supersedes an in-flight forgotten-task receipt read (#3204)", async () => {
   const h = harness();
   try {
