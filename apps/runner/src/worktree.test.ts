@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedHeadForge, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedHeadForge, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -79,6 +79,12 @@ test("change-request lifecycle parsing requires an exact forge URL and terminal 
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: `${gitlab}.evil.test`, state: "merged", sha: gitlabHead }), gitlab), null);
   assert.equal(parseWorktreePullRequestState(JSON.stringify({ web_url: gitlab, state: "merged", sha: gitlabHead }),
     "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
+});
+
+test("a typed merge's forge proof picks glab for a GitLab merge request URL and gh otherwise (#3602)", () => {
+  assert.equal(changeRequestProvider("https://gitlab.example.com/platform/agents/wollipog/-/merge_requests/7"), "gitlab");
+  assert.equal(changeRequestProvider("https://github.com/picoduck/wollipog/pull/7"), "github");
+  assert.equal(changeRequestProvider("not a url"), "github", "anything unrecognized keeps the GitHub read, which then fails closed");
 });
 
 test("merged head discovery requires the exact head whatever the PR branch is named", () => {
