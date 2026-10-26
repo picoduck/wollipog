@@ -300,6 +300,81 @@ test("unavailable candidate suite evidence cannot block the main backlog", async
   assert.equal(data.dispatches.length, 1); assert.equal(data.dispatches[0].inputs.target_sha, C);
 });
 
+test("candidate admission rechecks a newly advanced main backlog", async () => {
+  const { data, api } = forge();
+  data.nativeQueue = true; data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  await requestCandidate(repository, B, { api, now: () => at(41) });
+  await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  const worker = data.runs.at(-1);
+  data.jobs.set(`${worker.id}/1`, []);
+  data.main = C;
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 1, { api }), false);
+  await reconcile(repository, { api, now: () => at(103), log: () => {} });
+  assert.equal(data.dispatches.at(-1).inputs.target_sha, C);
+});
+
+test("transient optional evidence errors preserve an already-dispatched admission claim", async () => {
+  const { data, api } = forge();
+  data.nativeQueue = true; data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  const receipt = await requestCandidate(repository, B, { api, now: () => at(41) });
+  await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  const worker = data.runs.at(-1); data.jobs.set(`${worker.id}/1`, []);
+  let reads = 0;
+  const unavailable = async (path, options) => {
+    if (path.includes("/contents/") && ++reads > 3) throw new Error("optional transient failure");
+    return api(path, options);
+  };
+  const wake = await reconcile(repository, { api: unavailable, now: () => at(103), log: () => {} });
+  assert.equal(wake.state.pending.claimId, receipt.claimId);
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 1, { api }), true);
+});
+
+test("candidate scheduling remains bounded with over 1000 historical workers", async () => {
+  const { data, api } = forge(); data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  await requestCandidate(repository, B, { api, now: () => at(41) });
+  const large = async (path, options) => {
+    const result = await api(path, options);
+    return path.includes("status=completed") ? { ...result, total_count: 1500 } : result;
+  };
+  const before = data.requests.length;
+  await reconcile(repository, { api: large, now: () => at(102), log: () => {} });
+  assert.equal(data.dispatches.length, 1); assert.equal(data.dispatches[0].inputs.target_sha, B);
+  assert.ok(data.requests.length - before <= 55, `bounded reads/writes: ${data.requests.length - before}`);
+  assert.ok(!data.requests.some((p) => /status=completed.*page=2|page=2.*status=completed/.test(p)));
+});
+
+test("retained terminal candidate receipts do not cause repeated historical job reads", async () => {
+  const { data, api } = forge(); data.runs.push(run());
+  let ledger;
+  for (let i = 1; i <= CANDIDATE_POLICY.maxRequests; i++) ledger = queueCandidate(ledger,
+    { targetSha: i.toString(16).padStart(40, "0"), suiteVersion: "f".repeat(64), purpose: "release", requestedAt: at(), claimId });
+  ledger.requests.forEach((r, i) => Object.assign(r, { status: "success", runId: i + 100, dispatchedAt: at() }));
+  await writeState(api, repository, await readState(api, repository), { ...emptyState(repository), candidates: ledger });
+  const before = data.requests.length;
+  await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  assert.ok(data.requests.length - before <= 45, `steady-state calls: ${data.requests.length - before}`);
+  assert.ok(!data.requests.some((p) => /\/actions\/runs\/1\d\d/.test(p)), "no terminal candidate run re-reads");
+});
+
+test("newer incompatible-suite work does not leave a reusable older-suite request looping", () => {
+  const good = record();
+  const ledger = queueCandidate(undefined, { targetSha: A, suiteVersion: good.suiteVersion, purpose: "release", requestedAt: at(), claimId });
+  const other = { ...good, runId: 11, suiteVersion: "f".repeat(64) };
+  const result = candidatePlan(ledger, { active: [], records: [good, other] }, good.suiteVersion, at(102), true);
+  assert.equal(result.next.requests[0].status, "reconciliation-required");
+  assert.equal(result.request, null, "do not silently reuse green preceding a newer incompatible run");
+});
+
+test("request recording has its own CAS-fenced job outside controller pending coalescing", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/main-rolling-controller.yml", import.meta.url), "utf8");
+  const requestJob = workflow.slice(workflow.indexOf("  request:"), workflow.indexOf("  reconcile:"));
+  assert.match(requestJob, /run: node scripts\/main-rolling-validation.mjs request/);
+  assert.doesNotMatch(requestJob, /concurrency:|actions: write/);
+});
+
 test("state writes are fenced, compact at the bound, reject stale writers and strip unknown data", async () => {
   const { data, api } = forge();
   let previous = await readState(api, repository);

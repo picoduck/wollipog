@@ -13,7 +13,7 @@ const purpose = (p) => p === "release" || p === "repair";
 const statuses = ["queued", "dispatched", "success", "failure", "reconciliation-required", "incompatible-suite"];
 export const cleanCandidates = (ledger) => ({ version: 1, lastAdmissionAt: ledger.lastAdmissionAt,
   requests: ledger.requests.map((r) => Object.fromEntries(["targetSha", "suiteVersion", "purpose", "requestedAt", "claimId",
-    "dispatchedAt", "runId", "status", "waitMinutes", "executionMinutes"].filter((key) => r[key] !== undefined).map((key) => [key, r[key]]))) });
+    "dispatchedAt", "runId", "status", "statusObservedAt", "waitMinutes", "executionMinutes"].filter((key) => r[key] !== undefined).map((key) => [key, r[key]]))) });
 
 export function validCandidates(ledger) {
   return ledger?.version === 1 && (ledger.lastAdmissionAt === null || date(ledger.lastAdmissionAt)) &&
@@ -45,21 +45,23 @@ export function candidatePlan(ledger, observation, suiteVersion, now, mainComple
     const live = observation.active.find((r) => r.display_title?.startsWith(`Rolling ${request.targetSha} `));
     const record = records[0];
     if (live) {
-      request.runId = live.id; request.status = "dispatched";
+      request.runId = live.id; request.status = "dispatched"; request.statusObservedAt = now;
     } else if (record) {
       request.runId = record.runId;
-      request.status = record.suiteVersion !== request.suiteVersion ? request.dispatchedAt ? "incompatible-suite" : "queued"
+      request.status = record.suiteVersion !== request.suiteVersion ? request.dispatchedAt ? "incompatible-suite"
+        : records.some((r) => r.suiteVersion === request.suiteVersion) ? "reconciliation-required" : "queued"
         : ["success", "failure"].includes(record.verdict) ? record.verdict : "reconciliation-required";
       request.waitMinutes = record.metrics?.criticalWaitMinutes ?? null;
       request.executionMinutes = record.metrics?.criticalExecutionMinutes ?? null;
+      request.statusObservedAt = now;
     } else if (request.suiteVersion !== suiteVersion) request.status = "incompatible-suite";
-    else if (request.dispatchedAt) request.status = "reconciliation-required";
+    else if (request.dispatchedAt && ["queued", "dispatched"].includes(request.status)) request.status = "reconciliation-required";
     if (request.status === "queued" && request.suiteVersion !== suiteVersion) request.status = "incompatible-suite";
   }
   const elapsed = (at, interval) => at === null || Date.parse(now) - Date.parse(at) >= interval;
   // Forge-derived cooldown survives a lost coordination ledger. Conservatively charge ordinary
   // main workers too: candidate work only uses otherwise idle full-validation capacity.
-  const available = mainComplete && observation.candidateHistoryComplete !== false && observation.active.length === 0 &&
+  const available = mainComplete && observation.active.length === 0 &&
     elapsed(observation.latestWorkerActivityAt ?? null, CANDIDATE_POLICY.minimumIntervalMs) &&
     elapsed(next.lastAdmissionAt, CANDIDATE_POLICY.minimumIntervalMs);
   const request = available ? next.requests.filter((r) => r.status === "queued" && !r.dispatchedAt &&
@@ -77,6 +79,7 @@ export function candidateReceipt(ledger, targetSha, requestedPurpose, suiteVersi
   return { schema: "main-validation-candidate-v1", purpose: requestedPurpose, scheduledPurpose: request.purpose,
     targetSha, suiteVersion, claimId: request.claimId, requestedAt: request.requestedAt, observedAt,
     dispatchedAt: request.dispatchedAt, runId: request.runId, status: request.status,
+    statusObservedAt: request.statusObservedAt ?? request.requestedAt,
     queueWaitMinutes: (Date.parse(request.dispatchedAt ?? observedAt) - Date.parse(request.requestedAt)) / 60_000,
     waitMinutes: request.waitMinutes ?? null, executionMinutes: request.executionMinutes ?? null,
     certification: "none" };

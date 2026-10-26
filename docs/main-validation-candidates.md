@@ -23,6 +23,11 @@ worker evidence using the existing trusted-main environment. The state ref and r
 scheduling hints, never regression certificates. Release and repair consumers must independently
 reconcile current forge evidence for the exact SHA, suite and latest attempt.
 
+Request recording uses a separate CAS-fenced job without the controller's replaceable pending
+lane. Ordinary reconciliation may run before recording finishes; the next controller wake then
+considers the retained intent. A failed request job requires inspecting its result and retrying
+the idempotent request. An accepted workflow dispatch alone does not prove intent was recorded.
+
 The reusable JavaScript interfaces are:
 
 ```js
@@ -42,20 +47,30 @@ the authoritative health evidence. Obtain the retained ledger from `readState(..
 
 The receipt schema is `main-validation-candidate-v1`, with `purpose`, `scheduledPurpose`,
 `targetSha`, `suiteVersion`, `claimId`, `requestedAt`, `observedAt`, `dispatchedAt`, `runId`,
-`status`, `queueWaitMinutes`, `waitMinutes`, `executionMinutes` and `certification: "none"`.
+`status`, `statusObservedAt`, `queueWaitMinutes`, `waitMinutes`, `executionMinutes` and `certification: "none"`.
 The requested purpose stays visible even when another purpose already owns the shared allocation.
 `queueWaitMinutes` measures request-to-dispatch (or elapsed request wait). The worker wait and
 execution values use the existing critical-path timing projection; unavailable data stays null.
+Terminal statuses are historical receipts, not continually refreshed verdicts; `statusObservedAt`
+identifies the latest live-run/record observation. Consumers must read current forge evidence
+before relying on success, including after an operator reruns a previously completed worker.
 
 ## Bounds and Recovery
 
 `CANDIDATE_POLICY` in `scripts/main-validation-candidates.mjs` is the single exported policy object.
 Both purposes initially have equal priority and a 60-minute admission interval. A global
-60-minute cooldown also applies. Conservatively, recent ordinary full workers consume that
+60-minute cooldown also applies. Conservatively, recent ordinary full-worker activity consumes that
 cooldown too, including after coordination state recovery. Candidate work starts only when main
 has a complete verdict and there is no active worker. A new main backlog takes priority over an
 unadmitted candidate; an admitted full run finishes without cancellation. Continuous main work
 can delay candidates indefinitely; no extra full-worker capacity is purchased or provisioned.
+
+Admission rechecks current main and its complete verdict before promoting a candidate. A new
+backlog observed after scheduling takes priority. Optional candidate reads have a 48-call budget
+per reconciliation and honor the health collector's API reserve floor. Each wake reads the bounded
+recent window and at most one queued/live candidate's retained run pointer. Terminal candidate
+inventories are not repeatedly fetched. Growth past 1,000 completed workers does not disable
+admission or require enumerating all repository history.
 
 The existing native concurrency group permits one executing full worker and one replaceable
 pending worker. At most 16 exact target/suite allocations are retained without automatic eviction.
@@ -70,8 +85,8 @@ action outside automatic candidate retry; it still invalidates older certificati
 Failed, interrupted, ambiguous and incompatible-suite requests require operator reconciliation.
 Do not clear the state to bypass limits. Preserve and inspect the exact run/attempt and request
 history. A changed suite requires a new allocation for that exact suite; it cannot reuse the old
-suite's success. A pending rerun withdraws the earlier success. Missing state, capacity or bounded
-history evidence fails closed for candidate admission. Optional candidate-history failures do not
+suite's success. A pending rerun withdraws the earlier success. Missing state, capacity or required
+run evidence fails closed for candidate admission. Optional candidate-history failures do not
 stop the main scheduler from queuing its next snapshot.
 
 This primitive changes no full-suite job, health contract, signing permission or finalizer pool.
