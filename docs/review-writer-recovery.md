@@ -24,6 +24,8 @@ same-user migration out of a cgroup is outside this lifecycle proof's threat mod
 
 These commands are local OS-owner maintenance, not agent RPCs. An operator outside the hosting
 stack must perform the stop; a session hosted by that stack must never stop or restart it.
+Run recovery as the OS user who owns the runner data directory. `sudo` or another user is refused
+because scanning a different user's processes would not prove the original writer tree gone.
 
 1. Stop the runner cleanly and wait for its provider processes to exit. Its bwrap providers normally
    exit with it. The state doctor takes the same exclusive data-directory maintenance lease as

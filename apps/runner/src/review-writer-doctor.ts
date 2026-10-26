@@ -1,4 +1,5 @@
 import { resolve, join } from "node:path";
+import { statSync } from "node:fs";
 import { ReviewWriterRegistry } from "./review-writers.js";
 
 export interface ReviewWriterDoctorArgs {
@@ -32,8 +33,15 @@ export function parseReviewWriterDoctorArgs(argv: readonly string[]): ReviewWrit
 export function runReviewWriterDoctor(
   args: ReviewWriterDoctorArgs,
   output: (text: string) => unknown,
-  registry = new ReviewWriterRegistry(join(args.dataDir, "unprotected-agent-writers"), undefined, { reconcile: false }),
+  registry?: ReviewWriterRegistry,
 ): void {
+  const uid = process.getuid?.();
+  // A root scan would examine root's processes, not the original runner user's descendants.
+  // Never let sudo accidentally turn another user's unreadable writers into a clean scan.
+  if (args.command === "retire-legacy" && (uid === undefined || statSync(args.dataDir).uid !== uid)) {
+    throw new Error("Run review writer recovery as the OS user who owns this runner data directory; do not use sudo or another user.");
+  }
+  registry ??= new ReviewWriterRegistry(join(args.dataDir, "unprotected-agent-writers"), undefined, { reconcile: false });
   if (args.command === "inspect") { output(`${JSON.stringify({ writers: registry.inspect() })}\n`); return; }
   const result = registry.retireLegacy(args.recordId!, args.sha256!);
   output(`${JSON.stringify({ ...result, ...(!result.retired ? {

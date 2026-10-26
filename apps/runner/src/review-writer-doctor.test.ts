@@ -16,7 +16,7 @@ test("the admin parser rejects ambiguous targets and requires an exact inspected
   assert.equal(parseReviewWriterDoctorArgs(["inspect", "--data-dir", "/tmp"]).command, "inspect");
 });
 
-test("the admin command inspects without retiring, reports every blocker, and retires only exact proven legacy evidence", (t) => {
+test("the admin command inspects without retiring, reports every blocker, and retires only exact proven legacy evidence", { skip: process.getuid === undefined }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-writer-doctor-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const view: LeaseProcessProbe = { bootId: () => "12345678-1234-1234-1234-123456789abc", startTime: () => "100",
