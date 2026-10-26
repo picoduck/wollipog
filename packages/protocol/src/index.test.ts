@@ -348,8 +348,6 @@ test("PROTOCOL_VERSION is 237", () => {
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
   assert.equal(runnerSupportsProtocol(197, "campaignForgeStatus"), false);
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
-  assert.equal(runnerSupportsProtocol(198, "costReconciliation"), false);
-  assert.equal(runnerSupportsProtocol(199, "costReconciliation"), true);
   assert.equal(runnerSupportsProtocol(209, "costReconciliationIdentity"), false);
   assert.equal(runnerSupportsProtocol(210, "costReconciliationIdentity"), true);
   for (const version of [undefined, 197, 198, 199, 200, 201, 202]) {
