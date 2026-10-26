@@ -30,7 +30,7 @@ import { DEVELOPMENT_BUILD } from "../config.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
-import { backgroundWorkAccessibleName } from "./common.js";
+import { backgroundWorkCondition } from "../status-meta.js";
 import {
   useAccessibleMenu,
   useDismissiblePopover,
@@ -755,7 +755,7 @@ export function SessionHeader({
       {/* Background work changes are announced politely wherever the badge shows (#784). The region
           stays mounted, so its first state is announced too, and it is text, not a second badge. */}
       <span className="sr-only" data-live="background-work" role="status" aria-live="polite">
-        {visibleBackgroundWorkState ? backgroundWorkAccessibleName(visibleBackgroundWorkState) : ""}
+        {visibleBackgroundWorkState ? `Background Work: ${visibleBackgroundWorkState === "orphaned" ? "Lost" : backgroundWorkCondition(session, runnerOnline)?.meta.label}` : ""}
       </span>
       <div className="detail-actions">
         <div className="overflow-menu">

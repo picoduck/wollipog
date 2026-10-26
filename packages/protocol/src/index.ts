@@ -729,7 +729,8 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      its merge method, squash and source-branch settings; consuming it first asks the child's
 //      runner for `gitlab_merge_preflight`, which an older runner cannot answer, so the control
 //      plane refuses a GitLab merge decision for a pre-v239 child runner.
-export const PROTOCOL_VERSION = 239;
+// 240: display-only background follow-up execution, queue timing and blocker facts (#3682).
+export const PROTOCOL_VERSION = 240;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -1031,6 +1032,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
+  backgroundFollowUp: 237,
   managedBackgroundInventory: 82,
   backgroundMissingResultRecovery: 134,
   backgroundRetryExhaustion: 221,
@@ -6784,6 +6786,33 @@ export type SessionTitleSource = "generated" | "user" | "provider";
  * with pre-v106 runners and must never be presented as a current state. */
 export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
 
+/** Display-only facts about the automatic turn returning managed background results. These
+ * never authorize a retry. Running requires the runner's exact current background-job ids. */
+export interface BackgroundFollowUpView {
+  state: "queued" | "running" | "blocked";
+  queuedAt?: number;
+  blocker?: "governance" | "control_plane" | "budget" | "tool_limit" | "input" | "worktree" | "recovery_authorization";
+  /** A local retry timer is armed; absence carries no scheduling evidence. */
+  retryScheduled?: boolean;
+}
+
+/** Keep the public projection bounded and content-free, including on persisted-data reads. */
+export function normalizeBackgroundFollowUp(value: unknown): BackgroundFollowUpView | undefined {
+  if (value == null || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (v.state !== "queued" && v.state !== "running" && v.state !== "blocked") return undefined;
+  const blockers: NonNullable<BackgroundFollowUpView["blocker"]>[] =
+    ["governance", "control_plane", "budget", "tool_limit", "input", "worktree", "recovery_authorization"];
+  const blocker = blockers.find((candidate) => candidate === v.blocker);
+  if (v.state === "blocked" && !blocker) return undefined;
+  return {
+    state: v.state,
+    ...(typeof v.queuedAt === "number" && Number.isSafeInteger(v.queuedAt) && v.queuedAt > 0 ? { queuedAt: v.queuedAt } : {}),
+    ...(v.state === "blocked" ? { blocker } : {}),
+    ...(typeof v.retryScheduled === "boolean" ? { retryScheduled: v.retryScheduled } : {}),
+  };
+}
+
 /** Whether the runner can durably observe detached work for this provider. `untracked` is a
  * capability boundary, not proof that detached work currently exists. */
 export type BackgroundWorkTracking = "managed" | "untracked";
@@ -7585,6 +7614,8 @@ export interface SessionView {
   holds?: SessionHoldView[];
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
+  /** v237: display-only follow-up facts. Missing on older peers; never retry authority. */
+  backgroundFollowUp?: BackgroundFollowUpView | null;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
   /** Durable control-plane delivery stages. Omitted by pre-v82 control planes. */
@@ -7806,6 +7837,8 @@ export interface SessionSnapshot {
   queueHold?: SessionQueueHoldView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
+  /** v237: display-only follow-up facts. Missing on older peers; never retry authority. */
+  backgroundFollowUp?: BackgroundFollowUpView | null;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
   /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */

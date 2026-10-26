@@ -32,7 +32,10 @@ Every label below comes from one vocabulary in the web client, `statusMeta(domai
 | Health | Session runner is offline | **Disconnected** | The authoritative runner connection is unavailable. |
 | Health | History or connection recovery is active | Recovery-specific supporting text | Recovery does not rewrite lifecycle. |
 | Background Work | `backgroundWorkState=running` | **Waiting on External Job** | Detached work is still pending externally. |
-| Background Work | `backgroundWorkState=continuation_pending` | **Continuation Pending** | A continuation is durably pending. |
+| Background Work | `backgroundWorkState=continuation_pending`, `backgroundFollowUp.state=queued` | **Follow-Up Queued** | Background results need an automatic follow-up turn. Neutral, without a pulse; no corresponding turn is executing. |
+| Background Work | `backgroundFollowUp.state=running` and `status=running`, runner online | **Running** | The runner matched the executing turn to the pending background results. An unrelated running turn does not imply the follow-up is executing. |
+| Background Work | `backgroundFollowUp.state=blocked`, runner online | **Follow-Up Blocked** | A known budget, governance, input, recovery, or worktree condition prevents the follow-up from starting. Details explain the blocker. |
+| Background Work | `backgroundWorkState=continuation_pending`, execution facts unavailable or runner offline | **Follow-Up Pending** | Neutral compatibility fallback; no claim that a turn is executing. |
 | Background Work | `backgroundWorkState=orphaned` | **Background Work Lost** (the job row reads **Lost**) | Managed work needs recovery or authoritative re-observation. The wire value is unchanged; "Orphaned" is retired from visible text and accessible names. |
 | Background Work | `backgroundDeliveries[].watchdogState=continuation_blocked` | **Result Blocked** | A finished job's result cannot be returned while a sibling job from the same turn has no terminal status. **Acknowledge** clears the currently reported blocked-result alerts from status and reminders while keeping their jobs, held results and execution barriers intact. Background Work retains **Acknowledged** entries; a newly blocked result raises fresh attention (#3408). Reported only once the parent turn has ended and the result has waited an hour (`BACKGROUND_HANDOFF_WAIT_MAX_MS`); until then the receipt has no watchdog state and the session reads **Waiting on External Job** (#3073). |
 | Background Work | Listed job with `stalledSince` (no terminal status for over an hour) | **Stalled** job row | A report that the job may never end, not proof that it ended. When a queued handoff waits on the job past its bound (`queueHold.endsAt`), the runner ends it and it becomes a killed job row. |
@@ -53,8 +56,16 @@ checks (#2160). No session surface shows a Changes badge.
 - Current clients group the parent's Requests panel by **Waiting for You** and **Orchestrator Is Handling** with exact request counts. Older projections that omit `pendingRequests` retain the neutral descendant summary; missing ownership data must not invent human attention.
 - Managed background indicators open the **Background Work** inventory. Job lifecycle, continuation delivery, and notification delivery are separate fields; offline or stale non-terminal evidence reads **Unverified**, with a hollow dot. A subagent that is no longer reachable reads **Lost**.
 - A session with several pending requests shows one attention term per kind, each with its count when more than one ("**Answer Required** 2 · **Approval Required**"), in priority order: Recovery, Authentication, guardrail pauses, Answer, Approval. Session headers may still roll these up into an "N Actions Required" count. A parent session's Inbox row and Board card also carry a family rollup of its child sessions ("4 Children · 2 Awaiting Input"), which is a count of children, not an attention term of the parent's own.
-- Authoritative running, continuation-pending, and orphaned background work stays visible in Inbox rows and expanded Session headers alongside lifecycle. Mobile headers reserve a full-width line for it before the measured lifecycle/action line; passive badges may overflow, but background work never requires opening the status popover. Settled work adds no current-status line.
+- Authoritative running, follow-up-pending, and lost background work stays visible in Inbox rows and expanded Session headers alongside lifecycle. Mobile headers reserve a full-width line for it before the measured lifecycle/action line; passive badges may overflow, but background work never requires opening the status popover. Settled work adds no current-status line.
 
 ## Surface Contract
+
+Protocol v237 adds display-only `backgroundFollowUp` facts to negotiated runtime and reconnect
+snapshots, persisted in both full and compact session projections. Background Work details show
+the durable queue time and age when supplied, and whether an automatic retry timer is armed.
+Elapsed time never authorizes a retry or establishes failure. Missing facts clear old execution
+claims; offline facts are unverified. Pending badges clear after delivery settles, while receipts
+remain historical. These presentation facts do not change execution, spending, approval, or
+at-most-once submission protections.
 
 Inbox rows, session headers, the pinned summary, Board cards, Run member columns, Pod member rows, archives, filters, counts, notifications, and mobile layouts consume these terms. A surface omits a dimension when it lacks authoritative evidence, but it must never substitute workflow placement or another dimension as proof.

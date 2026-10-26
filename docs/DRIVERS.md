@@ -456,7 +456,7 @@ The lifetime policy is quiescence-aware and fail-safe:
   and a bounded runner-local output reference. Jobs from one parent turn form a barrier. When the
   final job in that barrier becomes terminal outside its parent turn, the runner durably queues one
   synthetic continuation and the UI moves from **Waiting on External Job** to
-  **Continuation Pending**. Claude's stdin-write callback is the acceptance boundary; definite
+  **Follow-Up Pending**. Claude's stdin-write callback is the acceptance boundary; definite
   pre-acceptance failures remain retryable, while accepted or uncertain submissions are never
   replayed. Cancellation before the write callback is treated as uncertain rather than replayed,
   because the provider may have received the bytes before local acknowledgement. A stable

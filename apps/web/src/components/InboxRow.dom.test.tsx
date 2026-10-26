@@ -148,7 +148,7 @@ test("a running row with background work shows Running and the strip", async () 
 test("an idle row with running background work shows Waiting on External Job", async () => {
   for (const [state, label] of [
     ["running", "Waiting on External Job"],
-    ["continuation_pending", "Continuation Pending"],
+    ["continuation_pending", "Follow-Up Pending"],
     ["orphaned", "Background Work Lost"],
   ] as const) {
     await withRow(baseSession({ backgroundWorkState: state }), (container) => {

@@ -293,7 +293,7 @@ test("family work suppresses review readiness without hiding requests or recover
     familyFollowUpLabel: "Needs Your Input" })), "Needs Your Input");
   assert.equal(label(sessionRowStatus(session({ status: "failed", attention }), { familyWorking: true })), "Failed");
   for (const [backgroundWorkState, expected] of [["running", "Waiting on External Job"],
-    ["continuation_pending", "Continuation Pending"]] as const) {
+    ["continuation_pending", "Follow-Up Pending"]] as const) {
     assert.equal(label(sessionRowStatus(session({ attention, backgroundWorkState }))), expected);
   }
 });

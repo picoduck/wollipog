@@ -100,7 +100,7 @@ const TABLE: readonly Row[] = [
   // Background Work turn group (#2858); Waiting and Finished carry their counts in the label
   ["jobGroup", "waiting", "Waiting for Jobs", "info"],
   ["jobGroup", "finished", "Finished", "neutral"],
-  ["jobGroup", "returning", "Returning Result", "info"],
+  ["jobGroup", "returning", "Follow-Up Pending", "neutral"],
   ["jobGroup", "returned", "Result Returned", "success"],
   ["jobGroup", "result_missing", "Result Missing", "warning"],
   ["jobGroup", "missing_acknowledged", "Missing Result Acknowledged", "neutral"],

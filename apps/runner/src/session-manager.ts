@@ -3,7 +3,7 @@ import { artifactGuidance } from "./artifact-guidance.js";
 import { shellGuidance } from "./shell-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
+import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
 import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
@@ -5494,11 +5494,14 @@ export class SessionManager {
   /** Phase 2: full metadata for every session the box holds (sent on register for hydration). */
   sessionSnapshots(exactEventSeq = false) {
     const protocolVersion = this.controlPlaneProtocolVersion();
-    return this.store.snapshots(protocolVersion, exactEventSeq).map((snapshot) =>
-      this.overlayQueueHold(this.overlayRuntimeSteering(
+    return this.store.snapshots(protocolVersion, exactEventSeq).map((snapshot) => {
+      const projected = this.overlayQueueHold(this.overlayRuntimeSteering(
         this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion),
         protocolVersion,
-      ), protocolVersion));
+      ), protocolVersion);
+      const meta = runnerSupportsProtocol(protocolVersion, "backgroundFollowUp") ? this.store.readMeta(snapshot.id) : null;
+      return meta ? { ...projected, backgroundFollowUp: this.backgroundFollowUp(meta) } : projected;
+    });
   }
 
   /** Re-publish runner-owned queue holds after reconnect. The notice is deliberately idempotent:
@@ -5518,10 +5521,37 @@ export class SessionManager {
 
   private snapshot(meta: SessionMeta) {
     const protocolVersion = this.controlPlaneProtocolVersion();
-    return this.overlayQueueHold(this.overlayRuntimeSteering(
+    const snapshot = this.overlayQueueHold(this.overlayRuntimeSteering(
       this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion),
       protocolVersion,
     ), protocolVersion);
+    return runnerSupportsProtocol(protocolVersion, "backgroundFollowUp")
+      ? { ...snapshot, backgroundFollowUp: this.backgroundFollowUp(meta) }
+      : snapshot;
+  }
+
+  /** Project execution evidence, never infer it from the session lifecycle alone. */
+  private backgroundFollowUp(meta: SessionMeta): BackgroundFollowUpView | null {
+    if (meta.backgroundWorkState !== "continuation_pending") return null;
+    const jobs = (meta.backgroundJobs ?? []).filter((job) => job.continuationQueuedAt != null &&
+      job.continuationRequired && !job.assistantResultPersistedAt &&
+      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+    if (!jobs.length) return null;
+    const queuedAt = Math.min(...jobs.map((job) => job.continuationQueuedAt!));
+    const entry = this.active.get(meta.sessionId);
+    if (meta.status === "running" && entry?.running &&
+        entry.currentBackgroundJobIds?.some((id) => jobs.some((job) => job.id === id))) {
+      return { state: "running", queuedAt };
+    }
+    const blocker: BackgroundFollowUpView["blocker"] = entry?.governanceTripped ? "governance"
+      : entry?.controlPlaneHold || this.recoveryHolds.has(meta.sessionId) ? "control_plane"
+      : meta.config.costBudgetUsd && meta.costUsd >= meta.config.costBudgetUsd ? "budget"
+      : meta.config.maxToolCalls && (entry?.toolCallIds ?? new Set(this.store.toolCallIds(meta.sessionId))).size >= meta.config.maxToolCalls ? "tool_limit"
+      : this.hasPendingApproval(meta.sessionId) ? "input"
+      : meta.worktreeRecovery ? "worktree"
+      : !automaticClaudeRecoveryAllowed(meta) ? "recovery_authorization" : undefined;
+    return { state: blocker ? "blocked" : "queued", queuedAt, ...(blocker ? { blocker } : {}),
+      retryScheduled: this.backgroundContinuationTimers.has(meta.sessionId) };
   }
 
   /** A supporting control plane always hears the current truth about a queue hold (#1651),
@@ -19056,6 +19086,10 @@ export class SessionManager {
     }, delay);
     timer.unref?.();
     this.backgroundContinuationTimers.set(sessionId, timer);
+    const meta = this.store.readMeta(sessionId);
+    if (meta?.backgroundWorkState === "continuation_pending") {
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+    }
   }
 
   private async runBackgroundContinuation(sessionId: string): Promise<void> {

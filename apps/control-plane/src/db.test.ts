@@ -4547,6 +4547,27 @@ test("the adopted marker round-trips through create/update snapshot into Session
   assert.equal(db.getSession("no")?.adopted, true);
 });
 
+test("follow-up facts round-trip through full and summary views, and old peers clear live claims", () => {
+  const db = withRunner();
+  const followUp = { state: "queued" as const, queuedAt: 1_000, retryScheduled: true };
+  const snap = snapshot({ backgroundWorkState: "continuation_pending", backgroundFollowUp: followUp });
+  db.createSessionFromSnapshot(snap, "runner-1", 2_000);
+  const summary = () => db.listSessionSummaries().find((session) => session.id === snap.id)!;
+  assert.deepEqual(db.getSession(snap.id)?.backgroundFollowUp, followUp);
+  assert.deepEqual(summary().backgroundFollowUp, followUp);
+  const blocked = { state: "blocked" as const, queuedAt: 1_000, blocker: "budget" as const };
+  db.updateSessionFromSnapshot(snap.id, { ...snap, backgroundFollowUp: blocked }, 3_000);
+  assert.deepEqual(db.getSession(snap.id)?.backgroundFollowUp, blocked);
+  assert.deepEqual(summary().backgroundFollowUp, blocked);
+  // Persisted rows survive projection/reload without inventing a new queue start time.
+  assert.match(db.raw().prepare("SELECT background_follow_up FROM sessions WHERE id=?").get(snap.id)!.background_follow_up as string,
+    /"queuedAt":1000/);
+  db.updateSessionFromSnapshot(snap.id, { ...snap, backgroundFollowUp: undefined }, 4_000);
+  assert.equal(db.getSession(snap.id)?.backgroundFollowUp, undefined);
+  assert.equal(summary().backgroundFollowUp, undefined);
+  db.close();
+});
+
 test("background work state round-trips while legacy settled sentinels clear current status", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(

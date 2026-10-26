@@ -320,6 +320,36 @@ function harness(
   };
 }
 
+test("follow-up projection requires exact executing job ids and retains its durable queue time", () => {
+  const h = harness({ driver: "claude-code", backgroundWorkState: "continuation_pending", backgroundJobs: [{
+    id: "finished", parentTurnId: "parent", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "shell", registeredAt: 100,
+    terminalStatus: "completed", terminalObservedAt: 200, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 300,
+  }] });
+  try {
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 237 });
+    const project = () => h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!).backgroundFollowUp;
+    assert.deepEqual(project(), { state: "queued", queuedAt: 300, retryScheduled: false });
+    assert.deepEqual(h.manager.sessionSnapshots().find((s) => s.id === "resume-session")?.backgroundFollowUp, project(),
+      "reconnect hydration carries the same facts as runtime updates");
+    const internals = h.manager as any;
+    internals.active.set("resume-session", { running: true, currentBackgroundJobIds: ["unrelated"], toolCallIds: new Set() });
+    h.store.patchMeta("resume-session", { status: "running" });
+    assert.equal(project()?.state, "queued", "unrelated running work is not the follow-up");
+    internals.active.get("resume-session").currentBackgroundJobIds = ["finished"];
+    assert.deepEqual(project(), { state: "running", queuedAt: 300 });
+    internals.active.clear();
+    h.store.patchMeta("resume-session", { status: "idle", config: { costBudgetUsd: 1 }, costUsd: 1 });
+    assert.deepEqual(project(), { state: "blocked", blocker: "budget", queuedAt: 300, retryScheduled: false });
+    assert.deepEqual(h.manager.sessionSnapshots().find((s) => s.id === "resume-session")?.backgroundFollowUp, project());
+    h.store.patchMeta("resume-session", { backgroundWorkState: undefined });
+    assert.equal(project(), null);
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 236 });
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!).backgroundFollowUp, undefined);
+  } finally { (h.manager as any).active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
 function exitActive(manager: SessionManager, sessionId: string, code: number | null): void {
   const internals = manager as any;
   const client = internals.active.get(sessionId)?.client;

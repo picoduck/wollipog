@@ -16,7 +16,7 @@ import {
   visibleForgeFacts,
   type GitPresentation,
 } from "../pinned-summary.js";
-import { statusMeta } from "../status-meta.js";
+import { backgroundWorkCondition, statusMeta } from "../status-meta.js";
 import { pullRequestStateLabel } from "../worktree-identity.js";
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection, type GitBranchFallback } from "./GitVisibility.js";
@@ -177,7 +177,7 @@ export function PinnedSummary({
     : backgroundWorkState === "orphaned"
       ? statusMeta("job", "lost")
       : backgroundWorkState === "continuation_pending"
-        ? statusMeta("background_work", "continuation_pending")
+        ? backgroundWorkCondition(session, runnerOnline)?.meta ?? null
         : null;
   const backgroundWorkUntracked = !backgroundWorkMeta && session.backgroundWorkTracking === "untracked";
   const watchdogState = shownWatchdogDelivery(session.backgroundDeliveries)?.watchdogState;

@@ -779,7 +779,7 @@ test("receipt-only turns list one Result Receipt row per receipt with its stage 
     assert.deepEqual(receipts.map((row) => [row.tagName, row.querySelector(".row-title")?.textContent,
       row.querySelector(".status")?.textContent, row.querySelector(".row-sub")?.textContent]), [
       ["DIV", "Result Receipt", "Result Returned", "3 of 3 jobs finished"],
-      ["DIV", "Result Receipt", "Returning Result", "1 of 1 job finished"],
+      ["DIV", "Result Receipt", "Follow-Up Pending", "1 of 1 job finished"],
     ], "a receipt is not a job, so it opens no page");
     assert.doesNotMatch(panel.container.textContent ?? "", /Running|Completed|Failed|Killed|Lost|private-continuation|retained-parent/u);
   } finally {
@@ -1199,7 +1199,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${paren
     assert.match(notice.textContent!, /will not resubmit them automatically/);
     assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
     assert.doesNotMatch(notice.textContent!, /Returning .* to this conversation/);
-    assert.doesNotMatch(panel.container.textContent!, /Returning Result/,
+    assert.doesNotMatch(panel.container.textContent!, /Follow-Up Pending/,
       "the group badge must not contradict its explicit historical recovery notice");
   } finally { await panel.dispose(); }
 });
