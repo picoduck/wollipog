@@ -1419,6 +1419,34 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
 });
 
+test("CLI automation proposals preserve configuration and expose read/execute without approval commands", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { authority: "human", status: "pending" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args, "--json"], env,
+    { stdout() {}, stderr() {} }, fetch);
+  const proposal = { requestId: "daily-1", resourceKey: "daily", spec: { name: "Daily", prompt: "Exact\ntext" } };
+  assert.equal(await invoke(["automation", "request", "--proposal", JSON.stringify(proposal)]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), proposal);
+  assert.equal(await invoke(["automation", "get", "workflow_1"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/self/automation-proposals/workflow_1");
+  assert.equal(await invoke(["automation", "execute", "workflow_1", "--digest", "a".repeat(64)]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { resourceDigest: "a".repeat(64) });
+  calls.length = 0;
+  assert.equal(await invoke(["automation", "get", "workflow_1", "--session", "other"]), 2);
+  assert.equal(calls.length, 0);
+  assert.equal(await invoke(["automation", "approve", "workflow_1"]), 2);
+  version = 231;
+  assert.equal(await invoke(["automation", "request", "--proposal", JSON.stringify(proposal)]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+  assert.match(resolveHelp(["help", "automation"])!.text, /human approval/);
+});
+
 test("CLI exact-result handoff forwards the descendant revision and refuses its own session", async () => {
   const calls: Array<{ url: string; body?: string }> = [];
   const output: string[] = [];

@@ -24,6 +24,7 @@ export function rootHelp(): string {
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
+    "  automation          Propose, inspect, and create an automation with human approval",
     "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
@@ -52,7 +53,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign, pr, review",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -291,6 +292,8 @@ function helpForTopic(topic: string): string | null {
       return artifactHelp();
     case "issue-closure":
       return issueClosureHelp();
+    case "automation":
+      return "Usage: wollipog automation request --proposal '<json>' [--json]\n       wollipog automation get <occurrence-id> [--json]\n       wollipog automation execute <occurrence-id> --digest <resource-digest> [--json]\nNormal and Orchestrator sessions propose exact configurations for human approval. Request returns a pending decision; execute creates only the unchanged approved configuration. Reuse the same request/occurrence after an uncertain response. No automation administration or approval commands are exposed.";
     case "campaign":
       return campaignHelp();
     case "pr":

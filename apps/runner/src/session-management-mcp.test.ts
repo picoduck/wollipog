@@ -73,6 +73,34 @@ function resultJson(result: any): any {
   return JSON.parse(result.content[0].text);
 }
 
+test("Normal and Orchestrator automation tools are session-bound and never fall back on unsupported peers", async () => {
+  for (const orchestrator of [false, true]) {
+    const { deps, calls } = makeDeps(() => ({ status: 200, body: { status: "pending", authority: "human" } }));
+    deps.orchestrator = orchestrator;
+    deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+    const proposal = { requestId: "weekly-1", resourceKey: "weekly", spec: { name: "Weekly" } };
+    assert.equal((await callTool(deps, "request_automation_creation", proposal)).isError, undefined);
+    assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/automation-proposals`);
+    assert.deepEqual(calls.at(-1)!.body, proposal);
+    assert.equal((await callTool(deps, "get_automation_creation", { occurrenceId: "workflow_1" })).isError, undefined);
+    assert.equal(calls.at(-1)!.method, "GET");
+    assert.equal((await callTool(deps, "execute_automation_creation", { occurrenceId: "workflow_1", resourceDigest: "a".repeat(64) })).isError, undefined);
+    assert.deepEqual(calls.at(-1)!.body, { resourceDigest: "a".repeat(64) });
+    assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/automation-proposals/workflow_1/execute`);
+    calls.length = 0;
+    deps.controlPlaneProtocolVersion = 235;
+    const refused = await callTool(deps, "request_automation_creation", proposal);
+    assert.equal(refused.isError, true);
+    assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, 236);
+    assert.equal(calls.length, 0);
+    deps.controlPlaneProtocolVersion = undefined;
+    const unknown = await callTool(deps, "request_automation_creation", proposal);
+    assert.equal(unknown.isError, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, `${CP_URL}/api/compatibility`);
+  }
+});
+
 test("campaign allocation tool fails closed on old peers and requires a matching Orchestrator", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { state: "active" } }));
   deps.controlPlaneProtocolVersion = 218;
@@ -465,6 +493,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
   assert.deepEqual(
     tools.map((t) => t.name),
     [
+      "request_automation_creation",
+      "get_automation_creation",
+      "execute_automation_creation",
       "list_runners",
       "get_agent_capabilities",
       "list_sessions",
