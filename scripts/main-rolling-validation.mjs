@@ -229,7 +229,7 @@ export async function observe(api, repository, state, { targetSha, report = fals
   const recent = await listRuns(api, repository, "&status=completed", false);
   // Inspect at most one live/queued allocation. Terminal receipts remain historical hints;
   // consumers independently reconcile current forge certification, never these cached statuses.
-  const candidate = state.candidates?.requests.find((r) => r.claimId === state.pending?.claimId) ??
+  const candidate = state.candidates?.requests.find((r) => r.claimId === state.pending?.claimId && ["queued", "dispatched"].includes(r.status)) ??
     state.candidates?.requests.find((r) => ["queued", "dispatched"].includes(r.status));
   const selected = report ? recent.slice(0, 8) : [
     ...recent.filter((r) => workerIdentity(r, repository)?.targetSha === targetSha).slice(0, 3),
@@ -283,7 +283,7 @@ export async function observe(api, repository, state, { targetSha, report = fals
     }
     live.push({ ...run, admissionVerified });
   }
-  return { active: live, records,
+  return { active: live, records, candidateTargetSha: candidate?.targetSha ?? null,
     latestWorkerActivityAt: [...active, ...recent].filter((r) => workerIdentity(r, repository))
       .flatMap((r) => [r.created_at, r.run_started_at, r.updated_at].filter(date)).sort().at(-1) ?? null,
     invalidRunIds: [...hintIds].filter((id) => !runs.some((run) => run.id === id)) };
@@ -384,10 +384,9 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
     if (previous.value.candidates) {
       const pendingCandidate = previous.value.candidates.requests.find((r) => r.claimId === previous.value.pending?.claimId && r.dispatchedAt);
       // Restore dispatched intent before optional reads. A transient failure cannot revoke it.
-      if (!decision.dispatch && decision.next.pending === null && pendingCandidate &&
-          !observation.records.some((r) => r.claimId === pendingCandidate.claimId) &&
-          !observation.active.some((r) => r.admissionVerified && matches(pendingCandidate, r, repository))) {
-        decision.next.pending = previous.value.pending;
+      const preserved = pendingCandidate && plan(previous.value, observation, pendingCandidate.targetSha, now()).next.pending;
+      if (!decision.dispatch && decision.next.pending === null && preserved && preserved.claimId === pendingCandidate?.claimId) {
+        decision.next.pending = preserved;
       }
       try {
         const optionalApi = budgetApi(api, { limit: 48, reserve: 0 });

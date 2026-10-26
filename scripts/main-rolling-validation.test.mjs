@@ -354,7 +354,8 @@ test("retained terminal candidate receipts do not cause repeated historical job 
   ledger.requests.forEach((r, i) => Object.assign(r, { status: "success", runId: i + 100, dispatchedAt: at() }));
   await writeState(api, repository, await readState(api, repository), { ...emptyState(repository), candidates: ledger });
   const before = data.requests.length;
-  await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  const wake = await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  assert.ok(wake.state.candidates.requests.every((r) => r.status === "success"), "terminal statuses retain their historical verdict");
   assert.ok(data.requests.length - before <= 45, `steady-state calls: ${data.requests.length - before}`);
   assert.ok(!data.requests.some((p) => /\/actions\/runs\/1\d\d/.test(p)), "no terminal candidate run re-reads");
 });
@@ -373,6 +374,35 @@ test("request recording has its own CAS-fenced job outside controller pending co
   const requestJob = workflow.slice(workflow.indexOf("  request:"), workflow.indexOf("  reconcile:"));
   assert.match(requestJob, /run: node scripts\/main-rolling-validation.mjs request/);
   assert.doesNotMatch(requestJob, /concurrency:|actions: write/);
+});
+
+test("ambiguous pending work cannot hide a second candidate's existing verdict and cause a duplicate run", async () => {
+  const { data, api } = forge(); data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  await requestCandidate(repository, B, { api, now: () => at(41) });
+  await reconcile(repository, { api, now: () => at(102), log: () => {} }); // Ambiguous: no worker appears.
+  data.runs.push(run({ id: 11, display_title: `Rolling ${C} ${nextClaim}` }));
+  await requestCandidate(repository, C, { api, now: () => at(103) });
+  await reconcile(repository, { api, now: () => at(180), log: () => {} });
+  const next = await reconcile(repository, { api, now: () => at(181), log: () => {} });
+  assert.equal(data.dispatches.length, 1, "the second candidate reuses its observed verdict");
+  assert.equal(next.state.candidates.requests.find((r) => r.targetSha === C).status, "success");
+});
+
+test("optional errors cannot restore an authoritatively contradicted pending claim", async () => {
+  const { data, api } = forge(); data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  await requestCandidate(repository, B, { api, now: () => at(41) });
+  await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  const previous = await readState(api, repository);
+  await writeState(api, repository, previous, { ...previous.value, pending: { ...previous.value.pending, runId: 999 } });
+  let contents = 0;
+  const unavailable = async (path, options) => {
+    if (path.includes("/contents/") && ++contents > 3) throw new Error("optional transient failure");
+    return api(path, options);
+  };
+  const wake = await reconcile(repository, { api: unavailable, now: () => at(103), log: () => {} });
+  assert.equal(wake.state.pending, null);
 });
 
 test("state writes are fenced, compact at the bound, reject stale writers and strip unknown data", async () => {

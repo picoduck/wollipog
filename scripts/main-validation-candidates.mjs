@@ -54,7 +54,7 @@ export function candidatePlan(ledger, observation, suiteVersion, now, mainComple
       request.waitMinutes = record.metrics?.criticalWaitMinutes ?? null;
       request.executionMinutes = record.metrics?.criticalExecutionMinutes ?? null;
       request.statusObservedAt = now;
-    } else if (request.suiteVersion !== suiteVersion) request.status = "incompatible-suite";
+    } else if (request.suiteVersion !== suiteVersion && ["queued", "dispatched"].includes(request.status)) request.status = "incompatible-suite";
     else if (request.dispatchedAt && ["queued", "dispatched"].includes(request.status)) request.status = "reconciliation-required";
     if (request.status === "queued" && request.suiteVersion !== suiteVersion) request.status = "incompatible-suite";
   }
@@ -65,6 +65,7 @@ export function candidatePlan(ledger, observation, suiteVersion, now, mainComple
     elapsed(observation.latestWorkerActivityAt ?? null, CANDIDATE_POLICY.minimumIntervalMs) &&
     elapsed(next.lastAdmissionAt, CANDIDATE_POLICY.minimumIntervalMs);
   const request = available ? next.requests.filter((r) => r.status === "queued" && !r.dispatchedAt &&
+    (!Object.hasOwn(observation, "candidateTargetSha") || observation.candidateTargetSha === r.targetSha) &&
     elapsed(next.requests.filter((other) => other.purpose === r.purpose && other.dispatchedAt)
       .map((other) => other.dispatchedAt).sort().at(-1) ?? null, CANDIDATE_POLICY[r.purpose].minimumIntervalMs))
     .sort((a, b) => CANDIDATE_POLICY[a.purpose].priority - CANDIDATE_POLICY[b.purpose].priority ||
