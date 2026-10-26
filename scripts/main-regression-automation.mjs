@@ -298,8 +298,18 @@ export async function reconcile(repository, { api, control, config, now = Date.n
   let verified = null;
   if (a.tries === 0) {
     verified = await verifyIntent(repository, a, health, api);
+    if (!verified && a.passingSha !== 'none' &&
+        await verifyIntent(repository, { ...a, passingSha: 'none' }, health, api)) {
+      // Before the first charged send there are no accepted body bytes to preserve.
+      // A withdrawn comparison disables attribution; it does not withdraw the failure.
+      a.passingSha = 'none'; verified = true; await save();
+    }
     if (!verified) {
-      // No charged send has ever begun, so this claim cannot have created remote occupancy.
+      const resolved = health.repository === repository && health.status !== 'unknown' &&
+        [...(health.resolvedRunIds ?? []), ...(health.supersededRunIds ?? [])].includes(a.runId) &&
+        !health.unresolvedFailures.some(r => r.testedSha === a.testedSha && r.suiteVersion === a.suiteVersion);
+      if (!resolved) return report('dispatch-evidence-unavailable-operator-required');
+      // Positive authoritative resolution plus no charged send proves safe release.
       state.active = null; await save(); return report('stale-never-sent-intent-released');
     }
   }

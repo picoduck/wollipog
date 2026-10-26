@@ -100,8 +100,13 @@ After exhausted delivery/stop attempts, no new investigation is admitted while
 occupancy is uncertain. Routine stop success and authenticated offline expiry
 release their slot; a later authenticated execution settlement also clears an
 elapsed-exhaustion or ambiguous-delivery hold. Blocked observations never consume suppression tombstones.
-If no charged send ever began, withdrawn evidence safely releases that never-sent
-claim. Otherwise the adapter first searches authenticated execution history by its
+If no charged send ever began, positive authoritative resolution/supersession proof
+with no remaining same-snapshot failure safely releases that never-sent claim.
+Unknown health or missing evidence retains it for fresh revalidation; absence is
+not proof of resolution. If only its comparison was withdrawn, a never-sent claim
+may drop `passing_sha` to `none` before its first send, disabling attribution while
+preserving investigation of the real failure. Once a send was charged, every
+retry preserves the exact original body. The adapter first searches authenticated execution history by its
 exact trigger/event idempotency key and pinned automation revision. It can recover
 an accepted send without replaying stale failure evidence. An absent history entry
 does not prove rejection; uncertain work remains fenced and eventually reports

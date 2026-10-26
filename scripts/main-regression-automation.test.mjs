@@ -129,10 +129,30 @@ test('serialized state cannot authorize a send without exact live forge revalida
 test('a never-sent stale intent releases safely even after its elapsed deadline', async () => {
   const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
   const f = fixture(s); f.time = instant + LIMITS.elapsedMs;
-  f.observation = health({ status: 'passing', unresolvedFailures: [], evidence: [] });
+  f.observation = health({ status: 'passing', unresolvedFailures: [], evidence: [], resolvedRunIds: [10] });
   assert.equal((await f.run()).status, 'stale-never-sent-intent-released');
   assert.equal(f.state.active, null); assert.equal(f.state.blocked, null); assert.equal(f.receipts.length, 0);
   assert.equal(f.state.seen.length, 1);
+});
+
+test('unknown health retains a never-sent intent for fresh revalidation rather than permanent suppression', async () => {
+  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+  const f = fixture(s);
+  f.observation = health({ status: 'unknown', unresolvedFailures: [], evidence: [], reasons: ['main-moved'] });
+  assert.equal((await f.run()).status, 'dispatch-evidence-unavailable-operator-required');
+  assert.ok(f.state.active); assert.equal(f.state.active.tries, 0); assert.equal(f.receipts.length, 0);
+  f.observation = health();
+  assert.equal((await f.run()).status, 'delivery-dispatched'); assert.equal(f.receipts.length, 1);
+});
+
+test('a withdrawn comparison is safely removed before the first send while preserving the real failure', async () => {
+  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+  const f = fixture(s);
+  const h = health(); h.evidence.push({ ...h.evidence[0], attempt: 2, certification: 'none', result: 'failing' });
+  f.observation = h;
+  assert.equal((await f.run()).status, 'delivery-dispatched');
+  assert.equal(JSON.parse(f.receipts[0].body).parameters.passing_sha, 'none');
+  assert.equal(f.state.active.runId, 10); assert.equal(f.state.active.tries, 1);
 });
 
 test('one active slot, latest pending coalescing, persistent pending age and rerun suppression', () => {
