@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import type { WslBwrapPreparedPath } from "./wsl-bwrap-launcher.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { serveSessionManagementMcp, type McpFetch } from "./session-management-mcp.js";
 import { runPullRequestCli, runWollipogCli } from "./wollipog-cli.js";
 
@@ -106,6 +107,8 @@ export function attachWslAgentControlBroker(
   fetchImpl: McpFetch = globalThis.fetch,
   // `wait_pull_request` reads GitHub with the distro's own `gh` login, never the Windows host's.
   gh: GhRunner = contextGhRunner({ kind: "wsl", distro: config.distro }, "/"),
+  // A GitLab merge request is read with the distro's own `glab` login, likewise (#3602).
+  glab: GlabRunner = contextGlabRunner({ kind: "wsl", distro: config.distro }, "/"),
 ): () => void {
   // `abort` cancels a bridged command still running when its connection closes.
   const connections = new Map<string, { input?: PassThrough; abort?: AbortController; closed: boolean }>();
@@ -152,6 +155,7 @@ export function attachWslAgentControlBroker(
         actorHeader: "x-wollipog-agent-session",
         orchestrator: true,
         gh,
+        glab,
       });
       return;
     }
@@ -165,7 +169,7 @@ export function attachWslAgentControlBroker(
     if (args[0] === "pr") {
       // The broker's working directory is not the agent's, so a bare number needs --repo here.
       connection.abort = new AbortController();
-      void runPullRequestCli(args, args.includes("--json"), io, gh, connection.abort.signal)
+      void runPullRequestCli(args, args.includes("--json"), io, gh, connection.abort.signal, undefined, glab)
         .then((code) => close(id, code), (error) => close(id, 1, (error as Error).message));
       return;
     }

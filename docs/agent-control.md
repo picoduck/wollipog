@@ -165,7 +165,7 @@ wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
 wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
-wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
+wollipog pr wait PR [--repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
 wollipog review session run --repo OWNER/NAME --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
 wollipog review session get REVIEW_SESSION_ID --json
 wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
@@ -212,6 +212,21 @@ checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads s
 starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
+
+A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
+timeout, interval, budget, and read-only contract. Give it as a merge request URL,
+`<gitlab-host>/group/project!IID`, or an IID with `--repo <gitlab-host>/group/project`; the host is
+always required, because a bare path would make `glab` resolve against gitlab.com, and every read
+passes `--hostname`. Each poll reads the merge request (its head pipeline is the merged-results
+pipeline where the project runs them) and, while it is open, its merge-train car; the project's
+"pipelines must succeed" setting is read once. Outcomes: `checks_passed` only for a `success`
+pipeline; `checks_failed` for a failed or canceled one; `checks_blocked` for a skipped pipeline or one
+waiting for a manual action, which will not finish on its own; `no_required_checks` when the project
+does not require a pipeline and the merge request has none; `queue_failed` when the train pipeline
+fails or is canceled; `queue_ejected` when the car stays gone for 10 seconds without a merge; and
+`merged`, `closed`, `head_changed`, or `timeout` as for GitHub. The summary carries `forge: "gitlab"`,
+the pipeline and train state, and GitLab's `detailed_merge_status`. A bare IID without `--repo` still
+resolves only a GitHub repository.
 
 Use [Review Sessions](#review-sessions) for required cross-model review of your own pushed pull
 request, including from an isolated campaign child. The bridge below is a compatibility fallback

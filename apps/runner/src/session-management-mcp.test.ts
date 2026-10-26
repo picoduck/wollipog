@@ -3049,3 +3049,29 @@ test("cross-model review tools are self-scoped session tools behind their own fl
   assert.equal(calls.at(-1)?.method, "POST");
   assert.equal(calls.at(-1)?.url, `${base}/srj_abcdefgh/cancel`);
 });
+
+test("wait_pull_request reads a GitLab merge request through glab, never gh or the control plane (#3602)", async () => {
+  const { deps, calls } = makeDeps();
+  const head = "5c1e0b7a90f2c3d4e5f60718293a4b5c6d7e8f90";
+  const project = "gitlab.example.com/platform/agents/wollipog";
+  const glabCalls: string[][] = [];
+  deps.gh = async () => { throw new Error("a GitLab merge request never reaches gh"); };
+  deps.glab = async (args) => {
+    glabCalls.push(args);
+    const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
+    const path = args[1] ?? "";
+    if (path.includes("merge_trains")) return { stdout: "", stderr: "glab: 404 Not Found (HTTP 404)", code: 1, timedOut: false };
+    if (path.endsWith("/merge_requests/7")) return json({ iid: 7, state: "opened", draft: false, sha: head, target_branch: "main",
+      web_url: `https://${project}/-/merge_requests/7`, head_pipeline: { id: 9, status: "success" } });
+    return json({ only_allow_merge_if_pipeline_succeeds: true });
+  };
+  const summary = resultJson(await callTool(deps, "wait_pull_request", {
+    pullRequest: `https://${project}/-/merge_requests/7`, headSha: head.toUpperCase(), timeoutMs: 60_000,
+  }));
+  assert.equal(summary.forge, "gitlab");
+  assert.equal(summary.outcome, "checks_passed");
+  assert.equal(calls.length, 0, "no control-plane request");
+  assert.ok(glabCalls.length > 0 && glabCalls.every((args) => args[0] === "api" && args.at(-1) === "gitlab.example.com"));
+  const bare = await callTool(deps, "wait_pull_request", { pullRequest: "group/sub/project!7" });
+  assert.equal(bare.isError, true, "a GitLab project without its host is refused");
+});

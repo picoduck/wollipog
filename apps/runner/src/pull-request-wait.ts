@@ -10,6 +10,7 @@
  * required check GitHub has not reported yet has no node at all, so it reads `pending`
  * (`reported: false`), never passing. A base with no required checks returns at once.
  */
+import { campaignRepositoryLocation } from "@wollipog/protocol";
 import { classifyGhFailure, githubRepository, type GhOutcome, type GhRunner } from "./campaign-forge-status.js";
 
 export const PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS = 240_000;
@@ -156,24 +157,30 @@ export function parsePullRequestRef(
     const text = pullRequest.trim();
     const url = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/u.exec(text);
     const short = /^([^/\s#]+\/[^/\s#]+)#(\d+)$/u.exec(text);
-    const match = url ?? short;
+    // GitLab (#3602): a merge request URL, or `<host>/group[/subgroup…]/project!<iid>`.
+    const gitlabUrl = /^https:\/\/([^/\s?#@]+\/[^\s?#]+?)\/-\/merge_requests\/(\d+)(?:[/?#].*)?$/u.exec(text);
+    const gitlabShort = /^([^/\s!]+(?:\/[^/\s!]+){2,})!(\d+)$/u.exec(text);
+    const match = url ?? short ?? gitlabUrl ?? gitlabShort;
     if (match) {
       if (repo && repo.toLowerCase() !== match[1]!.toLowerCase()) {
         return { error: `pull request ${text} is not in repository ${repo}` };
       }
       repo = match[1]!;
       number = Number(match[2]);
-    } else if (/^#?\d+$/u.test(text)) {
-      number = Number(text.replace(/^#/u, ""));
+    } else if (/^[#!]?\d+$/u.test(text)) {
+      number = Number(text.replace(/^[#!]/u, ""));
     } else {
-      return { error: "pullRequest must be a number, owner/name#number, or a github.com pull request URL" };
+      return { error: "pullRequest must be a number, owner/name#number, a github.com pull request URL, " +
+        "a GitLab merge request URL, or <gitlab-host>/group/project!number" };
     }
   } else {
     return { error: "pullRequest is required" };
   }
   if (!Number.isSafeInteger(number) || number! < 1) return { error: "pullRequest number must be a positive integer" };
-  if (!repo) return { error: "repository (owner/name) is required when pullRequest is a bare number" };
-  if (!githubRepository({ repository: repo, number: number! })) return { error: `invalid GitHub repository: ${repo}` };
+  if (!repo) return { error: "repository (owner/name, or <gitlab-host>/group/project) is required when pullRequest is a bare number" };
+  if (!githubRepository({ repository: repo, number: number! }) && campaignRepositoryLocation(repo)?.forge !== "gitlab") {
+    return { error: `invalid repository: ${repo} (a GitHub owner/name, or a GitLab project with its host)` };
+  }
   return { repository: repo, number: number! };
 }
 
@@ -625,7 +632,7 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
   return Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
 }
 
-async function cancellableSleep(deps: PullRequestWaitDeps, milliseconds: number): Promise<boolean> {
+export async function cancellableSleep(deps: Pick<PullRequestWaitDeps, "sleep" | "signal">, milliseconds: number): Promise<boolean> {
   const sleep = deps.sleep ?? ((duration: number) => new Promise<void>((resolve) => setTimeout(resolve, duration)));
   const signal = deps.signal;
   if (!signal) {

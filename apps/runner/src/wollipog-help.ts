@@ -228,8 +228,13 @@ export function pullRequestHelp(): string {
     "--timeout defaults to 240000 (4 minutes), up to 10800000; a slow GitHub read can add at most 20 seconds.",
     "--interval defaults to 30000, 10000-600000.",
     "--any-failure also returns when a check outside the required set fails on the head.",
-    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, queue_failed,",
-    "queue_ejected, closed, or head_changed; 124 timeout; 1 GitHub could not be read; 2 usage.",
+    "A GitLab merge request (its URL, or <gitlab-host>/group/project!<iid>, or a bare IID with",
+    "--repo <gitlab-host>/group/project) is read with this machine's `glab` login instead. It returns when",
+    "the head pipeline or merge-train pipeline finishes, it leaves the train, merges, closes, or its head",
+    "moves. Only a successful pipeline passes; a skipped or manual one returns checks_blocked.",
+    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, checks_blocked,",
+    "queue_failed, queue_ejected, closed, or head_changed; 124 timeout; 1 the forge could not be read;",
+    "2 usage.",
   ].join("\n");
 }
 
