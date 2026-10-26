@@ -63,6 +63,8 @@
     "probe:claude-mcp-image": "node --import tsx apps/runner/scripts/claude-mcp-image-probe.ts",
     "probe:claude-media-reviewer": "node --import tsx apps/runner/scripts/claude-media-reviewer-probe.ts",
     "probe:codex-escalation": "node --import tsx apps/runner/scripts/codex-escalation-probe.ts",
+    "probe:codex-assumptions": "node --import tsx scripts/codex-assumptions.mjs",
+    "probe:codex-diagnostics": "node --import tsx apps/runner/scripts/codex-diagnostics-probe.ts",
     "probe:codex-guard-hook": "node --import tsx apps/runner/scripts/codex-guard-hook-probe.ts",
     "probe:codex-inference-transport": "node --import tsx apps/runner/scripts/codex-inference-transport-probe.ts",
     "probe:codex-mcp-wait": "node --import tsx apps/runner/scripts/codex-mcp-wait-probe.ts",

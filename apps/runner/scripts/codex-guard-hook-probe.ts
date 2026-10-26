@@ -39,6 +39,7 @@ import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { isolatedProbeEnv, unavailableProbeOutput, probeResult, GUARD_DOCUMENTATION, ownProbeProcess, RecordedAssumptionChanged } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 const TURN_TIMEOUT_MS = 90_000;
@@ -78,13 +79,7 @@ interface Fixture { repo: string; codexHome: string; hook: string; hookLog: stri
 
 /** Never inherit a provider home, credential, Git config, or app-server endpoint from the host. */
 function probeEnv(fixture: Fixture): NodeJS.ProcessEnv {
-  return {
-    PATH: process.env.PATH, HOME: fixture.codexHome, CODEX_HOME: fixture.codexHome,
-    XDG_CONFIG_HOME: fixture.codexHome, XDG_DATA_HOME: fixture.codexHome,
-    XDG_STATE_HOME: fixture.codexHome, XDG_CACHE_HOME: fixture.codexHome,
-    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
-    PROBE_KEY: "scripted-local-provider", TERM: "xterm-256color", LANG: "C.UTF-8",
-  };
+  return isolatedProbeEnv(fixture.codexHome);
 }
 
 function listen(server: Server): Promise<number> {
@@ -111,7 +106,11 @@ function modelServer(state: { tool: Json | null; calls: number; input: string })
       const item: Json = guardian
         ? message(JSON.stringify({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "scripted" }))
         : step === 0 && state.tool
-          ? { type: "function_call", id: "fc", call_id: "call", name: "exec_command", arguments: JSON.stringify(state.tool), status: "completed" }
+          ? state.tool.patchDocument
+            ? state.tool.patchForm === "freeform"
+              ? { type: "custom_tool_call", id: "fc", call_id: "call", name: "apply_patch", input: state.tool.patchDocument, status: "completed" }
+              : { type: "function_call", id: "fc", call_id: "call", name: "apply_patch", arguments: JSON.stringify({ input: state.tool.patchDocument }), status: "completed" }
+            : { type: "function_call", id: "fc", call_id: "call", name: "exec_command", arguments: JSON.stringify(state.tool), status: "completed" }
           : message("finished");
       response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
       const send = (event: string, data: Json) => response.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
@@ -137,12 +136,12 @@ function runTurn(
   turnExtras: Json,
   accept: boolean,
 ): Promise<string> {
-  const child = spawn(CODEX, [...args, "app-server"], {
+  const child = ownProbeProcess(spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
     env: probeEnv(fixture),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-  });
+  }));
   return new Promise<string>((resolve) => {
     let settled = false;
     let outcome = "no command ran";
@@ -213,29 +212,29 @@ function runTurn(
 
 /** Ask a throwaway app-server what hooks this argv installs, and how it rates their trust. */
 function readInventory(fixture: Fixture, args: readonly string[]): Promise<Json[]> {
-  const child = spawn(CODEX, [...args, "app-server"], {
+  const child = ownProbeProcess(spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
     env: probeEnv(fixture),
     stdio: ["pipe", "pipe", "ignore"],
     detached: true,
-  });
-  return new Promise<Json[]>((resolve) => {
+  }));
+  return new Promise<Json[]>((resolve, reject) => {
     let settled = false;
-    const finish = (value: Json[]) => {
+    const finish = (value: Json[] | Error) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       killTree(child);
-      resolve(value);
+      value instanceof Error ? reject(value) : resolve(value);
     };
-    const timer = setTimeout(() => finish([]), 30_000);
+    const timer = setTimeout(() => finish(new Error("inventory timed out")), 30_000);
     const send = (payload: Json) => {
       if (settled || child.stdin.destroyed) return;
       child.stdin.write(`${JSON.stringify(payload)}\n`);
     };
     child.stdin.on("error", () => {});
-    child.on("error", () => finish([]));
-    child.on("close", () => finish([]));
+    child.on("error", () => finish(new Error("inventory unavailable")));
+    child.on("close", () => finish(new Error("inventory unavailable")));
     let buffer = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
@@ -245,12 +244,26 @@ function readInventory(fixture: Fixture, args: readonly string[]): Promise<Json[
         const line = buffer.slice(0, newline).trim();
         buffer = buffer.slice(newline + 1);
         if (!line) continue;
-        let msg: Json & { id?: unknown; result?: Json };
+        let msg: Json & { id?: unknown; result?: Json; error?: Json };
         try { msg = JSON.parse(line); } catch { continue; }
         if (msg.id === 1 && process.env.PROBE_DEBUG) process.stderr.write(`initialize: ${JSON.stringify(msg.result)}\n`);
         if (msg.id !== 2) continue;
-        const groups = ((msg.result ?? {}).data ?? []) as { hooks?: Json[] }[];
-        finish(groups.flatMap((group) => group.hooks ?? []));
+        if (msg.error) { finish(new Error("hooks/list RPC unavailable")); return; }
+        const groups = msg.result?.data;
+        if (!Array.isArray(groups)) { finish(new RecordedAssumptionChanged("hooks/list no longer returns a data array")); return; }
+        const hooks: Json[] = [];
+        for (const group of groups as { hooks?: Json[]; errors?: unknown[] }[]) {
+          if (!group || typeof group !== "object") { finish(new RecordedAssumptionChanged("hooks/list group changed shape")); return; }
+          if (group.errors?.length) { finish(new Error("fixture hook discovery failed")); return; }
+          if (!Array.isArray(group.hooks)) { finish(new RecordedAssumptionChanged("hooks/list group no longer contains a hooks array")); return; }
+          for (const hook of group.hooks) {
+            if (!hook || typeof hook.key !== "string" || typeof hook.enabled !== "boolean" || typeof hook.trustStatus !== "string") {
+              finish(new RecordedAssumptionChanged("hooks/list entry changed key, enabled or trustStatus shape")); return;
+            }
+            hooks.push(hook);
+          }
+        }
+        finish(hooks);
         return;
       }
     });
@@ -287,9 +300,9 @@ function runCliTurn(fixture: Fixture, args: string[], entry: "exec" | "tui"): Pr
     };
     const timer = setTimeout(() => finish("\nTIMED OUT"), TURN_TIMEOUT_MS);
     if (entry === "exec") {
-      const child = spawn(CODEX, [...common, "exec", "--json", "go"], {
+      const child = ownProbeProcess(spawn(CODEX, [...common, "exec", "--json", "go"], {
         cwd: fixture.repo, env: probeEnv(fixture), stdio: ["ignore", "pipe", "pipe"], detached: true,
-      });
+      }));
       stop = () => killTree(child);
       child.stdout.on("data", (chunk: Buffer) => { output += chunk.toString(); });
       child.stderr.on("data", (chunk: Buffer) => { output += chunk.toString(); });
@@ -297,10 +310,10 @@ function runCliTurn(fixture: Fixture, args: string[], entry: "exec" | "tui"): Pr
       child.on("close", (code) => complete(code === 0 ? "" : `\nEXIT ${code}`));
     } else {
       // Python's standard-library PTY avoids a native node-pty build prerequisite for this probe.
-      const terminal = spawn("python3", ["-u", "-c", PTY_DRIVER,
+      const terminal = ownProbeProcess(spawn("python3", ["-u", "-c", PTY_DRIVER,
         CODEX, ...common, "--no-alt-screen", "go"], {
         cwd: fixture.repo, env: probeEnv(fixture), stdio: ["ignore", "pipe", "pipe"],
-      });
+      }), false);
       stop = () => { terminal.kill("SIGTERM"); };
       terminal.stdout.on("data", (chunk: Buffer) => {
         if (process.env.PROBE_DEBUG) process.stderr.write(chunk);
@@ -364,7 +377,7 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
   const ours = inventory.find((hook) => String(hook.command ?? "").includes(fixture.hook));
   const foreign = inventory.find((hook) => String(hook.command ?? "").includes(foreignHook));
   if (!ours?.currentHash || !ours.key || foreign?.trustStatus !== "untrusted") {
-    throw new Error("CLI measurement cannot identify its own hash and the foreign untrusted hook");
+    throw new RecordedAssumptionChanged("hooks/list no longer identifies the installed hash and foreign untrusted hook");
   }
   const override = (hash: string) => `hooks.state={${JSON.stringify(ours.key)}={trusted_hash=${JSON.stringify(hash)}}}`;
   const trustedArgs = [...args, "-c", override(String(ours.currentHash))];
@@ -373,13 +386,13 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
   const readback = await readInventory(fixture, trustedArgs);
   if (readback.find((hook) => hook.key === ours.key)?.trustStatus !== "trusted" ||
       readback.find((hook) => hook.key === foreign.key)?.trustStatus !== "untrusted") {
-    throw new Error("CLI measurement trust read-back did not confirm trusted own / untrusted foreign hooks");
+    throw new RecordedAssumptionChanged("hooks.state inline-table trust override no longer reads back trusted own / untrusted foreign hooks");
   }
   process.stdout.write("\nCLI inventory read-back: own=trusted, foreign=untrusted, bypass absent\n");
   const isolated = await readInventory(fixture, isolatedBypassArgs);
   if (isolated.find((hook) => hook.key === foreign.key)?.enabled !== false ||
       isolated.find((hook) => hook.key === ours.key)?.enabled !== true) {
-    throw new Error("Legacy fallback inventory did not confirm foreign disabled / own enabled");
+    throw new RecordedAssumptionChanged("hooks.state inline-table disabling no longer reads back foreign disabled / own enabled");
   }
   let failures = 0;
   for (const entry of ["exec", "tui"] as const) {
@@ -399,7 +412,7 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
       rmSync(executed, { force: true });
       model.calls = 0;
       model.input = "";
-      model.tool = { cmd: `echo ${test.protected ? MARKER : "BENIGN-OK"} > '${executed}'`, yield_time_ms: 1000 };
+      model.tool = { cmd: `echo ${test.protected ? MARKER : "BENIGN-OK"} > '${executed}'`, shell: "/bin/sh", login: false, yield_time_ms: 1000 };
       const output = await runCliTurn(fixture, test.args, entry);
       const calls = readFileSync(fixture.hookLog, "utf8").split("\n").filter(Boolean).length;
       const foreignCalls = readFileSync(foreignLog, "utf8").split("\n").filter(Boolean).length;
@@ -408,6 +421,8 @@ async function cliMeasurements(fixture: Fixture, model: { tool: Json | null; cal
       const ok = calls === test.calls && foreignCalls === test.foreign && ran === test.ran &&
         (test.ran || denied) && model.calls >= 2 && !output.includes("TIMED OUT");
       if (!ok) failures++;
+      probeResult(`${entry} hook trust: ${test.name}`, unavailableProbeOutput(output) ? "could not run" : ok ? "unchanged" : "changed",
+        `ownCalls=${calls}; foreignCalls=${foreignCalls}; executed=${ran}; denied=${denied}; modelRequests=${model.calls}`, GUARD_DOCUMENTATION);
       process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${entry} · ${test.name}: own×${calls} foreign×${foreignCalls} ran=${ran} denied=${denied} model×${model.calls}\n`);
       if (!ok || process.env.PROBE_DEBUG) process.stderr.write(output.slice(-6000) + "\n");
       if (output.includes("TIMED OUT")) throw new Error(`${entry} did not complete a real turn`);
@@ -428,24 +443,30 @@ async function main(): Promise<number> {
   const model = { tool: null as Json | null, calls: 0, input: "" };
   const models = modelServer(model);
   let failures = 0;
+  let couldNotRun = false;
   try {
     mkdirSync(fixture.repo, { recursive: true });
     mkdirSync(fixture.codexHome, { recursive: true });
     writeFileSync(fixture.hook,
       "#!/bin/bash\n" +
       'input=$(cat)\n' +
-      `printf 'call\\n' >> ${JSON.stringify(fixture.hookLog)}\n` +
+      `printf '%s\\n' "$input" >> ${JSON.stringify(fixture.hookLog)}\n` +
       `case "$input" in\n  *${MARKER}*)\n` +
       `    printf '%s' '{"hookSpecificOutput":{"hookEventName":"PreToolUse",` +
       `"permissionDecision":"deny","permissionDecisionReason":"MANAGED_WORKTREE_REFUSAL: probe"}}'\n` +
       "    exit 0\n    ;;\nesac\nexit 0\n", { mode: 0o755 });
     writeFileSync(fixture.hookLog, "");
     await gitInit(fixture);
-    process.stdout.write(execFileSync(CODEX, ["--version"], { env: probeEnv(fixture), encoding: "utf8", timeout: 30_000 }));
+    const versionOutput = execFileSync(CODEX, ["--version"], { env: probeEnv(fixture), encoding: "utf8", timeout: 30_000 });
+    process.stdout.write(versionOutput);
+    // Installed older/newer catalogs offer apply_patch under different model families. These
+    // select fixture tool metadata only: every response still comes from our loopback script.
+    const minor = Number(versionOutput.match(/codex-cli 0\.(\d+)\./u)?.[1]);
+    const fixtureModel = minor < 158 ? "gpt-5.4" : minor < 160 ? "gpt-6-sol" : "gpt-6.1-sol";
 
     fixture.modelPort = await listen(models);
     writeFileSync(join(fixture.codexHome, "config.toml"),
-      'model = "probe-model"\nmodel_provider = "probe"\napproval_policy = "on-request"\n\n' +
+      `model = "${fixtureModel}"\nmodel_provider = "probe"\napproval_policy = "on-request"\n\n` +
       '[model_providers.probe]\nname = "Probe"\n' +
       `base_url = "http://127.0.0.1:${fixture.modelPort}/v1"\n` +
       'wire_api = "responses"\nenv_key = "PROBE_KEY"\n' +
@@ -473,11 +494,47 @@ async function main(): Promise<number> {
     process.stdout.write(
       `${trustedOk ? "ok  " : "FAIL"}  the trust override makes hooks/list report it trusted ` +
       `(got ${String(trustedOurs?.trustStatus)})\n\n`);
+    probeResult("hooks/list inventory and hooks.state inline-table trust override", trustedOk ? "unchanged" : "changed",
+      `sessionFlags hook present; hash available; trusted readback=${trustedOk}`, GUARD_DOCUMENTATION);
+
+    // Both wire forms must normalize to the guard's documented tool_input.command contract.
+    for (const form of ["freeform", "function"] as const) {
+      for (const blocked of [false, true]) {
+        const name = `${blocked ? MARKER : "benign"}-${form}.txt`;
+        const patch = `*** Begin Patch\n*** Add File: ${name}\n+fixture\n*** End Patch`;
+        writeFileSync(fixture.hookLog, "");
+        model.calls = 0;
+        model.input = "";
+        model.tool = { patchDocument: patch, patchForm: form };
+        await runTurn(fixture, [...hookArgs(fixture), "-c", trustOverride], { sandboxPolicy: { type: "dangerFullAccess" } }, true);
+        const payloads = readFileSync(fixture.hookLog, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as Json);
+        const payload = payloads[0];
+        const contract = payloads.length === 1 && payload?.tool_name === "apply_patch" &&
+          (payload?.tool_input as Json)?.command === patch && payload.cwd === fixture.repo &&
+          typeof payload.permission_mode === "string";
+        const created = existsSync(join(fixture.repo, name));
+        const denied = model.input.includes("MANAGED_WORKTREE_REFUSAL");
+        // These measured releases accept only custom_tool_call for apply_patch. Keep the
+        // function-call negative control executable: newly supported edits require review.
+        const rejectedFunction = form === "function" && payloads.length === 0 && !created && !denied &&
+          model.calls >= 2 && (model.input.includes('"output":"aborted"') || model.input.includes('"output":"unsupported call: apply_patch"'));
+        const unavailableCatalog = form === "freeform" && payloads.length === 0 && !created &&
+          model.input.includes("unsupported custom tool call: apply_patch");
+        couldNotRun ||= unavailableCatalog;
+        const ok = form === "function" ? rejectedFunction : contract && model.calls >= 2 && created === !blocked && denied === blocked;
+        if (!ok) failures++;
+        probeResult(`apply_patch ${form}: ${blocked ? "deny" : "allow"}`, unavailableCatalog ? "could not run" : ok ? "unchanged" : "changed",
+          unavailableCatalog ? "selected CLI fixture catalog does not expose apply_patch; hook payload could not be measured" :
+          form === "function" && rejectedFunction ? "CLI rejects unsupported function-call input before hook dispatch; no file written" :
+            `tool_input.command contract=${contract}; fileCreated=${created}; denied=${denied}; modelRequests=${model.calls}`, GUARD_DOCUMENTATION);
+      }
+    }
 
     for (const testCase of CASES) {
       writeFileSync(fixture.hookLog, "");
       model.tool = {
         cmd: testCase.protected ? `echo ${MARKER}` : "echo BENIGN-OK",
+        shell: "/bin/sh", login: false,
         yield_time_ms: 5000,
         ...(testCase.escalate
           ? { sandbox_permissions: "require_escalated", justification: "the probe needs it" }
@@ -504,6 +561,8 @@ async function main(): Promise<number> {
       const ran = output === (testCase.protected ? MARKER : "BENIGN-OK");
       const ok = (testCase.expect === "denied" ? denied : ran) && calls === testCase.hookCalls && model.calls >= 2;
       if (!ok) failures++;
+      probeResult(`app-server hook: ${testCase.name}`, unavailableProbeOutput(output) && !(testCase.expect === "denied" && denied)
+        ? "could not run" : ok ? "unchanged" : "changed", `hookCalls=${calls}; denied=${denied}; executed=${ran}; modelRequests=${model.calls}`, GUARD_DOCUMENTATION);
       process.stdout.write(
         `${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(50)} ` +
         `${testCase.expect.padEnd(7)} hook×${calls} ${JSON.stringify(output.slice(0, 40))}\n`);
@@ -516,7 +575,7 @@ async function main(): Promise<number> {
     ? `\nAll CLI cases and ${CASES.length + 1} app-server checks matched the recorded measurement.\n`
     : `\n${failures} check(s) did NOT match. Codex's hook behaviour has moved; re-read ADR 0012 ` +
       "before changing code.\n");
-  return failures === 0 ? 0 : 1;
+  return couldNotRun ? 2 : failures === 0 ? 0 : 1;
 }
 
 const FIXTURE_TIMEOUT_MS = 30_000;
@@ -525,10 +584,10 @@ const FIXTURE_TIMEOUT_MS = 30_000;
 function gitInit(fixture: Fixture): Promise<void> {
   const { repo } = fixture;
   const run = (args: string[]): Promise<void> => new Promise((resolve, reject) => {
-    const child: ChildProcess = spawn("git", [
+    const child: ChildProcess = ownProbeProcess(spawn("git", [
       "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
       "-c", "user.email=probe@example.invalid", "-c", "user.name=probe", ...args,
-    ], { cwd: repo, env: probeEnv(fixture), stdio: "ignore", detached: true });
+    ], { cwd: repo, env: probeEnv(fixture), stdio: "ignore", detached: true }));
     const timer = setTimeout(() => {
       killTree(child);
       reject(new Error(`git ${args[0]} did not finish within ${FIXTURE_TIMEOUT_MS}ms`));
@@ -547,6 +606,8 @@ function gitInit(fixture: Fixture): Promise<void> {
 }
 
 main().then((code) => { process.exitCode = code; }, (error: unknown) => {
-  process.stderr.write(`${String(error)}\n`);
-  process.exitCode = 1;
+  const changed = error instanceof RecordedAssumptionChanged;
+  probeResult("hook inventory/trust contract", changed ? "changed" : "could not run",
+    changed ? error.message : "fixture, PTY, inventory or compatible app-server unavailable", GUARD_DOCUMENTATION);
+  process.exitCode = changed ? 1 : 2;
 });
