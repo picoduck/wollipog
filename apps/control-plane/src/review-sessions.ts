@@ -311,7 +311,7 @@ export class ReviewSessions {
 
   history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true): ReviewRunHistory {
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
-      WHERE requester_session_id=? AND repository=? AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
+      WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
       .all(requesterSessionId, pullRequest.repository, pullRequest.number) as Array<Pick<Row, "head_sha" | "round_json" | "verdict_json" | "findings_json">>;
     const attempts = rows.flatMap((row) => {
       const round = json<ReviewAttemptRound>(row.round_json);

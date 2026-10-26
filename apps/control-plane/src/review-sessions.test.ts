@@ -1186,3 +1186,39 @@ test("a post-upvote round uses ordinary campaign admission, reservation and actu
     assert.equal(h.starts().at(-1)!.spec.review!.history!.roundBudget, 5);
   } finally { h.db.close(); }
 });
+
+test("a merge decision matches review repository names without case", () => {
+  const h = harness({ campaign: true });
+  try {
+    exhaustWithUpvote(h);
+    const headSha = "c".repeat(40);
+    const merge = h.svc.createWorkflowDecision("s1", { requestId: "mixed-case-merge", resourceKey: "merge",
+      resourceSnapshot: { category: "pr_merge", repository: request().pullRequest.repository.toUpperCase(),
+        pullRequest: request().pullRequest.number, headSha, reviewResult: "merge",
+        requiredChecks: { headSha, status: "passed", checkedAt: 10, checks: [{ name: "required", state: "passed" }] } } });
+    assert.equal(merge.status, 409);
+    assert.match(merge.error!, /current pull request head needs a valid review/u);
+  } finally { h.db.close(); }
+});
+
+test("consuming a merge decision rechecks the review run's head and revokes a stale grant", async () => {
+  const h = harness({ campaign: true });
+  try {
+    exhaustWithUpvote(h);
+    const snapshot = { category: "pr_merge" as const, repository: request().pullRequest.repository,
+      pullRequest: request().pullRequest.number, headSha: HEAD, reviewResult: "merge" as const,
+      requiredChecks: { headSha: HEAD, status: "passed" as const, checkedAt: 10,
+        checks: [{ name: "required", state: "passed" as const }] } };
+    const merge = h.svc.createWorkflowDecision("s1", { requestId: "stale-merge", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(merge.data, merge.error ?? "refused");
+    assert.ok(h.svc.approve("s1", merge.data.occurrenceId, "approve").ok);
+    const next = h.svc.requestReviewSession("s1", request({ headSha: "c".repeat(40) }));
+    assert.ok(next.data, next.error ?? "refused");
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: next.data.reviewSessionId, state: "completed",
+      output: report("c".repeat(40), { vote: "UPVOTE", findings: [] }), round: { ...ROUND, round: 5 }, verdict: VALID } as never);
+    const consumed = await h.svc.consumeWorkflowDecision("s1", merge.data.occurrenceId, { resourceSnapshot: snapshot });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /current pull request head needs a valid review/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(merge.data.occurrenceId)?.status, "revoked");
+  } finally { h.db.close(); }
+});

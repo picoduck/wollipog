@@ -35,7 +35,7 @@ export interface ReviewRunHistory {
   validRounds: number;
   /** Consumed attempts in the most recent attempt's round. */
   consumedInLastRound: number;
-  /** v236: a post-upvote grant forces delta scope until the next valid round. */
+  /** v237: a post-upvote grant forces delta scope until the next valid round. */
   postUpvoteExtension?: { headSha: string; upvotedHeadSha: string };
   roundBudget: number;
   attemptsPerRound: number;
