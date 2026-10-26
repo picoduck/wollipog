@@ -3,10 +3,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { setTimeout as sleep } from "node:timers/promises";
 import { FINALIZER_JOB, NATIVE_RELEASE_JOBS, readReleaseTimings } from "./release-timings.mjs";
+import { CERTIFICATION_SCHEMA } from "./release-certification.mjs";
 
 const SHA = /^[a-f0-9]{40}$/;
 const VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
@@ -22,7 +23,7 @@ export const notesPath = (version) => `docs/release-notes-v${version}.md`;
 
 /** No credentials or persisted authority: grants are supplied anew by the caller on each invocation. */
 export function validateCheckpoint(state) {
-  const keys = new Set(["schema", "repository", "version", "tag", "branch", "notesPath", "notesSha256", "baseSha", "oldVersion", "stage", "headSha", "prNumber", "mergeSha", "integrationSha", "integrationHistory", "runId", "runAttempt", "releaseId", "timings"]);
+  const keys = new Set(["schema", "repository", "version", "tag", "branch", "notesPath", "notesSha256", "baseSha", "oldVersion", "stage", "headSha", "prNumber", "mergeSha", "integrationSha", "integrationHistory", "runId", "runAttempt", "releaseId", "timings", "certification"]);
   check(state && Object.keys(state).every((key) => keys.has(key)), "Unexpected checkpoint fields; credentials and grants must not be persisted");
   check(state?.schema === 1 && REPOSITORY.test(state.repository ?? "") && VERSION.test(state.version ?? ""), "Invalid release checkpoint identity");
   check(typeof state.branch === "string" && /^[A-Za-z0-9][\w./-]{0,180}$/.test(state.branch) && !state.branch.includes(".."), "Invalid release branch");
@@ -30,6 +31,18 @@ export function validateCheckpoint(state) {
   check(SHA.test(state.baseSha ?? ""), "Missing preparation base");
   for (const key of ["headSha", "mergeSha", "integrationSha"]) check(state[key] === undefined || state[key] === null || SHA.test(state[key]), `Invalid ${key}`);
   for (const key of ["prNumber", "releaseId", "runId", "runAttempt"]) check(state[key] === undefined || positive(state[key]), `Invalid ${key}`);
+  if (state.certification !== undefined) {
+    const c = state.certification;
+    check(c && c.schema === CERTIFICATION_SCHEMA && c.repository === state.repository && c.targetSha === state.mergeSha &&
+      ["certified", "pending", "missing", "failed", "unknown", "incompatible"].includes(c.status) &&
+      typeof c.observedAt === "string" && Number.isFinite(Date.parse(c.observedAt)), "Invalid release certification checkpoint");
+    check(Object.keys(c).every((key) => ["schema", "repository", "targetSha", "coverageVersion", "status", "reason",
+      "suiteVersion", "observedAt", "runId", "attempt", "sourceSha", "mainSha", "url"].includes(key)),
+    "Unexpected certification checkpoint fields");
+    for (const key of ["sourceSha", "mainSha"]) check(c[key] === null || SHA.test(c[key]), "Invalid certification source");
+    for (const key of ["runId", "attempt"]) check(c[key] === null || positive(c[key]), "Invalid certification run identity");
+    check(c.suiteVersion === null || /^[a-f0-9]{64}$/.test(c.suiteVersion), "Invalid certification suite");
+  }
   return state;
 }
 
@@ -78,6 +91,12 @@ export function services(cwd = process.cwd(), cacheDirectory = null) {
   };
   return { cwd, git, gh, api, optional, pages,
     run: (program, args, options) => command(program, args, { cwd, ...options }),
+    certification: (state) => {
+      const args = [fileURLToPath(new URL("./release-certification.mjs", import.meta.url)), "--report",
+        "--repository", state.repository, "--target-sha", state.mergeSha];
+      if (state.certification?.runId) args.push("--run-id", String(state.certification.runId));
+      return JSON.parse(command(process.execPath, args, { cwd }));
+    },
     notes: (state) => command("git", ["show", `${state.headSha}:${state.notesPath}`], { cwd }),
     verify: (state, release) => verifyPublishedAssets(state, release, { cwd, git, api, pages, cacheDirectory }),
     gates: (state) => verifyReleaseJobs(state, pages(`repos/${state.repository}/actions/runs/${state.runId}/jobs?filter=latest`, "jobs")),
@@ -221,8 +240,21 @@ function stableOrder(left, right) {
   return 0;
 }
 
+/** Historical checkpoint data locates runs; only fresh forge proof can satisfy this gate. */
+export function reconcileCertification(state, io) {
+  check(typeof io.certification === "function", "Exact full-regression certification service is required");
+  state.certification = io.certification(state);
+  validateCheckpoint(state);
+  const current = state.certification;
+  check(current.coverageVersion === "rolling-full-v1", "Incompatible full-regression coverage contract");
+  if (current.status === "certified") check(positive(current.runId) && positive(current.attempt) &&
+    SHA.test(current.sourceSha ?? "") && /^[a-f0-9]{64}$/.test(current.suiteVersion ?? ""),
+  "Incomplete exact full-regression certificate");
+  return current.status === "certified";
+}
+
 /** One reconciled step. Cached stages never grant authority or replace fresh forge evidence. */
-export function advance(state, grants, io, save = () => {}) {
+export function advance(state, grants, io, save = () => {}, { reconcileOnResume = true } = {}) {
   validateCheckpoint(state);
   check(positive(state.prNumber) && SHA.test(state.headSha ?? ""), "Finish preparation before resuming");
   const [owner, repo] = state.repository.split("/");
@@ -255,6 +287,14 @@ export function advance(state, grants, io, save = () => {}) {
   io.git(["fetch", "origin", "main"]);
   verifyMergedPreparation(state, io);
   const ref = io.optional(`repos/${state.repository}/git/ref/tags/${state.tag}`);
+  // Within one watch invocation, native-build polling need not repeat a completed proof scan.
+  // A new invocation, missing tag, pending proof and the final publication gate always refresh it.
+  const refreshCertification = reconcileOnResume || !ref || state.certification?.status !== "certified";
+  if (refreshCertification && !reconcileCertification(state, io)) return finish("full-regression-certification", {
+    waiting: state.certification.status === "pending", certification: state.certification,
+    action: "Obtain complete exact-SHA full validation through Main Rolling Controller; no ancestor, PR head or merge-group substitute is accepted.",
+    requestCommand: `gh workflow run main-rolling-controller.yml --ref main --repo ${state.repository} -f candidate_sha=${state.mergeSha} -f purpose=release`,
+  });
   if (!ref) {
     if (grants.reviewedHead !== state.headSha || !grants.allowTag) return finish("tag-approval", { action: "Supply the reviewed head and explicit --allow-tag authority." });
     // The API creates only an absent ref; it cannot force-update an existing tag.
@@ -311,6 +351,11 @@ export function advance(state, grants, io, save = () => {}) {
         "A newer or unrecognised stable release exists; automatic latest promotion is refused");
     }
     recheckAssets();
+    if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
+      waiting: state.certification.status === "pending", certification: state.certification,
+      action: "Certification changed before publication; reconcile the exact candidate before retrying.",
+    });
+    save(state);
     io.api(`repos/${state.repository}/releases/${state.releaseId}`, {
       tag_name: state.tag, target_commitish: state.mergeSha, name: `Wollipog ${state.tag}`,
       body: notes, prerelease: false, draft: false, make_latest: "true",
@@ -321,6 +366,10 @@ export function advance(state, grants, io, save = () => {}) {
   const latest = io.api(`repos/${state.repository}/releases/latest`);
   check(latest.id === state.releaseId && latest.tag_name === state.tag, "Published release is not the latest stable release; no automatic promotion will be attempted");
   recheckAssets();
+  if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
+    waiting: state.certification.status === "pending", certification: state.certification,
+    action: "Published release recovery requires current exact-candidate certification; no publication mutation was repeated.",
+  });
   return finish("published", { url: release.html_url, commit: state.mergeSha, runId: state.runId });
 }
 
@@ -427,14 +476,16 @@ export async function main(args) {
     check(Number.isFinite(timeout) && timeout > 0 && timeout <= 86400, "Timeout must be between 1 and 86400 seconds");
     const deadline = Date.now() + timeout * 1000;
     const grants = positionals[0] === "status" ? {} : { reviewedHead: values["reviewed-head"], allowTag: values["allow-tag"], allowPublish: values["allow-publish"] };
-    let last;
+    let last, reconcileOnResume = true;
     do {
-      const result = advance(state, grants, io, (next) => saveCheckpoint(checkpoint, next));
+      const result = advance(state, grants, io, (next) => saveCheckpoint(checkpoint, next), { reconcileOnResume });
+      reconcileOnResume = false;
       const encoded = JSON.stringify(result);
       if (encoded !== last) console.log(encoded);
       last = encoded;
-      if (!values.watch || !result.waiting || Date.now() + 30_000 > deadline) return;
-      await sleep(30_000);
+      const pollMs = result.stage === "full-regression-certification" ? 10 * 60_000 : 30_000;
+      if (!values.watch || !result.waiting || Date.now() + pollMs > deadline) return;
+      await sleep(pollMs);
     } while (Date.now() < deadline);
   } finally { unlock(); }
 }

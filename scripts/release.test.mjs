@@ -14,6 +14,10 @@ const state = () => ({ schema: 1, repository: "example/project", version: "0.35.
   branch: "release/v0.35.0", baseSha: base, headSha: head, prNumber: 42, notesPath: notesPath("0.35.0"),
   notesSha256: createHash("sha256").update(notes).digest("hex"), stage: "review" });
 const grants = { reviewedHead: head, allowTag: true, allowPublish: true };
+const certificate = () => ({ schema: "exact-full-regression-v1", repository: "example/project", targetSha: merge,
+  coverageVersion: "rolling-full-v1", status: "certified", reason: null, suiteVersion: "d".repeat(64),
+  observedAt: "2026-10-25T12:00:00Z", runId: 90, attempt: 1, sourceSha: base, mainSha: base,
+  url: "https://github.com/example/project/actions/runs/90/attempts/1" });
 
 /** Inert forge: API mutations update observable state, including a crash after an accepted PATCH. */
 function fixture() {
@@ -24,7 +28,8 @@ function fixture() {
     repository: { full_name: "example/project" }, event: "push", head_branch: "v0.35.0", head_sha: merge };
   const release = { id: 200, tag_name: "v0.35.0", draft: true, prerelease: false };
   let tag = { object: { type: "commit", sha: merge } };
-  const controls = { failVerification: false, crashAfterPublish: false, changedPreparation: false, runs: [run], latestId: 200, previousTag: "v0.34.0" };
+  const controls = { failVerification: false, crashAfterPublish: false, changedPreparation: false, runs: [run], latestId: 200,
+    previousTag: "v0.34.0", certificationStatus: "certified", certificationChecks: 0 };
   const io = {
     api(path, body, method) {
       calls.push({ path, body, method });
@@ -61,6 +66,8 @@ function fixture() {
         ? JSON.stringify({ ...JSON.parse(files[path]), version: "0.0.0-drift" }) : files[path];
     },
     notes() { return notes; },
+    certification() { controls.certificationChecks++; calls.push({ certification: true });
+      return { ...certificate(), status: controls.certificationStatus }; },
     gates() { verifyReleaseJobs({ runId: 100, runAttempt: run.run_attempt, mergeSha: merge }, releaseJobs()); },
     timings() { return { runId: 100, attempt: run.run_attempt, headSha: merge, conclusion: run.conclusion, jobs: [{ conclusion: run.conclusion }] }; },
     verify() { calls.push({ verify: true }); if (controls.failVerification) throw new Error("bad signature or digest"); return () => calls.push({ recheck: true }); },
@@ -239,6 +246,73 @@ test("a rerun starting during final verification invalidates publication", () =>
   f.io.verify = () => { f.run.run_attempt++; f.run.status = "in_progress"; };
   assert.throws(() => advance(state(), grants, f.io), /changed before publication/);
   assert.equal(f.mutations().length, 0);
+});
+
+test("older checkpoints reconcile certification before tagging and cannot reuse cached green", () => {
+  for (const status of ["missing", "pending", "failed", "incompatible", "unknown"]) {
+    const f = fixture(), s = { ...state(), mergeSha: merge, stage: "published", certification: certificate() };
+    f.setTag(null); f.controls.certificationStatus = status;
+    const result = advance(s, grants, f.io, f.save);
+    assert.equal(result.stage, "full-regression-certification");
+    assert.equal(result.waiting, status === "pending");
+    assert.equal(s.certification.status, status);
+    assert.match(result.requestCommand, new RegExp(`candidate_sha=${merge} -f purpose=release$`));
+    assert.equal(f.mutations().length, 0, status);
+    f.controls.certificationStatus = "certified";
+    assert.equal(advance(s, grants, f.io).stage, "tag-created");
+  }
+  const f = fixture(); // Existing schema-1 checkpoints without the new field remain supported.
+  assert.equal(advance(state(), {}, f.io).stage, "publish-approval");
+  assert.ok(f.controls.certificationChecks > 0);
+});
+
+test("mismatched certificate targets and incompatible coverage cannot authorize publication", () => {
+  for (const edit of [{ targetSha: head }, { targetSha: base }, { coverageVersion: "rolling-full-v2" },
+    { schema: "unreviewed-equivalence-v1" }, { runId: null }, { suiteVersion: null }]) {
+    const f = fixture(); f.io.certification = () => ({ ...certificate(), ...edit });
+    assert.throws(() => advance(state(), grants, f.io));
+    assert.equal(f.mutations().length, 0);
+  }
+  assert.throws(() => validateCheckpoint({ ...state(), mergeSha: merge,
+    certification: { ...certificate(), token: "must not be persisted" } }), /Unexpected certification/);
+});
+
+test("full-regression rerun during final asset verification blocks the publication mutation", () => {
+  const f = fixture(), s = state();
+  f.io.verify = () => { f.controls.certificationStatus = "pending"; return () => {}; };
+  assert.equal(advance(s, grants, f.io, f.save).stage, "full-regression-certification");
+  assert.equal(f.controls.certificationChecks, 2);
+  assert.equal(f.saved.at(-1).certification.status, "pending");
+  assert.equal(f.mutations().length, 0);
+});
+
+test("native-build watch reuses observation only within one invocation and rechecks before publication", () => {
+  const f = fixture(), s = state();
+  f.run.status = "in_progress";
+  assert.equal(advance(s, {}, f.io).stage, "native-builds-and-verification");
+  assert.equal(f.controls.certificationChecks, 1);
+  advance(s, {}, f.io, () => {}, { reconcileOnResume: false });
+  assert.equal(f.controls.certificationChecks, 1, "native polling must not exhaust quota by rescanning full proof");
+  f.controls.certificationStatus = "pending";
+  assert.equal(advance(s, {}, f.io).stage, "full-regression-certification", "a new invocation reconciles current evidence");
+  f.controls.certificationStatus = "certified";
+  advance(s, {}, f.io);
+  f.run.status = "completed";
+  f.controls.certificationStatus = "failed";
+  assert.equal(advance(s, grants, f.io, () => {}, { reconcileOnResume: false }).stage, "full-regression-certification");
+  assert.equal(f.mutations().length, 0, "cached watch proof cannot authorize publication");
+});
+
+test("interruption and already-published recovery require fresh proof without repeating publication", () => {
+  const f = fixture(), s = state(); f.controls.crashAfterPublish = true;
+  assert.throws(() => advance(s, grants, f.io, f.save), /lost connection/);
+  const recovered = structuredClone(f.saved.at(-1));
+  f.controls.certificationStatus = "pending";
+  assert.equal(advance(recovered, {}, f.io, f.save).stage, "full-regression-certification");
+  assert.equal(f.mutations().length, 1);
+  f.controls.certificationStatus = "certified";
+  assert.equal(advance(recovered, {}, f.io).stage, "published");
+  assert.equal(f.mutations().length, 1, "accepted publication must not be repeated");
 });
 
 test("last-moment tag changes, changed assets, and newer stable releases block publication", () => {
