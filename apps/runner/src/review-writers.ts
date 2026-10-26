@@ -19,6 +19,7 @@ type WriterEntry = {
   group?: LinuxCgroupGroup;
   digest?: string;
   recoveryReason?: string;
+  exitProven?: boolean;
 };
 const digest = (bytes: string) => createHash("sha256").update(bytes).digest("hex");
 
@@ -29,6 +30,7 @@ export type WriterInspection = {
   state: "current_runner" | "previous_runner" | "unknown_runner";
   containment: "linux-cgroup-v2" | "unavailable";
   sha256?: string;
+  exitProven: boolean;
   recovery: string;
 };
 
@@ -76,7 +78,12 @@ export class ReviewWriterRegistry {
   reconcileRecovered(entryPoint: "startup" | "admission" = "startup"): void {
     const proofs = new Map<string, ReturnType<typeof proveLeaseAbandoned>>();
     for (const [id, entry] of this.entries) {
-      if (!id.startsWith("recovered:")) continue;
+      if (!id.startsWith("recovered:")) {
+        // A sealed driver's successful proof remains valid while a transient boundary read or
+        // a delayed kernel emptiness observation settles. Never infer this from an empty parent.
+        if (entry.exitProven && entry.group) this.retire(id, true);
+        continue;
+      }
       let reason = "legacy_boundary_unavailable", retired = false;
       if (entry.process?.containment?.kind === "linux-cgroup-v2" && entry.runnerPid) {
         const key = JSON.stringify([entry.runnerPid, entry.process]);
@@ -120,6 +127,7 @@ export class ReviewWriterRegistry {
     if (!proven) return false;
     const entry = this.entries.get(id);
     if (!entry) return true;
+    entry.exitProven = true;
     if (entry.group && (!entry.process?.containment || entry.process.containment.kind !== "linux-cgroup-v2" ||
         this.probe?.containment?.(entry.process.containment) !== "empty")) return false;
     if (entry.file) {
@@ -145,10 +153,15 @@ export class ReviewWriterRegistry {
       const bounded = entry.process?.containment?.kind === "linux-cgroup-v2";
       return { recordId: id.replace(/^recovered:/u, "").replace(/\.json$/u, ""), sessionId: entry.sessionId, kind: entry.kind,
         state: current ? "current_runner" : entry.process ? "previous_runner" : "unknown_runner",
-        containment: bounded ? "linux-cgroup-v2" : "unavailable", sha256: entry.digest,
-        recovery: current ? "End this writer's complete process tree; exact exit settlement retires its record." +
+        containment: bounded ? "linux-cgroup-v2" : "unavailable", sha256: entry.digest, exitProven: entry.exitProven === true,
+        recovery: !entry.process || !entry.runnerPid
+          ? "This record lacks verifiable runner identity. Preserve it for independent operator investigation; the legacy retirement command cannot authorize its removal."
+          : current ? (entry.exitProven ? "Tree exit is proven; retry admission to recheck the writer boundary."
+              : "End this writer's complete process tree; exact exit settlement retires its record.") +
             (bounded ? "" : " " + leaseContainmentGuidance(entry.process?.containment))
-          : bounded ? "The recorded writer boundary is still populated or cannot be verified. End its surviving processes and retry boundary reconciliation."
+          : bounded ? entry.recoveryReason === "runner_alive"
+            ? "The recorded previous runner is still alive. End this writer through its owning runner, then retry boundary reconciliation."
+            : "The recorded writer boundary is still populated or cannot be verified. End its surviving processes and retry boundary reconciliation."
             : "Use --state-doctor review-writers inspect, then retire-legacy with the exact record id and SHA-256. " +
               leaseContainmentGuidance(entry.process?.containment),
       };

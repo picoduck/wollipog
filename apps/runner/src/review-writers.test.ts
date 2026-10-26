@@ -104,6 +104,26 @@ test("legacy evidence stays blocked automatically and only explicit exact admin 
   assert.deepEqual(recovered.retireLegacy(row.recordId, row.sha256!), { retired: true, reason: "process_scan" });
 });
 
+test("a proven current writer retries retirement after temporary boundary uncertainty, while unproved writers remain", (t) => {
+  const dir = directory(t);
+  let empty = false;
+  const registry = contained(dir, probe({ containment: () => empty ? "empty" : "unverifiable" }));
+  const proven = registry.acquire("s_proven", "provider");
+  registry.acquire("s_not_proven", "provider");
+  assert.equal(registry.retire(proven, true), false);
+  empty = true;
+  registry.reconcileRecovered("admission");
+  assert.deepEqual(registry.sessions(), ["s_not_proven"]);
+});
+
+test("unknown identity recovery does not promise that legacy administration can retire it", (t) => {
+  const dir = directory(t);
+  writeFileSync(join(dir, "unknown.json"), JSON.stringify({ sessionId: "s_unknown", kind: "provider" }));
+  const row = uncontained(dir).inspect()[0]!;
+  assert.match(row.recovery, /independent operator investigation/);
+  assert.doesNotMatch(row.recovery, /then retire-legacy/);
+});
+
 test("legacy administration reports all blocking identities from the proof's same scan", (t) => {
   const dir = directory(t); uncontained(dir).acquire("s_legacy", "provider");
   const blockers = [{ pid: 42, startTime: "101", command: "provider", reason: "marked" as const },

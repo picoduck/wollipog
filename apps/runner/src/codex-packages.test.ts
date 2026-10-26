@@ -246,8 +246,28 @@ test("refusal lists every current, previous-runner and unknown writer with its m
   const refusal = manager.codexReviewerProtection(f.home).refusal!;
   assert.match(refusal, /session s_previous .*record left by a previous runner process.*--state-doctor review-writers inspect/);
   assert.match(refusal, /session s_unknown .*record with unknown runner identity/);
+  assert.match(refusal, /session s_unknown .*independent operator investigation/);
   assert.match(refusal, /session s_current .*writer of the current runner; complete exit unproven/);
   assert.doesNotMatch(refusal, /protocol|restart.*remove only/i);
+});
+
+test("remote provider launches never claim a native writer boundary they do not enter", posixOnly, (t) => {
+  const f = fixture(t), directory = join(f.root, "writers");
+  const registry = new ReviewWriterRegistry(directory, undefined, { createGroup: () => { throw new Error("must not create a native group"); } });
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setReviewWriterRegistry(registry);
+  t.after(() => manager.shutdownAll());
+  const internal = manager as unknown as {
+    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation, home: string): string | undefined;
+  };
+  for (const backend of ["container", "cloud"] as const) {
+    const token = internal.beginProviderReviewWriter({ sessionId: `s_${backend}`, context: { kind: "native" } } as SessionMeta,
+      { backend } as SpawnIsolation, f.home);
+    assert.ok(token);
+    assert.equal(registry.group(token), undefined);
+  }
+  assert.equal(registry.sessions().length, 2);
+  assert.ok(registry.inspect().every((row) => row.containment === "unavailable"));
 });
 
 test("graceful shutdown retires only exact proven provider writers before restart", posixOnly, async (t) => {

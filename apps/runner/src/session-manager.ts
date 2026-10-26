@@ -2024,7 +2024,7 @@ export class SessionManager {
       if ((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt") &&
           isolation.codexPackageReadOnlyPaths?.includes(packages)) return undefined;
     } catch { /* A missing installation is not proof for a future installation under a live writer. */ }
-    return this.reviewWriters.acquire(meta.sessionId, "provider");
+    return this.reviewWriters.acquire(meta.sessionId, "provider", isolation?.backend !== "container" && isolation?.backend !== "cloud");
   }
 
   private resolveIsolation(...[policy, context, deps, state]: Parameters<typeof resolveExecutionIsolation>) {
@@ -2042,7 +2042,7 @@ export class SessionManager {
     this.reviewWriters.reconcileRecovered("admission");
     const writers = this.reviewWriters.inspect();
     const retaining = writers.map((writer) => `session ${writer.sessionId} (${writer.kind === "agent_tui" ? "Agent TUI" : "provider"}; ${
-      writer.state === "current_runner" ? "writer of the current runner; complete exit unproven"
+      writer.state === "current_runner" ? `writer of the current runner; ${writer.exitProven ? "tree exit proven, awaiting boundary emptiness" : "complete exit unproven"}`
         : writer.state === "previous_runner" ? "record left by a previous runner process" : "record with unknown runner identity"
     }; record ${writer.recordId}). ${writer.recovery}`);
     const packages = join(home, ".codex", "packages");

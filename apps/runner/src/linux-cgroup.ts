@@ -444,9 +444,11 @@ export function spawnWithLinuxCgroup(command: string, args: string[], options: S
   const launch = group ? prepareLaunchIn(group.mount) : prepareLinuxCgroupLaunch();
   if (!launch) return { child: spawn(command, args, { ...options, stdio }) };
   try {
-    const child = spawn(launch.helper, ["--exec", command, ...args], {
+    // Only selecting the launch belongs to the writer context. ProcessWrap/Pipe resources must
+    // be created outside it: their later callbacks can schedule turns for unrelated sessions.
+    const child = launchGroup.exit(() => spawn(launch.helper, ["--exec", command, ...args], {
       ...options, shell: false, stdio: [...stdio, launch.directoryFd, "pipe", "pipe"],
-    }) as ChildProcessWithoutNullStreams;
+    })) as ChildProcessWithoutNullStreams;
     launch.boundary.bind(child);
     // Node's declaration enumerates only fds 0..4, although spawn accepts additional pipes.
     const errors = (child.stdio as unknown[])[5] as Readable;

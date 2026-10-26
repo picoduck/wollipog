@@ -13,12 +13,18 @@ the record only if the parent is empty. A later runner automatically retires it 
 recorded runner gone and the exact parent empty, or the recorded enclosing unit removed. A reboot
 also proves contained processes gone. Unrelated unreadable processes do not participate in this
 proof. The parent stays present until its record is retired, including interrupted launches.
+If live tree exit is already proven but a boundary read is temporarily unverifiable, admission
+retries that retirement without requiring a runner restart. An empty boundary alone never grants
+that live proof. Process callback handles do not inherit the writer launch context, so another
+session scheduled from a writer's output or exit callback gets its own launch boundary.
 
 Run the runner in an operator-configured `Delegate=yes` unit for future boundary recovery. The
 runner never creates systemd scopes or moves itself into another delegation. Without delegation,
 or on macOS/WSL, it preserves conservative process-tree proof and records why containment is
 unavailable. Restart and age never clear uncontained legacy evidence automatically. Deliberate
 same-user migration out of a cgroup is outside this lifecycle proof's threat model.
+Container/cloud launches do not enter native provider cgroups and therefore retain uncontained
+evidence rather than claiming an empty native boundary as proof for their remote process trees.
 
 ## Legacy Records
 

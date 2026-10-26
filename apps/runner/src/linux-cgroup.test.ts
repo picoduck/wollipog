@@ -302,6 +302,35 @@ test("real writer parents contain async probes and retire on live exit and runne
   // The read-only recovery retires the record; the enclosing test unit owns empty-directory cleanup.
 });
 
+for (const retireFirst of [false, true]) test(`writer callbacks do not lend ${retireFirst ? "retired" : "live"} cgroup context to unrelated sessions`, { skip: process.platform !== "linux" }, async (t) => {
+  if (!requireContainment(t)) return;
+  const directory = mkdtempSync(join(tmpdir(), "wollipog-writer-context-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const registry = new ReviewWriterRegistry(directory), token = registry.acquire("s_a", "provider");
+  const group = registry.group(token)!, ledger = new ProviderProcessLedger({ cgroup: group });
+  const child = ledger.launch(spawnAgent, { command: process.execPath, args: ["-e", ""], cwd: directory, descendantOwner: ledger.owner });
+  const member = await new Promise<string>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", async () => {
+      try {
+        if (retireFirst) {
+          assert.equal(await ledger.prove({ terminate: true }), true);
+          assert.equal(registry.retire(token, true), true);
+        }
+        const unrelated = new ProviderProcessLedger();
+        const other = unrelated.launch(spawnAgent, { command: process.execPath,
+          args: ["-e", "process.stdout.write(require('node:fs').readFileSync('/proc/self/cgroup','utf8'))"], cwd: directory });
+        let output = ""; other.stdout.on("data", (chunk) => { output += String(chunk); });
+        other.once("error", reject);
+        other.once("close", () => { void unrelated.prove({ terminate: true }).then(() => resolve(output), reject); });
+      } catch (error) { reject(error); }
+    });
+  });
+  assert.equal(await ledger.prove({ terminate: true }), true);
+  assert.equal(registry.retire(token, true), true);
+  assert.ok(!member.includes(`/${group.identity.cgroupPath}/`), member);
+});
+
 test("successful preparation clears a transient boundary-creation failure", { skip: process.platform !== "linux" }, (t) => {
   if (!requireContainment(t)) return;
   const original = fs.mkdirSync;
