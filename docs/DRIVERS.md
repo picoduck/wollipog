@@ -500,12 +500,25 @@ The lifetime policy is quiescence-aware and fail-safe:
   would hold are someone else's. See Queue Holds in [agent-control.md](agent-control.md).
 - Claude reports a stopped task as a `task_updated` patch to `killed`, then a `stopped`
   `task_notification`. It sends the same pair when the runner stops the task, when the model stops
-  it with its own `TaskStop` tool, and when Claude kills every task because its stdin closed. Only
-  the first two end the job. A model stop counts when its report arrives while that `TaskStop` call
+  it with its own `TaskStop` tool, and when Claude kills every task because its stdin closed.
+  A provider-initiated `killed` patch also ends a shell job (including an unclassified job moved
+  to the background after a foreground timeout) while its persistent transport's stdin is still
+  open. An explicitly classified shell job's `stopped` notification is sufficient at that same
+  live boundary. Both provider and tool-use identities are tombstoned so trailing notifications,
+  repeated launch results and markerless output files cannot revive it (#3204).
+  A model stop counts when its report arrives while that `TaskStop` call
   naming the task has not yet returned. The job is recorded as `killed`, not runner-ended, and
   tombstoned like the jobs above, so the trailing `stopped` report and a restart's receipt read
-  cannot revive it. A stdin-close kill, or any other unrequested report, leaves the job pending for
-  orphan recovery. A report that carries out a runner stop already answered `unconfirmed` is marked
+  cannot revive it. A stdin-close kill, an unrequested agent/workflow kill, or an ambiguous
+  `stopped` report for an unclassified task leaves the job pending for orphan recovery.
+  A successful recovery turn that does not re-observe a seeded task records that task as killed
+  without another continuation, rather than leaving an unfinished durable row. A live re-observed
+  task stays pending. Historical `stopped` text alone remains insufficient proof of termination.
+  Before returning an unconfirmed single-job stop, the driver inspects that job's durable terminal
+  receipts. A receipt settles it as already finished with its actual terminal status, without
+  attributing a stop to the requester. A concurrent live report or transport replacement invalidates
+  that read; a bare successful `stop_task` response still proves nothing.
+  A report that carries out a runner stop already answered `unconfirmed` is marked
   `stopConfirmedLate`, so the job keeps the actor who asked (#1849); while a model `TaskStop` call
   naming the task is outstanding, that call counts as the cause and no actor is recorded.
   When the report arrives in the provider turn that made the `TaskStop` call, the model already
