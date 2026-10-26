@@ -16,6 +16,15 @@ test("the admin parser rejects ambiguous targets and requires an exact inspected
   assert.equal(parseReviewWriterDoctorArgs(["inspect", "--data-dir", "/tmp"]).command, "inspect");
 });
 
+test("legacy retirement refuses a scan under a different OS user before reading records", { skip: process.getuid === undefined }, (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-writer-owner-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const uid = process.getuid!();
+  t.mock.method(process as NodeJS.Process & { getuid(): number }, "getuid", () => uid + 1);
+  assert.throws(() => runReviewWriterDoctor({ command: "retire-legacy", dataDir: dir,
+    recordId: "record", sha256: "a".repeat(64) }, () => {}), /OS user who owns/);
+});
+
 test("the admin command inspects without retiring, reports every blocker, and retires only exact proven legacy evidence", { skip: process.getuid === undefined }, (t) => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-writer-doctor-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
