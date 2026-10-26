@@ -108,8 +108,10 @@ export class LinuxCgroupBoundary {
   }
 
   private finish(): boolean {
-    // populated=0 is recursive, unlike cgroup.procs, and cannot miss a child cgroup. A failed
-    // rmdir (e.g. retained empty child cgroups) keeps the identity available but not the fd.
+    // populated=0 is recursive, unlike cgroup.procs, and cannot miss a child cgroup. Exiting
+    // tasks have passed user-code execution but may not yet show Z in procfs: cgroup_exit()
+    // precedes exit_notify(). See docs/linux-cgroup-exit-proof.md. A failed rmdir (e.g. retained
+    // empty child cgroups) keeps the identity available but not the fd.
     try { this.io.remove(); } catch { /* empty boundary retained for later recovery */ }
     this.removed = true;
     this.io.close();
