@@ -139,7 +139,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `VideoIcon` | Lucide | `Film` | A video artifact's kind tile in the Browser (#2854). |
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
-| `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
 | `CodeIcon` | Lucide | `Code` | Generic code destination; Markdown's Source in a narrow Files panel (#2913). |
 | `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |
 | `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
@@ -154,8 +153,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning, and Settings › Behavior, which holds each agent's default model and effort. |
-| `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
-| `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
 | `ServerIcon` | Lucide | `Server` | A machine reached over SSH: a project location row's leading icon (#2961). |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
