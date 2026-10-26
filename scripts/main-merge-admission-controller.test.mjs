@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import fc from "fast-check";
 import { ADMISSION_CONTEXT, authorizedRepair, failureFingerprint, main, planAdmissionCycle, planRollback,
-  readAdmissionEntries, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
+  readAdmissionEntries, rebuildAdmissionCycle, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
 import { repairDigest } from "./main-merge-repair.mjs";
 
 const repository = "example/project", base = "a".repeat(40), head = "b".repeat(40), group = "c".repeat(40);
@@ -128,7 +129,7 @@ test("forged, truncated and changing queue listings never form a complete census
   }
 });
 
-test("writer refuses by default and rebuilt evidence is mandatory for each exact target", async () => {
+test("writer refuses by default and rebuilt evidence is mandatory for the complete exact target set", async () => {
   const plan = await cycle();
   assert.deepEqual(await writeAdmissionPlan(plan, { api: () => assert.fail("default denies writes") }), { mode: "disabled", writes: 0 });
   const configuration = { enabled: true, repository, context: ADMISSION_CONTEXT };
@@ -139,8 +140,8 @@ test("writer refuses by default and rebuilt evidence is mandatory for each exact
     return { id: writes, context: body.context, state: body.state }; };
   api.rateLimit = { limit: 5000, remaining: 4900 };
   const result = await writeAdmissionPlan(plan, { configuration, api, now: () => at(12),
-    revalidate: async e => { rebuilds++; assert.deepEqual(e, entry()); return cycle({ health: red(), now: at(12) }); } });
-  assert.deepEqual(result, { mode: "operator-enabled", writes: 1 }); assert.equal(rebuilds, 1);
+    revalidate: async e => { rebuilds++; assert.deepEqual(e, { repository }); return cycle({ health: red(), now: at(12) }); } });
+  assert.equal(result.mode, "operator-enabled"); assert.equal(result.writes, 1); assert.equal(rebuilds, 1);
   for (const fresh of [await cycle({ now: at(0) }), { ...plan, censusComplete: false },
     { ...plan, decisions: [{ ...plan.decisions[0], entry: { ...entry(), headSha: group } }] },
     { ...plan, decisions: [{ ...plan.decisions[0], expiresAt: at(12) }] }]) {
@@ -175,4 +176,151 @@ test("the CLI has no enabled mode and cannot construct a status-writing capabili
   for (const value of [undefined, "", "disabled", "enabled", "enforce", "Dry-Run"]) {
     assert.equal(await main({ env: { MAIN_MERGE_ADMISSION_CONTROLLER: value }, api: () => assert.fail("off must do no work") }), 0);
   }
+});
+
+// The old per-target rebuild spends 37 reads repeatedly and fails after two
+// writes. This exercises the actual adapter with the same expensive callback.
+function batch(count) {
+  const c = census();
+  c.entries = Array.from({ length: count }, (_, i) => ({ ...entry(), pullRequest: i + 1,
+    integrationSha: (i + 1).toString(16).padStart(40, "0"),
+    members: [{ pullRequest: i + 1, headSha: head }] }));
+  return c;
+}
+function inertApi(limit = 5000, remaining = limit) {
+  const statuses = [];
+  const api = async (path, { body } = {}) => {
+    api.rateLimit.remaining--;
+    if (path.includes("/statuses/")) {
+      statuses.push({ path, body });
+      return { id: statuses.length, context: body.context, state: body.state };
+    }
+    return {};
+  };
+  api.rateLimit = { limit, remaining };
+  return { api, statuses };
+}
+const enabled = { enabled: true, repository, context: ADMISSION_CONTEXT };
+
+test("one independent rebuild covers all 45 holds inside the unchanged 96-call budget", async () => {
+  const plan = await cycle({ census: batch(45), health: red() });
+  const { api, statuses } = inertApi();
+  let rebuilds = 0;
+  const result = await writeAdmissionPlan(plan, { configuration: enabled, api, now: () => at(12),
+    revalidate: async (_request, { api: bounded }) => {
+      rebuilds++;
+      for (let i = 0; i < 37; i++) await bounded(`/inert-health-read/${i}`);
+      return plan;
+    } });
+  assert.equal(rebuilds, 1);
+  assert.equal(statuses.length, 45);
+  assert.ok(statuses.every(s => s.body.state === "failure"));
+  assert.equal(result.writes, 45);
+  assert.equal(result.apiBudget.calls, 83); // 1 quota + 37 rebuild + 45 status
+  assert.equal(result.apiBudget.limit, 96);
+});
+
+test("budget/quota arithmetic admits the entire batch or refuses before every status write", async () => {
+  await fc.assert(fc.asyncProperty(fc.record({ count: fc.integer({ min: 0, max: 100 }),
+    reads: fc.integer({ min: 0, max: 40 }), large: fc.boolean(), headroom: fc.integer({ min: 0, max: 110 }) }),
+  async ({ count, reads, large, headroom }) => {
+    const limit = large ? 5000 : 1000, floor = Math.ceil(limit * 0.6), callLimit = large ? 96 : 48;
+    const plan = await cycle({ census: batch(count), health: red() });
+    const { api, statuses } = inertApi(limit, floor + reads + 1 + headroom);
+    const available = Math.min(callLimit - reads - 1, headroom);
+    let rebuilds = 0;
+    const operation = writeAdmissionPlan(plan, { configuration: enabled, api, now: () => at(12),
+      revalidate: async (_request, { api: bounded }) => {
+        rebuilds++;
+        for (let i = 0; i < reads; i++) await bounded(`/inert-read/${i}`);
+        return plan;
+      } });
+    if (count <= available) {
+      const result = await operation;
+      assert.equal(result.writes, count);
+      assert.equal(result.apiBudget.calls, reads + 1 + count);
+      assert.equal(result.capacity.writesAvailable, available);
+    } else {
+      await assert.rejects(operation, e => {
+        assert.equal(e.writes, 0);
+        assert.equal(e.capacity.shortfall, count - available);
+        assert.equal(e.capacity.callsUsed, reads + 1);
+        assert.equal(e.capacity.callLimit, callLimit);
+        assert.equal(e.apiBudget.calls, reads + 1);
+        return true;
+      });
+    }
+    assert.equal(rebuilds, 1);
+    assert.equal(statuses.length, count <= available ? count : 0);
+  }), { numRuns: 100, examples: [[{ count: 45, reads: 37, large: true, headroom: 100 }],
+    [{ count: 45, reads: 37, large: false, headroom: 100 }]] });
+});
+
+test("late target changes, missing/additional targets and duplicates reject the entire batch", async () => {
+  const plan = await cycle({ census: batch(3) });
+  for (const edit of [p => { p.decisions[2].entry.headSha = group; }, p => { p.decisions.pop(); },
+    p => { p.decisions.push(p.decisions[0]); }, p => { p.decisions[2] = p.decisions[0]; },
+    p => { p.decisions[2].context = "other"; }, p => { p.decisions[2].expiresAt = at(12); }]) {
+    const fresh = structuredClone(plan); edit(fresh);
+    const { api, statuses } = inertApi();
+    await assert.rejects(writeAdmissionPlan(plan, { configuration: enabled, api, now: () => at(12), revalidate: async () => fresh }));
+    assert.equal(statuses.length, 0);
+  }
+});
+
+test("a shared rebuild cannot lend an expired grant or observation to later writes", async () => {
+  for (const boundary of ["grant", "cycle"]) {
+    const plan = await cycle({ census: batch(3) });
+    if (boundary === "grant") plan.decisions[1].expiresAt = at(13);
+    const { api: transport, statuses } = inertApi();
+    let clock = at(12);
+    const api = async (...args) => {
+      const result = await transport(...args);
+      if (statuses.length === 1) clock = boundary === "grant" ? at(13) : at(71);
+      return result;
+    };
+    Object.defineProperty(api, "rateLimit", { get: () => transport.rateLimit });
+    const audit = [];
+    await assert.rejects(writeAdmissionPlan(plan, { configuration: enabled, api, now: () => clock,
+      revalidate: async () => plan, log: line => audit.push(JSON.parse(line)) }), e => e.writes === 1);
+    assert.equal(statuses.length, 1);
+    assert.equal(audit.at(-1).complete, false);
+    assert.equal(audit.at(-1).writes, 1);
+  }
+});
+
+test("shared live rebuild performs one health report then one complete census, retaining failure evidence", async () => {
+  let reports = 0, queries = 0;
+  const report = async (argv, options) => {
+    reports++;
+    assert.deepEqual(argv, ["report"]);
+    assert.equal(options.env.GITHUB_REF, "refs/heads/main");
+    await options.api("/inert-health");
+    options.log(JSON.stringify(red())); return 0;
+  };
+  let mainSha = base;
+  const api = async path => {
+    if (path === "/inert-health") return {};
+    assert.equal(path, "/graphql"); queries++;
+    assert.equal(reports, queries, "one independent health rebuild precedes each census");
+    return { data: { repository: { defaultBranchRef: { name: "main", target: { oid: mainSha } },
+      pullRequests: { pageInfo: { hasNextPage: false }, nodes: [{ number: 42, isDraft: false,
+        headRefOid: head, baseRefOid: mainSha, mergeQueueEntry: null }] } } } };
+  };
+  const options = { repository, api, report, control: control(), now: () => at(11) };
+  const failed = await rebuildAdmissionCycle(options);
+  assert.equal(failed.decisions[0].state, "failure"); assert.equal(failed.decisions[0].plannedBlockLatencyMs, 1000);
+  assert.equal(reports, 1); assert.equal(queries, 1);
+  mainSha = group;
+  const moved = await rebuildAdmissionCycle(options);
+  assert.ok(moved.reasons.includes("main-observation-changed"));
+  assert.equal(moved.decisions[0].state, "failure");
+  assert.equal(reports, 2); assert.equal(queries, 2);
+  const unavailable = await rebuildAdmissionCycle({ ...options, report: async (_args, { log }) => {
+    log(JSON.stringify(health())); return 1;
+  }, api: async () => ({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: base } },
+    pullRequests: { pageInfo: { hasNextPage: false }, nodes: [{ number: 42, isDraft: false,
+      headRefOid: head, baseRefOid: base, mergeQueueEntry: null }] } } } }) });
+  assert.equal(unavailable.healthSummary.status, "unknown");
+  assert.equal(unavailable.decisions[0].state, "failure", "nonzero report cannot lend a passing projection");
 });

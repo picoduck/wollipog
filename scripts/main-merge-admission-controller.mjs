@@ -1,9 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { pathToFileURL } from "node:url";
 import { writeFileSync } from "node:fs";
-import { evaluateAdmission, observeAdmission, POLICY } from "./main-merge-admission.mjs";
+import { evaluateAdmission, POLICY } from "./main-merge-admission.mjs";
 import { repairRecovery, repairDigest } from "./main-merge-repair.mjs";
-import { budgetApi, githubApi } from "./main-ci-health.mjs";
+import { budgetApi, githubApi, main as healthReport } from "./main-ci-health.mjs";
 
 export const ADMISSION_CONTEXT = "Regression Admission";
 export const CONTROLLER = Object.freeze({ maxEntries: 100, maxCycleAgeMs: 60_000, reevaluateMs: 60_000 });
@@ -176,64 +176,124 @@ export function planRollback({ repository, fullQueueProof, operatorApproval } = 
       ["Keep the hold", "Obtain separate operator hold-removal approval"] };
 }
 
-/** Code-only adapter: default DENY. No workflow grants it status-writing scope.
- * The future operator must supply configuration and a fresh independent rebuild
- * for EACH exact target. Serialized artifacts never authorize a success.
+/** One independent health rebuild followed by one complete exact census. The
+ * health observer re-pins main itself; any main/census mismatch plans holds.
+ * The caller owns the single outer budget, including report and census reads.
+ */
+export async function rebuildAdmissionCycle({ repository, api, env = process.env, report = healthReport,
+  error = console.error, now = () => new Date().toISOString(), ...options } = {}) {
+  let health = null, census;
+  try {
+    const result = await report(["report"], { env: { ...env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main" },
+      api, log: line => { health = JSON.parse(line); }, error });
+    if (result !== 0) health = { ...health, status: "unknown", reasons: ["health-report-unavailable"] };
+    census = await readAdmissionEntries(api, repository);
+  } catch { census = { repository, complete: false, entries: [] }; }
+  return planAdmissionCycle({ ...options, repository, census, health, now: now() });
+}
+
+/** Code-only adapter: default DENY. No workflow grants status-writing scope.
+ * A trusted operator callback rebuilds the WHOLE cycle once using this budget.
+ * Serialized input supplies target identities only, never success authority.
  */
 export async function writeAdmissionPlan(plan, { configuration, api, revalidate, now = () => new Date().toISOString(), log = () => {} } = {}) {
   if (configuration?.enabled !== true) return { mode: "disabled", writes: 0 };
   if (!REPOSITORY.test(configuration.repository ?? "") || configuration.repository !== plan?.repository ||
       configuration.context !== ADMISSION_CONTEXT || typeof revalidate !== "function" || typeof api !== "function" ||
       !Array.isArray(plan?.decisions) || plan.decisions.length > CONTROLLER.maxEntries) throw new Error("Writer configuration unavailable");
-  // One quota-sized budget covers the writer and revalidation callbacks. The
-  // operator must use the supplied API in those callbacks, never a second token.
+  const requested = structuredClone(plan.decisions);
+  // One quota-sized budget covers the independent rebuild, census and ALL writes.
   const writerApi = budgetApi(api, { reserve: 0, requireHeaders: true });
-  await writerApi("/rate_limit");
-  let writes = 0;
-  for (const requested of structuredClone(plan.decisions)) {
-    if (!SHA.test(requested.targetSha ?? "")) throw new Error("Writer target unavailable");
-    const fresh = await revalidate(structuredClone(requested.entry), { api: writerApi });
-    const checked = Date.parse(now());
-    if (!Number.isFinite(checked) || fresh?.repository !== configuration.repository || fresh?.censusComplete !== true ||
-        !date(fresh.evaluatedAt) || Date.parse(fresh.evaluatedAt) > checked ||
-        checked - Date.parse(fresh.evaluatedAt) >= CONTROLLER.maxCycleAgeMs) throw new Error("Writer revalidation unavailable");
-    const current = fresh.decisions?.find(d => d.targetSha === requested.targetSha && hash(d.entry) === hash(requested.entry));
-    if (!current || !["success", "failure"].includes(current.state) || current.context !== ADMISSION_CONTEXT ||
-        current.state === "success" && (!date(current.expiresAt) || Date.parse(current.expiresAt) <= checked))
-      throw new Error("Writer evidence expired or changed");
-    const result = await writerApi(`/repos/${configuration.repository}/statuses/${current.targetSha}`, { method: "POST", body: {
-      state: current.state, context: ADMISSION_CONTEXT,
-      description: current.state === "failure" ? "Regression health hold; inspect the admission audit" :
-        current.repair ? "Exact repair exception; normal merge authority still required" : "Fresh regression admission decision",
-    } });
-    if (!positive(result?.id) || result.context !== ADMISSION_CONTEXT || result.state !== current.state)
-      throw new Error("Writer receipt unavailable");
-    writes++;
-    log(JSON.stringify({ event: "main_merge_admission_status_written", entryPoint: fresh.entryPoint,
-      observationId: fresh.observationId, repository: configuration.repository, targetSha: current.targetSha,
-      state: current.state, decision: current.decision, expiresAt: current.expiresAt, statusId: result.id,
-      apiCalls: writerApi.budget.calls }));
+  let writes = 0, attemptedWrites = 0, capacity, fresh, lastReceiptAt = null, lastPlannedBlockLatencyMs = null;
+  try {
+    await writerApi("/rate_limit");
+    fresh = structuredClone(await revalidate({ repository: configuration.repository }, { api: writerApi }));
+    const checkTime = () => {
+      const checked = Date.parse(now());
+      if (!Number.isFinite(checked) || fresh?.repository !== configuration.repository || fresh?.censusComplete !== true ||
+          !date(fresh.evaluatedAt) || Date.parse(fresh.evaluatedAt) > checked ||
+          checked - Date.parse(fresh.evaluatedAt) >= CONTROLLER.maxCycleAgeMs) throw new Error("Writer revalidation unavailable");
+      return checked;
+    };
+    const checked = checkTime();
+    if (!Array.isArray(fresh.decisions) || fresh.decisions.length !== requested.length)
+      throw new Error("Writer target census changed");
+    // Validate the ENTIRE batch before the first write; no changed head, newly
+    // discovered target or late malformed decision may leave a partial pass.
+    const identities = new Map();
+    for (const d of requested) {
+      if (!validEntry(d.entry) || d.entry.repository !== configuration.repository || d.targetSha !== target(d.entry) ||
+          identities.has(d.targetSha)) throw new Error("Writer target unavailable or duplicated");
+      identities.set(d.targetSha, hash(d.entry));
+    }
+    const seen = new Set();
+    for (const d of fresh.decisions) {
+      if (!validEntry(d.entry) || d.entry.repository !== configuration.repository || d.targetSha !== target(d.entry) ||
+          !identities.has(d.targetSha) || identities.get(d.targetSha) !== hash(d.entry) || seen.has(d.targetSha) ||
+          !["success", "failure"].includes(d.state) || d.context !== ADMISSION_CONTEXT ||
+          d.state === "success" && (!date(d.expiresAt) || Date.parse(d.expiresAt) <= checked))
+        throw new Error("Writer evidence expired or changed");
+      seen.add(d.targetSha);
+    }
+    const usage = writerApi.budget;
+    capacity = { plannedWrites: fresh.decisions.length, callsUsed: usage.calls, callLimit: usage.limit,
+      callsAvailable: usage.limit - usage.calls, restRemaining: usage.rateRemaining, remainingFloor: usage.remainingFloor,
+      quotaAvailable: usage.rateRemaining - usage.remainingFloor };
+    capacity.writesAvailable = Math.max(0, Math.min(capacity.callsAvailable, capacity.quotaAvailable));
+    capacity.shortfall = Math.max(0, capacity.plannedWrites - capacity.writesAvailable);
+    if (capacity.shortfall) throw new Error("Writer complete batch exceeds remaining budget");
+    for (const current of fresh.decisions) {
+      const checked = checkTime();
+      if (current.state === "success" && Date.parse(current.expiresAt) <= checked)
+        throw new Error("Writer evidence expired or changed");
+      attemptedWrites++;
+      const result = await writerApi(`/repos/${configuration.repository}/statuses/${current.targetSha}`, { method: "POST", body: {
+        state: current.state, context: ADMISSION_CONTEXT,
+        description: current.state === "failure" ? "Regression health hold; inspect the admission audit" :
+          current.repair ? "Exact repair exception; normal merge authority still required" : "Fresh regression admission decision",
+      } });
+      if (!positive(result?.id) || result.context !== ADMISSION_CONTEXT || result.state !== current.state)
+        throw new Error("Writer receipt unavailable");
+      writes++;
+      const received = Date.parse(now());
+      if (!Number.isFinite(received) || received < checked) throw new Error("Writer receipt clock unavailable");
+      lastReceiptAt = new Date(received).toISOString();
+      const plannedBlockLatencyMs = current.state === "failure" && Number.isFinite(current.plannedBlockLatencyMs)
+        ? current.plannedBlockLatencyMs + received - Date.parse(fresh.evaluatedAt) : null;
+      if (plannedBlockLatencyMs !== null) lastPlannedBlockLatencyMs = Math.max(lastPlannedBlockLatencyMs ?? 0, plannedBlockLatencyMs);
+      log(JSON.stringify({ event: "main_merge_admission_status_written", entryPoint: fresh.entryPoint,
+        observationId: fresh.observationId, repository: configuration.repository, targetSha: current.targetSha,
+        state: current.state, decision: current.decision, expiresAt: current.expiresAt, statusId: result.id,
+        receivedAt: lastReceiptAt, plannedBlockLatencyMs, apiCalls: writerApi.budget.calls }));
+    }
+    return { mode: "operator-enabled", writes, attemptedWrites, complete: true, capacity, apiBudget: { ...writerApi.budget },
+      lastReceiptAt, lastPlannedBlockLatencyMs };
+  } catch (cause) {
+    const failure = { event: "main_merge_admission_batch_incomplete", repository: configuration.repository,
+      writes, attemptedWrites, plannedWrites: requested.length, complete: false,
+      reason: writerApi.budget.reason ?? (capacity?.shortfall ? "complete-batch-capacity-shortfall" : "revalidation-or-delivery-unavailable"), capacity: capacity ?? null, apiBudget: { ...writerApi.budget } };
+    log(JSON.stringify(failure));
+    // A prior success is sticky even on a zero-write budget refusal. Never call
+    // this enforcement success or retry with another token; reconcile explicitly.
+    throw Object.assign(new Error("Admission batch incomplete", { cause }), failure);
   }
-  return { mode: "operator-enabled", writes };
 }
 
 export async function main({ env = process.env, api, log = console.log, error = console.error } = {}) {
   if (env.MAIN_MERGE_ADMISSION_CONTROLLER !== "dry-run") return 0;
   const repository = env.GITHUB_REPOSITORY, observationId = randomUUID(), entryPoint = env.GITHUB_EVENT_NAME ?? "cli";
-  let census, health, bounded;
+  let bounded, plan;
   try {
     if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN) throw new Error("Environment unavailable");
     bounded = budgetApi(api ?? githubApi(env.GITHUB_TOKEN), { reserve: 0, requireHeaders: !api });
     await bounded("/rate_limit");
-    census = await readAdmissionEntries(bounded, repository);
-    const report = await observeAdmission({ integration: { repository, kind: "merge_group", baseSha: census.mainSha,
-      integrationSha: census.mainSha }, env, api: bounded, error });
-    health = report.healthReport;
-    const final = await readAdmissionEntries(bounded, repository);
-    if (final.mainSha !== census.mainSha || final.fingerprint !== census.fingerprint) census.complete = false;
-  } catch { census = { repository, complete: false, entries: [] }; }
-  // No operator control-state provider, authority or writer is configured in the CLI.
-  const plan = await planAdmissionCycle({ repository, census, health, control: { available: false }, observationId, entryPoint });
+    // No authority or writer is configured. Missing control state always holds.
+    plan = await rebuildAdmissionCycle({ repository, api: bounded, env, error,
+      control: { available: false }, observationId, entryPoint });
+  } catch {
+    plan = await planAdmissionCycle({ repository, census: { repository, complete: false, entries: [] },
+      control: { available: false }, observationId, entryPoint });
+  }
   if (bounded) plan.apiBudget = { ...bounded.budget };
   if (env.MAIN_MERGE_ADMISSION_OUTPUT) writeFileSync(env.MAIN_MERGE_ADMISSION_OUTPUT, JSON.stringify(plan, null, 2) + "\n");
   log(JSON.stringify({ event: "main_merge_admission_cycle_planned", ...plan }));
