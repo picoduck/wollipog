@@ -93,7 +93,7 @@ export async function selectCandidate(repository, health, api, now) {
   const candidate = { runId: failure.runId, attempt: failure.attempt, testedSha: failure.testedSha,
     suiteVersion: failure.suiteVersion, passingSha: 'none', observedAt: now };
   if (!validCandidate(candidate)) fail('invalid-failure-evidence');
-  const passes = health.evidence.filter(r => r.certification === 'full' && r.result === 'passing' &&
+  const passes = currentPasses(health).filter(r =>
     r.suiteVersion === failure.suiteVersion && r.testedSha !== failure.testedSha && r.runId < failure.runId)
     .sort((a, b) => b.runId - a.runId);
   if (passes.length > 8) fail('comparison-budget-exhausted');
@@ -103,6 +103,31 @@ export async function selectCandidate(repository, health, api, now) {
     if (comparison?.merge_base_commit?.sha === pass.testedSha) { candidate.passingSha = pass.testedSha; break; }
   }
   return candidate;
+}
+
+function currentPasses(health) {
+  return health.evidence.filter(r => r.certification === 'full' && r.result === 'passing' &&
+    !health.evidence.some(other => other.testedSha === r.testedSha && other.result !== 'non-verdict' &&
+      (other.runId > r.runId || other.runId === r.runId && other.attempt > r.attempt)) &&
+    !(health.legacyEvidence ?? []).some(other => other.testedSha === r.testedSha &&
+      other.result === 'failing' && other.runId > r.runId));
+}
+
+/** Persisted coordination fields never supply their own forge verdict. Revalidate before every send. */
+export async function verifyIntent(repository, intent, health, api) {
+  const record = health.evidence.find(r => r.runId === intent.runId && r.attempt === intent.attempt &&
+    r.testedSha === intent.testedSha && r.suiteVersion === intent.suiteVersion &&
+    r.source === 'rolling-full' && r.result === 'failing' && r.workflowPath === WORKER &&
+    r.workflowAncestryVerified && r.targetAncestryVerified);
+  if (!record || health.repository !== repository || health.status === 'unknown') return false;
+  if (intent.passingSha !== 'none') {
+    const pass = currentPasses(health).find(r => r.testedSha === intent.passingSha &&
+      r.suiteVersion === intent.suiteVersion && r.runId < intent.runId);
+    if (!pass) return false;
+    const comparison = await api(`/repos/${repository}/compare/${intent.passingSha}...${intent.testedSha}?per_page=1`);
+    if (comparison?.merge_base_commit?.sha !== intent.passingSha) return false;
+  }
+  return true;
 }
 
 export function deliveryBody(repository, candidate) {
@@ -122,6 +147,7 @@ export function signDelivery(body, triggerId, secret, now, nonce = randomBytes(1
 /** Called before any send. Same-SHA/suite infrastructure reruns cannot buy another investigation. */
 export function plan(state, candidate, now) {
   const next = structuredClone(state);
+  if (next.blocked) return { next, reason: next.blocked };
   let reason = 'no-regression';
   if (candidate) {
     if (next.seen.includes(key(candidate))) reason = 'duplicate-or-rerun-suppressed';
@@ -198,7 +224,8 @@ export async function reconcile(repository, { api, control, config, now = Date.n
   collect = collectHealth, dryRun = true, log = () => {} } = {}) {
   let previous = await readState(api, repository);
   const healthHints = await readHealthState(api, repository);
-  const health = await collect(repository, { api, pointers: healthHints.pointers });
+  const health = await collect(repository, { api, pointers: [...new Set([...healthHints.pointers,
+    ...[previous.value.active?.runId, previous.value.pending?.runId].filter(positive)])] });
   const candidate = await selectCandidate(repository, health, api, now());
   const decision = plan(previous.value, candidate, now());
   let state = decision.next;
@@ -233,12 +260,15 @@ export async function reconcile(repository, { api, control, config, now = Date.n
         execution.idempotencyKey !== `trigger:${config.triggerId}:main-regression:${a.runId}:${a.attempt}`)
       fail('execution-provenance-unavailable');
     if (terminal.has(execution.status)) {
-      state.active = null; await save();
+      state.active = null;
+      if (state.blocked === 'elapsed-exhausted') state.blocked = null;
+      await save();
       return report(`investigation-${execution.status}`);
     }
     if (now() - a.createdAt >= LIMITS.elapsedMs) {
-      state.blocked = 'elapsed-exhausted';
-      if (a.stopTries >= 3 || !ID.test(execution.sessionId ?? '')) { await save(); return report('elapsed-exhausted-operator-required'); }
+      if (a.stopTries >= 3 || !ID.test(execution.sessionId ?? '')) {
+        state.blocked = 'elapsed-exhausted'; await save(); return report('elapsed-exhausted-operator-required');
+      }
       a.stopTries++; await save();
       await control(`/api/sessions/${execution.sessionId}/stop`, { method: 'POST', body: '{}' });
       // A stop response never proves completion; retain occupancy until execution settlement.
@@ -251,6 +281,7 @@ export async function reconcile(repository, { api, control, config, now = Date.n
     state.blocked = 'delivery-exhausted'; await save(); return report('delivery-exhausted-operator-required');
   }
   if (a.lastSentAt && now() - a.lastSentAt < LIMITS.deliveryBackoffMs) return report('delivery-backoff');
+  if (!await verifyIntent(repository, a, health, api)) return report('dispatch-evidence-unavailable-operator-required');
   a.tries++; a.lastSentAt = now(); await save();
   const body = deliveryBody(repository, a);
   let response;
@@ -268,7 +299,7 @@ export async function reconcile(repository, { api, control, config, now = Date.n
       (receipt.executionId !== undefined && !ID.test(receipt.executionId))) fail('invalid-trigger-receipt');
   if (a.invocationId && a.invocationId !== receipt.invocationId) fail('invocation-changed');
   a.invocationId = receipt.invocationId; a.executionId = receipt.executionId ?? null;
-  if (['skipped', 'expired', 'rejected'].includes(receipt.state)) { state.active = null; state.blocked = 'delivery-rejected'; }
+  if (['skipped', 'expired', 'rejected'].includes(receipt.state)) state.active = null;
   await save();
   return report(receipt.state === 'pending' ? 'runner-offline-or-pending' : `delivery-${receipt.state}`);
 }
@@ -296,11 +327,16 @@ export async function main({ env = process.env, fetchImpl = fetch, log = console
           !/^wollipogwhsec_[A-Za-z0-9_-]{43}$/.test(config.secret ?? ''))) fail('activation-config-incomplete');
       const started = Date.now(); let calls = 0;
       const github = githubApi(env.GITHUB_TOKEN, fetchImpl);
-      const api = budgetApi(async (path, options) => {
+      const guarded = async (path, options) => {
         if (++calls > 120 || Date.now() - started > 240000) fail('adapter-budget-exhausted');
         if (dryRun && options?.method && options.method !== 'GET') fail('dry-run-mutation-refused');
         return github(path, options);
-      }, { limit: 120, reserve: 0 });
+      };
+      Object.defineProperties(guarded, {
+        rateLimit: { get: () => github.rateLimit }, graphqlRateLimit: { get: () => github.graphqlRateLimit },
+      });
+      const api = budgetApi(guarded, { limit: 120, reserve: 0, requireHeaders: true });
+      await api('/rate_limit');
       result = await reconcile(env.GITHUB_REPOSITORY, { api, config, dryRun,
         control: dryRun ? undefined : controlClient(config, fetchImpl), log: emit });
       result.apiCalls = calls;

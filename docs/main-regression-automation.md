@@ -27,6 +27,10 @@ launch an investigation. Product and infrastructure failures may both launch one
 only reproduction can distinguish them.
 
 The comparison is a preceding full passing ancestor with the same suite version.
+Later failed/incomplete reruns or newer same-target runs withdraw earlier greens;
+those raw historical passes cannot supply a comparison. Active and pending run
+pointers join the fresh observation, and every send revalidates its exact failure
+and comparison. Persisted state is never a verdict or a source of dispatch authority.
 At most eight comparison candidates are inspected. A missing compatible comparison
 is sent as `passing_sha=none`; investigation may collect diagnostics but cannot
 bisect or attribute a culprit. Every delivery has exactly these string parameters:
@@ -82,7 +86,7 @@ cross-run suppression fence; the trigger still deduplicates each original event.
 | Culprit confirmation | Four counterfactual checks across both snapshots |
 | CI dispatch | Zero; an investigator cannot start full CI or a rolling worker |
 | Retained diagnostic input | 64 KiB per local diagnostic / fixture |
-| Adapter GitHub API | 120 requests total, including state writes; no new request after four minutes |
+| Adapter GitHub API | 120 requests total, including state writes; no new request after four minutes; authenticated quota headers required and the existing 60% remaining floor preserved |
 | Adapter control-plane API | Six requests, ten-second request deadline, bounded 256 KiB responses, redirects refused |
 | Adapter job | Eight minutes |
 
@@ -92,8 +96,16 @@ instruction is not a claim of an uninterrupted host timer. A delayed/offline
 watchdog retains occupancy and reports operator intervention; finite model/tool
 ceilings remain the independent execution bounds. An accepted-but-unconfirmed
 delivery cannot expire locally and release the slot: it may still start remotely.
-After exhausted delivery/stop attempts, no new investigation is admitted. An
-operator must inspect the exact invocation/execution before recovery.
+After exhausted delivery/stop attempts, no new investigation is admitted while
+occupancy is uncertain. Routine stop success and authenticated offline expiry
+release their slot; a later authenticated execution settlement also clears an
+elapsed-exhaustion hold. Blocked observations never consume suppression tombstones.
+An operator must inspect the exact invocation/execution before uncertain-delivery
+recovery. Preserve the existing `seen` ledger and stable event/body identity; prove
+the invocation terminal or replay its exact body through the approved trigger to
+recover the receipt, then use a reviewed CAS state migration to record that receipt
+or settled occupancy and clear only the matching hold. Never add delivery attempts,
+clear tombstones, change bindings, or release possibly live work merely to recover.
 
 Disabling the integration stops its watchdog as well as new deliveries. Stop or
 settle any active investigation separately before disabling. Unreachable control
@@ -115,7 +127,12 @@ Main CI Health's independent incident signal.
 
 The exact stored task is exported as `INVESTIGATION_PROMPT` from
 `scripts/main-regression-policy.mjs`. It reauthenticates the five identifiers and
-fetches evidence through authenticated **read-only** forge APIs. Never give the
+fetches evidence through authenticated **read-only** forge APIs. Its embedded
+SHA-256 manifest pins the reviewed helper, its policy dependency and this runbook
+from the trusted activation revision. Obtain and verify those copies before any
+tested checkout; keep their original relative layout outside the tested worktree.
+Never execute the helper or read task instructions from the tested snapshot. If
+matching trusted copies are unavailable, stop inconclusive. Never give the
 test process the adapter's bearer credential, signing secret or forge write token.
 Use a dedicated managed Wollipog worktree at the exact tested SHA. Verify checkout
 identity and isolate execution before running tested code. Review commands before
@@ -184,7 +201,8 @@ part of implementing or merging this issue, and no activation is requested here.
    and narrowly scoped credential storage. Never update the stack hosting an agent
    session from that session, even through a detached helper.
 2. Create exactly one fixed `create_session` automation with `useWorktree:true`,
-   the exact exported `INVESTIGATION_PROMPT`, concurrency `wait`, runner policy
+   the exact exported `INVESTIGATION_PROMPT` from a reviewed activation commit
+   (preserve that commit and its three manifest-pinned files), concurrency `wait`, runner policy
    `{kind:"expire",afterMinutes:15}`, limits `{maxCostUsd:20,maxToolCalls:120}`, UTC,
    and cron `0 0 1 1 *`. Legacy automations require cron as well as signed triggers;
    the fixed task immediately stops without investigation when its signed-delivery
