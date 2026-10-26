@@ -104,16 +104,6 @@ export function runnerOutdated(
   return protocolVersion != null && protocolVersion < current;
 }
 
-/** End-user tooltip for a connection that needs a newer runner. Technical recovery guidance lives
- * in docs/runner-updates.md rather than the primary Connections UI. */
-export function outdatedRunnerTitle(): string {
-  return "An update is available for this connection. Update it to enable all current features.";
-}
-
-export function unknownRunnerTitle(): string {
-  return "Version information is unavailable. Some features may remain disabled until this connection is updated.";
-}
-
 export function sshRunnerLifecycleHint(): string {
   return "Wollipog reconnects automatically if this SSH connection drops. Running work does not continue through the interruption.";
 }
@@ -125,10 +115,6 @@ export function nativeRunnerUpdateHint(
 ): string | null {
   if (protocolVersion != null && protocolVersion >= current) return null;
   return "This connection was started outside Wollipog and cannot be updated here. Install the latest runner using the same setup method, then restart the connection.";
-}
-
-export function outdatedBoxHint(): string {
-  return "Update this connection to enable the latest features.";
 }
 
 /**
