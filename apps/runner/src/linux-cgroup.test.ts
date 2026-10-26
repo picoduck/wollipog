@@ -299,9 +299,59 @@ async function waitUntil(predicate: () => boolean): Promise<void> {
   }
 }
 
+interface HelperState { state: string; flags: bigint }
+
+function helperState(pid: number): HelperState | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    // comm can contain spaces and parentheses. Fields 3 and 9 are state and task flags.
+    const fields = stat.slice(stat.lastIndexOf(") ") + 2).trim().split(/\s+/u);
+    return { state: fields[0]!, flags: BigInt(fields[6]!) };
+  } catch (error) {
+    if (["ENOENT", "ESRCH"].includes((error as NodeJS.ErrnoException).code ?? "")) return undefined;
+    throw error;
+  }
+}
+
 function alive(pid: number): boolean {
-  try { return !/^Z/u.test(readFileSync(`/proc/${pid}/stat`, "utf8").split(") ")[1]!.split(" ")[0]!); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
+  const snapshot = helperState(pid);
+  return snapshot !== undefined && snapshot.state !== "Z";
+}
+
+async function waitForHelperExit(readState: () => HelperState | undefined): Promise<void> {
+  // cgroup_exit() drops populated before exit_notify() publishes EXIT_ZOMBIE. The task is
+  // already inside noreturn do_exit(), with PF_EXITING set and its memory/files torn down.
+  // Reject anything still able to execute immediately; only kernel teardown may be awaited.
+  // See docs/linux-cgroup-exit-proof.md for source references and the observed X-state race.
+  await waitUntil(() => {
+    const snapshot = readState();
+    if (snapshot === undefined || snapshot.state === "Z") return true;
+    assert.notEqual(snapshot.flags & 0x4n, 0n, "proof cannot precede the helper's death"); // PF_EXITING
+    return false;
+  });
+}
+
+for (const state of ["R", "S", "D", "T"]) {
+  test(`proof checks reject executable state ${state} before waiting for exit`, async () => {
+    let reads = 0;
+    await assert.rejects(waitForHelperExit(() => {
+      reads++;
+      return reads === 1 ? { state, flags: 0n } : undefined;
+    }), /proof cannot precede the helper's death/u);
+    assert.equal(reads, 1, "a task that could still execute must fail immediately, even if it later exits");
+  });
+}
+
+for (const state of ["R", "X"]) for (const finalState of ["zombie", "disappeared"] as const) {
+  test(`proof checks wait for irreversible kernel exit ${state} to become ${finalState}`, async () => {
+    let reads = 0;
+    await waitForHelperExit(() => {
+      reads++;
+      if (reads <= 2) return { state, flags: 0x4n };
+      return finalState === "zombie" ? { state: "Z", flags: 0x4n } : undefined;
+    });
+    assert.ok(reads >= 3, "the pre-zombie exit window must reach an exit-complete observation");
+  });
 }
 
 test("cgroup v2 rejects renaming an owned boundary, preserving removed-path proof", { skip: process.platform !== "linux" }, (t) => {
@@ -408,6 +458,7 @@ for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {
     assert.equal(await ledger.prove({ terminate: false }), false, "early non-killing proof retains the lease while the helper lives");
     if (mode === "detached") assert.equal(await provenProcessTreeExit(child), true, "early per-process proof reaps the same boundary");
     else assert.deepEqual(await Promise.all(terminatePosixProcessBoundaries(ledger.owner)), [true], "shutdown uses the same boundary proof");
+    await waitForHelperExit(() => helperState(pid));
     assert.equal(alive(pid), false, "proof cannot precede the helper's death");
     if (mode === "term") assert.equal(readFileSync(pidfile + ".term", "utf8"), "term", "a retained setsid descendant receives TERM before forced cleanup");
     assert.equal(await ledger.prove({ terminate: true }), true);
