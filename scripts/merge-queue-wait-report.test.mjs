@@ -95,6 +95,9 @@ test("routing is sequential execution and advisory shadow work cannot become a r
     job("PR Suite Routing", 0, 2, 4),
     job("Browser End-to-End Tests (1)", 4, 7, 20),
     job("Suite Selection Shadow (Advisory)", 0, 19, 20.5),
+    // The admission observer can finish within the dependency timestamp slack,
+    // beside the aggregator. It must never become a required dependency.
+    job("Regression Admission Shadow (Advisory)", 20, 20, 20.05),
     job(AGGREGATOR, 20, 20, 21),
   ]);
   assert.equal(metrics.criticalExecutionMinutes, 16);
@@ -134,9 +137,10 @@ test("skipped routing anchors delayed full work without counting its API start p
 
 test("the assumed dependency structure matches the CI workflow files", () => {
   // Checks/browser wait for optional PR routing. Windows/WebKit stay independent, and only the
-  // aggregator consumes all required work. The advisory shadow never supplies a required result.
+  // aggregator consumes all required work. Advisory shadows never supply a required result.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
-  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: suite_plan", "needs: suite_plan", "needs: [checks, browser, win32, webkit, suite_plan]"]);
+  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: suite_plan", "needs: suite_plan",
+    "needs: [checks, browser, win32, webkit]", "needs: [checks, browser, win32, webkit, suite_plan]"]);
   assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, suite_plan\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
