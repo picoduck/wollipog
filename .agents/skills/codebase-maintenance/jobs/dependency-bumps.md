@@ -9,14 +9,28 @@ Start by reading the latest Dependency Queue Health workflow run, its conclusion
 log. It lists uncovered packages and dependency PRs older than seven days, giving the sweep a
 starting point before package-by-package investigation. Find it with
 `gh run list --workflow dependency-queue-health.yml --limit 1 --json databaseId,status,conclusion,url`,
-then inspect that run's jobs. If `gh run view <run-id> --log` or `--log-failed` returns empty
+then inspect that run's jobs. Also read the latest Dependabot Updates run for each affected
+ecosystem and its job log before classifying an uncovered package as an updater gap. List runs
+with `gh run list --workflow "Dependabot Updates" --limit 20 --json databaseId,createdAt,status,conclusion,url`.
+Inspect jobs to identify the ecosystem, then read the corresponding log. Distinguish failed updates from queue saturation,
+intentional ignores, and release-age exclusions. Record the actual error and proposed retry date;
+an unavailable log is a coverage limit, not evidence that the updater failed.
+If `gh run view <run-id> --log` or `--log-failed` returns empty
 output for a completed job, fetch its log with
 `gh api repos/picoduck/wollipog/actions/jobs/<job-id>/logs` and save it in the run's scratch
 directory. A pending run or unavailable log is a coverage limit, not proof that the queue is
 healthy. Recheck all listed package versions, publish dates, PR states, and checks: the workflow
 log is a lead, not a replacement for the ground-truth commands below.
 
-- `pnpm outdated -r` for the version gap across every workspace package.
+- `pnpm outdated -r` for the version gap across every workspace package. For any package carrying
+  an advisory, cross-check its reported Latest version with `npm view <pkg> version` and
+  `npm view <pkg> time --json`, and compare the proposed target with the upstream patched range.
+  Do this for advisory candidates found through other sources too, even if outdated omits them.
+  A registry/version disagreement is a coverage limit until resolved; never recommend a target
+  still inside a known affected range merely because outdated calls it Latest. Check the
+  effective release-age gate in repository configuration and the updater log before proposing a
+  retry date. A gate can be supplied by the updater even when no repository cooldown is set:
+  the October 19 npm log passed `--config.minimum-release-age=4320` (three days).
 - `pnpm audit --json` for known advisories. Do not run `pnpm audit --fix`; it changes the tree.
 - For the desktop crate, `cargo update --dry-run --manifest-path apps/desktop/src-tauri/Cargo.toml`
   for the version gap and `cargo audit` (run from `apps/desktop/src-tauri/`) for advisories. Do not
