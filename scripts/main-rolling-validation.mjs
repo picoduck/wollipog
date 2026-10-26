@@ -401,8 +401,13 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
         if (selected) {
           const compatible = { ...observation, records: observation.records.filter((r) =>
             r.targetSha !== selected.targetSha || r.suiteVersion === selected.suiteVersion) };
-          decision = plan(previous.value, compatible, selected.targetSha, now(), selected.claimId);
-          if (selected.dispatchedAt) decision.dispatch = false;
+          decision = plan(previous.value, compatible, selected.targetSha, now(), selected.dispatchedAt ? undefined : selected.claimId);
+          if (selected.dispatchedAt) {
+            decision.dispatch = false;
+            // A contradicted consumed claim must not be recreated by supplying its old ID.
+            // No replacement intent can execute a second time under this allocation.
+            if (decision.next.pending?.claimId !== selected.claimId) decision.next.pending = null;
+          }
           if (decision.dispatch) {
             selected.dispatchedAt = now();
             selected.status = "dispatched";

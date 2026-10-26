@@ -389,7 +389,8 @@ test("ambiguous pending work cannot hide a second candidate's existing verdict a
   assert.equal(next.state.candidates.requests.find((r) => r.targetSha === C).status, "success");
 });
 
-test("optional errors cannot restore an authoritatively contradicted pending claim", async () => {
+test("neither successful optional reads nor errors can restore a contradicted consumed claim", async () => {
+  for (const optionalFailure of [false, true]) {
   const { data, api } = forge(); data.runs.push(run());
   await writeState(api, repository, await readState(api, repository), emptyState(repository));
   await requestCandidate(repository, B, { api, now: () => at(41) });
@@ -401,8 +402,11 @@ test("optional errors cannot restore an authoritatively contradicted pending cla
     if (path.includes("/contents/") && ++contents > 3) throw new Error("optional transient failure");
     return api(path, options);
   };
-  const wake = await reconcile(repository, { api: unavailable, now: () => at(103), log: () => {} });
+  const wake = await reconcile(repository, { api: optionalFailure ? unavailable : api, now: () => at(103), log: () => {} });
   assert.equal(wake.state.pending, null);
+  assert.equal(data.dispatches.length, 1);
+  assert.equal(wake.state.candidates.requests[0].dispatchedAt, at(102));
+  }
 });
 
 test("state writes are fenced, compact at the bound, reject stale writers and strip unknown data", async () => {
