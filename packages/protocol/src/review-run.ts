@@ -35,6 +35,8 @@ export interface ReviewRunHistory {
   validRounds: number;
   /** Consumed attempts in the most recent attempt's round. */
   consumedInLastRound: number;
+  /** v236: a post-upvote grant forces delta scope until the next valid round. */
+  postUpvoteExtension?: { headSha: string; upvotedHeadSha: string };
   roundBudget: number;
   attemptsPerRound: number;
 }
@@ -100,7 +102,10 @@ export function planReviewRound(
   const openFindings = origin?.findings ?? [];
   // Before the epoch's first valid round, a retry reviews what the epoch's first attempt did.
   if (!lastValid) return { epoch: history.epoch, round, attempt, ...fromOrigin(), openFindings };
-  if (request.fullReason) return { epoch: history.epoch, round, attempt, mode: "full", openFindings };
+  const postUpvote = history.postUpvoteExtension;
+  if (request.fullReason && !(postUpvote && postUpvote.upvotedHeadSha === lastValid.headSha)) {
+    return { epoch: history.epoch, round, attempt, mode: "full", openFindings };
+  }
   if (lastValid.headSha === request.headSha) return { refusal: REVIEW_ROUND_REFUSALS.unchanged };
   return { epoch: history.epoch, round, attempt, mode: "delta", since: lastValid.headSha, openFindings };
 }

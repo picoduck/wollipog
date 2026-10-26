@@ -953,12 +953,13 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       additionalProperties: false,
     },
     {
-      // #3369: more cross-model review rounds for an epoch that used its budget without an upvote.
+      // More rounds for an exhausted epoch; a changed upvoted head also binds upvotedHeadSha (#3641).
       // resourceKey must be review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<roundsUsed>.
       type: "object",
       properties: {
         category: { const: "review_round_extension" }, repository: { type: "string" },
         pullRequest: { type: "integer", minimum: 1 }, epoch: { type: "integer", minimum: 1 },
+        upvotedHeadSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
         headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, roundsUsed: { type: "integer", minimum: 1 },
         blockingFindings: { type: "integer", minimum: 0 }, extraRounds: { type: "integer", minimum: 1, maximum: 4 },
         reason: { type: "string", minLength: 1, maxLength: 1000 },

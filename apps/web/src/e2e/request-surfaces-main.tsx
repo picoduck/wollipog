@@ -678,11 +678,12 @@ function toolCallsRequest(): PendingApproval {
 }
 
 function workflowRequest(): PendingApproval {
+  const extension = scenario === "review-extension";
   return {
     requestId: "merge-occurrence",
     occurrenceId: "merge-occurrence",
     kind: "workflow_decision",
-    title: "PR Merge Approval Required",
+    title: extension ? "Review Round Extension Approval Required" : "PR Merge Approval Required",
     options: [
       { optionId: "approve", name: "Approve", kind: "allow_once" },
       { optionId: "deny", name: "Deny", kind: "reject_once" },
@@ -692,9 +693,13 @@ function workflowRequest(): PendingApproval {
       occurrenceId: "merge-occurrence",
       sessionId: "dock-session",
       controllingSessionId: "parent",
-      category: "pr_merge",
+      category: extension ? "review_round_extension" : "pr_merge",
       resourceKey: "pr-2179",
-      resourceSnapshot: {
+      resourceSnapshot: extension ? {
+        category: "review_round_extension", repository: "example/project", pullRequest: 42,
+        epoch: 1, headSha: "c".repeat(40), upvotedHeadSha: "a".repeat(40), roundsUsed: 4,
+        blockingFindings: 0, extraRounds: 1, reason: "Review the verified fix added after the fourth-round upvote.",
+      } : {
         category: "pr_merge",
         repository: "picoduck/wollipog",
         pullRequest: 2179,
@@ -746,6 +751,7 @@ const DOCK_SCENARIOS: Record<string, { title: string; requests: () => PendingApp
   "budget-estimate": { title: "Budgeted Claude Turn", requests: () => [budgetRequest(true)] },
   "daily-budget-estimate": { title: "Claude Turn Past the Daily Budget", requests: () => [dailyBudgetEstimateRequest()] },
   "tool-calls": { title: "Tool-Limited Session", requests: () => [toolCallsRequest()] },
+  "review-extension": { title: "Post-Upvote Fix", requests: () => [workflowRequest()] },
   workflow: { title: "Campaign Merge", requests: () => [workflowRequest()] },
   // Arrival order: the permission came first, the sign-in last. The dock orders them by priority.
   multiple: { title: "Three Requests at Once", requests: () => [permissionRequest(), budgetRequest(), signInRequest()] },

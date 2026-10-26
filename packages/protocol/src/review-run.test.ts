@@ -75,3 +75,20 @@ test("an invalid first attempt of a rebase epoch is retried over the same range-
     epoch: 3, round: 1, attempt: 1, mode: "rebase", rebasedFrom: { baseSha: BASE, headSha: A }, openFindings: [finding],
   });
 });
+
+
+test("a post-upvote grant forces its first round and retry to review only the approved delta", () => {
+  const run = history({ validRounds: 4, roundBudget: 5, postUpvoteExtension: { headSha: B, upvotedHeadSha: A },
+    lastValid: { headSha: A, baseSha: BASE, round: 4, vote: "UPVOTE", findings: [] },
+    lastAttempt: { headSha: A, round: 4, attempt: 1, valid: true } });
+  assert.deepEqual(planReviewRound({ ...run, roundBudget: 4 }, { headSha: B }, true), { refusal: REVIEW_ROUND_REFUSALS.roundLimit });
+  assert.deepEqual(planReviewRound(run, { headSha: B, fullReason: "all files" }, true),
+    { epoch: 1, round: 5, attempt: 1, mode: "delta", since: A, openFindings: [] });
+  const retry = { ...run, lastAttempt: { headSha: B, round: 5, attempt: 1, valid: false }, consumedInLastRound: 1 };
+  assert.deepEqual(planReviewRound(retry, { headSha: B, fullReason: "all files" }, true),
+    { epoch: 1, round: 5, attempt: 2, mode: "delta", since: A, openFindings: [] });
+  assert.deepEqual(planReviewRound(retry, { headSha: C, fullReason: "all files" }, true),
+    { epoch: 1, round: 5, attempt: 2, mode: "delta", since: A, openFindings: [] });
+  assert.deepEqual(planReviewRound({ ...retry, consumedInLastRound: 2 }, { headSha: B }, true), { refusal: REVIEW_ROUND_REFUSALS.attemptLimit });
+  assert.deepEqual(planReviewRound(run, { headSha: A }, true), { refusal: REVIEW_ROUND_REFUSALS.upvoted });
+});

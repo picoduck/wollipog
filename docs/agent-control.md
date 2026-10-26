@@ -380,13 +380,19 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
-- An epoch that used its rounds without an upvote takes more only through a typed
+- An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
     of the last valid round, 1 to 4 extra rounds, and a reason of at most 1000 characters.
   - **Resource key:** `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<rounds>`.
   - **Checks:** the control plane checks the request against the run as it records it. A run with
-    rounds left, an upvote, or any other epoch, round count or blocking count is refused.
+    rounds left or any other epoch, round count or blocking count is refused. After an upvote,
+    protocol 237+ requires `upvotedHeadSha` naming the last valid upvoted head and a different
+    `headSha`. An unchanged upvoted head keeps the existing refusal. The granted round (including
+    retries) reviews only the delta since that upvote; `fullReason` cannot broaden it. Older peers
+    fail closed. Merge decisions for an existing review run require a valid review of their head.
+    Unused grants are rechecked against the run at consumption and admission; stale and superseded
+    grants do not add rounds. Extensions keep the normal campaign admission and cost accounting.
   - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
     itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
     an explicit Parent Control grant; Full Control never takes it as part of its own boundary.

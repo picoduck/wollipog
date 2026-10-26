@@ -874,15 +874,16 @@ export function normalizeWorkflowDecisionSnapshot(
     const roundsUsed = count(value.roundsUsed, 1, 1000);
     const blockingFindings = count(value.blockingFindings, 0, 1000);
     const extraRounds = count(value.extraRounds, 1, 4);
+    const upvotedHeadSha = value.upvotedHeadSha === undefined ? undefined : sha(value.upvotedHeadSha);
     if (!repo || !headSha || pullRequest === null || epoch === null || roundsUsed === null || blockingFindings === null ||
-        extraRounds === null || !boundedDecisionString(value.reason, 1000) ||
+        extraRounds === null || upvotedHeadSha === null || !boundedDecisionString(value.reason, 1000) ||
         Object.keys(value).some((key) => ![
-          "category", "repository", "pullRequest", "epoch", "headSha", "roundsUsed", "blockingFindings", "extraRounds", "reason",
+          "category", "repository", "pullRequest", "epoch", "headSha", "upvotedHeadSha", "roundsUsed", "blockingFindings", "extraRounds", "reason",
         ].includes(key))) {
       return fail("a review round extension requires the repository, pull request, epoch, head, rounds used, open blocking " +
         "findings, 1 to 4 extra rounds and a reason of at most 1000 characters");
     }
-    return ok({ category, repository: repo, pullRequest, epoch, headSha, roundsUsed, blockingFindings, extraRounds,
+    return ok({ category, repository: repo, pullRequest, epoch, headSha, ...(upvotedHeadSha ? { upvotedHeadSha } : {}), roundsUsed, blockingFindings, extraRounds,
       reason: value.reason as string });
   }
   if (category === "merged_branch_deletion") {
@@ -9116,6 +9117,9 @@ export class SessionsService {
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
       policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha);
+      if (policy.history.postUpvoteExtension && !runnerSupportsProtocol(runner?.protocolVersion, "postUpvoteReviewExtensions")) {
+        return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "postUpvoteReviewExtensions", "post-upvote review extensions"));
+      }
       if (request.fullReason !== undefined) policy.fullReason = request.fullReason.trim();
       // An approved extension the history counts is consumed now, so a later restart, which
       // revokes unconsumed decisions, cannot take back rounds the run has been granted.
@@ -10012,6 +10016,11 @@ export class SessionsService {
     if (normalized.data.category === "automation_creation" && !internal?.trustedAutomationCreation) {
       return fail("use request_automation_creation for a server-validated automation proposal", 403);
     }
+    if (normalized.data.category === "pr_merge") {
+      const snapshot = normalized.data;
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) return fail("the current pull request head needs a valid review before merge", 409);
+    }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
       return fail(this.decisionControllerRoot(child) === "refused"
@@ -10216,6 +10225,13 @@ export class SessionsService {
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
     }
+    if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
+      const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, actor);
+        return fail(refused, 409);
+      }
+    }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
     const normalizedResolution = checked.data;
@@ -10413,6 +10429,18 @@ export class SessionsService {
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
+    }
+    if (normalized.data.category === "pr_merge") {
+      const snapshot = normalized.data;
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("the current pull request head needs a valid review before merge", 409);
+      }
+    }
+    if (!this.reviewExtensionCurrent(child, decision)) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("the review extension no longer matches the current run", 409);
     }
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
     if (!action.ok) return failAs(action);
@@ -10836,7 +10864,8 @@ export class SessionsService {
   /**
    * Why a review_round_extension request does not match the requester's review run (#3369), or
    * null. It must name the run's current epoch exactly as the control plane records it: every
-   * granted round used, no upvote, and the open blocking findings of its last valid round. Its
+   * granted round used and the open blocking findings of its last valid round. After an upvote,
+   * both the upvoted head and the changed head must be bound (#3641). Its
    * resource key is canonical, so a newer request for the same epoch and round count supersedes an
    * older one and a later extension is a new resource.
    */
@@ -10849,7 +10878,13 @@ export class SessionsService {
     const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.headSha);
     if (run.epoch === 0 || !run.lastValid) return "this session has no valid review of that pull request to extend";
     if (snapshot.epoch !== run.epoch) return `the review run is in epoch ${run.epoch}, not ${snapshot.epoch}`;
-    if (run.lastValid.vote === "UPVOTE") return "the pull request's last valid review is an upvote; it needs no more rounds";
+    if (run.lastValid.vote === "UPVOTE") {
+      if (snapshot.headSha === run.lastValid.headSha) return "the pull request's last valid review is an upvote; it needs no more rounds";
+      if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "postUpvoteReviewExtensions")) {
+        return "post-upvote review extensions require a compatible runner; upgrade the runner before requesting one";
+      }
+      if (snapshot.upvotedHeadSha !== run.lastValid.headSha) return "the extension must bind the last valid upvoted head";
+    } else if (snapshot.upvotedHeadSha !== undefined) return "the last valid review is not the bound upvote";
     if (run.validRounds < run.roundBudget) {
       return `the epoch has used ${run.validRounds} of its ${run.roundBudget} rounds; request a review instead`;
     }
@@ -10861,6 +10896,15 @@ export class SessionsService {
     const key = `review_round_extension:${snapshot.repository}#${snapshot.pullRequest}:epoch-${snapshot.epoch}:rounds-${snapshot.roundsUsed}`;
     if (resourceKey !== key) return `resourceKey must be ${key}`;
     return null;
+  }
+
+  private reviewExtensionCurrent(child: SessionView, decision: WorkflowDecisionView): boolean {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "review_round_extension") return true;
+    if (snapshot.upvotedHeadSha && !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "postUpvoteReviewExtensions")) return false;
+    const extensions = this.db.reviewSessions.extensions(child.id,
+      { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.epoch, snapshot.headSha);
+    return extensions.approved.includes(decision.occurrenceId);
   }
 
   private workflowDecisionController(child: SessionView, category?: WorkflowDecisionCategory): {

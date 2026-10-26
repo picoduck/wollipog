@@ -503,3 +503,23 @@ test("releaseAll removes every checkout left by an earlier runner process", asyn
   f.launcher.releaseAll();
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts")), false);
 });
+
+
+test("an extra round after an upvote snapshots only the post-upvote delta", async (t) => {
+  const f = fixture(t);
+  const run = reviewed(f, "UPVOTE");
+  run.validRounds = 4;
+  run.roundBudget = 5;
+  run.lastValid!.round = 4;
+  run.lastAttempt!.round = 4;
+  writeFileSync(join(f.worktree, "notes.md"), "Verified correction after upvote.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "verified fix");
+  run.postUpvoteExtension = { headSha: head, upvotedHeadSha: f.head };
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: run, fullReason: "Review everything" }), CODEX, "b");
+  assert.deepEqual(prepared.round, { epoch: 1, round: 5, attempt: 1, mode: "delta", since: f.head,
+    baseSha: f.base, scopeFiles: ["notes.md"] });
+  assert.match(prepared.prompt, /Verified correction after upvote/u);
+  assert.doesNotMatch(prepared.prompt, /answer = 42/u);
+  f.launcher.release("s_review");
+});

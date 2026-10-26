@@ -723,7 +723,9 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 235: extend v233 providerHomeRefusal with specific recovery causes and authorized, path-free
 //      lease-inspection process observations (#3585). Older peers retain the original shapes.
 // 236: human-approved automation creation proposals, exact execution and durable creation receipts.
-export const PROTOCOL_VERSION = 236;
+// 237: post-upvote review extensions (#3641): bind upvotedHeadSha and require delta scope.
+//      Older peers cannot admit these extensions or receive their review history marker.
+export const PROTOCOL_VERSION = 237;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -976,6 +978,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** v237 binds post-upvote extensions and enforces their delta scope (#3641). */
+  postUpvoteReviewExtensions: 237,
   /** Review sessions preserve admitted campaign accounting through final usage settlement. */
   campaignReviewSessions: 232,
   /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
@@ -2536,8 +2540,8 @@ export const WORKFLOW_DECISION_CATEGORIES = [
   "follow_up_issue_publication",
   "ui_evidence_approval",
   /** #3369: more cross-model review rounds for a pull request whose epoch used its round budget
-   * without an upvote. Human-owned unless a Parent Control grant delegates it; Full Control never
-   * takes it on its own. */
+   * including after an upvote when the head changed. Human-owned unless a Parent Control grant
+   * delegates it; Full Control never takes it on its own. */
   "review_round_extension",
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
@@ -4830,6 +4834,8 @@ export type WorkflowDecisionResourceSnapshot =
       epoch: number;
       /** The pull request head the next round would review. */
       headSha: string;
+      /** v237: required after an upvote; the exact last valid upvoted head. */
+      upvotedHeadSha?: string;
       /** Valid rounds the epoch has used, which is its current budget. */
       roundsUsed: number;
       /** Blocking findings of the epoch's last valid round, still open. */

@@ -30,6 +30,7 @@ export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisi
       return <dl className="facts">
         <div><dt>Pull Request</dt><dd>{snapshot.repository}#{snapshot.pullRequest}</dd></div>
         <div><dt>Head Commit</dt><dd><code>{snapshot.headSha.slice(0, 12)}</code></dd></div>
+        {snapshot.upvotedHeadSha && <div><dt>Upvoted Head</dt><dd><code>{snapshot.upvotedHeadSha.slice(0, 12)}</code></dd></div>}
         <div><dt>Review Epoch</dt><dd>{snapshot.epoch}</dd></div>
         <div><dt>Rounds Used</dt><dd>{snapshot.roundsUsed}</dd></div>
         <div><dt>Open Blocking Findings</dt><dd>{snapshot.blockingFindings}</dd></div>

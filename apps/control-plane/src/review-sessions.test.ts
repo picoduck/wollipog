@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
+  planReviewRound, REVIEW_ROUND_REFUSALS,
   type CampaignBudgetAuthority,
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewReportFinding, type ReviewRunHistory,
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
@@ -1031,5 +1032,157 @@ test("every continuation transition invalidates the review summary, including sa
       h.db.raw().prepare("UPDATE review_sessions SET continuation_state='held' WHERE review_session_id=?").run(view.reviewSessionId);
       assert.equal(h.db.abandonReviewContinuations("s1", now), 1);
     });
+  } finally { h.db.close(); }
+});
+
+/** The final round upvotes HEAD after three blocking rounds. */
+function exhaustWithUpvote(h: ReturnType<typeof harness>): void {
+  for (let round = 1; round <= 4; round += 1) {
+    const view = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId, state: "completed",
+      output: report(HEAD, round === 4 ? { vote: "UPVOTE", findings: [] } : {}), round: { ...ROUND, round }, verdict: VALID } as never);
+  }
+}
+const postUpvoteSnapshot = () => ({ category: "review_round_extension" as const, repository: request().pullRequest.repository,
+  pullRequest: request().pullRequest.number, epoch: 1, headSha: "c".repeat(40), upvotedHeadSha: HEAD,
+  roundsUsed: 4, blockingFindings: 0, extraRounds: 1, reason: "Review a verified fix after the upvote." });
+const postUpvoteKey = () => `review_round_extension:${request().pullRequest.repository}#${request().pullRequest.number}:epoch-1:rounds-4`;
+function askPostUpvote(h: ReturnType<typeof harness>, snapshot = postUpvoteSnapshot(), requestId = "after-upvote") {
+  return h.svc.createWorkflowDecision("s1", { requestId, resourceKey: postUpvoteKey(), resourceSnapshot: snapshot });
+}
+
+test("an exhausted upvote admits only a changed head bound to that exact upvote", () => {
+  const h = harness();
+  try {
+    exhaustWithUpvote(h);
+    const snapshot = postUpvoteSnapshot();
+    assert.match(askPostUpvote(h, { ...snapshot, headSha: HEAD }).error!, /last valid review is an upvote; it needs no more rounds/u);
+    assert.match(askPostUpvote(h, { ...snapshot, upvotedHeadSha: "d".repeat(40) }).error!, /bind the last valid upvoted head/u);
+    assert.match(h.svc.createWorkflowDecision("s1", { requestId: "missing", resourceKey: postUpvoteKey(),
+      resourceSnapshot: { ...snapshot, upvotedHeadSha: undefined } }).error!, /bind the last valid upvoted head/u);
+    assert.equal(askPostUpvote(h, { ...snapshot, upvotedHeadSha: "bad" }).status, 400);
+    assert.match(askPostUpvote(h, { ...snapshot, epoch: 2 }).error!, /in epoch 1/u);
+    assert.match(askPostUpvote(h, { ...snapshot, roundsUsed: 3 }).error!, /used 4 rounds/u);
+    assert.match(askPostUpvote(h, { ...snapshot, blockingFindings: 1 }).error!, /0 open blocking/u);
+    const decision = askPostUpvote(h);
+    assert.ok(decision.ok, decision.error ?? "refused");
+    assert.equal(decision.data?.authority, "human");
+    assert.deepEqual(decision.data?.resourceSnapshot, snapshot);
+  } finally { h.db.close(); }
+});
+
+for (const preconsume of [false, true]) test(`a post-upvote extension admits a delta and accounts for its round and cost (preconsume=${preconsume})`, async () => {
+  const h = harness();
+  try {
+    exhaustWithUpvote(h);
+    const snapshot = postUpvoteSnapshot();
+    const decision = askPostUpvote(h);
+    assert.ok(decision.ok && decision.data, decision.error ?? "refused");
+    assert.ok(h.svc.approve("s1", decision.data.occurrenceId, "approve").ok);
+    if (preconsume) assert.ok((await h.svc.consumeWorkflowDecision("s1", decision.data.occurrenceId, { resourceSnapshot: snapshot })).ok);
+    const wrong = h.svc.requestReviewSession("s1", request({ headSha: "d".repeat(40) }));
+    assert.ok(wrong.data);
+    assert.equal(h.starts().at(-1)!.spec.review!.history!.roundBudget, 4);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: wrong.data.reviewSessionId, state: "failed" });
+    const next = h.svc.requestReviewSession("s1", request({ headSha: snapshot.headSha, fullReason: "Review everything" }));
+    assert.ok(next.ok && next.data, next.error ?? "refused");
+    const history = h.starts().at(-1)!.spec.review!.history!;
+    assert.equal(history.roundBudget, 5);
+    const plan = planReviewRound(history, { headSha: snapshot.headSha, fullReason: "Review everything" }, true);
+    assert.deepEqual(plan, { epoch: 1, round: 5, attempt: 1, mode: "delta", since: HEAD, openFindings: [] });
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "consumed");
+    assert.equal((await h.svc.consumeWorkflowDecision("s1", decision.data.occurrenceId, { resourceSnapshot: snapshot })).status, 409);
+    h.db.addSessionUsage(next.data.reviewSessionId, { costUsd: 2.75 }, 7);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: next.data.reviewSessionId, state: "completed",
+      output: report(snapshot.headSha, { vote: "UPVOTE", findings: [] }),
+      round: { ...ROUND, round: 5, mode: "delta", since: HEAD }, verdict: VALID } as never);
+    const after = h.db.reviewSessions.history("s1", request().pullRequest, snapshot.headSha);
+    assert.equal(after.validRounds, 5);
+    assert.equal(after.lastValid?.headSha, snapshot.headSha);
+    assert.equal(after.lastValid?.vote, "UPVOTE");
+    assert.equal(h.db.reviewSessions.spentFor("s1"), 2.75);
+  } finally { h.db.close(); }
+});
+
+test("post-upvote grants fail closed after supersession, epoch change, or runner downgrade", async () => {
+  const h = harness();
+  try {
+    exhaustWithUpvote(h);
+    const old = askPostUpvote(h);
+    assert.ok(old.data);
+    assert.ok(h.svc.approve("s1", old.data.occurrenceId, "approve").ok);
+    const replacement = askPostUpvote(h, { ...postUpvoteSnapshot(), headSha: "d".repeat(40) }, "replacement");
+    assert.ok(replacement.data, replacement.error ?? "refused");
+    assert.equal((await h.svc.consumeWorkflowDecision("s1", old.data.occurrenceId, { resourceSnapshot: postUpvoteSnapshot() })).status, 409);
+    assert.ok(h.svc.approve("s1", replacement.data.occurrenceId, "approve").ok);
+    h.db.registerRunner(h.metadata, 2, 236);
+    assert.equal(h.svc.requestReviewSession("s1", request({ headSha: "d".repeat(40) })).status, 409);
+    assert.equal((await h.svc.consumeWorkflowDecision("s1", replacement.data.occurrenceId, { resourceSnapshot: replacement.data.resourceSnapshot })).status, 409);
+    assert.match(askPostUpvote(h, postUpvoteSnapshot(), "old-peer").error!, /compatible runner/u);
+    h.db.registerRunner(h.metadata, 3, PROTOCOL_VERSION);
+    const current = askPostUpvote(h, postUpvoteSnapshot(), "new-epoch");
+    assert.ok(current.data, current.error ?? "refused");
+    assert.ok(h.svc.approve("s1", current.data.occurrenceId, "approve").ok);
+    const rewrite = h.svc.requestReviewSession("s1", request({ headSha: "e".repeat(40) }));
+    assert.ok(rewrite.data);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: rewrite.data.reviewSessionId, state: "completed",
+      output: report("e".repeat(40)), round: { ...ROUND, epoch: 2 }, verdict: VALID } as never);
+    assert.equal((await h.svc.consumeWorkflowDecision("s1", current.data.occurrenceId, { resourceSnapshot: postUpvoteSnapshot() })).status, 409);
+    assert.equal(h.db.reviewSessions.history("s1", request().pullRequest).roundBudget, 4);
+  } finally { h.db.close(); }
+});
+
+test("a pending post-upvote extension cannot be approved after a newer epoch", () => {
+  const h = harness();
+  try {
+    exhaustWithUpvote(h);
+    const pending = askPostUpvote(h);
+    assert.ok(pending.data);
+    const rewrite = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: rewrite.reviewSessionId, state: "completed",
+      output: report(), round: { ...ROUND, epoch: 2 }, verdict: VALID } as never);
+    assert.equal(h.svc.approve("s1", pending.data.occurrenceId, "approve").status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.data.occurrenceId)?.status, "revoked");
+  } finally { h.db.close(); }
+});
+
+test("a merge decision cannot reuse the upvote for the preceding head", () => {
+  const h = harness({ campaign: true });
+  try {
+    exhaustWithUpvote(h);
+    const headSha = "c".repeat(40);
+    const merge = () => h.svc.createWorkflowDecision("s1", { requestId: "merge", resourceKey: "merge",
+      resourceSnapshot: { category: "pr_merge", repository: request().pullRequest.repository, pullRequest: request().pullRequest.number,
+        headSha, reviewResult: "merge", requiredChecks: { headSha, status: "passed", checkedAt: 10,
+          checks: [{ name: "required", state: "passed" }] } } });
+    assert.match(merge().error!, /current pull request head needs a valid review/u);
+    const next = h.svc.requestReviewSession("s1", request({ headSha }));
+    assert.ok(next.data);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: next.data.reviewSessionId, state: "completed",
+      output: report(headSha, { vote: "UPVOTE", findings: [] }), round: { ...ROUND, round: 5 }, verdict: VALID } as never);
+    assert.ok(merge().ok);
+  } finally { h.db.close(); }
+});
+
+
+test("a post-upvote round uses ordinary campaign admission, reservation and actual usage", () => {
+  const h = harness({ campaign: true });
+  try {
+    exhaustWithUpvote(h);
+    h.enableCampaign();
+    const decision = askPostUpvote(h);
+    assert.ok(decision.data, decision.error ?? "refused");
+    assert.equal(decision.data.authority, "human");
+    assert.ok(h.svc.approve("s1", decision.data.occurrenceId, "approve").ok);
+    const before = h.db.campaignBudgets.view("root")!;
+    const next = h.svc.requestReviewSession("s1", request({ headSha: postUpvoteSnapshot().headSha }));
+    assert.ok(next.data, next.error ?? "refused");
+    const allocation = h.db.campaignBudgets.allocation(next.data.reviewSessionId)!;
+    assert.ok(typeof allocation.costUsd === "number" && allocation.costUsd > 0);
+    assert.equal(h.db.campaignBudgets.view("root")!.outstanding.costUsd, before.outstanding.costUsd + allocation.costUsd);
+    h.db.addSessionUsage(next.data.reviewSessionId, { costUsd: 3.25 }, 8);
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.costUsd, 3.25);
+    assert.equal(h.db.reviewSessions.spentFor("s1"), 3.25);
+    assert.equal(h.starts().at(-1)!.spec.review!.history!.roundBudget, 5);
   } finally { h.db.close(); }
 });
