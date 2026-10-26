@@ -59,8 +59,12 @@ function pullMentionsDependency(pull, dependency) {
   // Ignoring the changelog prevents an incidental mention of another package from counting as
   // coverage for that package.
   const bodySummary = (pull.body ?? "").split("<details>", 1)[0];
+  // A group label ("bump the fastify group", "in the fastify group") names the Dependabot group,
+  // not a package it updates, so it cannot cover the package that shares its name (#3612).
+  // Updated packages are named elsewhere in the title or summary.
+  const evidence = `${pull.title ?? ""}\n${bodySummary}`.replace(/\bthe\s+\S+\s+group\b/giu, "");
   return new RegExp(`(^|[^${boundary.slice(1, -1)}])${token}(?=$|[^${boundary.slice(1, -1)}])`, "imu")
-    .test(`${pull.title ?? ""}\n${bodySummary}`);
+    .test(evidence);
 }
 
 function checkState(pull) {
