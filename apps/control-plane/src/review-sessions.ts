@@ -255,7 +255,7 @@ export class ReviewSessions {
    * head. A newer occurrence for the canonical resource replaces even a consumed but unused grant.
    */
   extensions(requesterSessionId: string, pullRequest: { repository: string; number: number }, epoch: number, headSha?: string): {
-    rounds: number; approved: string[];
+    rounds: number; approved: string[]; postUpvoteExtension?: ReviewRunHistory["postUpvoteExtension"];
   } {
     let rows: Array<{ occurrence_id: string; status: string; resource_snapshot: string }>;
     try {
@@ -270,9 +270,11 @@ export class ReviewSessions {
       return { rounds: 0, approved: [] };
     }
     let rounds = 0;
+    let postUpvoteExtension: ReviewRunHistory["postUpvoteExtension"];
+    const run = this.history(requesterSessionId, pullRequest, undefined, false);
     const approved: string[] = [];
     for (const row of rows) {
-      const snapshot = json<{ repository?: unknown; pullRequest?: unknown; epoch?: unknown; extraRounds?: unknown; headSha?: unknown; roundsUsed?: unknown }>(row.resource_snapshot);
+      const snapshot = json<{ repository?: unknown; pullRequest?: unknown; epoch?: unknown; extraRounds?: unknown; headSha?: unknown; roundsUsed?: unknown; upvotedHeadSha?: unknown }>(row.resource_snapshot);
       if (!snapshot || typeof snapshot.repository !== "string" ||
           snapshot.repository.toLowerCase() !== pullRequest.repository.toLowerCase() ||
           snapshot.pullRequest !== pullRequest.number || snapshot.epoch !== epoch ||
@@ -282,22 +284,34 @@ export class ReviewSessions {
       // A consumed decision may have been consumed explicitly before its review request. Until
       // its exact head has started a planned extra round, it grants no budget to any other head.
       // Afterwards its remaining rounds belong to the epoch, including subsequent fixed heads.
-      if (headSha !== undefined && snapshot.headSha !== headSha) {
-        const activated = row.status === "consumed" && this.sql.prepare(`SELECT 1 FROM review_sessions
-          WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND head_sha=?
-            AND json_extract(round_json, '$.epoch')=? AND json_extract(round_json, '$.round')>? LIMIT 1`)
-          .get(requesterSessionId, pullRequest.repository, pullRequest.number, snapshot.headSha, epoch, snapshot.roundsUsed as number);
-        if (!activated) continue;
+      const activated = row.status === "consumed" && this.sql.prepare(`SELECT 1 FROM review_sessions
+        WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND head_sha=?
+          AND json_extract(round_json, '$.epoch')=? AND json_extract(round_json, '$.round')>? LIMIT 1`)
+        .get(requesterSessionId, pullRequest.repository, pullRequest.number, snapshot.headSha, epoch, snapshot.roundsUsed as number);
+      if (!activated) {
+        // An unused grant is valid only for the exact review state it described. This also fences
+        // explicit consumption followed by a newer round/epoch before the approved head launches.
+        if (run.epoch !== epoch || run.validRounds !== snapshot.roundsUsed || !run.lastValid ||
+            (headSha !== undefined && snapshot.headSha !== headSha)) continue;
+        if (snapshot.upvotedHeadSha !== undefined) {
+          if (run.lastValid.vote !== "UPVOTE" || snapshot.upvotedHeadSha !== run.lastValid.headSha ||
+              snapshot.headSha === snapshot.upvotedHeadSha) continue;
+        } else if (run.lastValid.vote === "UPVOTE") continue;
+      }
+      // Keep retries of the first granted round scoped to the same post-upvote delta too.
+      if (snapshot.upvotedHeadSha === run.lastValid?.headSha && run.lastValid?.vote === "UPVOTE" &&
+          run.validRounds === snapshot.roundsUsed) {
+        postUpvoteExtension = { headSha: snapshot.headSha, upvotedHeadSha: run.lastValid.headSha };
       }
       rounds += snapshot.extraRounds as number;
       if (row.status === "approved") approved.push(row.occurrence_id);
     }
-    return { rounds, approved };
+    return { rounds, approved, ...(postUpvoteExtension ? { postUpvoteExtension } : {}) };
   }
 
-  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string): ReviewRunHistory {
+  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true): ReviewRunHistory {
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
-      WHERE requester_session_id=? AND repository=? AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
+      WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
       .all(requesterSessionId, pullRequest.repository, pullRequest.number) as Array<Pick<Row, "head_sha" | "round_json" | "verdict_json" | "findings_json">>;
     const attempts = rows.flatMap((row) => {
       const round = json<ReviewAttemptRound>(row.round_json);
@@ -312,7 +326,11 @@ export class ReviewSessions {
     const current = attempts.filter((attempt) => attempt.round.epoch === epoch);
     const last = current.at(-1)!;
     history.epoch = epoch;
-    history.roundBudget += this.extensions(requesterSessionId, pullRequest, epoch, headSha).rounds;
+    if (includeExtensions) {
+      const extensions = this.extensions(requesterSessionId, pullRequest, epoch, headSha);
+      history.roundBudget += extensions.rounds;
+      if (extensions.postUpvoteExtension) history.postUpvoteExtension = extensions.postUpvoteExtension;
+    }
     history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid };
     const validVote = (attempt: typeof attempts[number]) => {
       const vote = attempt.verdict?.effectiveVote;

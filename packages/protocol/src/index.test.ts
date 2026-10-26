@@ -112,7 +112,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 236);
+  assert.equal(PROTOCOL_VERSION, 237);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -293,8 +293,8 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 236", () => {
-  assert.equal(PROTOCOL_VERSION, 236);
+test("PROTOCOL_VERSION is 237", () => {
+  assert.equal(PROTOCOL_VERSION, 237);
   assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
   assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
   // A v229 runner cannot attest Full Control worktree containment (#2940).
@@ -308,6 +308,8 @@ test("PROTOCOL_VERSION is 236", () => {
   // A v227 runner launches review sessions but neither plans rounds nor validates attempts (#3369).
   assert.equal(runnerSupportsProtocol(227, "reviewRuns"), false);
   assert.equal(runnerSupportsProtocol(228, "reviewRuns"), true);
+  assert.equal(runnerSupportsProtocol(236, "postUpvoteReviewExtensions"), false);
+  assert.equal(runnerSupportsProtocol(237, "postUpvoteReviewExtensions"), true);
   // A v228 runner cannot inspect or recover a stale provider-HOME lease (#3241).
   assert.equal(runnerSupportsProtocol(228, "providerHomeLeaseRecovery"), false);
   assert.equal(runnerSupportsProtocol(229, "providerHomeLeaseRecovery"), true);
