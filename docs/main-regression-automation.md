@@ -58,8 +58,8 @@ controller and health refs. Every claim and charged send/stop intent is durable
 unreadable state requires an operator; it never resets dedupe automatically.
 
 One investigation occupies the repository slot until an authenticated execution
-receipt settles. New snapshots coalesce into one latest pending item, with a
-15-minute observation age. Pending age does not reset on repeated observations.
+receipt settles, or a provably never-sent claim is released as described below.
+New snapshots coalesce into one latest pending item, with a 15-minute observation age. Pending age does not reset on repeated observations.
 Newer work can replace pending work; the active investigation is never cancelled
 to make room. The independently configured automation must also use concurrency
 `wait`. Do not configure a second automation for this repository.
@@ -103,7 +103,30 @@ elapsed-exhaustion or ambiguous-delivery hold. Blocked observations never consum
 If no charged send ever began, positive authoritative resolution/supersession proof
 with no remaining same-snapshot failure safely releases that never-sent claim.
 Unknown health or missing evidence retains it for fresh revalidation; absence is
-not proof of resolution. If only its comparison was withdrawn, a never-sent claim
+not proof of resolution. When authoritative evidence returns at or after the
+original 45-minute deadline and still verifies the failure, the adapter records
+`never-sent-intent-expired` and releases the claim through the same CAS state write.
+The receipt's `expired` field identifies the run, attempt, event and zero charged
+tries. It does not claim resolution of the failure. A later reconciliation may admit
+a different eligible snapshot; the original SHA/suite tombstone stays suppressed.
+Before that deadline, revalidation may send using only the original remaining
+elapsed budget. Expiry never renews its elapsed, retry, model or tool allowances.
+
+Known-never-sent means zero charged sends, zero last-send timestamp, zero stop
+requests and no invocation or execution ID. The same revalidation/release path
+recovers an older `delivery-exhausted` hold only for such an expired claim, provided
+the stored activation binding and prompt already match this adapter. No ad hoc state
+edit is needed for expiry itself under matching pins. Upgrading an already-activated
+installation still requires the reviewed prompt/pin and binding migration described
+below, including any held claim; this expiry path does not bypass that procedure.
+Unknown or incomplete evidence retains both the claim
+and any existing hold. Other holds, exhausted tombstone capacity, and any possibly
+sent delivery remain operator-controlled. `delivery-exhausted-operator-required`
+continues to mean that delivery may have begun and its occupancy is uncertain.
+Never clear that hold solely because health has turned green or history has no
+matching execution. Authenticated execution settlement remains the recovery proof.
+
+If only its comparison was withdrawn, a never-sent claim
 may drop `passing_sha` to `none` before its first send, disabling attribution while
 preserving investigation of the real failure. Once a send was charged, every
 retry preserves the exact original body. The adapter first searches authenticated execution history by its
