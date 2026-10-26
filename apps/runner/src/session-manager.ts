@@ -118,7 +118,7 @@ import {
   type SessionQueueHoldView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
-import { lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { ReviewWriterRegistry } from "./review-writers.js";
@@ -692,6 +692,8 @@ interface SteeringOperation {
 }
 
 interface ActiveSession {
+  /** False only when this exact launch has no host package filesystem sandbox. */
+  codexPackageSandboxed?: boolean;
   /** Immutable package-denial snapshot from this exact native provider launch. */
   codexPackageReadOnlyPaths?: readonly string[];
   orchestratorLaunchPolicy?: Pick<import("@wollipog/protocol").OrchestratorLaunchPolicy, "issueNumbers" | "issueScope" | "control">;
@@ -2014,16 +2016,20 @@ export class SessionManager {
   }
 
   setReviewWriterRegistry(registry: ReviewWriterRegistry): void {
-    if (this.reviewWriters.sessions().length) throw new Error("cannot replace retained agent writer evidence");
+    if (this.reviewWriters.sessions().length || this.reviewWriters.unsandboxedSessions().length) throw new Error("cannot replace retained agent writer evidence");
     this.reviewWriters = registry;
   }
 
   private beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation | undefined, home = homedir()): string | undefined {
     if (meta.context.kind !== "native" || meta.review) return undefined;
+    if (!isolation || ["windows-job", "container", "cloud"].includes(isolation.backend)) {
+      return this.reviewWriters.observeUnsandboxed(meta.sessionId, "provider");
+    }
     try {
-      const packages = realpathSync(join(home, ".codex", "packages"));
+      const packages = [realpathSync(join(home, ".codex", "packages")), ...this.codexHomes()
+        .filter((root) => existsSync(join(root, "packages"))).map((root) => realpathSync(join(root, "packages")))];
       if ((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt") &&
-          isolation.codexPackageReadOnlyPaths?.includes(packages)) return undefined;
+          packages.every((path) => isolation.codexPackageReadOnlyPaths?.includes(path))) return undefined;
     } catch { /* A missing installation is not proof for a future installation under a live writer. */ }
     return this.reviewWriters.acquire(meta.sessionId, "provider", isolation?.backend !== "container" && isolation?.backend !== "cloud");
   }
@@ -2042,6 +2048,7 @@ export class SessionManager {
   codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
     this.reviewWriters.reconcileRecovered("admission");
     const writers = this.reviewWriters.inspect();
+    const unsandboxedSessions = this.reviewWriters.unsandboxedSessions();
     const retaining = writers.map((writer) => `session ${writer.sessionId} (${writer.kind === "agent_tui" ? "Agent TUI" : "provider"}; ${
       writer.state === "current_runner" ? `writer of the current runner; ${writer.exitProven ? "tree exit proven, awaiting boundary emptiness" : "complete exit unproven"}`
         : writer.state === "previous_runner" ? "record left by a previous runner process" : "record with unknown runner identity"
@@ -2055,6 +2062,8 @@ export class SessionManager {
     for (const meta of this.store.listSessions()) {
       if (meta.context.kind !== "native" || meta.review) continue;
       const live = this.active.get(meta.sessionId);
+      const retiring = this.closing.get(meta.sessionId)?.entry;
+      if (live?.codexPackageSandboxed === false || (!live && retiring?.codexPackageSandboxed === false)) continue;
       if (this.closing.has(meta.sessionId) ||
           (live && !live.codexPackageReadOnlyPaths?.includes(canonical)) ||
           (!live && (["starting", "running", "input_required"].includes(meta.status) ||
@@ -2064,7 +2073,8 @@ export class SessionManager {
         }
       }
     }
-    return retaining.length ? { home, refusal: `Codex packages are unprotected from the following writers:\n${retaining.join("\n")}` } : { home };
+    return { home, unsandboxedSessions,
+      ...(retaining.length ? { refusal: `Codex packages are unprotected from the following writers:\n${retaining.join("\n")}` } : {}) };
   }
 
   private isReviewSession(sessionId: string): boolean {
@@ -2178,6 +2188,7 @@ export class SessionManager {
     if (!meta?.review || meta.review.update) return;
     this.clearReviewTimer(sessionId);
     const update: ReviewSessionUpdate = { type: "review_session_update", sessionId, state: outcome.state };
+    if (meta.review.admission) update.admission = meta.review.admission;
     if (meta.review.round) update.round = meta.review.round;
     if (outcome.verdict) update.verdict = outcome.verdict;
     if (outcome.output !== undefined) {
@@ -8858,6 +8869,15 @@ export class SessionManager {
         meta.orchestrator.issueScope = authoritativeScope;
       }
       driverConstructionStarted = true;
+      if (meta.review?.harness === "codex") {
+        // Snapshot at the final synchronous launch boundary, after all preparation awaits.
+        // Known unsandboxed agents add no capability by remaining alive during the review.
+        const admission = { observedAt: Date.now(), unsandboxedSessions: this.reviewWriters.unsandboxedSessions() };
+        meta.review = { ...meta.review, admission };
+        this.store.patchMeta(sessionId, { review: meta.review });
+        this.store.flush(sessionId);
+        this.send({ type: "review_session_update", sessionId, state: "running", admission });
+      }
       const reviewWriter = this.beginProviderReviewWriter(meta, isolation);
       client = this.createDriver(
         meta.driver,
@@ -9149,6 +9169,7 @@ export class SessionManager {
       worktree,
       worktreeLeaseOwner,
       context: meta.context,
+      codexPackageSandboxed: !!isolation && !["windows-job", "container", "cloud"].includes(isolation.backend),
       ...(isolation?.backend === "seatbelt" ? { seatbeltWritableRoots: [...isolation.writableRoots] } : {}),
       ...((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt")
         ? { codexPackageReadOnlyPaths: [...(isolation.codexPackageReadOnlyPaths ?? [])] } : {}),

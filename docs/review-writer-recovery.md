@@ -1,6 +1,23 @@
 # Review Writer Recovery
 
-Codex reviewer admission retains an obligation for each unprotected provider or Agent TUI writer.
+Codex reviewer admission retains an obligation for each runner-sandboxed launch without exact
+Codex package read-only proof, and every legacy durable provider or Agent TUI writer record.
+Known unsandboxed launches no longer create durable records or block admission. Each exact
+launch, including resumes and forks, is classified before spawn; a bwrap or Seatbelt launch
+without package protection still creates a blocking record. Missing classification stays
+conservative. An old record's `provider` kind does not identify its isolation, so it cannot be
+reclassified as unsandboxed from that field.
+
+The runner keeps a separate in-memory inventory of unsandboxed providers and Agent TUIs, including
+uncertain retirements. Codex review metadata snapshots their session IDs and kinds immediately
+before launch. That timestamped `admission` snapshot is visible through `review session get` /
+`get_review_session`, persists with the outcome, and is re-sent on reconnect. Undefined isolation,
+Windows Job isolation (which restricts no filesystem access), and container/cloud backends without
+host package protection are nonblocking. Current Agent TUIs run without a runner filesystem
+sandbox. Provider-internal sandbox settings do not change this classification. Claude reviewer
+admission is unchanged. An unsandboxed native process already has host-user access to the runner
+and reviewer installations; this admission policy does not attest their immunity to those agents.
+
 The refusal lists every retaining session and record, whether it belongs to the current runner,
 a previous runner, or has unknown identity, and its recovery step. A properly protected unrelated
 session is not blamed for a record merely because its UUID sorts first.
@@ -18,13 +35,17 @@ retries that retirement without requiring a runner restart. An empty boundary al
 that live proof. Process callback handles do not inherit the writer launch context, so another
 session scheduled from a writer's output or exit callback gets its own launch boundary.
 
-Run the runner in an operator-configured `Delegate=yes` unit for future boundary recovery. The
+For native sandboxed writers, run the runner in an operator-configured `Delegate=yes` unit for future boundary recovery. The
 runner never creates systemd scopes or moves itself into another delegation. Without delegation,
 or on macOS/WSL, it preserves conservative process-tree proof and records why containment is
 unavailable. Restart and age never clear uncontained legacy evidence automatically. Deliberate
 same-user migration out of a cgroup is outside this lifecycle proof's threat model.
-Container/cloud launches do not enter native provider cgroups and therefore retain uncontained
-evidence rather than claiming an empty native boundary as proof for their remote process trees.
+Legacy container/cloud writer records do not establish native process containment. Host cgroup
+delegation cannot prove remote process exit; investigate their complete trees on their execution
+targets. These records retain the existing conservative recovery requirements.
+When a live record lacks verifiable kernel identity, its refusal still offers exact live-tree exit
+settlement through the owning runner alongside independent operator investigation. Offline legacy
+retirement cannot remove an identity-less record.
 
 ## Legacy Records
 
@@ -70,7 +91,8 @@ because scanning a different user's processes would not prove the original write
 5. After successful retirement, start the runner normally and retry the review. Hand-deleting
    writer JSON files is not the recovery procedure.
 
-These commands do not alter the policy that unprotected writers block reviewer admission.
+These commands retire retained blocking records; they do not reclassify legacy records or change
+the nonblocking treatment of known unsandboxed launches.
 
 ## Diagnostics
 

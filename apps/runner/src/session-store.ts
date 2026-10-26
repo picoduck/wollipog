@@ -216,6 +216,8 @@ export interface SessionMeta {
     launchOwner: string;
     /** Accounting-only snapshot preparation record; no provider session has been launched. */
     preparing?: true;
+    /** Host-access observations at Codex reviewer admission (#3705). */
+    admission?: import("@wollipog/protocol").ReviewSessionAdmission;
     /** v228 (#3369): the attempt's planned place in its review run. */
     round?: import("@wollipog/protocol").ReviewAttemptRound;
     update?: import("@wollipog/protocol").ReviewSessionUpdate;

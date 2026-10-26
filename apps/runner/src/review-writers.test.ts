@@ -124,6 +124,39 @@ test("unknown identity recovery does not promise that legacy administration can 
   assert.doesNotMatch(row.recovery, /then retire-legacy/);
 });
 
+test("a live writer keeps exact-exit recovery guidance when kernel identity is unreadable", (t) => {
+  const registry = uncontained(directory(t), probe({ bootId: () => { throw new Error("unreadable"); } }));
+  registry.acquire("s_live", "provider");
+  const row = registry.inspect()[0]!;
+  assert.match(row.recovery, /End this writer's complete process tree; exact exit settlement/);
+  assert.match(row.recovery, /independent operator investigation/);
+  assert.doesNotMatch(row.recovery, /then retire-legacy/);
+});
+
+test("remote writer recovery never suggests host cgroup delegation", (t) => {
+  const dir = directory(t), registry = uncontained(dir);
+  registry.acquire("s_remote", "provider", false);
+  assert.match(registry.inspect()[0]!.recovery, /execution target/);
+  assert.doesNotMatch(registry.inspect()[0]!.recovery, /delegat|Delegate=yes/);
+  const recovered = uncontained(dir, probe({ startTime: () => "101" }));
+  assert.doesNotMatch(recovered.inspect()[0]!.recovery, /delegat|Delegate=yes/);
+});
+
+test("unsandboxed observations never acquire durable obligations and retire only their exact launch", (t) => {
+  const dir = directory(t), registry = uncontained(dir);
+  const first = registry.observeUnsandboxed("s_live", "provider");
+  const second = registry.observeUnsandboxed("s_live", "provider");
+  registry.observeUnsandboxed("s_live", "agent_tui");
+  assert.deepEqual(registry.sessions(), []);
+  assert.deepEqual(registry.inspect(), []);
+  assert.deepEqual(readdirSync(dir), []);
+  assert.equal(registry.retire(first, false), false);
+  assert.equal(registry.retire(first, true), true);
+  assert.equal(registry.unsandboxedSessions().length, 2, "another provider instance still lives");
+  registry.retire(second, true);
+  assert.deepEqual(registry.unsandboxedSessions(), [{ sessionId: "s_live", kind: "agent_tui" }]);
+});
+
 test("legacy administration reports all blocking identities from the proof's same scan", (t) => {
   const dir = directory(t); uncontained(dir).acquire("s_legacy", "provider");
   const blockers = [{ pid: 42, startTime: "101", command: "provider", reason: "marked" as const },
