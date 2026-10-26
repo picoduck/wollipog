@@ -24,6 +24,27 @@ test("historical health replay and inert recovery prove hold, exact repair, inde
   assert.equal(phases["rollback-after-full-restoration-and-exact-operator-approval"].fullRequiredContextRetained, true);
   assert.equal(report.latency.failureToPlannedBlockMs, 1000); assert.equal(report.latency.expiryToPlannedBlockMs, 0);
   assert.ok(Number.isFinite(report.latency.failureComputeMs)); assert.ok(Number.isFinite(report.latency.expiryComputeMs));
+  for (const [name, expectedLatency] of [["failure", 9300], ["expiry", 8300]]) {
+    const f = report.fanout[name];
+    assert.equal(f.targetCount, 45); assert.equal(f.writes, 45); assert.equal(f.complete, true);
+    assert.equal(f.reports, 1); assert.equal(f.censuses, 1);
+    assert.equal(f.apiBudget.calls, 83); assert.equal(f.apiBudget.limit, 96);
+    assert.equal(f.failureOrExpiryToLastPlannedHoldMs, expectedLatency);
+    assert.equal(f.lastPlannedBlockLatencyMs, expectedLatency);
+    assert.equal(f.liveMutations, 0); assert.ok(Number.isFinite(f.computeMs));
+  }
+  const short = report.fanout.insufficientBudget;
+  assert.equal(short.writes, 0); assert.equal(short.complete, false);
+  assert.equal(short.capacity.callsUsed, 38); assert.equal(short.capacity.callLimit, 48);
+  assert.equal(short.capacity.writesAvailable, 10); assert.equal(short.capacity.shortfall, 35);
+  assert.equal(short.failureOrExpiryToLastPlannedHoldMs, null);
+  const contemporary = report.fanout.currentReadCost35Targets;
+  assert.equal(contemporary.writes, 35); assert.equal(contemporary.apiBudget.calls, 88);
+  assert.equal(contemporary.failureOrExpiryToLastPlannedHoldMs, 9800);
+  const larger = report.fanout.currentReadCost45Targets;
+  assert.equal(larger.writes, 0); assert.equal(larger.complete, false);
+  assert.equal(larger.capacity.callsUsed, 53); assert.equal(larger.capacity.writesAvailable, 43);
+  assert.equal(larger.capacity.shortfall, 2);
   assert.equal(report.liveMutations, 0); assert.deepEqual(report.disabledWriter, { mode: "disabled", writes: 0 });
   assert.match(report.source.evidenceClass, /historical/); assert.match(report.forgeRace, /No finite unconditional/);
 });

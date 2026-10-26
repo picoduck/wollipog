@@ -3,8 +3,63 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluateAdmission } from "./main-merge-admission.mjs";
-import { authorizedRepair, failureFingerprint, planAdmissionCycle, planRollback, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
+import { authorizedRepair, failureFingerprint, planAdmissionCycle, planRollback, rebuildAdmissionCycle, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
 import { mergedRepairBinding, repairDigest, repairRecovery, requestMergedRepairCandidate } from "./main-merge-repair.mjs";
+
+/** Entire target set, inert transport, explicit virtual API latency. The 36
+ * report reads + one census conservatively replay the prior 37-read rebuild.
+ * These endpoints cannot reach GitHub; the enabled flag applies only to fixtures.
+ */
+export async function rehearseHoldFanout(health, { expired = false, restLimit = 5000, targetCount = 45, healthReadCount = 36 } = {}) {
+  const repository = health.repository, origin = Date.parse(health.observedAt);
+  const trigger = expired ? origin + 120_000 : Date.parse(health.unresolvedFailures[0].completedAt);
+  const start = expired ? trigger : trigger + 1000;
+  const virtualRequestMs = 100;
+  let clock = start, reports = 0, censuses = 0, writes = 0;
+  const nodes = Array.from({ length: targetCount }, (_, i) => ({ number: i + 1, isDraft: false,
+    headRefOid: (i + 100).toString(16).padStart(40, "0"), baseRefOid: health.currentMainSha, mergeQueueEntry: null }));
+  const api = async (path, { body } = {}) => {
+    clock += virtualRequestMs;
+    api.rateLimit.remaining--;
+    if (path === "/rate_limit" || path.startsWith("/inert-health/")) return {};
+    if (path === "/graphql") {
+      censuses++;
+      return { data: { repository: { defaultBranchRef: { name: "main", target: { oid: health.currentMainSha } },
+        pullRequests: { pageInfo: { hasNextPage: false }, nodes } } } };
+    }
+    if (path.startsWith(`/repos/${repository}/statuses/`)) {
+      if (body.state !== "failure") throw new Error("Fanout fixture must hold every target");
+      return { id: ++writes, state: body.state, context: body.context };
+    }
+    throw new Error("Unexpected inert fanout request");
+  };
+  api.rateLimit = { limit: restLimit, remaining: restLimit };
+  const now = () => new Date(clock).toISOString();
+  const report = async (_args, { api: bounded, log }) => {
+    reports++;
+    for (let i = 0; i < healthReadCount; i++) await bounded(`/inert-health/${i}`);
+    log(JSON.stringify(health)); return 0;
+  };
+  const census = { repository, mainSha: health.currentMainSha, complete: true,
+    entries: nodes.map(p => ({ repository, kind: "pull_request", pullRequest: p.number,
+      headSha: p.headRefOid, baseSha: p.baseRefOid, integrationSha: p.headRefOid })) };
+  const control = { available: true, repair: null };
+  const initial = await planAdmissionCycle({ repository, census, health, control, now: now() });
+  const cpuStart = performance.now();
+  let delivery;
+  try {
+    delivery = await writeAdmissionPlan(initial, { configuration: { enabled: true, repository, context: "Regression Admission" },
+      api, now, revalidate: ({ repository }, { api }) => rebuildAdmissionCycle({ repository, api, report, now, control,
+        observationId: "inert-full-fanout", entryPoint: "rehearsal" }) });
+  } catch (failure) {
+    if (!failure.capacity?.shortfall || failure.writes !== 0) throw failure;
+    delivery = { writes: failure.writes, complete: false, capacity: failure.capacity, apiBudget: failure.apiBudget };
+  }
+  return { evidenceClass: "inert-api-and-virtual-clock; no live delivery or authority", targetCount,
+    reports, censuses, healthReadCount, virtualRequestMs, virtualStartAt: new Date(start).toISOString(),
+    ...delivery, failureOrExpiryToLastPlannedHoldMs: delivery.complete ? clock - trigger : null,
+    computeMs: performance.now() - cpuStart, liveMutations: 0 };
+}
 
 /** Inert rehearsal. Historical live health is replayed at its original observation
  * time; every failure, authorization, CI proof, merge, request and recovery is a
@@ -102,6 +157,10 @@ export async function rehearseAdmission(projection, { candidateInterfaces } = {}
   const disabledWriter = await writeAdmissionPlan(released, { api: () => { throw new Error("No live writer permitted"); } });
   return { schema: "main-merge-admission-rehearsal-v1", mode: "dry-run", enforcement: "none", source,
     phases, latency, fixtureReads, liveMutations: 0, disabledWriter,
+    fanout: { failure: await rehearseHoldFanout(red), expiry: await rehearseHoldFanout(historical, { expired: true }),
+      insufficientBudget: await rehearseHoldFanout(red, { restLimit: 1000 }),
+      currentReadCost35Targets: await rehearseHoldFanout(red, { targetCount: 35, healthReadCount: 51 }),
+      currentReadCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 51 }) },
     forgeRace: "A success is sticky after the controller stops; fixture lease expiry does not expire a GitHub status. No finite unconditional block bound or atomic enforcement is established." };
 }
 

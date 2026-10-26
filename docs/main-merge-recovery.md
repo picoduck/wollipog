@@ -20,15 +20,19 @@ repository, PR number, reviewed head, base and current group SHA. The controller
 does not execute candidate code. It groups shared queue heads and records every
 member; one repair authorization cannot carry unrelated PRs in a batch. A
 100-target cap, truncation, duplicate identities, malformed data, queue movement,
-main movement or missing control state prevents admission. The census is read
-again after live health collection. No prior passing decision is reused.
+main movement or missing control state prevents admission. One independent health
+rebuild runs first, followed by **one complete census**. Its main SHA must match
+the independently re-pinned health main. Each exact target is evaluated against
+that shared health, control and repair state. No prior passing decision is reused.
+There is no second census or per-target health rebuild; movement after the census
+remains an explicit forge race.
 
 The underlying health `report` entry point independently verifies current full
 evidence, incident pointers, ancestry, attempts, inventory and main. One quota-sized
 48/96-call budget covers the CLI census and report, with the existing REST floor
 and no retry. GraphQL queries use HTTP POST: the existing API counter calls those
-`mutationCalls` by method, although these two operations are read-only queries.
-Do not misreport that counter as two state changes.
+`mutationCalls` by method, although the census operation is a read-only query.
+Do not misreport that counter as a state change.
 
 `planAdmissionCycle` produces exact **Regression Admission** status plans for PR
 head SHAs and group SHAs. It plans ordinary eligibility only for fresh evidence
@@ -39,15 +43,34 @@ IDs, exact target identities, health digest, reasons and planned-block latency.
 
 `writeAdmissionPlan` returns `{mode: "disabled", writes: 0}` by default without
 calling an API. A future operator-owned host must explicitly supply configuration,
-the exact repository/context, an authenticated API and `revalidate(entry, {api})`.
-Before **each** write, that callback must independently rebuild live identity,
-health, control state, authority and CI proof using the supplied bounded API.
-The adapter refuses incomplete censuses, changed entry identities, a cycle at least
-60 seconds old or an expired positive decision. It validates each returned status
-receipt and audits it; there is no retry. The same quota-sized budget covers writes
-and callback reads. A budget stop or partial failure needs reconciliation, not an
-alternate token. The callback is a trusted operator boundary, not a deserialized
-artifact or an author-provided function.
+the exact repository/context, an authenticated API and
+`revalidate({repository}, {api})`. **Once per batch**, that trusted callback must
+independently rebuild live health, control state, authority and CI proof, then a
+complete exact census, using only the supplied bounded API. The exported
+`rebuildAdmissionCycle` implements the report/census/plan sequence; trusted
+operator providers remain separately required and absent by default.
+
+The adapter requires the entire fresh target set to match the requested exact
+entries before writing anything. Missing/additional targets, changed heads/bases/
+groups, duplicate target SHAs, malformed decisions and incomplete census refuse
+the whole batch. Duplicate SHAs are conservatively refused rather than letting a
+later eligibility decision overwrite a hold on the same status context. Serialized
+input supplies identities only; only the independent callback supplies verdicts.
+
+After the rebuild, preflight requires enough **remaining calls AND REST quota
+above the existing floor for every planned status**. A shortfall records exact
+planned/available counts, cap, reads used, quota and floor, then refuses with zero
+writes. It never raises the 48/96-call cap or borrows another token. A successful
+preflight is conditional on subsequent API availability: changed quota, receipt
+failure or clock/lease expiry can still interrupt delivery. The adapter checks
+cycle age (strictly less than 60 seconds) and positive-decision expiry immediately
+before each write, validates receipts, and reports partial delivery with actual
+acknowledged and attempted write counts (a failed request may have reached the
+forge). Receipt timestamps, cumulative API calls and planned block latency
+are auditable through the last completed hold. No automatic retry is configured.
+A batch refusal is not an enforcement success: existing forge successes remain
+sticky until explicitly replaced. The callback is an operator trust boundary,
+never a deserialized artifact or an author-provided function.
 
 No workflow grants `statuses:write`. Simply merging this module, setting an
 environment string, adding a label or writing a prompt cannot activate it.
@@ -138,16 +161,41 @@ workflow dispatch, exceptional merge or status write was manufactured.
 | Rollback before full queue restoration | Hold retained |
 | Full queue restored and exact operator approval | Manual hold-removal plan only; no live removal |
 
-The recorded local rehearsal planned a block **1,000 ms after the fixture failure**
-and **0 ms after the fixture observation-expiry boundary**. Measured computation
-was 0.501 ms and 0.097 ms respectively in the latest local repeat. Virtual failure/expiry timestamps and real
-CPU duration are separate measurements; these values are not live detection or
-forge invalidation latency. The proposed 60-second reevaluation interval gives
-only a conditional decision envelope: next delivered cycle plus API observation
-and computation. No scheduler or provider delivery bound is established.
+The initial decision rehearsal plans a block **1,000 ms after the fixture
+failure** and **0 ms after the observation-expiry boundary**. The extended
+full-target rehearsal exercises the actual writer adapter, shared rebuild,
+complete GraphQL census and all **45 hold receipts** using an inert API. It
+reserves 36 synthetic health-report reads plus one census, matching the prior
+37-read rebuild cost without asserting that every future health history costs
+the same. Every API call takes an explicit **100 ms on a virtual clock**; no sleep
+or live status request is involved.
+
+| Full-Set Case | Arithmetic | Last Planned Hold |
+| --- | --- | --- |
+| Failure, 96-call cap | 1 quota + 36 health + 1 census + 45 statuses = **83** | **9,300 ms** after failure (1,000 ms initial delay + 8,300 ms calls) |
+| Expiry, 96-call cap | Same 83 calls, one report and one census | **8,300 ms** after expiry |
+| Same 45 targets, 48-call cap | 38 reads used; 48 - 38 = **10** writable; **35** short | **Zero writes**, incomplete; no block bound |
+
+Both successful fixtures leave **13 calls** under the unchanged 96-call cap and
+remain above the existing 60% REST quota floor. Property tests cover target counts
+0–100, read costs 0–40, both quota sizes and quota headroom, including exact budget
+boundaries. They compare actual writes with independent capacity arithmetic and
+require either complete delivery or zero-write capacity refusal. Expiry during a
+batch, main/head changes, incomplete census and changed target sets retain their
+negative checks.
+
+These are **planned full-set delivery bounds under explicit inert assumptions**,
+not measured live enforcement. Real CPU duration is emitted separately and is not
+included in virtual API latency. Actual request latency, runner delivery and
+controller availability have no established upper bound. For a delivered cycle
+with unchanged target identities, enough quota, call latency at most L and an
+initial delay D and computation C, the conditional receipt envelope is D + 83L + C.
+Forge visibility/landing races add a separate unbounded term. The proposed
+60-second reevaluation interval only bounds D if a separately approved host can
+actually guarantee that delivery interval. Full queue validation stays required.
 
 A separate live read-only controller observation at **2026-10-26T01:54:35.936Z**
-completed a stable census of **37 ready targets**. Main health was passing, zero
+completed two matching censuses of **37 ready targets** (the previous controller). Main health was passing, zero
 backlog, independently reverified at 01:54:29.783Z with the same exact worker and
 main above. It planned **37 holds** because control state was unconfigured, and
 zero writes. The whole cycle made **27 API calls: 25 REST reads and 2 GraphQL
@@ -157,7 +205,7 @@ census and default-deny operating point, not natural queue-group membership,
 status-writing permissions, sustained cost or live enforcement.
 
 A repeat at **2026-10-26T15:42:05.482Z**, after the first policy slice merged,
-verified a complete stable census of **45 targets** and planned **45 holds** for
+verified two matching complete censuses of **45 targets** (the previous controller) and planned **45 holds** for
 unconfigured control state. Main was `5f6743109ea487503f08a701c10714c7b702b937`;
 the independent health report at 15:41:49.353Z was pending with one unvalidated
 commit and passing snapshot run `40280462697`. The cycle used **39 API calls:
@@ -172,6 +220,24 @@ helper (SHA-256 `4c8835528f432f9e44a9cd7084ba15f2d2785f42079a88dad3337ec3994ffdf
 That temporary helper was removed, not included in this slice. The actual merged
 helper has the identical SHA-256. The repeat against merged source passed all
 **744 scripts tests**, with zero failures or skips, and the recovery rehearsal.
+
+A new read-only observation with the shared rebuild and **one census**, at
+**2026-10-26T19:41:19.776Z**, found **35 targets and 35 planned holds** (control
+unconfigured). Independent health at 19:40:58.266Z was pending, main
+`8f9970a183348fe3a5c7a19ffedc089dd7a2d804`, passing worker `40379151336`,
+two unvalidated commits. It used **53 calls: 52 REST reads and one GraphQL query**,
+zero actual mutations, REST remaining 4964/5000 and GraphQL 4939/5000. The adapter
+rejected every state-writing request. These CLI credentials still do not prove
+future workflow-token access. The larger current health history costs more than
+the earlier sample; the 37-read fixture is not a universal rebuild-cost claim.
+
+The rehearsal also models that measured read cost: **53 + 35 = 88** calls delivers
+the complete current-size set under the 96-call cap, taking **9,800 virtual ms**
+from failure to the last planned hold with the same assumptions. At **45 targets**
+with that read cost, **96 - 53 = 43** statuses fit, leaving a **two-write shortfall**.
+That fixture refuses with **zero writes** and no block bound. This is remaining
+capacity risk for an operator to evaluate before activation, not permission to
+raise budgets, weaken health evidence or claim a universal 45-target bound.
 
 A later campaign merge-group observation illustrates the scheduling limitation.
 Run [40318437984](https://github.com/picoduck/wollipog/actions/runs/40318437984),
@@ -205,8 +271,10 @@ an admission-policy hold or justify changing queue rules, budgets or thresholds.
 a status success remains sticky if the controller stops. Lease expiry does not
 make GitHub expire the status. Full controller outage, API outage, incomplete
 census, quota stops and a race between the last check/write and landing can leave
-a prior status unchanged. The adapter rechecks before each write but cannot make
-those operations atomic with GitHub merging. No finite unconditional
+a prior status unchanged. The adapter checks time/expiry before each write and binds all targets to one
+independent census; it cannot make that snapshot or the writes atomic with GitHub
+merging. New entries after the census wait for the next cycle. These races must be
+included in a separately approved activation design. No finite unconditional
 failure-to-block bound is claimed. The full queue remains required; do not cut
 over if the separately approved operator bound cannot be demonstrated.
 
