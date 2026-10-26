@@ -11545,9 +11545,49 @@ export class ControlPlaneDb {
     ).get(scope.owner.teamId, principal.organizationId, principal.userId) !== undefined;
   }
 
+  /** Runner-family access: the Machines, workspaces and agent installations a principal may list,
+   * inspect and launch on. A session credential delegated as one user acts for that user (#2940):
+   * a Full Control root and its children are user-owned so the campaign allowance and controlled
+   * review charge the authorizing Human, yet they must reach the runners that Human can use. Such
+   * an agent therefore gets that user's member access while the user is an active, non-viewer
+   * member: the organization's runners, the user's own, and those of the user's teams. It never
+   * gets the owner/admin bypass, another user's runner or another team's. Every other resource
+   * kind keeps the exact delegated-owner rule in principalCanAccessScope. */
+  private principalCanUseRunnerScope(principal: AuthPrincipal, scope: ResourceScope): boolean {
+    if (principal.kind !== "agent" || principal.delegatedScope.owner.kind !== "user") {
+      return this.principalCanAccessScope(principal, scope);
+    }
+    const organizationId = principal.delegatedScope.organizationId;
+    if (principal.organizationId !== organizationId || scope.organizationId !== organizationId) return false;
+    const userId = principal.delegatedScope.owner.userId;
+    if (scope.owner.kind === "user") return scope.owner.userId === userId;
+    const member = this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role<>'viewer'`,
+    ).get(organizationId, userId) !== undefined;
+    if (!member) return false;
+    if (scope.owner.kind === "organization") return scope.owner.organizationId === organizationId;
+    return this.stmt(
+      `SELECT 1 FROM identity_teams team
+       JOIN identity_team_members member ON member.team_id=team.team_id
+       WHERE team.team_id=? AND team.organization_id=? AND member.user_id=?`,
+    ).get(scope.owner.teamId, organizationId, userId) !== undefined;
+  }
+
+  /** Whether the user is an active owner or admin of the organization: the role a Human's own
+   * device principal would carry there. */
+  userAdministersOrganization(organizationId: string, userId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role IN ('owner','admin')`,
+    ).get(organizationId, userId) !== undefined;
+  }
+
   canAccessRunner(principal: AuthPrincipal, runnerId: string): boolean {
     const scope = this.runnerScope(runnerId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
   }
 
   canManageRunner(principal: AuthPrincipal, runnerId: string): boolean {
@@ -11562,7 +11602,7 @@ export class ControlPlaneDb {
 
   canAccessWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
     const scope = this.workspaceScope(runnerId, workspaceId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
   }
 
   canManageWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
