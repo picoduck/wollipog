@@ -20,7 +20,7 @@ import {
   useArtifactPreview,
 } from "./ArtifactPreview.js";
 
-const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
+const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
   localStorage: domWindow.localStorage, Element: domWindow.Element, HTMLElement: domWindow.HTMLElement,
