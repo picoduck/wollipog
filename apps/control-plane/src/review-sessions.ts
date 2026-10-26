@@ -32,7 +32,7 @@ function parsedAdmission(value: unknown): ReviewSessionAdmission | null {
   if (!value || typeof value !== "object") return null;
   const { observedAt, unsandboxedSessions } = value as ReviewSessionAdmission;
   if (!Number.isSafeInteger(observedAt) || observedAt < 0 || !Array.isArray(unsandboxedSessions) ||
-      unsandboxedSessions.length > 10_000 || !unsandboxedSessions.every((entry) => entry &&
+      !unsandboxedSessions.every((entry) => entry &&
         typeof entry.sessionId === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(entry.sessionId) &&
         (entry.kind === "provider" || entry.kind === "agent_tui"))) return null;
   return { observedAt, unsandboxedSessions: unsandboxedSessions.map(({ sessionId, kind }) => ({ sessionId, kind })) };

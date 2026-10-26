@@ -2048,7 +2048,6 @@ export class SessionManager {
   codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
     this.reviewWriters.reconcileRecovered("admission");
     const writers = this.reviewWriters.inspect();
-    const unsandboxedSessions = this.reviewWriters.unsandboxedSessions();
     const retaining = writers.map((writer) => `session ${writer.sessionId} (${writer.kind === "agent_tui" ? "Agent TUI" : "provider"}; ${
       writer.state === "current_runner" ? `writer of the current runner; ${writer.exitProven ? "tree exit proven, awaiting boundary emptiness" : "complete exit unproven"}`
         : writer.state === "previous_runner" ? "record left by a previous runner process" : "record with unknown runner identity"
@@ -2073,7 +2072,7 @@ export class SessionManager {
         }
       }
     }
-    return { home, unsandboxedSessions,
+    return { home,
       ...(retaining.length ? { refusal: `Codex packages are unprotected from the following writers:\n${retaining.join("\n")}` } : {}) };
   }
 

@@ -7,6 +7,9 @@ launch, including resumes and forks, is classified before spawn; a bwrap or Seat
 without package protection still creates a blocking record. Missing classification stays
 conservative. An old record's `provider` kind does not identify its isolation, so it cannot be
 reclassified as unsandboxed from that field.
+Configured package aliases or remapped homes whose canonical host package paths lack exact
+read-only proof also remain conservative blockers; admission does not infer protection from a
+missing inventory entry.
 
 The runner keeps a separate in-memory inventory of unsandboxed providers and Agent TUIs, including
 uncertain retirements. Codex review metadata snapshots their session IDs and kinds immediately

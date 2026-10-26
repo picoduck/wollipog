@@ -67,8 +67,6 @@ export interface CodexReviewerProtection {
   home: string;
   /** Missing proof names the unprotected session. */
   refusal?: string;
-  /** Known unsandboxed launches are recorded at admission, rather than refused. */
-  unsandboxedSessions?: import("./review-writers.js").UnsandboxedReviewSession[];
 }
 
 /** Check the write boundary and ownership of every component, retaining both for the exception. */

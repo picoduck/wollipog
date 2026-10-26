@@ -202,6 +202,18 @@ test("get_review_session exposes the immutable Codex host-access admission snaps
   } finally { h.db.close(); }
 });
 
+test("admission preserves a large valid inventory rather than silently dropping the snapshot", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId } = requested(h);
+    const admission = { observedAt: 123, unsandboxedSessions: Array.from({ length: 10_001 }, (_, index) => ({
+      sessionId: `s_observed_${index}`, kind: "provider" as const,
+    })) };
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId, state: "running", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission);
+  } finally { h.db.close(); }
+});
+
 test("review children preserve project attribution and never reserve implementation capacity or charges", () => {
   const h = harness();
   try {
