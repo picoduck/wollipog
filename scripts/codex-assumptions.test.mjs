@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
-import { collectResult, guardRangeResult, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
+import { acknowledgeUnavailable, collectResult, guardRangeResult, markdown, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
-import { CASES, hardeningRestorable } from "../apps/runner/scripts/codex-escalation-probe.ts";
+import { CASES, hardeningRestorable, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
 import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.ts";
 import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
@@ -33,6 +33,60 @@ test("changed assumptions and unavailable probes are distinct and both fail; opt
 test("version rechecks compare semantic versions across harmless output formatting", () => {
   for (const output of ["codex-cli 0.163.0", "codex-cli 0.163.0 (build)", "codex-cli 0.163.0\r\n", "warning\ncodex-cli 0.163.0\n"]) assert.equal(parseVersion(output), "0.163.0");
   assert.equal(parseVersion("codex-cli unavailable"), null);
+});
+
+test("only the measured namespace denial is eligible for acknowledgement, never a timeout or unrelated failure", () => {
+  const denied = { status: 1, signal: null, stderr: "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.\n" };
+  assert.equal(sandboxNamespaceUnavailable(denied), true);
+  for (const result of [null, { ...denied, error: new Error("ETIMEDOUT") }, { ...denied, signal: "SIGTERM" },
+    { ...denied, status: null }, { ...denied, status: 0 }, { ...denied, stderr: "bwrap: Operation not permitted" },
+    { ...denied, stderr: "error: unrecognized subcommand sandbox" }]) assert.equal(sandboxNamespaceUnavailable(result), false);
+});
+
+test("acknowledged namespace unavailability succeeds operationally with visible unmeasured evidence; every other failure remains failing", () => {
+  const escalation = PROBES.find(p => p.id === "escalation");
+  const unavailable = { ...execution("could not run", { unavailableReason: "sandbox_namespace_unavailable",
+    observed: "Host denies unprivileged user namespaces; no escalation assumption measured" }), code: 2 };
+  const result = collectResult(escalation, unavailable);
+  const acknowledged = acknowledgeUnavailable(result, "escalation");
+  assert.equal(acknowledged.status, "acknowledged unavailable");
+  assert.equal(acknowledged.measuredStatus, "could not run");
+  assert.equal(acknowledged.assumptions[0].status, "could not run");
+  assert.equal(reportExit([acknowledged]), 0);
+  assert.equal(reportExit([acknowledgeUnavailable(result)]), 2);
+  assert.equal(reportExit([acknowledgeUnavailable(result, "guard")]), 2);
+  for (const run of [execution("could not run"), { ...unavailable, unavailable: true }, { ...unavailable, code: null },
+    { ...unavailable, stdout: unavailable.stdout + "\n" + execution().stdout },
+    { ...execution("could not run", { unavailableReason: "missing_binary" }), code: 2 }]) {
+    assert.equal(reportExit([acknowledgeUnavailable(collectResult(escalation, run), "escalation")]), 2);
+  }
+  const changed = acknowledgeUnavailable(collectResult(escalation, execution("changed")), "escalation");
+  assert.equal(changed.status, "changed");
+  assert.equal(reportExit([acknowledged, changed]), 1);
+  assert.equal(reportExit([result, changed]), 1);
+  assert.equal(acknowledgeUnavailable(collectResult(PROBES.find(p => p.id === "guard"), unavailable), "guard").status, "could not run");
+
+  const dir = mkdtempSync(join(tmpdir(), "codex-acknowledged-test-"));
+  try {
+    const report = { version: "0.163.0", complete: true, completedAt: new Date().toISOString(), exitCode: 0,
+      results: PROBES.map(p => p.id === "escalation" ? acknowledged : collectResult(p, {
+        code: 0, stdout: Array(p.minimum).fill(execution().stdout).join("\n"), unavailable: false })) };
+    writeFileSync(join(dir, "latest.json"), JSON.stringify(report));
+    const persisted = readFileSync(join(dir, "latest.json"), "utf8");
+    assert.match(persisted, /"status":"acknowledged unavailable"/);
+    assert.match(persisted, /"measuredStatus":"could not run"/);
+    assert.match(markdown(report), /acknowledged unavailable: Host denies unprivileged user namespaces/);
+    const check = () => spawnSync(process.execPath, ["--import", "tsx", "scripts/codex-assumptions.mjs", "--check-fresh", "--report-dir", dir], { encoding: "utf8", timeout: 20000 });
+    const fresh = check();
+    assert.equal(fresh.status, 0, fresh.stderr);
+    assert.match(fresh.stdout, /escalation: acknowledged unavailable: Host denies unprivileged user namespaces/);
+    report.completedAt = new Date(Date.now() - 49 * 3600000).toISOString();
+    writeFileSync(join(dir, "latest.json"), JSON.stringify(report));
+    assert.equal(check().status, 2);
+    const service = readFileSync(new URL("./systemd/wollipog-codex-probes.service", import.meta.url), "utf8");
+    assert.match(service, /^EnvironmentFile=-%h\/\.config\/wollipog-codex-probes\.env$/m);
+    assert.ok(!service.includes("CODEX_ASSUMPTION_ACKNOWLEDGED_UNAVAILABLE="));
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("both real MCP entry kinds lose their approval grant in the negative control, retaining the timeout", () => {
@@ -113,7 +167,7 @@ test("missing binary writes a complete failing report rather than passing or cla
   const dir = mkdtempSync(join(tmpdir(), "codex-missing-test-"));
   try {
     const result = spawnSync(process.execPath, ["--import", "tsx", "scripts/codex-assumptions.mjs", "--report-dir", dir], {
-      encoding: "utf8", timeout: 20000, env: { ...process.env, CODEX_BIN: join(dir, "missing-codex") },
+      encoding: "utf8", timeout: 20000, env: { ...process.env, CODEX_BIN: join(dir, "missing-codex"), CODEX_ASSUMPTION_ACKNOWLEDGED_UNAVAILABLE: "escalation" },
     });
     assert.equal(result.status, 2, result.stderr);
     const report = JSON.parse(readFileSync(join(dir, "latest.json")));

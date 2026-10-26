@@ -43,8 +43,8 @@ export function unavailableProbeOutput(output: string): boolean {
     output === "no command ran";
 }
 
-export function probeResult(assumption: string, status: ProbeStatus, observed: string, documentation: string): void {
-  console.log(JSON.stringify({ event: "codex_assumption", assumption, status, observed, documentation }));
+export function probeResult(assumption: string, status: ProbeStatus, observed: string, documentation: string, unavailableReason?: "sandbox_namespace_unavailable"): void {
+  console.log(JSON.stringify({ event: "codex_assumption", assumption, status, observed, documentation, ...(unavailableReason ? { unavailableReason } : {}) }));
 }
 
 export function probeExit(statuses: ProbeStatus[]): number {

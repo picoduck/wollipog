@@ -12,10 +12,12 @@ The command measures the installed CLI version, executes every safe probe sequen
 An incomplete report replaces any previous green report before long-running work begins.
 Every assumption records its name, observed behavior and documentation holding the old measurement.
 
-Exit 0 means every required measurement matched. Exit 1 means an assumption changed. Exit 2 means a
+Exit 0 means every required measurement matched or a specific unavailable measurement was explicitly
+acknowledged by the operator as described below. An acknowledgement is **never a passing measurement**.
+Exit 1 means an assumption changed (including mixed runs with other failures). Exit 2 means a
 probe **could not run**, including missing/incompatible binaries, missing dependencies, sandbox
 restrictions, timeouts or incomplete results. A mixed run retains each individual result and fails
-overall; it never converts an environment failure to a behavior measurement. Optional diagnostic
+overall unless that exact unavailable cause was acknowledged; it never converts an environment failure to a behavior measurement. Optional diagnostic
 drift is advisory, explicitly identified, and cannot become a provider-launch requirement or
 evidence of successful WebSocket traffic. The CLI version is checked again at the end; an upgrade
 during measurement invalidates the run.
@@ -35,7 +37,8 @@ during measurement invalidates the run.
 The full suite normally takes about 47 minutes, chiefly waiting on the MCP stub; it makes no paid
 model requests. Each probe has a finite deadline and bounded output. The service has a 160-minute
 outer limit for slow/failing cases. A CLI lacking a working Linux sandbox can still measure schema,
-guard and diagnostic contracts, but its overall result remains **could not run**.
+guard and diagnostic contracts. Its escalation result remains **could not run**, or **acknowledged
+unavailable** after the explicit operator opt-in below.
 
 The guard probe runs even when the CLI lies outside `CODEX_GUARD_TRUST_VERSION_RANGE`. A passing
 matrix outside the production range reports **measured OK, range can be widened**; a failing one
@@ -47,7 +50,11 @@ If all approved profile escalation variants retain network access while the dire
 ordinary-network and approval-refusal controls still hold, the escalation report explicitly names
 the **provider-mode permission-profile deny withheld by #1336** as re-enablable through a reviewed
 code change. It still exits nonzero because the old recorded behavior changed. No hardening is
-automatically restored.
+automatically restored. This re-enablement detection requires a host that permits unprivileged user
+namespaces. The dogfood host has `apparmor_restrict_unprivileged_userns=1` and `unshare -Ur true`
+fails with EPERM (operator measurement, 2026-10-26). The #1336 re-enablement measurement therefore
+stays manual on a namespace-capable host; acknowledging this host limitation supplies no evidence
+that upstream has retained network access.
 
 ## Account Isolation and Cleanup Limits
 
@@ -72,8 +79,10 @@ runner. GitHub had no registered self-hosted runners at preflight; existing host
 not have Codex. Runner state/provider-home doctors do not execute CLI maintenance probes.
 
 The timer runs at 15:00 UTC with up to 15 minutes jitter and catches a missed run after downtime.
-**Changed and could-not-run both fail the service** and appear in `systemctl --user --failed` and
-the journal without opening a report. The fixed timer-report paths are:
+**Changed and unacknowledged could-not-run results fail the service** and appear in
+`systemctl --user --failed` and the journal without opening a report. An acknowledged namespace
+limitation stays visible in each run's journal and both reports while other probes can raise new
+failures. The fixed timer-report paths are:
 
 - `$HOME/.local/state/wollipog-codex-probes/latest.json`
 - `$HOME/.local/state/wollipog-codex-probes/latest.md`
@@ -131,5 +140,26 @@ journalctl --user -u wollipog-codex-probes.service -f
 ```
 
 The first measurement may take about 47 minutes. A failed sandbox capability check still permits
-the independent probes to finish and produces an overall failing report. Unit activation is an
-operator handoff, not an installation change performed by the hosted implementation agent.
+the independent probes to finish and initially produces an overall failing report. **Read that
+first report before configuring any acknowledgement.** If escalation reports the recorded
+`sandbox_namespace_unavailable` cause, the operator may create
+`$HOME/.config/wollipog-codex-probes.env` containing:
+
+```ini
+CODEX_ASSUMPTION_ACKNOWLEDGED_UNAVAILABLE=escalation
+```
+
+The unit reads this optional environment file; neither the template nor the suite enables the
+acknowledgement by default. The comma-separated setting names probes, but only `escalation` with
+the exact recorded `bwrap: No permissions to create new namespace` preflight denial is eligible.
+The failed preflight must have exited normally: a timeout, signal, missing/incompatible binary,
+unrecognized sandbox failure or incomplete result still exits 2. Any changed measurement exits 1
+regardless of the acknowledgement. No host settings are modified.
+
+Subsequent reports label the entry **acknowledged unavailable: Host denies unprivileged user
+namespaces...**, retain its underlying `could not run` assumption and `measuredStatus`, and record
+the reason code in JSON. Exit 0 then means operational success with that visible measurement gap,
+not that escalation passed. Remove the setting when moving to a capable host. The freshness check
+still requires a complete report no older than 48 hours and returns its recorded exit code; adding
+the setting does not reinterpret an earlier failing report. Unit activation and acknowledgement
+configuration are operator handoffs, not installation changes performed by this agent.

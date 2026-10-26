@@ -89,6 +89,12 @@ function listen(server: Server): Promise<number> {
   });
 }
 
+/** Only the recorded namespace denial is eligible for an operator acknowledgement. */
+export function sandboxNamespaceUnavailable(result: { error?: unknown; status: number | null; signal?: string | null; stderr: string | null } | null): boolean {
+  return !!result && !result.error && !result.signal && result.status !== null && result.status !== 0 &&
+    /^bwrap: No permissions to create new namespace(?:,|$)/m.test(result.stderr ?? "");
+}
+
 /** Stands in for the network: reachable outside the sandbox, refused inside it. */
 function networkServer(): Server {
   return createServer((_request, response) => {
@@ -299,8 +305,11 @@ async function main(): Promise<number> {
       ["sandbox", "linux", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"],
       { cwd: fixture.repo, env: isolatedProbeEnv(fixture.codexHome), encoding: "utf8", timeout: 15_000 }) : null;
     if (!sandbox || sandbox.error || sandbox.status !== 0 || !sandbox.stdout.includes("PROBE_SANDBOX_READY")) {
+      const namespaceUnavailable = sandboxNamespaceUnavailable(sandbox);
       probeResult("permission profile escalation matrix", "could not run",
-        "Codex Linux sandbox cannot execute a benign control command on this host; no escalation assumption measured", GUARD_DOCUMENTATION);
+        namespaceUnavailable ? "Host denies unprivileged user namespaces; Codex's benign sandbox control could not run; no escalation assumption measured" :
+          "Codex Linux sandbox cannot execute a benign control command on this host; no escalation assumption measured", GUARD_DOCUMENTATION,
+        namespaceUnavailable ? "sandbox_namespace_unavailable" : undefined);
       return 2;
     }
 

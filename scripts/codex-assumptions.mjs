@@ -24,7 +24,16 @@ export function parseVersion(output) {
 }
 
 export function reportExit(results) {
-  return results.some(r => r.status === "could not run") ? 2 : results.some(r => r.status === "changed") ? 1 : 0;
+  return results.some(r => r.status === "changed") ? 1 : results.some(r => r.status === "could not run") ? 2 : 0;
+}
+
+// An acknowledgement is operational success, never a successful measurement. Keep the original
+// assumption status and a separate explicit status in the persisted report.
+export function acknowledgeUnavailable(result, configured = "") {
+  if (result.probe !== "escalation" || result.status !== "could not run" ||
+    result.unavailableReason !== "sandbox_namespace_unavailable" || !configured.split(",").map(s => s.trim()).includes(result.probe)) return result;
+  return { ...result, status: "acknowledged unavailable", measuredStatus: "could not run",
+    observed: `acknowledged unavailable: ${result.observed}` };
 }
 
 export function collectResult(probe, execution) {
@@ -37,8 +46,11 @@ export function collectResult(probe, execution) {
   const status = execution.unavailable || !valid || (!changed && events.length < (probe.minimum ?? 1)) || ![0, 1].includes(execution.code) ||
     (execution.code === 1 && !changed) || events.some(e => e.status === "could not run") ? "could not run" :
     changed ? "changed" : events.some(e => e.status === "optional drift") ? "optional drift" : "unchanged";
+  const namespaceUnavailable = probe.id === "escalation" && !execution.unavailable && execution.code === 2 && valid && events.length === 1 &&
+    events[0].status === "could not run" && events[0].unavailableReason === "sandbox_namespace_unavailable";
   return { probe: probe.id, status, assumptions: valid ? events.map(({ event, ...value }) => value) : [],
-    observed: status === "could not run" ? "missing/incompatible binary, sandbox, timeout, dependency or incomplete probe result" : "see measured assumptions",
+    ...(namespaceUnavailable ? { unavailableReason: "sandbox_namespace_unavailable" } : {}),
+    observed: namespaceUnavailable ? events[0].observed : status === "could not run" ? "missing/incompatible binary, sandbox, timeout, dependency or incomplete probe result" : "see measured assumptions",
     documentation: probe.documentation };
 }
 
@@ -102,8 +114,10 @@ export async function main(args = process.argv.slice(2)) {
   if (args.includes("--check-fresh")) {
     let report; try { report = JSON.parse(readFileSync(join(reportDir, "latest.json"), "utf8")); } catch {}
     const fresh = reportFresh(report) && [0, 1, 2].includes(report.exitCode) && Array.isArray(report.results) && report.results.length === PROBES.length &&
-      report.results.every((r, i) => r.probe === PROBES[i].id && ["unchanged", "changed", "could not run", "optional drift"].includes(r.status)) && report.exitCode === reportExit(report.results);
+      report.results.every((r, i) => r.probe === PROBES[i].id && (["unchanged", "changed", "could not run", "optional drift"].includes(r.status) ||
+        (r.status === "acknowledged unavailable" && r.probe === "escalation" && r.measuredStatus === "could not run" && r.unavailableReason === "sandbox_namespace_unavailable"))) && report.exitCode === reportExit(report.results);
     console.log(fresh ? `Fresh Codex report; measured ${report.version}; exit=${report.exitCode}` : "Could not run: Codex report missing, incomplete or older than 48 hours");
+    if (fresh) for (const result of report.results.filter(r => r.status === "acknowledged unavailable")) console.log(`${result.probe}: ${result.observed}`);
     return fresh ? report.exitCode : 2;
   }
   if (args.some((a, i) => !["--report-dir", "--check-fresh"].includes(a) && !(dirIndex >= 0 && i === dirIndex + 1))) throw new Error("Usage: pnpm probe:codex-assumptions [--report-dir PATH] [--check-fresh]");
@@ -119,10 +133,10 @@ export async function main(args = process.argv.slice(2)) {
     for (const probe of PROBES) {
       const execution = report.version && !interrupted ? await execute(process.execPath, ["--import", "tsx", join(root, probe.script), ...(probe.args || [])], env, root, probe.timeout)
         : { stdout: "", code: 2, unavailable: true };
-      const result = collectResult(probe, execution);
+      const result = acknowledgeUnavailable(collectResult(probe, execution), process.env.CODEX_ASSUMPTION_ACKNOWLEDGED_UNAVAILABLE);
       result.version = report.version;
       report.results.push(result);
-      console.log(`${probe.id}: ${result.status}`);
+      console.log(`${probe.id}: ${result.status}; ${result.observed}`);
       for (const a of result.assumptions.filter(a => a.status !== "unchanged")) console.log(`${a.assumption}: ${a.status}; ${a.observed}; old measurement: ${a.documentation}`);
       writeReport(reportDir, report);
     }
