@@ -42,6 +42,20 @@ only. A cached report, hand-edited JSON, green controller, label, prompt or cand
 artifact cannot supply live proof. The pure function is useful for inert fixtures;
 production callers must use the live adapter rather than deserialize a verdict.
 
+The disabled controller's shared rebuild additionally batches the three immutable
+workflow blobs at each exact commit into one GraphQL read, with complete byte,
+Git blob hash, repository and revision verification. Mutable main/run/listing
+rechecks, freshness and complete evidence remain mandatory. Its measured-cost
+rehearsal now fits **45 holds in 96/96 calls** from the earlier 53-read baseline
+using only one three-file batch: **53 - 3 + 1 + 45 = 96**, **zero call headroom**.
+At 100 ms per virtual request, the last planned hold is **10,600 ms** after failure
+or **9,600 ms** after expiry; CPU time is separate. A 46-target batch is one short
+and refuses with zero writes. A new real read-only comparison reduced 38 calls to
+34 with two batches and preserved failing health; replaying that cost fits 45
+holds in **79/96 calls**, leaving **17**. See [the recovery runbook](main-merge-recovery.md#slice-4-batched-read-cost-and-full-set-delivery)
+for exact assumptions, negative cases and observations. Neither sample gives a
+universal history-cost bound. Limits and REST quota floors are unchanged.
+
 Every observation retains the complete health report, its SHA-256 digest, policy
 version/thresholds, decision time, repository, integration/base identity, passing
 run/attempt and reasons. `main_merge_admission_observed` logs the bounded summary

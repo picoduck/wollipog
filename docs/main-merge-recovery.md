@@ -31,8 +31,26 @@ The underlying health `report` entry point independently verifies current full
 evidence, incident pointers, ancestry, attempts, inventory and main. One quota-sized
 48/96-call budget covers the CLI census and report, with the existing REST floor
 and no retry. GraphQL queries use HTTP POST: the existing API counter calls those
-`mutationCalls` by method, although the census operation is a read-only query.
+`mutationCalls` by method, although the census and workflow-blob operations are read-only queries.
 Do not misreport that counter as a state change.
+
+Within each rebuild, `main-merge-admission-evidence.mjs` replaces three separate
+workflow Contents reads at one exact commit SHA with one GraphQL query. It binds
+the repository and commit object, requires all three complete nonbinary UTF-8
+blobs (at most 1 MiB each), verifies byte lengths and Git blob SHA-1 hashes, and
+supplies their original blob IDs and base64 bytes to the unchanged health observer.
+The observer still checks workflow bindings and suite identity. Missing, partial,
+binary, foreign, oversized or corrupt evidence, GraphQL errors and inaccessible
+queries fail closed; no weaker fallback is used. The cache contains only those
+immutable blobs and is discarded after the rebuild. Mutable refs, incident state,
+run/attempt metadata, job inventories and listings are read and independently
+rechecked as before. No prior health verdict is reused.
+
+The outer admission budget counts actual transport calls, including each batched
+query, census and status request. The health report's nested budget conservatively
+counts its logical Contents requests as before; its `apiBudget` is not the wire
+counter after batching. Both limits and the existing 60% REST quota floor remain
+intact; header validation and GraphQL accounting still pass through the shared API.
 
 `planAdmissionCycle` produces exact **Regression Admission** status plans for PR
 head SHAs and group SHAs. It plans ordinary eligibility only for fresh evidence
@@ -235,9 +253,60 @@ The rehearsal also models that measured read cost: **53 + 35 = 88** calls delive
 the complete current-size set under the 96-call cap, taking **9,800 virtual ms**
 from failure to the last planned hold with the same assumptions. At **45 targets**
 with that read cost, **96 - 53 = 43** statuses fit, leaving a **two-write shortfall**.
-That fixture refuses with **zero writes** and no block bound. This is remaining
-capacity risk for an operator to evaluate before activation, not permission to
-raise budgets, weaken health evidence or claim a universal 45-target bound.
+That unbatched fixture refuses with **zero writes** and no block bound. It remains
+in the rehearsal as the regression case; the batching delivery below addresses
+this specific shortfall without raising budgets or weakening evidence.
+
+### Slice 4: Batched Read Cost and Full-Set Delivery
+
+The conservative updated fixture keeps the measured **53 unbatched reads**, but
+uses just **one** complete three-file workflow batch. It executes the actual
+batching adapter within the shared rebuild, not a smaller synthetic read count.
+Every complete worker workflow verification reads these three files, so a known
+full baseline supplies this opportunity. Other reads remain charged individually.
+Additional workflow revisions can save more; unavailable evidence cannot supply
+a pass and does not promise this saving. These are conditional capacity proofs,
+not a universal maximum for future health histories.
+
+| Case | Exact Arithmetic | Last Planned Hold at 100 ms per Call |
+| --- | --- | --- |
+| Prior 53-read cost, one batch, 45 failure holds | 53 - 3 + 1 = **51 reads**; 51 + 45 = **96/96**, **0 calls headroom** | **10,600 ms** after failure, including 1,000 ms initial delay |
+| Same cost and set, expiry | Same **96/96**, **0 calls headroom** | **9,600 ms** after expiry |
+| Same cost, 46 targets | 96 - 51 = **45** writable, **1** short | **Zero writes**, no block bound |
+| Original 48-call short batch | 48 - 38 = **10** writable, **35** short | **Zero writes**, no block bound |
+| Latest observed cost, two workflow batches, 45 targets | 38 - 6 + 2 = **34 reads**; 34 + 45 = **79/96**, **17 calls headroom** | **8,900 ms** after failure |
+
+At the conservative measured-cost boundary there is no spare call: any extra
+read needs fresh capacity preflight and may refuse the whole batch. Quota
+headroom is checked independently; no REST floor or call cap was changed.
+The conditional receipt envelope for that case is **D + 96L + C**, where D is
+trigger-to-start delay, L an assumed per-call maximum and C actual computation.
+The rehearsal emits CPU time separately. All statuses are inert; live latency
+through the final held target still requires separately approved activation.
+
+Two new read-only observations on **2026-10-26**, at **21:51:57.465 UTC**
+(unbatched health start) and **21:52:21.618 UTC** (batched health start), used the
+same main `e22d02a65fdc130b07731a4e45818dd4a47820ec`, passing worker
+`40387489001`, one unvalidated commit and **36 census targets**. Both retained the
+authoritative failure in worker
+[40401596651](https://github.com/picoduck/wollipog/actions/runs/40401596651/attempts/1)
+and planned 36 holds. Unbatched cost was **38 calls** (37 REST, one census);
+batched cost was **34 calls** (31 REST, two workflow queries, one census).
+REST remaining was 4947/5000 then 4925/5000, floor **3000**; GraphQL remaining
+was 4733/5000 then 4860/5000. Independent buckets can reset between observations.
+The read-only CLI adapter rejected every state-writing request; zero mutations
+occurred. This proves current CLI read access, not future workflow-token access.
+
+The complete saved real REST snapshot was also replayed locally through the
+actual unchanged health `report` with and without batching, at one fixed clock.
+Full health JSON, including failure, inventory, attempts, ancestry and workflow
+blob identities, was identical after omitting only its budget counters:
+SHA-256 `ea71cbcdf5bf4cb06421f5c64faf4c8097a1a1bef95a01eb618d51f5d11e7c22`.
+Report transport calls fell **36 to 32**; adding outer quota and census gives the
+same **38 to 34** comparison. This was a deterministic replay of public reads,
+not fresh live authority. Existing independent end-of-observation main/run/listing
+checks all still executed. The red worker is tracked under #3710; this slice
+does not alter its tests or mask its failure.
 
 A later campaign merge-group observation illustrates the scheduling limitation.
 Run [40318437984](https://github.com/picoduck/wollipog/actions/runs/40318437984),

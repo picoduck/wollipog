@@ -45,6 +45,25 @@ test("historical health replay and inert recovery prove hold, exact repair, inde
   assert.equal(larger.writes, 0); assert.equal(larger.complete, false);
   assert.equal(larger.capacity.callsUsed, 53); assert.equal(larger.capacity.writesAvailable, 43);
   assert.equal(larger.capacity.shortfall, 2);
+  for (const [key, latency] of [["batchedMeasuredCost45Targets", 10600], ["batchedMeasuredCostExpiry45Targets", 9600]]) {
+    const batched = report.fanout[key];
+    assert.equal(batched.unbatchedReadCalls, 53); assert.equal(batched.savedCalls, 2);
+    assert.equal(batched.workflowQueries, 1); assert.equal(batched.censuses, 1); assert.equal(batched.reports, 1);
+    assert.equal(batched.capacity.callsUsed, 51); assert.equal(batched.apiBudget.calls, 96);
+    assert.equal(batched.writes, 45); assert.equal(batched.complete, true); assert.equal(batched.callHeadroom, 0);
+    assert.equal(batched.failureOrExpiryToLastPlannedHoldMs, latency);
+    assert.equal(batched.lastPlannedBlockLatencyMs, latency);
+    assert.equal(batched.apiBudget.remainingFloor, 3000); assert.equal(batched.liveMutations, 0);
+  }
+  const batchedShort = report.fanout.batchedMeasuredCost46Targets;
+  assert.equal(batchedShort.capacity.callsUsed, 51); assert.equal(batchedShort.capacity.writesAvailable, 45);
+  assert.equal(batchedShort.capacity.shortfall, 1); assert.equal(batchedShort.writes, 0);
+  assert.equal(batchedShort.failureOrExpiryToLastPlannedHoldMs, null);
+  const latest = report.fanout.latestObservedCost45Targets;
+  assert.equal(latest.unbatchedReadCalls, 38); assert.equal(latest.savedCalls, 4);
+  assert.equal(latest.capacity.callsUsed, 34); assert.equal(latest.apiBudget.calls, 79);
+  assert.equal(latest.writes, 45); assert.equal(latest.callHeadroom, 17);
+  assert.equal(latest.failureOrExpiryToLastPlannedHoldMs, 8900);
   assert.equal(report.liveMutations, 0); assert.deepEqual(report.disabledWriter, { mode: "disabled", writes: 0 });
   assert.match(report.source.evidenceClass, /historical/); assert.match(report.forgeRace, /No finite unconditional/);
 });

@@ -4,6 +4,7 @@ import { writeFileSync } from "node:fs";
 import { evaluateAdmission, POLICY } from "./main-merge-admission.mjs";
 import { repairRecovery, repairDigest } from "./main-merge-repair.mjs";
 import { budgetApi, githubApi, main as healthReport } from "./main-ci-health.mjs";
+import { admissionEvidenceApi } from "./main-merge-admission-evidence.mjs";
 
 export const ADMISSION_CONTEXT = "Regression Admission";
 export const CONTROLLER = Object.freeze({ maxEntries: 100, maxCycleAgeMs: 60_000, reevaluateMs: 60_000 });
@@ -185,7 +186,7 @@ export async function rebuildAdmissionCycle({ repository, api, env = process.env
   let health = null, census;
   try {
     const result = await report(["report"], { env: { ...env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main" },
-      api, log: line => { health = JSON.parse(line); }, error });
+      api: admissionEvidenceApi(api, repository), log: line => { health = JSON.parse(line); }, error });
     if (result !== 0) health = { ...health, status: "unknown", reasons: ["health-report-unavailable"] };
     census = await readAdmissionEntries(api, repository);
   } catch { census = { repository, complete: false, entries: [] }; }
