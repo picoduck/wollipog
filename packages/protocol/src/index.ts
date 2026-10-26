@@ -1032,7 +1032,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
-  backgroundFollowUp: 237,
+  backgroundFollowUp: 240,
   managedBackgroundInventory: 82,
   backgroundMissingResultRecovery: 134,
   backgroundRetryExhaustion: 221,
@@ -7614,7 +7614,7 @@ export interface SessionView {
   holds?: SessionHoldView[];
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
-  /** v237: display-only follow-up facts. Missing on older peers; never retry authority. */
+  /** v240: display-only follow-up facts. Missing on older peers; never retry authority. */
   backgroundFollowUp?: BackgroundFollowUpView | null;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
@@ -7837,7 +7837,7 @@ export interface SessionSnapshot {
   queueHold?: SessionQueueHoldView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
-  /** v237: display-only follow-up facts. Missing on older peers; never retry authority. */
+  /** v240: display-only follow-up facts. Missing on older peers; never retry authority. */
   backgroundFollowUp?: BackgroundFollowUpView | null;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;

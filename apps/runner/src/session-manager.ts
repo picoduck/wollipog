@@ -1429,7 +1429,7 @@ export class SessionManager {
   private readonly orphanRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly backgroundContinuationLaunching = new Set<string>();
   private readonly backgroundContinuationWakeAfterRepair = new Set<string>();
-  private readonly backgroundContinuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  private readonly backgroundContinuationTimers = new Map<string, { timer: ReturnType<typeof setTimeout>; retry: boolean }>();
   private readonly orphanDiscoveryLaunching = new Set<string>();
   private readonly historicalJobInspections = new Set<string>();
   private lastOrphanRecoveryScanAt = 0;
@@ -5551,7 +5551,15 @@ export class SessionManager {
       : meta.worktreeRecovery ? "worktree"
       : !automaticClaudeRecoveryAllowed(meta) ? "recovery_authorization" : undefined;
     return { state: blocker ? "blocked" : "queued", queuedAt, ...(blocker ? { blocker } : {}),
-      retryScheduled: this.backgroundContinuationTimers.has(meta.sessionId) };
+      retryScheduled: this.backgroundContinuationTimers.get(meta.sessionId)?.retry === true };
+  }
+
+  private publishBackgroundFollowUp(sessionId: string): void {
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "backgroundFollowUp")) return;
+    const meta = this.store.readMeta(sessionId);
+    if (meta?.backgroundWorkState === "continuation_pending") {
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+    }
   }
 
   /** A supporting control plane always hears the current truth about a queue hold (#1651),
@@ -17721,7 +17729,7 @@ export class SessionManager {
     this.orphanRecoveryScanTimer = null;
     for (const timer of this.orphanRecoveryTimers.values()) clearTimeout(timer);
     this.orphanRecoveryTimers.clear();
-    for (const timer of this.backgroundContinuationTimers.values()) clearTimeout(timer);
+    for (const { timer } of this.backgroundContinuationTimers.values()) clearTimeout(timer);
     this.backgroundContinuationTimers.clear();
     for (const { timer } of this.handoffWaitTimers.values()) clearTimeout(timer);
     this.handoffWaitTimers.clear();
@@ -17874,6 +17882,9 @@ export class SessionManager {
       controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
       ...(checkpoint?{campaignBudgetCheckpoint:checkpoint}:{}),
     });
+    // Publish the matched turn at its actual start, without waiting for provider acceptance;
+    // status-only messages cannot refresh the display-only follow-up facts at the control plane.
+    this.publishBackgroundFollowUp(sessionId);
   }
 
   /** Contain authoritative history failures to one session. History itself remains strict: this
@@ -19072,10 +19083,11 @@ export class SessionManager {
   /** Lifecycle rejection (Stop/delete) must also drop any pending continuation timer: a stale
    * timer entry would suppress scheduling for a restarted session's fresh background work. */
   private cancelBackgroundContinuationTimer(sessionId: string): void {
-    const timer = this.backgroundContinuationTimers.get(sessionId);
-    if (!timer) return;
-    clearTimeout(timer);
+    const scheduled = this.backgroundContinuationTimers.get(sessionId);
+    if (!scheduled) return;
+    clearTimeout(scheduled.timer);
     this.backgroundContinuationTimers.delete(sessionId);
+    if (scheduled.retry) this.publishBackgroundFollowUp(sessionId);
   }
 
   private scheduleBackgroundContinuation(sessionId: string, delay = 0): void {
@@ -19083,13 +19095,13 @@ export class SessionManager {
     const timer = setTimeout(() => {
       this.backgroundContinuationTimers.delete(sessionId);
       void this.runBackgroundContinuation(sessionId);
+      // A held continuation synchronously re-arms its retry and publishes once below. Otherwise
+      // clear the fired timer's scheduling claim, including when work is already in the queue.
+      if (this.backgroundContinuationTimers.get(sessionId)?.retry !== true) this.publishBackgroundFollowUp(sessionId);
     }, delay);
     timer.unref?.();
-    this.backgroundContinuationTimers.set(sessionId, timer);
-    const meta = this.store.readMeta(sessionId);
-    if (meta?.backgroundWorkState === "continuation_pending") {
-      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
-    }
+    this.backgroundContinuationTimers.set(sessionId, { timer, retry: delay > 0 });
+    this.publishBackgroundFollowUp(sessionId);
   }
 
   private async runBackgroundContinuation(sessionId: string): Promise<void> {
@@ -19099,7 +19111,9 @@ export class SessionManager {
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
     if (this.backgroundRecoveryHeld(meta)) {
-      if (!entry?.running) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      if (!entry?.running && !runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "backgroundFollowUp")) {
+        this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+      }
       this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
       return;
     }

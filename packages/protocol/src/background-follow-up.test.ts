@@ -11,8 +11,8 @@ test("follow-up display facts are bounded and never expose arbitrary runner data
     { state: "queued" });
   assert.deepEqual(normalizeBackgroundFollowUp({ state: "blocked", blocker: "budget", queuedAt: 100, retryScheduled: true, token: "private" }),
     { state: "blocked", blocker: "budget", queuedAt: 100, retryScheduled: true });
-  assert.equal(runnerSupportsProtocol(236, "backgroundFollowUp"), false);
-  assert.equal(runnerSupportsProtocol(237, "backgroundFollowUp"), true);
+  assert.equal(runnerSupportsProtocol(239, "backgroundFollowUp"), false);
+  assert.equal(runnerSupportsProtocol(240, "backgroundFollowUp"), true);
 });
 
 test("valid follow-up display facts round-trip while arbitrary extra data is discarded", () => {

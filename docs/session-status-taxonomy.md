@@ -60,7 +60,7 @@ checks (#2160). No session surface shows a Changes badge.
 
 ## Surface Contract
 
-Protocol v237 adds display-only `backgroundFollowUp` facts to negotiated runtime and reconnect
+Protocol v240 adds display-only `backgroundFollowUp` facts to negotiated runtime and reconnect
 snapshots, persisted in both full and compact session projections. Background Work details show
 the durable queue time and age when supplied, and whether an automatic retry timer is armed.
 Elapsed time never authorizes a retry or establishes failure. Missing facts clear old execution
