@@ -1146,7 +1146,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   claudeLiveUsage: 216,
   /** v219 control planes price a snapshot's `ratePricedUsage` residual per cache bucket. */
   ratePricedSnapshotUsage: 219,
-  costReconciliation: 199,
   costReconciliationIdentity: 210,
   /** v129 runners report the exact threshold that cancelled a turn. */
   governanceTripReporting: 129,
