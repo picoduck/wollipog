@@ -75,6 +75,21 @@ test("a process whose stat and environment both fail to read stays uninspectable
   assert.deepEqual(probe.scan(MARKER, "1"), { marked: [], uninspectable: [] }, "an exited process is no survivor");
 });
 
+test("legacy admin diagnostics exclude zombies and older unreadable processes but inspect their live descendants", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(401, { start: "99", environ: "directory", command: "older login" });
+  proc.add(402, { start: "101", state: "Z", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  proc.add(403, { start: "102", ppid: 402, env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`], command: "survivor" });
+  proc.add(404, { start: "103", environ: "directory", command: "sshd" });
+  const result = linuxLeaseProcessProbe(proc.root, UID, 300)!.scan(MARKER, "100", true, true);
+  assert.deepEqual(result.marked, [403]);
+  assert.deepEqual(result.uninspectable, [404]);
+  assert.deepEqual(result.blockers, [
+    { pid: 403, startTime: "102", command: "survivor", reason: "marked" },
+    { pid: 404, startTime: "103", command: "sshd", reason: "uninspectable" },
+  ]);
+});
+
 test("fallback diagnostics identify the observed process without its command or environment", { skip: process.platform !== "linux" }, (t) => {
   const proc = fakeProc(t);
   proc.add(210, { environ: "directory", start: "999", command: "private command" });

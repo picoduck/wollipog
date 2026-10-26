@@ -137,6 +137,7 @@ export class AcpClient {
       artifactGuidance?: string;
       sessionContext?: AcpSessionContextConfig;
       isolation?: SpawnIsolation;
+      reviewWriterCgroup?: import("./linux-cgroup.js").LinuxCgroupGroup;
       containerAgentLaunch?: boolean;
       cloudAgentLaunch?: boolean;
       orchestrator?: boolean;
@@ -164,7 +165,7 @@ export class AcpClient {
     this.mcpEnvironment = { ...process.env, ...opts.env };
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
-    this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation);
+    this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
     this.child = (deps.spawn ?? spawnAgent)(opts);
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>

@@ -289,9 +289,10 @@ export class AcpTerminalService {
     private readonly fs: AcpFilesystemService,
     private readonly context: AgentContext = nativeContext,
     private readonly isolation?: SpawnIsolation,
-    deps: { spawn?: typeof spawnAgent } = {},
+    deps: { spawn?: typeof spawnAgent; cgroup?: import("./linux-cgroup.js").LinuxCgroupGroup } = {},
   ) {
-    this.spawn = deps.spawn ?? spawnAgent;
+    const spawn = deps.spawn ?? spawnAgent;
+    this.spawn = (options) => deps.cgroup ? deps.cgroup.run(() => spawn(options)) : spawn(options);
   }
 
   async create(params: CreateTerminalRequest): Promise<CreateTerminalResponse> {

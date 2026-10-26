@@ -554,7 +554,7 @@ export class ClaudeCodeDriver implements Driver {
   private readonly deps: ClaudeDriverDeps;
   /** Every process this instance starts. Its owner is the descendant owner of the provider spawns
    * and keys the Claude namespace those spawns share. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   /** Graceful EOF retirements started by dispose(); a terminating proof must not preempt them. */
   private disposeBarrier: Promise<unknown> | null = null;
   private readonly persistentRequested: boolean;
@@ -701,6 +701,7 @@ export class ClaudeCodeDriver implements Driver {
     private readonly cb: DriverCallbacks,
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint, opts.claudeLiveUsage);
     this.cwd = opts.cwd;
     this.config = opts.config;
@@ -975,7 +976,7 @@ export class ClaudeCodeDriver implements Driver {
       this.processes.assertOpen();
       // No descendantOwner: the probe's boundary is terminated when it closes, so the ledger proves
       // it on its own.
-      child = this.processes.record(this.deps.spawn({
+      child = this.processes.launch(this.deps.spawn, {
         command: this.opts.command,
         args,
         cwd,
@@ -995,7 +996,7 @@ export class ClaudeCodeDriver implements Driver {
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         descendantMarker: options?.descendantMarker ?? this.opts.descendantMarker,
-      }));
+      });
     } catch (err) {
       throw new Error(`Claude fork failed to spawn: ${(err as Error).message}`);
     }
@@ -1323,7 +1324,7 @@ export class ClaudeCodeDriver implements Driver {
       let child: AgentProcess;
       try {
         this.processes.assertOpen();
-        child = this.processes.record(this.deps.spawn({
+        child = this.processes.launch(this.deps.spawn, {
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -1346,7 +1347,7 @@ export class ClaudeCodeDriver implements Driver {
           claudeNamespaceProvider: true,
           claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
-        }));
+        });
       } catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return resolve("refusal");
@@ -1628,7 +1629,7 @@ export class ClaudeCodeDriver implements Driver {
       let child: AgentProcess;
       try {
         this.processes.assertOpen();
-        child = this.processes.record(this.deps.spawn({
+        child = this.processes.launch(this.deps.spawn, {
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -1651,7 +1652,7 @@ export class ClaudeCodeDriver implements Driver {
           claudeNamespaceProvider: true,
           claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
-        }));
+        });
       } catch (err) {
         this.openPersistentCircuit(`persistent claude spawn failed: ${(err as Error).message}`, turn);
         return;

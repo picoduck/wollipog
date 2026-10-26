@@ -28,7 +28,7 @@ import {
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
 import { currentProviderHomeRunnerMarker, PROVIDER_HOME_RUNNER_MARKER_ENV } from "./provider-home-lease-evidence.js";
-import { spawnWithLinuxCgroup, type LinuxCgroupBoundary } from "./linux-cgroup.js";
+import { spawnWithLinuxCgroup, type LinuxCgroupBoundary, type LinuxCgroupGroup } from "./linux-cgroup.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -946,8 +946,15 @@ export class ProviderProcessLedger {
   private readonly observations = new Set<Promise<boolean>>();
   private readonly namespaceFor: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined;
 
-  constructor(options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined } = {}) {
+  constructor(private readonly options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined; cgroup?: LinuxCgroupGroup } = {}) {
     this.namespaceFor = options.namespaceFor ?? claudeNamespaceFor;
+  }
+
+  /** Enter the writer's durable parent before spawning, never after a child can execute. */
+  launch(spawn: typeof spawnAgent, options: SpawnAgentOptions): AgentProcess {
+    this.assertOpen();
+    const work = () => this.record(spawn(options));
+    return this.options.cgroup ? this.options.cgroup.run(work) : work();
   }
 
   /** Throws once the instance has ended; call before every spawn. */
@@ -1019,7 +1026,8 @@ export class ProviderProcessLedger {
       this.observations.delete(proof);
     });
     try {
-      return await work({ onProcess: (process) => { processes.push(process.catch(() => false)); } });
+      const run = () => work({ onProcess: (process: Promise<boolean>) => { processes.push(process.catch(() => false)); } });
+      return await (this.options.cgroup ? this.options.cgroup.run(run) : run());
     } finally { finish(); }
   }
 

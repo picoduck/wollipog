@@ -217,6 +217,8 @@ export interface DriverCallbacks {
 }
 
 export interface DriverOptions {
+  /** Durable parent for every process owned by one unprotected writer. */
+  reviewWriterCgroup?: import("../linux-cgroup.js").LinuxCgroupGroup;
   command: string;
   args: string[];
   cwd: string;
