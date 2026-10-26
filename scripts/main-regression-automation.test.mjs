@@ -185,6 +185,18 @@ test('never-sent recovery cannot clear other holds or inconsistent delivery prov
   }
 });
 
+test('positive resolution cannot release inconsistent never-sent provenance without a hold', async () => {
+  for (const extra of [{ lastSentAt: instant }, { stopTries: 1 }, { invocationId: 'ati_1' }]) {
+    const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+    Object.assign(s.active, extra);
+    const f = fixture(s); f.time = instant + LIMITS.elapsedMs;
+    f.observation = health({ status: 'passing', unresolvedFailures: [], evidence: [], resolvedRunIds: [10] });
+    assert.equal((await f.run()).status, 'dispatch-evidence-unavailable-operator-required');
+    assert.deepEqual(f.state.active, s.active); assert.equal(f.state.blocked, null);
+    assert.deepEqual(f.state.seen, s.seen); assert.equal(f.receipts.length, 0);
+  }
+});
+
 test('deadline crossed during evidence validation expires without charging a send', async () => {
   const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
   const f = fixture(s); let time = instant + LIMITS.elapsedMs - 1, comparisons = 0;

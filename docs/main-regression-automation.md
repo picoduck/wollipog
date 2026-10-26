@@ -114,8 +114,12 @@ elapsed budget. Expiry never renews its elapsed, retry, model or tool allowances
 
 Known-never-sent means zero charged sends, zero last-send timestamp, zero stop
 requests and no invocation or execution ID. The same revalidation/release path
-recovers an older `delivery-exhausted` hold only for such an expired claim; no
-manual state edit is needed. Unknown or incomplete evidence retains both the claim
+recovers an older `delivery-exhausted` hold only for such an expired claim, provided
+the stored activation binding and prompt already match this adapter. No ad hoc state
+edit is needed for expiry itself under matching pins. Upgrading an already-activated
+installation still requires the reviewed prompt/pin and binding migration described
+below, including any held claim; this expiry path does not bypass that procedure.
+Unknown or incomplete evidence retains both the claim
 and any existing hold. Other holds, exhausted tombstone capacity, and any possibly
 sent delivery remain operator-controlled. `delivery-exhausted-operator-required`
 continues to mean that delivery may have begun and its occupancy is uncertain.
