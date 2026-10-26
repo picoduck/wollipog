@@ -1,5 +1,9 @@
 # Main CI Health
 
+The [regression merge-admission runbook](main-merge-admission.md) documents #3633's
+disabled policy and optional read-only shadow. It does not change required checks
+or admit repairs; candidate integration and enforcement remain later slices.
+
 The merge queue tests every entry on top of `main`, so a red `main` fails every queued pull
 request, whatever it changes. Normally nothing reaches `main` without passing the queue. The one
 exception is the `main: merge queue` ruleset's bypass: organization admins can merge without the

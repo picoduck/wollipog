@@ -18,6 +18,7 @@ const EXPECTED_GROUP_TEMPLATE =
 const EXPECTED_JOB_GUARD =
   "github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false";
 const EXPECTED_SHADOW_GUARD = `(github.event_name == 'merge_group' || github.event_name == 'pull_request') && (${EXPECTED_JOB_GUARD})`;
+const EXPECTED_ADMISSION_SHADOW_GUARD = "${{ !cancelled() && vars.CI_REGRESSION_ADMISSION == 'dry-run' && (github.event_name == 'merge_group' || github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)) }}";
 // CI carries the required check, so its pull-request lanes are also per head and never cancel in
 // progress (#3283); pr-ci-supersede.yml stops older heads. The other PR workflows report no
 // required check and keep cancelling, but every workflow shares the same ready/draft lanes.
@@ -49,6 +50,10 @@ function workflowContract(path) {
   // Every job carries the same draft guard. The aggregator adds PR-only !cancelled()
   // admission; non-PR reporting remains unconditional, including on cancellation.
   const requiredGuards = jobGuards.filter((match, index) => {
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "regression-admission-shadow:") {
+      assert.equal(match[1].trim(), EXPECTED_ADMISSION_SHADOW_GUARD, "admission shadow remains optional, advisory and draft guarded");
+      return false;
+    }
     if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite-shadow:") {
       assert.equal(match[1].trim(), EXPECTED_SHADOW_GUARD, "advisory selection has its explicit PR/merge-group draft guard");
       return false;
@@ -243,7 +248,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["suite_plan", "checks", "browser", "win32", "webkit", "suite-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "checks", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
