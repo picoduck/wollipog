@@ -17,6 +17,10 @@ export function admissionEvidenceApi(api, repository) {
     const [file, revision, extra] = suffix.split("?ref=");
     if ((options?.method ?? "GET") !== "GET" || options?.body !== undefined || extra !== undefined ||
         !WORKFLOWS.includes(file) || !SHA.test(revision ?? "")) return api(path, options);
+    // Only rolling workers request the worker file first. Legacy main-push runs
+    // require just CI and Windows evidence; preserve their original REST reads
+    // rather than requiring a worker file that may not exist at that revision.
+    if (!revisions.has(revision) && file !== WORKFLOWS[0]) return api(path, options);
     if (!revisions.has(revision)) {
       const response = await api("/graphql", { method: "POST", body: {
         query: "query AdmissionWorkflowEvidence($owner:String!,$name:String!,$revision:GitObjectID!,$file0:String!,$file1:String!,$file2:String!){repository(owner:$owner,name:$name){nameWithOwner revision:object(oid:$revision){__typename oid} file0:object(expression:$file0){...WorkflowBlob} file1:object(expression:$file1){...WorkflowBlob} file2:object(expression:$file2){...WorkflowBlob}}} fragment WorkflowBlob on Blob{__typename oid text isBinary byteSize}",

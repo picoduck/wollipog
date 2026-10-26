@@ -45,6 +45,11 @@ queries fail closed; no weaker fallback is used. The cache contains only those
 immutable blobs and is discarded after the rebuild. Mutable refs, incident state,
 run/attempt metadata, job inventories and listings are read and independently
 rechecked as before. No prior health verdict is reused.
+Batching starts only when the collector requests the rolling worker file; legacy
+main-push runs that need only CI and Windows evidence retain their original REST
+reads and do not require a worker file at their older revision. A committed
+integration test runs the real complete collector, compares full health evidence,
+asserts the two-call saving and proves main/attempt changes still invalidate it.
 
 The outer admission budget counts actual transport calls, including each batched
 query, census and status request. The health report's nested budget conservatively
