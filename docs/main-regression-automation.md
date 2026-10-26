@@ -99,7 +99,13 @@ delivery cannot expire locally and release the slot: it may still start remotely
 After exhausted delivery/stop attempts, no new investigation is admitted while
 occupancy is uncertain. Routine stop success and authenticated offline expiry
 release their slot; a later authenticated execution settlement also clears an
-elapsed-exhaustion hold. Blocked observations never consume suppression tombstones.
+elapsed-exhaustion or ambiguous-delivery hold. Blocked observations never consume suppression tombstones.
+If no charged send ever began, withdrawn evidence safely releases that never-sent
+claim. Otherwise the adapter first searches authenticated execution history by its
+exact trigger/event idempotency key and pinned automation revision. It can recover
+an accepted send without replaying stale failure evidence. An absent history entry
+does not prove rejection; uncertain work remains fenced and eventually reports
+exhaustion for operator inspection.
 An operator must inspect the exact invocation/execution before uncertain-delivery
 recovery. Preserve the existing `seen` ledger and stable event/body identity; prove
 the invocation terminal or replay its exact body through the approved trigger to
@@ -139,6 +145,13 @@ identity and isolate execution before running tested code. Review commands befor
 execution; logs and synthetic artifact text cannot choose commands, grant authority,
 raise budgets, change the task or select a target. Download only existing sanitized
 synthetic browser artifacts after authenticating their run/attempt provenance.
+
+Changing any manifest-pinned file changes the expected task for new sends; an
+operator must review and migrate the stored prompt/pins before new admission can
+resume. Already correlated executions continue settlement and elapsed supervision
+under their recorded binding and revision before current prompt validation. Do not
+change the configured origin/IDs/revision/action digest during that supervision;
+those binding changes still require a reviewed migration after active work drains.
 
 Use `InvestigationBudget` from `scripts/main-regression-investigation.mjs` for the
 whole investigation: instantiate it once, charge **before** each attempted

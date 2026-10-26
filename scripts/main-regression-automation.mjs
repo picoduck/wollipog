@@ -199,9 +199,12 @@ export function controlClient(config, fetchImpl = fetch) {
   let calls = 0;
   return async (path, { method = 'GET', body, headers } = {}) => {
     if (++calls > 6) fail('control-plane-budget-exhausted');
-    const response = await fetchImpl(new URL(path, origin), { method, redirect: 'error',
-      headers: headers ?? { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
-      ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(10000) });
+    let response;
+    try {
+      response = await fetchImpl(new URL(path, origin), { method, redirect: 'error',
+        headers: headers ?? { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+        ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(10000) });
+    } catch { fail('control-plane-unavailable'); }
     if (!response.ok) fail([400, 401, 403, 409, 413, 415].includes(response.status)
       ? 'control-plane-rejected' : 'control-plane-unavailable');
     const text = await boundedText(response, 256 * 1024);
@@ -251,17 +254,30 @@ export async function reconcile(repository, { api, control, config, now = Date.n
   const a = state.active;
   if (!a) return report(state.blocked ?? decision.reason);
   const payload = await control(`/api/automations/${config.automationId}`);
-  const triggers = await control(`/api/automations/${config.automationId}/triggers`);
-  validateAutomation(payload, triggers, config);
+  const executionKey = `trigger:${config.triggerId}:main-regression:${a.runId}:${a.attempt}`;
+  if (!Array.isArray(payload?.executions)) fail('execution-provenance-unavailable');
+  // Read-only recovery works even if an accepted send lost its response or its old failure
+  // is now covered by a passing descendant. Never replay stale evidence just to find a receipt.
+  if (!a.executionId && a.tries > 0) {
+    const matches = payload.executions.filter(e => e.idempotencyKey === executionKey &&
+      e.automationId === config.automationId && e.automationRevision === config.revision && e.actionKind === 'create_session');
+    if (matches.length > 1) fail('execution-provenance-unavailable');
+    if (matches.length === 1) {
+      if (!ID.test(matches[0].executionId ?? '')) fail('execution-provenance-unavailable');
+      a.executionId = matches[0].executionId; await save();
+    }
+  }
+  // Existing exact executions are supervised under their recorded binding/revision. Future
+  // policy/helper/docs changes can prevent new sends but cannot disable their timeout/settlement.
   if (a.executionId) {
     const execution = payload.executions.find(e => e.executionId === a.executionId);
     if (!execution || execution.automationId !== config.automationId || execution.automationRevision !== config.revision ||
         execution.actionKind !== 'create_session' ||
-        execution.idempotencyKey !== `trigger:${config.triggerId}:main-regression:${a.runId}:${a.attempt}`)
+        execution.idempotencyKey !== executionKey)
       fail('execution-provenance-unavailable');
     if (terminal.has(execution.status)) {
       state.active = null;
-      if (state.blocked === 'elapsed-exhausted') state.blocked = null;
+      if (['elapsed-exhausted', 'delivery-exhausted', 'delivery-rejected'].includes(state.blocked)) state.blocked = null;
       await save();
       return report(`investigation-${execution.status}`);
     }
@@ -276,12 +292,22 @@ export async function reconcile(repository, { api, control, config, now = Date.n
     }
     return report('investigation-active');
   }
+  const triggers = await control(`/api/automations/${config.automationId}/triggers`);
+  validateAutomation(payload, triggers, config);
   if (state.blocked) return report(state.blocked);
+  let verified = null;
+  if (a.tries === 0) {
+    verified = await verifyIntent(repository, a, health, api);
+    if (!verified) {
+      // No charged send has ever begun, so this claim cannot have created remote occupancy.
+      state.active = null; await save(); return report('stale-never-sent-intent-released');
+    }
+  }
   if (a.tries >= LIMITS.deliveryAttempts || now() - a.createdAt >= LIMITS.elapsedMs) {
     state.blocked = 'delivery-exhausted'; await save(); return report('delivery-exhausted-operator-required');
   }
   if (a.lastSentAt && now() - a.lastSentAt < LIMITS.deliveryBackoffMs) return report('delivery-backoff');
-  if (!await verifyIntent(repository, a, health, api)) return report('dispatch-evidence-unavailable-operator-required');
+  if (!(verified ?? await verifyIntent(repository, a, health, api))) return report('dispatch-evidence-unavailable-operator-required');
   a.tries++; a.lastSentAt = now(); await save();
   const body = deliveryBody(repository, a);
   let response;
