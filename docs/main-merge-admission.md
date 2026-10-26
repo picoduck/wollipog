@@ -2,9 +2,10 @@
 
 Refs #3633 under #3625. **Disabled; no enforcement or activation in this delivery.**
 The first slice supplies a pure ordinary-admission policy, read-only live observer,
-optional advisory workflow job and this operator runbook. Repair authorization,
-candidate full-validation integration, active invalidation and enforcement remain
-required later slices of #3633. This document distinguishes those plans from shipped behavior.
+optional advisory workflow job and this operator runbook. The recovery slice adds
+a [dry-run controller, default-deny code-only writer and complete recovery rehearsal](main-merge-recovery.md).
+No workflow grants the writer permissions. Operator providers, status-writing
+authority, required-context wiring and activation remain separate human steps.
 
 ## Shipped Mechanism and Contexts
 
@@ -93,11 +94,12 @@ records `base-moved` and holds until rebuilt on current main. This can produce
 expected holds for stacked entries; report them separately from health failures
 when sizing thresholds. No natural stacked-entry shape was measured in this slice.
 
-## Enforcement Design and Forge Race — Not Yet Implemented
+## Disabled Enforcement Adapter and Forge Race
 
-The planned enforcement combines a trusted final exact-integration check with
-active invalidation of queued/in-flight entries. A check at initial enqueue alone
-does not cover entries already waiting or building. The separate operator-approved
+The code-only controller plans exact-integration checks and invalidation of
+queued/in-flight entries. A check at initial enqueue alone does not cover entries
+already waiting or building. Its default-deny writer rebuilds evidence before each
+target write and requires an operator-owned host. The separate operator-approved
 context would be **Regression Admission**; it is not required or emitted today.
 The existing **Typecheck, Test & Sidecar Bundle** must remain required and fully
 validate merge groups until a separately reviewed cutover proves the replacement.
@@ -124,35 +126,40 @@ strategy. If no supported fail-closed lease/invalidation mechanism can satisfy i
 retain full queue validation and leave the lighter gate disabled. Do not market a
 poll interval, workflow timeout or check timestamp as atomic enforcement.
 
-## Exact Repair and Reconciliation Contract — Pending #3635
+## Exact Repair and Reconciliation Contract
 
 Keep ordinary admissions held while a separately authorized repair/revert is tested.
 Do not require broken current main to pass before candidate testing. #3635 owns the
 single bounded, deduplicated exact-SHA candidate request and receipt-verification
 primitive; #3633 must use its merged interface, never add another scheduler.
 
-The later repair slice must bind an authorization to repository, PR number, reviewed
+The repair grant binds an authorization to repository, PR number, reviewed
 head, base SHA, exact resulting integration SHA, unresolved failure identities,
 approver/audit identity and bounded expiry. Review and normal merge authority remain
 required. A label, prompt or author-provided receipt grants nothing. Changing head,
 base, integration, current failure set or expiry requires new proof and approval.
 Concurrent repairs cannot inherit one another's authorization.
 
-Before exceptional admission, independently verify fast checks, named failing
-scenarios and the complete full-regression receipt on that **exact integration**.
-The candidate worker must test the repair without current-main-green admission.
-A green dispatcher or run title alone is insufficient. A full receipt for a
-different SHA, superseded attempt, partial inventory or changed workflow is invalid.
-If the eventual squash merge changes commit identity, reconcile the forge's actual
-merge SHA and approved tree/parent binding, then collect authoritative post-merge
-health. Do not feed candidate success into ordinary main health as if it were a
-passing main descendant. Keep the hold through that reconciliation; release only
-when independently verified main evidence resolves the exact failures and meets
-the freshness/backlog policy. Recovery must work with all required contexts intact.
+Before exceptional admission, independently verify fast checks and named failing
+scenarios on the exact authorized head/integration. Preserve normal review, merge
+authority and the existing full merge-group check. The shared candidate primitive
+accepts only main-ancestry targets; it supplies no pre-merge or merge-group
+equivalence. Do not require broken current main to pass before admitting its repair.
 
-This contract is deliberately **not a shipped repair bypass**. Complete dry-run
-hold → exact repair validation → post-merge reconciliation → release, plus rollback,
-after #3635 lands. Until then #3633 is incomplete and must remain open.
+After the squash merge, independently bind its actual SHA to the authorized group
+tree and base, then request purpose=`repair` validation of that exact merged SHA.
+A scheduling receipt certifies `none`; a green dispatcher or run title is not full
+proof. Keep ordinary admissions held until fresh independent main health verifies
+the exact merged target, current full run/attempt and suite, resolves the failures,
+and meets freshness/backlog policy. A different SHA, superseded attempt, partial
+inventory, changed workflow or unexpected main movement keeps the hold. Recovery
+must work with all existing required contexts intact.
+
+This contract is deliberately **not a live repair bypass**. The
+[recovery rehearsal](main-merge-recovery.md) exercises hold → exact authorized
+repair → purpose=repair merged-SHA validation → independent reconciliation →
+release, plus ordered rollback, using historical health and inert fixtures.
+Normal review/merge authority and separate activation approval remain mandatory.
 
 ## Dry-Run Evidence and Separate Operator Steps
 
