@@ -59,9 +59,17 @@ export interface ReviewSessionRequest {
 
 export type ReviewSessionState = "requested" | "running" | "completed" | "failed" | "cancelled";
 
+/** Informational host-access snapshot; these launches do not block Codex admission (#3705).
+ * Optional for compatibility with peers predating this observation. */
+export interface ReviewSessionAdmission {
+  observedAt: number;
+  unsandboxedSessions: Array<{ sessionId: string; kind: "provider" | "agent_tui" }>;
+}
+
 /** A review session as its requester sees it. `output` is the reviewer's final structured output
  * exactly as returned: it is not validated against the review contract in this phase. */
 export interface ReviewSessionView {
+  admission?: ReviewSessionAdmission;
   reviewSessionId: string;
   requesterSessionId: string;
   pullRequest: { repository: string; number: number };
@@ -133,6 +141,7 @@ export interface ReviewAttemptVerdictView {
 /** Runner to control plane: the review session's outcome. Accepted only from the runner that owns
  * the review session; a terminal state is final. */
 export interface ReviewSessionUpdate {
+  admission?: ReviewSessionAdmission;
   type: "review_session_update";
   sessionId: string;
   state: Exclude<ReviewSessionState, "requested">;

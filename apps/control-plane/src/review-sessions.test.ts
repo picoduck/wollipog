@@ -178,6 +178,42 @@ test("a requester has one active review; another starts once it settles", () => 
   } finally { h.db.close(); }
 });
 
+test("get_review_session exposes the immutable Codex host-access admission snapshot", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId } = requested(h);
+    const admission = { observedAt: 123, unsandboxedSessions: [
+      { sessionId: "s_orchestrator", kind: "provider" as const }, { sessionId: "s_tui", kind: "agent_tui" as const },
+    ] };
+    assert.equal(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, undefined);
+    assert.equal(h.db.reviewSessions.accept("wrong-runner", { type: "review_session_update", sessionId: reviewSessionId,
+      state: "running", admission }, 124), false);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId, state: "running", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId,
+      state: "completed", output: "{}", admission: { observedAt: 456, unsandboxedSessions: [] } });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission, "first admission is immutable");
+    assert.equal(h.svc.reviewSessionView("s2", reviewSessionId).status, 404);
+    const next = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: next.reviewSessionId,
+      state: "completed", output: "{}", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", next.reviewSessionId).data?.admission, admission,
+      "terminal-first delivery also persists the snapshot");
+  } finally { h.db.close(); }
+});
+
+test("admission preserves a large valid inventory rather than silently dropping the snapshot", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId } = requested(h);
+    const admission = { observedAt: 123, unsandboxedSessions: Array.from({ length: 10_001 }, (_, index) => ({
+      sessionId: `s_observed_${index}`, kind: "provider" as const,
+    })) };
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId, state: "running", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission);
+  } finally { h.db.close(); }
+});
+
 test("review children preserve project attribution and never reserve implementation capacity or charges", () => {
   const h = harness();
   try {

@@ -10,6 +10,7 @@ import { createLinuxCgroupGroup, providerContainmentStatus, providerContainmentU
 import { leaseContainmentGuidance } from "./provider-home-lease-containment.js";
 
 type WriterKind = "agent_tui" | "provider";
+export type UnsandboxedReviewSession = { sessionId: string; kind: WriterKind };
 type WriterEntry = {
   sessionId: string;
   kind: WriterKind;
@@ -38,6 +39,8 @@ export type WriterInspection = {
  * or a runner restart cannot substitute for a complete process-tree exit proof. */
 export class ReviewWriterRegistry {
   private readonly entries = new Map<string, WriterEntry>();
+  /** Known host-access launches are observations, never durable blocking obligations. */
+  private readonly unsandboxed = new Map<string, UnsandboxedReviewSession>();
 
   constructor(
     private readonly directory?: string,
@@ -123,8 +126,20 @@ export class ReviewWriterRegistry {
 
   group(id: string | undefined): LinuxCgroupGroup | undefined { return id ? this.entries.get(id)?.group : undefined; }
 
+  observeUnsandboxed(sessionId: string, kind: WriterKind): string {
+    const id = randomUUID();
+    this.unsandboxed.set(id, { sessionId, kind });
+    return id;
+  }
+
+  unsandboxedSessions(): UnsandboxedReviewSession[] {
+    return [...new Map([...this.unsandboxed.values()].map((entry) => [`${entry.sessionId}:${entry.kind}`, entry])).values()]
+      .map((entry) => ({ ...entry }));
+  }
+
   retire(id: string, proven: boolean): boolean {
     if (!proven) return false;
+    if (this.unsandboxed.delete(id)) return true;
     const entry = this.entries.get(id);
     if (!entry) return true;
     entry.exitProven = true;
@@ -151,19 +166,24 @@ export class ReviewWriterRegistry {
         this.probe?.bootId() === entry.process.bootId && this.probe.startTime(process.pid) === entry.process.startTime; }
       catch { /* diagnostic only */ }
       const bounded = entry.process?.containment?.kind === "linux-cgroup-v2";
+      const liveRecovery = entry.exitProven ? "Tree exit is proven; retry admission to recheck the writer boundary."
+        : "End this writer's complete process tree; exact exit settlement retires its record.";
+      // Remote containment cannot be established by delegating the host runner's cgroup.
+      const guidance = entry.process?.containment?.kind === "marker-parent-links" &&
+        entry.process.containment.reason === "unsupported-platform"
+        ? "Native cgroup containment is unavailable for this launch; verify its complete process tree on its execution target."
+        : leaseContainmentGuidance(entry.process?.containment);
       return { recordId: id.replace(/^recovered:/u, "").replace(/\.json$/u, ""), sessionId: entry.sessionId, kind: entry.kind,
         state: current ? "current_runner" : entry.process ? "previous_runner" : "unknown_runner",
         containment: bounded ? "linux-cgroup-v2" : "unavailable", sha256: entry.digest, exitProven: entry.exitProven === true,
         recovery: !entry.process || !entry.runnerPid
-          ? "This record lacks verifiable runner identity. Preserve it for independent operator investigation; the legacy retirement command cannot authorize its removal."
-          : current ? (entry.exitProven ? "Tree exit is proven; retry admission to recheck the writer boundary."
-              : "End this writer's complete process tree; exact exit settlement retires its record.") +
-            (bounded ? "" : " " + leaseContainmentGuidance(entry.process?.containment))
+          ? (current ? liveRecovery + " " : "") + "This record lacks verifiable runner identity. Preserve it for independent operator investigation; the legacy retirement command cannot authorize its removal."
+          : current ? liveRecovery + (bounded ? "" : " " + guidance)
           : bounded ? entry.recoveryReason === "runner_alive"
             ? "The recorded previous runner is still alive. End this writer through its owning runner, then retry boundary reconciliation."
             : "The recorded writer boundary is still populated or cannot be verified. End its surviving processes and retry boundary reconciliation."
             : "Use --state-doctor review-writers inspect, then retire-legacy with the exact record id and SHA-256. " +
-              leaseContainmentGuidance(entry.process?.containment),
+              guidance,
       };
     });
   }

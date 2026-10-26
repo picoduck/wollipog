@@ -10,7 +10,8 @@ import type { DriverOptions } from "./drivers/driver.js";
 import { ReviewScopeRefusal } from "./review-snapshot.js";
 import { reviewLaunchArgs, type ReviewSessionHooks } from "./review-sessions.js";
 import { SessionManager } from "./session-manager.js";
-import { SessionStore } from "./session-store.js";
+import { SessionStore, type SessionMeta } from "./session-store.js";
+import { ReviewWriterRegistry } from "./review-writers.js";
 
 const HEAD = "c".repeat(40);
 const OUTPUT = JSON.stringify({ schema_version: 2, vote: "UPVOTE" });
@@ -59,6 +60,7 @@ function harness(t: { after(fn: () => void): void }, options: {
   /** Permission denials the fake Claude driver reports for the turn. */
   denials?: number;
   providerAccount?: boolean;
+  reviewer?: "codex";
 } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -73,7 +75,8 @@ function harness(t: { after(fn: () => void): void }, options: {
     () => {},
     store,
     "runner",
-    (driver, _context, agentId) => agentId === "claude" && driver === "claude-code" ? { command: "claude", args: [], env: {} } : null,
+    (driver, _context, agentId) => (agentId === "claude" && driver === "claude-code") ||
+      (agentId === "codex" && driver === "codex-app-server") ? { command: agentId, args: [], env: {} } : null,
     ((_kind: string, driverOptions: DriverOptions) => {
       const record = { options: driverOptions, prompts: [] as string[], disposed: false };
       drivers.push(record);
@@ -116,7 +119,8 @@ function harness(t: { after(fn: () => void): void }, options: {
     recordOutcome: (update) => { recorded.push(update); released.push(update.sessionId); },
     outcomes: () => [...(options.outcomes ?? []), ...recorded],
     prepare: options.prepare ?? (async (sessionId, _policy, launch, brief) => {
-      assert.deepEqual(launch, { driver: "claude-code", agentId: "claude", command: "claude" }, "the authorized launch is re-verified");
+      assert.deepEqual(launch, options.reviewer === "codex" ? { driver: "codex-app-server", agentId: "codex", command: "codex" }
+        : { driver: "claude-code", agentId: "claude", command: "claude" }, "the authorized launch is re-verified");
       prepared.push({ sessionId, brief });
       return { checkout, prompt: "REVIEW PROMPT", baseSha: "b".repeat(40), round: ROUND };
     }),
@@ -173,6 +177,44 @@ test("a review session launches past full capacity, read-only in its checkout, a
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.equal((h.manager as any).admitted.has("s_review"), false, "no runner slot was taken");
   assert.deepEqual(h.manager.reviewSessionUpdates(), h.updates(), "the outcome is re-sent at registration");
+});
+
+test("Codex admission records unsandboxed provider and TUI launches, durably and in requester updates", async (t) => {
+  const h = harness(t, { hold: true, reviewer: "codex" });
+  const registry = new ReviewWriterRegistry(join(h.root, "writers"));
+  h.manager.setReviewWriterRegistry(registry);
+  const begin = (h.manager as unknown as {
+    beginProviderReviewWriter(meta: SessionMeta, isolation: undefined): string;
+  }).beginProviderReviewWriter.bind(h.manager);
+  begin({ sessionId: "s_orchestrator", context: { kind: "native" } } as SessionMeta, undefined);
+  registry.observeUnsandboxed("s_tui", "agent_tui");
+  const spec = reviewSpec({ agentId: "codex", command: "codex", driver: "codex-app-server",
+    review: { ...reviewSpec().review!, harness: "codex" } });
+  assert.equal(await h.manager.start(spec, "brief"), true);
+  await until(() => h.drivers[0]?.prompts.length === 1, "Codex reviewer launch");
+  const admission = h.store.readMeta("s_review")!.review!.admission!;
+  assert.ok(admission.observedAt > 0);
+  assert.deepEqual(admission.unsandboxedSessions, [
+    { sessionId: "s_orchestrator", kind: "provider" }, { sessionId: "s_tui", kind: "agent_tui" },
+  ]);
+  assert.deepEqual(h.running().find((update) => update.admission)?.admission, admission);
+  h.finishTurn();
+  await until(() => h.updates().length > 0, "Codex review result");
+  assert.deepEqual(h.updates()[0]!.admission, admission, "terminal delivery restores a lost admission update");
+  assert.deepEqual(h.manager.reviewSessionUpdates()[0]!.admission, admission, "reconnect preserves the original snapshot");
+  assert.deepEqual(new SessionStore(join(h.root, "sessions")).readMeta("s_review")!.review!.admission, admission);
+});
+
+test("Claude admission remains unchanged in the presence of blocking writer records", async (t) => {
+  const h = harness(t, { hold: true });
+  const registry = new ReviewWriterRegistry(join(h.root, "writers"));
+  h.manager.setReviewWriterRegistry(registry);
+  registry.acquire("s_sandboxed_writer", "provider");
+  assert.equal(await h.manager.start(reviewSpec(), "brief"), true);
+  await until(() => h.drivers[0]?.prompts.length === 1, "Claude reviewer launch");
+  assert.equal(h.store.readMeta("s_review")!.review!.admission, undefined);
+  assert.ok(h.running().every((update) => update.admission === undefined));
+  h.finishTurn();
 });
 
 test("a campaign review preserves its admitted generation through final usage and reconnect", async (t) => {

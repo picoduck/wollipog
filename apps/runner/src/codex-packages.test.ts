@@ -170,10 +170,12 @@ test("reviewer admission names each unprotected writer and requires exact live l
   }) as SessionMeta;
   for (const driver of ["codex-app-server", "claude-code", "pi", "acp"] as const) {
     store.create(makeMeta(driver));
-    active.set(id, { codexPackageReadOnlyPaths: [] });
+    active.set(id, { codexPackageSandboxed: true, codexPackageReadOnlyPaths: [] });
     assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/);
-    active.set(id, { codexPackageReadOnlyPaths: [f.packages] });
+    active.set(id, { codexPackageSandboxed: true, codexPackageReadOnlyPaths: [f.packages] });
     assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
+    active.set(id, { codexPackageSandboxed: false });
+    assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined, "a known unsandboxed launch is admitted");
     active.delete(id);
     store.patchMeta(id, { status: "starting" });
     assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/);
@@ -209,7 +211,8 @@ test("a stopped structured writer remains refused until its asynchronous full-tr
   let resolveProof!: (proven: boolean) => void;
   const proof = new Promise<boolean>((resolve) => { resolveProof = resolve; });
   const client = { dispose: () => {}, proveProcessTreeExit: () => proof };
-  const token = internal.beginProviderReviewWriter(meta, undefined, f.home)!;
+  const writable: SpawnIsolation = { backend: "bwrap", command: "/bin/bwrap", args: [], network: "inherit" };
+  const token = internal.beginProviderReviewWriter(meta, writable, f.home)!;
   internal.driverReviewWriterTokens.set(client, token);
   internal.disposeDriver(client);
   assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
@@ -220,7 +223,7 @@ test("a stopped structured writer remains refused until its asynchronous full-tr
   assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
 
   const failed = { dispose: () => {}, proveProcessTreeExit: async () => false };
-  internal.driverReviewWriterTokens.set(failed, internal.beginProviderReviewWriter(meta, undefined, f.home)!);
+  internal.driverReviewWriterTokens.set(failed, internal.beginProviderReviewWriter(meta, writable, f.home)!);
   internal.disposeDriver(failed);
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_retiring/);
@@ -230,6 +233,23 @@ test("a stopped structured writer remains refused until its asynchronous full-tr
   t.after(() => afterRestart.shutdownAll());
   assert.match(afterRestart.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
     "uncertain retired writers survive both session removal and runner reconstruction");
+});
+
+test("a sandbox needs read-only proof for configured package directories as well as the default install", posixOnly, (t) => {
+  const f = fixture(t), account = join(f.root, "account"), packages = join(account, "packages");
+  mkdirSync(packages, { recursive: true });
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setCodexHomes(() => [account]);
+  t.after(() => manager.shutdownAll());
+  const internal = manager as unknown as {
+    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation, home: string): string | undefined;
+  };
+  const meta = { sessionId: "s_account_writer", context: { kind: "native" } } as SessionMeta;
+  const isolation: SpawnIsolation = { backend: "bwrap", command: "/bin/bwrap", args: [], network: "inherit",
+    codexPackageReadOnlyPaths: [f.packages, packages] };
+  assert.equal(internal.beginProviderReviewWriter(meta, isolation, f.home), undefined);
+  assert.ok(internal.beginProviderReviewWriter(meta, { ...isolation, codexPackageReadOnlyPaths: [f.packages] }, f.home));
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /s_account_writer/);
 });
 
 test("refusal lists every current, previous-runner and unknown writer with its matching recovery", posixOnly, (t) => {
@@ -251,23 +271,37 @@ test("refusal lists every current, previous-runner and unknown writer with its m
   assert.doesNotMatch(refusal, /protocol|restart.*remove only/i);
 });
 
-test("remote provider launches never claim a native writer boundary they do not enter", posixOnly, (t) => {
+test("each exact launch is classified anew; unsandboxed and remote launches create no durable writer", posixOnly, (t) => {
   const f = fixture(t), directory = join(f.root, "writers");
   const registry = new ReviewWriterRegistry(directory, undefined, { createGroup: () => { throw new Error("must not create a native group"); } });
   const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
   manager.setReviewWriterRegistry(registry);
   t.after(() => manager.shutdownAll());
   const internal = manager as unknown as {
-    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation, home: string): string | undefined;
+    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation | undefined, home: string): string | undefined;
   };
-  for (const backend of ["container", "cloud"] as const) {
+  for (const backend of [undefined, "windows-job", "container", "cloud"] as const) {
     const token = internal.beginProviderReviewWriter({ sessionId: `s_${backend}`, context: { kind: "native" } } as SessionMeta,
-      { backend } as SpawnIsolation, f.home);
+      backend ? { backend } as SpawnIsolation : undefined, f.home);
     assert.ok(token);
     assert.equal(registry.group(token), undefined);
   }
-  assert.equal(registry.sessions().length, 2);
-  assert.ok(registry.inspect().every((row) => row.containment === "unavailable"));
+  assert.deepEqual(registry.sessions(), []);
+  assert.equal(registry.unsandboxedSessions().length, 4);
+  assert.deepEqual(readdirSync(directory), []);
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
+  // Reusing a session id never borrows an earlier launch's host-access classification.
+  const blocking = new ReviewWriterRegistry(directory, undefined, { createGroup: () => undefined });
+  const fresh = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "fresh")), "runner");
+  fresh.setReviewWriterRegistry(blocking);
+  t.after(() => fresh.shutdownAll());
+  const begin = (fresh as unknown as typeof internal).beginProviderReviewWriter.bind(fresh);
+  const meta = { sessionId: "s_transition", context: { kind: "native" } } as SessionMeta;
+  begin(meta, undefined, f.home);
+  for (const backend of ["bwrap", "seatbelt"] as const) {
+    begin(meta, { backend, codexPackageReadOnlyPaths: [] } as unknown as SpawnIsolation, f.home);
+    assert.match(fresh.codexReviewerProtection(f.home).refusal!, /session s_transition/);
+  }
 });
 
 test("graceful shutdown retires only exact proven provider writers before restart", posixOnly, async (t) => {

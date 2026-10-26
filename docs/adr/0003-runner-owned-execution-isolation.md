@@ -109,10 +109,22 @@ and transcripts keep their existing write permissions. Package updates must run 
 boundaries. A real Codex App smoke test exercises a failed installer write followed by two local
 mock-inference turns; a separate bwrap test verifies the mount when user namespaces are available.
 
-Reviewer admission can accept the conventional `~/.codex/packages/standalone` install only with
-package protection proven for every live agent writer. Each structured launch supplies an immutable
-denial snapshot; an unprotected session or Agent TUI is named in the refusal. Human-operated
-terminals remain the operator boundary. Unprotected structured-provider and TUI writer markers
+Reviewer admission can accept the conventional `~/.codex/packages/standalone` install while known
+unsandboxed sessions run (#3705). Such native sessions already have host-user access, including to
+the runner and reviewer installations. Each launch, resume and fork is classified from its exact
+isolation before spawn: undefined isolation and backends without host package filesystem protection
+(Windows Job, container and cloud) enter a separate in-memory nonblocking inventory. Current Agent
+TUIs have no runner filesystem sandbox and enter that inventory too. A Codex review records the
+timestamp, session IDs and kinds at admission in durable metadata and in its requester-visible
+`review session get` / `get_review_session` view; terminal delivery repeats this snapshot for
+reconnect recovery. Claude reviewer admission is unchanged.
+
+Bwrap and Seatbelt launches still require exact package-denial proof; missing or uncertain proof
+creates a durable blocking writer obligation. A legacy `provider` or `agent_tui` kind contains
+no isolation evidence, so every existing durable record remains blocking until proven retired.
+Each structured launch supplies an immutable denial snapshot; a sandboxed writer without package
+protection is named in the refusal. Human-operated terminals remain the operator boundary.
+Blocking structured-provider and legacy TUI writer markers
 survive runner restarts, session removal, and a root process's disposal. Only a complete tree proof
 retires them; asynchronous or failed retirement proofs continue to refuse reviewer admission.
 The native-Linux marker directory is `unprotected-agent-writers` beneath runner data. A failed or
@@ -144,8 +156,8 @@ Malformed, partial, unreadable, and otherwise unprovable records stay fail-close
 every retained writer, distinguish current-runner writers from previous-runner or unknown records,
 and give the matching recovery step. See [Review Writer Recovery](../review-writer-recovery.md)
 for the exact operator commands and refusal diagnostics.
-Structured launches already proving package containment need
-no marker, and the read-only review preset remains outside the agent-writer inventory.
+Structured launches already proving package containment and known unsandboxed launches need
+no durable marker, and the read-only review preset remains outside the agent-writer inventory.
 This is an admission-time check: it does not block future
 unisolated agent launches during a review. Those agents already have host-user write access,
 including to the runner itself. All other writable-root and executable-ownership checks still apply.
