@@ -40,7 +40,7 @@ export function fullTestStepsPassed(jobs) {
 export async function collectCertification(repository, targetSha, { api: rawApi, pointerRunId = null,
   now = () => new Date().toISOString(), requireHeaders = false } = {}) {
   const result = { schema: CERTIFICATION_SCHEMA, repository, targetSha, coverageVersion: FULL_COVERAGE,
-    status: "unknown", reason: null, suiteVersion: null, observedAt: now(), runId: null, attempt: null,
+    status: "unknown", reason: null, suiteVersion: null, observedAt: now(), runId: positive(pointerRunId) ? pointerRunId : null, attempt: null,
     sourceSha: null, mainSha: null, url: null };
   try {
     if (!REPOSITORY.test(repository) || !SHA.test(targetSha) || !date(result.observedAt) ||
@@ -88,8 +88,10 @@ export async function collectCertification(repository, targetSha, { api: rawApi,
             total !== undefined && total !== body.total_count) fail("incomplete-worker-listing");
         total = body.total_count;
         runs.push(...body.workflow_runs);
-        if (!complete) return runs;
-        if (total > 1000) fail("evidence-window-exceeds-bound");
+        // Discovery and complete census use the same bounded history window. Stop discovery
+        // once an exact target is located; unrelated newer workers cannot hide page two.
+        if (!complete && (runs.some(exact) || runs.length === total)) return runs;
+        if (complete && total > 1000) fail("evidence-window-exceeds-bound");
         if (runs.length === total && new Set(runs.map((r) => r.id)).size === total) return runs;
         if (!body.workflow_runs.length || runs.length > total) fail("incomplete-worker-listing");
       }
@@ -104,7 +106,7 @@ export async function collectCertification(repository, targetSha, { api: rawApi,
     for (const run of await active()) if (await onMain(run.head_sha))
       return { ...result, status: "pending", reason: "candidate-validation-active", runId: run.id, attempt: run.run_attempt };
     const seed = (await list()).filter(exact);
-    if (pointerRunId !== null && !seed.some((r) => r.id === pointerRunId)) {
+    if (pointerRunId !== null && !seed.length) {
       const pointer = await bounded(`${root}/actions/runs/${pointerRunId}`);
       if (!exact(pointer)) fail("candidate-pointer-mismatch");
       seed.push(pointer);

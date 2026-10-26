@@ -80,6 +80,10 @@ checkpoint and release draft intact and requires operator reconciliation, not au
 
 Each observation is read-only and limited to 48 API calls with the existing quota reserve. The
 collector rechecks current main, exact attempt and the target-run census after job verification.
+Discovery searches up to 1,000 recent workers, including without a checkpoint pointer; a pointer
+is retained through unavailable observations only as a locator. Fresh target evidence takes
+precedence over an obsolete locator. The supervision subprocess allows 13 minutes for the
+48 reads, each bounded to 15 seconds, rather than aborting a valid slow scan after one minute.
 An observation expires when that evidence can no longer be established: for example, a rerun
 starts, workflow blobs change, a required run is unavailable, or the bounded census since the
 located run exceeds 1,000 workers. It fails closed; no age-based ancestor equivalence is used.
@@ -123,6 +127,13 @@ The stable Release workflow also checks exact certification before native builds
 hosted-asset verification. Branch test builds and prerelease behavior remain as documented.
 These checks add Actions read access only to preflight/final verification; they do not expand
 signing or asset-write permissions or activate the dedicated finalizer.
+Both workflow gates deliberately fail closed if main moves during observation or the shared
+API quota reaches its reserve. They do not automatically retry or spend beyond the observation
+budget. Inspect the reported reason, wait for a quiet main/quota recovery and establish fresh
+exact proof before an authorized retry of the failed job. If only final verification failed,
+retry that job rather than successful native builds; it repeats hosted verification and uploads,
+so reconcile the resulting assets and current attempt again before publication. Never dispatch
+another release run or publish from a failed run to bypass this gate.
 
 The final mutation includes the explicit tag, target commit, title, notes, draft/prerelease state,
 and stable/latest selection. The command rechecks workflow attempt, tag, release ID, asset metadata,

@@ -248,6 +248,38 @@ test("a rerun starting during final verification invalidates publication", () =>
   assert.equal(f.mutations().length, 0);
 });
 
+test("the final publication fences run after the expensive certification scan", () => {
+  for (const change of ["attempt", "tag", "latest", "assets"]) {
+    const f = fixture(); let scans = 0, changedAssets = false;
+    f.io.verify = () => () => { if (changedAssets) throw new Error("assets changed"); };
+    f.io.certification = () => {
+      if (++scans === 2) {
+        if (change === "attempt") { f.run.run_attempt++; f.run.status = "in_progress"; }
+        if (change === "tag") f.setTag({ object: { type: "commit", sha: base } });
+        if (change === "latest") f.controls.previousTag = "v0.36.0";
+        if (change === "assets") changedAssets = true;
+      }
+      return certificate();
+    };
+    assert.throws(() => advance(state(), grants, f.io), undefined, change);
+    assert.equal(f.mutations().length, 0, change);
+  }
+});
+
+test("published recovery rechecks metadata, latest and tag after certification without mutation", () => {
+  for (const change of ["metadata", "latest", "tag"]) {
+    const f = fixture(); advance(state(), grants, f.io);
+    f.io.certification = () => {
+      if (change === "metadata") f.release.body = "changed after publication";
+      if (change === "latest") f.controls.latestId = 201;
+      if (change === "tag") f.setTag({ object: { type: "commit", sha: base } });
+      return certificate();
+    };
+    assert.throws(() => advance(state(), {}, f.io), undefined, change);
+    assert.equal(f.mutations().length, 1, change);
+  }
+});
+
 test("older checkpoints reconcile certification before tagging and cannot reuse cached green", () => {
   for (const status of ["missing", "pending", "failed", "incompatible", "unknown"]) {
     const f = fixture(), s = { ...state(), mergeSha: merge, stage: "published", certification: certificate() };

@@ -95,7 +95,8 @@ export function services(cwd = process.cwd(), cacheDirectory = null) {
       const args = [fileURLToPath(new URL("./release-certification.mjs", import.meta.url)), "--report",
         "--repository", state.repository, "--target-sha", state.mergeSha];
       if (state.certification?.runId) args.push("--run-id", String(state.certification.runId));
-      return JSON.parse(command(process.execPath, args, { cwd }));
+      // The proof allows 48 sequential reads, each with a 15-second deadline.
+      return JSON.parse(command(process.execPath, args, { cwd, timeout: 13 * 60_000 }));
     },
     notes: (state) => command("git", ["show", `${state.headSha}:${state.notesPath}`], { cwd }),
     verify: (state, release) => verifyPublishedAssets(state, release, { cwd, git, api, pages, cacheDirectory }),
@@ -335,6 +336,12 @@ export function advance(state, grants, io, save = () => {}, { reconcileOnResume 
   if (release.draft) {
     if (grants.reviewedHead !== state.headSha || !grants.allowPublish) return finish("publish-approval", { action: "Supply the reviewed head and explicit --allow-publish authority." });
     save(state); // Bind immutable IDs before the mutation; reconcile after a crash, never replay blindly.
+    if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
+      waiting: state.certification.status === "pending", certification: state.certification,
+      action: "Certification changed before publication; reconcile the exact candidate before retrying.",
+    });
+    save(state);
+    // Keep the existing publication fences after the potentially expensive regression scan.
     const currentRun = io.api(`repos/${state.repository}/actions/runs/${state.runId}`);
     check(currentRun.status === "completed" && currentRun.conclusion === "success" &&
       currentRun.run_attempt === state.runAttempt && currentRun.head_sha === state.mergeSha,
@@ -351,25 +358,25 @@ export function advance(state, grants, io, save = () => {}, { reconcileOnResume 
         "A newer or unrecognised stable release exists; automatic latest promotion is refused");
     }
     recheckAssets();
-    if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
-      waiting: state.certification.status === "pending", certification: state.certification,
-      action: "Certification changed before publication; reconcile the exact candidate before retrying.",
-    });
-    save(state);
     io.api(`repos/${state.repository}/releases/${state.releaseId}`, {
       tag_name: state.tag, target_commitish: state.mergeSha, name: `Wollipog ${state.tag}`,
       body: notes, prerelease: false, draft: false, make_latest: "true",
     }, "PATCH");
     return finish("publication-requested", { waiting: true });
   }
-  check(release.body === notes && release.name === `Wollipog ${state.tag}` && release.published_at && release.html_url === `https://github.com/${state.repository}/releases/tag/${state.tag}`, "Published release does not match the reviewed metadata");
-  const latest = io.api(`repos/${state.repository}/releases/latest`);
-  check(latest.id === state.releaseId && latest.tag_name === state.tag, "Published release is not the latest stable release; no automatic promotion will be attempted");
-  recheckAssets();
   if (!reconcileCertification(state, io)) return finish("full-regression-certification", {
     waiting: state.certification.status === "pending", certification: state.certification,
     action: "Published release recovery requires current exact-candidate certification; no publication mutation was repeated.",
   });
+  const currentRelease = io.api(`repos/${state.repository}/releases/${state.releaseId}`);
+  check(currentRelease.id === state.releaseId && currentRelease.tag_name === state.tag && !currentRelease.draft &&
+    !currentRelease.prerelease && currentRelease.body === notes && currentRelease.name === `Wollipog ${state.tag}` &&
+    currentRelease.published_at && currentRelease.html_url === `https://github.com/${state.repository}/releases/tag/${state.tag}`,
+  "Published release does not match the reviewed metadata");
+  verifyTag(state, io.optional(`repos/${state.repository}/git/ref/tags/${state.tag}`), io);
+  const latest = io.api(`repos/${state.repository}/releases/latest`);
+  check(latest.id === state.releaseId && latest.tag_name === state.tag, "Published release is not the latest stable release; no automatic promotion will be attempted");
+  recheckAssets();
   return finish("published", { url: release.html_url, commit: state.mergeSha, runId: state.runId });
 }
 

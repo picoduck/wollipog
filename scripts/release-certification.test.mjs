@@ -149,6 +149,26 @@ test("old pointers are hints only and history expiry fails closed", async () => 
   assert.notEqual((await f.collect({ pointerRunId: 999 })).status, "certified");
 });
 
+test("workflow discovery finds exact evidence beyond the first worker page", async () => {
+  const f = forge();
+  f.data.runs.push(...Array.from({ length: 150 }, (_, i) => worker({ id: i + 100,
+    display_title: `Rolling ${D} ${claim}`, created_at: at(40) })));
+  assert.equal((await f.collect()).status, "certified");
+  assert.equal(await main(["--repository", repository, "--target-sha", A], { api: f.api, log: () => {} }), 0);
+});
+
+test("fresh exact evidence takes precedence over a deleted checkpoint locator", async () => {
+  const f = forge();
+  assert.equal((await f.collect({ pointerRunId: 999 })).status, "certified");
+});
+
+test("an unavailable observation preserves only the run locator for later resume", async () => {
+  const f = forge(); f.api.rateLimit = { limit: 1000, remaining: 599 };
+  const result = await f.collect({ pointerRunId: 10 });
+  assert.equal(result.status, "unknown"); assert.equal(result.runId, 10);
+  assert.equal(result.attempt, null); assert.equal(result.sourceSha, null);
+});
+
 test("API quota and evidence errors never reuse stale success or disclose response text", async () => {
   const f = forge();
   f.api.rateLimit = { limit: 1000, remaining: 599 };
