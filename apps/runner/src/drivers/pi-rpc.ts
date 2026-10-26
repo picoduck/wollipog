@@ -158,7 +158,7 @@ export class PiRpcDriver implements Driver {
   private readonly pendingPermissions = new Map<string, PendingPiPermission>();
   private readonly forkedSessionFiles = new Map<string, string>();
   /** Every process this instance starts; its owner is each spawn's descendantOwner. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   private agentControlBridge: PendingAgentControlBridge | null = null;
   private startupStateTimer: NodeJS.Timeout | undefined;
   private startupStatePending = false;
@@ -169,6 +169,7 @@ export class PiRpcDriver implements Driver {
     private readonly spawn: typeof spawnAgent = spawnAgent,
     private readonly kill: typeof killTree = killTree,
   ) {
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.config = opts.config;
     this.cwd = opts.cwd;
   }
@@ -219,7 +220,7 @@ export class PiRpcDriver implements Driver {
       ...(this.opts.resumeId ? ["--session", this.opts.resumeId] : []),
     ];
     this.processes.assertOpen();
-    const child = this.processes.record(this.spawn({
+    const child = this.processes.launch(this.spawn, {
       command: this.opts.command,
       args,
       cwd: this.cwd,
@@ -230,7 +231,7 @@ export class PiRpcDriver implements Driver {
       cloudAgentLaunch: true,
       descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    }));
+    });
     this.child = child;
     const peer = new PiRpcPeer(
       child.stdin,
@@ -327,7 +328,7 @@ export class PiRpcDriver implements Driver {
 
     const expectedForkSessionId = randomUUID();
     this.processes.assertOpen();
-    const child = this.processes.record(this.spawn({
+    const child = this.processes.launch(this.spawn, {
       command: this.opts.command,
       args: [
         ...this.opts.args,
@@ -344,7 +345,7 @@ export class PiRpcDriver implements Driver {
       cloudAgentLaunch: true,
       descendantOwner: this.processes.owner,
       descendantMarker: options.descendantMarker ?? this.opts.descendantMarker,
-    }));
+    });
     const forkPeer = new PiRpcPeer(child.stdin, child.stdout, () => {}, () => {
       if (child.exitCode == null) this.kill(child);
     });

@@ -121,19 +121,29 @@ TUI's exact process-tree proof and, after draining kills, bounded exact proofs f
 provider instances. Only successful proofs retire their individual markers; a global drain alone
 does not settle failed or untracked launches.
 
-New markers record the runner PID, kernel start time, boot identity, and inherited provider-HOME
-runner marker before launch. Startup reconciliation reuses provider-HOME's lifecycle proof: a
-different kernel boot proves all old trees gone; on the same boot, the exact recorded runner must
-be gone and a bounded, identity-stable process scan must find no marked survivor or potentially
-related uninspectable same-user process. A dead/reused PID alone, restart, or file age never proves
-tree exit. Recovery never signals processes. This runner-wide evidence is deliberately coarse:
-another surviving child of the old runner may keep a writer's record even after that writer exits.
-It shares the provider-HOME marker-scan limitation for descendants that scrub their environment
-and escape observed parent links; it is not kernel containment.
+New markers record the runner PID, kernel start time, boot identity, inherited provider-HOME marker,
+and a dedicated writer cgroup identity before launch. On delegated native Linux, all of that
+writer's provider processes, preparation probes, ACP terminals, and Agent TUI launches run in leaves
+beneath its own durable parent in the existing provider subtree. Live settlement requires both the
+driver/TUI's complete exit proof and the writer parent's emptiness. Startup and later admission
+reconciliation reuse provider-HOME's cgroup proof: after the recorded runner exits, recursive
+emptiness or retirement of the recorded enclosing unit proves exit without reading unrelated
+process environments. A different kernel boot also proves contained writers gone. Recovery never
+signals processes. This lifecycle boundary does not cover deliberate same-user cgroup migration.
 
-Legacy, malformed, partial, unreadable, and otherwise unprovable records stay fail-closed. The
-refusal instructs the operator to stop the runner, independently prove that session's complete
-agent tree gone, and remove only its record when automatic reconciliation cannot do so.
+Without delegated cgroup v2 (including macOS and WSL), records state why boundary proof is
+unavailable. Uncontained legacy records are never retired by automatic recovery. An explicit
+offline state-doctor command can retire an exact legacy record after proving the recorded runner
+identity gone and completing an identity-stable marker scan. Zombies and unreadable processes
+that predate the recorded runner cannot write for it; live descendants are scanned separately.
+Other unreadable possibly related processes still refuse proof. No cgroup-name exclusion is used.
+This fallback shares provider-HOME's limitation for descendants that scrub their environment and
+escape observed parent links; it is not kernel containment.
+
+Malformed, partial, unreadable, and otherwise unprovable records stay fail-closed. Refusals enumerate
+every retained writer, distinguish current-runner writers from previous-runner or unknown records,
+and give the matching recovery step. See [Review Writer Recovery](../review-writer-recovery.md)
+for the exact operator commands and refusal diagnostics.
 Structured launches already proving package containment need
 no marker, and the read-only review preset remains outside the agent-writer inventory.
 This is an admission-time check: it does not block future

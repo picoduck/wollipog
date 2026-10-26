@@ -260,9 +260,9 @@ export class ShellManager {
     if (meta?.kind === "agent_tui") {
       // Publish before spawn: a crash cannot leave an agent writer with no durable admission
       // evidence. Recovered/uncertain markers require operator reconciliation, never age out.
-      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.acquire(sessionId, "agent_tui"));
+      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.acquire(sessionId, "agent_tui", context.kind === "native"));
     }
-    const child = process.platform === "win32" && context.kind === "native"
+    const spawn = () => process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
           args: meta?.launch?.args ?? args,
@@ -286,6 +286,8 @@ export class ShellManager {
           trackDescendants: meta?.kind === "agent_tui" || meta?.cleanupOwnsDescendants === true,
           descendantMarker: meta?.cleanupDescendantMarker,
         });
+    const group = this.reviewWriters.group(this.agentTuiWriterTokens.get(shellId));
+    const child = group ? group.run(spawn) : spawn();
     const live: LiveShell = {
       sessionId,
       root: cwd,

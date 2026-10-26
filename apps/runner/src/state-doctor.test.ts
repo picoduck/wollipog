@@ -29,6 +29,25 @@ async function capture(argv: string[]): Promise<string> {
   return output;
 }
 
+test("review writer administration uses the offline maintenance lease and the exact inspected record", { skip: process.platform !== "linux" }, async (t) => {
+  const root = fixture(t), directory = join(root, "unprotected-agent-writers");
+  mkdirSync(directory);
+  writeFileSync(join(directory, "legacy.json"), JSON.stringify({ sessionId: "s_legacy", kind: "provider", runnerPid: 42,
+    process: { bootId: "12345678-1234-1234-1234-123456789abc", startTime: "100", marker: "a".repeat(32) } }));
+  const base = ["runner", "--state-doctor", "review-writers"];
+  const row = JSON.parse(await capture([...base, "inspect", "--data-dir", root])).writers[0];
+  assert.equal(row.recordId, "legacy");
+  assert.equal(existsSync(join(directory, "legacy.json")), true);
+  const command = [...base, "retire-legacy", "--data-dir", root, "--record-id", row.recordId, "--sha256", row.sha256];
+  writeFileSync(join(root, ".wollipog-runner-active-v1.lock"), "occupied");
+  await assert.rejects(capture(command), /active or unrecovered lease/);
+  rmSync(join(root, ".wollipog-runner-active-v1.lock"));
+  const result = JSON.parse(await capture(command));
+  assert.deepEqual(result, { retired: true, reason: "reboot" });
+  assert.equal(existsSync(join(directory, "legacy.json")), false);
+  assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
+});
+
 test("Windows state-doctor file fsync uses a write-capable handle", () => {
   assert.notEqual(stateDoctorFileSyncFlags("win32") & constants.O_RDWR, 0);
   assert.equal(stateDoctorFileSyncFlags("linux") & constants.O_RDWR, 0);

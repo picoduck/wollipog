@@ -2039,11 +2039,18 @@ export class SessionManager {
    * has host-user write access, including to the runner itself; starting one mid-review adds no
    * capability. Agent TUIs are checked separately; human terminals are the operator boundary. */
   codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
-    const retainedWriter = this.reviewWriters.sessions()[0];
-    if (retainedWriter) return { home, refusal: `Codex packages are unprotected from session ${retainedWriter}. Close its complete process tree and retry after runner restart. Legacy, partial, or unprovable unprotected-agent-writers records require the operator to stop the runner, independently prove the tree gone, and remove only that record.` };
+    this.reviewWriters.reconcileRecovered("admission");
+    const writers = this.reviewWriters.inspect();
+    const retaining = writers.map((writer) => `session ${writer.sessionId} (${writer.kind === "agent_tui" ? "Agent TUI" : "provider"}; ${
+      writer.state === "current_runner" ? "writer of the current runner; complete exit unproven"
+        : writer.state === "previous_runner" ? "record left by a previous runner process" : "record with unknown runner identity"
+    }; record ${writer.recordId}). ${writer.recovery}`);
     const packages = join(home, ".codex", "packages");
     let canonical: string;
-    try { canonical = realpathSync(packages); } catch { return { home, refusal: "Codex packages cannot be resolved" }; }
+    try { canonical = realpathSync(packages); } catch {
+      return { home, refusal: retaining.length
+        ? `Codex packages cannot be resolved. Retaining writers:\n${retaining.join("\n")}` : "Codex packages cannot be resolved" };
+    }
     for (const meta of this.store.listSessions()) {
       if (meta.context.kind !== "native" || meta.review) continue;
       const live = this.active.get(meta.sessionId);
@@ -2051,10 +2058,12 @@ export class SessionManager {
           (live && !live.codexPackageReadOnlyPaths?.includes(canonical)) ||
           (!live && (["starting", "running", "input_required"].includes(meta.status) ||
             this.store.readWorktreeLease(meta.sessionId) !== null))) {
-        return { home, refusal: `Codex packages are unprotected from session ${meta.sessionId}` };
+        if (!writers.some((writer) => writer.sessionId === meta.sessionId)) {
+          retaining.push(`session ${meta.sessionId} (current runner session lacks package-protection proof). End its complete process tree and retry; a retained worktree lease requires its owning runner to settle exit.`);
+        }
       }
     }
-    return { home };
+    return retaining.length ? { home, refusal: `Codex packages are unprotected from the following writers:\n${retaining.join("\n")}` } : { home };
   }
 
   private isReviewSession(sessionId: string): boolean {
@@ -8852,6 +8861,7 @@ export class SessionManager {
       client = this.createDriver(
         meta.driver,
         {
+          reviewWriterCgroup: this.reviewWriters.group(reviewWriter),
           command: meta.command,
           prepareClaudeHooks: launchPreparation?.prepareClaudeHooks,
           args: preparedProjectMemoryArgs ?? launchPreparation?.codexLaunchArgs ?? meta.args,
@@ -15238,6 +15248,7 @@ export class SessionManager {
         temporary = this.createDriver(
           source.driver,
           {
+            reviewWriterCgroup: this.reviewWriters.group(reviewWriter),
             command: source.command,
             args: launchPreparation?.codexLaunchArgs ?? source.args,
             cwd: source.worktreePath,
@@ -15378,6 +15389,7 @@ export class SessionManager {
         temporary = this.createDriver(
           source.driver,
           {
+            reviewWriterCgroup: this.reviewWriters.group(reviewWriter),
             command: source.command,
             args: source.args,
             cwd: worktree.path,

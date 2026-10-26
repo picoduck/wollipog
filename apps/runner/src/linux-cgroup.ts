@@ -5,6 +5,7 @@ import { posix } from "node:path";
 import type { Readable } from "node:stream";
 import { getSystemErrorName } from "node:util";
 import { linuxCgroupHelper } from "./linux-cgroup-helper.js";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 export type ProviderProcessProofStandard = "linux-cgroup-v2" | "marker-parent-links";
 
@@ -360,13 +361,63 @@ export function providerContainmentIdentity(dataDirectory?: string): Readonly<Li
 export function prepareLinuxCgroupLaunch(): LinuxCgroupLaunch | undefined {
   providerContainmentIdentity();
   if (!instance) return undefined;
-  const directory = posix.join(instance.mount.directory, `provider-${randomUUID()}`);
+  return prepareLaunchIn(instance.mount);
+}
+
+/** A durable writer parent outlives its individual launch leaves. Async context includes probes
+ * started after awaits without changing their argv, environment, or detached lifetime contract. */
+export interface LinuxCgroupGroup {
+  readonly identity: Readonly<LinuxCgroupIdentity>;
+  run<T>(work: () => T): T;
+  releaseIfEmpty(): boolean;
+}
+const launchGroup = new AsyncLocalStorage<{ mount: CgroupLocation; verify(): void }>();
+
+export function createLinuxCgroupGroup(): LinuxCgroupGroup | undefined {
+  providerContainmentIdentity();
+  if (!instance) return undefined;
+  const parent = instance;
+  const directory = posix.join(parent.mount.directory, `writer-${randomUUID()}`);
+  mkdirSync(directory, { mode: 0o700 });
+  let opened: ReturnType<typeof openCgroup>;
+  try { opened = openCgroup(directory, parent.mount, parent.bootId); }
+  catch (error) { try { rmdirSync(directory); } catch { /* preserve evidence */ } throw error; }
+  let released = false;
+  const verify = () => {
+    if (released) throw new Error("writer boundary retired; refusing another launch");
+    parent.io.populated();
+    opened.io.populated();
+  };
+  return {
+    identity: opened.identity,
+    run: (work) => {
+      verify();
+      return launchGroup.run({ mount: { ...parent.mount, directory }, verify }, work);
+    },
+    releaseIfEmpty: () => {
+      if (released) return true;
+      try {
+        if (opened.io.populated()) return false;
+        // The registry unlinks its record before removing this empty parent, so a crash cannot
+        // leave a journal pointing at an unprovable missing leaf in a still-live unit.
+        try { opened.io.remove(); } catch { /* empty child directories can remain */ }
+        opened.io.close();
+        released = true;
+        return true;
+      } catch { return false; }
+    },
+  };
+}
+
+function prepareLaunchIn(mount: CgroupLocation): LinuxCgroupLaunch {
+  if (!instance) throw new Error("provider containment instance unavailable");
+  const directory = posix.join(mount.directory, `provider-${randomUUID()}`);
   try {
     // Verify the retained parent identity before creating anything below it.
     instance.io.populated();
     const helper = linuxCgroupHelper(helperDataDirectory);
     mkdirSync(directory, { mode: 0o700 });
-    const opened = openCgroup(directory, instance.mount, instance.bootId);
+    const opened = openCgroup(directory, mount, instance.bootId);
     report({ proofStandard: "linux-cgroup-v2", reason: "available" });
     return { helper, directoryFd: opened.directoryFd,
       boundary: new LinuxCgroupBoundary(opened.identity, opened.io) };
@@ -388,7 +439,9 @@ export function spawnWithLinuxCgroup(command: string, args: string[], options: S
 };
 export function spawnWithLinuxCgroup(command: string, args: string[], options: SpawnOptionsWithoutStdio,
   stdio: CgroupStdio = ["pipe", "pipe", "pipe"]): { child: ChildProcess; containment?: LinuxCgroupBoundary } {
-  const launch = prepareLinuxCgroupLaunch();
+  const group = launchGroup.getStore();
+  group?.verify();
+  const launch = group ? prepareLaunchIn(group.mount) : prepareLinuxCgroupLaunch();
   if (!launch) return { child: spawn(command, args, { ...options, stdio }) };
   try {
     const child = spawn(launch.helper, ["--exec", command, ...args], {
