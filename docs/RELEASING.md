@@ -311,17 +311,29 @@ including the unique tag used by a manual test release.
 
 ## Cut a release
 
+Stable releases require [exact full-regression certification](release-automation.md#exact-full-regression-certification)
+of the actual merged release commit. A green PR, merge group or ancestor is insufficient. Use
+resumable supervision for checkpoint recovery and fresh certification immediately before
+publication. An intermediate candidate skipped by rolling main can request the bounded candidate
+lane; wait for that exact SHA's complete compatible suite before tagging.
+
 ```bash
 # 1. Bump the six version fields above to the new X.Y.Z, commit, merge to main.
-# 2. Tag the release commit and push the tag:
-git tag vX.Y.Z
+# 2. Verify the actual merged release SHA, with explicit tagging/publication authority:
+node scripts/release-certification.mjs --repository picoduck/wollipog --target-sha FULL_MERGED_RELEASE_SHA
+# 3. Tag that exact commit and push the tag:
+git tag vX.Y.Z FULL_MERGED_RELEASE_SHA
 git push origin vX.Y.Z
 ```
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and
-**Publish**. Publishing is also what makes the release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
+limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and reconcile
+fresh exact-candidate certification immediately before an authorized **Publish**. Prefer
+`pnpm release resume` for this final gate and accepted-publication recovery. A pending rerun,
+failed/incomplete validation, incompatible suite or expired evidence blocks stable publication;
+a previously green workflow or checkpoint does not waive it. Publishing is also what makes the
+release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
 After publishing, reconcile the repository's security advisories with the release. For every
