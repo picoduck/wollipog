@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import fc from "fast-check";
+import { CANDIDATE_POLICY, candidatePlan, candidateReceipt, queueCandidate } from "./main-validation-candidates.mjs";
 import { admit, COMPACT_EVERY, emptyState, main, observe, plan, readState, reconcile, REQUIRED, RETRY_MS, STATE_REF,
-  STALLED_MS, isSupersededWorkerAttempt, validationRecord, validState, workerIdentity, WORKER, writeState } from "./main-rolling-validation.mjs";
+  STALLED_MS, candidateSuiteVersion, requestCandidate, isSupersededWorkerAttempt, validationRecord, validState, workerIdentity, WORKER, writeState } from "./main-rolling-validation.mjs";
 
 const repository = "example/project";
 const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40), W = "d".repeat(40);
@@ -25,6 +26,54 @@ const claimed = () => ({ ...emptyState(repository), active: { targetSha: A, clai
   dispatchCount: 1, lastDispatchAt: at() }, status: "validating" });
 const eventFor = (r) => ({ ref: "refs/heads/main", inputs: { target_sha: workerIdentity(r, repository).targetSha,
   claim_id: workerIdentity(r, repository).claimId } });
+
+test("candidate requests deduplicate across purposes and retain their cost bound", () => {
+  const request = { targetSha: A, suiteVersion: "f".repeat(64), purpose: "release", requestedAt: at(), claimId };
+  let ledger = queueCandidate(undefined, request);
+  assert.deepEqual(queueCandidate(ledger, { ...request, purpose: "repair", claimId: nextClaim }), ledger);
+  const receipt = candidateReceipt(ledger, A, "repair", request.suiteVersion, at(5));
+  assert.equal(receipt.purpose, "repair"); assert.equal(receipt.scheduledPurpose, "release");
+  assert.equal(receipt.queueWaitMinutes, 5); assert.equal(receipt.certification, "none");
+  assert.equal(CANDIDATE_POLICY.release.minimumIntervalMs, CANDIDATE_POLICY.repair.minimumIntervalMs);
+  assert.equal(CANDIDATE_POLICY.release.priority, CANDIDATE_POLICY.repair.priority);
+  for (let i = 1; i < CANDIDATE_POLICY.maxRequests; i++) ledger = queueCandidate(ledger,
+    { ...request, targetSha: i.toString(16).padStart(40, "0") });
+  assert.throws(() => queueCandidate(ledger, { ...request, targetSha: B }), /retention limit/);
+  assert.throws(() => queueCandidate(undefined, { ...request, purpose: "unbounded" }), /Invalid/);
+});
+
+test("candidate policy prioritizes main, caps shared/per-purpose admissions, and never retries ambiguous dispatch", () => {
+  const request = { targetSha: A, suiteVersion: "f".repeat(64), purpose: "release", requestedAt: at(), claimId };
+  const observation = { active: [], records: [] };
+  const ledger = queueCandidate(undefined, request);
+  assert.equal(candidatePlan(ledger, observation, request.suiteVersion, at(1), false).request, null);
+  assert.equal(candidatePlan(ledger, { ...observation, active: [run({ status: "in_progress" })] }, request.suiteVersion, at(1), true).request, null);
+  assert.equal(candidatePlan(ledger, observation, request.suiteVersion, at(1), true).request.targetSha, A);
+  ledger.lastAdmissionAt = at();
+  assert.equal(candidatePlan(ledger, observation, request.suiteVersion, at(59), true).request, null);
+  assert.ok(candidatePlan(ledger, observation, request.suiteVersion, at(60), true).request);
+  ledger.requests[0].dispatchedAt = at();
+  const ambiguous = candidatePlan(ledger, observation, request.suiteVersion, at(180), true);
+  assert.equal(ambiguous.request, null); assert.equal(ambiguous.next.requests[0].status, "reconciliation-required");
+});
+
+test("candidate receipts withdraw success for failed or pending reruns and incompatible suites", () => {
+  const good = record();
+  let ledger = queueCandidate(undefined, { targetSha: A, suiteVersion: good.suiteVersion, purpose: "release", requestedAt: at(), claimId });
+  let result = candidatePlan(ledger, { active: [], records: [good] }, good.suiteVersion, at(42), true);
+  assert.equal(result.next.requests[0].status, "success"); assert.equal(result.request, null);
+  const receipt = candidateReceipt(result.next, A, "release", good.suiteVersion, at(42));
+  assert.ok(receipt.waitMinutes > 0); assert.ok(receipt.executionMinutes > 0);
+  result = candidatePlan(result.next, { active: [run({ status: "in_progress", run_attempt: 2 })], records: [good] }, good.suiteVersion, at(45), true);
+  assert.equal(result.next.requests[0].status, "dispatched");
+  const failed = { ...good, attempt: 2, verdict: "failure" };
+  result = candidatePlan(result.next, { active: [], records: [good, failed] }, good.suiteVersion, at(50), true);
+  assert.equal(result.next.requests[0].status, "failure"); assert.equal(result.request, null);
+  ledger = queueCandidate(undefined, { targetSha: A, suiteVersion: "f".repeat(64), purpose: "repair", requestedAt: at(), claimId });
+  assert.equal(candidatePlan(ledger, { active: [], records: [good] }, "e".repeat(64), at(42), true).next.requests[0].status, "incompatible-suite");
+  assert.ok(candidatePlan(ledger, { active: [], records: [good] }, "f".repeat(64), at(42), true).request,
+    "a newly requested suite can validate a snapshot previously tested with a different suite");
+});
 
 test("dispatch identity separates the immutable target from workflow head and rejects other sources", () => {
   assert.equal(workerIdentity(run(), repository).targetSha, A);
@@ -177,6 +226,79 @@ function forge() {
   };
   return { data, api };
 }
+
+test("candidate request persists before dispatch, concurrent/cross-purpose duplicates share one claim", async () => {
+  const { data, api } = forge();
+  await assert.rejects(requestCandidate(repository, B, { api }), /state requires operator/);
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  const receipts = await Promise.all(["release", "repair"].map((purpose) => requestCandidate(repository, B, { api, purpose, now: () => at() })));
+  assert.equal(receipts[0].claimId, receipts[1].claimId);
+  assert.equal(data.dispatches.length, 0);
+  assert.equal((await readState(api, repository)).value.candidates.requests.length, 1);
+  data.deniedAncestry = true;
+  await assert.rejects(requestCandidate(repository, C, { api }), /outside main/);
+});
+
+test("candidate dispatch/admission survives wakes, then new main takes priority without cancelling it", async () => {
+  const { data, api } = forge();
+  data.nativeQueue = true;
+  data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  const receipt = await requestCandidate(repository, B, { api, purpose: "repair", now: () => at(41) });
+  assert.equal(receipt.suiteVersion, await candidateSuiteVersion(api, repository, W));
+  const dispatched = await reconcile(repository, { api, now: () => at(102), log: () => {} });
+  assert.equal(data.dispatches.length, 1);
+  assert.equal(dispatched.state.pending.targetSha, B);
+  const worker = data.runs.at(-1);
+  data.jobs.set(`${worker.id}/1`, []);
+  const wake = await reconcile(repository, { api, now: () => at(43), log: () => {} });
+  assert.equal(wake.state.pending.claimId, receipt.claimId, "ordinary completed-main reconciliation retains candidate admission intent");
+  assert.equal(data.dispatches.length, 1);
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 1, { api }), true);
+  data.jobs.set(`${worker.id}/1`, jobs());
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 1, { api }), false, "duplicate admission cannot repeat a full run");
+  worker.run_attempt = 2;
+  assert.equal(await admit(repository, eventFor(worker), worker.id, 2, { api }), false);
+  worker.run_attempt = 1;
+  data.main = C;
+  const next = await reconcile(repository, { api, now: () => at(44), log: () => {} });
+  assert.equal(next.state.pending.targetSha, C);
+  assert.equal(worker.status, "in_progress");
+  data.finish(worker);
+  const done = await reconcile(repository, { api, now: () => at(85), log: () => {} });
+  assert.equal(done.state.candidates.requests[0].status, "success");
+  assert.equal(done.state.candidates.requests[0].runId, worker.id);
+  assert.equal(data.dispatches.filter((d) => d.inputs.target_sha === B).length, 1);
+});
+
+test("candidate dispatch ambiguity consumes its budget and cannot loop or displace main", async () => {
+  const { data, api } = forge();
+  data.runs.push(run());
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  await requestCandidate(repository, B, { api, now: () => at(41) });
+  data.dispatchError = new Error("unknown delivery");
+  await assert.rejects(reconcile(repository, { api, now: () => at(102), log: () => {} }), /unknown delivery/);
+  data.dispatchError = null;
+  for (const minutes of [43, 60, 180]) await reconcile(repository, { api, now: () => at(minutes), log: () => {} });
+  assert.equal(data.dispatches.length, 1);
+  assert.equal((await readState(api, repository)).value.candidates.requests[0].status, "reconciliation-required");
+  data.main = C;
+  await reconcile(repository, { api, now: () => at(181), log: () => {} });
+  assert.equal(data.dispatches.at(-1).inputs.target_sha, C);
+});
+
+test("unavailable candidate suite evidence cannot block the main backlog", async () => {
+  const { data, api } = forge();
+  await writeState(api, repository, await readState(api, repository), emptyState(repository));
+  await requestCandidate(repository, B, { api, now: () => at() });
+  const unavailable = async (path, options) => {
+    if (path.includes("/contents/")) throw new Error("unavailable");
+    return api(path, options);
+  };
+  data.main = C;
+  await reconcile(repository, { api: unavailable, now: () => at(90), log: () => {} });
+  assert.equal(data.dispatches.length, 1); assert.equal(data.dispatches[0].inputs.target_sha, C);
+});
 
 test("state writes are fenced, compact at the bound, reject stale writers and strip unknown data", async () => {
   const { data, api } = forge();

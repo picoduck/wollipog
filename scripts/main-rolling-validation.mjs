@@ -4,6 +4,7 @@ import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
 import { githubApi } from "./main-ci-health.mjs";
 import { attemptRecord, listJobs } from "./merge-queue-wait-report.mjs";
+import { candidateReceipt, candidatePlan, cleanCandidates, queueCandidate, validCandidates } from "./main-validation-candidates.mjs";
 
 import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 export { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
@@ -59,6 +60,7 @@ export function validState(s, repository) {
     (s.active === null || validClaim(s.active)) && (s.pending === null || validClaim(s.pending) &&
       date(s.pending.observedAt) && (s.pending.priorRunId === null || positive(s.pending.priorRunId))) &&
     (s.lastVerdict === null || positive(s.lastVerdict?.runId) && SHA.test(s.lastVerdict.targetSha)) &&
+    (s.candidates === undefined || validCandidates(s.candidates)) &&
     Array.isArray(s.records) && s.records.length <= MAX_HISTORY && s.records.every((r) =>
       positive(r?.runId) && positive(r.attempt) && SHA.test(r.targetSha)) && STATUSES.has(s.status);
 }
@@ -133,6 +135,7 @@ export async function readState(api, repository) {
       priorRunId: value.pending.priorRunId };
     const lastVerdict = value.lastVerdict && { targetSha: value.lastVerdict.targetSha, runId: value.lastVerdict.runId };
     return { oid, value: { ...emptyState(repository), sequence: value.sequence, active, pending, lastVerdict,
+      ...(value.candidates === undefined ? {} : { candidates: cleanCandidates(value.candidates) }),
       records: value.records.map((r) => ({ runId: r.runId, attempt: r.attempt, targetSha: r.targetSha })), status: value.status },
       recovered: false, migrated };
   } catch (error) {
@@ -223,9 +226,17 @@ export async function observe(api, repository, state, { targetSha, report = fals
   const active = [];
   for (const status of ACTIVE) active.push(...await listRuns(api, repository, `&status=${status}`));
   // Recent completions reconstruct missing/rewritten state. Old no-change evidence is re-read by id.
-  const recent = await listRuns(api, repository, "&status=completed", false);
+  let recent, candidateHistoryComplete = true;
+  try { recent = await listRuns(api, repository, "&status=completed", Boolean(state.candidates?.requests.length)); }
+  catch (cause) {
+    if (cause.message !== "Worker listing truncated; operator reconciliation required") throw cause;
+    // Candidate retention must never stop ordinary main reconciliation.
+    recent = await listRuns(api, repository, "&status=completed", false);
+    candidateHistoryComplete = false;
+  }
   const selected = report ? recent.slice(0, 8) : [
-    ...recent.filter((r) => workerIdentity(r, repository)?.targetSha === targetSha).slice(0, 3),
+    ...[...new Set([targetSha, ...(state.candidates?.requests ?? []).map((r) => r.targetSha)])].flatMap((sha) =>
+      recent.filter((r) => workerIdentity(r, repository)?.targetSha === sha).slice(0, 3)),
     // A worker may finish before admission records its runId. Its claim still releases old work.
     ...[...new Set([state.active?.claimId, state.pending?.claimId].filter(Boolean))].flatMap((claim) =>
       recent.filter((r) => workerIdentity(r, repository)?.claimId === claim).slice(0, 1)),
@@ -275,7 +286,10 @@ export async function observe(api, repository, state, { targetSha, report = fals
     }
     live.push({ ...run, admissionVerified });
   }
-  return { active: live, records, invalidRunIds: [...hintIds].filter((id) => !runs.some((run) => run.id === id)) };
+  return { active: live, records, candidateHistoryComplete,
+    latestWorkerActivityAt: [...active, ...recent].filter((r) => workerIdentity(r, repository))
+      .flatMap((r) => [r.created_at, r.run_started_at, r.updated_at].filter(date)).sort().at(-1) ?? null,
+    invalidRunIds: [...hintIds].filter((id) => !runs.some((run) => run.id === id)) };
 }
 
 /** Pure transition. Native concurrency owns execution; only admission promotes pending intent. */
@@ -366,8 +380,36 @@ export async function reconcile(repository, { api, now = () => new Date().toISOS
     const previous = await readState(api, repository);
     const main = await api(`/repos/${repository}/git/ref/heads/main`);
     if (!SHA.test(main?.object?.sha)) throw new Error("Invalid main head");
-    const observation = await observe(api, repository, previous.value, { mainSha: main.object.sha });
-    const decision = plan(previous.value, observation, main.object.sha, now(), randomUUID(), previous.recovered);
+    // Candidate history is optional overhead. Missing/large old candidate evidence must not
+    // prevent the main scheduler from queuing its next snapshot.
+    let observation = await observe(api, repository, { ...previous.value, candidates: undefined }, { mainSha: main.object.sha });
+    let decision = plan(previous.value, observation, main.object.sha, now(), randomUUID(), previous.recovered);
+    if (previous.value.candidates) {
+      try {
+        const mainComplete = !decision.dispatch && decision.next.pending === null &&
+          decisive(latestAttempt(observation.records, main.object.sha) ?? {});
+        if (mainComplete) observation = await observe(api, repository, previous.value, { mainSha: main.object.sha });
+        const suiteVersion = await candidateSuiteVersion(api, repository, main.object.sha);
+        const candidate = candidatePlan(previous.value.candidates, observation, suiteVersion, now(), mainComplete);
+        const retained = candidate.next.requests.find((r) => r.dispatchedAt && r.claimId === previous.value.pending?.claimId &&
+          ["dispatched", "reconciliation-required"].includes(r.status));
+        const selected = candidate.request ?? (!decision.dispatch && decision.next.pending === null ? retained : null);
+        if (selected) {
+          const compatible = { ...observation, records: observation.records.filter((r) =>
+            r.targetSha !== selected.targetSha || r.suiteVersion === selected.suiteVersion) };
+          decision = plan(previous.value, compatible, selected.targetSha, now(), selected.claimId);
+          if (selected.dispatchedAt) decision.dispatch = false;
+          if (decision.dispatch) {
+            selected.dispatchedAt = now();
+            selected.status = "dispatched";
+            candidate.next.lastAdmissionAt = now();
+          }
+        }
+        decision.next.candidates = candidate.next;
+      } catch {
+        log(JSON.stringify({ event: "main_validation_candidate_reconciliation", status: "operator-required" }));
+      }
+    }
     const value = decision.dispatch ? { ...decision.next,
       status: decision.next.status === "stalled-active-run" ? "stalled-active-run" : "dispatch-outcome-unknown",
       pending: { ...decision.next.pending, dispatchCount: decision.next.pending.dispatchCount + 1, lastDispatchAt: now() } }
@@ -402,8 +444,11 @@ export async function admit(repository, event, runId, attempt, { api, now = () =
     // An unchanged run may rerun its admission; a newer pending claim fences old reruns.
     const rerun = attempt > 1 && !pending && matches(previous.value.active, run, repository) && previous.value.active.runId === runId;
     if (!claim && !rerun) return false;
-    const observation = await observe(api, repository, previous.value, { targetSha });
-    const alreadyDone = attempt === 1 && decisive(latestAttempt(observation.records, targetSha) ?? {});
+    const candidate = previous.value.candidates?.requests.find((r) => r.claimId === claimId);
+    const observation = await observe(api, repository, { ...previous.value, candidates: undefined }, { targetSha });
+    if (candidate && (attempt !== 1 || candidate.suiteVersion !== await candidateSuiteVersion(api, repository, run.head_sha))) return false;
+    const alreadyDone = attempt === 1 && decisive(latestAttempt(observation.records.filter((r) =>
+      !candidate || r.suiteVersion === candidate.suiteVersion), targetSha) ?? {});
     const priors = new Set([previous.value.active?.runId, claim?.priorRunId, claim?.runId].filter((id) => id && id !== runId));
     let terminal = true;
     for (const id of priors) {
@@ -434,12 +479,52 @@ export async function admit(repository, event, runId, attempt, { api, now = () =
   }
 }
 
+/** Immutable suite identity shared by requests and authoritative worker evidence. */
+export async function candidateSuiteVersion(api, repository, sourceSha) {
+  if (!SHA.test(sourceSha)) throw new Error("Invalid workflow source");
+  const blobs = {};
+  for (const [key, path] of Object.entries({ worker: WORKER, ci: ".github/workflows/ci.yml", windows: ".github/workflows/settings-rows-win32.yml" })) {
+    const file = await api(`/repos/${repository}/contents/${path}?ref=${sourceSha}`);
+    if (!SHA.test(file?.sha)) throw new Error("Candidate suite unavailable");
+    blobs[key] = file.sha;
+  }
+  return createHash("sha256").update(JSON.stringify(blobs)).digest("hex");
+}
+
+/** Record intent only; the bounded reconciler is the sole worker dispatcher. */
+export async function requestCandidate(repository, targetSha, { purpose = "release", api, now = () => new Date().toISOString() } = {}) {
+  if (!REPOSITORY.test(repository) || !SHA.test(targetSha)) throw new Error("Invalid candidate request");
+  for (let retry = 0; retry < 3; retry++) {
+    const previous = await readState(api, repository);
+    if (previous.recovered) throw new Error("Candidate scheduler state requires operator reconciliation");
+    const mainSha = (await api(`/repos/${repository}/git/ref/heads/main`))?.object?.sha;
+    if (!SHA.test(mainSha) || (await api(`/repos/${repository}/compare/${targetSha}...${mainSha}`))?.merge_base_commit?.sha !== targetSha)
+      throw new Error("Candidate is outside main ancestry");
+    const suiteVersion = await candidateSuiteVersion(api, repository, mainSha);
+    const queued = queueCandidate(previous.value.candidates, { targetSha, suiteVersion, purpose, requestedAt: now(), claimId: randomUUID() });
+    try {
+      if (!isDeepStrictEqual(queued, previous.value.candidates)) await writeState(api, repository, previous, { ...previous.value, candidates: queued });
+      return candidateReceipt(queued, targetSha, purpose, suiteVersion, now());
+    } catch (cause) { if (cause instanceof StateConflict && retry < 2) continue; throw cause; }
+  }
+}
+
 export async function main(argv, { env = process.env, log = console.log, error = console.error, api } = {}) {
   try {
     const repository = env.GITHUB_REPOSITORY;
     if (!REPOSITORY.test(repository ?? "") || !env.GITHUB_TOKEN || env.GITHUB_REF !== "refs/heads/main") throw new Error("Invalid controller environment");
     api ??= githubApi(env.GITHUB_TOKEN);
     const mode = argv[0] ?? "reconcile";
+    if (mode === "request") {
+      const event = JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
+      if (event.ref !== "refs/heads/main") throw new Error("Invalid candidate request ref");
+      const receipt = await requestCandidate(repository, event.inputs?.candidate_sha,
+        { api, purpose: event.inputs?.purpose ?? "release" });
+      log(JSON.stringify({ event: "main_validation_candidate_request", ...receipt }));
+      if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY,
+        `Candidate Request\n\n\`\`\`json\n${JSON.stringify(receipt, null, 2)}\n\`\`\`\n`);
+      return 0;
+    }
     if (mode === "reconcile" || mode === "report") {
       const result = mode === "reconcile" ? await reconcile(repository, { api, log })
         : { state: (await readState(api, repository)).value };

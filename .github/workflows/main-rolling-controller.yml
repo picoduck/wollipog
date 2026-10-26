@@ -9,6 +9,16 @@ on:
   schedule:
     - cron: '7,17,27,37,47,57 * * * *'
   workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact main-ancestry candidate SHA (empty for ordinary reconciliation)
+        type: string
+        default: ''
+      purpose:
+        description: Candidate request purpose
+        type: choice
+        options: [release, repair]
+        default: release
 
 permissions: {}
 
@@ -33,6 +43,11 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '24'
+      - name: Request Exact Candidate
+        if: github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/main-rolling-validation.mjs request
       - name: Reconcile and Dispatch
         env:
           GITHUB_TOKEN: ${{ github.token }}
