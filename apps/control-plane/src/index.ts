@@ -807,14 +807,20 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
   if (routePath === "/api/sessions" && req.method === "POST") {
     const body = (req.body ?? {}) as { runnerId?: unknown; workspaceId?: unknown; workspacePath?: unknown };
-    if (principal.kind === "human" && !organizationAdmin &&
-        typeof body.workspacePath === "string" && body.workspacePath.trim()) {
+    // Creation trims the path, so a blank one launches the named workspace and must pass its check.
+    const arbitraryPath = typeof body.workspacePath === "string" && body.workspacePath.trim() !== "";
+    // A credential delegated as one user reaches that user's runners (#2940), so it may name an
+    // arbitrary host path only when that user, as a Human, could.
+    const delegatedUser = principal.kind === "agent" && principal.delegatedScope.owner.kind === "user"
+      ? principal.delegatedScope.owner.userId : null;
+    if (arbitraryPath && (principal.kind === "human" ? !organizationAdmin
+      : delegatedUser !== null && !db.userAdministersOrganization(principal.delegatedScope.organizationId, delegatedUser))) {
       return "organization owner or admin permission is required to start a session from an arbitrary host path";
     }
     if (typeof body.runnerId !== "string" || !db.canAccessRunner(principal, body.runnerId)) {
       return { statusCode: 404, error: "runner not found" };
     }
-    if (typeof body.workspaceId === "string" && !body.workspacePath &&
+    if (typeof body.workspaceId === "string" && !arbitraryPath &&
         !db.canAccessWorkspace(principal, body.runnerId, body.workspaceId)) {
       return { statusCode: 404, error: "workspace not found" };
     }

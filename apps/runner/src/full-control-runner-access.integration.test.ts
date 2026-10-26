@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
@@ -32,11 +32,15 @@ import { executeManagerTool, type McpDeps } from "./session-management-mcp.js";
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER = "org-runner";
 const WORKSPACE = "repo";
+/** A workspace on the organization runner that belongs to one colleague alone. */
+const PEER_WORKSPACE = "colleague-private";
 const AGENT = "claude";
 const MODEL = "claude-opus-5-5";
-const MEMBER_TOKEN = "full-control-member-device-token";
+const ADMIN_TOKEN = "full-control-admin-device-token";
+const OPERATOR_TOKEN = "full-control-operator-device-token";
 const RUNNER_TOKEN = `wollipogr_${"f".repeat(43)}`;
 const PRICING_URL = "http://127.0.0.1:9/fixture-model-rates.json";
+const ARBITRARY_PATH_ERROR = "organization owner or admin permission is required to start a session from an arbitrary host path";
 
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
@@ -64,10 +68,19 @@ async function stopChild(child: ChildProcess): Promise<void> {
   await exited;
 }
 
-function runnerMeta(runnerId: string, workspacePath: string): RunnerMetadata {
+async function waitFor(condition: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() > deadline) assert.fail(`timed out waiting until ${what}`);
+    await delay(20);
+  }
+}
+
+function runnerMeta(runnerId: string, temp: string): RunnerMetadata {
   return {
     runnerId, hostname: runnerId, os: "linux", version: "fixture",
-    workspaces: [{ id: WORKSPACE, name: "Repository", path: workspacePath }],
+    workspaces: [{ id: WORKSPACE, name: "Repository", path: temp },
+      ...(runnerId === RUNNER ? [{ id: PEER_WORKSPACE, name: "Colleague Private", path: join(temp, PEER_WORKSPACE) }] : [])],
     agents: [{ id: AGENT, name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code",
       context: { kind: "native" }, available: true, authStatus: "authenticated",
       capabilities: { models: [{ id: MODEL, default: true }], effortLevels: ["high"], slashCommands: [],
@@ -77,12 +90,13 @@ function runnerMeta(runnerId: string, workspacePath: string): RunnerMetadata {
   };
 }
 
-test("a Full Control root and its descendants reach the organization runner their Human can use, and nothing else (#2940)", {
-  timeout: 120_000,
-}, async (t) => {
+/** A real control plane with one online synthetic organization runner, and the identities and
+ * Machines both scenarios need. */
+async function stack(t: TestContext) {
   const port = await reservePort();
   const base = `http://127.0.0.1:${port}`;
   const temp = mkdtempSync(join(tmpdir(), "wollipog-full-control-runner-access-"));
+  mkdirSync(join(temp, PEER_WORKSPACE));
   const databasePath = join(temp, "control-plane.db");
   const now = Date.now();
   // Campaign members need a priced model; the source is unroutable, so no real pricing is fetched.
@@ -92,25 +106,30 @@ test("a Full Control root and its descendants reach the organization runner thei
   const seed = ControlPlaneDb.open(databasePath);
   const local = seed.localIdentityContext();
   const org = local.organizationId;
-  const member = "usr_campaign_member";
+  const admin = "usr_campaign_admin";
+  const operator = "usr_operator";
   const colleague = "usr_colleague";
   const otherOrg = "org_elsewhere";
   let projectId = "";
   try {
-    seed.createIdentityMember({ userId: member, displayName: "Campaign Admin", organizationId: org, role: "admin", now });
+    seed.createIdentityMember({ userId: admin, displayName: "Campaign Admin", organizationId: org, role: "admin", now });
+    seed.createIdentityMember({ userId: operator, displayName: "Operator", organizationId: org, role: "operator", now });
     seed.createIdentityMember({ userId: colleague, displayName: "Colleague", organizationId: org, role: "operator", now });
-    seed.createIdentityTeam({ teamId: "team_mine", organizationId: org, name: "Mine", memberUserIds: [member], now });
+    seed.createIdentityTeam({ teamId: "team_mine", organizationId: org, name: "Mine", memberUserIds: [admin], now });
     seed.createIdentityTeam({ teamId: "team_theirs", organizationId: org, name: "Theirs", memberUserIds: [colleague], now });
     seed.raw().prepare("INSERT INTO identity_organizations (organization_id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
       .run(otherOrg, "Elsewhere", now, now);
-    seed.createDevice({ id: "member-device", name: "Member", tokenHash: hashToken(MEMBER_TOKEN), userId: member, organizationId: org, now });
+    seed.createDevice({ id: "admin-device", name: "Admin", tokenHash: hashToken(ADMIN_TOKEN), userId: admin, organizationId: org, now });
+    seed.createDevice({ id: "operator-device", name: "Operator", tokenHash: hashToken(OPERATOR_TOKEN), userId: operator, organizationId: org, now });
     seed.registerRunner(runnerMeta(RUNNER, temp), now, PROTOCOL_VERSION);
     seed.issueRunnerCredential({ credentialId: `rcred_${"fullcontrol".padEnd(32, "0")}`, runnerId: RUNNER, organizationId: org,
       ownerKind: "organization", ownerId: org, label: "Organization Runner", tokenHash: hashToken(RUNNER_TOKEN),
       createdByUserId: local.userId, now, expiresAt: now + 600_000 });
-    // Machines the member can use, and Machines nobody delegated as the member may see.
+    assert.equal(seed.setResourceScope({ resource: "workspace", runnerId: RUNNER, resourceId: PEER_WORKSPACE,
+      scope: { organizationId: org, owner: { kind: "user", userId: colleague } }, now }), true);
+    // Machines the administrator can use, and Machines nobody delegated as that user may see.
     const scoped: Array<[string, ResourceScope]> = [
-      ["member-runner", { organizationId: org, owner: { kind: "user", userId: member } }],
+      ["member-runner", { organizationId: org, owner: { kind: "user", userId: admin } }],
       ["my-team-runner", { organizationId: org, owner: { kind: "team", teamId: "team_mine" } }],
       ["colleague-runner", { organizationId: org, owner: { kind: "user", userId: colleague } }],
       ["their-team-runner", { organizationId: org, owner: { kind: "team", teamId: "team_theirs" } }],
@@ -185,12 +204,10 @@ test("a Full Control root and its descendants reach the organization runner thei
   socket.send(JSON.stringify({ type: "register", token: RUNNER_TOKEN, protocolVersion: PROTOCOL_VERSION,
     runner: runnerMeta(RUNNER, temp), sessionSnapshots: [] }));
   await ready;
-  /** The runner started this session and the control plane accepted its own credential. */
-  const running = (sessionId: string, what: string) => waitFor(() => bound.has(sessionId), what);
 
-  const human = async (path: string, body: unknown) => {
+  const post = async (authorization: Record<string, string>, path: string, body: unknown) => {
     const response = await fetch(`${base}${path}`, { method: "POST",
-      headers: { authorization: `Bearer ${MEMBER_TOKEN}`, "content-type": "application/json" }, body: JSON.stringify(body) });
+      headers: { ...authorization, "content-type": "application/json" }, body: JSON.stringify(body) });
     return { status: response.status, json: await response.json() as Record<string, unknown> };
   };
   /** The real Session Management tools, called with one session's own runner-minted credential. */
@@ -201,14 +218,32 @@ test("a Full Control root and its descendants reach the organization runner thei
     const text = result.content.map((item) => item.type === "text" ? item.text : "").join("\n");
     return { isError: result.isError === true, text, json: result.isError ? null : JSON.parse(text) as Record<string, unknown> };
   };
-  const visibleRunners = async (sessionId: string) => {
-    const listed = await tool(sessionId, "list_runners");
-    assert.equal(listed.isError, false, listed.text);
-    return (listed.json!.runners as Array<{ runnerId: string; workspaces: Array<{ id: string }> }>)
-      .map((runner) => runner.runnerId).sort();
+  return {
+    base, databasePath, org, admin, operator, projectId, peerPath: join(temp, PEER_WORKSPACE), started, credentials,
+    /** The runner started this session and the control plane accepted its own credential. */
+    running: (sessionId: string, what: string) => waitFor(() => bound.has(sessionId), what),
+    /** POST as a Human, through that Human's paired device. */
+    human: (path: string, body: unknown, token = ADMIN_TOKEN) => post({ authorization: `Bearer ${token}` }, path, body),
+    /** POST with one session's own credential, exactly as the CLI and MCP tools send it. */
+    agent: (sessionId: string, path: string, body: unknown) => post({ authorization: `Bearer ${credentials.get(sessionId)}`,
+      [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: sessionId }, path, body),
+    tool,
+    visible: async (sessionId: string) => {
+      const listed = await tool(sessionId, "list_runners");
+      assert.equal(listed.isError, false, listed.text);
+      return listed.json!.runners as Array<{ runnerId: string; workspaces: Array<{ id: string }> }>;
+    },
   };
+}
 
-  // 1. The member launches Full Control on the organization runner through the real launch route.
+test("a Full Control root and its descendants reach the organization runner their Human can use, and nothing else (#2940)", {
+  timeout: 120_000,
+}, async (t) => {
+  const s = await stack(t);
+  const { org, admin, projectId, running, human, tool } = s;
+  const visibleRunners = async (sessionId: string) => (await s.visible(sessionId)).map((runner) => runner.runnerId).sort();
+
+  // 1. The administrator launches Full Control on the organization runner through the real launch route.
   const launch: FullControlLaunchRequest = { runnerId: RUNNER, workspaceId: WORKSPACE, issueNumbers: [12],
     task: "Deliver issue 12", overrides: { session: { agentId: AGENT, config: { model: MODEL, permissionMode: "orchestrator" },
       orchestrator: { behavior: { childModel: MODEL,
@@ -221,9 +256,9 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.equal(admitted.status, 201, JSON.stringify(admitted.json));
   const rootId = admitted.json.id as string;
   await running(rootId, "the root starts");
-  const live = ControlPlaneDb.open(databasePath);
+  const live = ControlPlaneDb.open(s.databasePath);
   try {
-    assert.deepEqual(live.sessionScope(rootId), { organizationId: org, owner: { kind: "user", userId: member } },
+    assert.deepEqual(live.sessionScope(rootId), { organizationId: org, owner: { kind: "user", userId: admin } },
       "the root stays charged to the authorizing Human");
   } finally { live.close(); }
 
@@ -261,13 +296,11 @@ test("a Full Control root and its descendants reach the organization runner thei
   // parks that approval instead of answering 404. Once approved, the identical call launches (the
   // approval fingerprints the exact request, so the body is built in the tool's own key order).
   const grandchild = { runnerId: RUNNER, agentId: AGENT, workspaceId: WORKSPACE, prompt: "Check one file", useWorktree: false };
-  const asked = await fetch(`${base}/api/sessions`, { method: "POST", body: JSON.stringify(grandchild),
-    headers: { authorization: `Bearer ${credentials.get(childId)}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: childId,
-      "content-type": "application/json" } });
-  const parked = await asked.json() as { error: string };
-  assert.equal(asked.status, 428, parked.error);
-  const spawnRequestId = /\(request (spawn_[0-9a-f]+)\)/u.exec(parked.error)?.[1];
-  assert.ok(spawnRequestId, parked.error);
+  const asked = await s.agent(childId, "/api/sessions", grandchild);
+  const parked = String(asked.json.error);
+  assert.equal(asked.status, 428, parked);
+  const spawnRequestId = /\(request (spawn_[0-9a-f]+)\)/u.exec(parked)?.[1];
+  assert.ok(spawnRequestId, parked);
   const approved = await human(`/api/sessions/${childId}/approve`, { requestId: spawnRequestId, optionId: "allow" });
   assert.equal(approved.status, 200, JSON.stringify(approved.json));
   const grandchildCreated = await tool(childId, "create_session", grandchild);
@@ -277,11 +310,11 @@ test("a Full Control root and its descendants reach the organization runner thei
   const refusedGrandchild = await tool(childId, "create_session", { runnerId: "colleague-runner", workspaceId: WORKSPACE,
     agentId: AGENT, prompt: "Never launched", useWorktree: false });
   assert.match(refusedGrandchild.text, /HTTP 404: runner not found/u);
-  const lineage = ControlPlaneDb.open(databasePath);
+  const lineage = ControlPlaneDb.open(s.databasePath);
   try {
     for (const id of [rootId, childId, grandchildId]) {
       assert.equal(lineage.getSession(id)!.projectId, projectId, `${id} is in the organization Project`);
-      assert.deepEqual(lineage.sessionScope(id), { organizationId: org, owner: { kind: "user", userId: member } },
+      assert.deepEqual(lineage.sessionScope(id), { organizationId: org, owner: { kind: "user", userId: admin } },
         `${id} keeps the Human's ownership`);
     }
   } finally { lineage.close(); }
@@ -297,7 +330,7 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.equal(inspected.isError, true, "the Full Control root cannot read an organization session it did not create");
 
   // 5. A Custom root in the organization Project is delegated organization-wide, exactly as before.
-  const scopeCheck = ControlPlaneDb.open(databasePath);
+  const scopeCheck = ControlPlaneDb.open(s.databasePath);
   try {
     assert.deepEqual(scopeCheck.sessionScope(customId), { organizationId: org, owner: { kind: "organization", organizationId: org } });
   } finally { scopeCheck.close(); }
@@ -305,10 +338,54 @@ test("a Full Control root and its descendants reach the organization runner thei
     ["colleague-runner", "member-runner", "my-team-runner", RUNNER, "their-team-runner"].sort());
 });
 
-async function waitFor(condition: () => boolean, what: string, timeoutMs = 10_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!condition()) {
-    if (Date.now() > deadline) assert.fail(`timed out waiting until ${what}`);
-    await delay(20);
+test("a user-delegated agent cannot launch into a workspace or host path its Human cannot (#2940 review CR-1.1)", {
+  timeout: 120_000,
+}, async (t) => {
+  const s = await stack(t);
+  // An operator's own Custom Orchestrator with no Project is owned by, and delegated as, the operator.
+  const created = await s.human("/api/sessions", { runnerId: RUNNER, workspaceId: WORKSPACE, agentId: AGENT, role: "orchestrator",
+    projectId: null, useWorktree: false, config: { model: MODEL, permissionMode: "orchestrator" } }, OPERATOR_TOKEN);
+  assert.equal(created.status, 201, JSON.stringify(created.json));
+  const orchestratorId = created.json.id as string;
+  await s.running(orchestratorId, "the operator's Orchestrator starts");
+  const scope = ControlPlaneDb.open(s.databasePath);
+  try {
+    assert.deepEqual(scope.sessionScope(orchestratorId), { organizationId: s.org, owner: { kind: "user", userId: s.operator } });
+  } finally { scope.close(); }
+  const listed = (await s.visible(orchestratorId)).find((runner) => runner.runnerId === RUNNER)!;
+  assert.deepEqual(listed.workspaces.map((workspace) => workspace.id), [WORKSPACE], "the colleague's workspace stays hidden");
+
+  const launches = s.started.length;
+  const attempts: Array<[label: string, body: Record<string, unknown>, status: number, error: string]> = [
+    ["the colleague's directory as an arbitrary path",
+      { runnerId: RUNNER, agentId: AGENT, workspacePath: s.peerPath, projectId: null, useWorktree: false }, 403, ARBITRARY_PATH_ERROR],
+    ["the colleague's registered workspace",
+      { runnerId: RUNNER, agentId: AGENT, workspaceId: PEER_WORKSPACE, projectId: null, useWorktree: false }, 404, "workspace not found"],
+    // Creation trims the path, so a blank one would launch the named workspace without its check.
+    ["a blank path beside the colleague's workspace",
+      { runnerId: RUNNER, agentId: AGENT, workspaceId: PEER_WORKSPACE, workspacePath: "  ", projectId: null, useWorktree: false }, 404, "workspace not found"],
+  ];
+  for (const [label, body, status, error] of attempts) {
+    for (const [who, attempt] of [
+      ["agent", () => s.agent(orchestratorId, "/api/sessions", body)],
+      ["human", () => s.human("/api/sessions", body, OPERATOR_TOKEN)],
+    ] as const) {
+      const refused = await attempt();
+      assert.equal(refused.status, status, `${who}: ${label}: ${JSON.stringify(refused.json)}`);
+      assert.equal(refused.json.error, error, `${who}: ${label}`);
+    }
   }
-}
+  await delay(200);
+  assert.equal(s.started.length, launches, "no refused attempt reached the runner");
+
+  // An administrator may name an arbitrary host path, and so may an agent delegated as one.
+  const adminCreated = await s.human("/api/sessions", { runnerId: RUNNER, workspaceId: WORKSPACE, agentId: AGENT, role: "orchestrator",
+    projectId: null, useWorktree: false, config: { model: MODEL, permissionMode: "orchestrator" } });
+  assert.equal(adminCreated.status, 201, JSON.stringify(adminCreated.json));
+  const adminOrchestratorId = adminCreated.json.id as string;
+  await s.running(adminOrchestratorId, "the administrator's Orchestrator starts");
+  const adminChild = await s.agent(adminOrchestratorId, "/api/sessions",
+    { runnerId: RUNNER, agentId: AGENT, workspacePath: s.peerPath, projectId: null, useWorktree: false });
+  assert.equal(adminChild.status, 201, JSON.stringify(adminChild.json));
+  await waitFor(() => s.started.some((message) => message.spec.sessionId === adminChild.json.id), "the administrator's child starts");
+});

@@ -11573,6 +11573,16 @@ export class ControlPlaneDb {
     ).get(scope.owner.teamId, organizationId, userId) !== undefined;
   }
 
+  /** Whether the user is an active owner or admin of the organization: the role a Human's own
+   * device principal would carry there. */
+  userAdministersOrganization(organizationId: string, userId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role IN ('owner','admin')`,
+    ).get(organizationId, userId) !== undefined;
+  }
+
   canAccessRunner(principal: AuthPrincipal, runnerId: string): boolean {
     const scope = this.runnerScope(runnerId);
     return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
