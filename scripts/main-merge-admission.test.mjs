@@ -128,8 +128,10 @@ test("workflow shadow has no dependency into required checks and reads trusted b
   const aggregator = source.split("\n  check:\n")[1];
   assert.match(shadow, /vars.CI_REGRESSION_ADMISSION == 'dry-run'/);
   assert.match(shadow, /continue-on-error: true/); assert.match(shadow, /needs: \[checks, browser, win32, webkit\]/);
-  assert.match(shadow, /ref: \$\{\{ github.event.merge_group.base_sha \|\| github.event.pull_request.base.sha \}\}/);
+  assert.match(shadow, /ref: refs\/heads\/main/);
   assert.match(shadow, /persist-credentials: false/); assert.doesNotMatch(shadow, /: write|pull_request_target|pnpm install/);
+  const permissions = shadow.match(/    permissions:\n((?:      .+\n)+)/)?.[1];
+  assert.equal(permissions, "      contents: read\n", "reusable CI must not exceed its rolling caller's contents-only grant");
   assert.match(aggregator, /needs: \[checks, browser, win32, webkit, suite_plan\]/);
   assert.doesNotMatch(aggregator, /regression-admission|MAIN_MERGE_ADMISSION/);
   assert.match(shadow, /"decision":"hold","reasons":\["trusted-policy-unavailable"\]/);

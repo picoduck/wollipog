@@ -14,8 +14,12 @@ activation value. No repository variable is changed by this implementation.
 
 In `ci.yml`, `CI_REGRESSION_ADMISSION=dry-run` would admit **Regression Admission
 Shadow (Advisory)** for ready PRs and merge groups. That setting change requires
-separate human approval. It checks out the event's trusted main base, not candidate
-code, with non-persisted credentials and only contents/Actions/issues **read**.
+separate human approval. It checks out current `refs/heads/main`, with non-persisted
+credentials and only contents **read**, matching the existing reusable rolling
+caller's permission cap. Public Actions/issues endpoints support reads without
+extra permissions; inaccessible evidence remains a hold. See GitHub's
+[public workflow-run permissions](https://docs.github.com/en/rest/actions/workflow-runs#get-a-workflow-run)
+and [reusable permission ceiling](https://docs.github.com/en/actions/reference/workflows-and-actions/reusing-workflow-configurations).
 It runs after the suite jobs, alongside the required aggregator. The aggregator's
 dependencies, commands and results remain unchanged. Disabled mode schedules no
 job. Dry run adds no dependency to the required critical path; it consumes a separate
@@ -81,6 +85,13 @@ committer time. Equality holds. A changed main/base, including competing repairs
 invalidates that integration's prior evaluation. Prospective commits in a queue
 group are not included in current backlog; this is not a hard five-commit landing
 bound for batched groups.
+
+The workflow does not assume an event base is safe code to execute. It always
+executes current main's observer. An integration whose event base differs from
+live main, including a queued predecessor if the forge supplies one, conservatively
+records `base-moved` and holds until rebuilt on current main. This can produce
+expected holds for stacked entries; report them separately from health failures
+when sizing thresholds. No natural stacked-entry shape was measured in this slice.
 
 ## Enforcement Design and Forge Race — Not Yet Implemented
 
