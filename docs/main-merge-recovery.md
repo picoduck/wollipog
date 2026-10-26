@@ -1,7 +1,8 @@
 # Disabled Regression Admission Controller and Recovery
 
-Refs #3633. Depends on the shared candidate primitive from #3678; verify its merged
-interface before publishing this slice. **No activation or live write authority.**
+Refs #3633. Uses the shared candidate primitive merged in #3678 as
+`c8f9c4fa384fcafd0cfa27181ad3d497576341e3`. Its request signature and returned
+receipt were verified from merged source. **No activation or live write authority.**
 This is the code-only implementation and dry-run evidence, not an operational
 claim that GitHub is enforcing a new required context.
 
@@ -168,8 +169,9 @@ establish future workflow-token permissions or operator trust-provider readiness
 The local compatibility run passed **729 scripts tests**, including the complete
 inert rehearsal, against an unchanged temporary copy of #3678's provisional shared
 helper (SHA-256 `4c8835528f432f9e44a9cd7084ba15f2d2785f42079a88dad3337ec3994ffdf8`).
-That temporary helper was removed, not included in this slice. Repeat validation
-against the actual merged dependency before opening the recovery PR.
+That temporary helper was removed, not included in this slice. The actual merged
+helper has the identical SHA-256. The repeat against merged source passed all
+**744 scripts tests**, with zero failures or skips, and the recovery rehearsal.
 
 A later campaign merge-group observation illustrates the scheduling limitation.
 Run [40318437984](https://github.com/picoduck/wollipog/actions/runs/40318437984),
