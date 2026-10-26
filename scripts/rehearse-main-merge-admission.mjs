@@ -10,12 +10,18 @@ import { mergedRepairBinding, repairDigest, repairRecovery, requestMergedRepairC
  * report reads + one census conservatively replay the prior 37-read rebuild.
  * These endpoints cannot reach GitHub; the enabled flag applies only to fixtures.
  */
-export async function rehearseHoldFanout(health, { expired = false, restLimit = 5000, targetCount = 45, healthReadCount = 36 } = {}) {
+export async function rehearseHoldFanout(health, { expired = false, restLimit = 5000, targetCount = 45, healthReadCount = 36,
+  workflowBatches = 0 } = {}) {
   const repository = health.repository, origin = Date.parse(health.observedAt);
   const trigger = expired ? origin + 120_000 : Date.parse(health.unresolvedFailures[0].completedAt);
   const start = expired ? trigger : trigger + 1000;
   const virtualRequestMs = 100;
-  let clock = start, reports = 0, censuses = 0, writes = 0;
+  let clock = start, reports = 0, censuses = 0, writes = 0, workflowQueries = 0;
+  const workflowFiles = ["main-rolling-validation.yml", "ci.yml", "settings-rows-win32.yml"];
+  const workflowText = "# Inert complete workflow blob; not live health evidence\n";
+  const byteSize = Buffer.byteLength(workflowText);
+  const workflowBlob = { __typename: "Blob", text: workflowText, byteSize, isBinary: false,
+    oid: createHash("sha1").update(`blob ${byteSize}\0${workflowText}`).digest("hex") };
   const nodes = Array.from({ length: targetCount }, (_, i) => ({ number: i + 1, isDraft: false,
     headRefOid: (i + 100).toString(16).padStart(40, "0"), baseRefOid: health.currentMainSha, mergeQueueEntry: null }));
   const api = async (path, { body } = {}) => {
@@ -23,6 +29,11 @@ export async function rehearseHoldFanout(health, { expired = false, restLimit = 
     api.rateLimit.remaining--;
     if (path === "/rate_limit" || path.startsWith("/inert-health/")) return {};
     if (path === "/graphql") {
+      if (body.query.includes("AdmissionWorkflowEvidence")) {
+        workflowQueries++;
+        return { data: { repository: { nameWithOwner: repository, revision: { __typename: "Commit", oid: body.variables.revision },
+          file0: workflowBlob, file1: workflowBlob, file2: workflowBlob } } };
+      }
       censuses++;
       return { data: { repository: { defaultBranchRef: { name: "main", target: { oid: health.currentMainSha } },
         pullRequests: { pageInfo: { hasNextPage: false }, nodes } } } };
@@ -37,7 +48,9 @@ export async function rehearseHoldFanout(health, { expired = false, restLimit = 
   const now = () => new Date(clock).toISOString();
   const report = async (_args, { api: bounded, log }) => {
     reports++;
-    for (let i = 0; i < healthReadCount; i++) await bounded(`/inert-health/${i}`);
+    for (let i = 0; i < workflowBatches; i++) for (const file of workflowFiles)
+      await bounded(`/repos/${repository}/contents/.github/workflows/${file}?ref=${(i + 1).toString(16).padStart(40, "0")}`);
+    for (let i = workflowBatches * 3; i < healthReadCount; i++) await bounded(`/inert-health/${i}`);
     log(JSON.stringify(health)); return 0;
   };
   const census = { repository, mainSha: health.currentMainSha, complete: true,
@@ -56,8 +69,10 @@ export async function rehearseHoldFanout(health, { expired = false, restLimit = 
     delivery = { writes: failure.writes, complete: false, capacity: failure.capacity, apiBudget: failure.apiBudget };
   }
   return { evidenceClass: "inert-api-and-virtual-clock; no live delivery or authority", targetCount,
-    reports, censuses, healthReadCount, virtualRequestMs, virtualStartAt: new Date(start).toISOString(),
+    reports, censuses, healthReadCount, workflowQueries, unbatchedReadCalls: healthReadCount + 2,
+    savedCalls: workflowBatches * 2, virtualRequestMs, virtualStartAt: new Date(start).toISOString(),
     ...delivery, failureOrExpiryToLastPlannedHoldMs: delivery.complete ? clock - trigger : null,
+    callHeadroom: delivery.complete ? delivery.apiBudget.limit - delivery.apiBudget.calls : null,
     computeMs: performance.now() - cpuStart, liveMutations: 0 };
 }
 
@@ -160,7 +175,11 @@ export async function rehearseAdmission(projection, { candidateInterfaces } = {}
     fanout: { failure: await rehearseHoldFanout(red), expiry: await rehearseHoldFanout(historical, { expired: true }),
       insufficientBudget: await rehearseHoldFanout(red, { restLimit: 1000 }),
       currentReadCost35Targets: await rehearseHoldFanout(red, { targetCount: 35, healthReadCount: 51 }),
-      currentReadCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 51 }) },
+      currentReadCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 51 }),
+      batchedMeasuredCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 51, workflowBatches: 1 }),
+      batchedMeasuredCostExpiry45Targets: await rehearseHoldFanout(historical, { expired: true, healthReadCount: 51, workflowBatches: 1 }),
+      batchedMeasuredCost46Targets: await rehearseHoldFanout(red, { targetCount: 46, healthReadCount: 51, workflowBatches: 1 }),
+      latestObservedCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 36, workflowBatches: 2 }) },
     forgeRace: "A success is sticky after the controller stops; fixture lease expiry does not expire a GitHub status. No finite unconditional block bound or atomic enforcement is established." };
 }
 
