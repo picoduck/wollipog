@@ -839,6 +839,51 @@ jobs:
             echo 'Trusted suite policy unavailable at this base; full coverage remains required.'
           fi
 
+  # Disabled by default. Advisory sibling of the aggregator: no needs edge into any
+  # required job, no status-writing token and no change to full regression coverage.
+  regression-admission-shadow:
+    if: ${{ !cancelled() && vars.CI_REGRESSION_ADMISSION == 'dry-run' && (github.event_name == 'merge_group' || github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)) }}
+    name: Regression Admission Shadow (Advisory)
+    needs: [checks, browser, win32, webkit]
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # Reusable CI has contents:read-only callers. Public Actions/issues endpoints
+      # require no extra read scope; inaccessible evidence remains a hold.
+      # A queue base may contain earlier queued work: execute only current main code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Observe Regression Admission Without Enforcement
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_MERGE_ADMISSION: ${{ vars.CI_REGRESSION_ADMISSION }}
+          MAIN_MERGE_ADMISSION_OUTPUT: ${{ runner.temp }}/main-merge-admission.json
+        run: |
+          if [ "$MAIN_MERGE_ADMISSION" != dry-run ]; then
+            echo 'Regression admission shadow requires exact lowercase dry-run.'
+          elif test -f scripts/main-merge-admission.mjs; then
+            node scripts/main-merge-admission.mjs
+          else
+            echo '{"schema":"main-merge-admission-v1","mode":"dry-run","enforcement":"none","decision":"hold","reasons":["trusted-policy-unavailable"]}' > "$MAIN_MERGE_ADMISSION_OUTPUT"
+            cat "$MAIN_MERGE_ADMISSION_OUTPUT"
+          fi
+      - name: Retain Regression Admission Observation
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-merge-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-merge-admission.json
+          retention-days: 30
+          if-no-files-found: warn
+
   check:
     # Report failed, cancelled or skipped dependencies while PR CI is active. !cancelled()
     # lets superseded PR runs cancel this job (#2452), without changing non-PR aggregation.

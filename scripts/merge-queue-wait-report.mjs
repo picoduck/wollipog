@@ -10,6 +10,7 @@ import { githubApi } from "./merge-group-cleanup.mjs";
 // merge-queue removals, and never changes anything.
 
 export const AGGREGATOR = "Typecheck, Test & Sidecar Bundle";
+const ADVISORY_JOBS = new Set(["Suite Selection Shadow (Advisory)", "Regression Admission Shadow (Advisory)"]);
 const QUEUE_BRANCH = /^gh-readonly-queue\/main\/pr-([1-9][0-9]*)-[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export const MAX_PAGES = 10;
@@ -53,7 +54,7 @@ const callerOf = (job) => job.name.includes(" / ") ? job.name.slice(0, job.name.
  * Older runs have no routing job. The jobs API does not name dependencies; tests pin this model.
  */
 function dependencyCandidates(job, work, aggregator) {
-  const requiredWork = work.filter((other) => other.name !== "Suite Selection Shadow (Advisory)");
+  const requiredWork = work.filter((other) => !ADVISORY_JOBS.has(other.name));
   if (job === aggregator) return requiredWork;
   if (job.name === "PR Suite Routing") return [];
   const routed = job.name === "Typecheck, Unit Tests & Bundles" || /^Browser End-to-End Tests \([1-5]\)$/.test(job.name);
