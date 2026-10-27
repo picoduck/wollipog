@@ -94,6 +94,12 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
   These changes do not establish unattended Full Control production readiness: the complete
   execution, evidence review, and managed-usage path still requires verification.
 
+## Security
+
+- Updates the desktop's `ctutils` dependency from 0.4.2 to 0.4.4 to address non-constant-time
+  mask generation and comparison behavior reported in
+  [RUSTSEC-2026-0385](https://rustsec.org/advisories/RUSTSEC-2026-0385.html).
+
 ## Recovery, Retention, and Reliability
 
 - Provider-HOME recovery reports specific refusal causes and process diagnostics. Supported
