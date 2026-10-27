@@ -17,7 +17,9 @@
  * (`closes#12`, `closes:#12`), `closes (#12)`, emphasis that ends between the two
  * (`**Closes:** #12`, `_closes_ #12`), a keyword that is itself a link, `http` URLs, `#12_x`, a
  * second reference after one keyword (`Closes #11, #12` closes only #11), and the title.
- * Indented code and `#12_x` are still reported, as the simpler rule; neither is common.
+ * Where this approximation of GitHub's Markdown is unsure it reports: indented code, `#12_x`, text
+ * after a fence indented by one to three spaces once a line is less indented (as a list item's fence
+ * ends), and HTML comments only one of cmark-gfm and the HTML parser would hide.
  */
 
 /** GitHub's documented closing keywords, matched without regard to case. */
@@ -81,47 +83,97 @@ export function canonicalIssueReference(value: string, repository?: string): str
 
 const MASK = "\u0000";
 
-/** A fence line's delimiter and the text after it, read in one pass: blockquote markers (each after
- * up to three spaces and followed by an optional space), up to three spaces, then three or more
- * backticks or tildes. A scan rather than a regular expression, which would backtrack
- * exponentially over a long run of `> ` markers. */
-function fence(line: string): { char: string; length: number; rest: string } | null {
-  let i = 0;
-  for (;;) {
-    let j = i;
-    while (j < line.length && j - i < 3 && line[j] === " ") j += 1;
-    if (line[j] !== ">") {
-      i = j;
-      break;
-    }
-    i = line[j + 1] === " " ? j + 2 : j + 1;
+/** Quote markers at the start of a line, at most `limit` of them: each after up to three spaces and
+ * followed by an optional space. Returns how many and where the rest of the line starts. A scan
+ * rather than a regular expression, which would backtrack exponentially over a run of `> `. */
+function quotes(line: string, limit = Number.POSITIVE_INFINITY): { depth: number; rest: number } {
+  let rest = 0;
+  let depth = 0;
+  while (depth < limit) {
+    let j = rest;
+    while (j < line.length && j - rest < 3 && line[j] === " ") j += 1;
+    if (line[j] !== ">") break;
+    depth += 1;
+    rest = line[j + 1] === " " ? j + 2 : j + 1;
   }
+  return { depth, rest };
+}
+
+/** A fence delimiter at `from`: up to three spaces, then three or more backticks or tildes. */
+function delimiter(line: string, from: number): { indent: number; char: string; length: number; info: string } | null {
+  let i = from;
+  while (i < line.length && i - from < 3 && line[i] === " ") i += 1;
   const char = line[i];
   if (char !== "`" && char !== "~") return null;
   let end = i;
   while (line[end] === char) end += 1;
-  return end - i >= 3 ? { char, length: end - i, rest: line.slice(end) } : null;
+  return end - i >= 3 ? { indent: i - from, char, length: end - i, info: line.slice(end) } : null;
 }
 
-/** The text with code and HTML comments blanked out, at the same offsets. A blank never reads as
- * a space, so nothing hidden can join a keyword to a reference either. */
+function leadingSpaces(text: string): number {
+  let count = 0;
+  while (text[count] === " ") count += 1;
+  return count;
+}
+
+/** Positions of every occurrence of `needle`, in order. */
+function occurrences(text: string, needle: string): number[] {
+  const found: number[] = [];
+  for (let at = text.indexOf(needle); at >= 0; at = text.indexOf(needle, at + 1)) found.push(at);
+  return found;
+}
+
+/** The first position in sorted `positions` at or after `at`, or -1. */
+function nextAt(positions: readonly number[], at: number): number {
+  let low = 0;
+  let high = positions.length;
+  while (low < high) {
+    const middle = (low + high) >> 1;
+    if (positions[middle]! < at) low = middle + 1;
+    else high = middle;
+  }
+  return low < positions.length ? positions[low]! : -1;
+}
+
+/**
+ * The text with code and HTML comments blanked out, at the same offsets. A blank never reads as a
+ * space, so nothing hidden can join a keyword to a reference either. Where this approximation of
+ * GitHub's Markdown is unsure, it leaves text visible: a reference reported needlessly costs a
+ * reworded sentence, one hidden wrongly closes an issue. (In the merge gate, GitHub's own
+ * `closingIssuesReferences` also backs it up.)
+ */
 function maskMarkdown(text: string): string {
   const out = text.split("");
   const blank = (from: number, to: number) => {
     for (let i = from; i < to; i += 1) if (out[i] !== "\n") out[i] = MASK;
   };
-  // Fenced code blocks, line by line. An unclosed fence runs to the end, as CommonMark reads it.
+  // Fenced code blocks, line by line. A fence opened inside a quote ends with the quote, since code
+  // has no lazy continuation; one opened indented (as in a list item) ends at the first less
+  // indented line, which also ends a list item. An unclosed fence otherwise runs to the end, as
+  // CommonMark reads it.
   let offset = 0;
-  let open: { char: string; length: number; from: number } | null = null;
+  let open: { char: string; length: number; from: number; depth: number; indent: number } | null = null;
   for (const line of text.split("\n")) {
-    const delimiter = fence(line);
     if (open) {
-      if (delimiter && delimiter.char === open.char && delimiter.length >= open.length && !delimiter.rest.trim()) {
-        blank(open.from, offset + line.length);
+      const prefix = quotes(line, open.depth);
+      const content = line.slice(prefix.rest);
+      if (prefix.depth < open.depth || (content.trim() !== "" && leadingSpaces(content) < open.indent)) {
+        blank(open.from, offset - 1);
         open = null;
+      } else {
+        const close = delimiter(line, prefix.rest);
+        if (close && close.char === open.char && close.length >= open.length && !close.info.trim()) {
+          blank(open.from, offset + line.length);
+          open = null;
+        }
+        offset += line.length + 1;
+        continue;
       }
-    } else if (delimiter && !(delimiter.char === "`" && delimiter.rest.includes("`"))) {
-      open = { char: delimiter.char, length: delimiter.length, from: offset };
+    }
+    const prefix = quotes(line);
+    const opening = delimiter(line, prefix.rest);
+    if (opening && !(opening.char === "`" && opening.info.includes("`"))) {
+      open = { char: opening.char, length: opening.length, from: offset, depth: prefix.depth, indent: opening.indent };
     }
     offset += line.length + 1;
   }
@@ -156,18 +208,41 @@ function maskMarkdown(text: string): string {
     cursor = runs[close]!.start + length;
     blank(start, cursor);
   }
-  // HTML comments. One left open is not a comment GitHub hides, so it stays readable.
+  // HTML comments, hidden only where both GitHub's Markdown and its HTML parser hide them.
+  // - A line that starts with `<!--` (after quote markers and up to three spaces) is a raw HTML
+  //   block, and the HTML parser ends its comment at the first `-->` or `--!>`; `<!-->` and
+  //   `<!--->` are complete, empty comments.
+  // - Elsewhere, cmark-gfm takes `<!--` as a comment only when the text before the next `-->`
+  //   neither starts with `>` or `->`, contains `--`, ends with `-`, nor crosses a paragraph.
+  //   Anything else is literal text, which GitHub shows.
+  // A comment left open hides nothing here.
   const commented = out.join("");
+  const ends = occurrences(commented, "-->");
+  const bangEnds = occurrences(commented, "--!>");
+  const dashes = occurrences(commented, "--");
   let from = commented.indexOf("<!--");
   while (from >= 0) {
-    if (out[from] === MASK) {
-      from = commented.indexOf("<!--", from + 1);
-      continue;
+    let end = -1;
+    if (out[from] !== MASK) {
+      const window = commented.slice(Math.max(0, from - 64), from);
+      const newline = window.lastIndexOf("\n");
+      const linePrefix = newline >= 0 ? window.slice(newline + 1) : from <= 64 ? window : null;
+      const prefix = linePrefix === null ? null : quotes(linePrefix);
+      if (linePrefix !== null && prefix && /^ {0,3}$/u.test(linePrefix.slice(prefix.rest))) {
+        const plain = nextAt(ends, from + 2);
+        const bang = nextAt(bangEnds, from + 2);
+        end = bang >= 0 && (plain < 0 || bang < plain) ? bang + 4 : plain >= 0 ? plain + 3 : -1;
+      } else {
+        const close = nextAt(ends, from + 4);
+        const content = close >= 0 ? commented.slice(from + 4, Math.min(close, from + 6)) : "";
+        const dash = nextAt(dashes, from + 4);
+        const paragraphEnd = nextAt(paragraphEnds, from);
+        if (close >= 0 && !(content.startsWith(">") || content.startsWith("->")) && !(dash >= 0 && dash < close) &&
+            !(close > from + 4 && commented[close - 1] === "-") && !(paragraphEnd >= 0 && paragraphEnd < close)) end = close + 3;
+      }
     }
-    const end = commented.indexOf("-->", from + 4);
-    if (end < 0) break;
-    blank(from, end + 3);
-    from = commented.indexOf("<!--", end + 3);
+    if (end >= 0) blank(from, end);
+    from = commented.indexOf("<!--", end >= 0 ? end : from + 1);
   }
   return out.join("");
 }

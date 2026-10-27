@@ -4769,7 +4769,7 @@ test("a GitHub merge is requested and armed only while GitHub would close exactl
 
     // An issue linked by hand is a closure too.
     answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "picoduck/wollipog#9", sources: ["linked"] }] } };
-    assert.match((await ask("linked")).error ?? "", /picoduck\/wollipog#9, which is linked to the pull request on GitHub/u);
+    assert.match((await ask("linked")).error ?? "", /picoduck\/wollipog#9, which GitHub links to the pull request/u);
 
     // A declared closure GitHub would not make leaves the snapshot describing another merge.
     answer = { ok: true, check: { checkedAt: 5, closures: [] } };

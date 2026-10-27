@@ -1376,7 +1376,9 @@ The description matcher follows GitHub's measured behavior (each case was checke
 pull URL, and a Markdown link to one all count, in any block outside code; inline code, fenced and
 indented code, HTML comments, a line break or no-break space between keyword and reference, a missing
 space, a parenthesis, emphasis that ends between the two, and a second reference after one keyword
-(`Closes #1, #2` closes only #1) do not. Indented code is still reported, as the simpler rule. The
+(`Closes #1, #2` closes only #1) do not. Where the matcher is unsure it reports rather than hides: a
+fence left open inside a quote or list item ends with it, a comment hides text only where both
+cmark-gfm and the HTML parser hide it, and indented code is still reported. The
 title and commit messages are not read: GitHub never links from the title, and a merge-queue squash
 commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
 an open pull request, or for a draft description with `--file`, compared with `--intended`.

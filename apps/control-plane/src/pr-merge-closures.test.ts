@@ -13,11 +13,11 @@ test("declared closures that match GitHub's need no change (#3713)", () => {
 test("every undeclared closure and every unmade declaration is named, with the description's line", () => {
   const message = prMergeClosureMismatch(["a/b#5"], [negated, { issue: "a/b#9", sources: ["linked"] }])!;
   assert.match(message, /^Merging this pull request would close issues that intendedClosures does not list: /u);
-  assert.match(message, /a\/b#3635, from the description: “This PR does not close #3635\.”; a\/b#9, which is linked to the pull request on GitHub\./u);
+  assert.match(message, /a\/b#3635, from the description: “This PR does not close #3635\.”; a\/b#9, which GitHub links to the pull request \(from its description or its Development section\)\./u);
   assert.match(message, /even in a negated or hyphenated phrase such as “does not close #N” or “auto-close #N”/u);
   assert.match(message, /intendedClosures lists a\/b#5, but merging this pull request would not close it\. Remove it,/u);
   const many = prMergeClosureMismatch([], Array.from({ length: 8 }, (_, i) => ({ issue: `a/b#${i + 1}`, sources: ["linked" as const] })))!;
-  assert.match(many, /a\/b#5, which is linked to the pull request on GitHub; and 3 more\./u);
+  assert.match(many, /a\/b#5, which GitHub links to the pull request \(from its description or its Development section\); and 3 more\./u);
   assert.doesNotMatch(many, /a\/b#6/u);
   assert.match(prMergeClosureMismatch(["a/b#1", "a/b#2"], [])!, /lists a\/b#1; a\/b#2, but merging this pull request would not close them\. Remove them,/u);
 });

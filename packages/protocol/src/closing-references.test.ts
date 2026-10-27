@@ -74,12 +74,33 @@ test("code and HTML comments in a Markdown description do not close", () => {
   assert.deepEqual(issues("```\ncode\n```\ncloses #4"), ["team/repo#4"]);
   assert.deepEqual(issues("<!-- note --> closes #5 <!-- open"), ["team/repo#5"]);
   assert.deepEqual(issues("<!-- a --><!-- closes #7 -->"), [], "a comment right after another is hidden too (#3729 review)");
-  // Fences follow CommonMark's prefix: quote markers, then at most three spaces before the delimiter.
-  for (const text of ["> > ```\n> > closes #1\n> > ```", ">```\n>closes #1", "   ~~~\ncloses #1\n   ~~~",
-    ">    ```\ncloses #1\n```"]) {
+  // Only what both cmark-gfm and the HTML parser hide is hidden (#3729 security review).
+  for (const text of ["<!-- a -- b\ncloses #1\n-->", "> <!-- closes #1 -->", "Text <!-- closes #1 --> more",
+    "Text <!---->closes <!-- x --> #1"]) {
     assert.deepEqual(issues(text), [], text);
   }
-  for (const text of ["    ```\ncloses #1", "> ``\ncloses #1", "``` x`y\ncloses #1", "```\ncode\n~~~\nmore\n```\ncloses #1"]) {
+  for (const text of ["<!--> This PR does not close #1 <!-- note -->", "<!---> closes #1", "<!-- x --!> closes #1 -->",
+    "Text <!-- a -- b closes #1 -->", "Text <!--> closes #1 -->", "Text <!-- x - closes #1 --->", "Text <!-- a\n\ncloses #1 -->",
+    "- <!-- a -- b closes #1 -->"]) {
+    assert.deepEqual(issues(text), ["team/repo#1"], text);
+  }
+  // Fences follow CommonMark's prefix: quote markers, then at most three spaces before the delimiter.
+  for (const text of ["> > ```\n> > closes #1\n> > ```", ">```\n>closes #1", "   ~~~\n   closes #1\n   ~~~",
+    "> ```\n>\n> closes #1\n> ```", "- item\n\n  ```\n\n  closes #1\n  ```", "```\n> ```\ncloses #1\n```"]) {
+    assert.deepEqual(issues(text), [], text);
+  }
+  for (const text of ["    ```\ncloses #1", "> ``\ncloses #1", "``` x`y\ncloses #1", "```\ncode\n~~~\nmore\n```\ncloses #1",
+    "- ```\ncloses #1"]) {
+    assert.deepEqual(issues(text), ["team/repo#1"], text);
+  }
+  // Code has no lazy continuation, so a fence left open in a quote or list item ends with it, and
+  // the text after it is visible on GitHub (#3729 security review).
+  for (const text of [">    ```\ncloses #1\n```", "> ```\n> code\nThis PR does not close #1",
+    "> ```\n\nThis PR does not close #1", "- item\n  ```\n  code\nThis PR does not close #1",
+    "> > ```\n> code\nThis PR does not close #1",
+    // Reported though GitHub hides it: an indented fence is read as a list item's, which ends at
+    // the first less indented line. Telling the two apart needs a full list parser.
+    "   ~~~\ncloses #1\n   ~~~"]) {
     assert.deepEqual(issues(text), ["team/repo#1"], text);
   }
   // Indented code is still reported: telling it apart from list text needs a full parser.
@@ -113,6 +134,9 @@ test("adversarial descriptions stay linear", () => {
     `${"> ".repeat(40)}plain\n`.repeat(1_000) + "closes #1",
     `${"<!--".repeat(20_000)} closes #1`,
     `${"<!-- x -->".repeat(10_000)} closes #1`,
+    `x ${"<!-- -- ".repeat(10_000)}--> closes #1`,
+    `${"> ```\n".repeat(10_000)}closes #1`,
+    `- a\n${"  ```\n  b\n".repeat(10_000)}closes #1`,
     `${"closes ".repeat(10_000)}#1`,
     `closes [${"x".repeat(256)}](${"y".repeat(2_048)}`.repeat(30) + " closes #1",
   ]) {

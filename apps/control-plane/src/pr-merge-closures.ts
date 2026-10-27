@@ -65,7 +65,7 @@ export function prMergeClosureMismatch(declared: readonly string[], closures: re
         const closure = actual.get(issue)!;
         return closure.excerpt
           ? `${issue}, from the description: “${closure.excerpt}”`
-          : `${issue}, which is linked to the pull request on GitHub`;
+          : `${issue}, which GitHub links to the pull request (from its description or its Development section)`;
       })}.`);
     sentences.push("GitHub closes an issue when close, fix or resolve, in any tense, comes directly before its reference, " +
       "even in a negated or hyphenated phrase such as “does not close #N” or “auto-close #N”.");
