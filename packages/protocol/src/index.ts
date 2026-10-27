@@ -5066,6 +5066,8 @@ export interface PendingApproval {
     kind: RunnerGuardrailKind;
     threshold: number;
     observed: number;
+    /** Optional owning durable command, pinned at the runner crossing. */
+    commandId?: string;
   };
   /** Present only for a control-plane-owned typed workflow gate. */
   workflowDecision?: WorkflowDecisionView;
@@ -8730,7 +8732,7 @@ export interface OutboundEventEnvelope {
 
 /** Exact runner evidence, present only when governance cancelled this execution's work. */
 export type AutomationGovernancePause = Pick<GovernanceTrippedMessage,
-  "sessionId" | "tripId" | "kind" | "threshold" | "observed">;
+  "sessionId" | "tripId" | "kind" | "threshold" | "observed" | "commandId">;
 
 export type AutomationExecutionStatus =
   | "dispatching"
@@ -9125,6 +9127,10 @@ export interface GovernanceTrippedMessage {
   kind: RunnerGuardrailKind;
   threshold: number;
   observed: number;
+  /** Additive and optional: the durable command whose active turn crossed this ceiling.
+   * Reconnect retains this identity even after that turn settles. Older peers omit/ignore it;
+   * turns without a durable command owner must omit it. */
+  commandId?: string;
 }
 
 /** Runner streams a normalized session event. In Phase 2 the runner owns the per-session `seq`

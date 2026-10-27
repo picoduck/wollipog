@@ -15100,6 +15100,13 @@ export class SessionsService {
       this.log.warn(`ignoring malformed governance trip for ${message.sessionId} from ${runnerId}`);
       return false;
     }
+    if (message.commandId !== undefined) {
+      if (typeof message.commandId !== "string" || !message.commandId || message.commandId.length > 256) return false;
+      const automationCommand = this.db.getAutomationCommand(message.commandId);
+      if (automationCommand?.supersededBy) return false;
+      const command = automationCommand ?? this.db.getSessionPromptCommand(message.commandId);
+      if (!command || command.runnerId !== runnerId || command.sessionId !== session.id) return false;
+    }
     const requestId = `runner-${message.kind}:${message.tripId}`;
     const pending = pendingRequests(session.pendingApproval);
     if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
@@ -15111,6 +15118,9 @@ export class SessionsService {
       "policy_decision",
       "asked",
     );
+    // Never enrich an already recorded trip with a different command or crossing on replay.
+    if (alreadyAsked &&
+        !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now())) return false;
     const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
     const title = message.kind === "cost_budget"
@@ -15121,6 +15131,7 @@ export class SessionsService {
       kind: message.kind,
       threshold: message.threshold,
       observed: message.observed,
+      ...(message.commandId !== undefined ? { commandId: message.commandId } : {}),
     };
     // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
     // have parked the same crossing. Promote that card with the runner evidence instead of asking
@@ -15145,6 +15156,8 @@ export class SessionsService {
     if (!alreadyAsked) {
       this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
         { kind: "system", id: "runner-governance" }, now, {
+          ...(message.commandId !== undefined
+            ? { content: [message.commandId, message.kind, message.threshold, message.observed] } : {}),
           policyRule: message.kind === "cost_budget"
             ? { kind: "cost_budget", budgetUsd: message.threshold }
             : { kind: "max_tool_calls", maxCalls: message.threshold },

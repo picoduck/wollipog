@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type {
   AgentCapabilities,
@@ -13,7 +14,7 @@ import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { PreStagedDeliveryOptions, SessionsService } from "./sessions.js";
 import { AutomationsService, validateAutomationSpec } from "./automations.js";
-import { workflowRunCapabilityError } from "./sessions.js";
+import { SessionsService as RealSessionsService, workflowRunCapabilityError } from "./sessions.js";
 import { signAutomationTrigger } from "./automation-trigger-ingress.js";
 
 function runner(
@@ -198,7 +199,7 @@ function harness(
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
   const restartService = () => new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
-  return { db, online, service, restartService, created, prompted, workflows, notifications, failures,
+  return { db, hub, online, service, restartService, created, prompted, workflows, notifications, failures,
     delivered, recoveredSnapshots };
 }
 
@@ -218,56 +219,259 @@ function receiveSignedTrigger(
   }, body, now);
 }
 
-function runnerPause(db: ControlPlaneDb, sessionId: string, now: number, trip = {
+function runnerPause(db: ControlPlaneDb, sessionId: string, now: number, trip: { tripId: string; kind: "cost_budget" | "max_tool_calls"; threshold: number; observed: number; commandId?: string } = {
   tripId: "trip", kind: "cost_budget" as "cost_budget" | "max_tool_calls", threshold: 1.5, observed: 2,
 }): void {
   const requestId = `runner-${trip.kind}:${trip.tripId}`;
   db.setPendingApproval(sessionId, { requestId, kind: trip.kind, title: "Continue?",
     options: [{ optionId: "continue", name: "Continue", kind: "allow_once" }], runnerGuardrail: trip });
   db.appendGovernanceAudit({ requestId, approvalKind: trip.kind, stage: "policy_decision", outcome: "asked",
-    actor: { kind: "system", id: "runner-governance" }, scope: { sessionId, runnerId: "runner-1" }, timestamp: now });
+    actor: { kind: "system", id: "runner-governance" }, scope: { sessionId, runnerId: "runner-1" }, timestamp: now,
+    ...(trip.commandId ? { contentDigest: createHash("sha256").update(JSON.stringify(
+      [trip.commandId, trip.kind, trip.threshold, trip.observed])).digest("hex") } : {}) });
 }
+
+test("same-command reconnect trips survive missing started receipts and terminal replay", (t) => {
+  let now = 60_002;
+  t.mock.method(Date, "now", () => now);
+  for (const actionKind of ["create_session", "prompt_session"] as const) {
+    for (const kind of ["cost_budget", "max_tool_calls"] as const) {
+      for (const replay of ["completed", "failed", "retryable-failure"] as const) {
+        const state = replay === "retryable-failure" ? "failed" : replay;
+        const { db, hub, service, restartService, notifications } = harness();
+        try {
+          db.createSession({ id: "target", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+            title: "Target", useWorktree: false, driver: "acp", config: {}, now: 0 });
+          db.updateSessionStatus("target", "idle", 1);
+          const automation = service.create(baseSpec(actionKind === "prompt_session" ? {
+            action: { kind: actionKind, sessionId: "target", request: { text: "Continue" } },
+          } : {}), { kind: "human", id: "device" }, 0).data!;
+          service.tick(60_000);
+          const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+          const command = execution.commands![0]!;
+          const trip = { tripId: `reconnect-${kind}`, kind, threshold: kind === "cost_budget" ? 1.5 : 12,
+            observed: kind === "cost_budget" ? 2 : 12, commandId: command.commandId };
+          // Reconnect reports the pinned trip first. No started receipt ever reached the CP.
+          const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
+          now = 60_002;
+          const message = { type: "governance_tripped" as const, sessionId: command.sessionId, ...trip };
+          assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+          assert.equal(ingestion.onGovernanceTripped("runner-1", message), false);
+          // Model a crash after trip persistence but before the automation callback.
+          const recovered = restartService();
+          recovered.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+            commandId: command.commandId, sessionId: command.sessionId, state, revision: 3,
+            ...(state === "failed" ? { error: replay === "retryable-failure"
+              ? "Service temporarily unavailable, please retry later" : "provider cancelled" } : {}) }, 60_003);
+          const paused = db.getAutomationExecution(execution.executionId)!;
+          assert.equal(paused.status, "ceiling_paused", `${actionKind}/${kind}/${state}`);
+          assert.deepEqual(paused.governancePause, { sessionId: command.sessionId, ...trip });
+          recovered.onGovernanceTripped(command.sessionId, 60_004);
+          recovered.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+            commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 4,
+            error: "Service temporarily unavailable, please retry later" }, 60_005);
+          recovered.recover(60_006);
+          assert.deepEqual(db.getAutomationExecution(execution.executionId), paused);
+          assert.equal(db.listAutomationCommands(execution.executionId).length, 1);
+          assert.equal(notifications.filter((item) => item === `${execution.executionId}:failed`).length, 1);
+        } finally { db.close(); }
+      }
+    }
+  }
+});
+
+test("correlated trips require immutable audit evidence and the current command", () => {
+  for (const evidence of ["other-command", "changed-crossing", "missing-audit", "old-audit", "valid"] as const) {
+    const { db, service } = harness();
+    try {
+      const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+      service.tick(60_000);
+      const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+      const command = execution.commands![0]!;
+      service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+        commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+      const trip = { tripId: "crossing", kind: "cost_budget" as const, threshold: 1.5, observed: 2,
+        commandId: evidence === "other-command" ? "unrelated-command" : command.commandId };
+      runnerPause(db, command.sessionId, evidence === "old-audit" ? 59_999 : 60_002, trip);
+      if (evidence === "changed-crossing") {
+        db.setPendingApproval(command.sessionId, { ...db.getSession(command.sessionId)!.pendingApproval!,
+          runnerGuardrail: { ...trip, observed: 3 } });
+      }
+      if (evidence === "missing-audit") db.pruneGovernanceAudit(60_003);
+      service.onGovernanceTripped(command.sessionId, 60_003);
+      assert.equal(db.getAutomationExecution(execution.executionId)?.status,
+        evidence === "valid" ? "ceiling_paused" : "running", evidence);
+    } finally { db.close(); }
+  }
+});
+
+test("authenticated ingestion validates and pins correlated trip replay", (t) => {
+  t.mock.method(Date, "now", () => 60_002);
+  const { db, hub, service } = harness();
+  try {
+    const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const command = db.listAutomationExecutions(automation.automationId)[0]!.commands![0]!;
+    const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
+    const message = { type: "governance_tripped" as const, sessionId: command.sessionId,
+      tripId: "pinned", kind: "cost_budget" as const, threshold: 1.5, observed: 2, commandId: command.commandId };
+    assert.equal(ingestion.onGovernanceTripped("wrong-runner", message), false);
+    for (const commandId of ["", "missing", "x".repeat(257), 123]) {
+      assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, commandId } as typeof message), false);
+    }
+    db.createSession({ id: "other", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Other", useWorktree: false, driver: "acp", config: {}, now: 0 });
+    db.updateSessionStatus("other", "running", 60_001);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, sessionId: "other" }), false);
+    // Ordinary durable prompts use the same runner lifecycle. Keep their cards, but never
+    // transfer their crossing to an automation that happens to own the same session.
+    db.stageSessionPromptCommand({ commandId: "manual-turn", sessionId: "other", runnerId: "runner-1",
+      payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000, now: 60_001 });
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, sessionId: "other",
+      commandId: "manual-turn" }), true);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+    const card = db.getSession(command.sessionId)!.pendingApproval!;
+    db.setPendingApproval(command.sessionId, null); // displacement, not resolution
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, observed: 3 }), false);
+    const { commandId: _commandId, ...withoutOwner } = message;
+    assert.equal(ingestion.onGovernanceTripped("runner-1", withoutOwner), false, "cannot downgrade to time correlation");
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+    const restored = db.getSession(command.sessionId)!.pendingApproval!;
+    assert.equal(restored.requestId, card.requestId);
+    assert.deepEqual(restored.runnerGuardrail, card.runnerGuardrail);
+    assert.equal(db.listGovernanceAudit(command.sessionId).filter((entry) => entry.stage === "policy_decision").length, 1);
+  } finally { db.close(); }
+});
+
+test("a superseded command's trip cannot transfer to its replacement", () => {
+  const { db, hub, service } = harness();
+  try {
+    const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    const command = execution.commands![0]!;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: command.commandId, sessionId: command.sessionId, state: "failed", revision: 1,
+      error: "Service temporarily unavailable, please retry later" }, 60_001);
+    const replacement = db.listAutomationCommands(execution.executionId).find((item) => !item.supersededBy)!;
+    assert.notEqual(replacement.commandId, command.commandId);
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: replacement.commandId, sessionId: replacement.sessionId, state: "started", revision: 1 }, 60_002);
+    const trip = { tripId: "superseded-trip", kind: "cost_budget" as const, threshold: 1.5, observed: 2,
+      commandId: command.commandId };
+    const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { type: "governance_tripped",
+      sessionId: command.sessionId, ...trip }), false);
+    runnerPause(db, command.sessionId, 60_003, trip);
+    service.onGovernanceTripped(command.sessionId, 60_004);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
+  } finally { db.close(); }
+});
+
+test("uncorrelated reconnect trips retain ordinary terminal-first settlement", () => {
+  for (const kind of ["cost_budget", "max_tool_calls"] as const) {
+    for (const state of ["completed", "failed"] as const) {
+      const { db, service } = harness();
+      try {
+        const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+        service.tick(60_000);
+        const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+        const command = execution.commands![0]!;
+        runnerPause(db, command.sessionId, 60_002, { tripId: "uncorrelated", kind,
+          threshold: kind === "cost_budget" ? 1.5 : 12, observed: kind === "cost_budget" ? 2 : 12 });
+        service.onGovernanceTripped(command.sessionId, 60_002);
+        service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+          commandId: command.commandId, sessionId: command.sessionId, state, revision: 2,
+          ...(state === "failed" ? { error: "provider cancelled" } : {}) }, 60_003);
+        assert.equal(db.getAutomationExecution(execution.executionId)?.status, state === "failed" ? "failed" : "running");
+        assert.equal(db.getAutomationExecution(execution.executionId)?.governancePause, undefined);
+      } finally { db.close(); }
+    }
+  }
+});
+
+test("a previous command's correlated trip cannot mark a later execution or rewrite settled receipts", () => {
+  const { db, service } = harness();
+  try {
+    db.createSession({ id: "target", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Target", useWorktree: false, driver: "acp", config: {}, now: 0 });
+    db.updateSessionStatus("target", "idle", 1);
+    const automation = service.create(baseSpec({ action: { kind: "prompt_session", sessionId: "target",
+      request: { text: "Continue" } } }), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const first = db.listAutomationExecutions(automation.automationId)[0]!;
+    const command = first.commands![0]!;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: command.commandId, sessionId: "target", state: "failed", revision: 2, error: "provider cancelled" }, 60_002);
+    const settled = db.getAutomationExecution(first.executionId)!;
+    db.updateSessionStatus("target", "idle", 60_003);
+    service.tick(120_000);
+    const second = db.listAutomationExecutions(automation.automationId)[0]!;
+    const next = second.commands![0]!;
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+      commandId: next.commandId, sessionId: "target", state: "started", revision: 1 }, 120_001);
+    for (const commandId of [command.commandId, "later-manual-turn"]) {
+      runnerPause(db, "target", 120_002, { tripId: commandId, kind: "cost_budget", threshold: 1.5,
+        observed: 2, commandId });
+      service.onGovernanceTripped("target", 120_003);
+      assert.equal(db.getAutomationExecution(second.executionId)?.status, "running");
+    }
+    assert.deepEqual(db.getAutomationExecution(first.executionId), settled);
+    assert.equal(db.getAutomationExecution(second.executionId)?.status, "running");
+  } finally { db.close(); }
+});
 
 test("a workflow ceiling pause finishes the instance and cancels siblings before releasing wait or skip", () => {
   for (const concurrencyPolicy of ["wait", "skip"] as const) {
-    const { db, service, delivered } = harness();
-    try {
-      installCapabilityWorkflow(db, "wf-1");
-      const actor = { kind: "human" as const, id: "device" };
-      const automation = service.create(baseSpec({ concurrencyPolicy, action: { kind: "workflow_run", request: {
-        workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-        agentBindings: { worker: "agent-1", reviewer: "agent-1" },
-      } } }), actor, 0).data!;
-      service.tick(60_000);
-      const execution = db.listAutomationExecutions(automation.automationId)[0]!;
-      const commands = execution.commands!;
-      db.createRun({ id: execution.runId!, title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
-      db.createWorkflowInstance({ instanceId: execution.workflowInstanceId!, definition: db.getWorkflowDefinition("wf-1")!,
-        runId: execution.runId!, createdBy: actor, now: 60_000 });
-      for (const command of commands) {
-        db.createSession({ id: command.sessionId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
-          title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_000 });
-        db.updateSessionStatus(command.sessionId, "running", 60_001);
-        service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
-          commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+    for (const replay of ["live", "completed", "failed"] as const) {
+      for (const kind of ["cost_budget", "max_tool_calls"] as const) {
+        const { db, service, delivered } = harness();
+        try {
+          installCapabilityWorkflow(db, "wf-1");
+          const actor = { kind: "human" as const, id: "device" };
+          const automation = service.create(baseSpec({ concurrencyPolicy, action: { kind: "workflow_run", request: {
+            workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+            agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+          } } }), actor, 0).data!;
+          service.tick(60_000);
+          const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+          const commands = execution.commands!;
+          db.createRun({ id: execution.runId!, title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
+          db.createWorkflowInstance({ instanceId: execution.workflowInstanceId!, definition: db.getWorkflowDefinition("wf-1")!,
+            runId: execution.runId!, createdBy: actor, now: 60_000 });
+          for (const command of commands) {
+            db.createSession({ id: command.sessionId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+              title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_000 });
+            db.updateSessionStatus(command.sessionId, "running", 60_001);
+            if (replay === "live" || command !== commands[0]) {
+              service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+                commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
+            }
+          }
+          runnerPause(db, commands[0]!.sessionId, 60_002, { tripId: "workflow-trip", kind,
+            threshold: kind === "cost_budget" ? 1.5 : 12, observed: kind === "cost_budget" ? 2 : 12,
+            ...(replay !== "live" ? { commandId: commands[0]!.commandId } : {}) });
+          if (replay === "live") service.onGovernanceTripped(commands[0]!.sessionId, 60_003);
+          else service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+            commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId, state: replay, revision: 2,
+            ...(replay === "failed" ? { error: "provider cancelled" } : {}) }, 60_003);
+          assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+          assert.equal(db.getWorkflowInstance(execution.workflowInstanceId!)?.status, "failed",
+            "the workflow must be terminal before its automation slot is freed");
+          assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "uncertain");
+          assert.ok(delivered.some((message) => (message as { type: string; sessionId?: string }).type === "cancel_session" &&
+            (message as { sessionId?: string }).sessionId === commands[1]!.sessionId), "the sibling receives cancellation");
+          assert.ok(db.getSession(commands[0]!.sessionId)?.pendingApproval, "the source approval remains available");
+          service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
+            commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId,
+            state: "failed", revision: 2, error: "provider cancelled" }, 60_004);
+          service.tick(120_000);
+          assert.equal(db.listAutomationExecutions(automation.automationId).length, 2,
+            "the next occurrence may launch only after the prior instance finished and siblings were cancelled");
+          assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
+        } finally { db.close(); }
       }
-      runnerPause(db, commands[0]!.sessionId, 60_002);
-      service.onGovernanceTripped(commands[0]!.sessionId, 60_003);
-      assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
-      assert.equal(db.getWorkflowInstance(execution.workflowInstanceId!)?.status, "failed",
-        "the workflow must be terminal before its automation slot is freed");
-      assert.equal(db.listAutomationCommands(execution.executionId)[1]?.state, "uncertain");
-      assert.ok(delivered.some((message) => (message as { type: string; sessionId?: string }).type === "cancel_session" &&
-        (message as { sessionId?: string }).sessionId === commands[1]!.sessionId), "the sibling receives cancellation");
-      assert.ok(db.getSession(commands[0]!.sessionId)?.pendingApproval, "the source approval remains available");
-      service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
-        commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId,
-        state: "failed", revision: 2, error: "provider cancelled" }, 60_004);
-      service.tick(120_000);
-      assert.equal(db.listAutomationExecutions(automation.automationId).length, 2,
-        "the next occurrence may launch only after the prior instance finished and siblings were cancelled");
-      assert.equal(db.getAutomationExecution(execution.executionId)?.status, "ceiling_paused");
-    } finally { db.close(); }
+    }
   }
 });
 

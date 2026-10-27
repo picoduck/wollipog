@@ -19738,6 +19738,10 @@ export class SessionManager {
         kind: tripped,
         threshold,
         observed: tripped === "cost_budget" ? meta.costUsd : entry.toolCallIds?.size ?? 0,
+        // A queued runner prompt may be waiting behind a provider-owned turn. That turn must
+        // never inherit the queued command's identity. Pin only the current runner-owned turn.
+        ...(entry.running && !entry.providerInitiatedTurnActive && entry.currentDurable
+          ? { commandId: entry.currentDurable.commandId } : {}),
       };
       this.reportGovernanceTrip(sessionId, entry);
     }
