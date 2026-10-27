@@ -327,15 +327,53 @@ for (const context of ["workflow attempt", "pod orchestration", "pod step"] as c
       }
       const decision = h.request().data!;
       now += 24 * 60 * 60_000;
-      assert.doesNotThrow(() => h.sessions.retryDuePrompts(now));
+      const failingNotifier = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} },
+        () => { throw new Error("test persistent notification failure"); });
+      assert.doesNotThrow(() => failingNotifier.retryDuePrompts(now));
       assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
       assert.equal(h.db.getSession("self")!.status, "idle");
       assert.deepEqual(h.warnings, []);
       if (context === "workflow attempt") assert.equal(h.db.getWorkflowAttempt("attempt")!.status, "awaiting_output");
       else assert.notEqual(h.db.getPod("pod")!.orchestration!.state.status, "running");
+      const snapshot = () => ({
+        audit: h.db.listGovernanceAudit("self"),
+        workflow: context === "workflow attempt" ? h.db.listWorkflowEvents("instance") : [],
+        pod: context === "workflow attempt" ? [] : h.db.listPodContextEntries("pod"),
+      });
+      const settled = snapshot();
+      assert.equal(h.db.automationExpirationEffects().length, 1);
+      for (let retry = 0; retry < 3; retry++) failingNotifier.retryDuePrompts(now);
+      assert.deepEqual(snapshot(), settled, "Notification retries must not repeat workflow, pod or audit effects");
+      h.sessions.expireAutomationCreationDecisions(now);
+      assert.equal(h.db.automationExpirationEffects().length, 0);
     } finally { h.db.close(); }
   });
 }
+
+for (const deadline of ["approval", "proposal"] as const) test(`future outbox scheduling does not expire an automation ${deadline} early`, (t) => {
+  const start = Date.now();
+  let now = start;
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    if (deadline === "proposal") now += 24 * 60 * 60_000 - 10 * 60_000;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const end = deadline === "approval" ? now + 30 * 60_000 : start + 24 * 60 * 60_000;
+    h.db.stageWorkflowDecisionResume({ occurrenceId: decision.occurrenceId, from: "held", command: {
+      commandId: "future-due", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: end + 86_400_000, now,
+    } });
+    now = end - 500;
+    h.sessions.retryDuePrompts(now + 1000, "runner");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.deepEqual(h.db.dueSessionPromptCommands(now + 1000).map((row) => row.commandId), ["future-due"]);
+    now = end;
+    h.sessions.retryDuePrompts(now + 1000, "runner");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    const audit = h.db.listGovernanceAudit("self").find((entry) => entry.outcome === "revoked")!;
+    assert.equal(audit.timestamp, now);
+  } finally { h.db.close(); }
+});
 
 for (const scenario of ["deny", "expired", "revoked", "capability", "workspace", "owner", "stopped", "membership-removed", "suspended", "viewer", "operator"] as const) {
   test(`creation refuses ${scenario} without leaving an automation`, () => {
@@ -398,6 +436,36 @@ test("post-commit lifecycle recovery survives restart without replaying expirati
     assert.equal(h.db.listAutomations().length, 0);
     assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
   } finally { h.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a partial pod publication failure does not duplicate context or settlement on recovery", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    h.db.updateSessionStatus("self", "idle", now);
+    h.db.appendEvent("self", { kind: "agent_message", text: "Finished inspection", final: true }, now);
+    h.db.createPod({ id: "pod", title: "Pod", objective: "Inspect", sessionIds: ["self"], now });
+    h.db.updatePodOrchestrationPolicy("pod", { ...h.db.getPod("pod")!.orchestration!.policy, maxTurns: 1 }, now);
+    h.db.startPodOrchestration("pod", "pod-run", now);
+    h.db.beginPodOrchestrationStep({ stepId: "step", podId: "pod", runId: "pod-run", targetSessionId: "self",
+      selectedEntryIds: [], estimatedTokens: 0, now });
+    h.db.markPodOrchestrationStepRunning("step", "pod", "self", 0, now);
+    h.hub.podChanged = () => {};
+    let publications = 0;
+    h.hub.podContextEntry = () => { publications++; throw new Error("test context publication failure"); };
+    h.request();
+    now += 24 * 60 * 60_000;
+    h.sessions.expireAutomationCreationDecisions(now);
+    assert.equal(h.db.automationExpirationEffects().length, 1);
+    assert.equal(h.db.listPodContextEntries("pod").length, 1);
+    h.sessions.retryDuePrompts(now);
+    assert.equal(h.db.automationExpirationEffects().length, 0);
+    assert.equal(h.db.listPodContextEntries("pod").length, 1);
+    assert.equal(publications, 1, "An already-recorded source range must not be appended or published again");
+    assert.notEqual(h.db.getPod("pod")!.orchestration!.state.status, "running");
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
+  } finally { h.db.close(); }
 });
 
 test("one failed expiration neither blocks other grants nor admits an expired resume", (t) => {

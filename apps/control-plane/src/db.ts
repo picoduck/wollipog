@@ -23674,7 +23674,8 @@ export class ControlPlaneDb {
 
   dueSessionPromptCommands(now: number, runnerId?: string, limit = 100): SessionPromptCommandRecord[] {
     const runner = runnerId ? "AND command.runner_id=?" : "";
-    const params = [now, now, now, now - AUTOMATION_APPROVAL_TTL_MS, ...(runnerId ? [runnerId] : []), limit];
+    const approvalNow = Math.min(now, Date.now());
+    const params = [now, now, approvalNow, approvalNow - AUTOMATION_APPROVAL_TTL_MS, ...(runnerId ? [runnerId] : []), limit];
     const rows = this.stmt(
       `SELECT command.* FROM session_prompt_commands command
        JOIN sessions session ON session.id=command.session_id

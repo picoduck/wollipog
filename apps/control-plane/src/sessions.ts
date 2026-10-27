@@ -11359,6 +11359,8 @@ export class SessionsService {
 
   /** Control-plane lifecycle, independent of runner availability and safe to replay after restart. */
   expireAutomationCreationDecisions(now = Date.now(), sessionId?: string): number {
+    // Some callers advance outbox scheduling to bypass fan-in. That is not an approval clock.
+    now = Math.min(now, Date.now());
     if (this.expiringAutomationDecisions) return 0;
     this.expiringAutomationDecisions = true;
     let count = 0;
