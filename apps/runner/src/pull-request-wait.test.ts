@@ -843,9 +843,9 @@ const added = (createdAt = ENQUEUED_AT) => ({ __typename: "AddedToMergeQueueEven
 const removedEvent = (reason: string | null, createdAt = REMOVED_AT) => ({ __typename: "RemovedFromMergeQueueEvent", createdAt, reason });
 const forcePushed = (createdAt: string) => ({ __typename: "HeadRefForcePushedEvent", createdAt });
 const BRANCH = "feature";
-/** A head check run, by default created for the pull request's own branch before the removal. */
-const headCheck = (startedAt = RUN_AT, branch = BRANCH, name = AGGREGATOR) =>
-  run(name, "SUCCESS", { startedAt, checkSuite: { app: { databaseId: 15368 }, branch: { name: branch } } });
+/** A head check run whose suite was created for the pull request's own branch, by default before the removal. */
+const headCheck = (createdAt = RUN_AT, branch = BRANCH, name = AGGREGATOR, startedAt = createdAt) =>
+  run(name, "SUCCESS", { startedAt, checkSuite: { app: { databaseId: 15368 }, branch: { name: branch }, createdAt } });
 /** An open, unqueued pull request whose head checks passed, with its latest queue event and force pushes. */
 const afterQueue = (events: unknown[], nodes: unknown[] = [headCheck()], pushes: unknown[] = []) =>
   ok(pr({ headRefName: BRANCH, queueEvents: { nodes: events.slice(-1) }, forcePushes: { nodes: pushes.slice(-1) } }, nodes));
@@ -895,6 +895,9 @@ test("a removal that belongs to an earlier head keeps current behavior", async (
       [headCheck("2026-10-12T12:10:00Z"), headCheck(RUN_AT, "stacked-child", "Optional Lint")]],
     // A commit this branch had before a force push, restored by a later fast-forward.
     ["checked on this branch only before a force push", [added(), removedEvent("manual")], [headCheck(RUN_AT)], [forcePushed("2026-10-12T10:30:00Z")]],
+    // A job of the earlier head's suite that started late, or was re-run, after a force push away from it.
+    ["delayed or re-run job of a suite from before a force push", [added(), removedEvent("manual")],
+      [headCheck(RUN_AT, BRANCH, AGGREGATOR, "2026-10-12T10:45:00Z")], [forcePushed("2026-10-12T10:30:00Z")]],
     ["only status contexts before the removal", [added(), removedEvent("manual")],
       [{ __typename: "StatusContext", context: AGGREGATOR, state: "SUCCESS", createdAt: RUN_AT, targetUrl: "https://ci.example/1" }]],
     ["no suite branch reported", [added(), removedEvent("manual")], [run(AGGREGATOR, "SUCCESS")]],
@@ -921,6 +924,12 @@ test("a removal that belongs to an earlier head keeps current behavior", async (
     { gh: fakeGh([afterQueue([added(), removedEvent("manual")], [headCheck()], [forcePushed("2026-10-12T09:30:00Z")])]).gh, ...clock() });
   assert.ok(rebased.ok);
   assert.equal(rebased.summary.outcome, "queue_ejected");
+
+  // The rebase's own push creates the head's suites, often in the force push's second.
+  const sameSecond = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 },
+    { gh: fakeGh([afterQueue([added(), removedEvent("manual")], [headCheck("2026-10-12T10:30:00Z")], [forcePushed("2026-10-12T10:30:00Z")])]).gh, ...clock() });
+  assert.ok(sameSecond.ok);
+  assert.equal(sameSecond.summary.outcome, "queue_ejected");
 });
 
 test("a different removal restarts the confirmation interval", async () => {
@@ -948,6 +957,22 @@ test("a different removal restarts the confirmation interval", async () => {
   assert.equal(ejected.summary.outcome, "queue_ejected");
   assert.deepEqual(ejected.summary.mergeQueueRemoval, { reason: "failed_checks", removedAt: LATER });
   assert.deepEqual(clockTwo.sleeps, [10_000, 10_000], "the new removal is confirmed over its own whole interval");
+
+  // An entry this call watched restarts on a new removal too, even when only status contexts report
+  // on the head, so no removal can be tied to it.
+  const status = [{ __typename: "StatusContext", context: AGGREGATOR, state: "SUCCESS", createdAt: RUN_AT, targetUrl: "https://ci.example/1" }];
+  const entry = { position: 1, state: "AWAITING_CHECKS", enqueuedAt: ENQUEUED_AT, headCommit: null };
+  const watched = fakeGh([
+    ok(pr({ headRefName: BRANCH, mergeQueueEntry: entry, queueEvents: { nodes: [added()] }, forcePushes: { nodes: [] } }, status)),
+    afterQueue([added(), removedEvent("checks_timed_out")], status),
+    afterQueue([added("2026-10-12T12:10:00Z"), removedEvent("merged", LATER)], status),
+    ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE } })),
+  ]);
+  const clockThree = clock();
+  const statusOnly = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: watched.gh, ...clockThree });
+  assert.ok(statusOnly.ok);
+  assert.equal(statusOnly.summary.outcome, "merged");
+  assert.deepEqual(clockThree.sleeps, [30_000, 10_000, 10_000]);
 });
 
 test("a removal immediately followed by a merge still reports merged", async () => {

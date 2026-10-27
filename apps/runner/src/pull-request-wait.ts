@@ -278,7 +278,7 @@ export async function requiredCheckNames(
 
 const contextFields = (after: string) => `contexts(first:${CONTEXTS_PER_COMMIT}${after}){pageInfo{hasNextPage endCursor} nodes{
   __typename
-  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId} branch{name}} isRequired(pullRequestNumber:$number)}
+  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId} branch{name} createdAt} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
 const CONTEXT_FIELDS = contextFields("");
@@ -318,8 +318,10 @@ interface CheckNode {
   at: string;
   /** The GitHub App that reported a check run. */
   appId?: number;
-  /** The branch a check run's suite was created for. */
+  /** The branch a check run's suite was created for, and when: the push or event that created it.
+   * A re-run or a delayed start keeps its suite's time. */
   branch?: string;
+  suiteCreatedAt?: string;
   url?: string;
   isRequired: boolean;
 }
@@ -342,6 +344,7 @@ function checkNode(raw: unknown): CheckNode | null {
     const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
     const appId = record(record(node.checkSuite)?.app)?.databaseId;
     const branch = record(record(node.checkSuite)?.branch)?.name;
+    const suiteCreatedAt = record(node.checkSuite)?.createdAt;
     return {
       kind: "CheckRun",
       name: node.name,
@@ -351,6 +354,7 @@ function checkNode(raw: unknown): CheckNode | null {
       at: typeof node.startedAt === "string" ? node.startedAt : "",
       ...(Number.isSafeInteger(appId) ? { appId: appId as number } : {}),
       ...(typeof branch === "string" && branch ? { branch } : {}),
+      ...(typeof suiteCreatedAt === "string" ? { suiteCreatedAt } : {}),
       url: httpsUrl(node.detailsUrl),
       isRequired: node.isRequired === true,
     };
@@ -523,9 +527,11 @@ function lastQueueRemoval(events: unknown, forcePushes: unknown): Observation["l
 }
 
 /** The removal belongs to the current head only when that commit was already this pull request's
- * head before it: a check run created for the pull request's own head branch started after the
- * latest force push and before the removal. A fast-forward creates no force-push event, but checks
- * of a head pushed afterwards start later, and checks a commit got on another branch do not count. */
+ * head before it: a check suite created for the pull request's own head branch at or after the
+ * latest force push and before the removal. A fast-forward creates no force-push event, but a head
+ * pushed afterwards gets its suites later; suites a commit got on another branch, or on this branch
+ * before a force push replaced it, do not count. A suite's time is its creating push or event, so a
+ * delayed job or a re-run cannot move it. */
 function headRemoval(seen: Observation): Observation["removal"] {
   const removal = seen.lastRemoval;
   if (!removal || seen.queue || !seen.headRef || seen.rollupSha !== seen.headSha) return undefined;
@@ -533,9 +539,9 @@ function headRemoval(seen: Observation): Observation["removal"] {
   const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
   const before = nodes.some((raw) => {
     const node = checkNode(raw);
-    const at = timestamp(node?.at);
+    const at = timestamp(node?.suiteCreatedAt);
     return node?.kind === "CheckRun" && node.branch === seen.headRef && at !== null && at < removal.at &&
-      (removal.forcePushedAt === null || at > removal.forcePushedAt);
+      (removal.forcePushedAt === null || at >= removal.forcePushedAt);
   });
   return before ? { reason: removal.reason, removedAt: removal.removedAt } : undefined;
 }
@@ -883,8 +889,9 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       // GitHub can drop the entry a moment before the pull request reads MERGED, so an ejection
       // stands only once the entry has stayed missing for the whole confirmation interval. A removal
       // this call did not see happen (#3712) is confirmed the same way, from its first observation.
-      const removedAt = seen.removal?.removedAt ?? null;
-      // Another removal (the entry was queued again and left again) gets its own whole interval.
+      // Another removal (the entry was queued again and left again) gets its own whole interval. Its
+      // identity is the timeline's own, whether or not it could be tied to this head.
+      const removedAt = seen.lastRemoval?.removedAt ?? null;
       if (removedAt !== null && confirming !== null && removedAt !== confirming) vanishedAt = null;
       confirming = removedAt ?? confirming;
       vanishedAt ??= now();
