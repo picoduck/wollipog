@@ -19,6 +19,20 @@ const certificate = () => ({ schema: "exact-full-regression-v1", repository: "ex
   observedAt: "2026-10-25T12:00:00Z", runId: 90, attempt: 1, sourceSha: base, mainSha: base,
   url: "https://github.com/example/project/actions/runs/90/attempts/1" });
 
+/** Stable-release fixtures must not inherit a prerelease checkout's version or dependencies. */
+function versionFiles(version = "0.34.0") {
+  return {
+    "package.json": JSON.stringify({ name: "wollipog", version,
+      scripts: { test: "node --test", typecheck: "tsc --noEmit" }, devDependencies: { semver: "7.8.5" } }) + "\n",
+    "apps/desktop/package.json": JSON.stringify({ name: "@wollipog/desktop", version }) + "\n",
+    "apps/desktop/src-tauri/tauri.conf.json": JSON.stringify({ productName: "Wollipog", version }) + "\n",
+    "apps/desktop/src-tauri/Cargo.toml": `[package]\nname = "wollipog-desktop"\nversion = "${version}"\n`,
+    "apps/desktop/src-tauri/Cargo.lock": `version = 4\n\n[[package]]\nname = "wollipog-desktop"\nversion = "${version}"\n`,
+    "apps/runner/src/version.ts": `export const VERSION = "${version}";\n`,
+    "apps/control-plane/src/release-version.ts": `export const APP_RELEASE_VERSION = "${version}";\n`,
+  };
+}
+
 /** Inert forge: API mutations update observable state, including a crash after an accepted PATCH. */
 function fixture() {
   const calls = [], saved = [];
@@ -60,7 +74,7 @@ function fixture() {
       assert.equal(program, "git"); assert.equal(args[0], "show");
       const path = args[1].slice(41);
       if (path === notesPath("0.35.0")) return notes;
-      const originals = Object.fromEntries(["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"].map((file) => [file, readFileSync(new URL(`../${file}`, import.meta.url), "utf8")]));
+      const originals = versionFiles();
       const files = bumpVersions(originals, JSON.parse(originals["package.json"]).version, "0.35.0");
       return controls.changedPreparation && path === "package.json"
         ? JSON.stringify({ ...JSON.parse(files[path]), version: "0.0.0-drift" }) : files[path];
@@ -94,8 +108,7 @@ test("checkpoints are private atomic snapshots and carry no publication grant", 
 });
 
 test("version preparation changes each release field, retains dependencies, and recovers partial edits", () => {
-  const paths = ["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"];
-  const originals = Object.fromEntries(paths.map((path) => [path, readFileSync(new URL(`../${path}`, import.meta.url), "utf8")]));
+  const originals = versionFiles();
   const currentVersion = JSON.parse(originals["package.json"]).version;
   const changed = bumpVersions(originals, currentVersion, "0.35.0");
   assert.equal(JSON.parse(changed["package.json"]).version, "0.35.0");
@@ -367,10 +380,10 @@ test("preparation recovers accepted commits and PR creation without repeating ei
   try {
     mkdirSync(primary); git(["init", "--initial-branch=main"], primary);
     git(["config", "user.name", "Release Test"], primary); git(["config", "user.email", "release-test@example.invalid"], primary);
-    const paths = ["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"];
-    for (const path of paths) {
+    const originals = versionFiles();
+    for (const [path, text] of Object.entries(originals)) {
       const target = join(primary, path); mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, readFileSync(new URL(`../${path}`, import.meta.url)));
+      writeFileSync(target, text);
     }
     git(["add", "."], primary); git(["commit", "-m", "Initial fixture"], primary);
     git(["remote", "add", "origin", "https://github.com/example/project.git"], primary);
@@ -426,7 +439,7 @@ test("preparation recovers accepted commits and PR creation without repeating ei
     assert.equal(resumed.prNumber, 42); assert.equal(resumed.headSha, committedHead);
     assert.deepEqual(checks, ["typecheck", "test"]); assert.equal(creations.length, 1);
     assert.equal(git(["rev-list", "--count", "HEAD"]), "2");
-    assert.equal(readFileSync(join(primary, "package.json"), "utf8"), readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    assert.equal(readFileSync(join(primary, "package.json"), "utf8"), originals["package.json"]);
     assert.equal(resumed.notesSha256, createHash("sha256").update(fixtureNotes).digest("hex"));
     const packagePath = join(worktree, "package.json");
     const packageText = readFileSync(packagePath, "utf8");
