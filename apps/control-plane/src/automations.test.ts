@@ -316,7 +316,7 @@ test("authenticated ingestion validates and pins correlated trip replay", (t) =>
     const message = { type: "governance_tripped" as const, sessionId: command.sessionId,
       tripId: "pinned", kind: "cost_budget" as const, threshold: 1.5, observed: 2, commandId: command.commandId };
     assert.equal(ingestion.onGovernanceTripped("wrong-runner", message), false);
-    for (const commandId of ["", "missing", "x".repeat(257), 123]) {
+    for (const commandId of ["", "x".repeat(257), 123]) {
       assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, commandId } as typeof message), false);
     }
     db.createSession({ id: "other", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
@@ -361,10 +361,48 @@ test("a superseded command's trip cannot transfer to its replacement", () => {
       commandId: command.commandId };
     const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
     assert.equal(ingestion.onGovernanceTripped("runner-1", { type: "governance_tripped",
-      sessionId: command.sessionId, ...trip }), false);
-    runnerPause(db, command.sessionId, 60_003, trip);
+      sessionId: command.sessionId, ...trip }), true, "the runner still needs its pause card");
+    assert.equal(db.getSession(command.sessionId)!.pendingApproval?.runnerGuardrail?.commandId, command.commandId);
     service.onGovernanceTripped(command.sessionId, 60_004);
     assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
+  } finally { db.close(); }
+});
+
+test("a first trip with expired command ownership keeps its card without inventing attribution", (t) => {
+  let now = 60_002;
+  t.mock.method(Date, "now", () => now);
+  const { db, hub, service } = harness();
+  try {
+    const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    const sessionId = execution.commands![0]!.sessionId;
+    const expired = { commandId: "expired-before-report", sessionId, runnerId: "runner-1",
+      payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000, now: 60_001 };
+    db.stageSessionPromptCommand(expired);
+    db.recordSessionPromptCommandReceipt({ commandId: expired.commandId, sessionId, runnerId: "runner-1",
+      state: "completed", revision: 2, now: 60_003 });
+    now += 8 * 24 * 60 * 60_000;
+    db.pruneSessionPromptCommands(now);
+    assert.equal(db.getSessionPromptCommand(expired.commandId), null);
+    const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
+    const message = { type: "governance_tripped" as const, sessionId, tripId: "late-first-report",
+      kind: "cost_budget" as const, threshold: 1.5, observed: 2, commandId: expired.commandId };
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), false);
+    assert.ok(db.getSession(sessionId)!.pendingApproval);
+    service.onGovernanceTripped(sessionId, now);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "dispatching");
+    assert.equal(db.hasRunnerGovernanceTripForCommand(sessionId, message, expired.commandId, 0, now), false);
+    // Even if a row with that opaque ID later appears, restoring the card cannot upgrade proof.
+    db.stageSessionPromptCommand({ ...expired, now, expiresAt: now + 60_000 });
+    db.setPendingApproval(sessionId, null);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, observed: 3 }), false);
+    const { commandId: _commandId, ...withoutOwner } = message;
+    assert.equal(ingestion.onGovernanceTripped("runner-1", withoutOwner), false);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+    assert.equal(db.hasRunnerGovernanceTripForCommand(sessionId, message, expired.commandId, 0, now), false);
+    assert.equal(db.listGovernanceAudit(sessionId).filter((entry) => entry.stage === "policy_decision").length, 1);
   } finally { db.close(); }
 });
 
@@ -453,7 +491,7 @@ test("a previous command's correlated trip cannot mark a later execution or rewr
 
 test("a workflow ceiling pause finishes the instance and cancels siblings before releasing wait or skip", () => {
   for (const concurrencyPolicy of ["wait", "skip"] as const) {
-    for (const replay of ["live", "completed", "failed"] as const) {
+    for (const replay of ["live", "completed", "failed", "attempt-prompt"] as const) {
       for (const kind of ["cost_budget", "max_tool_calls"] as const) {
         const { db, service, delivered } = harness();
         try {
@@ -478,10 +516,19 @@ test("a workflow ceiling pause finishes the instance and cancels siblings before
                 commandId: command.commandId, sessionId: command.sessionId, state: "started", revision: 1 }, 60_001);
             }
           }
+          if (replay === "attempt-prompt") {
+            db.recordAutomationCommandReceipt({ commandId: commands[0]!.commandId, runnerId: "runner-1",
+              sessionId: commands[0]!.sessionId, state: "completed", revision: 1, now: 60_001 });
+            db.createWorkflowAttempt({ attemptId: "attempt-prompt", instanceId: execution.workflowInstanceId!,
+              nodeId: "build", attempt: 1, status: "running", dispatchKey: "attempt-prompt",
+              sessionId: commands[0]!.sessionId, startedAt: 60_001, deadlineAt: 120_001 });
+            db.stageSessionPromptCommand({ commandId: "prompt_workflow", sessionId: commands[0]!.sessionId,
+              runnerId: "runner-1", payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000, now: 60_001 });
+          }
           runnerPause(db, commands[0]!.sessionId, 60_002, { tripId: "workflow-trip", kind,
             threshold: kind === "cost_budget" ? 1.5 : 12, observed: kind === "cost_budget" ? 2 : 12,
-            ...(replay !== "live" ? { commandId: commands[0]!.commandId } : {}) });
-          if (replay === "live") service.onGovernanceTripped(commands[0]!.sessionId, 60_003);
+            ...(replay !== "live" ? { commandId: replay === "attempt-prompt" ? "prompt_workflow" : commands[0]!.commandId } : {}) });
+          if (replay === "live" || replay === "attempt-prompt") service.onGovernanceTripped(commands[0]!.sessionId, 60_003);
           else service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update",
             commandId: commands[0]!.commandId, sessionId: commands[0]!.sessionId, state: replay, revision: 2,
             ...(replay === "failed" ? { error: "provider cancelled" } : {}) }, 60_003);

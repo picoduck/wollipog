@@ -15116,14 +15116,16 @@ export class SessionsService {
     );
     // Never enrich an already recorded trip with a different command or crossing on replay.
     if (alreadyAsked &&
-        !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now())) return false;
+        !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now(), true)) return false;
     // A matching immutable audit already proves ownership even after terminal command retention
-    // expires. First reports still need the live command record; never invent correlation.
+    // expires. A missing/superseded command cannot authorize automation attribution, but the
+    // authenticated runner crossing still needs its Continue/Stop card. Pin it as unverified.
+    let verifiedCommand = false;
     if (!alreadyAsked && message.commandId !== undefined) {
       const automationCommand = this.db.getAutomationCommand(message.commandId);
-      if (automationCommand?.supersededBy) return false;
       const command = automationCommand ?? this.db.getSessionPromptCommand(message.commandId);
-      if (!command || command.runnerId !== runnerId || command.sessionId !== session.id) return false;
+      if (command && (command.runnerId !== runnerId || command.sessionId !== session.id)) return false;
+      verifiedCommand = Boolean(command && !automationCommand?.supersededBy);
     }
     const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
@@ -15161,7 +15163,8 @@ export class SessionsService {
       this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
         { kind: "system", id: "runner-governance" }, now, {
           ...(message.commandId !== undefined
-            ? { content: [message.commandId, message.kind, message.threshold, message.observed] } : {}),
+            ? { content: [...(verifiedCommand ? [] : ["unverified-command"]),
+              message.commandId, message.kind, message.threshold, message.observed] } : {}),
           policyRule: message.kind === "cost_budget"
             ? { kind: "cost_budget", budgetUsd: message.threshold }
             : { kind: "max_tool_calls", maxCalls: message.threshold },

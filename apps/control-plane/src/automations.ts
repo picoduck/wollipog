@@ -1004,10 +1004,9 @@ export class AutomationsService {
         if (evidence.commandId === undefined) {
           return this.db.hasRunnerGovernanceTripInWindow(sessionId, evidence, since, until);
         }
-        // CP-owned attempts and legacy executions have no launch command to correlate.
-        // Their ordinary durable prompts retain the original bounded window. Never use
-        // this path to bypass a receipted launch's exact command ownership/completion.
-        if (commands.length !== 0) return false;
+        // CP-dispatched attempts (including workflows with launch commands) and legacy
+        // execution sources retain their original bounded window for ordinary durable prompts.
+        // Launch IDs cannot use this path: only the separate prompt-command table resolves here.
         const prompt = this.db.getSessionPromptCommand(evidence.commandId);
         return prompt?.sessionId === sessionId && prompt.runnerId === session.runnerId &&
           prompt.createdAt >= since && prompt.createdAt <= until &&
