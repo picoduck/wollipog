@@ -840,7 +840,7 @@ test("background child dots and working counts follow job and continuation trans
     assert.equal(family.children[0]!.state, active ? "running" : "idle", String(backgroundWorkState));
     assert.equal(family.working, active ? 1 : 0, String(backgroundWorkState));
     assert.equal(family.hasActiveWork, active, String(backgroundWorkState));
-    if (active) assert.match(family.children[0]!.statusLabel!, /Waiting on External Job|Continuation Pending/);
+    if (active) assert.match(family.children[0]!.statusLabel!, /Waiting on External Job|Follow-Up Pending/);
   }
 });
 

@@ -213,7 +213,7 @@ const VOCABULARY = {
   jobGroup: {
     waiting: info("Waiting for Jobs"),
     finished: neutral("Finished"),
-    returning: info("Returning Result"),
+    returning: neutral("Follow-Up Pending"),
     returned: success("Result Returned"),
     result_missing: warning("Result Missing"),
     missing_acknowledged: neutral("Missing Result Acknowledged"),
@@ -224,7 +224,9 @@ const VOCABULARY = {
   /** A session's aggregate background work, as its header shows it. */
   background_work: {
     running: info("Waiting on External Job", { pulse: true }),
-    continuation_pending: info("Continuation Pending", { pulse: true }),
+    continuation_pending: neutral("Follow-Up Pending"),
+    follow_up_queued: neutral("Follow-Up Queued"),
+    follow_up_blocked: warning("Follow-Up Blocked"),
     orphaned: danger("Background Work Lost"),
   },
   /**
@@ -605,7 +607,48 @@ export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval"
   Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "orchestratorPolicy" | "parentSessionId" |
     "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
-    "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
+    "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries">>;
+
+const FOLLOW_UP_BLOCKERS: Record<NonNullable<NonNullable<SessionView["backgroundFollowUp"]>["blocker"]>, string> = {
+  governance: "The session is paused by a governance limit. Review the session's pending action to continue.",
+  control_plane: "The session is held by Wollipog. Resolve the session's hold to continue.",
+  budget: "The session reached its cost budget. Review its budget before continuing.",
+  tool_limit: "The session reached its tool-call limit. Review its limit before continuing.",
+  input: "The session needs an answer or approval before the follow-up can start.",
+  worktree: "The session's worktree needs recovery. Open the session's recovery action to continue.",
+  recovery_authorization: "Automatic recovery has not been authorized for this adopted session.",
+};
+
+/** One presentation for live background facts across headers, lists, summaries and details. */
+export function backgroundWorkCondition(
+  session: Pick<SessionView, "status" | "backgroundWorkState" | "backgroundFollowUp">,
+  runnerOnline = true,
+): SessionCondition | null {
+  const state = session.backgroundWorkState;
+  if (!state || state === "resumed") return null;
+  if (state !== "continuation_pending") return {
+    kind: "background_work", meta: statusMeta("background_work", state), needsYou: false,
+    description: state === "orphaned" ? "Managed background work was lost and will not return its result."
+      : "A background job is still running, and its result returns to this conversation when it finishes.",
+  };
+  const followUp = runnerOnline ? session.backgroundFollowUp : undefined;
+  const blocked = followUp?.state === "blocked" && followUp.blocker != null;
+  const running = followUp?.state === "running" && session.status === "running";
+  const queued = followUp?.state === "queued";
+  return {
+    kind: "background_work",
+    meta: running ? statusMeta("session", "running") : statusMeta("background_work",
+      blocked ? "follow_up_blocked" : queued ? "follow_up_queued" : "continuation_pending"),
+    description: "Background jobs finished. " + (running
+      ? "The agent is processing their results in an automatic follow-up."
+      : blocked ? FOLLOW_UP_BLOCKERS[followUp.blocker!]
+      : queued ? "An automatic follow-up is queued to process their results."
+      : "An automatic follow-up is pending; its execution state is unavailable.") +
+      (runnerOnline && followUp?.retryScheduled === true ? " An automatic retry is scheduled." : "") +
+      (!runnerOnline ? " The machine is offline, so the follow-up's current state is unverified." : ""),
+    needsYou: Boolean(blocked),
+  };
+}
 
 const LIFECYCLE_DESCRIPTIONS: Partial<Record<StatusValue<"session">, string>> = {
   queued: "The session is waiting for a slot to start.",
@@ -749,16 +792,8 @@ export function sessionStatusSummary(
     runnerOnline,
   });
   const backgroundState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
-  const background: SessionCondition | null = backgroundState ? {
-    kind: "background_work",
-    meta: statusMeta("background_work", backgroundState),
-    description: backgroundState === "orphaned"
-      ? "Managed background work was lost and will not return its result."
-      : backgroundState === "running"
-        ? "A background job is still running, and its result returns to this conversation when it finishes."
-        : "A background job finished, and the conversation continues with its result.",
-    needsYou: false,
-  } : null;
+  const background = backgroundWorkCondition(session, runnerOnline);
+  if (background?.needsYou) needs.push(background);
   const lost = backgroundState === "orphaned" ? background : null;
   const disconnected: SessionCondition | null = runnerOnline ? null : {
     kind: "disconnected",
@@ -767,7 +802,7 @@ export function sessionStatusSummary(
     needsYou: false,
   };
   const awaitingPrompt = lifecycle.label === statusMeta("session", "idle").label;
-  const waiting = !lost && awaitingPrompt ? background : null;
+  const waiting = !lost && !background?.needsYou && awaitingPrompt ? background : null;
 
   const conditions: SessionCondition[] = [...needs];
   if (lost) conditions.push(lost);
@@ -775,7 +810,7 @@ export function sessionStatusSummary(
   if (waiting) conditions.push(waiting);
   // Listed even under a request, so the popover still says the agent is Running (#3073).
   conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
-  if (background && background !== lost && background !== waiting) conditions.push(background);
+  if (background && !background.needsYou && background !== lost && background !== waiting) conditions.push(background);
   if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;
   if (workers > 0) {

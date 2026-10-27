@@ -566,7 +566,7 @@ test("Board defers an idle parent's result until background descendants finish (
       assert.equal(card.querySelectorAll(".inbox-thread-dot.running").length, backgroundWorkState === "resumed" ? 0 : 1);
       if (backgroundWorkState !== "resumed") {
         assert.match(card.querySelector(".inbox-thread-family")!.getAttribute("aria-label")!, /1 Working/);
-        assert.match(card.querySelector(".inbox-thread-dot")!.getAttribute("title")!, /Waiting on External Job|Continuation Pending/);
+        assert.match(card.querySelector(".inbox-thread-dot")!.getAttribute("title")!, /Waiting on External Job|Follow-Up Pending/);
       }
     } finally { await board.unmount(); }
   }

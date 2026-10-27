@@ -67,6 +67,7 @@ import {
   canonicalAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
+  normalizeBackgroundFollowUp,
   scopeAudienceContained,
   validatePromptImageInputs,
   type AutomationAuditEvent,
@@ -744,6 +745,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   semantic_title INTEGER NOT NULL DEFAULT 0,
   provider_updated_at TEXT,
   background_work_state TEXT,
+  background_follow_up TEXT,
   background_work_tracking TEXT,
   history_quarantine TEXT,
   worktree_recovery TEXT,
@@ -3149,6 +3151,7 @@ interface SessionRow {
   semantic_title: number;
   provider_updated_at: string | null;
   background_work_state: string | null;
+  background_follow_up: string | null;
   background_work_tracking: string | null;
   history_quarantine: string | null;
   worktree_recovery: string | null;
@@ -7123,6 +7126,7 @@ export class ControlPlaneDb {
       "semantic_title INTEGER NOT NULL DEFAULT 0",
       "provider_updated_at TEXT",
       "background_work_state TEXT",
+      "background_follow_up TEXT",
       "background_work_tracking TEXT",
       // Protocol v126: bounded, content-free projection of a runner-owned provider-history
       // quarantine. Runner-authoritative, so it is overwritten on every snapshot.
@@ -11843,7 +11847,7 @@ export class ControlPlaneDb {
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
       provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
-      title title_source provider_updated_at background_work_state background_work_tracking
+      title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
       parent_control_policy parent_control_policy_revision orchestrator_policy session_role
@@ -16117,11 +16121,11 @@ export class ControlPlaneDb {
     try {
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_follow_up, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq,
               runner_snapshot_fingerprint, runner_registration_snapshot_fingerprint, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -16134,6 +16138,7 @@ export class ControlPlaneDb {
         snap.titleSource ?? "generated",
         snap.providerUpdatedAt ?? null,
         backgroundWorkStateForStorage(snap.backgroundWorkState),
+        JSON.stringify(normalizeBackgroundFollowUp(snap.backgroundFollowUp)) ?? null,
         snap.backgroundWorkTracking ?? null,
         snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
         capacityWaitForStorage(
@@ -16429,7 +16434,7 @@ export class ControlPlaneDb {
       );
     }
     this.stmt(
-      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), queue_hold=NULLIF(COALESCE(?, queue_hold), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_follow_up=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), queue_hold=NULLIF(COALESCE(?, queue_hold), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
           model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
           acp_session_context=COALESCE(?, acp_session_context), runner_snapshot_fingerprint=?,
           runner_registration_snapshot_fingerprint=COALESCE(?, runner_registration_snapshot_fingerprint),
@@ -16442,6 +16447,7 @@ export class ControlPlaneDb {
       semanticTitle,
       snap.providerUpdatedAt ?? null,
       backgroundWorkStateForStorage(snap.backgroundWorkState),
+      JSON.stringify(normalizeBackgroundFollowUp(snap.backgroundFollowUp)) ?? null,
       snap.backgroundWorkTracking ?? null,
       // Three-valued, matching the snapshot field: SQL NULL carries no information and preserves
       // whatever is stored; the empty-string sentinel is a supporting runner saying the
@@ -24786,6 +24792,7 @@ export class ControlPlaneDb {
       title: row.title, titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: row.background_work_state ? parseBackgroundWorkState(row.background_work_state) : undefined,
+      backgroundFollowUp: normalizeBackgroundFollowUp(parseJson(row.background_follow_up)),
       backgroundWorkTracking: row.background_work_tracking ? parseBackgroundWorkTracking(row.background_work_tracking) : undefined,
       historyQuarantine: row.history_quarantine ? parseHistoryQuarantine(row.history_quarantine) : undefined,
       worktreeRecovery, queueHold,
@@ -24943,6 +24950,7 @@ export class ControlPlaneDb {
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
+      backgroundFollowUp: normalizeBackgroundFollowUp(parseJson(row.background_follow_up)),
       backgroundWorkTracking: parseBackgroundWorkTracking(row.background_work_tracking),
       ...(() => {
         const historyQuarantine = parseHistoryQuarantine(row.history_quarantine);

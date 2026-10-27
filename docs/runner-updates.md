@@ -146,7 +146,7 @@ Protocol v81 distinguishes managed external-job waits from continuation delivery
 persists structured Claude job identity and parent-turn barriers before detachment, resumes a parent
 when its barrier becomes terminal, and retains an accepted-but-undelivered continuation as visibly
 pending instead of replaying it. Update runner and control plane together before relying on the
-**Waiting on External Job** or **Continuation Pending** states. Provider-opaque detached processes
+**Waiting on External Job** or **Follow-Up Pending** states. Provider-opaque detached processes
 remain untracked and carry no automatic-resume promise.
 
 Protocol v82 adds projection-safe managed-job inventories and a structured continuation-delivery

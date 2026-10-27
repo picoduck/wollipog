@@ -44,7 +44,7 @@ import {
   type BackgroundParentTurn,
 } from "../background-work.js";
 import { useApi } from "../api-context.js";
-import { statusMeta } from "../status-meta.js";
+import { backgroundWorkCondition, statusMeta } from "../status-meta.js";
 import { driverLabel } from "../usage-view-model.js";
 import { BackgroundRecoveryNotice, RecordedTime, backgroundRecoveryNoticeTone } from "./BackgroundRecoveryNotice.js";
 import { ChevronRightIcon } from "./Icons.js";
@@ -225,7 +225,8 @@ export function BackgroundWorkPanel({
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
-  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);
+  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0 || session.backgroundFollowUp != null);
+  const followUp = session.backgroundWorkState === "continuation_pending" ? backgroundWorkCondition(session, runnerOnline) : null;
   const aggregateState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
   const inventoryPending = session.backgroundJobsAvailable === true && session.backgroundJobs === undefined;
   const inventoryProjectionUnknown = session.backgroundJobsAvailable === undefined &&
@@ -590,6 +591,10 @@ export function BackgroundWorkPanel({
   ) : aggregateState === "orphaned" ? (
     // The Lost notice in the panel's slot says it all.
     null
+  ) : aggregateState === "continuation_pending" ? (
+    <State compact title="Follow-Up Pending">
+      Background jobs finished, but their follow-up details aren't available yet.
+    </State>
   ) : aggregateState ? (
     <State compact title="Background Work Running">
       A background job is running, but its details aren't available yet.
@@ -616,7 +621,18 @@ export function BackgroundWorkPanel({
       </PanelHeaderActions>
       <PanelNoticeSlot sessionId={session.id} entries={notices} claimRemovedFocus={claimRemovedFocus} />
       {/* The list stays mounted under a page, so its rows and scroll are there on Back. */}
-      <div className="background-work-panel" hidden={pageJobId !== null}>{body}</div>
+      <div className="background-work-panel" hidden={pageJobId !== null}>
+        {followUp && (
+          <section aria-label="Automatic Follow-Up">
+            <StatusBadge meta={followUp.meta} />
+            <p>{followUp.description}</p>
+            {session.backgroundFollowUp?.queuedAt != null && (
+              <p>Queued <RecordedTime at={session.backgroundFollowUp.queuedAt} now={now} />.</p>
+            )}
+          </section>
+        )}
+        {body}
+      </div>
       {pageJobId !== null && (
         <div className="background-work-page" key={pageJobId}>
           <PanelPageTitle>{pageJob ? backgroundJobLabel(pageJob) : "Background Job"}</PanelPageTitle>

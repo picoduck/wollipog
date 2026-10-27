@@ -64,7 +64,7 @@ test("a group's status: waiting, some finished, returning, returned, missing, un
   assert.deepEqual(read(status([job(), job({ id: "b" })])), ["Waiting for 2 Jobs", "info"]);
   assert.deepEqual(read(status([finished(), job({ id: "b" })])), ["1 of 2 Finished", "neutral"]);
   assert.deepEqual(read(status([finished()], [{ parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, acceptedAt: NOW }])),
-    ["Returning Result", "info"]);
+    ["Follow-Up Pending", "neutral"]);
   assert.deepEqual(read(status([finished({ assistantResultPersistedAt: NOW })])), ["Result Returned", "success"]);
   assert.deepEqual(read(status([finished()], [{ parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, acceptedAt: NOW,
     missingResultAt: NOW }])), ["Result Missing", "warning"]);
@@ -89,7 +89,7 @@ test("a row's sentence and the page's Result say where the job's result is, in t
   assert.equal(backgroundJobRowSentence(job(), "unverified", 0, NOW), "Last seen 1m ago");
   assert.equal(backgroundJobRowSentence(finished(), "completed", 1, NOW), "Result waits for the other job");
   assert.equal(backgroundJobRowSentence(finished(), "completed", 2, NOW), "Result waits for 2 other jobs");
-  assert.equal(backgroundJobRowSentence(finished({ continuationQueuedAt: NOW }), "completed", 0, NOW), "Returning result");
+  assert.equal(backgroundJobRowSentence(finished({ continuationQueuedAt: NOW }), "completed", 0, NOW), "Awaiting follow-up");
   assert.equal(backgroundJobRowSentence(finished({ assistantResultPersistedAt: NOW - 50 * MINUTE }), "completed", 0, NOW),
     "Result returned 50m ago");
   assert.equal(backgroundJobRowSentence(finished({ continuationMissingResultAt: NOW }), "completed", 0, NOW), "Result never arrived");
@@ -138,13 +138,13 @@ test("a blocked receipt's unfinished siblings hold the turn even when the bounde
 });
 
 
-test("exhausted delivery wording supersedes stale Returning result until acceptance", () => {
+test("exhausted delivery wording supersedes stale Awaiting follow-up until acceptance", () => {
   const item = finished({ continuationId: "continuation", continuationSubmittedAt: NOW });
   const delivery: BackgroundDeliveryView = { continuationId: "continuation", parentTurnId: item.parentTurnId,
     jobCount: 1, terminalCount: 1, retryExhaustedAt: NOW, watchdogState: "capacity_retry_exhausted" };
   assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [delivery]), "Result return stopped");
   assert.equal(backgroundJobResultSentence(item, "completed", 0, NOW, [delivery]), "Automatic capacity retries ended before this result was accepted");
   assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, retryExhaustionAcknowledgedAt: NOW }]), "Result return stopped");
-  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, acceptedAt: NOW }]), "Returning result");
-  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, continuationId: "unrelated" }]), "Returning result");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, acceptedAt: NOW }]), "Awaiting follow-up");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, continuationId: "unrelated" }]), "Awaiting follow-up");
 });

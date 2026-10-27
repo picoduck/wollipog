@@ -320,6 +320,96 @@ function harness(
   };
 }
 
+test("follow-up projection requires exact executing job ids and retains its durable queue time", () => {
+  const h = harness({ driver: "claude-code", backgroundWorkState: "continuation_pending", backgroundJobs: [{
+    id: "finished", parentTurnId: "parent", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "shell", registeredAt: 100,
+    terminalStatus: "completed", terminalObservedAt: 200, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 300,
+  }] });
+  try {
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 240 });
+    const project = () => h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!).backgroundFollowUp;
+    assert.deepEqual(project(), { state: "queued", queuedAt: 300, retryScheduled: false });
+    assert.deepEqual(h.manager.sessionSnapshots().find((s) => s.id === "resume-session")?.backgroundFollowUp, project(),
+      "reconnect hydration carries the same facts as runtime updates");
+    const internals = h.manager as any;
+    internals.active.set("resume-session", { running: true, currentBackgroundJobIds: ["unrelated"], toolCallIds: new Set() });
+    h.store.patchMeta("resume-session", { status: "running" });
+    assert.equal(project()?.state, "queued", "unrelated running work is not the follow-up");
+    internals.active.get("resume-session").currentBackgroundJobIds = ["finished"];
+    assert.deepEqual(project(), { state: "running", queuedAt: 300 });
+    internals.active.clear();
+    h.store.patchMeta("resume-session", { status: "idle", config: { costBudgetUsd: 1 }, costUsd: 1 });
+    assert.deepEqual(project(), { state: "blocked", blocker: "budget", queuedAt: 300, retryScheduled: false });
+    assert.deepEqual(h.manager.sessionSnapshots().find((s) => s.id === "resume-session")?.backgroundFollowUp, project());
+    h.store.patchMeta("resume-session", { backgroundWorkState: undefined });
+    assert.equal(project(), null);
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 239 });
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!).backgroundFollowUp, undefined);
+  } finally { (h.manager as any).active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+function queuedFollowUpHarness(overrides: Partial<SessionMeta> = {}) {
+  const h = harness({ driver: "claude-code", backgroundWorkState: "continuation_pending", backgroundJobs: [{
+    id: "finished", parentTurnId: "parent", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "shell", registeredAt: 100,
+    terminalStatus: "completed", terminalObservedAt: 200, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 300,
+  }], ...overrides });
+  Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 240 });
+  return h;
+}
+
+test("follow-up retry display clears on firing and cancellation, and excludes immediate first attempts", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = queuedFollowUpHarness();
+  const internals = h.manager as any;
+  try {
+    internals.active.set("resume-session", { running: true, queue: [{ backgroundJobIds: ["finished"] }], toolCallIds: new Set() });
+    const last = () => h.sent.filter((m) => m.type === "session_runtime_updated").at(-1)?.snapshot.backgroundFollowUp;
+    internals.scheduleBackgroundContinuation("resume-session", 0);
+    assert.equal(last()?.retryScheduled, false, "the initial attempt is not a retry");
+    t.mock.timers.tick(0);
+    assert.equal(last()?.retryScheduled, false);
+    internals.scheduleBackgroundContinuation("resume-session", 30_000);
+    assert.equal(last()?.retryScheduled, true);
+    t.mock.timers.tick(30_000);
+    assert.equal(last()?.retryScheduled, false, "a queued prompt does not leave a fictional retry timer");
+    internals.scheduleBackgroundContinuation("resume-session", 30_000);
+    internals.cancelBackgroundContinuationTimer("resume-session");
+    assert.equal(last()?.retryScheduled, false, "cancellation republishes the clear");
+  } finally { internals.active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("follow-up execution display publishes at turn start before provider acceptance", () => {
+  const h = queuedFollowUpHarness();
+  const internals = h.manager as any;
+  try {
+    internals.active.set("resume-session", { running: true, currentBackgroundJobIds: ["finished"], toolCallIds: new Set() });
+    internals.emitStatus("resume-session", "running");
+    const last = h.sent.filter((m) => m.type === "session_runtime_updated").at(-1);
+    assert.equal(last?.snapshot.backgroundFollowUp?.state, "running");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.continuationAcceptedAt, undefined,
+      "displaying execution never invents provider acceptance");
+  } finally { internals.active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("a held follow-up publishes once per retry interval without a transient scheduling clear", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = queuedFollowUpHarness({ config: { costBudgetUsd: 1 }, costUsd: 1 });
+  const internals = h.manager as any;
+  try {
+    void internals.runBackgroundContinuation("resume-session");
+    const updates = () => h.sent.filter((m) => m.type === "session_runtime_updated");
+    assert.equal(updates().length, 1);
+    assert.equal(updates()[0]!.snapshot.backgroundFollowUp?.retryScheduled, true);
+    t.mock.timers.tick(30_000);
+    assert.equal(updates().length, 2);
+    assert.equal(updates()[1]!.snapshot.backgroundFollowUp?.retryScheduled, true);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
 function exitActive(manager: SessionManager, sessionId: string, code: number | null): void {
   const internals = manager as any;
   const client = internals.active.get(sessionId)?.client;
