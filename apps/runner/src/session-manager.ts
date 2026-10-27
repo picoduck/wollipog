@@ -2080,13 +2080,15 @@ export class SessionManager {
       if (meta.context.kind !== "native" || meta.review) continue;
       const live = this.active.get(meta.sessionId);
       const retiring = this.closing.get(meta.sessionId)?.entry;
-      if (live?.codexPackageSandboxed === false || (!live && retiring?.codexPackageSandboxed === false)) continue;
-      if (this.closing.has(meta.sessionId) ||
-          (live && !live.codexPackageReadOnlyPaths?.includes(canonical)) ||
-          (!live && (["starting", "running", "input_required"].includes(meta.status) ||
-            this.store.readWorktreeLease(meta.sessionId) !== null))) {
+      // The current process records a generation before asynchronous launch preparation, even
+      // before active is populated. Saved statuses and worktree leases are not writer evidence;
+      // writers surviving a previous runner are covered by the durable registry above.
+      const launching = this.launchGenerations.has(meta.sessionId);
+      if (!launching && (live?.codexPackageSandboxed === false || (!live && retiring?.codexPackageSandboxed === false))) continue;
+      if (launching || this.closing.has(meta.sessionId) ||
+          (live && !live.codexPackageReadOnlyPaths?.includes(canonical))) {
         if (!writers.some((writer) => writer.sessionId === meta.sessionId)) {
-          retaining.push(`session ${meta.sessionId} (current runner session lacks package-protection proof). End its complete process tree and retry; a retained worktree lease requires its owning runner to settle exit.`);
+          retaining.push(`session ${meta.sessionId} (current runner session lacks package-protection proof). Wait for its launch or complete process-tree exit to settle and retry.`);
         }
       }
     }

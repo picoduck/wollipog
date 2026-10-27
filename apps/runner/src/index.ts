@@ -4,7 +4,7 @@ import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReview
 import { configuredCodexHomes } from "./review-trust.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
-import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
+import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
@@ -1449,7 +1449,8 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 
 function sendUp(msg: RunnerToControlPlane): void {
   // Registration precedes agent discovery, so the review-session capability it advertised can say
-  // no reviewer is available. Every discovery result carries it again, from the agents it found.
+  // no reviewer is available. Every update recomputes it, including the existing five-minute
+  // discovery pass, so repaired tools/agents recover without reconnecting.
   if (msg.type === "agents_updated" && process.platform === "linux") {
     msg = { ...msg, reviewSession: reviewSessionCapability() ?? null };
   }
@@ -1713,11 +1714,12 @@ function sessionReviewCapability(): SessionReviewCapability | undefined {
 }
 /** The review-session capability from the agents discovered so far (#3368, #3369). */
 function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
+  if (process.platform !== "linux") return undefined;
   try {
     return reviewSessionLauncher.capability();
   } catch (error) {
     log(`review session discovery failed: ${errText(error)}`);
-    return undefined;
+    return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
   }
 }
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {

@@ -163,6 +163,10 @@ test("reviewer admission names each unprotected writer and requires exact live l
   t.after(() => manager.shutdownAll());
   const active = (manager as unknown as { active: Map<string, unknown> }).active;
   const id = "s_writer";
+  const launch = manager as unknown as {
+    beginLaunchGeneration(sessionId: string): number;
+    finishLaunchGeneration(sessionId: string, generation: number): void;
+  };
   const makeMeta = (driver: SessionMeta["driver"]) => ({
     sessionId: id, agentId: "fixture", workspaceId: "fixture", driver, context: { kind: "native" }, env: {}, repoPath: f.root, worktreePath: null,
     status: "idle", title: "writer", config: {}, args: [], command: "fixture", agentSessionId: null,
@@ -178,12 +182,26 @@ test("reviewer admission names each unprotected writer and requires exact live l
     assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined, "a known unsandboxed launch is admitted");
     active.delete(id);
     store.patchMeta(id, { status: "starting" });
+    const generation = launch.beginLaunchGeneration(id);
+    assert.equal(active.has(id), false, "launch preparation has not installed a live provider yet");
     assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/);
+    launch.finishLaunchGeneration(id, generation);
     store.patchMeta(id, { status: "idle" });
   }
   assert.equal(store.acquireWorktreeLease(id, "other-runner"), true);
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/,
-    "an idle provider owned by another manager has no attested boundary here");
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined,
+    "a lease without a current provider is not writer evidence; previous writers have durable records");
+  for (const status of ["starting", "running", "input_required"] as const) {
+    store.patchMeta(id, { status });
+    const restarted = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "restarted");
+    t.after(() => restarted.shutdownAll());
+    assert.equal(restarted.codexReviewerProtection(f.home).refusal, undefined,
+      `restart leaves stale ${status} and a lease, but no current writer`);
+  }
+  const closing = (manager as unknown as { closing: Map<string, unknown> }).closing;
+  closing.set(id, { entry: { codexPackageSandboxed: true }, unconfirmed: true });
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/, "an unproven closing provider still blocks");
+  closing.delete(id);
   store.releaseWorktreeLease(id, "other-runner");
   const providerManager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, f.root);
   t.after(() => providerManager.shutdownAll());

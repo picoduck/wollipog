@@ -290,6 +290,15 @@ export interface ReviewLaunch {
   command: string;
 }
 
+/** Capability reasons travel through agents_updated, whose control-plane validator caps each
+ * at 500 characters. Keep the useful prefix; callers log the complete diagnostic locally. */
+export function reviewSessionDiscoveryReason(error: unknown): string {
+  const reason = (error instanceof Error ? error.message : String(error)) || "review-session discovery failed";
+  return reason.length <= 500
+    ? reason
+    : `${reason.slice(0, 480)}… see runner log`;
+}
+
 /** The agent a harness's reviews launch through: the first available native agent using its driver. */
 function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionReviewHarness): AgentDefinition | undefined {
   return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
@@ -345,11 +354,20 @@ export class ReviewSessionLauncher {
 
   /** The reviewer harnesses this runner can launch, each through its first available native agent
    * whose CLI passes the trust checks. Linux only, like the protected sessions it serves. */
-  capability(agents: readonly AgentDefinition[] = this.deps.agents(), platform: NodeJS.Platform = process.platform): ReviewSessionCapability | undefined {
+  capability(agents: readonly AgentDefinition[] | undefined = undefined, platform: NodeJS.Platform = process.platform): ReviewSessionCapability | undefined {
     if (platform !== "linux") return undefined;
     const unavailable: NonNullable<ReviewSessionCapability["unavailable"]> = {};
-    const tools = this.deps.tools();
-    if ("unavailable" in tools) return { reviewers: [], unavailable: { tools: tools.unavailable } };
+    try {
+      const tools = this.deps.tools();
+      agents ??= this.deps.agents();
+      if ("unavailable" in tools) {
+        this.deps.log(JSON.stringify({ event: "review_session_discovery_unavailable", component: "tools", reason: tools.unavailable }));
+        return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
+      }
+    } catch (error) {
+      this.deps.log(JSON.stringify({ event: "review_session_discovery_failed", component: "tools_or_agents", reason: String(error) }));
+      return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
+    }
     const reviewers: ReviewSessionCapability["reviewers"] = [];
     for (const harness of ["claude-code", "codex"] as const) {
       const agent = reviewerAgent(agents, harness);
@@ -358,7 +376,8 @@ export class ReviewSessionLauncher {
         this.deps.verifyCommand(agent.command, this.deps.agentPath(agent.id, agent.driver));
         reviewers.push({ harness, agentId: agent.id });
       } catch (error) {
-        unavailable[harness] = (error as Error).message;
+        this.deps.log(JSON.stringify({ event: "review_session_discovery_failed", harness, reason: String(error) }));
+        unavailable[harness] = reviewSessionDiscoveryReason(error);
       }
     }
     return { reviewers, ...(Object.keys(unavailable).length ? { unavailable } : {}) };

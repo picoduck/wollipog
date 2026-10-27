@@ -348,6 +348,17 @@ test("a discovery result replaces the reviewer capability a registration made be
   } finally { h.db.close(); }
 });
 
+test("a tool discovery failure is named in the refusal and a refreshed capability restores admission", () => {
+  const h = harness({ reviewSession: { reviewers: [], unavailable: { tools: "tool roots unavailable during startup" } } });
+  try {
+    const result = h.svc.requestReviewSession("s1", request());
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /tool roots unavailable during startup/u);
+    h.db.updateRunnerReviewSessionCapability("r", CAPABILITY);
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+  } finally { h.db.close(); }
+});
+
 test("a review session is refused without a supporting runner, reviewer or connection, and for unsupported requesters", () => {
   const old = harness({ protocol: 223 });
   try {
@@ -356,7 +367,7 @@ test("a review session is refused without a supporting runner, reviewer or conne
     assert.match(result.error!, /review sessions/u);
   } finally { old.db.close(); }
   const none = harness({ reviewSession: null });
-  try { assert.match(none.svc.requestReviewSession("s1", request()).error!, /Codex reviewer is unavailable/u); } finally { none.db.close(); }
+  try { assert.match(none.svc.requestReviewSession("s1", request()).error!, /review-session capability not reported by the runner/u); } finally { none.db.close(); }
   const partial = harness({ reviewSession: { reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable: { codex: "codex is not installed" } } });
   try {
     assert.match(partial.svc.requestReviewSession("s1", request()).error!, /Codex reviewer is unavailable on this session's runner: codex is not installed/u);

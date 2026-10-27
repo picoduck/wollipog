@@ -289,8 +289,8 @@ export interface ReviewToolEnvironment {
 
 /** Find and verify git, gh and ssh. Never throws: a refusal is returned as its reason. */
 export function discoverReviewTools(env: ReviewToolEnvironment): ReviewTools | { unavailable: string } {
-  const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
   try {
+    const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
     const git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid);
     const gh = trustedExecutable("gh", env.pathEnv, roots, env.uid, env.rootUid);
     let ssh: string | undefined;
