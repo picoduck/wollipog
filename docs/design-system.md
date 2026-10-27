@@ -1491,7 +1491,9 @@ variant by default and offers side by side as a user preference (§6.3).
   is titled by the name with "On <machine>" under it, and leads with a status notice whenever the
   agent is not Ready (warning or danger by its status, neutral for Not Installed): one sentence and
   the fix, a command in a code well, **Approve Launch…**, or **Choose Another Installation…**,
-  which opens Machine Settings at its installations. Then one `.facts` list, the Launch Command in
+  which opens Machine Settings at its installations. Then one `.facts` list, whose Updates fact
+  gives the `harnessUpdateLabel()` and under it, in `--type-small` and `--text-dim`, the runner's
+  release guidance from `harnessUpdateGuidance()` unless the notice already quotes it (#3523); the Launch Command in
   a code well with copy (only for an installed agent whose launch can be copied; a reference-only
   Windows launch keeps its Executable and Arguments facts), and a closed Release Details
   disclosure. Its footer is ghost **Find Sessions…** where the agent can be scanned, ghost danger

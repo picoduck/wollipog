@@ -19,7 +19,7 @@ import {
   notInstalledLabel,
   type MachineAgentRow,
 } from "../machine-agents.js";
-import { agentInstallHints } from "../runners.js";
+import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
@@ -91,6 +91,10 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
     : !registrySupported ? runnerCapabilityRequirement(runner.protocolVersion, "acpRegistryApproval", "registry approval")
       : null;
   const transport = registry?.transport ?? agent.acpTransport;
+  // How to update this exact copy, or clear a failed check (#3523). A notice that already quotes it
+  // (a Codex that is missing or too old) keeps it, so it is said once.
+  const updateGuidance = agent.update ? harnessUpdateGuidance(agent, os) : undefined;
+  const updateGuidanceShown = updateGuidance && !notice?.text.includes(updateGuidance) ? updateGuidance : undefined;
   const launchTitleId = useId();
 
   // Both confirmations wait on the request, so a failure stays in view (§7.4).
@@ -164,7 +168,15 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
         )}
         <div><dt>Version</dt><dd>{agent.version ? `v${agent.version}` : "Unknown"}</dd></div>
         <div><dt>Sign-In</dt><dd>{agentSignInFact(agent)}</dd></div>
-        {agent.update && <div><dt>Updates</dt><dd>{harnessUpdateLabel(agent.update, online)}</dd></div>}
+        {agent.update && (
+          <div>
+            <dt>Updates</dt>
+            {/* Under the label, so on a machine that is not online it reads as last reported too. */}
+            <dd>{updateGuidanceShown
+              ? <><div>{harnessUpdateLabel(agent.update, online)}</div><div className="machine-agent-update-guidance">{updateGuidanceShown}</div></>
+              : harnessUpdateLabel(agent.update, online)}</dd>
+          </div>
+        )}
         {registry && (
           <div>
             <dt>Registry</dt>

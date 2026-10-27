@@ -58,6 +58,10 @@ const agentRow = (page: import("@playwright/test").Page, name: string) =>
   page.locator("article.machine-detail button.row").filter({
     has: page.locator(".row-title", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
   });
+
+/** Agent Details' Updates fact: the label, then the runner's release guidance (#3523). */
+const updatesFact = (details: import("@playwright/test").Locator) =>
+  details.locator("dt", { hasText: /^Updates$/ }).locator("+ dd");
 /** Machine Settings (#2991), one form whose description is the machine's name. */
 const settingsDialog = (page: import("@playwright/test").Page) => page.getByRole("dialog", { name: "Machine Settings" });
 /** One of Agent Installations' radio groups (#2991), by its label. */
@@ -205,7 +209,7 @@ test("Machine Settings lists competing installations as one radio group and save
   await expect(installationGroup(page, "Codex").getByRole("radio", { name: "/home/example/.local/bin/codex" })).toBeChecked();
 });
 
-test("Machine Settings states each installation's availability, and Agent Details keeps its release guidance", async ({ page }) => {
+test("Machine Settings states each installation's availability, and Agent Details gives its release guidance (#3523)", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states"));
   await openSettings(page);
   const codex = installationGroup(page, "Codex");
@@ -224,6 +228,44 @@ test("Machine Settings states each installation's availability, and Agent Detail
     "& 'C:\\Program Files\\Codex Tools\\codex.exe' '--profile' 'Team''s Profile'",
   );
   await expect(details.getByText("Pinned by Machine Policy", { exact: true })).toBeVisible();
+  // The release guidance Machine Settings gave before #2991 sits under each Updates label (#3523).
+  await expect(updatesFact(details)).toContainText("change the pin before planning an upgrade");
+  await details.getByRole("button", { name: "Done" }).click();
+  await agentRow(page, "Policy Claude").click();
+  const claude = page.getByRole("dialog", { name: "Policy Claude" });
+  await expect(updatesFact(claude)).toContainText("Checks Disabled by Machine Policy");
+  await expect(updatesFact(claude)).toContainText("whether manual upgrades are permitted");
+  await claude.getByRole("button", { name: "Done" }).click();
+  await agentRow(page, "Failed Pi").click();
+  const pi = page.getByRole("dialog", { name: "Failed Pi" });
+  await expect(updatesFact(pi)).toContainText("no current release status was established");
+  await expect(updatesFact(pi)).toContainText(
+    "Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish",
+  );
+  await pi.getByRole("button", { name: "Done" }).click();
+  // A Codex too old to run already gives the guidance in its notice, so the fact keeps only its label.
+  await agentRow(page, "Codex App Server (v0.140.0)").click();
+  const legacy = page.getByRole("dialog", { name: "Codex App Server (v0.140.0)" });
+  await expect(legacy.locator(".notice")).toContainText("Use the package or version manager that installed this exact copy");
+  await expect(updatesFact(legacy)).toHaveText("New Release Published");
+});
+
+test("Agent Details gives a Ready installation's release guidance, and on an offline machine as last reported (#3523)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
+  await agentRow(page, "Codex App Server (v0.199.0)").click();
+  const system = page.getByRole("dialog", { name: "Codex App Server (v0.199.0)" });
+  await expect(system.locator(".notice")).toHaveCount(0);
+  await expect(updatesFact(system).locator("> div").first()).toHaveText("New Release Published");
+  await expect(updatesFact(system)).toContainText("compatibility with this Machine has not been verified");
+  await system.getByRole("button", { name: "Done" }).click();
+  await agentRow(page, "Codex App Server (v0.210.0)").click();
+  const local = page.getByRole("dialog", { name: "Codex App Server (v0.210.0)" });
+  await expect(updatesFact(local)).toContainText("Run `'/home/example/.local/bin/codex' 'update'` in a POSIX shell");
+  await local.getByRole("button", { name: "Done" }).click();
+  await setOffline(page);
+  await agentRow(page, "Codex App Server (v0.199.0)").click();
+  await expect(updatesFact(system).locator("> div").first()).toHaveText("Last Reported: New Release Published");
+  await expect(updatesFact(system)).toContainText("compatibility with this Machine has not been verified");
 });
 
 test("Agent Details treats Windows batch wrapper arguments as reference data", async ({ page }) => {
@@ -297,8 +339,10 @@ test("older Windows runner update instructions are suppressed in Agent Details a
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("older-interpreter-guidance"));
   await agentRow(page, "Codex App Server").click();
   const details = page.getByRole("dialog", { name: "Codex App Server" });
-  // A ready agent's details carry no update guidance at all (#2990), so never the unsafe command.
+  // A ready agent's details give its update guidance (#3523), but the safe replacement for the
+  // command an older runner quoted for a reference-only launch, never the unsafe command.
   await expect(details.getByText("Managed Externally", { exact: true })).toBeVisible();
+  await expect(updatesFact(details)).toContainText("No copyable update command is available for this launch");
   await expect(details).not.toContainText("Run `& 'C:\\Windows");
   await details.getByRole("button", { name: "Done" }).click();
   await openSettings(page);
@@ -322,7 +366,7 @@ test("an offline machine's settings say what saves now and what waits, and still
   await expect(settingsDialog(page).getByRole("button", { name: "Delete Machine…" })).toBeEnabled();
 });
 
-test("an SSH machine's failed release check reads Check Failed in Agent Details, and its menu offers Reconnect", async ({ page }) => {
+test("an SSH machine's failed release check reads Check Failed in Agent Details with Reconnect guidance, and its menu offers Reconnect", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states-ssh"));
   const detail = page.locator('article.machine-detail[data-kind="ssh"]');
   await detail.getByRole("button", { name: "Machine Actions" }).click();
@@ -330,8 +374,9 @@ test("an SSH machine's failed release check reads Check Failed in Agent Details,
   await expect(actions.getByRole("menuitem", { name: "Reconnect", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await agentRow(page, "Failed Pi").click();
-  await expect(page.getByRole("dialog", { name: "Failed Pi" }).locator("dt", { hasText: "Updates" }).locator("+ dd"))
-    .toHaveText("Check Failed");
+  const updates = updatesFact(page.getByRole("dialog", { name: "Failed Pi" }));
+  await expect(updates.locator("> div").first()).toHaveText("Check Failed");
+  await expect(updates).toContainText("Reconnect for an SSH Machine after active sessions finish");
 });
 
 test("Machine Settings keeps same-name container installations scoped to their targets (#2991)", async ({ page }) => {
