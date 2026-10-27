@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canonicalIssueReference, findClosingReferences } from "./closing-references.js";
+import { CLOSING_REFERENCE_EXCERPT_MAX, canonicalIssueReference, findClosingReferences } from "./closing-references.js";
 
 const REPO = "Team/Repo";
 const issues = (text: string) => findClosingReferences(text, REPO).map((found) => found.issue);
@@ -73,8 +73,27 @@ test("code and HTML comments in a Markdown description do not close", () => {
   assert.deepEqual(issues("`span\n\nends` closes #3"), ["team/repo#3"]);
   assert.deepEqual(issues("```\ncode\n```\ncloses #4"), ["team/repo#4"]);
   assert.deepEqual(issues("<!-- note --> closes #5 <!-- open"), ["team/repo#5"]);
+  assert.deepEqual(issues("<!-- a --><!-- closes #7 -->"), [], "a comment right after another is hidden too (#3729 review)");
+  // Fences follow CommonMark's prefix: quote markers, then at most three spaces before the delimiter.
+  for (const text of ["> > ```\n> > closes #1\n> > ```", ">```\n>closes #1", "   ~~~\ncloses #1\n   ~~~",
+    ">    ```\ncloses #1\n```"]) {
+    assert.deepEqual(issues(text), [], text);
+  }
+  for (const text of ["    ```\ncloses #1", "> ``\ncloses #1", "``` x`y\ncloses #1", "```\ncode\n~~~\nmore\n```\ncloses #1"]) {
+    assert.deepEqual(issues(text), ["team/repo#1"], text);
+  }
   // Indented code is still reported: telling it apart from list text needs a full parser.
   assert.deepEqual(issues("Text\n\n    closes #6"), ["team/repo#6"]);
+});
+
+test("a long link keeps its excerpt within the bound every consumer accepts (#3729 review)", () => {
+  const [found] = findClosingReferences(`Closes [the issue](https://github.com/a/b/issues/1?${"x".repeat(1_900)}) for real.`, REPO);
+  assert.equal(found!.issue, "a/b#1");
+  assert.ok(found!.excerpt.length <= CLOSING_REFERENCE_EXCERPT_MAX, String(found!.excerpt.length));
+  assert.match(found!.excerpt, /^Closes \[the issue\]\(https:\/\/github\.com\/a\/b\/issues\/1\?x+…$/u);
+  const [emoji] = findClosingReferences(`closes [x](https://github.com/a/b/issues/2?${"😀".repeat(400)})`, REPO);
+  assert.ok(emoji!.excerpt.length <= CLOSING_REFERENCE_EXCERPT_MAX);
+  assert.doesNotMatch(emoji!.excerpt, /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/u, "no surrogate pair is split");
 });
 
 test("each finding carries one bounded line around it", () => {
@@ -86,11 +105,21 @@ test("each finding carries one bounded line around it", () => {
   assert.equal(findClosingReferences("a\u0007closes #1", REPO)[0]!.excerpt, "a closes #1");
 });
 
-test("adversarial backticks stay linear", () => {
-  const text = `${"`".repeat(1)} ${"``".repeat(20_000)} ${"`x".repeat(20_000)} closes #1`;
-  const started = Date.now();
-  assert.deepEqual(issues(text), ["team/repo#1"]);
-  assert.ok(Date.now() - started < 2_000);
+test("adversarial descriptions stay linear", () => {
+  for (const text of [
+    `${"`".repeat(1)} ${"``".repeat(20_000)} ${"`x".repeat(20_000)} closes #1`,
+    // Repeated quote markers without a fence backtracked exponentially in a fence regex (#3729 review).
+    `${"> ".repeat(20_000)}plain\ncloses #1`,
+    `${"> ".repeat(40)}plain\n`.repeat(1_000) + "closes #1",
+    `${"<!--".repeat(20_000)} closes #1`,
+    `${"<!-- x -->".repeat(10_000)} closes #1`,
+    `${"closes ".repeat(10_000)}#1`,
+    `closes [${"x".repeat(256)}](${"y".repeat(2_048)}`.repeat(30) + " closes #1",
+  ]) {
+    const started = Date.now();
+    assert.ok(issues(text).includes("team/repo#1"), text.slice(0, 40));
+    assert.ok(Date.now() - started < 2_000, `${text.slice(0, 40)} took ${Date.now() - started} ms`);
+  }
 });
 
 test("issue references canonicalize for declared closures", () => {

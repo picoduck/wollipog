@@ -8,7 +8,7 @@
  * one GitHub would not make leaves the approved snapshot describing a different merge.
  */
 import type { PullRequestClosingReferenceCheck, PullRequestClosure } from "@wollipog/protocol";
-import { canonicalIssueReference, compareIssueReferences } from "@wollipog/protocol";
+import { CLOSING_REFERENCE_EXCERPT_MAX, canonicalIssueReference, compareIssueReferences } from "@wollipog/protocol";
 
 /** Declared closures a snapshot may carry; a merge that closes more cannot be described exactly. */
 export const INTENDED_CLOSURES_LIMIT = 100;
@@ -39,7 +39,8 @@ export function validClosingReferenceCheck(value: unknown): PullRequestClosingRe
         !sources || sources.length < 1 || sources.length > 2 || new Set(sources).size !== sources.length ||
         sources.some((source) => source !== "description" && source !== "linked") ||
         sources.includes("description") !== (typeof closure.excerpt === "string") ||
-        (closure.excerpt !== undefined && (typeof closure.excerpt !== "string" || !closure.excerpt || closure.excerpt.length > 512)) ||
+        (closure.excerpt !== undefined && (typeof closure.excerpt !== "string" || !closure.excerpt ||
+          closure.excerpt.length > CLOSING_REFERENCE_EXCERPT_MAX)) ||
         closures.some((known) => known.issue === closure.issue)) return null;
     closures.push({ issue: closure.issue, sources: [...sources] as PullRequestClosure["sources"],
       ...(typeof closure.excerpt === "string" ? { excerpt: closure.excerpt } : {}) });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { pullRequestClosures } from "../../runner/src/github-merge-preflight.js";
 import { normalizeIntendedClosures, prMergeClosureMismatch, validClosingReferenceCheck } from "./pr-merge-closures.js";
 
 const negated = { issue: "a/b#3635", sources: ["description" as const], excerpt: "This PR does not close #3635." };
@@ -30,6 +31,13 @@ test("declared closures canonicalize against the merge's repository", () => {
   }
 });
 
+test("whatever the runner's matcher produces, the control plane accepts (#3729 review)", () => {
+  const body = `Closes [the issue](https://github.com/a/b/issues/1?${"x".repeat(2_000)}) and resolves #2.`;
+  const check = { checkedAt: 1, closures: pullRequestClosures(body, "a/b", ["a/b#2", "c/d#3"]) };
+  assert.deepEqual(check.closures.map((closure) => closure.issue), ["a/b#1", "a/b#2", "c/d#3"]);
+  assert.deepEqual(validClosingReferenceCheck(check), check);
+});
+
 test("a runner's check is accepted only in its exact bounded shape", () => {
   const check = { checkedAt: 3, closures: [negated, { issue: "a/b#9", sources: ["linked"] }] };
   assert.deepEqual(validClosingReferenceCheck(check), { checkedAt: 3, closures: [check.closures[1], check.closures[0]] },
@@ -46,7 +54,7 @@ test("a runner's check is accepted only in its exact bounded shape", () => {
     { checkedAt: 1, closures: [{ issue: "a/b#1", sources: ["description"] }] },
     { checkedAt: 1, closures: [{ issue: "a/b#1", sources: ["linked"], excerpt: "Closes #1" }] },
     { checkedAt: 1, closures: [{ issue: "a/b#1", sources: ["description"], excerpt: "" }] },
-    { checkedAt: 1, closures: [{ issue: "a/b#1", sources: ["description"], excerpt: "x".repeat(513) }] },
+    { checkedAt: 1, closures: [{ issue: "a/b#1", sources: ["description"], excerpt: "x".repeat(241) }] },
     { checkedAt: 1, closures: [{ issue: "a/b#1", sources: ["linked"] }, { issue: "a/b#1", sources: ["linked"] }] },
   ]) assert.equal(validClosingReferenceCheck(invalid), null, JSON.stringify(invalid)?.slice(0, 80));
 });

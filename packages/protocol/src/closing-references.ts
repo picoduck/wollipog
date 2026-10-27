@@ -25,6 +25,9 @@ export const GITHUB_CLOSING_KEYWORDS = [
   "close", "closes", "closed", "fix", "fixes", "fixed", "resolve", "resolves", "resolved",
 ] as const;
 
+/** The longest excerpt a finding carries, so every consumer can accept what the matcher produces. */
+export const CLOSING_REFERENCE_EXCERPT_MAX = 240;
+
 export interface ClosingReference {
   /** `owner/repo#N`, with the repository lowercased as GitHub compares it. */
   issue: string;
@@ -77,7 +80,28 @@ export function canonicalIssueReference(value: string, repository?: string): str
 }
 
 const MASK = "\u0000";
-const FENCE = /^(?:[ ]{0,3}>[ ]?)*[ ]{0,3}(`{3,}|~{3,})(.*)$/u;
+
+/** A fence line's delimiter and the text after it, read in one pass: blockquote markers (each after
+ * up to three spaces and followed by an optional space), up to three spaces, then three or more
+ * backticks or tildes. A scan rather than a regular expression, which would backtrack
+ * exponentially over a long run of `> ` markers. */
+function fence(line: string): { char: string; length: number; rest: string } | null {
+  let i = 0;
+  for (;;) {
+    let j = i;
+    while (j < line.length && j - i < 3 && line[j] === " ") j += 1;
+    if (line[j] !== ">") {
+      i = j;
+      break;
+    }
+    i = line[j + 1] === " " ? j + 2 : j + 1;
+  }
+  const char = line[i];
+  if (char !== "`" && char !== "~") return null;
+  let end = i;
+  while (line[end] === char) end += 1;
+  return end - i >= 3 ? { char, length: end - i, rest: line.slice(end) } : null;
+}
 
 /** The text with code and HTML comments blanked out, at the same offsets. A blank never reads as
  * a space, so nothing hidden can join a keyword to a reference either. */
@@ -90,14 +114,14 @@ function maskMarkdown(text: string): string {
   let offset = 0;
   let open: { char: string; length: number; from: number } | null = null;
   for (const line of text.split("\n")) {
-    const fence = FENCE.exec(line);
+    const delimiter = fence(line);
     if (open) {
-      if (fence && fence[1]![0] === open.char && fence[1]!.length >= open.length && !fence[2]!.trim()) {
+      if (delimiter && delimiter.char === open.char && delimiter.length >= open.length && !delimiter.rest.trim()) {
         blank(open.from, offset + line.length);
         open = null;
       }
-    } else if (fence && !(fence[1]![0] === "`" && fence[2]!.includes("`"))) {
-      open = { char: fence[1]![0]!, length: fence[1]!.length, from: offset };
+    } else if (delimiter && !(delimiter.char === "`" && delimiter.rest.includes("`"))) {
+      open = { char: delimiter.char, length: delimiter.length, from: offset };
     }
     offset += line.length + 1;
   }
@@ -134,22 +158,30 @@ function maskMarkdown(text: string): string {
   }
   // HTML comments. One left open is not a comment GitHub hides, so it stays readable.
   const commented = out.join("");
-  for (let from = commented.indexOf("<!--"); from >= 0; from = commented.indexOf("<!--", from + 4)) {
-    if (out[from] === MASK) continue;
+  let from = commented.indexOf("<!--");
+  while (from >= 0) {
+    if (out[from] === MASK) {
+      from = commented.indexOf("<!--", from + 1);
+      continue;
+    }
     const end = commented.indexOf("-->", from + 4);
     if (end < 0) break;
     blank(from, end + 3);
-    from = end;
+    from = commented.indexOf("<!--", end + 3);
   }
   return out.join("");
 }
 
+/** The line around a finding: up to 60 characters before its keyword and 40 after its reference,
+ * never longer than CLOSING_REFERENCE_EXCERPT_MAX even when the reference is a long link. */
 function excerpt(text: string, start: number, end: number): string {
   const lineStart = text.lastIndexOf("\n", start - 1) + 1;
   const newline = text.indexOf("\n", end);
   const lineEnd = newline < 0 ? text.length : newline;
   const from = Math.max(lineStart, start - 60);
-  const to = Math.min(lineEnd, end + 40);
+  let to = Math.min(lineEnd, end + 40, from + CLOSING_REFERENCE_EXCERPT_MAX - 2);
+  // Never split a surrogate pair at the cut.
+  if (to < lineEnd && /[\uD800-\uDBFF]/u.test(text[to - 1] ?? "")) to -= 1;
   const line = text.slice(from, to).replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim();
   return `${from > lineStart ? "…" : ""}${line}${to < lineEnd ? "…" : ""}`;
 }
