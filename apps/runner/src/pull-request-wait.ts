@@ -37,9 +37,6 @@ const MAX_URL = 300;
 const MAX_TRANSIENT_FAILURES = 3;
 /** Pause before confirming that a queue entry which vanished without a merge was really ejected. */
 const EJECTION_CONFIRM_MS = 10_000;
-/** Latest merge-queue and force-push timeline events read per poll: the latest decides, and the one
- * before it catches a force push GitHub lists in the same second. */
-const QUEUE_EVENTS = 2;
 /** How far past the timeout one in-flight observation may run; no read starts after it. */
 export const PULL_REQUEST_WAIT_READ_GRACE_MS = 20_000;
 const BUDGET_SPENT: GhOutcome = { stdout: "", stderr: "the wait's time budget is spent", code: "ETIMEDOUT", timedOut: true };
@@ -281,7 +278,7 @@ export async function requiredCheckNames(
 
 const contextFields = (after: string) => `contexts(first:${CONTEXTS_PER_COMMIT}${after}){pageInfo{hasNextPage endCursor} nodes{
   __typename
-  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId}} isRequired(pullRequestNumber:$number)}
+  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId} branch{name}} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
 const CONTEXT_FIELDS = contextFields("");
@@ -290,11 +287,12 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
   repository(owner:$owner,name:$name){
     defaultBranchRef{name}
     pullRequest(number:$number){
-      url state isDraft headRefOid baseRefName mergeStateStatus createdAt
+      url state isDraft headRefOid headRefName baseRefName mergeStateStatus createdAt
       timelineItems(last:1,itemTypes:[READY_FOR_REVIEW_EVENT]){nodes{... on ReadyForReviewEvent{createdAt}}}
-      queueEvents:timelineItems(last:${QUEUE_EVENTS},itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT,HEAD_REF_FORCE_PUSHED_EVENT]){nodes{
-        __typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt reason} ... on HeadRefForcePushedEvent{createdAt}
+      queueEvents:timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
+        __typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt reason}
       }}
+      forcePushes:timelineItems(last:1,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{createdAt}}}
       mergeCommit{oid}
       mergeQueueEntry{position state enqueuedAt headCommit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}
       commits(last:1){nodes{commit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}}
@@ -320,6 +318,8 @@ interface CheckNode {
   at: string;
   /** The GitHub App that reported a check run. */
   appId?: number;
+  /** The branch a check run's suite was created for. */
+  branch?: string;
   url?: string;
   isRequired: boolean;
 }
@@ -341,6 +341,7 @@ function checkNode(raw: unknown): CheckNode | null {
     const completed = node.status === "COMPLETED";
     const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
     const appId = record(record(node.checkSuite)?.app)?.databaseId;
+    const branch = record(record(node.checkSuite)?.branch)?.name;
     return {
       kind: "CheckRun",
       name: node.name,
@@ -349,6 +350,7 @@ function checkNode(raw: unknown): CheckNode | null {
       ...(Number.isSafeInteger(node.databaseId) ? { id: node.databaseId as number } : {}),
       at: typeof node.startedAt === "string" ? node.startedAt : "",
       ...(Number.isSafeInteger(appId) ? { appId: appId as number } : {}),
+      ...(typeof branch === "string" && branch ? { branch } : {}),
       url: httpsUrl(node.detailsUrl),
       isRequired: node.isRequired === true,
     };
@@ -497,40 +499,45 @@ interface Observation {
   /** Latest ready event, or creation for a PR with a known empty ready-event timeline. */
   admittedAfter: number | null;
   admittedSkippedRuns?: ReadonlySet<number>;
-  /** The latest merge-queue or force-push event, when it is a merge-queue removal. */
-  lastRemoval: null | { reason: string | null; removedAt: string; at: number };
+  /** The pull request's head branch, which check suites name. */
+  headRef: string | null;
+  /** The latest merge-queue event, when it is a removal no force push has followed. */
+  lastRemoval: null | { reason: string | null; removedAt: string; at: number; forcePushedAt: number | null };
   /** `lastRemoval`, once the current head is shown to have been the pull request's head then. */
   removal?: { reason: string | null; removedAt: string };
 }
 
-/** The latest merge-queue or force-push event, when it is a merge-queue removal. Null for a pull
- * request never enqueued, one queued again or force-pushed since, or a timeline it cannot read. */
-function lastQueueRemoval(events: unknown): Observation["lastRemoval"] {
-  const nodes = record(events)?.nodes;
-  if (!Array.isArray(nodes) || nodes.length === 0) return null;
-  const latest = record(nodes.at(-1));
+/** The latest merge-queue event, when it is a removal. Null for a pull request never enqueued, one
+ * queued again since, one force-pushed at or after the removal (a push may be what removed it), or
+ * a timeline it cannot read. */
+function lastQueueRemoval(events: unknown, forcePushes: unknown): Observation["lastRemoval"] {
+  const latest = record((record(events)?.nodes as unknown[] | undefined)?.at(-1));
   const at = timestamp(latest?.createdAt);
   if (latest?.__typename !== "RemovedFromMergeQueueEvent" || at === null) return null;
-  // A push in the same second may be what removed the entry, and may be listed first.
-  const previous = record(nodes.at(-2));
-  if (previous?.__typename === "HeadRefForcePushedEvent" && (timestamp(previous.createdAt) ?? at) >= at) return null;
+  const pushes = record(forcePushes)?.nodes;
+  if (!Array.isArray(pushes)) return null;
+  const pushed = pushes.length === 0 ? null : timestamp(record(pushes.at(-1))?.createdAt);
+  if (pushes.length > 0 && (pushed === null || pushed >= at)) return null;
   const reason = typeof latest.reason === "string" && latest.reason ? clip(latest.reason, MAX_NAME) : null;
-  return { reason, removedAt: latest.createdAt as string, at };
+  return { reason, removedAt: latest.createdAt as string, at, forcePushedAt: pushed };
 }
 
-/** The removal belongs to the current head only when that commit was already reporting checks
- * before it: a head pushed afterwards, even a fast-forward of an older commit, starts its checks
- * later. A force push after the removal was already ruled out by `lastQueueRemoval`. */
+/** The removal belongs to the current head only when that commit was already this pull request's
+ * head before it: a check run created for the pull request's own head branch started after the
+ * latest force push and before the removal. A fast-forward creates no force-push event, but checks
+ * of a head pushed afterwards start later, and checks a commit got on another branch do not count. */
 function headRemoval(seen: Observation): Observation["removal"] {
-  if (!seen.lastRemoval || seen.queue || seen.rollupSha !== seen.headSha) return undefined;
+  const removal = seen.lastRemoval;
+  if (!removal || seen.queue || !seen.headRef || seen.rollupSha !== seen.headSha) return undefined;
   const contexts = record(record(seen.rollup)?.contexts);
   const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
-  const removedAt = seen.lastRemoval.at;
   const before = nodes.some((raw) => {
-    const at = timestamp(checkNode(raw)?.at);
-    return at !== null && at < removedAt;
+    const node = checkNode(raw);
+    const at = timestamp(node?.at);
+    return node?.kind === "CheckRun" && node.branch === seen.headRef && at !== null && at < removal.at &&
+      (removal.forcePushedAt === null || at > removal.forcePushedAt);
   });
-  return before ? { reason: seen.lastRemoval.reason, removedAt: seen.lastRemoval.removedAt } : undefined;
+  return before ? { reason: removal.reason, removedAt: removal.removedAt } : undefined;
 }
 
 function observation(data: unknown): Observation | null {
@@ -553,6 +560,7 @@ function observation(data: unknown): Observation | null {
     state,
     isDraft: pr.isDraft === true,
     headSha: pr.headRefOid,
+    headRef: typeof pr.headRefName === "string" && pr.headRefName ? pr.headRefName : null,
     baseRef: pr.baseRefName,
     defaultBranch: typeof defaultBranch === "string" ? clip(defaultBranch, MAX_NAME) : null,
     mergeStateStatus: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus : null,
@@ -569,7 +577,7 @@ function observation(data: unknown): Observation | null {
     rollup: commit?.statusCheckRollup ?? null,
     rollupSha: typeof commit?.oid === "string" && SHA.test(commit.oid) ? commit.oid : null,
     admittedAfter,
-    lastRemoval: lastQueueRemoval(pr.queueEvents),
+    lastRemoval: lastQueueRemoval(pr.queueEvents, pr.forcePushes),
   };
 }
 
@@ -719,6 +727,8 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   let sawQueue = false;
   /** When the queue entry was first seen missing without a merge; null while it is present. */
   let vanishedAt: number | null = null;
+  /** The removal `vanishedAt` is confirming; a different one restarts the interval. */
+  let confirming: string | null = null;
   let transientFailures = 0;
   let polls = 0;
 
@@ -864,6 +874,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     if (seen.queue) {
       sawQueue = true;
       vanishedAt = null;
+      confirming = null;
       // A failed merge-group check is not GitHub's verdict: when an entry ahead caused it, GitHub
       // drops that entry and rebuilds this one's group on a new commit. Only GitHub giving up ends
       // the wait: the entry reads UNMERGEABLE, or it leaves the queue unmerged (confirmed below).
@@ -872,6 +883,10 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       // GitHub can drop the entry a moment before the pull request reads MERGED, so an ejection
       // stands only once the entry has stayed missing for the whole confirmation interval. A removal
       // this call did not see happen (#3712) is confirmed the same way, from its first observation.
+      const removedAt = seen.removal?.removedAt ?? null;
+      // Another removal (the entry was queued again and left again) gets its own whole interval.
+      if (removedAt !== null && confirming !== null && removedAt !== confirming) vanishedAt = null;
+      confirming = removedAt ?? confirming;
       vanishedAt ??= now();
       const missingFor = now() - vanishedAt;
       if (missingFor >= EJECTION_CONFIRM_MS) return { ok: true, summary: summarize("queue_ejected", seen) };
@@ -881,6 +896,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       continue;
     } else {
       vanishedAt = null;
+      confirming = null;
       const initial = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus);
       if (initial.requiredState === "pending" && initial.complete &&
           !(input.returnOnAnyFailure && initial.summary.failedJobs.length > 0)) {

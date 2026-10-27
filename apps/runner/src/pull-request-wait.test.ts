@@ -842,9 +842,13 @@ const REMOVED_AT = "2026-10-12T12:00:00Z";
 const added = (createdAt = ENQUEUED_AT) => ({ __typename: "AddedToMergeQueueEvent", createdAt });
 const removedEvent = (reason: string | null, createdAt = REMOVED_AT) => ({ __typename: "RemovedFromMergeQueueEvent", createdAt, reason });
 const forcePushed = (createdAt: string) => ({ __typename: "HeadRefForcePushedEvent", createdAt });
-/** An open, unqueued pull request whose head checks passed, with its latest queue timeline events. */
-const afterQueue = (events: unknown[], nodes: unknown[] = [run(AGGREGATOR, "SUCCESS")]) =>
-  ok(pr({ queueEvents: { nodes: events.slice(-2) } }, nodes));
+const BRANCH = "feature";
+/** A head check run, by default created for the pull request's own branch before the removal. */
+const headCheck = (startedAt = RUN_AT, branch = BRANCH, name = AGGREGATOR) =>
+  run(name, "SUCCESS", { startedAt, checkSuite: { app: { databaseId: 15368 }, branch: { name: branch } } });
+/** An open, unqueued pull request whose head checks passed, with its latest queue event and force pushes. */
+const afterQueue = (events: unknown[], nodes: unknown[] = [headCheck()], pushes: unknown[] = []) =>
+  ok(pr({ headRefName: BRANCH, queueEvents: { nodes: events.slice(-1) }, forcePushes: { nodes: pushes.slice(-1) } }, nodes));
 
 for (const reason of ["checks_timed_out", "failed_checks", "manual"]) {
   test(`a call that starts after GitHub removed the head's entry (${reason}) returns queue_ejected`, async () => {
@@ -876,25 +880,74 @@ test("a pull request that was never enqueued keeps returning checks_passed", asy
     assert.equal(fake.graphqlCalls(), 1);
   }
   assert.match(PULL_REQUEST_WAIT_QUERY, /REMOVED_FROM_MERGE_QUEUE_EVENT/u);
+  assert.match(PULL_REQUEST_WAIT_QUERY, /HEAD_REF_FORCE_PUSHED_EVENT/u);
 });
 
 test("a removal that belongs to an earlier head keeps current behavior", async () => {
-  const cases: Array<[string, unknown[], unknown[]?]> = [
-    ["force-pushed after the removal", [removedEvent("manual"), forcePushed("2026-10-12T12:05:00Z")]],
-    ["force-pushed in the same second, listed first", [forcePushed(REMOVED_AT), removedEvent("manual")]],
+  const cases: Array<[string, unknown[], unknown[]?, unknown[]?]> = [
+    ["force-pushed after the removal", [removedEvent("manual")], undefined, [forcePushed("2026-10-12T12:05:00Z")]],
+    ["force-pushed in the removal's second", [removedEvent("manual")], undefined, [forcePushed(REMOVED_AT)]],
     // A fast-forward push after the removal (even of an older commit) reports its checks later.
-    ["pushed after the removal", [added(), removedEvent("checks_timed_out")], [run(AGGREGATOR, "SUCCESS", { startedAt: "2026-10-12T12:10:00Z" })]],
-    ["checks reported in the removal's second", [added(), removedEvent("failed_checks")], [run(AGGREGATOR, "SUCCESS", { startedAt: REMOVED_AT })]],
+    ["pushed after the removal", [added(), removedEvent("checks_timed_out")], [headCheck("2026-10-12T12:10:00Z")]],
+    ["checks reported in the removal's second", [added(), removedEvent("failed_checks")], [headCheck(REMOVED_AT)]],
+    // A descendant already tested on another branch, fast-forwarded in after the removal.
+    ["tested earlier on another branch", [added(), removedEvent("checks_timed_out")],
+      [headCheck("2026-10-12T12:10:00Z"), headCheck(RUN_AT, "stacked-child", "Optional Lint")]],
+    // A commit this branch had before a force push, restored by a later fast-forward.
+    ["checked on this branch only before a force push", [added(), removedEvent("manual")], [headCheck(RUN_AT)], [forcePushed("2026-10-12T10:30:00Z")]],
+    ["only status contexts before the removal", [added(), removedEvent("manual")],
+      [{ __typename: "StatusContext", context: AGGREGATOR, state: "SUCCESS", createdAt: RUN_AT, targetUrl: "https://ci.example/1" }]],
+    ["no suite branch reported", [added(), removedEvent("manual")], [run(AGGREGATOR, "SUCCESS")]],
     ["queued again since", [removedEvent("checks_timed_out"), added("2026-10-12T12:30:00Z")]],
     ["unreadable removal time", [added(), removedEvent("manual", "not a time")]],
+    ["unreadable force-push time", [added(), removedEvent("manual")], undefined, [forcePushed("not a time")]],
   ];
-  for (const [label, events, nodes] of cases) {
+  for (const [label, events, nodes, pushes] of cases) {
     const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD },
-      { gh: fakeGh([afterQueue(events, nodes)]).gh, ...clock() });
+      { gh: fakeGh([afterQueue(events, nodes, pushes)]).gh, ...clock() });
     assert.ok(result.ok, label);
     assert.equal(result.summary.outcome, "checks_passed", label);
     assert.equal(result.summary.mergeQueueRemoval, null, label);
   }
+
+  // Missing force-push or head-branch fields decline attribution rather than guess.
+  const unread = await waitForPullRequest({ repository: "o/r", number: 7 },
+    { gh: fakeGh([ok(pr({ queueEvents: { nodes: [removedEvent("manual")] } }, [headCheck()]))]).gh, ...clock() });
+  assert.ok(unread.ok);
+  assert.equal(unread.summary.outcome, "checks_passed");
+
+  // A force push before the head's on-branch check does not void the removal.
+  const rebased = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 },
+    { gh: fakeGh([afterQueue([added(), removedEvent("manual")], [headCheck()], [forcePushed("2026-10-12T09:30:00Z")])]).gh, ...clock() });
+  assert.ok(rebased.ok);
+  assert.equal(rebased.summary.outcome, "queue_ejected");
+});
+
+test("a different removal restarts the confirmation interval", async () => {
+  // The old removal is replaced during confirmation: the entry was queued again and GitHub's own
+  // merge removed it, a second before the pull request reads MERGED.
+  const LATER = "2026-10-12T12:20:00Z";
+  const fake = fakeGh([
+    afterQueue([added(), removedEvent("checks_timed_out")]),
+    afterQueue([added("2026-10-12T12:10:00Z"), removedEvent("merged", LATER)]),
+    ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE } })),
+  ]);
+  const time = clock();
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fake.gh, ...time });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "merged");
+  assert.deepEqual(time.sleeps, [10_000, 10_000]);
+
+  const replaced = fakeGh([
+    afterQueue([added(), removedEvent("checks_timed_out")]),
+    afterQueue([added("2026-10-12T12:10:00Z"), removedEvent("failed_checks", LATER)]),
+  ]);
+  const clockTwo = clock();
+  const ejected = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: replaced.gh, ...clockTwo });
+  assert.ok(ejected.ok);
+  assert.equal(ejected.summary.outcome, "queue_ejected");
+  assert.deepEqual(ejected.summary.mergeQueueRemoval, { reason: "failed_checks", removedAt: LATER });
+  assert.deepEqual(clockTwo.sleeps, [10_000, 10_000], "the new removal is confirmed over its own whole interval");
 });
 
 test("a removal immediately followed by a merge still reports merged", async () => {
