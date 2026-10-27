@@ -1,3 +1,4 @@
+import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
@@ -7758,7 +7759,9 @@ export class ControlPlaneDb {
       }
 
       const editors = meta.editors ? JSON.stringify(meta.editors) : null;
-      const runtime = meta.runtime ? JSON.stringify(meta.runtime) : null;
+      const runtime = meta.runtime ? JSON.stringify({ ...meta.runtime,
+        reviewSession: safeReviewSessionCapability(meta.runtime.reviewSession),
+      }) : null;
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
         ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
         : null;
@@ -7954,31 +7957,9 @@ export class ControlPlaneDb {
     if (!row?.runtime) return;
     let runtime: Record<string, unknown>;
     try { runtime = JSON.parse(row.runtime) as Record<string, unknown>; } catch { return; }
-    const valid = capability !== null && typeof capability === "object" && Array.isArray(capability.reviewers) &&
-      capability.reviewers.length <= 2 && capability.reviewers.every((reviewer) =>
-        (reviewer?.harness === "codex" || reviewer?.harness === "claude-code") &&
-        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128);
     const { reviewSession: _previous, ...rest } = runtime;
-    let next = rest;
-    if (valid) {
-      const unavailable: NonNullable<ReviewSessionCapability["unavailable"]> = {};
-      const reasons = capability.unavailable;
-      if (reasons !== undefined) {
-        if (!reasons || typeof reasons !== "object" || Array.isArray(reasons)) {
-          unavailable.tools = "runner reported invalid review-session unavailability reasons";
-        } else {
-          for (const key of ["claude-code", "codex", "tools"] as const) {
-            const reason = reasons[key];
-            if (reason === undefined) continue;
-            unavailable[key] = typeof reason !== "string" || !reason.trim()
-              ? "runner reported an invalid review-session unavailability reason"
-              : reason.length <= 500 ? reason : `${reason.slice(0, 450)}… (+${reason.length - 450} more characters)`;
-          }
-        }
-      }
-      next = { ...rest, reviewSession: { reviewers: capability.reviewers,
-        ...(Object.keys(unavailable).length ? { unavailable } : {}) } };
-    }
+    const safe = safeReviewSessionCapability(capability);
+    const next = safe ? { ...rest, reviewSession: safe } : rest;
     this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
   }
 

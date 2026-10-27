@@ -1,56 +1,39 @@
 # Review Writer Recovery
 
-Codex reviewer admission retains an obligation for each runner-sandboxed launch without exact
-Codex package read-only proof, and every legacy durable provider or Agent TUI writer record.
-Known unsandboxed launches no longer create durable records or block admission. Each exact
-launch, including resumes and forks, is classified before spawn; a bwrap or Seatbelt launch
-without package protection still creates a blocking record. Missing classification stays
-conservative. An old record's `provider` kind does not identify its isolation, so it cannot be
-reclassified as unsandboxed from that field.
-Configured package aliases or remapped homes whose canonical host package paths lack exact
-read-only proof also remain conservative blockers; admission does not infer protection from a
-missing inventory entry.
+Reviewer admission uses static installation trust, available tools and the native agent catalog.
+It never reads writer records, session statuses, worktree leases or launch generations. Existing
+records under `unprotected-agent-writers` are ignored for admission after upgrade, including
+legacy, malformed, previous-runner and uncertain records. No manual cleanup is required after a
+runner restart or host reboot. Running Orchestrators, Agent TUIs and unsandboxed sessions do not
+change admission. Unsandboxed processes already have host-user access to the runner itself.
 
-The runner keeps a separate in-memory inventory of unsandboxed providers and Agent TUIs, including
-uncertain retirements. Codex review metadata snapshots their session IDs and kinds immediately
-before launch. That timestamped `admission` snapshot is visible through `review session get` /
-`get_review_session`, persists with the outcome, and is re-sent on reconnect. Undefined isolation,
-Windows Job isolation (which restricts no filesystem access), and container/cloud backends without
-host package protection are nonblocking. Current Agent TUIs run without a runner filesystem
-sandbox. Provider-internal sandbox settings do not change this classification. Claude reviewer
-admission is unchanged. An unsandboxed native process already has host-user access to the runner
-and reviewer installations; this admission policy does not attest their immunity to those agents.
+Every native bubblewrap and Seatbelt launch protects configured Codex package trees and the
+resolved reviewer executable, symlink-container and interpreter installation directories. Linux
+places read-only mounts after writable grants; macOS denies writes and pins ancestors against
+renaming. An unverifiable installation fails the launch with its path. Missing package trees
+beneath writable roots are created empty and protected before launch, so a sandbox cannot plant
+a future installation. Other session-writable executable locations remain refused at admission.
+An installation that contains a requested writable worktree, cache or state root also fails with
+both paths instead of silently making that root read-only. Use a dedicated installation directory.
 
-The refusal lists every retaining session and record, whether it belongs to the current runner,
-a previous runner, or has unknown identity, and its recovery step. A properly protected unrelated
-session is not blamed for a record merely because its UUID sorts first.
+Both review sessions and the older bridge accept the conventional
+`~/.codex/packages/standalone` installation based on that launch invariant. Trust still rejects
+other-user ownership, session-writable locations outside that exception, world-writable paths
+and shared writable groups. A writable user-private group is accepted only when the system
+passwd/group database proves the owning user's primary gid and no other primary or supplementary
+members across all same-gid group entries. A separately configured `initgroups` NSS database is
+checked too. Environment variables supply no identity evidence. Unknown or remote NSS sources fail
+closed with the source named. `files` and local `systemd` sources are supported; a listed `sss`
+source is non-contributing only when SSSD configuration, fragments, sockets and processes are
+provably absent. Unreadable evidence refuses the exception.
 
-On native Linux with delegated cgroup v2, each new writer has its own parent beneath the existing
-provider cgroup subtree. Provider launches, asynchronous preparation probes, ACP terminals and
-Agent TUIs run in child leaves. The record stores the parent's boot, mount root, path and inode,
-plus the enclosing delegated unit identity when available. Successful live tree settlement retires
-the record only if the parent is empty. A later runner automatically retires it after proving the
-recorded runner gone and the exact parent empty, or the recorded enclosing unit removed. A reboot
-also proves contained processes gone. Unrelated unreadable processes do not participate in this
-proof. The parent stays present until its record is retired, including interrupted launches.
-If live tree exit is already proven but a boundary read is temporarily unverifiable, admission
-retries that retirement without requiring a runner restart. An empty boundary alone never grants
-that live proof. Process callback handles do not inherit the writer launch context, so another
-session scheduled from a writer's output or exit callback gets its own launch boundary.
+The writer registry and `--state-doctor review-writers` remain **non-blocking diagnostics**.
+Retaining them avoids coupling this admission change to process-tree containment and shutdown
+cleanup. Their exact proof rules still apply to retiring a diagnostic record, but neither a
+retained record nor a failed cleanup blocks any reviewer. Admission does not reconcile them.
+Codex reviews may still record the existing informational snapshot of known host-access sessions.
 
-For native sandboxed writers, run the runner in an operator-configured `Delegate=yes` unit for future boundary recovery. The
-runner never creates systemd scopes or moves itself into another delegation. Without delegation,
-or on macOS/WSL, it preserves conservative process-tree proof and records why containment is
-unavailable. Restart and age never clear uncontained legacy evidence automatically. Deliberate
-same-user migration out of a cgroup is outside this lifecycle proof's threat model.
-Legacy container/cloud writer records do not establish native process containment. Host cgroup
-delegation cannot prove remote process exit; investigate their complete trees on their execution
-targets. These records retain the existing conservative recovery requirements.
-When a live record lacks verifiable kernel identity, its refusal still offers exact live-tree exit
-settlement through the owning runner alongside independent operator investigation. Offline legacy
-retirement cannot remove an identity-less record.
-
-## Legacy Records
+## Optional Legacy Diagnostic Cleanup
 
 These commands are local OS-owner maintenance, not agent RPCs. An operator outside the hosting
 stack must perform the stop; a session hosted by that stack must never stop or restart it.
@@ -91,16 +74,19 @@ because scanning a different user's processes would not prove the original write
    Zombies count as exited and unreadable processes that started before the recorded runner are
    excluded; surviving live descendants are inspected independently. Unknown/malformed records
    require independent operator investigation and are not deletable through this proof command.
-5. After successful retirement, start the runner normally and retry the review. Hand-deleting
-   writer JSON files is not the recovery procedure.
+5. After successful retirement, start the runner normally. This cleanup is optional and does not
+   change reviewer admission. Hand-deleting writer JSON files is not the recovery procedure.
 
-These commands retire retained blocking records; they do not reclassify legacy records or change
-the nonblocking treatment of known unsandboxed launches.
+These commands retire diagnostic records only. A refusal here does not prevent a review.
 
 ## Diagnostics
 
-The runner emits `review_writer_recovery` JSON events when a recovered record's outcome changes.
-`recordId` and `sessionId` correlate the event with the refusal; `entryPoint` distinguishes startup
-from admission-time retry, and `outcome`/`reason` distinguish retirement, a populated or unverifiable
-boundary, a live recorded runner, and unavailable legacy boundary evidence. Unchanged refusals do
-not emit repeated events. Paths, inherited markers, and process environments are not logged.
+The runner emits `review_writer_recovery` JSON events when startup reconciliation changes a
+record's outcome. `recordId` and `sessionId` identify the diagnostic record; `outcome` and `reason`
+distinguish retirement from retained evidence. These events are not admission refusals. An
+unchanged outcome is not repeatedly logged. Paths, inherited markers and process environments
+are not logged. Review capability diagnostics instead report missing tools, agents or untrusted
+installation paths, with bounded reasons that preserve the other reviewer.
+
+The optional release-digest pin is not implemented. Static trust does not detect tampering that
+predates installation protection or writes by processes with unsandboxed host-user access.

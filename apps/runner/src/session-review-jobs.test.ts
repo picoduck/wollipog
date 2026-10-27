@@ -43,7 +43,9 @@ test("trusted paths refuse session-writable roots and other-user-writable compon
   chmodSync(tool, 0o757);
   assert.throws(() => trustedPath(tool, [], uid, rootUid), /writable by every user/);
   chmodSync(tool, 0o775);
-  assert.equal(trustedPath(tool, [], uid, rootUid), tool, "group-write is fine below a private (0700) ancestor");
+  assert.equal(trustedPath(tool, [], uid, rootUid, undefined, () => true), tool, "proven user-private group writes are safe");
+  assert.throws(() => trustedPath(tool, [], uid, rootUid, undefined, () => false), /writable by its group/,
+    "shared groups remain untrusted even below a private ancestor");
   const link = join(root, "link"); symlinkSync(planted, link);
   assert.throws(() => trustedPath(link, [join(root, "home", ".codex")], uid, rootUid), /a session can write/, "symlinks are resolved first");
   // A trusted target reached through a link a session could repoint is refused too.
@@ -110,7 +112,7 @@ test("discovery reports an unsupported controller contract instead of using it",
   assert.match(install?.capability.unavailable?.controller ?? "", /unsupported contract/);
 });
 
-test("bridge discovery admits a protected standalone Codex reviewer and names an unprotected session", posixOnly, (t) => {
+test("bridge discovery admits the statically protected standalone Codex installation", posixOnly, (t) => {
   const f = fakeHome(t);
   const bin = join(f.home, ".codex", "packages", "standalone", "version", "bin");
   mkdirSync(bin, { recursive: true });
@@ -118,10 +120,6 @@ test("bridge discovery admits a protected standalone Codex reviewer and names an
   const env = { home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: `${f.bin}:${bin}`, temporaryRoots };
   assert.equal(discoverSessionReviewInstallation(env)?.reviewers.codex, undefined);
   assert.equal(discoverSessionReviewInstallation({ ...env, codexProtection: { home: f.home } })?.reviewers.codex, binary);
-  const refused = discoverSessionReviewInstallation({ ...env,
-    codexProtection: { home: f.home, refusal: "Codex packages are unprotected from session s_tui (Agent TUI)" } });
-  assert.equal(refused?.reviewers.codex, undefined);
-  assert.match(refused?.capability.unavailable?.codex ?? "", /session s_tui/);
 });
 
 test("discovery never finds the controller through a provider home's skills directory", posixOnly, (t) => {

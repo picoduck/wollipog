@@ -2026,11 +2026,16 @@ export class SessionManager {
   }
 
   private codexHomes: () => readonly string[] = () => [];
+  private reviewerInstallationPaths: () => readonly string[] = () => [];
   private reviewWriters = new ReviewWriterRegistry();
   private readonly driverReviewWriterTokens = new Map<Driver, string>();
 
   setCodexHomes(read: () => readonly string[]): void {
     this.codexHomes = read;
+  }
+
+  setReviewerInstallationPaths(read: () => readonly string[]): void {
+    this.reviewerInstallationPaths = read;
   }
 
   setReviewWriterRegistry(registry: ReviewWriterRegistry): void {
@@ -2054,56 +2059,17 @@ export class SessionManager {
 
   private resolveIsolation(...[policy, context, deps, state]: Parameters<typeof resolveExecutionIsolation>) {
     const homes = this.codexHomes();
-    return this.resolveIsolationBoundary(policy, context, deps, state && homes.length
-      ? { ...state, codexHomes: homes } : state);
+    const installations = state && context.kind === "native" && (policy.mode === "bwrap" || policy.mode === "seatbelt")
+      ? this.reviewerInstallationPaths() : [];
+    return this.resolveIsolationBoundary(policy, context, deps, state
+      ? { ...state, ...(homes.length ? { codexHomes: homes } : {}),
+          ...(installations.length ? { reviewerInstallationPaths: installations } : {}) } : state);
   }
 
-  /** A configuration promise is insufficient for an already-running provider. Check its exact
-   * launch snapshot, including every harness, and refuse while a launch/retirement is uncertain.
-   * This is admission-time evidence, not a lock on future launches. An unisolated agent already
-   * has host-user write access, including to the runner itself; starting one mid-review adds no
-   * capability. Agent TUIs are checked separately; human terminals are the operator boundary. */
+  /** Static conventional-install exception. Sandbox construction protects these packages for
+   * every harness; retained writer diagnostics and provider lifecycle state never admit reviews. */
   codexReviewerProtection(home = homedir()): import("./review-trust.js").CodexReviewerProtection {
-    this.reviewWriters.reconcileRecovered("admission");
-    const writers = this.reviewWriters.inspect();
-    const retaining = writers.map((writer) => `session ${writer.sessionId} (${writer.kind === "agent_tui" ? "Agent TUI" : "provider"}; ${
-      writer.state === "current_runner" ? `writer of the current runner; ${writer.exitProven ? "tree exit proven, awaiting boundary emptiness" : "complete exit unproven"}`
-        : writer.state === "previous_runner" ? "record left by a previous runner process" : "record with unknown runner identity"
-    }; record ${writer.recordId}). ${writer.recovery}`);
-    const packages = join(home, ".codex", "packages");
-    let canonical: string;
-    try { canonical = realpathSync(packages); } catch {
-      return { home, refusal: retaining.length
-        ? `Codex packages cannot be resolved. Retaining writers:\n${retaining.join("\n")}` : "Codex packages cannot be resolved" };
-    }
-    const capacityWaiters = new Set(this.admissionQueue.map((entry) => entry.request.sessionId));
-    // Include launches that have not persisted their session row yet. Idle durable rows add no
-    // evidence: only this runner's live lifecycle maps and the durable writer registry can do so.
-    const current = new Set([...this.launchGenerations.keys(), ...this.active.keys(), ...this.closing.keys()]);
-    for (const sessionId of current) {
-      // Review preparation attests this identity before the review's session row is persisted.
-      if (this.preparedReviewRounds.has(sessionId)) continue;
-      const meta = this.store.readMeta(sessionId);
-      if (meta && (meta.context.kind !== "native" || meta.review)) continue;
-      const live = this.active.get(sessionId);
-      const retiring = this.closing.get(sessionId)?.entry;
-      // The current process records a generation before asynchronous launch preparation, even
-      // before active is populated. Saved statuses and worktree leases are not writer evidence;
-      // writers surviving a previous runner are covered by the durable registry above.
-      // A capacity waiter has not begun provider launch; parking uses a generation to retire
-      // an existing provider, whose exact boundary remains available in the closing entry.
-      const launching = this.launchGenerations.has(sessionId) && !capacityWaiters.has(sessionId) &&
-        !this.parkingSessions.has(sessionId);
-      if (!launching && (live?.codexPackageSandboxed === false || (!live && retiring?.codexPackageSandboxed === false))) continue;
-      if (launching || this.closing.has(sessionId) ||
-          (live && !live.codexPackageReadOnlyPaths?.includes(canonical))) {
-        if (!writers.some((writer) => writer.sessionId === sessionId)) {
-          retaining.push(`session ${sessionId} (current runner session lacks package-protection proof). Wait for its launch or complete process-tree exit to settle and retry.`);
-        }
-      }
-    }
-    return { home,
-      ...(retaining.length ? { refusal: `Codex packages are unprotected from the following writers:\n${retaining.join("\n")}` } : {}) };
+    return { home };
   }
 
   private isReviewSession(sessionId: string): boolean {

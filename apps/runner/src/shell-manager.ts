@@ -260,7 +260,7 @@ export class ShellManager {
     const launchCwd = meta?.launch?.cwd ?? cwd;
     if (meta?.kind === "agent_tui") {
       // No runner filesystem sandbox is applied to this launch. Provider-internal permissions
-      // do not change that boundary; legacy durable TUI records still block separately.
+      // do not change that boundary. Current and legacy records are diagnostics only.
       this.agentTuiWriterTokens.set(shellId, this.reviewWriters.observeUnsandboxed(sessionId, "agent_tui"));
     }
     const spawn = () => process.platform === "win32" && context.kind === "native"

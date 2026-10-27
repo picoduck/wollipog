@@ -35,8 +35,8 @@ export type WriterInspection = {
   recovery: string;
 };
 
-/** Admission evidence for host agent writers. A root process exiting, a session disappearing,
- * or a runner restart cannot substitute for a complete process-tree exit proof. */
+/** Non-blocking lifecycle diagnostics, never reviewer admission evidence. A root process exiting,
+ * a session disappearing or a restart cannot substitute for an exact diagnostic retirement proof. */
 export class ReviewWriterRegistry {
   private readonly entries = new Map<string, WriterEntry>();
   /** Known host-access launches are observations, never durable blocking obligations. */

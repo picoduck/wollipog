@@ -168,6 +168,8 @@ export interface IsolationStateOptions {
   readOnlyPaths?: string[];
   /** All configured Codex homes, including homes used by other harnesses. */
   codexHomes?: readonly string[];
+  /** Canonical reviewer executable, symlink-container and interpreter installation directories. */
+  reviewerInstallationPaths?: readonly string[];
   /** The runner's hook state directory, hidden from the provider and everything it spawns, and
    * the few entries inside it the provider must still read (#1336). Native bwrap and Seatbelt
    * express it; every other mode is documented as not enforcing it. */
@@ -255,19 +257,55 @@ async function codexPackageDirectories(
     // unrelated launches on a foreign-platform or traversal-containing hint. Actual writable
     // provider/transcript roots retain their own strict validation above.
     if (!home.startsWith("/") || home.split("/").includes("..")) continue;
-    if (!await runtime.existsNative(posix.join(home, "packages"))) continue;
+    if (!await runtime.existsNative(posix.join(home, "packages"))) {
+      // Pin an empty package tree too. Otherwise a sandbox could create the installation that a
+      // later review would trust while this same sandbox still has a writable provider home.
+      if (!writableRoots.some((root) => pathsOverlap(root, posix.join(home, "packages")))) continue;
+      await runtime.mkdirNative([posix.join(home, "packages")]);
+    }
     const path = posix.join(await runtime.realpathNative(home), "packages");
     // A virtual transcript mount does not expose the original host directory at its target.
     // Never bind host entries back through that replacement or claim a proof about its contents.
     if (remappedRoots.some((root) => pathWithinOrEqual(root, path))) continue;
-    const writable = writableRoots.some((root) => pathWithinOrEqual(root, path));
+    const writable = writableRoots.some((root) => pathsOverlap(root, path));
     if (!await runtime.isExposableEntryNative(path)) {
-      if (writable) throw new Error(`Codex packages in a writable home must be a real directory: ${path}`);
+      const target = await runtime.realpathNative(path);
+      if (writable || writableRoots.some((root) => pathsOverlap(root, target))) {
+        throw new Error(`Codex packages exposed to writable roots must be a real directory: ${path} (target ${target})`);
+      }
       continue;
     }
     paths.set(path, { path, writable });
   }
   return [...paths.values()];
+}
+
+async function reviewerInstallationDirectories(
+  state: IsolationStateOptions, runtime: IsolationDeps, writable: readonly string[],
+  remapped: readonly { source: string; target: string }[] = [],
+): Promise<Array<{ path: string; writable: boolean }>> {
+  const paths = await codexPackageDirectories(state, runtime, writable, remapped.map((bind) => bind.target));
+  for (const path of state.reviewerInstallationPaths ?? []) {
+    try {
+      if (!posix.isAbsolute(path) || await runtime.realpathNative(path) !== path || !await runtime.isExposableEntryNative(path)) {
+        throw new Error("directory is missing, aliased, or not a real installation directory");
+      }
+    } catch (error) { throw new Error(`Cannot protect reviewer installation ${path}: ${(error as Error).message}`); }
+    if (!paths.some((entry) => entry.path === path)) paths.push({ path, writable: writable.some((root) => pathsOverlap(root, path)) });
+  }
+  for (const { path } of paths) {
+    for (const root of writable) {
+      let canonical: string;
+      try { canonical = await runtime.realpathNative(root); } catch { canonical = root; }
+      if (pathWithinOrEqual(path, canonical)) {
+        throw new Error(`Cannot protect reviewer installation ${path}: it contains a writable root ${root}; use a dedicated installation directory`);
+      }
+    }
+    if (remapped.some((bind) => pathsOverlap(bind.source, path))) {
+      throw new Error(`Cannot protect reviewer installation ${path}: a writable remapped source exposes the installation`);
+    }
+  }
+  return paths;
 }
 
 /** Common build caches whose writes previously worked in provider mode. Each is a directory below
@@ -903,7 +941,7 @@ export async function resolveExecutionIsolation(
       runtime.realpathNative,
     );
     const packageAncestors = new Set<string>();
-    const packages = await codexPackageDirectories(state, runtime, writableRoots);
+    const packages = await reviewerInstallationDirectories(state, runtime, writableRoots);
     for (const { path } of packages) {
       if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
       for (let ancestor = posix.dirname(path); ancestor !== "/"; ancestor = posix.dirname(ancestor)) {
@@ -1039,10 +1077,10 @@ export async function resolveExecutionIsolation(
   // Resolved after the writable binds are materialized: the entries live inside those roots, and
   // the launcher renders them last so the narrower read-only rule wins over the containing mount.
   const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
-  const packages = state ? await codexPackageDirectories(state, runtime, [
+  const packages = state ? await reviewerInstallationDirectories(state, runtime, [
     state.cwd, ...(protectedWorktree?.gitWritableRoots ?? []),
     ...writableBinds.filter((bind) => bind.source === bind.target).map((bind) => bind.target),
-  ], writableBinds.filter((bind) => bind.source !== bind.target).map((bind) => bind.target)) : [];
+  ], writableBinds.filter((bind) => bind.source !== bind.target)) : [];
   for (const { path, writable } of packages) {
     if (writable && !readOnlyBinds.includes(path)) readOnlyBinds.push(path);
   }
