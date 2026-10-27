@@ -15102,10 +15102,6 @@ export class SessionsService {
     }
     if (message.commandId !== undefined) {
       if (typeof message.commandId !== "string" || !message.commandId || message.commandId.length > 256) return false;
-      const automationCommand = this.db.getAutomationCommand(message.commandId);
-      if (automationCommand?.supersededBy) return false;
-      const command = automationCommand ?? this.db.getSessionPromptCommand(message.commandId);
-      if (!command || command.runnerId !== runnerId || command.sessionId !== session.id) return false;
     }
     const requestId = `runner-${message.kind}:${message.tripId}`;
     const pending = pendingRequests(session.pendingApproval);
@@ -15121,6 +15117,14 @@ export class SessionsService {
     // Never enrich an already recorded trip with a different command or crossing on replay.
     if (alreadyAsked &&
         !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now())) return false;
+    // A matching immutable audit already proves ownership even after terminal command retention
+    // expires. First reports still need the live command record; never invent correlation.
+    if (!alreadyAsked && message.commandId !== undefined) {
+      const automationCommand = this.db.getAutomationCommand(message.commandId);
+      if (automationCommand?.supersededBy) return false;
+      const command = automationCommand ?? this.db.getSessionPromptCommand(message.commandId);
+      if (!command || command.runnerId !== runnerId || command.sessionId !== session.id) return false;
+    }
     const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
     const title = message.kind === "cost_budget"

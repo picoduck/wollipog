@@ -368,6 +368,36 @@ test("a superseded command's trip cannot transfer to its replacement", () => {
   } finally { db.close(); }
 });
 
+test("a pinned trip card restores after its terminal prompt command expires", (t) => {
+  let now = 60_002;
+  t.mock.method(Date, "now", () => now);
+  const { db, hub } = harness();
+  try {
+    db.createSession({ id: "target", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      title: "Target", useWorktree: false, driver: "acp", config: {}, now: 0 });
+    db.updateSessionStatus("target", "running", 60_001);
+    db.stageSessionPromptCommand({ commandId: "retained-trip-owner", sessionId: "target", runnerId: "runner-1",
+      payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000, now: 60_001 });
+    const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
+    const message = { type: "governance_tripped" as const, sessionId: "target", tripId: "retained",
+      kind: "cost_budget" as const, threshold: 1.5, observed: 2, commandId: "retained-trip-owner" };
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+    db.recordSessionPromptCommandReceipt({ commandId: message.commandId, sessionId: "target", runnerId: "runner-1",
+      state: "completed", revision: 2, now: 60_003 });
+    now += 8 * 24 * 60 * 60_000;
+    db.pruneSessionPromptCommands(now);
+    assert.equal(db.getSessionPromptCommand(message.commandId), null);
+    db.setPendingApproval("target", null);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { ...message, observed: 3 }), false);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", message), true);
+    assert.deepEqual(db.getSession("target")!.pendingApproval?.runnerGuardrail, {
+      tripId: message.tripId, kind: message.kind, threshold: message.threshold, observed: message.observed,
+      commandId: message.commandId,
+    });
+    assert.equal(db.listGovernanceAudit("target").filter((entry) => entry.stage === "policy_decision").length, 1);
+  } finally { db.close(); }
+});
+
 test("uncorrelated reconnect trips retain ordinary terminal-first settlement", () => {
   for (const kind of ["cost_budget", "max_tool_calls"] as const) {
     for (const state of ["completed", "failed"] as const) {
@@ -476,38 +506,52 @@ test("a workflow ceiling pause finishes the instance and cancels siblings before
 });
 
 test("a control-plane workflow pause cancels active attempt siblings without launch commands", () => {
-  const { db, service, delivered } = harness();
-  try {
-    installCapabilityWorkflow(db, "wf-1");
-    const actor = { kind: "human" as const, id: "device" };
-    const automation = service.create(baseSpec({ action: { kind: "workflow_run", request: {
-      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
-      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
-    } } }), actor, 0).data!;
-    db.claimAutomationExecution({ executionId: "native", automationId: automation.automationId,
-      expectedNextFireAt: 60_000, scheduledFor: 60_000, nextFireAt: 120_000, actionKind: "workflow_run",
-      status: "dispatching", deliveryMode: "receipted_v53", actor, now: 60_000 });
-    db.createRun({ id: "run-native", title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
-    db.createWorkflowInstance({ instanceId: "wfi-native", definition: db.getWorkflowDefinition("wf-1")!,
-      runId: "run-native", createdBy: actor, now: 60_000 });
-    db.settleAutomationExecution({ executionId: "native", status: "running", runId: "run-native",
-      workflowInstanceId: "wfi-native", runnerId: "runner-1", actor, now: 60_001 });
-    for (const nodeId of ["build", "review"]) {
-      db.createSession({ id: nodeId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
-        title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_001 });
-      db.updateSessionStatus(nodeId, "running", 60_001);
-      db.createWorkflowAttempt({ attemptId: `attempt-${nodeId}`, instanceId: "wfi-native", nodeId, attempt: 1,
-        status: "running", dispatchKey: nodeId, sessionId: nodeId, startedAt: 60_001, deadlineAt: 120_001 });
-    }
-    runnerPause(db, "build", 60_002);
-    service.onGovernanceTripped("build", 60_003);
-    assert.equal(db.getAutomationExecution("native")?.status, "ceiling_paused");
-    assert.equal(db.getWorkflowInstance("wfi-native")?.status, "failed");
-    assert.ok(db.getWorkflowInstance("wfi-native")?.attempts.every((attempt) => attempt.status === "cancelled"));
-    assert.deepEqual(delivered, [{ type: "cancel_session", sessionId: "review" }]);
-    assert.ok(db.getSession("build")?.pendingApproval);
-    assert.equal(db.activeAutomationExecution(automation.automationId), null);
-  } finally { db.close(); }
+  for (const correlation of ["none", "current", "old-prompt", "other-session", "after-window"] as const) {
+    const { db, service, delivered } = harness();
+    try {
+      installCapabilityWorkflow(db, "wf-1");
+      const actor = { kind: "human" as const, id: "device" };
+      const automation = service.create(baseSpec({ action: { kind: "workflow_run", request: {
+        workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+        agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+      } } }), actor, 0).data!;
+      db.claimAutomationExecution({ executionId: "native", automationId: automation.automationId,
+        expectedNextFireAt: 60_000, scheduledFor: 60_000, nextFireAt: 120_000, actionKind: "workflow_run",
+        status: "dispatching", deliveryMode: "receipted_v53", actor, now: 60_000 });
+      db.createRun({ id: "run-native", title: "Run", prompt: "Build", workspaceId: null, runnerId: null, now: 60_000 });
+      db.createWorkflowInstance({ instanceId: "wfi-native", definition: db.getWorkflowDefinition("wf-1")!,
+        runId: "run-native", createdBy: actor, now: 60_000 });
+      db.settleAutomationExecution({ executionId: "native", status: "running", runId: "run-native",
+        workflowInstanceId: "wfi-native", runnerId: "runner-1", actor, now: 60_001 });
+      for (const nodeId of ["build", "review"]) {
+        db.createSession({ id: nodeId, runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+          title: "Member", useWorktree: false, driver: "acp", config: {}, now: 60_001 });
+        db.updateSessionStatus(nodeId, "running", 60_001);
+        db.createWorkflowAttempt({ attemptId: `attempt-${nodeId}`, instanceId: "wfi-native", nodeId, attempt: 1,
+          status: "running", dispatchKey: nodeId, sessionId: nodeId, startedAt: 60_001, deadlineAt: 120_001,
+          ...(correlation === "after-window" ? { completedAt: 60_001 } : {}) });
+      }
+      if (correlation !== "none") db.stageSessionPromptCommand({ commandId: "prompt_workflow",
+        sessionId: correlation === "other-session" ? "review" : "build", runnerId: "runner-1",
+        payloadJson: "{}", payloadSha256: "a".repeat(64), expiresAt: 120_000,
+        now: correlation === "old-prompt" ? 60_000 : 60_001 });
+      runnerPause(db, "build", 60_002, { tripId: "workflow-attempt", kind: "cost_budget", threshold: 1.5, observed: 2,
+        ...(correlation !== "none" ? { commandId: "prompt_workflow" } : {}) });
+      service.onGovernanceTripped("build", 60_003);
+      if (!["none", "current"].includes(correlation)) {
+        assert.equal(db.getAutomationExecution("native")?.status, "running", correlation);
+        assert.ok(db.activeAutomationExecution(automation.automationId), "unrelated evidence cannot release the slot");
+        assert.deepEqual(delivered, []);
+        continue;
+      }
+      assert.equal(db.getAutomationExecution("native")?.status, "ceiling_paused");
+      assert.equal(db.getWorkflowInstance("wfi-native")?.status, "failed");
+      assert.ok(db.getWorkflowInstance("wfi-native")?.attempts.every((attempt) => attempt.status === "cancelled"));
+      assert.deepEqual(delivered, [{ type: "cancel_session", sessionId: "review" }]);
+      assert.ok(db.getSession("build")?.pendingApproval);
+      assert.equal(db.activeAutomationExecution(automation.automationId), null);
+    } finally { db.close(); }
+  }
 });
 
 test("a transient-looking receipt cannot create a replacement for a ceiling-paused execution", () => {

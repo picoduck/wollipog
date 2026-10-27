@@ -993,12 +993,26 @@ export class AutomationsService {
       // Exact command ownership recovers missing-start and terminal-first reconnect replay.
       // Without correlation, retain the original bounded execution-window safeguard. Explicit
       // ownership of another command must never fall back to a coincidental timestamp match.
-      const trip = pendingRequests(session.pendingApproval).find(({ runnerGuardrail: evidence }) => evidence &&
-        (evidence.commandId !== undefined
-          ? commandId !== undefined && this.db.hasRunnerGovernanceTripForCommand(
-            sessionId, evidence, commandId, execution.createdAt, now)
-          : startedAt !== undefined && this.db.hasRunnerGovernanceTripInWindow(sessionId, evidence,
-            Math.max(execution.createdAt, startedAt), completedAt ?? now)))?.runnerGuardrail;
+      const trip = pendingRequests(session.pendingApproval).find(({ runnerGuardrail: evidence }) => {
+        if (!evidence) return false;
+        if (evidence.commandId !== undefined && commandId !== undefined) {
+          return this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, commandId, execution.createdAt, now);
+        }
+        if (startedAt === undefined) return false;
+        const since = Math.max(execution.createdAt, startedAt);
+        const until = completedAt ?? now;
+        if (evidence.commandId === undefined) {
+          return this.db.hasRunnerGovernanceTripInWindow(sessionId, evidence, since, until);
+        }
+        // CP-owned attempts and legacy executions have no launch command to correlate.
+        // Their ordinary durable prompts retain the original bounded window. Never use
+        // this path to bypass a receipted launch's exact command ownership/completion.
+        if (commands.length !== 0) return false;
+        const prompt = this.db.getSessionPromptCommand(evidence.commandId);
+        return prompt?.sessionId === sessionId && prompt.runnerId === session.runnerId &&
+          prompt.createdAt >= since && prompt.createdAt <= until &&
+          this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, evidence.commandId, since, until);
+      })?.runnerGuardrail;
       if (!trip) continue;
       if (execution.actionKind === "workflow_run") {
         this.failWorkflowExecution(execution, commands, sessionId,
