@@ -316,11 +316,30 @@ than live, and it is closed by requiring the runner's own hook to come back trus
 This measurement did not cover hash trust alone on TUI/exec. The 2026-10-25 measurement below
 settles #1488 and supersedes the earlier bypass requirement on those entry points.
 
+## Re-Measurement: codex-cli 0.164.0 (Linux, 2026-10-27)
+
+`CODEX_BIN=/path/to/codex pnpm probe:codex-guard-hook` passed on standalone **codex-cli 0.164.0**
+from a clean checkout of `574851410409be55a249d779c503b83f436c69ca`, before widening the range.
+It exited 0: **All CLI cases and 8 app-server checks matched the recorded measurement**.
+All 26 `codex_assumption` events were `unchanged`: exec and real TUI untrusted, matching-hash
+deny/allow, stale-hash, bypass-control and isolated-bypass deny/allow; hook inventory and the
+`hooks.state` trust override; freeform and function-call `apply_patch` allow/deny; and app-server
+bypass-inert and trust-override controls. Function-call patch inputs remain rejected before hook
+dispatch with no write; this does not claim support for that editing form.
+
+HOME, CODEX_HOME and XDG roots were throwaway directories, host Git configuration was disabled,
+and the provider was scripted on loopback. No real provider homes or credentials were read.
+The benign warning about refusing to create PATH aliases under temporary `/tmp` appeared.
+This confirms the earlier hash-trust contract and widens the TUI range to **`>=0.155.1 <0.164.1`**;
+0.164.1 and later, malformed and prerelease versions retain the verified legacy fallback.
+The existing daemon-lifetime and legacy-fallback measurement limits remain unchanged.
+
 ## Measurements: Hash Trust Without a TUI or Exec Bypass (codex-cli 0.155.1–0.163.0, Linux, 2026-10-25)
 
 The complete hash-trust matrix passed on installed releases **0.155.1, 0.157.0, 0.158.0, 0.159.0,
-0.159.2, 0.160.0, 0.162.1 and 0.163.0**. These measurements widen the TUI preference range to
-`>=0.155.1 <0.163.1`. Versions outside it use the verified legacy TUI fallback below rather than
+0.159.2, 0.160.0, 0.162.1 and 0.163.0**. Together with the 0.164.0 re-measurement above, these
+measurements support the TUI preference range
+`>=0.155.1 <0.164.1`. Versions outside it use the verified legacy TUI fallback below rather than
 turning a routine CLI upgrade into a TUI outage. No real provider homes or credentials were used.
 
 `pnpm probe:codex-guard-hook` now measures all three entry points. `--cli-only`, `--exec-only`,
@@ -362,7 +381,7 @@ No-escalation cases use a sandbox-free fixture so host namespace availability ca
 as hook denial; escalated cases still exercise approval.
 
 **Decision:** a TUI prefers trust for the runner's key alone by hash on
-**`>=0.155.1 <0.163.1`**, read from the inventory connection's `initialize.userAgent` independently
+**`>=0.155.1 <0.164.1`**, read from the inventory connection's `initialize.userAgent` independently
 of its caller-selected originator prefix. The hook must read back **enabled and trusted** on the
 second inventory pass, and the launch carries no bypass. Ordinary foreign untrusted hooks keep
 Codex's own gate. Orchestrator launches still disable every foreign hook and verify that isolation.
@@ -1321,7 +1340,7 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   - The inventory-to-launch bypass window, group-shared-writer limitation and authenticated TUI
     evidence gap remain on the legacy fallback, and are gone on the hash-trust path. See the
     three residual dispositions in the 2026-10-25 measurement above.
-  - TUI hash trust is preferred on codex-cli `>=0.155.1 <0.163.1`. Other versions require verified
+  - TUI hash trust is preferred on codex-cli `>=0.155.1 <0.164.1`. Other versions require verified
     legacy fallback isolation; if both mechanisms fail, guarded TUI launch is refused.
 
   Amended by #1473: **the Orchestrator preset is guarded, for both providers, and its list is

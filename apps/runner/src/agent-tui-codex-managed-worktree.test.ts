@@ -162,7 +162,7 @@ function dependencies(
           // managed-worktree-guard.test.ts runs the real sidecar launch probe.
           verifyGuardLaunch: () => options.selfTest ?? { ok: true as const },
           readCodexHookInventory: async (probe) => {
-            probe.onVersion?.(options.version === undefined ? "0.163.0" : options.version ?? undefined);
+            probe.onVersion?.(options.version === undefined ? "0.164.0" : options.version ?? undefined);
             harness.probes.push(probe);
             return options.inventory ? options.inventory(probe) : [runnerHookEntry(probe)];
           },
@@ -217,7 +217,7 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
     // The guard is observable in the argv the TUI launches with, never inferred.
     assert.deepEqual(guardEvent(harness.logs), {
       event: "codex_managed_worktree_guard_provisioned", sessionId: "s1377", entryPoint: "tui",
-      mechanism: "trusted-hash", codexVersion: "0.163.0", replacedExplicitBypass: false,
+      mechanism: "trusted-hash", codexVersion: "0.164.0", replacedExplicitBypass: false,
     });
     const override = overrideArgument(launch.args);
     assert.ok(override);
@@ -596,7 +596,7 @@ test("the probe replays every accepted spelling and follows -C/--cd (review CR-1
 });
 
 /** A stand-in app-server that answers initialize and hooks/list over stdio. */
-function fakeAppServer(dir: string, reply: string, userAgent: unknown = "wollipog-runner/0.163.0 (test)"): CodexHookInventoryProbe {
+function fakeAppServer(dir: string, reply: string, userAgent: unknown = "wollipog-runner/0.164.0 (test)"): CodexHookInventoryProbe {
   const script = join(dir, "fake-app-server.mjs");
   writeFileSync(script, `
 import { createInterface } from "node:readline";
@@ -655,9 +655,9 @@ test("the inventory client reads hooks/list over stdio and fails closed on anyth
 test("unmeasured inventory versions remain readable, but cannot select TUI hash trust", async () => {
   await withDir(async (dir) => {
     for (const userAgent of [
-      "wollipog-runner/0.155.0 (test)", "wollipog-runner/0.163.1 (test)",
-      "wollipog-runner/0.164.0 (test)", "wollipog-runner/0.163.0-beta (test)",
-      "wollipog-runner/0.163.00 (test)", "malformed", null, 163,
+      "wollipog-runner/0.155.0 (test)", "wollipog-runner/0.164.1 (test)",
+      "wollipog-runner/0.165.0 (test)", "wollipog-runner/0.164.0-beta (test)",
+      "wollipog-runner/0.164.00 (test)", "malformed", null, 163,
     ]) {
       let observed: string | undefined;
       assert.deepEqual(await readCodexHookInventory({ ...fakeAppServer(dir,
@@ -669,7 +669,7 @@ test("unmeasured inventory versions remain readable, but cannot select TUI hash 
   });
 });
 
-for (const version of ["0.155.0", "0.163.1", "0.164.0", null]) {
+for (const version of ["0.155.0", "0.164.1", "0.165.0", "0.164.0-beta", "malformed", null]) {
   test(`a TUI on ${version ?? "unknown version"} verifies foreign-hook isolation before its legacy bypass`, async () => {
     await withDir(async (dir) => {
       const harness: Harness = { probes: [], logs: [] };
@@ -748,9 +748,9 @@ test("structured admission remains version-independent and never falls back to t
   });
 });
 
-test("the inventory version proof admits measured versions independently of the originator", async () => {
+test("the inventory version proof admits supported releases independently of the originator", async () => {
   await withDir(async (dir) => {
-    for (const version of ["0.155.1", "0.157.0", "0.158.0", "0.159.0", "0.159.2", "0.160.0", "0.162.1", "0.163.0"]) {
+    for (const version of ["0.155.1", "0.157.0", "0.158.0", "0.159.0", "0.159.2", "0.160.0", "0.162.1", "0.163.0", "0.163.1", "0.164.0"]) {
       let observed: string | undefined;
       assert.deepEqual(await readCodexHookInventory({ ...fakeAppServer(dir,
         JSON.stringify({ id: 2, result: { data: [] } }), `codex_cli_rs/${version} (test)`),
