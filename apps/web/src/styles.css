@@ -2152,14 +2152,14 @@ button.status { cursor: pointer; }
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  gap: 0 var(--space-3);
+  column-gap: var(--space-3);
 }
 /* Beside an action row, the title and the sentence are padded to the height of a `.btn.sm` (28px,
    36px on touch) around their 20px line, so every part of a line starts at its top: WebKit places a
    wrapping row by its first part's baseline as if that part sat at the row's top, and would
-   otherwise lift a one-line notice with a taller action out of center. Without actions they keep
-   a 28px line, which is what spaces a wrapped notice's lines either way. */
-.notice.compact .notice-content > :is(.notice-head, .notice-body) { padding-block: var(--space-1); }
+   otherwise lift a one-line notice with a taller action out of center. That padding then spaces
+   the wrapped lines in place of the row gap. A notice without actions keeps its lines as they were. */
+.notice.compact:has(> .notice-content > .notice-actions) > .notice-content { row-gap: 0; }
 .notice.compact:has(> .notice-content > .notice-actions) > .notice-content > :is(.notice-head, .notice-body) {
   padding-block: calc((var(--control-h-sm) - var(--space-5)) / 2);
 }
