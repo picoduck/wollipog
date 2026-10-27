@@ -25,9 +25,9 @@ does not replace v0.34.0 as the latest stable release.
 ## Upgrade and Rollback Guidance
 
 Upgrade the control plane before standalone or remote runners, and update all components to
-this release. The runner protocol advances from v228 to v239. New review, campaign, recovery,
-and retention features require compatible runners; updating only the control plane does not
-supply runner capabilities or install a reviewer.
+this release. The runner protocol advances beyond v228, which v0.34.0 used. New review,
+campaign, recovery, and retention features require compatible runners; updating only the
+control plane does not supply runner capabilities or install a reviewer.
 
 Before upgrading, stop Wollipog processes that share a mutable data directory and back up the
 control-plane database and runner data. Retain the previous release's binaries and configuration.
