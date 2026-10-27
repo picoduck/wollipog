@@ -948,6 +948,17 @@ function launchingJob(h: Harness, marker: string, attempt: "none" | "complete"):
   }));
 }
 
+/** Wait until each process shows the marker in /proc/<pid>/environ: it reads empty while the
+ * process is still exec'ing, which a shell that has already exited does not wait for. */
+async function waitForMarker(marker: string, ...pids: number[]): Promise<void> {
+  const marked = (pid: number) => {
+    try { return readFileSync(`/proc/${pid}/environ`, "latin1").split("\0").includes(`WOLLIPOG_SESSION_REVIEW_JOB=${marker}`); }
+    catch { return false; }
+  };
+  for (let i = 0; i < 500 && !pids.every(marked); i++) await delay(2);
+  assert.ok(pids.every(marked), "every marked process shows the marker in /proc");
+}
+
 function restart(h: Harness, t: { after(fn: () => void): void }): { jobs: SessionReviewJobs; updates: SessionReviewJobUpdate[] } {
   h.jobs.close();
   const updates: SessionReviewJobUpdate[] = [];
@@ -964,7 +975,7 @@ test("a restart between the spawn and the running record adopts the controller f
   });
   t.after(() => { try { process.kill(-controller.pid!, "SIGKILL"); } catch { /* gone */ } });
   const exited = once(controller, "exit");
-  await delay(100); // the marker is in /proc once sleep has been exec'd
+  await waitForMarker(marker, controller.pid!);
   launchingJob(h, marker, "none");
   const { jobs, updates } = restart(h, t);
   const job = JSON.parse(readFileSync(join(h.root, "reviews", "jobs", "srj_00000009.json"), "utf8")) as { phase: string; pid?: number };
@@ -997,6 +1008,9 @@ test("a restart keeps supervising the summary's reviewer when a short-lived mark
   for (let i = 0; i < 100 && !existsSync(pids); i++) await delay(10);
   const [helper, reviewer] = readFileSync(pids, "utf8").trim().split(" ").map(Number) as [number, number];
   assert.ok(helper < reviewer, "the helper is enumerated before the reviewer");
+  // The shell exits without waiting for its children to finish exec'ing; a restart that reads /proc
+  // before then sees neither marker.
+  await waitForMarker(marker, helper, reviewer);
   launchingJob(h, marker, "none");
   const job = JSON.parse(readFileSync(join(h.root, "reviews", "jobs", "srj_00000009.json"), "utf8")) as { attemptDir: string };
   mkdirSync(job.attemptDir);
