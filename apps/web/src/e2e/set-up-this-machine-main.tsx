@@ -20,19 +20,21 @@ import "../styles.css";
 /**
  * Set Up This Machine (#2993) in the web build, with the desktop app's bridge mocked: the bundled
  * runner is available and not set up, and each `connect_local_runner` call waits until the test
- * settles it through `window.__WOLLIPOG_SET_UP_MACHINE_E2E__`. The runner's progress arrives as
- * `runner_upsert` messages, as the control plane sends them.
+ * settles it through `window.__WOLLIPOG_SET_UP_MACHINE_E2E__`; its reply is what
+ * `local_runner_status` reports from then on. The runner's progress arrives as `runner_upsert`
+ * messages, as the control plane sends them.
  */
 
 const NOT_SET_UP: LocalRunnerStatus = { available: true, enabled: false, running: false, runnerId: null };
 const STARTED: LocalRunnerStatus = { available: true, enabled: true, running: true, runnerId: "this-machine" };
 
+let bridgeStatus: LocalRunnerStatus = NOT_SET_UP;
 let pendingConnect: { resolve: (status: LocalRunnerStatus) => void; reject: (cause: Error) => void } | null = null;
 Object.assign(globalThis, { isTauri: true });
 Object.assign(window, {
   __TAURI_INTERNALS__: {
     invoke: async (command: string) => {
-      if (command === "local_runner_status") return NOT_SET_UP;
+      if (command === "local_runner_status") return bridgeStatus;
       if (command === "connect_local_runner") {
         return new Promise<LocalRunnerStatus>((resolve, reject) => { pendingConnect = { resolve, reject }; });
       }
@@ -169,6 +171,8 @@ declare global {
       finishConnect(outcome: "started" | "not-running" | { error: string }): void;
       /** The bundled runner as the control plane reports it. */
       setRunner(scenario: RunnerScenario): void;
+      /** The bundled runner's process exits, as `local_runner_status` reports it next. */
+      exitRunner(): void;
     };
   }
 }
@@ -178,13 +182,17 @@ window.__WOLLIPOG_SET_UP_MACHINE_E2E__ = {
     const pending = pendingConnect;
     if (!pending) throw new Error("no connect_local_runner call is pending");
     pendingConnect = null;
-    if (outcome === "started") pending.resolve(STARTED);
-    else if (outcome === "not-running") pending.resolve({ ...STARTED, running: false });
-    else pending.reject(new Error(outcome.error));
+    if (outcome === "started") bridgeStatus = STARTED;
+    else if (outcome === "not-running") bridgeStatus = { ...STARTED, running: false };
+    else return pending.reject(new Error(outcome.error));
+    pending.resolve(bridgeStatus);
   },
   setRunner: (scenario) => {
     runner = localRunner(scenario);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+  },
+  exitRunner: () => {
+    bridgeStatus = { ...bridgeStatus, running: false };
   },
 };
 
