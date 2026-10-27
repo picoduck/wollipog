@@ -1324,7 +1324,6 @@ export function NewSessionDialog({
         <Notice
           tone="neutral"
           compact
-          className="new-session-no-locations"
           actions={cannotAddLocation ? undefined : (
             <button
               type="button"

@@ -115,7 +115,7 @@ export function TranscriptHistoryNotice({
 }) {
   if (kind === "stale") {
     return (
-      <Notice compact tone="neutral" role="status" className="transcript-history-notice" dataState="stale">
+      <Notice compact tone="neutral" role="status" dataState="stale">
         Showing cached activity while disconnected.
       </Notice>
     );
@@ -125,7 +125,7 @@ export function TranscriptHistoryNotice({
       compact
       tone="danger"
       role="status"
-      className="transcript-history-notice"
+     
       dataState="error"
       title="Couldn't Load the Full Conversation"
       actions={<button className="btn sm" type="button" disabled={!canRetry} onClick={onRetry}>Retry</button>}
@@ -141,7 +141,7 @@ export function TranscriptHistoryNotice({
  * phone one or two lines; Show Details says under which policy, what went, and what was kept. */
 export function TranscriptPrunedNotice({ pruned }: { pruned: SessionHistoryPruned }) {
   return (
-    <Notice compact tone="info" role="note" className="transcript-history-notice" dataState="pruned"
+    <Notice compact tone="info" role="note" dataState="pruned"
       title="History Pruned" ariaLabel="History Pruned"
       details={<p>{historyPrunedDetails(pruned)}</p>}>
       {historyPrunedSummary(pruned)}

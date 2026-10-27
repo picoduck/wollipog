@@ -350,7 +350,7 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     await page.keyboard.press("End");
     await expect(follow(page)).toHaveAttribute("data-follow-tail-state", "following");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.releaseSyntheticHistoryRead());
-    const error = page.locator(".transcript-history-notice[data-state='error']");
+    const error = page.locator(".transcript-history-band > .notice[data-state='error']");
     await expect(error).toContainText("Couldn't Load the Full Conversation", { timeout: 20_000 });
     await expect(reader(page)).toHaveAttribute("aria-busy", "false");
     await expect(reader(page).getByText(/^Public live response after incomplete recovery 16\./)).toBeVisible();
