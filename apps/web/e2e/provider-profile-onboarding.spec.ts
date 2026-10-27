@@ -24,18 +24,18 @@ async function capture(page: Page, name: string) {
 for (const width of [390, 1280]) {
   test(`a refused session offers Set Up Managed Profile and Recover Existing Profile at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 844 });
-    await page.goto("/session-usage-e2e.html?driver=claude-code&lease-refusal=busy&lease-refusal-account=none&lease-viewer=member");
+    await page.goto(`/session-usage-e2e.html?driver=claude-code&width=${Math.min(width, 900)}&lease-refusal=busy&lease-refusal-account=none&lease-viewer=member`);
     const shared = page.getByRole("status", { name: "Account in Use" });
     await expect(shared).toBeVisible();
     await expect(shared.locator(".notice-actions button")).toHaveText(["Restart Session", "Set Up Managed Profile…"]);
     await capture(page, `notice-set-up-${width}`);
 
-    await page.goto("/session-usage-e2e.html?driver=claude-code&lease-refusal=foreign_owner&lease-viewer=owner");
+    await page.goto(`/session-usage-e2e.html?driver=claude-code&width=${Math.min(width, 900)}&lease-refusal=foreign_owner&lease-viewer=owner`);
     const locked = page.getByRole("status", { name: "Account Locked by Another Runner" });
     await expect(locked.locator(".notice-actions button")).toHaveText(["Recover Existing Profile…", "Switch Account…"]);
     await capture(page, `notice-recover-${width}`);
 
-    await page.goto("/session-usage-e2e.html?driver=claude-code&lease-refusal=foreign_owner&lease-viewer=member");
+    await page.goto(`/session-usage-e2e.html?driver=claude-code&width=${Math.min(width, 900)}&lease-refusal=foreign_owner&lease-viewer=member`);
     await expect(page.getByRole("status", { name: "Account Locked by Another Runner" }).locator(".notice-actions button"))
       .toHaveText(["Open Machine Accounts", "Switch Account…"]);
   });
