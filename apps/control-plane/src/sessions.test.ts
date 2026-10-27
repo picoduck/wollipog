@@ -3358,46 +3358,94 @@ for (const outcome of ["rejected", "expired"] as const) {
   });
 }
 
-test("a spawn approval pending under the pre-canonical fingerprint still resolves for its request", () => {
-  const { db, svc, hub } = makeHarness();
-  try {
-    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
-    db.updateSessionStatus(parent.id, "running", Date.now());
-    assert.ok(svc.upsertGovernancePolicy({
-      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
-      enabled: true, scope: { toolName: "wollipog.create_session" },
-    }).ok);
-    const { rest } = spawnRequestInTwoKeyOrders();
-    // An older control plane hashed the body in the order the client sent it.
-    const legacyFingerprint = createHash("sha256").update(JSON.stringify({
-      request: rest, parentSessionId: parent.id, ordinal: 0,
-    })).digest("hex");
-    const legacyRequestId = `spawn_${legacyFingerprint}`;
-    const approval: PendingApproval = {
-      requestId: legacyRequestId, kind: "policy_hook", title: `${parent.title} requests a child: Requested Child`,
-      context: { toolName: "wollipog.create_session" }, governancePolicyId: "ask-child-spawn",
-      options: [
-        { optionId: "allow", name: "Create Child", kind: "allow_once" },
-        { optionId: "deny", name: "Reject", kind: "reject_once" },
-      ],
-    };
-    assert.equal(db.beginPolicyHookApproval({
-      sessionId: parent.id, requestId: legacyRequestId, requestFingerprint: legacyFingerprint,
-      governancePolicyId: "ask-child-spawn", approval, now: Date.now(),
-    }).kind, "created");
-    const create = () =>
-      svc.createSession(rest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+/** A parent holding a spawn approval that an older control plane recorded for `rest`, keyed to
+ * that body's own key order. */
+function legacySpawnApprovalFixture() {
+  const harness = makeHarness();
+  const { db, svc } = harness;
+  const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+  db.updateSessionStatus(parent.id, "running", Date.now());
+  assert.ok(svc.upsertGovernancePolicy({
+    policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+    enabled: true, scope: { toolName: "wollipog.create_session" },
+  }).ok);
+  const { rest, tool } = spawnRequestInTwoKeyOrders();
+  const legacyFingerprint = createHash("sha256").update(JSON.stringify({
+    request: rest, parentSessionId: parent.id, ordinal: 0,
+  })).digest("hex");
+  const legacyRequestId = `spawn_${legacyFingerprint}`;
+  const approval: PendingApproval = {
+    requestId: legacyRequestId, kind: "policy_hook", title: `${parent.title} requests a child: Requested Child`,
+    context: { toolName: "wollipog.create_session" }, governancePolicyId: "ask-child-spawn",
+    options: [
+      { optionId: "allow", name: "Create Child", kind: "allow_once" },
+      { optionId: "deny", name: "Reject", kind: "reject_once" },
+    ],
+  };
+  assert.equal(db.beginPolicyHookApproval({
+    sessionId: parent.id, requestId: legacyRequestId, requestFingerprint: legacyFingerprint,
+    governancePolicyId: "ask-child-spawn", approval, now: Date.now(),
+  }).kind, "created");
+  const create = (request: typeof rest) =>
+    svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+  return { ...harness, parent, rest, tool, legacyRequestId, create };
+}
 
-    const retried = create();
+test("a spawn approval pending under the pre-canonical fingerprint still resolves for its request", () => {
+  const { db, svc, hub, parent, rest, legacyRequestId, create } = legacySpawnApprovalFixture();
+  try {
+    const retried = create(rest);
     assert.equal(retried.status, 428, retried.error);
     assert.match(retried.error!, new RegExp(`\\(request ${legacyRequestId}\\)`), "the retry finds the upgraded approval");
     assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, legacyRequestId);
     const launched = hub.sentOfType("start_session").length;
     assert.ok(svc.approve(parent.id, legacyRequestId, "allow").ok);
-    const created = create();
+    const created = create(rest);
     assert.ok(created.ok, created.error);
     assert.equal(db.childSessionAllocations(parent.id).count, 1);
     assert.equal(hub.sentOfType("start_session").length, launched + 1);
+  } finally { db.close(); }
+});
+
+test("a pre-canonical spawn approval outranks the canonical card a reordered retry queued behind it", () => {
+  const { db, svc, hub, parent, rest, tool, legacyRequestId, create } = legacySpawnApprovalFixture();
+  try {
+    // The old fingerprint cannot be derived from a reordered body, so that retry parks its own card.
+    const reordered = create(tool);
+    assert.equal(reordered.status, 428, reordered.error);
+    const canonicalRequestId = /\(request (spawn_[0-9a-f]{64})\)/.exec(reordered.error!)![1]!;
+    assert.notEqual(canonicalRequestId, legacyRequestId);
+    assert.equal(db.getPolicyHookApproval(parent.id, canonicalRequestId)!.status, "queued");
+
+    const launched = hub.sentOfType("start_session").length;
+    assert.ok(svc.approve(parent.id, legacyRequestId, "allow").ok);
+    const created = create(rest);
+    assert.ok(created.ok, created.error);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "the exact original body creates exactly one child");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+
+    // The created child advanced the ordinal, so the canonical card can no longer authorize anything.
+    const canonical = db.getPolicyHookApproval(parent.id, canonicalRequestId)!;
+    if (canonical.status === "pending") assert.ok(svc.approve(parent.id, canonicalRequestId, "allow").ok);
+    for (const request of [tool, rest]) {
+      const again = create(request);
+      assert.equal(again.status, 428, again.error);
+      assert.doesNotMatch(again.error!, new RegExp(`${legacyRequestId}|${canonicalRequestId}`));
+    }
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "neither card creates a second child");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+  } finally { db.close(); }
+});
+
+test("a rejected pre-canonical spawn approval keeps its 403 even with a canonical card queued", () => {
+  const { db, svc, parent, rest, tool, legacyRequestId, create } = legacySpawnApprovalFixture();
+  try {
+    assert.equal(create(tool).status, 428);
+    assert.ok(svc.approve(parent.id, legacyRequestId, "deny").ok);
+    const refused = create(rest);
+    assert.equal(refused.status, 403, refused.error);
+    assert.equal(refused.error, "child session creation was rejected or its approval expired");
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
   } finally { db.close(); }
 });
 

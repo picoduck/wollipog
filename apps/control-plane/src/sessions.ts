@@ -3667,20 +3667,17 @@ export class SessionsService {
     // Keys are sorted at every depth so a REST body and the MCP tool's body for the same request
     // share one approval whatever order their fields arrive in (#3685).
     const fingerprint = createHash("sha256").update(canonicalAutomationCommandJson(identity)).digest("hex");
-    let requestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
+    const canonicalRequestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
+    // An approval recorded before the upgrade is keyed to the client's key order. It keeps
+    // resolving for the exact body that created it, ahead of any canonical card a reordered retry
+    // queued behind it. Once either record creates the child the ordinal advances, so the other
+    // can no longer match any request and lapses at its fence.
+    const legacyRequestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${
+      createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
     this.reconcilePolicyHookTimeouts(now, parentSessionId);
-    let stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
-    if (!stored) {
-      // An approval recorded before the upgrade is keyed to the client's key order. It keeps
-      // resolving for the exact body that created it until it settles or its fence expires.
-      const legacyRequestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${
-        createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
-      const legacy = this.db.getPolicyHookApproval(parentSessionId, legacyRequestId);
-      if (legacy) {
-        stored = legacy;
-        requestId = legacyRequestId;
-      }
-    }
+    const legacy = this.db.getPolicyHookApproval(parentSessionId, legacyRequestId);
+    const requestId = legacy ? legacyRequestId : canonicalRequestId;
+    const stored = legacy ?? this.db.getPolicyHookApproval(parentSessionId, canonicalRequestId);
     if (stored) {
       if (stored.status === "allowed") return ok(null);
       if (stored.status !== "pending" && stored.status !== "queued") {
