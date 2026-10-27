@@ -12,6 +12,8 @@
  * `forge=gitlab` moves the Campaign Status Panel item to a GitLab project in a nested namespace.
  * `scope=outdated-runner` or `scope=issue-limits` makes issue scope unavailable because a participating
  * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
+ * `refresh=failing` fails every work-list read after the first, so a ledger write (`bumpRevision`)
+ * leaves the loaded list under a Couldn't Refresh Work Items notice.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -359,6 +361,9 @@ const client = {
   childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
   campaignWorkItems: async (_id: string, query: string) => {
     queries.push(query);
+    if (params.get("refresh") === "failing" && queries.length > 1) {
+      throw new ApiError("The control plane didn't answer in time.", 503);
+    }
     const search = new URLSearchParams(query);
     const filters: CampaignWorkFilters = {
       origin: (search.get("origin") ?? "all") as CampaignWorkFilters["origin"],

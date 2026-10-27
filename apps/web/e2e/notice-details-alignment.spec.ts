@@ -76,7 +76,9 @@ for (const theme of ["dark", "light"]) {
           expectGeometry(toggle.x - (body.x + body.width), "Show Details stays clear of the sentence's box")
             .toBeGreaterThanOrEqual(0);
         } else {
-          expectGeometry(toggle.y - (body.y + body.height), "the row wraps under the sentence").toBeGreaterThanOrEqual(0);
+          // A compact sentence's own padding spaces it from the row it wraps over (#3522), so the row
+          // starts where the sentence's box ends.
+          expectGeometry(toggle.y - (body.y + body.height), "the row wraps under the sentence").toBeGreaterThanOrEqual(-1);
           await expectToggleAligned(notice);
         }
       });

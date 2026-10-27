@@ -2128,26 +2128,46 @@ button.status { cursor: pointer; }
 }
 .notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
 .notice-head .notice-dismiss { margin: 0 calc(var(--space-2) * -1) 0 0; }
-/* One line for field-group and composer notices: icon, sentence, one trailing action. */
+/* One line for field-group and composer notices: icon, sentence, one trailing action.
+   Its parts line up on their first baselines rather than their centers, so once a notice wraps (a
+   title beside or over a sentence of several lines, a sentence over two lines) the icon and an
+   untitled notice's dismiss button stay level with the title or the sentence's first line, and a
+   sentence or action row beside the title starts on its line (#3522). `align-content` still
+   centers a one-line row in the notice's 40px.
+   The icon, the trailing controls and the action row have no text baseline of their own (an image,
+   or a 13px label), so a zero-width character in the notice's own type gives each one the baseline
+   of a body line centered on it: on one line, everything stays centered as before. */
 .notice.compact {
-  align-items: center;
+  align-items: baseline;
+  align-content: center;
   min-height: 40px;
   padding: var(--space-1) var(--space-3);
 }
+.notice.compact > :is(.notice-icon, .notice-trailing)::before,
+.notice.compact .notice-actions::before { content: "\200b"; }
+/* Each character is a flex item too, so it gives back the gap after it. */
+.notice.compact > .notice-trailing::before { margin-right: calc(var(--space-1) * -1); }
+.notice.compact .notice-actions::before { margin-right: calc(var(--space-2) * -1); }
 .notice.compact .notice-content {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   column-gap: var(--space-3);
+}
+/* Beside an action row, the title and the sentence are padded to the height of a `.btn.sm` (28px,
+   36px on touch) around their 20px line, so every part of a line starts at its top: WebKit places a
+   wrapping row by its first part's baseline as if that part sat at the row's top, and would
+   otherwise lift a one-line notice with a taller action out of center. That padding then spaces
+   the wrapped lines in place of the row gap. A notice without actions keeps its lines as they were. */
+.notice.compact:has(> .notice-content > .notice-actions) > .notice-content { row-gap: 0; }
+.notice.compact:has(> .notice-content > .notice-actions) > .notice-content > :is(.notice-head, .notice-body) {
+  padding-block: calc((var(--control-h-sm) - var(--space-5)) / 2);
 }
 .notice.compact .notice-body { flex: 1 1 12rem; }
 .notice.compact .notice-actions { margin-top: 0; }
 .notice.compact .notice-dismiss { margin: 0; }
-/* Opened details take the line under the sentence, and the icon stays on the sentence's line, which
-   is as tall as its Show Details toggle. */
-.notice.compact .notice-details-body { flex-basis: 100%; }
-.notice.compact:has(> .notice-content > .notice-details-body) { align-items: start; }
-.notice.compact:has(> .notice-content > .notice-details-body) > .notice-icon { height: var(--control-h-sm); }
+/* Opened details take the line under the sentence and its row; the icon stays on the first line. */
+.notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
    in the tone below it. */
 .notice.page-banner {
@@ -10682,11 +10702,6 @@ textarea {
     max-width: none;
     margin-top: 0;
   }
-  /* An ending wraps here, so its icon stays on the title's line. */
-  .signin > .notice.compact {
-    align-items: start;
-    padding-block: var(--space-2);
-  }
 }
 /* Choose Another Account's sign-in (#2208): a plain head over the shared steps. */
 .signin-card {
@@ -12380,13 +12395,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   margin: 0;
   color: var(--text-dim);
   font: var(--type-body);
-}
-/* New Session's No Locations notice (#2952) takes Location's place in a half-width column, where its
-   sentence wraps: the icon stays on the sentence's first line, as a full notice's does. Add Location's
-   onboarding and offline notices (#2966) are sentences that wrap on a phone, so they do the same. */
-.notice.compact:is(.new-session-no-locations, .add-location-note) {
-  align-items: start;
-  padding-block: var(--space-2);
 }
 /* New Session picks one agent from a shared list; the provider icon adorns its responsive owner. */
 .new-session-choice-control {
@@ -17274,14 +17282,6 @@ button.review-finding-location {
   padding-top: var(--space-3);
   padding-inline: max(var(--tl-gutter), calc((100% - var(--chat-max)) / 2));
 }
-.notice.transcript-history-notice {
-  /* Its title, body and actions wrap onto several lines in a narrow reader, so the tone icon is
-     pinned to the first line, which is as tall as the Retry button beside it. */
-  align-items: start;
-}
-.notice.transcript-history-notice .notice-icon,
-.notice.transcript-history-notice .notice-head { min-height: var(--control-h-sm); }
-.notice.transcript-history-notice .notice-head { align-items: center; }
 .transcript-history-error { font: var(--type-small); font-family: var(--font-mono); overflow-wrap: anywhere; }
 
 /* The floating tail control (#2153; docs/design-system.md §3.1, §13.2): one .btn.sm at the reader's
