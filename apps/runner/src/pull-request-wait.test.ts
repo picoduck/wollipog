@@ -837,6 +837,111 @@ test("a failed merge group ends the wait only once GitHub gives up on the entry"
   assert.deepEqual(time.sleeps, [30_000, 10_000], "the ejection is confirmed over the whole interval");
 });
 
+const ENQUEUED_AT = "2026-10-12T11:00:00Z";
+const REMOVED_AT = "2026-10-12T12:00:00Z";
+const added = (createdAt = ENQUEUED_AT) => ({ __typename: "AddedToMergeQueueEvent", createdAt });
+const removedEvent = (reason: string | null, createdAt = REMOVED_AT) => ({ __typename: "RemovedFromMergeQueueEvent", createdAt, reason });
+const forcePushed = (createdAt: string) => ({ __typename: "HeadRefForcePushedEvent", createdAt });
+/** An open, unqueued pull request whose head checks passed, with its latest queue timeline events. */
+const afterQueue = (events: unknown[], nodes: unknown[] = [run(AGGREGATOR, "SUCCESS")]) =>
+  ok(pr({ queueEvents: { nodes: events.slice(-2) } }, nodes));
+
+for (const reason of ["checks_timed_out", "failed_checks", "manual"]) {
+  test(`a call that starts after GitHub removed the head's entry (${reason}) returns queue_ejected`, async () => {
+    // #3712: the entry left between two calls, so this call never sees it and its head checks pass.
+    const fake = fakeGh([afterQueue([added(), removedEvent(reason)])]);
+    const time = clock();
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD, timeoutMs: 600_000 }, { gh: fake.gh, ...time });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "queue_ejected");
+    assert.deepEqual(result.summary.mergeQueueRemoval, { reason, removedAt: REMOVED_AT });
+    assert.equal(result.summary.mergeQueue, null);
+    assert.equal(result.summary.merged, false);
+    assert.equal(result.summary.state, "open");
+    assert.deepEqual(time.sleeps, [10_000], "the removal is confirmed over the whole ejection interval");
+    assert.equal(fake.graphqlCalls(), 2);
+    assert.ok(fake.calls.every((args) => !args.some((arg) => /^-X$|--method|^query=\s*mutation|enqueuePullRequest/u.test(arg))), "reads only, never re-enqueues");
+  });
+}
+
+test("a pull request that was never enqueued keeps returning checks_passed", async () => {
+  for (const events of [undefined, { nodes: [] }]) {
+    const fake = fakeGh([ok(pr(events ? { queueEvents: events } : {}, [run(AGGREGATOR, "SUCCESS")]))]);
+    const time = clock();
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD }, { gh: fake.gh, ...time });
+    assert.ok(result.ok);
+    assert.equal(result.summary.outcome, "checks_passed");
+    assert.equal(result.summary.mergeQueueRemoval, null);
+    assert.deepEqual(time.sleeps, []);
+    assert.equal(fake.graphqlCalls(), 1);
+  }
+  assert.match(PULL_REQUEST_WAIT_QUERY, /REMOVED_FROM_MERGE_QUEUE_EVENT/u);
+});
+
+test("a removal that belongs to an earlier head keeps current behavior", async () => {
+  const cases: Array<[string, unknown[], unknown[]?]> = [
+    ["force-pushed after the removal", [removedEvent("manual"), forcePushed("2026-10-12T12:05:00Z")]],
+    ["force-pushed in the same second, listed first", [forcePushed(REMOVED_AT), removedEvent("manual")]],
+    // A fast-forward push after the removal (even of an older commit) reports its checks later.
+    ["pushed after the removal", [added(), removedEvent("checks_timed_out")], [run(AGGREGATOR, "SUCCESS", { startedAt: "2026-10-12T12:10:00Z" })]],
+    ["checks reported in the removal's second", [added(), removedEvent("failed_checks")], [run(AGGREGATOR, "SUCCESS", { startedAt: REMOVED_AT })]],
+    ["queued again since", [removedEvent("checks_timed_out"), added("2026-10-12T12:30:00Z")]],
+    ["unreadable removal time", [added(), removedEvent("manual", "not a time")]],
+  ];
+  for (const [label, events, nodes] of cases) {
+    const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD },
+      { gh: fakeGh([afterQueue(events, nodes)]).gh, ...clock() });
+    assert.ok(result.ok, label);
+    assert.equal(result.summary.outcome, "checks_passed", label);
+    assert.equal(result.summary.mergeQueueRemoval, null, label);
+  }
+});
+
+test("a removal immediately followed by a merge still reports merged", async () => {
+  // GitHub records the queue's own removal (reason `merged`) a second before the pull request reads MERGED.
+  const fake = fakeGh([
+    afterQueue([added(), removedEvent("merged")]),
+    ok(pr({ state: "MERGED", mergeCommit: { oid: MERGE }, queueEvents: { nodes: [added(), removedEvent("merged")] } })),
+  ]);
+  const time = clock();
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, headSha: HEAD, timeoutMs: 600_000 }, { gh: fake.gh, ...time });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "merged");
+  assert.equal(result.summary.mergeCommitSha, MERGE);
+  assert.deepEqual(time.sleeps, [10_000]);
+
+  // Unconfirmed at the deadline it is a timeout that still names the removal, never a guessed ejection.
+  const late = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 1 },
+    { gh: fakeGh([afterQueue([added(), removedEvent("checks_timed_out")])]).gh, ...clock() });
+  assert.ok(late.ok);
+  assert.equal(late.summary.outcome, "timeout");
+  assert.deepEqual(late.summary.mergeQueueRemoval, { reason: "checks_timed_out", removedAt: REMOVED_AT });
+});
+
+test("a removal that stops applying before it is confirmed falls back to the head's checks", async () => {
+  // Queued again: the timeline shows the new entry before the entry itself is readable.
+  const fake = fakeGh([
+    afterQueue([added(), removedEvent("checks_timed_out")]),
+    afterQueue([removedEvent("checks_timed_out"), added("2026-10-12T12:30:00Z")]),
+  ]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "checks_passed");
+  assert.equal(result.summary.mergeQueueRemoval, null);
+});
+
+test("an ejection this call watched also carries GitHub's removal reason", async () => {
+  const entry = { position: 1, state: "AWAITING_CHECKS", enqueuedAt: ENQUEUED_AT, headCommit: null };
+  const fake = fakeGh([
+    ok(pr({ mergeQueueEntry: entry, queueEvents: { nodes: [added()] } }, [run(AGGREGATOR, "SUCCESS")])),
+    afterQueue([added(), removedEvent("failed_checks")]),
+  ]);
+  const result = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 }, { gh: fake.gh, ...clock() });
+  assert.ok(result.ok);
+  assert.equal(result.summary.outcome, "queue_ejected");
+  assert.deepEqual(result.summary.mergeQueueRemoval, { reason: "failed_checks", removedAt: REMOVED_AT });
+});
+
 test("HTTP 403 rate limits and 5xx answers retry; an ordinary 403 does not", async () => {
   for (const stderr of ["gh: API rate limit exceeded for user ID 1. (HTTP 403)", "gh: Bad Gateway (HTTP 502)"]) {
     const fake = fakeGh([ok(pr({}, [run(AGGREGATOR, "SUCCESS")]))]);

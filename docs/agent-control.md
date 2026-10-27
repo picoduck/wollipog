@@ -205,7 +205,13 @@ GitHub's `mergeStateStatus` to confirm it, because an unseen context could still
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
-for 10 seconds. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
+for 10 seconds. The same query reads the last two merge-queue and force-push timeline events (#3712),
+so a call that starts after GitHub removed the entry also reports `queue_ejected`, confirmed over the
+same 10 seconds from its first observation, with `mergeQueueRemoval` carrying GitHub's `reason` and
+`removedAt`. The removal counts only when it is the latest such event (a later enqueue or force push
+voids it, as does a force push listed in the same second) and the open head already reported a check
+before it, so a pull request never enqueued, or a head pushed after the removal, keeps reporting its
+own checks. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
 caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
 reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
 checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
