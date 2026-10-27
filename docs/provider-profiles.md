@@ -224,7 +224,9 @@ the code, with the recovery it needs:
 A refusal of the runner's own provider HOME (no account bound) names it as "this Machine's Claude
 sign-in" (or Codex) and offers no account switch: the way out is a managed profile of this control
 plane, so a busy, locked or foreign-host refusal of that HOME offers **Set Up Managed Profile…**
-(after **Restart Session** when it is only busy). Older runners report only text; the session's **Turn Failed**
+(after **Restart Session** when it is only busy). The profile serves new sessions: a session bound
+to no account can't be switched onto an account, so the refused session itself keeps the Machine's
+own HOME. Older runners report only text; the session's **Turn Failed**
 notice says that the runner couldn't use the session's provider account, with the runner's message
 under its details.
 

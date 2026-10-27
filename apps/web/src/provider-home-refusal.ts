@@ -67,21 +67,21 @@ export function providerHomeRefusalCopy(
       title: "Account in Use",
       body: `Another runner, provider, helper, or lease publication is using ${subject}, so this session didn't start. ` +
         (account ? "Restart the session once it's free, or switch to another account."
-          : "Restart the session once it's free, or set up a managed profile so this control plane has its own sign-in."),
+          : "Restart the session once it's free, or set up a managed profile for this control plane's new sessions."),
       actions: account ? ["restart", "switch_account"] : ["restart", "set_up_profile"],
     }),
     foreign_owner: () => ({
       title: "Account Locked by Another Runner",
       body: account
         ? `A runner or control plane that stopped left ${account} locked. An Owner or Admin can unlock it with Recover Existing Profile, or you can switch to another account.`
-        : `A runner or control plane that stopped left ${subject} locked. Set up a managed profile so this control plane has its own sign-in.`,
+        : `A runner or control plane that stopped left ${subject} locked. Set up a managed profile for this control plane's new sessions.`,
       actions: account ? ["recover_profile", "switch_account"] : ["set_up_profile"],
     }),
     foreign_host: () => ({
       title: "Account in Use on Another Host",
       body: account
         ? `A runner on another host uses ${account}, so this Machine can't share it. Switch to another account, or set up a managed profile for this Machine.`
-        : `A runner on another host uses ${subject}. Set up a managed profile so this control plane has its own sign-in.`,
+        : `A runner on another host uses ${subject}. Set up a managed profile for this control plane's new sessions.`,
       actions: account ? ["switch_account", "set_up_profile"] : ["set_up_profile"],
     }),
     unavailable: () => ({

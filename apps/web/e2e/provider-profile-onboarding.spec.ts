@@ -41,12 +41,13 @@ for (const width of [390, 1280]) {
   });
 }
 
-test("Set Up Managed Profile opens Add Account for the provider, and the new account can serve new sessions", async ({ page }) => {
+for (const width of [390, 1280]) test(`Set Up Managed Profile opens Add Account for the provider, and the new account can serve new sessions at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 844 });
   await page.goto(`/machine-management-e2e.html?profiles&${DESIGN_WORKSTATION}&accounts=add-claude`);
   const dialog = page.getByRole("dialog", { name: "Add Account" });
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole("radio", { name: "Claude" })).toHaveAttribute("aria-checked", "true");
-  await capture(page, "set-up-add-account");
+  await capture(page, `set-up-add-account-${width}`);
   await dialog.getByLabel("Account Label").fill("Second Control Plane");
   await dialog.getByRole("button", { name: "Start Sign-In" }).click();
   const steps = signInSteps(page, "Second Control Plane");
@@ -56,21 +57,22 @@ test("Set Up Managed Profile opens Add Account for the provider, and the new acc
   const offer = providerAccounts(page).getByRole("status", { name: "Use for New Sessions" });
   await expect(offer).toBeVisible();
   await expect(offer).toContainText("New Claude sessions on this machine that don't choose an account will use it.");
-  await capture(page, "set-up-use-for-new-sessions");
+  await capture(page, `set-up-use-for-new-sessions-${width}`);
   await offer.getByRole("button", { name: "Use for New Sessions" }).click();
   await expect(page.getByText("New Claude sessions on this machine use this account.")).toBeVisible();
   await expect(offer).toHaveCount(0);
 });
 
-test("Recover Existing Profile adopts and unlocks a configured account in one confirmation", async ({ page }) => {
+for (const width of [390, 1280]) test(`Recover Existing Profile unlocks and adopts a configured account in one confirmation at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 844 });
   await page.goto(`/machine-management-e2e.html?profiles&leases&${DESIGN_WORKSTATION}&accounts=recover-claude-personal`);
   const confirm = page.getByRole("dialog", { name: "Recover Existing Profile" });
   await expect(confirm).toBeVisible();
   await expect(confirm).toContainText("then adopts it as this control plane's profile");
   await expect(confirm).toContainText("Locked since");
-  await capture(page, "recover-existing-profile");
+  await capture(page, `recover-existing-profile-${width}`);
   await confirm.getByRole("button", { name: "Recover Existing Profile" }).click();
   await expect(page.getByText("Profile recovered.")).toBeVisible();
   await expect(accountRow(page, "Personal").locator(".provider-account-lease")).toHaveCount(0);
-  await capture(page, "recover-existing-profile-done");
+  await capture(page, `recover-existing-profile-done-${width}`);
 });

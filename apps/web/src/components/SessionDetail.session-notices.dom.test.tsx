@@ -467,7 +467,7 @@ test("a refusal of the Machine's own provider HOME names it and offers no accoun
     providerHomeRefusal: launchRefusal("foreign_owner", false) }));
   try {
     const notice = fixture.notices()[0]!;
-    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Set up a managed profile so this control plane has its own sign-in/);
+    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Set up a managed profile for this control plane's new sessions\./);
     assert.deepEqual(actionNames(notice), ["Open Machine Accounts"]);
   } finally {
     await fixture.unmount();

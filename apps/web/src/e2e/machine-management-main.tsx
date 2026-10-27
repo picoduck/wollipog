@@ -172,6 +172,7 @@ if (signInFixture && runner.providerAccounts) {
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
   // A Windows runner refuses every adoption, so the Machine that adopts is a Linux one (#3240).
   runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
   const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
   for (const account of runner.providerAccounts) {
     const state = access[account.id as keyof typeof access];
