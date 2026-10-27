@@ -4183,6 +4183,17 @@ export class SessionsService {
       ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
         savedProviderAccountId ?? defaultProviderAccountId ?? implicitProviderAccountId
       : undefined;
+    // With no account chosen and every compatible one another control plane's profile, the runner
+    // would fall back to the first of them and refuse it at its lease (#3240): say so here instead.
+    if (usesRunnerProviderAccount && !providerAccountId && (launch.context?.kind ?? "native") === "native" &&
+        compatibleProviderAccounts.length > 0 &&
+        compatibleProviderAccounts.every((account) => account.profile?.access === "not_granted")) {
+      return fail(
+        "Every account for this provider on this Machine is a profile of another control plane. " +
+          "Set up a managed profile for this control plane, or adopt one, in the Machine's accounts.",
+        409,
+      );
+    }
     const providerAccount = providerAccountId
       ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
       : undefined;

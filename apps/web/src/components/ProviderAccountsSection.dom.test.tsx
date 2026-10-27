@@ -105,6 +105,7 @@ function client(handlers: {
 type RenderProps = {
   runner?: RunnerView; online?: boolean; canManageProfiles?: boolean; api?: ApiClient; machineName?: string;
   intent?: MachineAccountsIntent;
+  profileAccessKnown?: boolean;
 };
 
 async function render(props: RenderProps) {
@@ -117,7 +118,8 @@ async function render(props: RenderProps) {
     <ApiProvider client={apiClient}>
       <FeedbackProvider>
         <ProviderAccountsSection runner={next.runner ?? runnerView()} online={next.online ?? true}
-          machineName={next.machineName ?? "Studio Mac"} canManageProfiles={next.canManageProfiles ?? true} intent={next.intent} />
+          machineName={next.machineName ?? "Studio Mac"} canManageProfiles={next.canManageProfiles ?? true} intent={next.intent}
+          profileAccessKnown={next.profileAccessKnown ?? true} />
       </FeedbackProvider>
     </ApiProvider>,
   );
@@ -1427,22 +1429,37 @@ async function confirmDialog(ui: Awaited<ReturnType<typeof render>>, label: stri
   await ui.settle();
 }
 
-test("Recover Existing Profile adopts a pending profile, inspects the lock again, then unlocks it in one confirmation", async () => {
-  const api = leaseClient();
-  const adopted: string[] = [];
-  const recovering = { ...api.client, adoptProviderProfile: async (_runnerId: string, accountId: string) => {
-    adopted.push(accountId); return { status: "active", profileId: "p2", grantId: "g" };
-  } } as unknown as ApiClient;
-  const ui = await render({ api: recovering, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+/** The lease client, with adoption recorded in the same order as recovery. */
+function recoveringClient(options: Parameters<typeof leaseClient>[0] = {}) {
+  const api = leaseClient(options);
+  const order: string[] = [];
+  const client = {
+    ...api.client,
+    adoptProviderProfile: async (_runnerId: string, accountId: string) => {
+      order.push(`adopt:${accountId}`);
+      return { status: "active", profileId: "p2", grantId: "g" };
+    },
+    recoverProviderHomeLease: async (runnerId: string, accountId: string, tip: string) => {
+      order.push(`recover:${accountId}`);
+      return (api.client as unknown as { recoverProviderHomeLease: (r: string, a: string, t: string) => Promise<unknown> })
+        .recoverProviderHomeLease(runnerId, accountId, tip);
+    },
+  } as unknown as ApiClient;
+  return { ...api, client, order };
+}
+
+test("Recover Existing Profile unlocks a stale lease, then adopts the profile, in one confirmation", async () => {
+  const api = recoveringClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
     intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
   try {
     const dialog = ui.dialog()!;
     assert.match(dialog.textContent ?? "", /Recover Existing Profile/);
-    assert.match(dialog.textContent ?? "", /adopts the account as its profile/);
-    assert.match(dialog.textContent ?? "", /unlocks it only after checking that no earlier session is still using it/);
+    assert.match(dialog.textContent ?? "", /unlocks it only after checking that no earlier session is still using it, then adopts it/);
     assert.match(dialog.textContent ?? "", /Locked since/);
     await confirmDialog(ui, "Recover Existing Profile");
-    assert.deepEqual(adopted, ["pending"]);
+    // Adoption takes the HOME's lease, so another runner's stale lease is recovered first.
+    assert.deepEqual(api.order, ["recover:pending", "adopt:pending"]);
     assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }]);
     assert.ok(ui.toasts().some((toast) => toast.includes("Profile recovered.")), ui.toasts().join("|"));
   } finally {
@@ -1450,14 +1467,69 @@ test("Recover Existing Profile adopts a pending profile, inspects the lock again
   }
 });
 
-test("Recover Existing Profile explains a lock the runner still refuses after adoption, and never forces it", async () => {
-  const api = leaseClient();
+test("Recover Existing Profile recovers exactly the lock its confirmation showed", async () => {
+  const api = recoveringClient({ recover: async (_accountId, tip) => {
+    if (tip !== TIP) return { status: "recovered", authorizationId: "a" };
+    throw new ApiError("The lease changed", 409, "TIP_CHANGED");
+  } });
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
+  try {
+    // While the confirmation is open, another stale record replaces the one it shows.
+    api.state.pending = { ...api.state.pending!, tipHash: "e".repeat(64) };
+    await confirmDialog(ui, "Recover Existing Profile");
+    assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }], "only the confirmed record is authorized");
+    assert.deepEqual(api.order, ["recover:pending"], "nothing is adopted once the recovery is refused");
+    assert.match(ui.error() ?? "", /changed after it was checked/);
+    assert.ok(!ui.toasts().some((toast) => /recovered|unlocked|adopted/iu.test(toast)), ui.toasts().join("|"));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile explains a lock the runner refuses to recover, before asking and without adopting", async () => {
+  const api = recoveringClient();
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
     intent: { kind: "recover_profile", accountId: "other", activationId: 1 } });
   try {
-    await confirmDialog(ui, "Recover Existing Profile");
-    assert.deepEqual(api.recovered, [], "a lock without reboot proof is not recovered");
+    assertNoDomNode(ui.dialog(), "nothing to confirm");
+    assert.deepEqual(api.order, []);
     assert.match(ui.error() ?? "", /until this machine has restarted/);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+for (const [label, inspect, expected] of [
+  ["an inspection that fails", async () => { throw new Error("offline"); }, /couldn't check whether this account is locked/],
+  ["an unverifiable lease", async () => ({ state: "unverifiable" as const }), /could not check whether this account is still in use/],
+] as const) {
+  test(`Recover Existing Profile reports ${label} instead of success`, async () => {
+    const api = recoveringClient();
+    const client = { ...api.client, inspectProviderHomeLease: inspect } as unknown as ApiClient;
+    const ui = await render({ api: client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+      intent: { kind: "recover_profile", accountId: "granted", activationId: 1 } });
+    try {
+      assertNoDomNode(ui.dialog());
+      assert.deepEqual(api.order, []);
+      assert.match(ui.error() ?? "", expected);
+      assert.ok(!ui.toasts().some((toast) => /can already be used|unlocked|recovered/iu.test(toast)), ui.toasts().join("|"));
+    } finally {
+      await ui.unmount();
+    }
+  });
+}
+
+test("Recover Existing Profile waits for the viewer's permissions instead of refusing on the way", async () => {
+  const api = recoveringClient();
+  const intent: MachineAccountsIntent = { kind: "recover_profile", accountId: "pending", activationId: 1 };
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    canManageProfiles: false, profileAccessKnown: false, intent });
+  try {
+    assertNoDomNode(ui.dialog());
+    assertNoDomNode(ui.notice(), "no refusal while the identity is still loading");
+    await ui.rerender({ canManageProfiles: true, profileAccessKnown: true, intent });
+    assert.ok(ui.dialog(), "it opens once the identity says the viewer is an Owner");
   } finally {
     await ui.unmount();
   }

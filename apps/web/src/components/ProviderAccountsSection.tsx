@@ -281,7 +281,7 @@ type SectionNotice = { title: ReactNode; body: string; details?: string };
  * and Add Account…, then one surface of account rows, each with one status. Removal and the profile
  * actions live in each row's ⋯; a refusal is one compact notice between the title and the rows.
  */
-export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, intent }: {
+export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, profileAccessKnown = true, intent }: {
   runner: RunnerView;
   online: boolean;
   /** The machine's display name, for Add Account and the removal confirmation. */
@@ -289,6 +289,9 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   /** The viewer is an organization Owner or Admin. Profile routes are not member-scoped, so a member
    * with manage rights on this Machine does not get the profile actions. */
   canManageProfiles?: boolean;
+  /** Whether `canManageProfiles` is final: the Machines view reads it from an identity that loads
+   * on its own, and a recovery intent waits for it rather than being refused on the way. */
+  profileAccessKnown?: boolean;
   /** Set Up Managed Profile or Recover Existing Profile from a refused session (#3240): each new
    * activation scrolls here and opens it once. */
   intent?: MachineAccountsIntent;
@@ -500,34 +503,45 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
 
   /**
    * Recover Existing Profile (#3240), opened from a refused session: one confirmation for what a
-   * configured account needs before this control plane can use it again. Adopt as Profile when its
-   * profile isn't granted here, then Recover Account when an earlier runner left it locked. Each
-   * step keeps its own checks; a lock the runner still refuses to recover is explained instead.
+   * configured account needs before this control plane can use it again. Recover Account first when
+   * an earlier runner left it locked (adoption takes the HOME's lease, so it cannot pass another
+   * runner's stale lease), then Adopt as Profile when its profile isn't granted here. Recovery is
+   * bound to the exact lock the confirmation showed; a lock the runner refuses to recover, or one it
+   * can't inspect, is explained instead and nothing changes.
    */
   const recoverExistingProfile = async (account: ProviderAccountDefinition) => {
     const fail = (body: string) => setNotice({ title: <>Couldn't Recover {identifier(account)}</>, body });
     if (!canManageProfiles || !canManage) return fail("Only an Owner or Admin can recover an account's profile.");
     if (!online) return fail(OFFLINE);
     const adoptable = profileActions && runner.os !== "windows" && account.profile?.access !== "granted";
-    const lease = leaseActions
-      ? await api.inspectProviderHomeLease(runner.runnerId, account.id).catch(() => undefined)
-      : undefined;
-    if (lease) setLeases((current) => ({ ...current, [account.id]: lease }));
+    let lease: ProviderHomeLeaseInspection | undefined;
+    if (leaseActions) {
+      try {
+        lease = await api.inspectProviderHomeLease(runner.runnerId, account.id);
+      } catch {
+        return fail("Wollipog couldn't check whether this account is locked. Try again from the session.");
+      }
+      setLeases((current) => ({ ...current, [account.id]: lease! }));
+      if (lease.state === "unverifiable") {
+        return fail(providerHomeLeaseDescription(lease) ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE!);
+      }
+    }
     const stale = lease?.state === "stale";
-    // Without adoption, a lock the runner already refuses to recover cannot be helped here.
-    const blocked = stale && !adoptable && (lease.cause || lease.refusal) ? providerHomeLeaseDescription(lease) : undefined;
-    if (blocked) return fail(blocked);
+    // A lock the runner already refuses to recover can't be helped here, and adoption would need it.
+    if (stale && (lease!.cause || lease!.refusal || !lease!.tipHash)) {
+      return fail(providerHomeLeaseDescription(lease!) ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE!);
+    }
     if (!adoptable && !stale) {
       showToast("This account can already be used here.", { tone: "success" });
       return;
     }
-    const recorded = stale && lease.createdAt ? new Date(lease.createdAt) : null;
+    const recorded = stale && lease!.createdAt ? new Date(lease!.createdAt) : null;
     const when = recorded && !Number.isNaN(recorded.getTime()) ? `Locked since ${recorded.toLocaleString()}` : undefined;
     const approved = await confirm({
       title: "Recover Existing Profile",
       message: adoptable && stale
-        ? "This control plane adopts the account as its profile, so other control planes that share this Machine's account " +
-          "lose access to it. Wollipog then unlocks it only after checking that no earlier session is still using it."
+        ? "An earlier Wollipog runner left this account locked. Wollipog unlocks it only after checking that no earlier session " +
+          "is still using it, then adopts it as this control plane's profile, so other control planes that share this Machine's account lose access to it."
         : adoptable
           ? "This control plane adopts the account as its profile, so other control planes that share this Machine's account " +
             "lose access to it. Existing sessions keep working as before; new sessions record the profile."
@@ -537,38 +551,32 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
       tone: stale ? "danger" : undefined,
     });
     if (!approved) return;
+    if (stale) {
+      // The confirmed lock's own hash: if it changed since, the runner refuses it as TIP_CHANGED.
+      let unlocked = false;
+      await runProfileAction(account, "recover", async () => {
+        try {
+          await api.recoverProviderHomeLease(runner.runnerId, account.id, lease!.tipHash!);
+          unlocked = true;
+        } finally {
+          void inspectLease(account.id);
+        }
+      });
+      if (!unlocked) return;
+    }
     if (adoptable) {
       let adopted = false;
       await runProfileAction(account, "adopt", async () => {
         await api.adoptProviderProfile(runner.runnerId, account.id);
         adopted = true;
       });
-      if (!adopted) return;
-    }
-    if (!stale) {
-      showToast("Account adopted as a profile.", { tone: "success" });
-      return;
-    }
-    // Adoption can change what the runner says about the lock, so it is inspected again.
-    const fresh = await api.inspectProviderHomeLease(runner.runnerId, account.id).catch(() => undefined);
-    if (fresh) setLeases((current) => ({ ...current, [account.id]: fresh }));
-    if (fresh && fresh.state !== "stale") {
-      showToast(adoptable ? "Account adopted as a profile." : "Account unlocked.", { tone: "success" });
-      return;
-    }
-    if (!fresh?.tipHash || fresh.cause || fresh.refusal) {
-      return fail((fresh && providerHomeLeaseDescription(fresh)) ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE!);
-    }
-    let unlocked = false;
-    await runProfileAction(account, "recover", async () => {
-      try {
-        await api.recoverProviderHomeLease(runner.runnerId, account.id, fresh.tipHash!);
-        unlocked = true;
-      } finally {
-        void inspectLease(account.id);
+      if (!adopted) {
+        // The account was unlocked; only the adoption is left, which the notice explains.
+        if (stale) showToast("Account unlocked.", { tone: "success" });
+        return;
       }
-    });
-    if (unlocked) showToast(adoptable ? "Profile recovered." : "Account unlocked.", { tone: "success" });
+    }
+    showToast(adoptable && stale ? "Profile recovered." : adoptable ? "Account adopted as a profile." : "Account unlocked.", { tone: "success" });
   };
 
   // Set Up Managed Profile (#3240): once the sign-in this section started records its account, the
@@ -655,7 +663,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   useEffect(() => {
     const activation = intent?.activationId;
     if (!intent || activation === undefined || handledIntent.current === activation) return;
-    if (intent.kind === "recover_profile" && !accounts.some((account) => account.id === intent.accountId)) return;
+    if (intent.kind === "recover_profile" &&
+        (!profileAccessKnown || !accounts.some((account) => account.id === intent.accountId))) return;
     handledIntent.current = activation;
     sectionRef.current?.scrollIntoView?.({ block: "start" });
     if (intent.kind === "add_account") {
@@ -666,7 +675,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     const account = accounts.find((candidate) => candidate.id === intent.accountId)!;
     void recoverExistingProfile(account);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- handled once per activation, when its account is listed
-  }, [intent?.activationId, accountKey]);
+  }, [intent?.activationId, accountKey, profileAccessKnown]);
 
   if (!supported && accounts.length === 0) return null;
   const canAdd = supported && canManage;

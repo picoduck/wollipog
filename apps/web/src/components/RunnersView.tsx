@@ -61,7 +61,7 @@ export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "U
  */
 function MachineSections({
   runner, name, online, canFindSessions, onChooseInstallation, canManageProfiles = false, canManageMachines, onChangeLimit,
-  accountsIntent,
+  accountsIntent, profileAccessKnown = true,
 }: {
   runner: RunnerView;
   name: string;
@@ -75,6 +75,8 @@ function MachineSections({
   onChangeLimit: () => void;
   /** An Add Account or Recover Existing Profile the route asks the accounts section to open (#3240). */
   accountsIntent?: MachineAccountsIntent;
+  /** The viewer's identity has answered (or failed), so `canManageProfiles` is final. */
+  profileAccessKnown?: boolean;
 }) {
   return (
     <div className="machine-detail-sections">
@@ -82,7 +84,7 @@ function MachineSections({
       <MachineAgentsSection runner={runner} online={online} machineName={name}
         canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
       <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles}
-        intent={accountsIntent} />
+        profileAccessKnown={profileAccessKnown} intent={accountsIntent} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
     </div>
@@ -430,6 +432,7 @@ export function RunnersView() {
           canManageMachines={canManageMachines}
           onChangeLimit={() => openSettings(selectedMachine.runnerId, "capacity")}
           accountsIntent={view.name === "runners" ? view.accounts : undefined}
+          profileAccessKnown={identity !== null || identityError !== null}
         />
       )}
     </MachineDetail>

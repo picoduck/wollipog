@@ -66,7 +66,7 @@ test("Recover Existing Profile adopts and unlocks a configured account in one co
   await page.goto(`/machine-management-e2e.html?profiles&leases&${DESIGN_WORKSTATION}&accounts=recover-claude-personal`);
   const confirm = page.getByRole("dialog", { name: "Recover Existing Profile" });
   await expect(confirm).toBeVisible();
-  await expect(confirm).toContainText("adopts the account as its profile");
+  await expect(confirm).toContainText("then adopts it as this control plane's profile");
   await expect(confirm).toContainText("Locked since");
   await capture(page, "recover-existing-profile");
   await confirm.getByRole("button", { name: "Recover Existing Profile" }).click();
