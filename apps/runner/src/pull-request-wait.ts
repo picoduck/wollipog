@@ -292,7 +292,7 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
       queueEvents:timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
         __typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt reason}
       }}
-      forcePushes:timelineItems(last:1,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{createdAt}}}
+      forcePushes:timelineItems(last:1,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{createdAt afterCommit{oid}}}}
       mergeCommit{oid}
       mergeQueueEntry{position state enqueuedAt headCommit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}
       commits(last:1){nodes{commit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}}
@@ -506,7 +506,11 @@ interface Observation {
   /** The pull request's head branch, which check suites name. */
   headRef: string | null;
   /** The latest merge-queue event, when it is a removal no force push has followed. */
-  lastRemoval: null | { reason: string | null; removedAt: string; at: number; forcePushedAt: number | null };
+  lastRemoval: null | {
+    reason: string | null; removedAt: string; at: number;
+    /** The latest force push before the removal, and the commit it left as head. */
+    forcePushedAt: number | null; forcePushedTo: string | null;
+  };
   /** `lastRemoval`, once the current head is shown to have been the pull request's head then. */
   removal?: { reason: string | null; removedAt: string };
 }
@@ -520,15 +524,20 @@ function lastQueueRemoval(events: unknown, forcePushes: unknown): Observation["l
   if (latest?.__typename !== "RemovedFromMergeQueueEvent" || at === null) return null;
   const pushes = record(forcePushes)?.nodes;
   if (!Array.isArray(pushes)) return null;
-  const pushed = pushes.length === 0 ? null : timestamp(record(pushes.at(-1))?.createdAt);
+  const push = record(pushes.at(-1));
+  const pushed = pushes.length === 0 ? null : timestamp(push?.createdAt);
   if (pushes.length > 0 && (pushed === null || pushed >= at)) return null;
+  const to = record(push?.afterCommit)?.oid;
   const reason = typeof latest.reason === "string" && latest.reason ? clip(latest.reason, MAX_NAME) : null;
-  return { reason, removedAt: latest.createdAt as string, at, forcePushedAt: pushed };
+  return {
+    reason, removedAt: latest.createdAt as string, at,
+    forcePushedAt: pushed, forcePushedTo: typeof to === "string" && SHA.test(to) ? to : null,
+  };
 }
 
 /** The removal belongs to the current head only when that commit was already this pull request's
- * head before it: a check suite created for the pull request's own head branch at or after the
- * latest force push and before the removal. A fast-forward creates no force-push event, but a head
+ * head before it: a check suite created for the pull request's own head branch after the latest
+ * force push (or in its second, when that push left this very commit) and before the removal. A fast-forward creates no force-push event, but a head
  * pushed afterwards gets its suites later; suites a commit got on another branch, or on this branch
  * before a force push replaced it, do not count. A suite's time is its creating push or event, so a
  * delayed job or a re-run cannot move it. */
@@ -541,7 +550,9 @@ function headRemoval(seen: Observation): Observation["removal"] {
     const node = checkNode(raw);
     const at = timestamp(node?.suiteCreatedAt);
     return node?.kind === "CheckRun" && node.branch === seen.headRef && at !== null && at < removal.at &&
-      (removal.forcePushedAt === null || at >= removal.forcePushedAt);
+      (removal.forcePushedAt === null || at > removal.forcePushedAt ||
+        // A rebase's own suites often share its second; a suite of the commit it replaced may too.
+        (at === removal.forcePushedAt && removal.forcePushedTo === seen.headSha));
   });
   return before ? { reason: removal.reason, removedAt: removal.removedAt } : undefined;
 }

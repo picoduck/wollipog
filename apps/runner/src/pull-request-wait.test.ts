@@ -841,7 +841,7 @@ const ENQUEUED_AT = "2026-10-12T11:00:00Z";
 const REMOVED_AT = "2026-10-12T12:00:00Z";
 const added = (createdAt = ENQUEUED_AT) => ({ __typename: "AddedToMergeQueueEvent", createdAt });
 const removedEvent = (reason: string | null, createdAt = REMOVED_AT) => ({ __typename: "RemovedFromMergeQueueEvent", createdAt, reason });
-const forcePushed = (createdAt: string) => ({ __typename: "HeadRefForcePushedEvent", createdAt });
+const forcePushed = (createdAt: string, to: string = OTHER_HEAD) => ({ __typename: "HeadRefForcePushedEvent", createdAt, afterCommit: { oid: to } });
 const BRANCH = "feature";
 /** A head check run whose suite was created for the pull request's own branch, by default before the removal. */
 const headCheck = (createdAt = RUN_AT, branch = BRANCH, name = AGGREGATOR, startedAt = createdAt) =>
@@ -927,9 +927,17 @@ test("a removal that belongs to an earlier head keeps current behavior", async (
 
   // The rebase's own push creates the head's suites, often in the force push's second.
   const sameSecond = await waitForPullRequest({ repository: "o/r", number: 7, timeoutMs: 600_000 },
-    { gh: fakeGh([afterQueue([added(), removedEvent("manual")], [headCheck("2026-10-12T10:30:00Z")], [forcePushed("2026-10-12T10:30:00Z")])]).gh, ...clock() });
+    { gh: fakeGh([afterQueue([added(), removedEvent("manual")], [headCheck("2026-10-12T10:30:00Z")], [forcePushed("2026-10-12T10:30:00Z", HEAD)])]).gh, ...clock() });
   assert.ok(sameSecond.ok);
   assert.equal(sameSecond.summary.outcome, "queue_ejected");
+
+  // In that second a suite may instead belong to the commit the push replaced, restored later by a
+  // fast-forward: without the push leaving this head, the shared second proves nothing.
+  const replacedSecond = await waitForPullRequest({ repository: "o/r", number: 7 },
+    { gh: fakeGh([afterQueue([added(), removedEvent("manual")], [headCheck("2026-10-12T10:30:00Z")], [forcePushed("2026-10-12T10:30:00Z", OTHER_HEAD)])]).gh, ...clock() });
+  assert.ok(replacedSecond.ok);
+  assert.equal(replacedSecond.summary.outcome, "checks_passed");
+  assert.equal(replacedSecond.summary.mergeQueueRemoval, null);
 });
 
 test("a different removal restarts the confirmation interval", async () => {

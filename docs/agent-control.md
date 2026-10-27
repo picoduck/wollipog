@@ -210,9 +210,9 @@ for 10 seconds. The same query reads the latest merge-queue timeline event and t
 over the same 10 seconds from its first observation (a different removal restarts the interval), with
 `mergeQueueRemoval` carrying GitHub's `reason` and `removedAt`. The removal counts only when it is
 the latest merge-queue event, no force push happened at or after it, and the open head has a check
-suite created for the pull request's own head branch at or after the latest force push and before
-the removal (a suite's time is its creating push or event, so a delayed or re-run job cannot move
-it). A pull request never enqueued, one queued again, or a head pushed after the removal (including
+suite created for the pull request's own head branch after the latest force push (or in its second
+when that push left this very commit) and before the removal; a suite's time is its creating push or
+event, so a delayed or re-run job cannot move it. A pull request never enqueued, one queued again, or a head pushed after the removal (including
 a commit already tested on another branch) keeps reporting its own checks. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
 caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
 reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
