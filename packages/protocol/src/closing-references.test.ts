@@ -62,49 +62,46 @@ test("forms GitHub measurably ignores are not reported", () => {
 });
 
 test("code and HTML comments in a Markdown description do not close", () => {
-  for (const text of ["Example: `closes #1`", "closes `#1`", "``a ` closes #1 ``", "```\ncloses #1\n```",
-    "~~~~md\ncloses #1\n~~~~", "> ```\n> closes #1\n> ```", "```\nunclosed fence\ncloses #1",
-    "<!-- closes #1 -->", "<!--\ncloses #1\n-->", "closes `x` #1", "closes <!-- x --> #1"]) {
+  for (const text of ["Example: `closes #1`", "closes `#1`", "``a ` closes #1 ``", "`a` closes `#1`", "```\ncloses #1\n```",
+    "~~~~md\ncloses #1\n~~~~", "> ```\n> closes #1\n> ```", "> > ```\n> > closes #1\n> > ```", "   ~~~\n   closes #1\n   ~~~",
+    "> ```\n>\n> closes #1\n> ```", "- item\n\n  ```\n\n  closes #1\n  ```", "```\n> ```\ncloses #1\n```",
+    "<details>\n\n```\ncloses #1\n```\n\n</details>", "<!-- closes #1 -->", "<!--\ncloses #1\n-->", "closes `x` #1",
+    "closes <!-- x --> #1", "<!-- a --><!-- closes #7 -->", "<!-- a -- b\ncloses #1\n-->", "> <!-- closes #1 -->",
+    "Text <!-- closes #1 --> more", "Text <!---->closes <!-- x --> #1"]) {
     assert.deepEqual(issues(text), [], text);
   }
-  // Outside the code, or in a code span that never closes, the reference still counts.
-  assert.deepEqual(issues("`code` then closes #1"), ["team/repo#1"]);
-  assert.deepEqual(issues("an unmatched ` then closes #2"), ["team/repo#2"]);
-  assert.deepEqual(issues("`span\n\nends` closes #3"), ["team/repo#3"]);
-  assert.deepEqual(issues("```\ncode\n```\ncloses #4"), ["team/repo#4"]);
-  assert.deepEqual(issues("<!-- note --> closes #5 <!-- open"), ["team/repo#5"]);
-  assert.deepEqual(issues("<!-- a --><!-- closes #7 -->"), [], "a comment right after another is hidden too (#3729 review)");
-  // Only what both cmark-gfm and the HTML parser hide is hidden (#3729 security review).
-  for (const text of ["<!-- a -- b\ncloses #1\n-->", "> <!-- closes #1 -->", "Text <!-- closes #1 --> more",
-    "Text <!---->closes <!-- x --> #1"]) {
-    assert.deepEqual(issues(text), [], text);
-  }
-  for (const text of ["<!--> This PR does not close #1 <!-- note -->", "<!---> closes #1", "<!-- x --!> closes #1 -->",
-    "Text <!-- a -- b closes #1 -->", "Text <!--> closes #1 -->", "Text <!-- x - closes #1 --->", "Text <!-- a\n\ncloses #1 -->",
-    "- <!-- a -- b closes #1 -->"]) {
+  // Outside the code, or where code or a comment never closes, the reference still counts.
+  for (const text of ["`code` then closes #1", "an unmatched ` then closes #1", "```\ncode\n```\ncloses #1",
+    "<!-- note --> closes #1 <!-- open", "    ```\ncloses #1", "> ``\ncloses #1", "``` x`y\ncloses #1",
+    "```\ncode\n~~~\nmore\n```\ncloses #1", "- ```\ncloses #1"]) {
     assert.deepEqual(issues(text), ["team/repo#1"], text);
   }
-  // Fences follow CommonMark's prefix: quote markers, then at most three spaces before the delimiter.
-  for (const text of ["> > ```\n> > closes #1\n> > ```", ">```\n>closes #1", "   ~~~\n   closes #1\n   ~~~",
-    "> ```\n>\n> closes #1\n> ```", "- item\n\n  ```\n\n  closes #1\n  ```", "```\n> ```\ncloses #1\n```"]) {
-    assert.deepEqual(issues(text), [], text);
-  }
-  for (const text of ["    ```\ncloses #1", "> ``\ncloses #1", "``` x`y\ncloses #1", "```\ncode\n~~~\nmore\n```\ncloses #1",
-    "- ```\ncloses #1"]) {
-    assert.deepEqual(issues(text), ["team/repo#1"], text);
-  }
-  // Code has no lazy continuation, so a fence left open in a quote or list item ends with it, and
-  // the text after it is visible on GitHub (#3729 security review).
-  for (const text of [">    ```\ncloses #1\n```", "> ```\n> code\nThis PR does not close #1",
+  // Wherever this approximation of GitHub's Markdown is unsure, it reports rather than hides
+  // (#3729 security reviews). Each case below is text GitHub shows, or could show.
+  for (const text of [
+    // An unclosed fence; one in a quote or list item also ends with its container.
+    "```\nunclosed fence\ncloses #1", ">```\n>closes #1", ">    ```\ncloses #1\n```", "> ```\n> code\nThis PR does not close #1",
     "> ```\n\nThis PR does not close #1", "- item\n  ```\n  code\nThis PR does not close #1",
     "> > ```\n> code\nThis PR does not close #1",
-    // Reported though GitHub hides it: an indented fence is read as a list item's, which ends at
-    // the first less indented line. Telling the two apart needs a full list parser.
-    "   ~~~\ncloses #1\n   ~~~"]) {
+    // A closing fence less indented than its opener closes it; the line after is visible.
+    "  ```\n  code\n```\ncloses #1\n```",
+    // An indented fence is read as a list item's, ending at the first less indented line; telling the
+    // two apart needs a full list parser, so this one is reported though GitHub hides it.
+    "   ~~~\ncloses #1\n   ~~~",
+    // Raw HTML blocks are not Markdown: no fence opens inside one, and a backtick is literal.
+    "<details>\n```\ncloses #1\n```\n</details>", "<div>\n`closes #1`\n</div>", "- <div>\n  ```\n  closes #1\n  ```",
+    "<pre>\n\n```\n</pre>\ncloses #1\n```", "<!--\n```\n-->\ncloses #1\n```",
+    // Comments: GitHub ends one at its first `-->`, even inside what would read as code; `<!-->` is
+    // complete; HTML ends one at `--!>`; an inline one with `--`, ending in `-`, or crossing a line
+    // may be literal text.
+    "Text <!-- a `-->` closes #1 -->", "<!--> This PR does not close #1 <!-- note -->", "<!---> closes #1",
+    "<!-- x --!> closes #1 -->", "Text <!-- a -- b closes #1 -->", "Text <!--> closes #1 -->", "Text <!-- x - closes #1 --->",
+    "Text <!-- a\n\ncloses #1 -->", "Text <!-- a\n# closes #1 -->", "- <!-- a -- b closes #1 -->",
+    // A code span crossing a line may be cut by a block that starts the next line.
+    "Text `a\n- closes #1 `",
+  ]) {
     assert.deepEqual(issues(text), ["team/repo#1"], text);
   }
-  // Indented code is still reported: telling it apart from list text needs a full parser.
-  assert.deepEqual(issues("Text\n\n    closes #6"), ["team/repo#6"]);
 });
 
 test("a long link keeps its excerpt within the bound every consumer accepts (#3729 review)", () => {
