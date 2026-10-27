@@ -18494,7 +18494,10 @@ export class SessionManager {
   }
 
   /** Only the authenticated control-plane channel can send authoritative scope synchronization. */
-  async campaignIssueScope(message: import("@wollipog/protocol").CampaignIssueScopeMessage): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
+  async campaignIssueScope(
+    message: import("@wollipog/protocol").CampaignIssueScopeMessage,
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
     const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
@@ -18509,7 +18512,7 @@ export class SessionManager {
         error: "Campaign issue scope requires a valid local or SSH host execution target belonging to its runner" };
     }
     try {
-      const run = issueClosureRun(meta.context, meta.repoPath);
+      const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
       if (message.operation === "publication_inspect") return { ...base, ok: true, ...await inspectCampaignPublication(run, message) };
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
@@ -18550,7 +18553,10 @@ export class SessionManager {
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
-  async githubIssueClosure(message: GithubIssueClosureMessage): Promise<GithubIssueClosureResultMessage> {
+  async githubIssueClosure(
+    message: GithubIssueClosureMessage,
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
@@ -18576,7 +18582,7 @@ export class SessionManager {
         Boolean(control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason));
     };
     if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
-    const run = issueClosureRun(meta.context, meta.repoPath);
+    const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests);

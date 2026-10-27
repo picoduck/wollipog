@@ -159,8 +159,9 @@ export async function inspectGitlabIssueClosure(
   const invalidMr = () => closureError("GitLab merge-request evidence is invalid");
   const evidence = (raw: unknown): Relevant | null => {
     const mr = record(raw, invalidMr);
-    // Other projects' merge requests and closed or merged ones are not conflict evidence.
-    if (mr.state !== "opened" || mr.project_id !== project.id) return null;
+    // Other projects' merge requests and closed or merged ones are not conflict evidence. A
+    // `locked` one is mid-merge: unresolved work, so it counts as open.
+    if ((mr.state !== "opened" && mr.state !== "locked") || mr.project_id !== project.id) return null;
     if (!Number.isSafeInteger(mr.iid) || (mr.iid as number) < 1 || mr.web_url !== `${project.webUrl}/-/merge_requests/${mr.iid}` ||
         typeof mr.sha !== "string" || !SHA.test(mr.sha) || typeof mr.title !== "string" ||
         (typeof mr.description !== "string" && mr.description !== null) || typeof mr.updated_at !== "string") throw invalidMr();

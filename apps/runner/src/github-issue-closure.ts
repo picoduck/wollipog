@@ -41,10 +41,13 @@ function nodes(value: unknown): unknown[] {
   return connection.nodes;
 }
 
-export function issueClosureRun(context: AgentContext, cwd: string): Run {
+/** `agentEnv` is the environment the Orchestrator's agent launches with, so a `GH_TOKEN`,
+ * `GITLAB_TOKEN` or `GLAB_CONFIG_DIR` configured for that agent selects the same login its own `gh`
+ * or `glab` uses (#3539), as for forge observation and the GitLab merge preflight. */
+export function issueClosureRun(context: AgentContext, cwd: string, agentEnv: Record<string, string> = {}): Run {
   return async (command, args) => (await runContextCommand(context, command, args, {
     cwd, timeoutMs: 25_000, maxBuffer: 2 * 1024 * 1024,
-    env: { GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_PROMPT: "1" },
+    env: { ...agentEnv, GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_PROMPT: "1" },
   })).stdout;
 }
 

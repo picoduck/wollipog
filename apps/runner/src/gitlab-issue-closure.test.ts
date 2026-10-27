@@ -129,6 +129,16 @@ test("GitLab conflict evidence unites related, closing and mentioning open merge
   assert.notEqual((await inspectGithubIssueClosure(123, f.run)).forgeDigest, digest, "a moved merge-request head changes the digest");
 });
 
+test("a locked merge request is mid-merge, so it stays unresolved conflict evidence", async () => {
+  const f = gitlab();
+  // From each source: a mentioning open-list row, a related one and a closing one.
+  f.lists.open = [f.mergeRequest(90, { state: "locked", title: "Fix #123" })];
+  f.lists.related = [f.mergeRequest(91, { state: "locked" })];
+  f.lists.closedBy = [f.mergeRequest(92, { state: "locked" })];
+  const inspection = await inspectGithubIssueClosure(123, f.run);
+  assert.deepEqual(inspection.openPullRequests.map((mr) => mr.number), [90, 91, 92]);
+});
+
 test("GitLab closure inspection refuses a full page from any list rather than a partial answer", async () => {
   for (const list of ["related", "closedBy", "open"] as const) {
     const f = gitlab();
