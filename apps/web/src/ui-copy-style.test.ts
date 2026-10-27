@@ -1299,6 +1299,7 @@ test("New Session's agent and account strings name the choice, never the mechani
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
+  visit(parseSource(path.join(SOURCE_ROOT, "native-tui-availability.ts")));
   assert.deepEqual(texts.filter((text) => NEW_SESSION_MECHANISM_WORDS.test(text)), []);
 
   // Every reason an agent under Needs Setup can give, and every limit a ready one can name.

@@ -1252,7 +1252,7 @@ export function NewSessionDialog({
 
   const openConnections = () => {
     onClose();
-    navigate({ name: "runners", section: "machines" });
+    navigate({ name: "runners", section: "machines", ...(runner ? { machineId: runner.runnerId } : {}) });
   };
   // Machines in Connections lists each machine with its agents (#2953).
   const setUpAgentsAction: PickerFooterAction = { label: "Set Up Agents in Connections", onSelect: openConnections };
