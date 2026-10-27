@@ -66,9 +66,9 @@ test("code and HTML comments in a Markdown description do not close", () => {
     "~~~~md\ncloses #1\n~~~~", "> ```\n> closes #1\n> ```", "> > ```\n> > closes #1\n> > ```", "   ~~~\n   closes #1\n   ~~~",
     "> ```\n>\n> closes #1\n> ```", "- item\n\n  ```\n\n  closes #1\n  ```", "```\n> ```\ncloses #1\n```",
     "<details>\n\n```\ncloses #1\n```\n\n</details>", "<!-- closes #1 -->", "<!--\ncloses #1\n-->", "closes `x` #1",
-    "closes <!-- x --> #1", "<!-- a --><!-- closes #7 -->", "<!-- a -- b\ncloses #1\n-->", "> <!-- closes #1 -->",
-    "Text <!-- closes #1 --> more", "Text <!---->closes <!-- x --> #1", "`a` b\n`closes #1` c",
-    "x `a\nb` y\n\n`closes #1`"]) {
+    "<!-- a --><!-- closes #7 -->", "<!-- a -- b\ncloses #1\n-->", "> <!-- closes #1 -->",
+    "Text <!-- closes #1 --> more", "closes<!-- x -->#1", "`a` b\n`closes #1` c",
+    "x `a\nb` y\n\n`closes #1`", "\\` x\n\n`closes #1`"]) {
     assert.deepEqual(issues(text), [], text);
   }
   // Outside the code, or where code or a comment never closes, the reference still counts.
@@ -102,6 +102,14 @@ test("code and HTML comments in a Markdown description do not close", () => {
     // backticks so that a later span on the next line is not what it seems.
     "Text `a\n- closes #1 `", "a `b\nc` closes #1 `d`", "Text `a\n- `x` closes #1 `y`", "x `a\nb` y\n`c` closes #1 `d`",
     "Text `a\nx` <!-- `closes #1 -->",
+    // GitHub drops a comment and renders `closes  #1`; whether its closing match sees that is not
+    // known, so both readings are checked (#3729 review, checked with GitHub's Markdown API).
+    "closes <!-- x --> #1", "Text <!---->closes <!-- x --> #1", "clo<!-- x -->ses #1",
+    // A backslash before a backtick or a comment opener: GitHub renders each of these with the
+    // reference visible (checked with its Markdown API), so the paragraph hides nothing (#3729 review).
+    "Text \\<!-- `a -->` closes #1 `b`", "a \\\\`b` closes #1 `c`", "`a\\` closes #1 `b`",
+    // GitHub hides this one, as code; it is reported anyway, the conservative side of the same rule.
+    "Text \\`a` closes #1 `b`",
   ]) {
     assert.deepEqual(issues(text), ["team/repo#1"], text);
   }

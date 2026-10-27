@@ -85,6 +85,8 @@ export function canonicalIssueReference(value: string, repository?: string): str
 const MASK = "\u0000";
 /** Stands in for a backtick in raw HTML, where it is literal text, so it never opens a code span. */
 const LITERAL_BACKTICK = "\u0001";
+/** Marks a hidden HTML comment, which the matcher reads both as a separator and as nothing. */
+const COMMENT = "\u0002";
 
 /** Quote markers at the start of a line, at most `limit` of them: each after up to three spaces and
  * followed by an optional space. Returns how many and where the rest of the line starts. A scan
@@ -174,8 +176,8 @@ function nextAt(positions: readonly number[], at: number): number {
  */
 function maskMarkdown(text: string): string {
   const out = text.split("");
-  const blank = (from: number, to: number) => {
-    for (let i = from; i < to; i += 1) if (out[i] !== "\n") out[i] = MASK;
+  const blank = (from: number, to: number, mark = MASK) => {
+    for (let i = from; i < to; i += 1) if (out[i] !== "\n") out[i] = mark;
   };
   // Blocks, line by line. A fenced code block is hidden once a closing fence ends it, or once its
   // quote ends (code has no lazy continuation) or a line is less indented than its fence (as a list
@@ -235,15 +237,21 @@ function maskMarkdown(text: string): string {
   // within one line, though: a later line might start a block (a heading, a list item) that ends the
   // paragraph first, and then GitHub shows the text and pairs that line's backticks afresh. So a
   // pair that crosses a line hides nothing, and neither does anything else on the lines it reaches.
+  // A backslash right before a backtick or `<!--` may escape it, or be escaped itself, or sit at
+  // the end of a code span, where it escapes nothing; rather than model that, a paragraph with one
+  // hides no inline code or comment at all.
   const masked = out.join("");
   const inline = out.slice();
   for (const [from, to] of raw) for (let i = from; i < to; i += 1) if (inline[i] === "`") inline[i] = LITERAL_BACKTICK;
-  const runs = [...inline.join("").matchAll(/(?<!\\)`+/gu)].map((match) => ({ start: match.index, length: match[0].length }));
+  const inlineText = inline.join("");
+  const runs = [...inlineText.matchAll(/`+/gu)].map((match) => ({ start: match.index, length: match[0].length }));
   const newlines = occurrences(masked, "\n");
   const lineAt = (at: number) => indexAt(newlines, at);
   const paragraphEnds = [...masked.matchAll(/\n[ \t]*\n/gu)].map((match) => match.index);
   const paragraph = runs.map((run) => indexAt(paragraphEnds, run.start));
   const unsure = new Set<number>();
+  const escaped = new Set([...occurrences(inlineText, "\\`"), ...occurrences(masked, "\\<!--")]
+    .map((at) => indexAt(paragraphEnds, at)));
   const byLength = new Map<number, number[]>();
   runs.forEach((run, i) => {
     const same = byLength.get(run.length);
@@ -287,7 +295,7 @@ function maskMarkdown(text: string): string {
       if (from < cursor) continue;
       const end = commentEnd(from);
       if (end >= 0) {
-        if (!unsure.has(lineAt(from))) blank(from, end);
+        if (!unsure.has(lineAt(from)) && !escaped.has(indexAt(paragraphEnds, from))) blank(from, end, COMMENT);
         cursor = end;
       }
       continue;
@@ -304,7 +312,7 @@ function maskMarkdown(text: string): string {
     cursor = runs[close]!.start + length;
     const [first, last] = [lineAt(start), lineAt(runs[close]!.start)];
     for (let line = first + 1; line <= last; line += 1) unsure.add(line);
-    if (first === last && !unsure.has(first)) blank(start, cursor);
+    if (first === last && !unsure.has(first) && !escaped.has(paragraph[i]!)) blank(start, cursor);
   }
   return out.join("");
 }
@@ -324,24 +332,41 @@ function excerpt(text: string, start: number, end: number): string {
 }
 
 /** Every closing reference in a Markdown description, in order. `#N` and `GH-N` name issues in
- * `repository`. Code and HTML comments are blanked first, as GitHub ignores them. */
+ * `repository`. Code and HTML comments are blanked first, as GitHub ignores them. GitHub drops a
+ * comment from what it renders, so `closes <!-- x --> #12` may read as `closes  #12`; whether its
+ * closing match sees that is unknown, so the text is read both with each comment as a separator
+ * and with it removed, and every match of either reading is reported. */
 export function findClosingReferences(text: string, repository: string): ClosingReference[] {
   if (!REPOSITORY.test(repository)) throw new Error("repository must be owner/name");
-  const scanned = maskMarkdown(text);
-  const found: ClosingReference[] = [];
-  for (const match of scanned.matchAll(KEYWORD)) {
-    TARGET.lastIndex = match.index + match[0].length;
-    const target = TARGET.exec(scanned);
-    if (!target) continue;
-    const token = target[0];
-    const link = token.startsWith("[") ? LINK.exec(token) : null;
-    const issues = link
-      ? [reference(link[1]!.trim(), repository), reference(link[2]!, repository)]
-      : [reference(token.replace(/^[\\<]/u, ""), repository)];
-    const shown = excerpt(text, match.index, target.index + token.length);
-    for (const target of new Set(issues)) {
-      if (target) found.push({ issue: target, keyword: match[1]!, index: match.index, excerpt: shown });
+  const masked = maskMarkdown(text);
+  const found = new Map<string, ClosingReference>();
+  const scan = (scanned: string, original: (index: number) => number) => {
+    for (const match of scanned.matchAll(KEYWORD)) {
+      TARGET.lastIndex = match.index + match[0].length;
+      const target = TARGET.exec(scanned);
+      if (!target) continue;
+      const token = target[0];
+      const link = token.startsWith("[") ? LINK.exec(token) : null;
+      const issues = link
+        ? [reference(link[1]!.trim(), repository), reference(link[2]!, repository)]
+        : [reference(token.replace(/^[\\<]/u, ""), repository)];
+      const index = original(match.index);
+      const shown = excerpt(text, index, original(target.index + token.length - 1) + 1);
+      for (const issue of new Set(issues)) {
+        if (issue && !found.has(`${index}:${issue}`)) found.set(`${index}:${issue}`, { issue, keyword: match[1]!, index, excerpt: shown });
+      }
     }
+  };
+  scan(masked.replaceAll(COMMENT, MASK), (index) => index);
+  if (masked.includes(COMMENT)) {
+    const kept: number[] = [];
+    let joined = "";
+    for (let i = 0; i < masked.length; i += 1) {
+      if (masked[i] === COMMENT) continue;
+      kept.push(i);
+      joined += masked[i];
+    }
+    scan(joined, (index) => kept[index]!);
   }
-  return found;
+  return [...found.values()].sort((a, b) => a.index - b.index);
 }
