@@ -2026,7 +2026,9 @@ export class SessionManager {
   }
 
   private codexHomes: () => readonly string[] = () => [];
-  private reviewerInstallationPaths: () => readonly string[] = () => [];
+  private reviewerInstallations: () => import("./reviewer-installations.js").ReviewerInstallations = () => ({
+    reviewerInstallationPaths: [], reviewerSymlinkPaths: [],
+  });
   private reviewWriters = new ReviewWriterRegistry();
   private readonly driverReviewWriterTokens = new Map<Driver, string>();
 
@@ -2034,8 +2036,8 @@ export class SessionManager {
     this.codexHomes = read;
   }
 
-  setReviewerInstallationPaths(read: () => readonly string[]): void {
-    this.reviewerInstallationPaths = read;
+  setReviewerInstallations(read: () => import("./reviewer-installations.js").ReviewerInstallations): void {
+    this.reviewerInstallations = read;
   }
 
   setReviewWriterRegistry(registry: ReviewWriterRegistry): void {
@@ -2060,10 +2062,11 @@ export class SessionManager {
   private resolveIsolation(...[policy, context, deps, state]: Parameters<typeof resolveExecutionIsolation>) {
     const homes = this.codexHomes();
     const installations = state && context.kind === "native" && (policy.mode === "bwrap" || policy.mode === "seatbelt")
-      ? this.reviewerInstallationPaths() : [];
+      ? this.reviewerInstallations() : undefined;
     return this.resolveIsolationBoundary(policy, context, deps, state
       ? { ...state, ...(homes.length ? { codexHomes: homes } : {}),
-          ...(installations.length ? { reviewerInstallationPaths: installations } : {}) } : state);
+          ...(installations?.reviewerInstallationPaths.length ? { reviewerInstallationPaths: installations.reviewerInstallationPaths } : {}),
+          ...(installations?.reviewerSymlinkPaths.length ? { reviewerSymlinkPaths: installations.reviewerSymlinkPaths } : {}) } : state);
   }
 
   /** Static conventional-install exception. Sandbox construction protects these packages for

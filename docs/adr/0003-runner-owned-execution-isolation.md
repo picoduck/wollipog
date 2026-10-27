@@ -112,8 +112,16 @@ mock-inference turns; a separate bwrap test verifies the mount when user namespa
 Reviewer admission for review sessions and the legacy controller bridge uses only static trust
 checks, required tools and available native agents. The conventional
 `~/.codex/packages/standalone` exception follows from the launch invariant, not runtime writer
-tracking. Every native bwrap/Seatbelt launch protects configured reviewer executable, symlink
-container and interpreter installation directories as well as Codex packages. Empty package
+tracking. Every native bwrap/Seatbelt launch protects configured reviewer executable and
+interpreter installation directories as well as Codex packages. Symlink hops are inventoried as
+exact entries rather than turning their containers into installations: a dotfiles-managed
+`~/bin` link must not make HOME a read-only installation overlay or mask writable cache/worktree
+grants below it. Linux pins those entries through the existing read-only root or installation
+mount; it refuses a resolution link whose parent remains exposed to a writable identity or
+remapped mount, naming the link and writable root. A bind on a symlink would follow its target
+and does not pin the link. Seatbelt denies writes to exact link entries and unlinking their
+ancestor entries, preserving sibling writes. Only links on actual reviewer/interpreter resolution
+paths participate. Empty package
 directories under writable grants are pinned before launch to prevent planting future installs.
 Unverifiable installation protection fails the launch with the affected path. Writable remapped
 sources that expose a protected installation are refused. Other session-writable executables,

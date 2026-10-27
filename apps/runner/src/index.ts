@@ -2,7 +2,7 @@ import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
 import { configuredCodexHomes } from "./review-trust.js";
-import { reviewerInstallationPaths } from "./reviewer-installations.js";
+import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
@@ -1636,7 +1636,7 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
   sessions: store.listSessions(), hostEnv: process.env,
 }));
 const codexProtection = () => sessions.codexReviewerProtection();
-sessions.setReviewerInstallationPaths(() => reviewerInstallationPaths(agentsForControlPlane(),
+sessions.setReviewerInstallations(() => reviewerInstallations(agentsForControlPlane(),
   (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
 const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
 // One owner of every review mirror, so the bridge's fetches and review sessions' never race.
