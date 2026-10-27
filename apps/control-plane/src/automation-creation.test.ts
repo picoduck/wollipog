@@ -122,15 +122,170 @@ for (const [driver, permissionModes] of [
   });
 }
 
-test("expired pending proposals cannot be approved but can still be denied and cleared", () => {
+test("expired pending proposals are retired and cleared without a human denial", () => {
   const h = harness();
   try {
     const proposed = h.service.request("self", { requestId: "expired", resourceKey: "expired", spec: spec() }, h.principal, Date.now() - 25 * 60 * 60_000);
     assert.equal(proposed.ok, true);
     assert.equal(h.resolve(proposed.data!.occurrenceId).status, 409);
-    assert.equal(h.resolve(proposed.data!.occurrenceId, "deny").ok, true);
+    assert.equal(h.service.get("self", proposed.data!.occurrenceId, h.principal).data!.status, "revoked");
     assert.equal(h.db.getSession("self")!.pendingApproval, null);
     assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+for (const deadline of ["approval", "proposal"] as const) {
+  test(`unexecuted approval is retired at its ${deadline} deadline without losing history`, (t) => {
+    const start = Date.now();
+    let now = start;
+    t.mock.method(Date, "now", () => now);
+    const h = harness();
+    try {
+      const decision = h.request().data!;
+      if (deadline === "proposal") now += 24 * 60 * 60_000 - 10 * 60_000;
+      assert.equal(h.resolve(decision.occurrenceId).ok, true);
+      const approved = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+      const end = deadline === "approval" ? now + 30 * 60_000 : start + 24 * 60 * 60_000;
+      now = end - 1;
+      assert.equal(h.service.get("self", decision.occurrenceId, h.principal).data!.status, "approved");
+      now = end;
+      assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, false);
+      const expired = h.service.get("self", decision.occurrenceId, h.principal).data!;
+      assert.equal(expired.status, "revoked");
+      assert.equal(expired.resolvedAt, approved.resolvedAt);
+      assert.deepEqual(expired.resourceSnapshot, approved.resourceSnapshot);
+      assert.equal(h.db.automationCreationApprover(decision.occurrenceId), h.owner);
+      assert.equal(h.db.unconsumedWorkflowDecisionsForSession("self").length, 0);
+      assert.equal(h.db.unconsumedWorkflowDecisionsForController("self").length, 0);
+      assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+      assert.equal(h.db.listAutomations().length, 0);
+      const audit = h.db.listGovernanceAudit("self").filter((entry) => entry.requestId === decision.occurrenceId);
+      assert.equal(audit.filter((entry) => entry.outcome === "allowed").length, 1);
+      assert.equal(audit.filter((entry) => entry.outcome === "revoked").length, 1);
+      assert.equal(h.request().data!.status, "revoked", "An identical retry must not renew an expired grant");
+    } finally { h.db.close(); }
+  });
+}
+
+test("restart maintenance retires offline approvals and unsent approval resumes", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const root = mkdtempSync(join(tmpdir(), "automation-expiry-"));
+  let h = harness(join(root, "state.db"));
+  try {
+    const held = h.request("held", "held").data!;
+    const staged = h.request("staged", "staged").data!;
+    assert.equal(h.resolve(held.occurrenceId).ok, true);
+    assert.equal(h.resolve(staged.occurrenceId).ok, true);
+    h.db.stageWorkflowDecisionResume({ occurrenceId: staged.occurrenceId, from: "held", command: {
+      commandId: "stale-resume", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: now + 86_400_000, now,
+    } });
+    h.db.close();
+    now += 30 * 60_000;
+    h = harness(join(root, "state.db"), false);
+    h.sessions.retryDuePrompts(now);
+    for (const decision of [held, staged]) {
+      assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+      assert.equal((h.db.raw().prepare("SELECT resume_state AS state FROM workflow_decisions WHERE occurrence_id=?")
+        .get(decision.occurrenceId) as { state: string }).state, "abandoned");
+      assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, false);
+    }
+    assert.equal(h.db.getSessionPromptCommand("stale-resume")!.state, "failed");
+    assert.equal(h.db.dueSessionPromptCommands(now).length, 0);
+    assert.equal(h.db.listAutomations().length, 0);
+    h.sessions.retryDuePrompts(now + 1);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 2);
+  } finally { h.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("expiration preserves consumed creation receipts after both deadlines", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const created = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!;
+    now += 25 * 60 * 60_000;
+    h.sessions.retryDuePrompts(now);
+    assert.deepEqual(h.service.get("self", decision.occurrenceId, h.principal).data, created);
+    assert.deepEqual(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data, created);
+    assert.equal(h.db.listAutomations().length, 1);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("expiration fences an already-sent approval resume and late receipts cannot re-hold it", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    h.db.stageWorkflowDecisionResume({ occurrenceId: decision.occurrenceId, from: "held", command: {
+      commandId: "sent-resume", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: now + 86_400_000, now,
+    } });
+    h.db.markSessionPromptCommandSent("sent-resume", "sent-request", now, now + 1);
+    now += 30 * 60_000;
+    h.sessions.retryDuePrompts(now);
+    const command = h.db.getSessionPromptCommand("sent-resume")!;
+    assert.equal(command.state, "uncertain", "Already-attempted delivery must not be reported as recalled");
+    assert.equal(command.nextAttemptAt, null);
+    assert.equal(h.db.dueSessionPromptCommands(now).length, 0);
+    assert.equal(h.db.workflowDecisionResumeForCommand("sent-resume"), null);
+    h.sessions.onDurablePromptReceipt("runner", { type: "durable_session_command_result", requestId: "sent-request",
+      commandId: "sent-resume", sessionId: "self", state: "failed", revision: command.revision + 1,
+      error: "Recovery required", code: "WORKTREE_RECOVERY_REQUIRED", duplicate: false });
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("agent HTTP inspection and the UI decision reader agree on expired status", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness(); const app = Fastify();
+  registerAutomationCreationRoutes(app, { service: h.service, requestPrincipal: () => h.principal });
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    now += 30 * 60_000;
+    const response = await app.inject({ method: "GET", url: `/api/sessions/self/automation-proposals/${decision.occurrenceId}` });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().status, "revoked");
+    assert.deepEqual(response.json(), h.sessions.workflowDecision("self", decision.occurrenceId).data);
+    assert.deepEqual(h.sessions.workflowDecisions("self", undefined, 10).data!.decisions, []);
+    assert.equal(h.db.getSession("self")!.pendingApproval, null);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
+  } finally { await app.close(); h.db.close(); }
+});
+
+for (const status of ["pending", "approved"] as const) test(`interrupted ${status} expiration rolls back the decision, card, resume and audit for recovery`, (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    h.db.updateSessionStatus("self", "idle", now);
+    const decision = h.request().data!;
+    if (status === "approved") assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const before = h.db.getSession("self")!;
+    now += status === "pending" ? 24 * 60 * 60_000 : 30 * 60_000;
+    const auditCount = h.db.listGovernanceAudit("self").length;
+    h.db.raw().exec("CREATE TRIGGER fail_expiration BEFORE INSERT ON governance_audit WHEN NEW.outcome='revoked' BEGIN SELECT RAISE(ABORT, 'test expiration interruption'); END");
+    assert.throws(() => h.sessions.expireAutomationCreationDecisions(now), /test expiration interruption/);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, status);
+    assert.deepEqual(h.db.getSession("self")!.pendingApproval, before.pendingApproval);
+    assert.equal(h.db.getSession("self")!.status, before.status);
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, status === "approved" ? 1 : 0);
+    assert.equal(h.db.listGovernanceAudit("self").length, auditCount);
+    h.db.raw().exec("DROP TRIGGER fail_expiration");
+    assert.equal(h.sessions.expireAutomationCreationDecisions(now), 1);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+    assert.equal(h.db.getSession("self")!.pendingApproval, null);
+    assert.equal(h.db.getSession("self")!.status, "idle");
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
   } finally { h.db.close(); }
 });
 

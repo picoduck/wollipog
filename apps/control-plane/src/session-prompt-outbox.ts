@@ -39,6 +39,7 @@ export class SessionPromptOutbox {
     private readonly db: ControlPlaneDb,
     private readonly hub: Hub,
     private readonly log: Logger,
+    private readonly beforeFlush: (now: number) => void = () => {},
   ) {}
 
   stage(
@@ -180,6 +181,7 @@ export class SessionPromptOutbox {
   }
 
   flush(now = Date.now(), runnerId?: string): number {
+    this.beforeFlush(now);
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;

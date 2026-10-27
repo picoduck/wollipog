@@ -1761,7 +1761,8 @@ export class SessionsService {
     if (operatorValidationPermits && operatorValidationPermits.database !== db.raw()) throw new Error("Validation permits require the same durable database.");
     if (preparedMediaActiveStops && preparedMediaActiveStops.database !== db.raw()) throw new Error("Dedicated media Stop requires the same durable database.");
     this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
-    this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
+    this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log,
+      (now) => this.expireAutomationCreationDecisions(now));
     this.campaignRecovery = new CampaignRecoveryService(this.db, id => this.hub.sessionChangedById(id), this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
     // dashboards drop their transcript and recover it again.
@@ -5739,6 +5740,7 @@ export class SessionsService {
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
+    this.expireAutomationCreationDecisions(now);
     this.campaignRecovery.maintain(now, runnerId);
     // A first message whose command expired or failed without a receipt reopens its wait.
     for (const { sessionId } of this.db.firstMessageDeliveries()) {
@@ -10119,6 +10121,7 @@ export class SessionsService {
   }
 
   workflowDecision(sessionId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
+    this.expireAutomationCreationDecisions(Date.now(), sessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     return decision?.sessionId === sessionId ? ok(decision) : fail("workflow decision not found", 404);
   }
@@ -10126,6 +10129,7 @@ export class SessionsService {
   workflowDecisions(sessionId: string, cursorId: string | undefined, limit: number): ServiceResult<{
     decisions: WorkflowDecisionView[]; nextCursor?: string;
   }> {
+    this.expireAutomationCreationDecisions(Date.now(), sessionId);
     const cursor = cursorId === undefined ? undefined : this.db.workflowDecisionByOccurrence(cursorId);
     if (cursorId !== undefined && cursor?.sessionId !== sessionId) return fail("invalid workflow decision cursor", 400);
     const rows = this.db.workflowDecisionPage(sessionId, cursor ?? undefined, limit + 1);
@@ -10142,6 +10146,7 @@ export class SessionsService {
     actor: GovernanceActor,
     canAccess: (sessionId: string) => boolean,
   ): ServiceResult<WorkflowDecisionView> {
+    if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (decision?.category === "automation_creation") {
       if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
@@ -11350,6 +11355,30 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controllerBefore);
   }
 
+  /** Control-plane lifecycle, independent of runner availability and safe to replay after restart. */
+  private expiringAutomationDecisions = false;
+
+  expireAutomationCreationDecisions(now = Date.now(), sessionId?: string): number {
+    if (this.expiringAutomationDecisions) return 0;
+    this.expiringAutomationDecisions = true;
+    let count = 0;
+    try {
+      for (const decision of this.db.expiredAutomationCreationDecisions(now, sessionId)) {
+        const controllerBefore = this.db.getSession(decision.controllingSessionId);
+        const changed = this.db.expireAutomationCreationDecision(decision.occurrenceId, now, () => {
+          this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+          this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "system", id: "automation-approval-expiration" },
+            now, "automation proposal or approval execution deadline elapsed");
+        });
+        if (!changed) continue;
+        count++;
+        this.hub.sessionChangedById(decision.sessionId);
+        this.publishCampaignAttentionTransition(controllerBefore);
+      }
+      return count;
+    } finally { this.expiringAutomationDecisions = false; }
+  }
+
   /** Settle a server-owned workflow card against the provider state it temporarily covered.
    * `resume` delivers a turn that continues the child; it returns whether the turn was admitted.
    * It is told whether the child had settled idle behind the card, so its admission can say
@@ -11664,6 +11693,7 @@ export class SessionsService {
    * boundary that can see the hold clear calls this; staging is conditional on the resume still
    * being held, so only the first of them delivers it. */
   private deliverHeldWorkflowDecisionResumes(sessionId: string, now = Date.now()): void {
+    this.expireAutomationCreationDecisions(now, sessionId);
     const held = this.db.heldWorkflowDecisionResumes(sessionId);
     if (!held.length) return;
     const session = this.db.getSession(sessionId);
