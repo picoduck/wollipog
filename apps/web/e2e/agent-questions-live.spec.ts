@@ -37,11 +37,17 @@ interface LiveStack {
   stop(): Promise<void>;
 }
 
+// Provider home variables take precedence over HOME when the runner picks a provider's lease
+// home, so an inherited one would point the fixture runner at the invoking user's real
+// provider directory instead of its own runner HOME (#3739).
+const PROVIDER_HOME_VARIABLES = ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const;
+
 function hermeticEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
   for (const key of Object.keys(env)) {
     if (/^(RUNNER_|CONTROL_PLANE_)/u.test(key)) delete env[key];
   }
+  for (const key of PROVIDER_HOME_VARIABLES) delete env[key];
   return env;
 }
 
