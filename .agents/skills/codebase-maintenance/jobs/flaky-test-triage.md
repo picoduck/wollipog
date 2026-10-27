@@ -19,9 +19,9 @@ three times: `pnpm test:e2e`, from the repository root (the config and baseURL l
 historical flake in this repository has been e2e/browser, so a unit-only pass is structurally
 blind to the layer that actually flakes. Before each e2e run, check that port 4174 is free —
 concurrent worktree sessions run their own e2e servers; if the port is held, wait and retry
-rather than killing the other server, and stagger subsequent runs. Budget about 5 hours of wall
-clock for the unit runs and three e2e passes: the 2026-10-20 suite collected 3,415 browser cases
-and each complete pass took 87–90 minutes; the complete sweep took 4 hours 43 minutes. Record current
+rather than killing the other server, and stagger subsequent runs. Budget about 6 hours of wall
+clock for the unit runs and three e2e passes: the 2026-10-27 suite collected 3,693 browser cases
+and each complete pass took 97–108 minutes; the complete sweep took about 5 hours 30 minutes. Record current
 collection counts and actual durations rather than treating this estimate as fixed. A window that long is also why HEAD moves under the
 sweep, so the baseline-pinning rule below matters most for the e2e passes.
 
