@@ -9,7 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
-  defaultReviewSessionDependencies, gitlabMergeRequestFacts, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
+  defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
   type ReviewSessionDependencies,
 } from "./review-sessions.js";
 import type { SessionMeta } from "./session-store.js";
@@ -45,6 +45,8 @@ interface Fixture {
   facts: PullRequestFacts;
   /** Every GitLab merge request read: glab, host, project and IID. */
   mergeRequestReads: unknown[][];
+  /** Every host the GitLab host gate was asked about. */
+  hostChecks: string[];
   policy(overrides?: Partial<ReviewLaunchPolicy>): ReviewLaunchPolicy;
 }
 
@@ -60,6 +62,8 @@ function fixture(t: { after(fn: () => void): void }, options: {
   gitlab?: boolean;
   /** Leave out the GitLab merge request reader. */
   noMergeRequestReader?: boolean;
+  /** Hosts the user's global glab configuration names; `null` leaves out the host gate. */
+  gitlabHosts?: string[] | null;
 } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-sessions-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -92,6 +96,8 @@ function fixture(t: { after(fn: () => void): void }, options: {
     headSha: head, baseSha: base, ...options.pr,
   };
   const mergeRequestReads: unknown[][] = [];
+  const hostChecks: string[] = [];
+  const gitlabHosts = options.gitlabHosts === undefined ? ["gitlab.example.com"] : options.gitlabHosts;
   const exec: ReviewSessionDependencies["exec"] = async (command, args, execOptions) =>
     execFileSync(command, args, { encoding: "utf8", ...(execOptions?.cwd ? { cwd: execOptions.cwd } : {}), env: execOptions?.env });
   const deps: ReviewSessionDependencies = {
@@ -99,6 +105,9 @@ function fixture(t: { after(fn: () => void): void }, options: {
     pullRequest: async () => ({ ...facts }),
     ...(options.noMergeRequestReader ? {} : {
       mergeRequest: async (...args: unknown[]) => { mergeRequestReads.push(args.slice(0, 4)); return { ...facts }; },
+    }),
+    ...(gitlabHosts === null ? {} : {
+      gitlabHostConfigured: async (_glab: string, host: string) => { hostChecks.push(host); return gitlabHosts.includes(host); },
     }),
     tools: () => options.tools ?? (options.gitlab ? { git: GIT, glab: "/trusted/glab" } : { git: GIT, gh: "/trusted/gh" }),
     verifyCommand: () => { if (options.untrusted) throw new Error("planted"); },
@@ -109,7 +118,7 @@ function fixture(t: { after(fn: () => void): void }, options: {
   const snapshots = new ReviewSnapshotter(join(root, "snapshots"), exec, (message) => logs.push(message));
   const launcher = new ReviewSessionLauncher(join(root, "snapshots"), snapshots, { readMeta: (id) => metas.get(id) ?? null }, deps);
   return {
-    root, repo, worktree, base, head, requester, metas, launcher, logs, facts, mergeRequestReads,
+    root, repo, worktree, base, head, requester, metas, launcher, logs, facts, mergeRequestReads, hostChecks,
     policy: (overrides = {}) => ({
       requesterSessionId: "s_requester", pullRequest: { repository, number: 7 }, headSha: facts.headSha,
       harness: "codex", ...overrides,
@@ -421,6 +430,8 @@ test("prepare binds a GitLab merge request in a nested namespace through glab, f
   const prepared = await f.launcher.prepare("s_review", f.policy({ pullRequest: { repository: GITLAB, number: 12 } }), CODEX, "b");
   // Read once, by host, project and IID, with the verified glab.
   assert.deepEqual(f.mergeRequestReads, [["/trusted/glab", "gitlab.example.com", "acme/team/widget", 12]]);
+  // The host was proven configured before that read.
+  assert.deepEqual(f.hostChecks, ["gitlab.example.com"]);
   assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
   assert.equal(prepared.baseSha, f.base);
   assert.match(prepared.prompt, /- Merge request: gitlab\.example\.com\/acme\/team\/widget!12\n/u);
@@ -450,6 +461,14 @@ test("prepare refuses a GitLab merge request outside the session's own project, 
     const g = fixture(t, { gitlab: true, pr });
     assert.equal(await refusal(g.launcher.prepare("s_review", g.policy(), CODEX, "b")), reason);
   }
+  // A self-managed host the user's global glab configuration does not name is never asked, so a
+  // session-written origin cannot send glab's credentials elsewhere; nor is it without the gate.
+  for (const gitlabHosts of [[], null]) {
+    const unconfigured = fixture(t, { gitlab: true, gitlabHosts });
+    assert.equal(await refusal(unconfigured.launcher.prepare("s_review", unconfigured.policy(), CODEX, "b")),
+      "the runner's glab is not configured for this GitLab host");
+    assert.deepEqual(unconfigured.mergeRequestReads, []);
+  }
   const noGlab = fixture(t, { gitlab: true, tools: { git: GIT, gh: "/trusted/gh" } });
   assert.equal(await refusal(noGlab.launcher.prepare("s_review", noGlab.policy(), CODEX, "b")),
     "the runner is missing a trusted glab for GitLab reviews");
@@ -462,6 +481,35 @@ test("prepare refuses a GitLab merge request outside the session's own project, 
   assert.equal(await refusal(noGh.launcher.prepare("s_review", noGh.policy(), CODEX, "b")),
     "the runner is missing a trusted gh for GitHub reviews");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+});
+
+test("the GitLab host gate reads only the user's global glab configuration, and fails closed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-glab-gate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const glab = join(root, "glab");
+  const calls = join(root, "calls");
+  // A fake glab: records its arguments, and answers api_protocol for the hosts it is configured for.
+  writeFileSync(glab, [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> '${calls}'`,
+    'case "$5" in',
+    "  gitlab.example.com) echo https ;;",
+    "  ssh.example.com) echo ssh ;;",
+    "  *) echo 'not configured' >&2; exit 1 ;;",
+    "esac",
+    "",
+  ].join("\n"));
+  chmodSync(glab, 0o755);
+  assert.equal(await gitlabHostConfigured(glab, "gitlab.example.com"), true);
+  assert.equal(await gitlabHostConfigured(glab, "attacker.example"), false);
+  assert.equal(await gitlabHostConfigured(glab, "ssh.example.com"), false);
+  assert.equal(await gitlabHostConfigured("glab", "gitlab.example.com"), false, "only a verified absolute glab");
+  assert.equal(await gitlabHostConfigured(join(root, "missing"), "gitlab.example.com"), false);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+    "config get api_protocol --host gitlab.example.com --global",
+    "config get api_protocol --host attacker.example --global",
+    "config get api_protocol --host ssh.example.com --global",
+  ]);
 });
 
 test("a GitLab merge request is open only when opened, same-project, and diffed at its head", () => {

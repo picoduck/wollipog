@@ -69,6 +69,9 @@ export interface ReviewSessionDependencies {
   /** v244 (#3539): a GitLab merge request's facts, read with the verified glab. Without it, a GitLab
    * review is refused. */
   mergeRequest?(glab: string, host: string, project: string, iid: number, env?: NodeJS.ProcessEnv): Promise<PullRequestFacts>;
+  /** Whether the user's global glab configuration names `host`. Without it, only gitlab.com
+   * merge requests can be reviewed. */
+  gitlabHostConfigured?(glab: string, host: string, env?: NodeJS.ProcessEnv): Promise<boolean>;
   tools(): ReviewTools | { unavailable: string };
   /** Throw unless `command`, as spawn would resolve it on `pathEnv`, and its interpreter are trusted. */
   verifyCommand(command: string, pathEnv?: string): void;
@@ -125,6 +128,7 @@ export function defaultReviewSessionDependencies(
       ], { encoding: "utf8", timeout: 30_000, maxBuffer: 2_000_000, env: env ?? { ...process.env, NO_PROMPT: "1" } })).stdout;
       return gitlabMergeRequestFacts(JSON.parse(raw), `${host}/${project}`, iid);
     },
+    gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
     verifyCommand: (command, pathEnv = process.env.PATH) =>
       void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid, undefined, codexProtection()),
@@ -132,6 +136,23 @@ export function defaultReviewSessionDependencies(
     agentPath,
     log,
   };
+}
+
+/**
+ * Whether the user's global glab configuration names `host` (v244, #3539): the same local,
+ * unauthenticated `api_protocol` read every other GitLab reader makes before it contacts a
+ * self-managed host, so a session-written origin cannot send glab's credentials elsewhere.
+ */
+export async function gitlabHostConfigured(glab: string, host: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
+  if (!isAbsolute(glab)) return false;
+  try {
+    const { stdout } = await execFileAsync(glab, ["config", "get", "api_protocol", "--host", host, "--global"], {
+      encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024, env: env ?? { ...process.env, NO_PROMPT: "1" },
+    });
+    return ["http", "https"].includes(stdout.trim().toLowerCase());
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -497,6 +518,7 @@ export class ReviewSessionLauncher {
     const scope = await bindPullRequestScope({
       meta: requester, tools: verified, env, exec: this.deps.exec, pullRequest: this.deps.pullRequest,
       mergeRequest: this.deps.mergeRequest,
+      gitlabHostConfigured: this.deps.gitlabHostConfigured,
       request: { repository: policy.pullRequest.repository, number: policy.pullRequest.number, headSha: policy.headSha },
     });
     try {

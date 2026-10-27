@@ -132,6 +132,9 @@ export async function bindPullRequestScope(input: {
   /** A GitLab merge request's facts, read with the verified `glab` (v244, #3539). Without it, only
    * GitHub pull requests can be bound. */
   mergeRequest?: (glab: string, host: string, project: string, iid: number, env?: NodeJS.ProcessEnv) => Promise<PullRequestFacts>;
+  /** Whether the user's global glab configuration names `host` (a local, unauthenticated read).
+   * gitlab.com needs no proof; without this check no other host is ever asked. */
+  gitlabHostConfigured?: (glab: string, host: string, env?: NodeJS.ProcessEnv) => Promise<boolean>;
   /** Further refusals that apply once the worktree is proven to be the session's own. */
   beforeRepository?: () => void;
 }): Promise<BoundPullRequestScope> {
@@ -175,6 +178,13 @@ export async function bindPullRequestScope(input: {
   }
   if (named!.forge === "github" && !tools.gh) refuseReview("the runner is missing a trusted gh for GitHub reviews");
   if (named!.forge === "gitlab" && !tools.glab) refuseReview("the runner is missing a trusted glab for GitLab reviews");
+  // The origin is session-writable configuration, and glab may hold credentials that are not bound
+  // to one host (GITLAB_TOKEN). So, like every other GitLab reader, no authenticated request goes to
+  // a self-managed host the user's own global glab configuration does not name.
+  if (named!.forge === "gitlab" && named!.host.toLowerCase() !== "gitlab.com" &&
+      !(input.gitlabHostConfigured && await input.gitlabHostConfigured(tools.glab!, named!.host, env).catch(() => false))) {
+    refuseReview("the runner's glab is not configured for this GitLab host");
+  }
   const pr = named!.forge === "github"
     ? await input.pullRequest(tools.gh!, repository, request.number, env)
     : await input.mergeRequest!(tools.glab!, named!.host, named!.project, request.number, env);

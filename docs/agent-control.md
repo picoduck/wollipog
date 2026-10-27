@@ -408,7 +408,11 @@ worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `b
 
 Protocol v244 (#3539) adds GitLab merge requests. `--repo` (MCP `repository`) names the project by
 its host and full namespace, `<host>/group[/subgroup…]/project`, and `--pr` (MCP `number`) is the
-merge request's IID. The project checkout's `origin` must name exactly that host and project. The
+merge request's IID. The project checkout's `origin` must name exactly that host and project. Because
+that origin is session-writable configuration, a self-managed host must also be named by the user's
+global glab configuration (`glab config get api_protocol --host <host> --global`, the same local check
+every GitLab reader makes); otherwise the review is refused with `the runner's glab is not configured
+for this GitLab host` before any authenticated request. gitlab.com needs no such proof. The
 runner reads the merge request with a trusted `glab` (`glab api projects/<project>/merge_requests/<iid>
 --hostname <host>`, with the user's own glab login) and requires it to be `opened` (a `locked` merge
 request is not), from the same project, on the worktree's branch, at `--head`. The base is GitLab's

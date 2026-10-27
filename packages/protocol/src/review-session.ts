@@ -185,6 +185,7 @@ const REVIEW_SESSION_REASONS = new Set([
   "the runner is missing a trusted git or gh for reviews",
   "the runner is missing a trusted gh for GitHub reviews",
   "the runner is missing a trusted glab for GitLab reviews",
+  "the runner's glab is not configured for this GitLab host",
   "the review session could not be launched",
   "the review was cancelled",
   "the review ended without a result",
