@@ -39,7 +39,7 @@ async function iconCenter(notice: Locator): Promise<number> {
 async function expectIconOnTitleLine(notice: Locator, label: string) {
   const title = await firstLine(notice.locator(".notice-title"));
   const box = (await notice.boundingBox())!;
-  expectGeometry(title.top - box.y, `${label}: the title is the notice's first line`).toBeLessThan(16);
+  expectGeometry(title.top - box.y, `${label}: the title is the notice's first line`).toBeLessThan(20);
   expectGeometry(Math.abs(await iconCenter(notice) - title.center), `${label}: the icon is level with the title`)
     .toBeLessThanOrEqual(2);
 }
@@ -149,3 +149,32 @@ for (const theme of ["dark", "light"]) {
     });
   }
 }
+
+test.describe("on a touch phone", () => {
+  // Touch sizes `.btn.sm` at 36px (the coarse-pointer tokens), so a Retry beside the sentence is
+  // taller than on a desktop, and the notice grows around it as before.
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("compact notices keep their icon on the first line, and a one-line notice stays centered", async ({ page }) => {
+    await openNotices(page, "dark");
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+    for (const state of ["titled-dismiss", "titled-retry", "error"]) {
+      await expectIconOnTitleLine(page.locator(`.notice.compact[data-state="${state}"]`), state);
+    }
+    const notice = page.locator('.notice.compact[data-state="one-line"]');
+    const box = (await notice.boundingBox())!;
+    const middle = box.y + box.height / 2;
+    const retry = (await notice.getByRole("button", { name: "Retry" }).boundingBox())!;
+    expectGeometry(Math.abs(box.height - (retry.height + 10)), "the notice is Retry's height and its 4px padding and edge")
+      .toBeLessThanOrEqual(1);
+    expectGeometry(Math.abs(await iconCenter(notice) - middle), "the icon is centered").toBeLessThanOrEqual(1);
+    expectGeometry(Math.abs((await firstLine(notice.locator(".notice-body"))).center - middle), "the sentence is centered")
+      .toBeLessThanOrEqual(1);
+    expectGeometry(Math.abs(retry.y + retry.height / 2 - middle), "Retry is centered").toBeLessThanOrEqual(1);
+    const sentence = page.locator('.notice.compact[data-state="one-line-text"]');
+    const sentenceBox = (await sentence.boundingBox())!;
+    expectGeometry(Math.abs(sentenceBox.height - 40), "a sentence alone keeps its 40px line").toBeLessThanOrEqual(1);
+    expectGeometry(Math.abs(await iconCenter(sentence) - (sentenceBox.y + sentenceBox.height / 2)),
+      "its icon is centered").toBeLessThanOrEqual(1);
+  });
+});

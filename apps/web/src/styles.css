@@ -2152,13 +2152,22 @@ button.status { cursor: pointer; }
   display: flex;
   flex-wrap: wrap;
   align-items: baseline;
-  column-gap: var(--space-3);
+  gap: 0 var(--space-3);
+}
+/* Beside an action row, the title and the sentence are padded to the height of a `.btn.sm` (28px,
+   36px on touch) around their 20px line, so every part of a line starts at its top: WebKit places a
+   wrapping row by its first part's baseline as if that part sat at the row's top, and would
+   otherwise lift a one-line notice with a taller action out of center. Without actions they keep
+   a 28px line, which is what spaces a wrapped notice's lines either way. */
+.notice.compact .notice-content > :is(.notice-head, .notice-body) { padding-block: var(--space-1); }
+.notice.compact:has(> .notice-content > .notice-actions) > .notice-content > :is(.notice-head, .notice-body) {
+  padding-block: calc((var(--control-h-sm) - var(--space-5)) / 2);
 }
 .notice.compact .notice-body { flex: 1 1 12rem; }
 .notice.compact .notice-actions { margin-top: 0; }
 .notice.compact .notice-dismiss { margin: 0; }
-/* Opened details take the line under the sentence; the icon stays on the sentence's line. */
-.notice.compact .notice-details-body { flex-basis: 100%; }
+/* Opened details take the line under the sentence and its row; the icon stays on the first line. */
+.notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
    in the tone below it. */
 .notice.page-banner {
