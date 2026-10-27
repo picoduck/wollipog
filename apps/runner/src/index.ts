@@ -2,6 +2,7 @@ import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
 import { configuredCodexHomes } from "./review-trust.js";
+import { reviewerInstallationPaths } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
@@ -1277,7 +1278,7 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // authoritative inventory after every registration instead.
 /** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
 const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
-// Reviewer admission is native-Linux only; avoid accumulating unsupported-platform records.
+// Writer lifecycle diagnostics are native-Linux only and never gate reviewer admission.
 const reviewWriters = new ReviewWriterRegistry(process.platform === "linux"
   ? join(config.dataDir, "unprotected-agent-writers") : undefined);
 sessions.setReviewWriterRegistry(reviewWriters);
@@ -1635,6 +1636,8 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
   sessions: store.listSessions(), hostEnv: process.env,
 }));
 const codexProtection = () => sessions.codexReviewerProtection();
+sessions.setReviewerInstallationPaths(() => reviewerInstallationPaths(agentsForControlPlane(),
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
 const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
 // One owner of every review mirror, so the bridge's fetches and review sessions' never race.
 const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);

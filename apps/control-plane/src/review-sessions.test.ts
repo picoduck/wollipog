@@ -342,7 +342,7 @@ test("a discovery result replaces the reviewer capability a registration made be
     assert.ok(h.svc.requestReviewSession("s1", request()).ok, "the discovered reviewer is used");
     // A malformed capability is dropped, so the next request is refused rather than launched on it.
     h.db.updateRunnerReviewSessionCapability("r", { reviewers: [{ harness: "bash", agentId: "x" }] } as never);
-    assert.equal(h.db.getRunner("r")!.runtime?.reviewSession, undefined);
+    assert.deepEqual(h.db.getRunner("r")!.runtime?.reviewSession?.reviewers, []);
     h.db.updateRunnerReviewSessionCapability("r", null);
     assert.equal(h.db.getRunner("r")!.runtime?.reviewSession, undefined);
   } finally { h.db.close(); }
@@ -392,6 +392,23 @@ test("invalid unavailability reasons never discard valid reviewer entries", () =
     }
     assert.ok(h.svc.requestReviewSession("s1", request()).ok);
   } finally { h.db.close(); }
+});
+
+test("invalid reviewer entries cannot discard the other harness at registration or refresh", () => {
+  const capability = { reviewers: [
+    { harness: "codex", agentId: null }, { harness: "bash", agentId: "unknown" },
+    { harness: "claude-code", agentId: "claude" },
+  ], unavailable: { codex: " " } } as unknown as ReviewSessionCapability;
+  for (const registration of [true, false]) {
+    const h = harness({ driver: "codex-app-server", ...(registration ? { reviewSession: capability } : {}) });
+    try {
+      if (!registration) h.db.updateRunnerReviewSessionCapability("r", capability);
+      const stored = h.db.getRunner("r")!.runtime!.reviewSession!;
+      assert.deepEqual(stored.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+      assert.ok(stored.unavailable?.codex?.trim());
+      assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+    } finally { h.db.close(); }
+  }
 });
 
 test("a review session is refused without a supporting runner, reviewer or connection, and for unsupported requesters", () => {
