@@ -15,8 +15,8 @@ export default defineConfig({
   failOnFlakyTests: Boolean(process.env.CI),
   workers: 1,
   reporter: process.env.PLAYWRIGHT_JSON_OUTPUT_NAME
-    ? [[process.env.CI ? "github" : "list"], ["json"]]
-    : process.env.CI ? "github" : "list",
+    ? [[process.env.CI ? "github" : "list"], ["json"], ...(process.env.CI ? [["./scripts/ci-browser-timing-reporter.mjs"] as [string]] : [])]
+    : process.env.CI ? [["github"], ["./scripts/ci-browser-timing-reporter.mjs"]] : "list",
   use: {
     baseURL: `http://127.0.0.1:${port}`,
     trace: "retain-on-failure",

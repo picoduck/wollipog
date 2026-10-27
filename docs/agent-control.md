@@ -165,7 +165,7 @@ wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
 wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
-wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
+wollipog pr wait PR [--repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
 wollipog review session run --repo OWNER/NAME --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
 wollipog review session get REVIEW_SESSION_ID --json
 wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
@@ -212,6 +212,21 @@ checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads s
 starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
+
+A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
+timeout, interval, budget, and read-only contract. Give it as a merge request URL,
+`<gitlab-host>/group/project!IID`, or an IID with `--repo <gitlab-host>/group/project`; the host is
+always required, because a bare path would make `glab` resolve against gitlab.com, and every read
+passes `--hostname`. Each poll reads the merge request (its head pipeline is the merged-results
+pipeline where the project runs them) and, while it is open, its merge-train car; the project's
+"pipelines must succeed" setting is read once. Outcomes: `checks_passed` only for a `success`
+pipeline; `checks_failed` for a failed or canceled one; `checks_blocked` for a skipped pipeline or one
+waiting for a manual action, which will not finish on its own; `no_required_checks` when the project
+does not require a pipeline and the merge request has none; `queue_failed` when the train pipeline
+fails or is canceled; `queue_ejected` when the car stays gone for 10 seconds without a merge; and
+`merged`, `closed`, `head_changed`, or `timeout` as for GitHub. The summary carries `forge: "gitlab"`,
+the pipeline and train state, and GitLab's `detailed_merge_status`. A bare IID without `--repo` still
+resolves only a GitHub repository.
 
 Use [Review Sessions](#review-sessions) for required cross-model review of your own pushed pull
 request, including from an isolated campaign child. The bridge below is a compatibility fallback
@@ -380,13 +395,19 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
-- An epoch that used its rounds without an upvote takes more only through a typed
+- An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
     of the last valid round, 1 to 4 extra rounds, and a reason of at most 1000 characters.
   - **Resource key:** `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<rounds>`.
   - **Checks:** the control plane checks the request against the run as it records it. A run with
-    rounds left, an upvote, or any other epoch, round count or blocking count is refused.
+    rounds left or any other epoch, round count or blocking count is refused. After an upvote,
+    protocol 237+ requires `upvotedHeadSha` naming the last valid upvoted head and a different
+    `headSha`. An unchanged upvoted head keeps the existing refusal. The granted round (including
+    retries) reviews only the delta since that upvote; `fullReason` cannot broaden it. Older peers
+    fail closed. Merge decisions for an existing review run require a valid review of their head.
+    Unused grants are rechecked against the run at consumption and admission; stale and superseded
+    grants do not add rounds. Extensions keep the normal campaign admission and cost accounting.
   - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
     itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
     an explicit Parent Control grant; Full Control never takes it as part of its own boundary.
@@ -1299,6 +1320,30 @@ arms that exact command while the decision remains approved. The matching one-sh
 command permission is then admitted and the decision is marked consumed only after the allow
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
+
+Protocol v239 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
+its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
+request IID, and three fields exist only for GitLab and are then required: `mergeMethod`
+(`merge_train` or `merge`), `squash`, and `removeSourceBranch`. GitHub snapshots and their digests
+are unchanged. The canonical command is one `glab api` call pinned to the approved head with `sha=`
+and always naming the host:
+
+- `merge_train`: `glab api --method POST projects/<url-encoded project>/merge_trains/merge_requests/<iid>
+  --hostname <host> -f sha=<approved-head-sha> -F squash=<true|false>`. It omits
+  `when_pipeline_succeeds`, which GitLab 17.7 rejects for a merge request that is already mergeable.
+- `merge`: `glab api --method PUT projects/<url-encoded project>/merge_requests/<iid>/merge --hostname
+  <host> -f sha=<approved-head-sha> -F squash=<true|false> -F should_remove_source_branch=<true|false>`.
+
+Before arming it, the control plane asks the child's runner (v239) for `gitlab_merge_preflight`,
+which reads GitLab through the child's own `glab` login and context. A merge request that is not
+open or is a draft, a head that moved since approval, a direct merge on a project that runs merge
+trains (GitLab would merge it straight past the train), a train merge on a project without them or
+on an instance older than the merge-train API (15.11), squash outside the project's squash option,
+or a train whose merge request deletes its source branch differently from the approval revokes the
+decision. GitLab being unreadable proves nothing, so nothing is armed and the child may try again.
+The forge proof reads the merge request's own URL through `glab`. A failed train pipeline is not
+retried: `wait_pull_request` reports it as `queue_failed`, and the child requests a new decision.
+
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
 child verification settles an approved evidence decision as consumed instead of requiring the child

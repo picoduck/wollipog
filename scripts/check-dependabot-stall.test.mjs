@@ -96,6 +96,93 @@ test("does not treat package names found only in release notes as coverage", () 
   ]);
 });
 
+test("does not treat a group named after a package as coverage for that package", () => {
+  const result = assessDependabotHealth({
+    outdated: { fastify: outdated("5.12.5", "5.12.7") },
+    pulls: [
+      pull({
+        title: "chore(deps): bump the fastify group",
+        body: "Bumps the fastify group with updates to @fastify/cors and @fastify/static.\n"
+          + "<details>Release notes.</details>",
+      }),
+      pull({
+        number: 11,
+        title: "chore(deps)(deps): bump @fastify/static from 10.1.6 to 10.1.7 in the fastify group",
+        body: "Bumps the fastify group with 1 update: [@fastify/static](https://example.test/static).\n\n"
+          + "Updates `@fastify/static` from 10.1.6 to 10.1.7\n<details>Release notes.</details>",
+      }),
+      pull({
+        number: 12,
+        title: "chore(deps)(deps): bump the fastify group across 1 directory with 2 updates",
+        body: "Bumps the fastify group with 2 updates in the / directory: [@fastify/cors](https://example.test/cors) "
+          + "and [@fastify/static](https://example.test/static).\n<details>Release notes.</details>",
+      }),
+    ],
+    issues: [],
+    config: "",
+    now: NOW,
+  });
+
+  assert.deepEqual(result.uncovered, [
+    { dependency: "fastify", current: "5.12.5", latest: "5.12.7" },
+  ]);
+  assert.equal(result.healthy, false);
+});
+
+test("covers packages that single-package and grouped pull requests actually update", () => {
+  const result = assessDependabotHealth({
+    outdated: {
+      fastify: outdated("5.12.5", "5.12.7"),
+      "happy-dom": outdated("20.14.5", "21.0.4"),
+      react: outdated("19.3.0", "19.3.1"),
+      "react-dom": outdated("19.3.0", "19.3.1"),
+      vite: outdated("8.3.4", "8.3.5"),
+      ws: outdated("8.21.3", "8.22.0"),
+      "@types/ws": outdated("8.18.1", "8.18.2"),
+    },
+    pulls: [
+      pull({
+        title: "chore(deps)(deps-dev): bump happy-dom from 20.14.5 to 21.0.4",
+        body: "Bumps [happy-dom](https://example.test/happy-dom) from 20.14.5 to 21.0.4.\n"
+          + "<details>Release notes.</details>",
+      }),
+      pull({
+        number: 11,
+        title: "chore(deps)(deps): bump the react group with 2 updates",
+        body: "Bumps the react group with 2 updates: [react](https://example.test/react) and "
+          + "[react-dom](https://example.test/react-dom).\n\nUpdates `react` from 19.3.0 to 19.3.1\n"
+          + "<details>Release notes.</details>\n\nUpdates `react-dom` from 19.3.0 to 19.3.1\n"
+          + "<details>Release notes.</details>",
+      }),
+      pull({
+        number: 12,
+        title: "chore(deps)(deps-dev): bump vite from 8.3.4 to 8.3.5 in the vite group",
+        body: "Bumps the vite group with 1 update: [vite](https://example.test/vite).\n\n"
+          + "Updates `vite` from 8.3.4 to 8.3.5\n<details>Release notes.</details>",
+      }),
+      pull({
+        number: 13,
+        title: "chore(deps)(deps): bump the fastify group with 2 updates",
+        body: "Bumps the fastify group with 2 updates: [fastify](https://example.test/fastify) and "
+          + "[@fastify/static](https://example.test/static).\n<details>Release notes.</details>",
+      }),
+      pull({
+        number: 14,
+        title: "chore(deps)(deps): bump ws and @types/ws",
+        body: "Bumps [ws](https://example.test/ws) and [@types/ws](https://example.test/types-ws). "
+          + "These dependencies needed to be updated together.\nUpdates `ws` from 8.21.3 to 8.22.0\n"
+          + "<details>Release notes.</details>",
+      }),
+    ],
+    issues: [],
+    config: "",
+    now: NOW,
+  });
+
+  assert.deepEqual(result.uncovered, []);
+  assert.equal(result.healthy, true);
+});
+
 test("flags pull requests only after they have been open for more than seven days", () => {
   const result = assessDependabotHealth({
     outdated: {},

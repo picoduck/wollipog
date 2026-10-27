@@ -1,15 +1,21 @@
 name: CI
 
-# Fast PR/main safety net. Draft pull requests do not consume hosted runners; moving
+# PR/merge-group full validation and reusable rolling main validation. Draft PRs skip runners; moving
 # a pull request to Ready for Review starts this workflow once the change is ready.
 
 on:
+  # Rolling main validation shares every job; PR and merge-group defaults stay intact.
+  workflow_call:
+    inputs:
+      target_sha:
+        description: Immutable main snapshot admitted by the rolling controller
+        type: string
+        default: ''
   # Merge queue entries run the same required check on the queued merge group.
   merge_group:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  push:
-    branches: [main]
+  # Main pushes use Main Rolling Controller; rollback: scripts/restore-main-push-ci.mjs.
   workflow_dispatch:
     inputs:
       synthetic_failure_artifacts:
@@ -30,12 +36,53 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'pull_request' }}
 
 jobs:
+  # Opt-in only. Absent/ordinary off values consume no runner. Case variants admit this job,
+  # but the exact shell check below forces full coverage; only lowercase enabled permits fast.
+  # Non-PR events never enter selection, including merge groups and rolling validation.
+  suite_plan:
+    if: github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
+    name: PR Suite Routing
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Compute Trusted PR Route
+        id: plan
+        env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          # A fetch/selector error explicitly chooses full. Setup/job failures remain failures.
+          # GitHub expression equality ignores case; only this exact shell match permits fast.
+          if [ "$ROUTING_SWITCH" != enabled ]; then
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'Routing switch is not exactly enabled; full coverage required.'
+          elif git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA" && test -f scripts/ci-pr-routing.mjs; then
+            node scripts/ci-pr-routing.mjs
+          else
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'PR routing unavailable; full coverage required.'
+          fi
+
   # The required status context "Typecheck, Test & Sidecar Bundle" is the `check` job below. It
   # only aggregates: the work runs in parallel jobs with their own time budgets, because the
   # browser end-to-end suite alone takes ~19 minutes and was crowding the single 30-minute job
   # (a merge-queue run that hits the budget is cancelled and the PR silently leaves the queue).
   checks:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    needs: suite_plan
     name: Typecheck, Unit Tests & Bundles
     runs-on: ubuntu-24.04
     # Everything except the video decoder install took a median of 539 seconds and at most 771 over
@@ -48,6 +95,14 @@ jobs:
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -232,7 +287,15 @@ jobs:
         run: pnpm typecheck
 
       - name: Unit Tests
-        run: pnpm test
+        env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+        run: |
+          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            node scripts/test-suites.mjs --node-only --groups node-fast --ci
+          else
+            pnpm test:ci
+          fi
 
       - name: Verify Delegated Linux Provider Containment
         timeout-minutes: 3
@@ -277,7 +340,8 @@ jobs:
         run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
 
   browser:
-    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    needs: suite_plan
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
     # A recovered install timeout plus passing tests exhausted the old budget (#2700).
@@ -287,27 +351,36 @@ jobs:
     # Maximum non-install remainder: 2016s (previous envelope: 1448s),
     # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
     # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
-    # 720s attempts + 2020s rounded remainder + 105s enforcement + 480s failure diagnostics
-    # + 180s reserve = 3505s. A finite 59m (3540s) leaves 215s modeled residual reserve.
-    # Same five concurrent browser jobs; successful execution is unchanged. Hung jobs can
-    # hold runners 10m longer than the prior 49m limit in the shared 20-job pool.
+    # #3628 projects 1710s; retain the measured 2020s floor pending redistributed natural runs.
+    # 720s attempts + max(2020s, 1710s) remainder + 105s enforcement + 480s failure diagnostics
+    # + 180s reserve = 3505s before the system-package cache. Its five bounded phases add
+    # 480s + 75s enforcement (#3649): 4060s fits a finite 68m (4080s), with 200s residual.
+    # Same five concurrent browser jobs. Hung jobs can hold runners 9m longer than the
+    # prior 59m limit in the shared 20-job pool; cache hits should shorten normal setup.
     # scripts/workflow-browser-budget.test.mjs derives this from actual step deadlines and
     # identified phases. Remeasure after workload/setup changes; do not grow blindly.
     # docs/ci-browser-budget.md records warm/cold-cache uncertainty and natural-run delivery.
-    timeout-minutes: 59
+    timeout-minutes: 68
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
       # announced as four timeouts, which is the opposite of a useful signal.
       fail-fast: false
       matrix:
-        # The shard COUNT is duplicated in the --shard denominator below because GitHub offers no
-        # way to read the matrix length from inside the job. scripts/workflow-pr-event-contract.test.mjs
-        # asserts the two agree: a matrix of five against --shard=i/4 overruns, and a matrix of
-        # four against --shard=i/5 silently drops a fifth of the suite and still reports green.
-        shard: [1, 2, 3, 4, 5]
+        # Projects partition the live file inventory by measured duration, keeping files intact.
+        # The inventory contract pins these five jobs to all five projects and compares every
+        # configured test identity with the unpartitioned development inventory.
+        shard: ${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -342,21 +415,33 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
 
-      # Both installs fetch Chromium's system packages through apt, and a stalled mirror once held
-      # one silent until the job budget cancelled the shard before any test ran (run 36729343435,
-      # #2123). Across 2,516 successful installs from 2026-09-20 to 2026-09-30 the step took a
-      # median of 20 seconds and a p99 of 61, but a slow yet moving mirror (73 kB/s) stretched one
-      # to 321, so six minutes clears every measured success. A stall then costs six minutes plus a
-      # retry rather than the whole shard budget. A step timeout signals only the step's shell, so a
-      # timed-out attempt's Playwright and root apt processes keep running and holding the apt and
-      # dpkg locks; the retry kills them and finishes any interrupted dpkg run before installing
-      # again, reusing any packages the first attempt finished downloading.
+      # Cache Playwright's exact resolved archives as in #2345 (#3649). Keys follow the image,
+      # Playwright version and archive names/sizes/checksums. Optional cache failures use #2123's
+      # bounded install and retry; a broken offline install enters the network-enabled retry.
+      - name: Resolve Playwright Chromium System Packages
+        id: playwright-chromium-packages-resolve
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.playwright-version.outputs.version }}
+        run: bash scripts/playwright-system-packages.sh resolve chromium
+      - name: Restore Playwright Chromium System Packages
+        id: playwright-chromium-packages-cache
+        if: steps.playwright-chromium-packages-resolve.outputs.key != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/playwright-chromium-packages
+          key: ${{ steps.playwright-chromium-packages-resolve.outputs.key }}
       - name: Install Playwright Browser
         id: playwright-browser
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 6
-        run: pnpm exec playwright install --with-deps chromium
+        env:
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-hit || 'false' }}
+        run: bash scripts/playwright-system-packages.sh install chromium browser
       - name: Retry Install Playwright Browser
         if: ${{ !cancelled() && steps.playwright-browser.outcome == 'failure' }}
         timeout-minutes: 6
@@ -371,7 +456,9 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit == 'true'
         continue-on-error: true
         timeout-minutes: 6
-        run: pnpm exec playwright install-deps chromium
+        env:
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-chromium-packages-cache.outcome == 'success' && steps.playwright-chromium-packages-cache.outputs.cache-hit || 'false' }}
+        run: bash scripts/playwright-system-packages.sh install chromium system
       - name: Retry Install Playwright System Dependencies
         if: ${{ !cancelled() && steps.playwright-system-dependencies.outcome == 'failure' }}
         timeout-minutes: 6
@@ -381,12 +468,37 @@ jobs:
           sudo dpkg --configure -a
           pnpm exec playwright install-deps chromium
 
+      - name: Verify Playwright Chromium Launch
+        timeout-minutes: 1
+        run: node scripts/verify-playwright-browser.mjs chromium
+      - name: Collect Playwright Chromium System Packages
+        id: playwright-chromium-packages-collect
+        if: steps.playwright-chromium-packages-resolve.outputs.key != '' && (steps.playwright-chromium-packages-cache.outcome != 'success' || steps.playwright-chromium-packages-cache.outputs.cache-hit != 'true')
+        continue-on-error: true
+        timeout-minutes: 1
+        run: bash scripts/playwright-system-packages.sh collect chromium
+      - name: Save Playwright Chromium System Packages
+        if: steps.playwright-chromium-packages-collect.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/playwright-chromium-packages
+          key: ${{ steps.playwright-chromium-packages-resolve.outputs.key }}
+
       - name: Remote-Instance Browser End-to-End Tests
         id: browser-tests
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/synthetic-browser-report.json
           SYNTHETIC_ARTIFACT_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' || 'false' }}
-        run: pnpm test:e2e --shard=${{ matrix.shard }}/5
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+        run: |
+          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
+          else
+            pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}
+          fi
 
       # Upload only projected allowlisted captures from this failed shard. The original test step
       # is never continued-on-error: missing captures, sanitizer failure and upload failure cannot
@@ -396,6 +508,8 @@ jobs:
         if: ${{ !cancelled() && steps.browser-tests.outcome == 'failure' }}
         continue-on-error: true
         timeout-minutes: 1
+        env:
+          CI_EVIDENCE_HEAD: ${{ inputs.target_sha || github.event.pull_request.head.sha || github.sha }}
         run: >-
           python3 scripts/sanitize-browser-failure-artifacts.py
           --report "${{ runner.temp }}/synthetic-browser-report.json"
@@ -404,7 +518,7 @@ jobs:
           --outcome failure
           --run-id "${{ github.run_id }}" --attempt "${{ github.run_attempt }}"
           --shard "${{ matrix.shard }}"
-          --head "${{ github.event.pull_request.head.sha || github.sha }}"
+          --head "$CI_EVIDENCE_HEAD"
 
       - name: Upload Sanitized Synthetic Browser Failure Artifacts
         if: ${{ !cancelled() && steps.browser-tests.outcome == 'failure' && steps.sanitize-browser-artifacts.outcome == 'success' && steps.sanitize-browser-artifacts.outputs.retained == 'true' }}
@@ -538,8 +652,8 @@ jobs:
             echo "::error title=Stale linux Baselines::$COUNT linux settings-rows baselines differ from what CI renders. The regenerated images are in this run's settings-rows-linux-baselines artifact; the job summary says how to commit them."
           fi
 
-      # The production pass is thirty-three seconds and does not shard: it builds the app once and
-      # loads it once. Running it on every shard would be five copies of the same evidence.
+      # Production build/smoke remains shard-1-only. Its measured cost is preloaded into the
+      # duration grouping so the complete shard path, including this work, is balanced.
       - name: Validate Web Production Build
         if: matrix.shard == 1
         run: pnpm --filter @wollipog/web build
@@ -559,6 +673,9 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Settings-Rows win32 Baselines
     uses: ./.github/workflows/settings-rows-win32.yml
+    with:
+      ref: ${{ inputs.target_sha }}
+      expected_sha: ${{ inputs.target_sha }}
 
   # The specs that opt into WebKit (playwright.webkit.config.ts), which is Safari's engine and both
   # desktop webviews'. It is its own job, beside the Chromium shards rather than inside one, so it
@@ -569,9 +686,19 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: WebKit End-to-End Tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    # Two 6m attempts + 8m cache/verify bounds + 1m45s enforcement + 4m remainder
+    # + 3m reserve = 28m45s. The derived cache allowance raises 20m to 29m (#3649).
+    timeout-minutes: 29
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - name: Setup pnpm
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
@@ -607,13 +734,33 @@ jobs:
           path: ~/.cache/ms-playwright
           key: ${{ runner.os }}-playwright-webkit-${{ steps.playwright-version.outputs.version }}
 
-      # The same bounded attempt and lock-clearing retry as the Chromium installs above (#2123).
+      # Cache Playwright's exact resolved archives as in #2345 (#3649). Keys follow the image,
+      # Playwright version and archive names/sizes/checksums. Optional cache failures use #2123's
+      # bounded install and retry; a broken offline install enters the network-enabled retry.
+      - name: Resolve Playwright WebKit System Packages
+        id: playwright-webkit-packages-resolve
+        continue-on-error: true
+        timeout-minutes: 2
+        env:
+          PLAYWRIGHT_VERSION: ${{ steps.playwright-version.outputs.version }}
+        run: bash scripts/playwright-system-packages.sh resolve webkit
+      - name: Restore Playwright WebKit System Packages
+        id: playwright-webkit-packages-cache
+        if: steps.playwright-webkit-packages-resolve.outputs.key != ''
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/playwright-webkit-packages
+          key: ${{ steps.playwright-webkit-packages-resolve.outputs.key }}
       - name: Install Playwright WebKit
         id: playwright-webkit
         if: steps.playwright-webkit-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         timeout-minutes: 6
-        run: pnpm exec playwright install --with-deps webkit
+        env:
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-hit || 'false' }}
+        run: bash scripts/playwright-system-packages.sh install webkit browser
       - name: Retry Install Playwright WebKit
         if: ${{ !cancelled() && steps.playwright-webkit.outcome == 'failure' }}
         timeout-minutes: 6
@@ -628,7 +775,9 @@ jobs:
         if: steps.playwright-webkit-cache.outputs.cache-hit == 'true'
         continue-on-error: true
         timeout-minutes: 6
-        run: pnpm exec playwright install-deps webkit
+        env:
+          SYSTEM_CACHE_HIT: ${{ steps.playwright-webkit-packages-cache.outcome == 'success' && steps.playwright-webkit-packages-cache.outputs.cache-hit || 'false' }}
+        run: bash scripts/playwright-system-packages.sh install webkit system
       - name: Retry Install Playwright WebKit System Dependencies
         if: ${{ !cancelled() && steps.playwright-webkit-system-dependencies.outcome == 'failure' }}
         timeout-minutes: 6
@@ -638,8 +787,102 @@ jobs:
           sudo dpkg --configure -a
           pnpm exec playwright install-deps webkit
 
+      - name: Verify Playwright WebKit Launch
+        timeout-minutes: 1
+        run: node scripts/verify-playwright-browser.mjs webkit
+      - name: Collect Playwright WebKit System Packages
+        id: playwright-webkit-packages-collect
+        if: steps.playwright-webkit-packages-resolve.outputs.key != '' && (steps.playwright-webkit-packages-cache.outcome != 'success' || steps.playwright-webkit-packages-cache.outputs.cache-hit != 'true')
+        continue-on-error: true
+        timeout-minutes: 1
+        run: bash scripts/playwright-system-packages.sh collect webkit
+      - name: Save Playwright WebKit System Packages
+        if: steps.playwright-webkit-packages-collect.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/playwright-webkit-packages
+          key: ${{ steps.playwright-webkit-packages-resolve.outputs.key }}
+
       - name: WebKit Browser End-to-End Tests
         run: pnpm test:e2e:webkit
+
+  # Advisory only: no needs edge into the required aggregator and no test is executed twice.
+  # Checkout the event's trusted base; never import the pull request's selector or policy.
+  suite-shadow:
+    if: (github.event_name == 'merge_group' || github.event_name == 'pull_request') && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
+    name: Suite Selection Shadow (Advisory)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Compute Trusted Suite Selection
+        env:
+          BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.pull_request.base.sha }}
+          TESTED_SHA: ${{ github.sha }}
+          CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA"
+          if test -f scripts/ci-suite-selection.mjs; then
+            node scripts/ci-suite-selection.mjs --base "$BASE_SHA" --head "$TESTED_SHA" --change-head "$CHANGE_HEAD_SHA"
+          else
+            echo 'Trusted suite policy unavailable at this base; full coverage remains required.'
+          fi
+
+  # Disabled by default. Advisory sibling of the aggregator: no needs edge into any
+  # required job, no status-writing token and no change to full regression coverage.
+  regression-admission-shadow:
+    if: ${{ !cancelled() && vars.CI_REGRESSION_ADMISSION == 'dry-run' && (github.event_name == 'merge_group' || github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)) }}
+    name: Regression Admission Shadow (Advisory)
+    needs: [checks, browser, win32, webkit]
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      # Reusable CI has contents:read-only callers. Public Actions/issues endpoints
+      # require no extra read scope; inaccessible evidence remains a hold.
+      # A queue base may contain earlier queued work: execute only current main code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Observe Regression Admission Without Enforcement
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_MERGE_ADMISSION: ${{ vars.CI_REGRESSION_ADMISSION }}
+          MAIN_MERGE_ADMISSION_OUTPUT: ${{ runner.temp }}/main-merge-admission.json
+        run: |
+          if [ "$MAIN_MERGE_ADMISSION" != dry-run ]; then
+            echo 'Regression admission shadow requires exact lowercase dry-run.'
+          elif test -f scripts/main-merge-admission.mjs; then
+            node scripts/main-merge-admission.mjs
+          else
+            echo '{"schema":"main-merge-admission-v1","mode":"dry-run","enforcement":"none","decision":"hold","reasons":["trusted-policy-unavailable"]}' > "$MAIN_MERGE_ADMISSION_OUTPUT"
+            cat "$MAIN_MERGE_ADMISSION_OUTPUT"
+          fi
+      - name: Retain Regression Admission Observation
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-merge-admission-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-merge-admission.json
+          retention-days: 30
+          if-no-files-found: warn
 
   check:
     # Report failed, cancelled or skipped dependencies while PR CI is active. !cancelled()
@@ -650,10 +893,14 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [checks, browser, win32, webkit]
+    needs: [checks, browser, win32, webkit, suite_plan]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
+          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && 'true' || 'false' }}
+          PLAN_RESULT: ${{ needs.suite_plan.result }}
+          PLAN_MODE: ${{ needs.suite_plan.outputs.mode }}
           CHECKS_RESULT: ${{ needs.checks.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
           WIN32_RESULT: ${{ needs.win32.result }}
@@ -667,6 +914,18 @@ jobs:
               *) echo "::error::$1 ended with result '$2'"; status=1 ;;
             esac
           }
+          if [ "$ROUTING_ENABLED" = true ]; then
+            report "PR Suite Routing" "$PLAN_RESULT"
+            case "$PLAN_MODE" in
+              full) ;;
+              fast) if [ "$ROUTING_SWITCH" != enabled ]; then
+                echo '::error::Fast routing requires the exact lowercase enabled switch'; status=1
+              fi ;;
+              *) echo "::error::PR Suite Routing returned missing or unknown mode '$PLAN_MODE'"; status=1 ;;
+            esac
+          elif [ "$ROUTING_ENABLED" != false ] || [ "$PLAN_RESULT" != skipped ] || [ -n "$PLAN_MODE" ]; then
+            echo "::error::Unexpected PR Suite Routing admission or output"; status=1
+          fi
           report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
           report "Settings-Rows win32 Baselines" "$WIN32_RESULT"

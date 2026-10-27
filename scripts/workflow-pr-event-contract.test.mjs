@@ -17,6 +17,8 @@ const EXPECTED_GROUP_TEMPLATE =
   "${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}";
 const EXPECTED_JOB_GUARD =
   "github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false";
+const EXPECTED_SHADOW_GUARD = `(github.event_name == 'merge_group' || github.event_name == 'pull_request') && (${EXPECTED_JOB_GUARD})`;
+const EXPECTED_ADMISSION_SHADOW_GUARD = "${{ !cancelled() && vars.CI_REGRESSION_ADMISSION == 'dry-run' && (github.event_name == 'merge_group' || github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)) }}";
 // CI carries the required check, so its pull-request lanes are also per head and never cancel in
 // progress (#3283); pr-ci-supersede.yml stops older heads. The other PR workflows report no
 // required check and keep cancelling, but every workflow shares the same ready/draft lanes.
@@ -47,7 +49,22 @@ function workflowContract(path) {
   }
   // Every job carries the same draft guard. The aggregator adds PR-only !cancelled()
   // admission; non-PR reporting remains unconditional, including on cancellation.
-  const guards = [...new Set(jobGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
+  const requiredGuards = jobGuards.filter((match, index) => {
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "regression-admission-shadow:") {
+      assert.equal(match[1].trim(), EXPECTED_ADMISSION_SHADOW_GUARD, "admission shadow remains optional, advisory and draft guarded");
+      return false;
+    }
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite-shadow:") {
+      assert.equal(match[1].trim(), EXPECTED_SHADOW_GUARD, "advisory selection has its explicit PR/merge-group draft guard");
+      return false;
+    }
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite_plan:") {
+      assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
+      return false;
+    }
+    return true;
+  });
+  const guards = [...new Set(requiredGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
   assert.equal(guards.length, 1, `${path}: every job must carry the same draft guard, got ${JSON.stringify(guards)}`);
 
   return {
@@ -58,6 +75,8 @@ function workflowContract(path) {
 }
 
 function unwrapAggregatorGuard(expression) {
+  const work = expression.match(/^\$\{\{ !cancelled\(\) && \((.+)\) \}\}$/);
+  if (work) return work[1];
   const wrapped = expression.match(/^\$\{\{\s*\(github\.event_name != 'pull_request' \|\| !cancelled\(\)\)\s*&&\s*\((.+)\)\s*\}\}$/);
   return wrapped ? wrapped[1].trim() : expression;
 }
@@ -69,6 +88,16 @@ function groupExpressions(groupTemplate) {
   assert.ok(match, "concurrency group must retain workflow, ref, and lane segments");
   return { ref: match[1], lane: match[2] };
 }
+
+test("advisory suite selection runs only on admitted PR and merge-group events", () => {
+  const text = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  const expression = text.match(/^  suite-shadow:\n    if: (.+)$/m)?.[1];
+  assert.equal(expression, EXPECTED_SHADOW_GUARD);
+  for (const row of [...EVENT_MATRIX, { name: "merge group", eventName: "merge_group", ref: "refs/heads/gh-readonly-queue/main" }]) {
+    const expected = row.eventName === "merge_group" || (row.eventName === "pull_request" && row.expectedRun);
+    assert.equal(evaluate(expression, githubContext(row)), expected, row.name);
+  }
+});
 
 function evaluate(expression, github) {
   return vm.runInNewContext(expression, { github }, { timeout: 1_000 });
@@ -219,10 +248,14 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["checks", "browser", "win32", "webkit", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "checks", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
+  assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
+  assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
+  assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
   for (const id of ["checks", "browser", "webkit"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
-    assert.doesNotMatch(byId[id], /^    needs:/m, `${id}: the work jobs run in parallel, not chained`);
+    if (id === "webkit") assert.doesNotMatch(byId[id], /^    needs:/m);
+    else assert.match(byId[id], /^    needs: suite_plan$/m, `${id}: only routing may precede parallel work`);
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
 
@@ -243,7 +276,26 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // forecloses spellings nobody has thought of yet, including inserting a key ANYWHERE rather than
   // only where the last bypass happened to put it. Changing the job then means editing this
   // expectation by hand, which is the reviewable act the guard exists to force.
+  // Assert the exact new routing text before normalising to the established full shard shape.
+  // workflow-ci-routing.test.mjs executes these same expressions and both actual shell branches.
+  const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
+  const matrixExpression = "${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const routedRun = [
+    "          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}",
+    `          PR_FAST: ${fastExpression}`,
+    "        run: |",
+    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
+    "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts",
+    "          else",
+    "            pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}",
+    "          fi",
+  ].join("\n");
+  assert.ok(byId.browser.includes(`        shard: ${matrixExpression}\n`));
+  assert.ok(byId.browser.includes(routedRun));
   const structural = byId.browser
+    .replace("    needs: suite_plan\n", "")
+    .replace(matrixExpression, "[1, 2, 3, 4, 5]")
+    .replace(routedRun, "        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}")
     .split("\n")
     .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
     .join("\n");
@@ -268,7 +320,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // after `run:` and skip the suite on whichever legs it excluded — which those legs then reported
   // as success.
   const step = structural.match(
-    /^      - name: Remote-Instance Browser End-to-End Tests\n        id: browser-tests\n        env:\n          PLAYWRIGHT_JSON_OUTPUT_NAME: \$\{\{ runner.temp \}\}\/synthetic-browser-report.json\n          SYNTHETIC_ARTIFACT_FAILURE: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' \|\| 'false' \}\}\n        run: pnpm test:e2e --shard=\$\{\{ matrix\.shard \}\}\/(\d+)\n      - name: /m,
+    /^      - name: Remote-Instance Browser End-to-End Tests\n        id: browser-tests\n        env:\n          PLAYWRIGHT_JSON_OUTPUT_NAME: \$\{\{ runner.temp \}\}\/synthetic-browser-report.json\n          SYNTHETIC_ARTIFACT_FAILURE: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' \|\| 'false' \}\}\n        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-\$\{\{ matrix\.shard \}\}\n      - name: /m,
   );
   assert.ok(step,
     "browser: the shard command's step must be exactly its reviewed name/id/env/run shape, followed by the " +
@@ -291,22 +343,20 @@ test("the required CI check aggregates parallel jobs that each own a time budget
 
   const shards = header[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(shards, shards.map((_, index) => index + 1),
-    "browser: shards must be numbered 1..N with no gaps, because --shard=i/N means the i-th of N");
-  assert.equal(Number(step[1]), shards.length,
-    `browser: --shard=i/${step[1]} against ${shards.length} matrix legs runs the wrong fraction of ` +
-    "the suite. The dangerous direction is silent: fewer legs than the denominator runs a fraction " +
-    "and reports every leg green, because a shard that was never scheduled cannot fail.");
+    "browser: shard projects must be numbered consecutively with no gaps");
+  assert.deepEqual(shards, [1, 2, 3, 4, 5],
+    "browser: retain the five-job envelope; browser-shards.test.mjs compares all project test identities");
 
   assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit, suite_plan\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
-  // The win32 job is the draft guard, its name and the call, and nothing else. Its path scoping lives
+  // The win32 job is the draft guard, its name, the call and optional snapshot inputs. Its path scoping lives
   // in the called workflow, where a skip is a job the call still reports as a success; a condition
   // here would instead skip the call, which the aggregator rightly reads as a failure.
   const win32 = byId.win32
@@ -314,8 +364,8 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
     .join("\n");
   assert.match(win32,
-    /^  win32:\n    if: [^\n]*\n    name: Settings-Rows win32 Baselines\n    uses: \.\/\.github\/workflows\/settings-rows-win32\.yml$/,
-    "win32: the job must be exactly its guard, its name and the call to the win32 baselines workflow");
+    /^  win32:\n    if: [^\n]*\n    name: Settings-Rows win32 Baselines\n    uses: \.\/\.github\/workflows\/settings-rows-win32\.yml\n    with:\n      ref: \$\{\{ inputs.target_sha \}\}\n      expected_sha: \$\{\{ inputs.target_sha \}\}$/,
+    "win32: the job must retain its guard, name, call and exact rolling snapshot inputs");
   assert.match(byId.check, /needs\.win32\.result/,"the aggregator must inspect the win32 baselines result");
   assert.match(byId.check, /^          report "Settings-Rows win32 Baselines" "\$WIN32_RESULT"$/m,
     "the aggregator must fail when the win32 baselines job did not succeed");
@@ -533,6 +583,7 @@ test("both Playwright installs time out and retry once after clearing the stalle
   ];
 
   for (const [name, id, cacheHit, command, cache = "playwright-cache"] of installs) {
+    const browser = command.endsWith("webkit") ? "webkit" : "chromium";
     const index = steps.findIndex((step) => step.startsWith(`${name}\n`));
     assert.notEqual(index, -1, `${name}: step is missing`);
     assert.equal(steps[index], [
@@ -541,7 +592,9 @@ test("both Playwright installs time out and retry once after clearing the stalle
       `        if: steps.${cache}.outputs.cache-hit ${cacheHit} 'true'`,
       "        continue-on-error: true",
       "        timeout-minutes: 6",
-      `        run: ${command}`,
+      "        env:",
+      `          SYSTEM_CACHE_HIT: \${{ steps.playwright-${browser}-packages-cache.outcome == 'success' && steps.playwright-${browser}-packages-cache.outputs.cache-hit || 'false' }}`,
+      `        run: bash scripts/playwright-system-packages.sh install ${browser} ${cacheHit === "!=" ? "browser" : "system"}`,
     ].join("\n"), `${name}: first attempt must be bounded and allow one retry`);
     assert.equal(steps[index + 1], [
       `Retry ${name}`,
@@ -554,6 +607,68 @@ test("both Playwright installs time out and retry once after clearing the stalle
       `          ${command}`,
     ].join("\n"), `${name}: retry must immediately follow, clear the stalled attempt, and fail the job on a second failure`);
   }
+});
+
+test("Playwright system package caches pin exact keys, optional failures and verified pre-test ordering", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
+  for (const [browser, jobId, nextJob, suite, installNames] of [
+    ["chromium", "browser", "win32", "Remote-Instance Browser End-to-End Tests",
+      ["Install Playwright Browser", "Install Playwright System Dependencies"]],
+    ["webkit", "webkit", "check", "WebKit Browser End-to-End Tests",
+      ["Install Playwright WebKit", "Install Playwright WebKit System Dependencies"]],
+  ]) {
+    const job = ci.slice(ci.indexOf(`\n  ${jobId}:\n`), ci.indexOf(`\n  ${nextJob}:\n`));
+    const steps = job.split(/^      - name: /m).slice(1)
+      .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
+    const label = browser === "chromium" ? "Playwright Chromium" : "Playwright WebKit";
+    const id = `playwright-${browser}-packages`;
+    const path = `~/.cache/playwright-${browser}-packages`;
+    const key = `\${{ steps.${id}-resolve.outputs.key }}`;
+    const action = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9";
+    const names = [`Resolve ${label} System Packages`, `Restore ${label} System Packages`,
+      installNames[0], `Retry ${installNames[0]}`, installNames[1], `Retry ${installNames[1]}`,
+      `Verify ${label} Launch`, `Collect ${label} System Packages`, `Save ${label} System Packages`];
+    const first = steps.findIndex((step) => step.startsWith(`${names[0]}\n`));
+    assert.ok(first >= 0);
+    assert.deepEqual(steps.slice(first, first + names.length).map((step) => step.split("\n")[0]), names);
+    assert.equal(steps[first + names.length].split("\n")[0], suite,
+      "cache phases and real browser launch must finish before tests");
+    const expected = [
+      [names[0], `        id: ${id}-resolve`, "        continue-on-error: true", "        timeout-minutes: 2",
+        "        env:", "          PLAYWRIGHT_VERSION: \${{ steps.playwright-version.outputs.version }}",
+        `        run: bash scripts/playwright-system-packages.sh resolve ${browser}`],
+      [names[1], `        id: ${id}-cache`, `        if: steps.${id}-resolve.outputs.key != ''`,
+        "        continue-on-error: true", "        timeout-minutes: 2",
+        `        uses: actions/cache/restore@${action} # v6.1.0`, "        with:",
+        `          path: ${path}`, `          key: ${key}`],
+      [names[6], "        timeout-minutes: 1", `        run: node scripts/verify-playwright-browser.mjs ${browser}`],
+      [names[7], `        id: ${id}-collect`,
+        `        if: steps.${id}-resolve.outputs.key != '' && (steps.${id}-cache.outcome != 'success' || steps.${id}-cache.outputs.cache-hit != 'true')`,
+        "        continue-on-error: true", "        timeout-minutes: 1",
+        `        run: bash scripts/playwright-system-packages.sh collect ${browser}`],
+      [names[8], `        if: steps.${id}-collect.outcome == 'success'`,
+        "        continue-on-error: true", "        timeout-minutes: 2",
+        `        uses: actions/cache/save@${action} # v6.1.0`, "        with:",
+        `          path: ${path}`, `          key: ${key}`],
+    ];
+    for (const [index, lines] of [[0, expected[0]], [1, expected[1]], [6, expected[2]], [7, expected[3]], [8, expected[4]]]) {
+      assert.equal(steps[first + index], lines.join("\n"),
+        `${names[index]}: exact-key caching must be bounded and optional; verification must fail closed`);
+    }
+    if (browser === "webkit") {
+      const overhead = expected.reduce((minutes, lines) =>
+        minutes + Number(lines.find((line) => line.includes("timeout-minutes:")).split(": ")[1]), 0);
+      const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+      // #3214's dated remainder was under four minutes. Include enforcement on all seven
+      // active bounded steps, plus the same three-minute reserve as Chromium.
+      assert.ok(budget * 60 >= 12 * 60 + overhead * 60 + 7 * 15 + 4 * 60 + 180);
+    }
+  }
+  const helper = readFileSync(resolve(process.cwd(), "scripts/playwright-system-packages.sh"), "utf8");
+  assert.match(helper, /pnpm exec playwright install-deps --dry-run "\$browser"/);
+  assert.match(helper, /--print-uris --no-install-recommends "\$\{packages\[@\]\}"/);
+  assert.match(helper, /cut -d ' ' -f 2- "\$manifest" \| sort \| sha256sum/);
+  assert.match(helper, /key=playwright-system-v1-\$browser-\$ImageOS-\$ImageVersion-\$PLAYWRIGHT_VERSION-\$digest/);
 });
 
 test("the unit-test job's video decoder install is cached, retries once, and every step fits its budget", () => {
@@ -819,9 +934,12 @@ test("every workflow job bounds its own runtime", () => {
       const timeout = body.match(/^ {4}timeout-minutes: (\d+)$/m);
 
       assert.ok(timeout, `${path}: job "${heading[1]}" must set timeout-minutes`);
+      // #3649 adds 8m of bounded cache/verification phases plus 75s enforcement to
+      // the measured Chromium model. Only this job may exceed the general ceiling.
+      const maximum = path === WORKFLOWS[0] && heading[1] === "browser" ? 68 : MAX_TIMEOUT_MINUTES;
       assert.ok(
-        Number(timeout[1]) <= MAX_TIMEOUT_MINUTES,
-        `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${MAX_TIMEOUT_MINUTES}`,
+        Number(timeout[1]) <= maximum,
+        `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${maximum}`,
       );
     }
   }

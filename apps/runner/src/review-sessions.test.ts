@@ -9,7 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
-  reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand, type ReviewSessionDependencies,
+  defaultReviewSessionDependencies, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand, type ReviewSessionDependencies,
 } from "./review-sessions.js";
 import type { SessionMeta } from "./session-store.js";
 
@@ -239,6 +239,69 @@ test("capability names one available native agent per reviewer harness and repor
   });
   const noTools = fixture(t, { tools: { unavailable: "git is not installed" } });
   assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], unavailable: { tools: "git is not installed" } });
+});
+
+test("long writer refusals stay within the control plane capability limit", () => {
+  const reason = "Codex packages are unprotected from the following writers: " + Array.from({ length: 10 }, (_, index) =>
+    `session s_writer_${index} (complete exit unproven; ${"retained writer detail ".repeat(7)}).`).join("\n");
+  const logs: string[] = [];
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    exec: async () => "", pullRequest: async () => { throw new Error("unused"); },
+    tools: () => ({ git: GIT, gh: "/trusted/gh" }), agents: () => AGENTS, agentPath: () => "/trusted",
+    verifyCommand: (command) => { if (command === "codex") throw new Error(reason); }, log: (message) => logs.push(message),
+  });
+  const capability = launcher.capability(undefined, "linux")!;
+  assert.ok(capability.unavailable!.codex!.length <= 500, "otherwise agents_updated discards the whole capability");
+  assert.match(capability.unavailable!.codex!, /10 retaining sessions: s_writer_0, s_writer_1, s_writer_2 \(\+7 more\).*--state-doctor review-writers inspect/u);
+  assert.deepEqual(capability.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+  assert.ok(logs.some((message) => String((JSON.parse(message) as { reason: string }).reason).includes(reason)),
+    "retain the complete refusal in the runner log");
+});
+
+test("unchanged discovery failures log once, and recovery allows a recurrence to be logged", () => {
+  let unavailable = true;
+  const logs: string[] = [];
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    exec: async () => "", pullRequest: async () => { throw new Error("unused"); },
+    tools: () => ({ git: GIT, gh: "/trusted/gh" }), agents: () => AGENTS, agentPath: () => "/trusted",
+    verifyCommand: (command) => { if (command === "codex" && unavailable) throw new Error("codex unavailable"); },
+    log: (message) => logs.push(message),
+  });
+  launcher.capability(undefined, "linux");
+  launcher.capability(undefined, "linux");
+  assert.equal(logs.length, 1);
+  unavailable = false;
+  launcher.capability(undefined, "linux");
+  unavailable = true;
+  launcher.capability(undefined, "linux");
+  assert.equal(logs.length, 2);
+  assert.deepEqual(JSON.parse(logs[0]!), { event: "review_session_discovery_failed", component: "codex", reason: "Error: codex unavailable" });
+});
+
+test("capability contains tool-root and agent discovery exceptions and recovers on the next computation", () => {
+  let failure: "tools" | "agents" | null = "tools";
+  const deps = defaultReviewSessionDependencies("/state", () => {}, () => {
+    if (failure === "tools") throw new Error("tool roots unavailable during startup");
+    return [];
+  }, () => {
+    if (failure === "agents") throw new Error("agent catalog unavailable during startup");
+    return AGENTS;
+  });
+  const tools = deps.tools;
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    ...deps, tools: () => failure === "tools" ? tools() : { git: GIT, gh: "/trusted/gh" }, verifyCommand: () => {},
+  });
+  assert.deepEqual(launcher.capability(undefined, "linux"), {
+    reviewers: [], unavailable: { tools: "tool roots unavailable during startup" },
+  });
+  failure = "agents";
+  assert.deepEqual(launcher.capability(undefined, "linux"), {
+    reviewers: [], unavailable: { tools: "agent catalog unavailable during startup" },
+  });
+  failure = null;
+  assert.deepEqual(launcher.capability(undefined, "linux"), {
+    reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
+  });
 });
 
 test("a spawned reviewer command must be trusted as the first PATH match, with its env interpreter", (t) => {
@@ -502,4 +565,24 @@ test("releaseAll removes every checkout left by an earlier runner process", asyn
   assert.ok(existsSync(prepared.checkout));
   f.launcher.releaseAll();
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts")), false);
+});
+
+
+test("an extra round after an upvote snapshots only the post-upvote delta", async (t) => {
+  const f = fixture(t);
+  const run = reviewed(f, "UPVOTE");
+  run.validRounds = 4;
+  run.roundBudget = 5;
+  run.lastValid!.round = 4;
+  run.lastAttempt!.round = 4;
+  writeFileSync(join(f.worktree, "notes.md"), "Verified correction after upvote.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "verified fix");
+  run.postUpvoteExtension = { headSha: head, upvotedHeadSha: f.head };
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: run, fullReason: "Review everything" }), CODEX, "b");
+  assert.deepEqual(prepared.round, { epoch: 1, round: 5, attempt: 1, mode: "delta", since: f.head,
+    baseSha: f.base, scopeFiles: ["notes.md"] });
+  assert.match(prepared.prompt, /Verified correction after upvote/u);
+  assert.doesNotMatch(prepared.prompt, /answer = 42/u);
+  f.launcher.release("s_review");
 });

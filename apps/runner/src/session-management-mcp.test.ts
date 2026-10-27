@@ -73,6 +73,34 @@ function resultJson(result: any): any {
   return JSON.parse(result.content[0].text);
 }
 
+test("Normal and Orchestrator automation tools are session-bound and never fall back on unsupported peers", async () => {
+  for (const orchestrator of [false, true]) {
+    const { deps, calls } = makeDeps(() => ({ status: 200, body: { status: "pending", authority: "human" } }));
+    deps.orchestrator = orchestrator;
+    deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+    const proposal = { requestId: "weekly-1", resourceKey: "weekly", spec: { name: "Weekly" } };
+    assert.equal((await callTool(deps, "request_automation_creation", proposal)).isError, undefined);
+    assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/automation-proposals`);
+    assert.deepEqual(calls.at(-1)!.body, proposal);
+    assert.equal((await callTool(deps, "get_automation_creation", { occurrenceId: "workflow_1" })).isError, undefined);
+    assert.equal(calls.at(-1)!.method, "GET");
+    assert.equal((await callTool(deps, "execute_automation_creation", { occurrenceId: "workflow_1", resourceDigest: "a".repeat(64) })).isError, undefined);
+    assert.deepEqual(calls.at(-1)!.body, { resourceDigest: "a".repeat(64) });
+    assert.equal(calls.at(-1)!.url, `${CP_URL}/api/sessions/${SELF_ID}/automation-proposals/workflow_1/execute`);
+    calls.length = 0;
+    deps.controlPlaneProtocolVersion = 235;
+    const refused = await callTool(deps, "request_automation_creation", proposal);
+    assert.equal(refused.isError, true);
+    assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, 236);
+    assert.equal(calls.length, 0);
+    deps.controlPlaneProtocolVersion = undefined;
+    const unknown = await callTool(deps, "request_automation_creation", proposal);
+    assert.equal(unknown.isError, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, `${CP_URL}/api/compatibility`);
+  }
+});
+
 test("campaign allocation tool fails closed on old peers and requires a matching Orchestrator", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { state: "active" } }));
   deps.controlPlaneProtocolVersion = 218;
@@ -386,6 +414,32 @@ test("PR merge action admission fails closed against mixed-version control plane
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
+test("a GitLab merge consume outlasts the control plane's GitLab preflight; other consumes keep their timeout (#3602)", async () => {
+  const { deps } = makeDeps();
+  deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  deps.requestTimeoutMs = 50;
+  // The control plane answers after 120 ms, as a slow preflight would.
+  deps.fetch = async (_url, init) => {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, 120);
+      init?.signal?.addEventListener("abort", () => { clearTimeout(timer); reject(new Error("The operation was aborted due to timeout")); });
+    });
+    return { ok: true, status: 200, text: async () => JSON.stringify({ status: "approved" }) };
+  };
+  const snapshot = {
+    category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42, headSha: "a".repeat(40), reviewResult: "merge",
+    requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [{ name: "Required", state: "passed" }] },
+  };
+  const github = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_github", resourceSnapshot: snapshot,
+    action: { kind: "pr_merge_enqueue", command: "gh pr merge" } });
+  assert.equal(github.isError, true, "an ordinary consume keeps its own timeout");
+  const gitlab = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_gitlab",
+    resourceSnapshot: { ...snapshot, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train", squash: false,
+      removeSourceBranch: false },
+    action: { kind: "pr_merge_enqueue", command: "glab api" } });
+  assert.equal(gitlab.isError, undefined, "a GitLab merge consume waits for the preflight to finish");
+});
+
 test("PR merge reconciliation fails closed against mixed-version control planes", async () => {
   const { deps, calls } = makeDeps();
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1;
@@ -465,6 +519,9 @@ test("tools/list returns the curated session and workflow tools with schemas", a
   assert.deepEqual(
     tools.map((t) => t.name),
     [
+      "request_automation_creation",
+      "get_automation_creation",
+      "execute_automation_creation",
       "list_runners",
       "get_agent_capabilities",
       "list_sessions",
@@ -3017,4 +3074,30 @@ test("cross-model review tools are self-scoped session tools behind their own fl
   await callTool(deps, "cancel_cross_model_review", { jobId: "srj_abcdefgh" });
   assert.equal(calls.at(-1)?.method, "POST");
   assert.equal(calls.at(-1)?.url, `${base}/srj_abcdefgh/cancel`);
+});
+
+test("wait_pull_request reads a GitLab merge request through glab, never gh or the control plane (#3602)", async () => {
+  const { deps, calls } = makeDeps();
+  const head = "5c1e0b7a90f2c3d4e5f60718293a4b5c6d7e8f90";
+  const project = "gitlab.example.com/platform/agents/wollipog";
+  const glabCalls: string[][] = [];
+  deps.gh = async () => { throw new Error("a GitLab merge request never reaches gh"); };
+  deps.glab = async (args) => {
+    glabCalls.push(args);
+    const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
+    const path = args[1] ?? "";
+    if (path.includes("merge_trains")) return { stdout: "", stderr: "glab: 404 Not Found (HTTP 404)", code: 1, timedOut: false };
+    if (path.endsWith("/merge_requests/7")) return json({ iid: 7, state: "opened", draft: false, sha: head, target_branch: "main",
+      web_url: `https://${project}/-/merge_requests/7`, head_pipeline: { id: 9, status: "success" } });
+    return json({ only_allow_merge_if_pipeline_succeeds: true });
+  };
+  const summary = resultJson(await callTool(deps, "wait_pull_request", {
+    pullRequest: `https://${project}/-/merge_requests/7`, headSha: head.toUpperCase(), timeoutMs: 60_000,
+  }));
+  assert.equal(summary.forge, "gitlab");
+  assert.equal(summary.outcome, "checks_passed");
+  assert.equal(calls.length, 0, "no control-plane request");
+  assert.ok(glabCalls.length > 0 && glabCalls.every((args) => args[0] === "api" && args.at(-1) === "gitlab.example.com"));
+  const bare = await callTool(deps, "wait_pull_request", { pullRequest: "group/sub/project!7" });
+  assert.equal(bare.isError, true, "a GitLab project without its host is refused");
 });

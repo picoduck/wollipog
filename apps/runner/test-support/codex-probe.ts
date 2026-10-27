@@ -28,7 +28,8 @@ if (process.argv.includes("mcp")) {
       ? { activePermissionProfile: { id: ":workspace" }, sandbox: {
         type: "workspaceWrite", writableRoots: [], networkAccess: false,
         excludeTmpdirEnvVar: false, excludeSlashTmp: false
-      }} : request.method === "hooks/list" ? { data: [] } : {} });
+      }} : request.method === "hooks/list" ? { data: [] }
+        : request.method === "initialize" ? { userAgent: "wollipog-runner/0.163.0 (fixture)" } : {} });
   });
 } else setTimeout(() => {
   if (!silent) { console.log("probe output"); console.error("probe diagnostic"); process.exit(7); }

@@ -127,7 +127,6 @@ test("every exported icon is inventoried and follows its documented ownership de
   assert.deepEqual(customExceptions, [
     "CursorEditorIcon",
     "DevinDesktopIcon",
-    "GitHubIcon",
     "VisualStudioCodeIcon",
     "ZedEditorIcon",
   ]);
@@ -170,7 +169,7 @@ test("the retired icon aliases stay deleted", () => {
 });
 
 /** Components whose `size` is not an interface icon size: product and vendor marks keep their own geometry. */
-const SIZE_EXEMPT_TAGS = new Set(["AgentIcon", "CursorEditorIcon", "DevinDesktopIcon", "GitHubIcon", "VisualStudioCodeIcon", "ZedEditorIcon"]);
+const SIZE_EXEMPT_TAGS = new Set(["AgentIcon", "CursorEditorIcon", "DevinDesktopIcon", "VisualStudioCodeIcon", "ZedEditorIcon"]);
 const SIZE_EXEMPT_FILES = new Set<string>();
 
 /** Every `<…Icon size={N}>` whose literal N is off the §18 scale, as `file:line <Tag size={N}>`. */
@@ -226,7 +225,7 @@ test("the documented icon bundle ceiling matches the contract and no measured fi
     "record the live icon bundle size only in the contract output, never as a literal that goes stale");
 });
 
-test("every exported icon uses an approved adapter or is the documented GitHub brand mark", () => {
+test("every exported icon uses an approved adapter", () => {
   const source = readFileSync(ICONS_PATH, "utf8");
   const customAdapter = new Set([
     "CursorEditorIcon",
@@ -237,9 +236,7 @@ test("every exported icon uses an approved adapter or is the documented GitHub b
   const offenders: string[] = [];
   for (const match of source.matchAll(/export function (\w+)\(([\s\S]*?)\n\}/g)) {
     const [, name, body] = match;
-    if (name === "GitHubIcon") {
-      if (!/<svg/.test(body!)) offenders.push(name);
-    } else if (customAdapter.has(name!)) {
+    if (customAdapter.has(name!)) {
       if (!/<IconBase/.test(body!)) offenders.push(name!);
     } else if (!/<LibraryIcon/.test(body!)) {
       offenders.push(name!);

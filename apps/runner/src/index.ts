@@ -2,9 +2,10 @@ import { projectMemoryAgentVersion } from "./project-memory.js";
 import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
 import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
 import { configuredCodexHomes } from "./review-trust.js";
+import { reviewerInstallationPaths } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
-import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
+import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
@@ -1129,9 +1130,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     // human, which is exactly the behaviour it had before this. The runner says which it got.
     //
     // Provisioned LAST, after everything that rewrites `meta.args`: `provisionAgentControl` runs
-    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path, which drops
-    // `--dangerously-bypass-hook-trust` and then appends the preset's own arguments, so a guard
-    // proved before it would be a proof about a different argv than the one that launches.
+    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path and appends its own arguments.
+    // A guard proved before it would describe a different argv than the one that launches.
     let codexLaunchArgs: string[] | undefined;
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
       // Prepare the exact plugin inventory before guard enumeration, without persisting default
@@ -1278,7 +1278,7 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // authoritative inventory after every registration instead.
 /** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
 const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
-// Reviewer admission is native-Linux only; avoid accumulating unsupported-platform records.
+// Writer lifecycle diagnostics are native-Linux only and never gate reviewer admission.
 const reviewWriters = new ReviewWriterRegistry(process.platform === "linux"
   ? join(config.dataDir, "unprotected-agent-writers") : undefined);
 sessions.setReviewWriterRegistry(reviewWriters);
@@ -1450,7 +1450,8 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 
 function sendUp(msg: RunnerToControlPlane): void {
   // Registration precedes agent discovery, so the review-session capability it advertised can say
-  // no reviewer is available. Every discovery result carries it again, from the agents it found.
+  // no reviewer is available. Every update recomputes it, including the existing five-minute
+  // discovery pass, so repaired tools/agents recover without reconnecting.
   if (msg.type === "agents_updated" && process.platform === "linux") {
     msg = { ...msg, reviewSession: reviewSessionCapability() ?? null };
   }
@@ -1635,6 +1636,8 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
   sessions: store.listSessions(), hostEnv: process.env,
 }));
 const codexProtection = () => sessions.codexReviewerProtection();
+sessions.setReviewerInstallationPaths(() => reviewerInstallationPaths(agentsForControlPlane(),
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
 const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
 // One owner of every review mirror, so the bridge's fetches and review sessions' never race.
 const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
@@ -1714,11 +1717,12 @@ function sessionReviewCapability(): SessionReviewCapability | undefined {
 }
 /** The review-session capability from the agents discovered so far (#3368, #3369). */
 function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
+  if (process.platform !== "linux") return undefined;
   try {
     return reviewSessionLauncher.capability();
   } catch (error) {
     log(`review session discovery failed: ${errText(error)}`);
-    return undefined;
+    return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
   }
 }
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
@@ -2524,6 +2528,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }).then(sendUp));
       break;
     }
+    case "gitlab_merge_preflight": {
+      // The child's own glab login and environment, as its agent would run the merge (#3602).
+      runCommandTask("gitlab_merge_preflight", sessions.gitlabMergePreflight(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
     case "reconcile_workflow_action": {
       runCommandTask("reconcile_workflow_action", sessions.reconcileWorkflowAction(msg.sessionId, {
         occurrenceId: msg.occurrenceId,
@@ -2535,7 +2548,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ...(msg.runnerHistoryEpoch !== undefined ? { runnerHistoryEpoch: msg.runnerHistoryEpoch } : {}),
         ...(msg.actionProviderThreadId ? { actionProviderThreadId: msg.actionProviderThreadId } : {}),
         ...(msg.actionProviderTurnId ? { actionProviderTurnId: msg.actionProviderTurnId } : {}),
-      }, controlPlaneProtocolVersion).then((reconciled) => {
+      }, controlPlaneProtocolVersion, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then((reconciled) => {
         sendUp({
           type: "workflow_action_reconciliation_result",
           requestId: msg.requestId,

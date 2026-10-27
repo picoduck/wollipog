@@ -3046,3 +3046,28 @@ test("the daylight-saving rules appear only in the About Time Zones popover", as
     await unmountFixture(fixture);
   }
 });
+
+
+test("editing an automation keeps its retired exec agent unavailable with the configuration reason", async () => {
+  const stored = schedule("retired-exec", "Retired Exec");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.request.agentId = "retired-codex";
+  const machine = { ...runners[0]!, agents: [...runners[0]!.agents, {
+    id: "retired-codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex" as const, available: true,
+  }] };
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [machine]);
+  try {
+    const trigger = choiceTrigger(fixture.container, "Agent");
+    assert.ok(trigger);
+    assert.match(trigger.getAttribute("aria-label") ?? "", /^Agent: Codex$/);
+    await act(async () => trigger.click());
+    const option = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((candidate) => candidate.getAttribute("aria-selected") === "true");
+    assert.ok(option, "the bound retired agent stays listed");
+    assert.equal(option.getAttribute("aria-disabled"), "true", "even an older runner's available=true cannot revive exec");
+    assert.match(option.textContent ?? "", /Change this agent's driver to codex-app-server in the runner configuration/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

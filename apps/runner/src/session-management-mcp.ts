@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
+  campaignRepositoryLocation,
   isOrchestratorOnlyCapabilities,
   POLICY_HOOK_ABANDONMENT_MS,
   PACED_VIDEO_REVIEW_MIN_PROTOCOL,
@@ -17,6 +18,8 @@ import {
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
+import { waitForMergeRequest } from "./merge-request-wait.js";
 import {
   parsePullRequestRef,
   PULL_REQUEST_WAIT_DEFAULT_INTERVAL_MS,
@@ -46,6 +49,8 @@ const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orch
 /** Default cap on one CP round-trip. Without it, a half-open connection (the documented
  * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
+/** The control plane's GitLab merge preflight (50 s) plus the Codex admission fence (5 s) and margin. */
+const GITLAB_MERGE_CONSUME_TIMEOUT_MS = 75_000;
 const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
 /** Every status `wait_session` can wait for. A Record so a new SessionStatus fails to compile here
  * until it is listed; the handler refuses anything else (#3269). */
@@ -103,6 +108,8 @@ export interface McpDeps {
   controlPlaneProtocolVersion?: number;
   /** Read-only `gh` for `wait_pull_request`; defaults to this process's own `gh` login. */
   gh?: GhRunner;
+  /** Read-only `glab` for a GitLab `wait_pull_request` (#3602); defaults to this process's own login. */
+  glab?: GlabRunner;
   /** `wait_pull_request`'s read grace when a caller already spent part of it (CLI repository discovery). */
   pullRequestReadGraceMs?: number;
 }
@@ -948,17 +955,22 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
             name: { type: "string" }, state: { const: "passed" }, url: { type: "string" },
           }, required: ["name", "state"], additionalProperties: false } },
         }, required: ["headSha", "status", "checkedAt", "checks"], additionalProperties: false },
+        // GitLab only, and then required (#3602): repository is <gitlab-host>/group/project, pullRequest the IID.
+        mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
+        squash: { type: "boolean" },
+        removeSourceBranch: { type: "boolean" },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
       additionalProperties: false,
     },
     {
-      // #3369: more cross-model review rounds for an epoch that used its budget without an upvote.
+      // More rounds for an exhausted epoch; a changed upvoted head also binds upvotedHeadSha (#3641).
       // resourceKey must be review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<roundsUsed>.
       type: "object",
       properties: {
         category: { const: "review_round_extension" }, repository: { type: "string" },
         pullRequest: { type: "integer", minimum: 1 }, epoch: { type: "integer", minimum: 1 },
+        upvotedHeadSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
         headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, roundsUsed: { type: "integer", minimum: 1 },
         blockingFindings: { type: "integer", minimum: 0 }, extraRounds: { type: "integer", minimum: 1, maximum: 4 },
         reason: { type: "string", minLength: 1, maxLength: 1000 },
@@ -1014,6 +1026,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
 const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
   "adjudicate_campaign_recommendation", "get_campaign_work_items"];
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
+  "request_automation_creation", "get_automation_creation", "execute_automation_creation",
   "allocate_campaign_budget",
   "run_campaign_review_job",
   "get_campaign_review_job",
@@ -1054,7 +1067,41 @@ async function pacedVideoReviewCompatibilityError(deps: McpDeps): Promise<ToolRe
   return null;
 }
 
+async function automationCreationCall(deps: McpDeps, method: "GET" | "POST", suffix: string, body?: Json): Promise<ToolResult> {
+  if (!deps.selfSessionId) return errorResult("Automation proposals require a Wollipog session identity");
+  const compatibility = deps.controlPlaneProtocolVersion === undefined ? await cpFetch(deps, "GET", "/api/compatibility") : null;
+  const version = deps.controlPlaneProtocolVersion ?? (compatibility?.ok ? compatibility.data?.protocolVersion : undefined);
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.agentAutomationCreation;
+  if (!Number.isSafeInteger(version) || version < required) {
+    return controlPlaneUpdateRequired("Automation creation needs a newer version of Wollipog. Update Wollipog and try again; no automation was created.", required, version);
+  }
+  const response = await cpFetch(deps, method, `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/automation-proposals${suffix}`, body);
+  return response.ok ? textResult(response.data) : errorResult(response.message);
+}
+
 export const TOOLS: McpTool[] = [
+  {
+    name: "request_automation_creation",
+    description: "Propose an exact automation for authenticated human approval. Available to Normal and Orchestrator sessions; Full Control never delegates this approval. Returns a pending typed decision, never creates a schedule. Reuse requestId with identical content to recover its result; reuse resourceKey with a new requestId to revise a proposal. Read the decision with get_automation_creation and execute only after human approval. Future runs retain their own budgets, permissions and approval gates.",
+    inputSchema: { type: "object", properties: {
+      requestId: { type: "string", minLength: 1, maxLength: 256 },
+      resourceKey: { type: "string", minLength: 1, maxLength: 512 },
+      spec: { type: "object", description: "Complete AutomationSpec: name, cron, timezone, enabled, action, misfirePolicy, runnerPolicy, concurrencyPolicy, finite limits and notifications." },
+    }, required: ["requestId", "resourceKey", "spec"], additionalProperties: false },
+    handler: async (args, deps) => automationCreationCall(deps, "POST", "", args),
+  },
+  {
+    name: "get_automation_creation",
+    description: "Read your own automation creation proposal, exact human approval status and durable creation receipt. A consumed receipt identifies the original creation even if the human subsequently edits or deletes the automation. No approval or creation occurs.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 } }, required: ["occurrenceId"], additionalProperties: false },
+    handler: async (args, deps) => automationCreationCall(deps, "GET", `/${encodeURIComponent(args.occurrenceId)}`),
+  },
+  {
+    name: "execute_automation_creation",
+    description: "Create the exact human-approved automation once, after revalidating targets and capabilities. Supply the occurrenceId and resourceDigest returned by the proposal. No configuration overrides are accepted. Approval expires after 30 minutes; stale or changed proposals require fresh human approval. Retry the same occurrence after a lost response: creation and its receipt commit atomically.",
+    inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
+    handler: async (args, deps) => automationCreationCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
+  },
   {
     name: "get_campaign_issue_scope",
     description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. Use before delegating an epic and after any human scope change.",
@@ -2011,7 +2058,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned with --match-head-commit and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2042,11 +2089,15 @@ export const TOOLS: McpTool[] = [
         const compatibilityError = await workflowDecisionActionCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
+      // A GitLab merge is checked against GitLab before it is armed (up to 50 seconds, #3602), so
+      // its consume must outlast that check; otherwise the server could arm after the call gave up.
+      const gitlabMerge = args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.mergeMethod !== undefined;
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/consume`,
         { resourceSnapshot: args?.resourceSnapshot, ...(args?.action ? { action: args.action } : {}) },
+        gitlabMerge ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, GITLAB_MERGE_CONSUME_TIMEOUT_MS) : undefined,
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
@@ -2191,15 +2242,15 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_pull_request",
-    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
+    description: "Wait, without model turns, until a GitHub pull request's required checks pass or fail, GitHub marks its merge-queue entry UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires; then return one bounded summary (head SHA, each required check, merge-queue position and state, failed jobs with run links, merged). Required checks come from the base branch's rules; one not reported yet is pending, never passing. Reads only, through this runner's gh login. A GitLab merge request (a merge request URL, or <gitlab-host>/group/project!iid) is read through this runner's glab login instead: it returns when its head pipeline (the merged-results pipeline where the project runs them) or its merge-train pipeline finishes, it leaves the train, merges, closes, or its head moves; only a successful pipeline passes, and a skipped or manual one returns \"checks_blocked\". Keep timeoutMs plus 20 seconds inside your harness's tool-call limit and call again on outcome \"timeout\".",
     inputSchema: {
       type: "object",
       properties: {
         pullRequest: {
           type: "string",
-          description: "Pull request number (with repository), owner/name#number, or a github.com pull request URL.",
+          description: "Pull request number (with repository), owner/name#number, a github.com pull request URL, a GitLab merge request URL, or <gitlab-host>/group/project!iid.",
         },
-        repository: { type: "string", description: "GitHub owner/name; required with a bare number." },
+        repository: { type: "string", description: "GitHub owner/name, or a GitLab project with its host (<gitlab-host>/group/project); required with a bare number." },
         headSha: { type: "string", description: "The reviewed head; a different head returns outcome \"head_changed\"." },
         timeoutMs: {
           type: "integer",
@@ -2222,6 +2273,21 @@ export const TOOLS: McpTool[] = [
       const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
       if ("error" in ref) return errorResult(ref.error);
       if (args?.headSha !== undefined && typeof args.headSha !== "string") return errorResult("headSha must be a string");
+      if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+        const waited = await waitForMergeRequest({
+          ...ref,
+          ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),
+          ...(Number.isFinite(args?.timeoutMs) ? { timeoutMs: args.timeoutMs } : {}),
+          ...(Number.isFinite(args?.intervalMs) ? { intervalMs: args.intervalMs } : {}),
+        }, {
+          glab: deps.glab ?? contextGlabRunner({ kind: "native" }, process.cwd()),
+          ...(deps.now ? { now: deps.now } : {}),
+          ...(deps.sleep ? { sleep: deps.sleep } : {}),
+          ...(deps.signal ? { signal: deps.signal } : {}),
+          ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
+        });
+        return waited.ok ? textResult(waited.summary) : errorResult(waited.error);
+      }
       const result = await waitForPullRequest({
         ...ref,
         ...(typeof args?.headSha === "string" ? { headSha: args.headSha.trim().toLowerCase() } : {}),

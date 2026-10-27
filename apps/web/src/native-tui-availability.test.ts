@@ -56,7 +56,7 @@ test("the orchestrator branches apply only under the Orchestrator preset", () =>
   assert.match(reason({ orchestrator: true, orchestratorTuiSupported: false }) ?? "",
     /needs a newer runner for Orchestrator Native TUI\./, "the caller's capability sentence is passed through verbatim");
   assert.match(reason({ orchestrator: true, orchestratorTuiHostContext: false }) ?? "",
-    /unavailable for WSL agents/);
+    /unavailable for WSL agents\. Choose an agent that runs directly on the machine\./);
 });
 
 test("a supported runner is not asked about its start fence before its protocol", () => {

@@ -60,9 +60,12 @@ dependency, a filesystem or port race, a shared-state or ordering dependency bet
 genuine bug that surfaces nondeterministically. Name the mechanism; do not guess a fix.
 
 Check history with `git log -1 --format='%h %ad' -- <test-file>`, and read CI history across all
-events, not only pushes to `main`: list every failed run of the CI workflow since the previous
-sweep (`gh run list --workflow ci.yml --status failure --created '>=<previous sweep date>' --limit 500`)
-and pull the log of every failed job other than the aggregator. A fixed run count does not cover a
+events: list every failed run of both CI and Main Rolling Validation since the previous sweep
+(`gh run list --workflow ci.yml --status failure --created '>=<previous sweep date>' --limit 500`
+and `gh run list --workflow main-rolling-validation.yml --status failure --created '>=<previous sweep date>' --limit 500`).
+After the rolling cutover, current main regressions belong to the rolling caller, while CI retains
+PR/merge-group and historical or restored main-push runs. Pull the log of every failed job other
+than the aggregator. A fixed run count does not cover a
 week: on 2026-09-29 the last 200 runs reached back only 36 hours and held 15 of the week's 41
 failed runs, missing the ejection that carried the #1819 evidence. In this repository flakes rarely show up as a red push. They surface as merge-queue
 ejections and as browser jobs that failed once and passed on retry, which still fail the run

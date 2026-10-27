@@ -979,7 +979,7 @@ test("pull request references parse from numbers, short refs, and github.com URL
     { repository: "picoduck/wollipog", number: 3087 });
   assert.match((parsePullRequestRef("12", undefined) as { error: string }).error, /repository/u);
   assert.match((parsePullRequestRef("https://github.com/a/b/pull/1", "c/d") as { error: string }).error, /not in repository/u);
-  assert.match((parsePullRequestRef("https://gitlab.com/a/b/-/merge_requests/1", undefined) as { error: string }).error, /must be/u);
+  assert.match((parsePullRequestRef("https://example.com/a/b/merge_requests/1", undefined) as { error: string }).error, /must be/u);
   assert.match((parsePullRequestRef("0", "o/r") as { error: string }).error, /positive/u);
-  assert.match((parsePullRequestRef("1", "../etc") as { error: string }).error, /invalid GitHub repository/u);
+  assert.match((parsePullRequestRef("1", "../etc") as { error: string }).error, /invalid repository/u);
 });

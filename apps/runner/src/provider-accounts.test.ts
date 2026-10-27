@@ -222,6 +222,33 @@ test("background account work supports unambiguous and explicit WSL-local homes"
   assert.equal(agentForProviderAccount([claudeAgent], account, undefined, "linux")?.id, "claude");
 });
 
+test("account probes prefer an available native harness over a retired configured entry", () => {
+  const retired = { ...codexAgent, id: "codex-native", driver: "codex" as const, available: false };
+  const working = { ...codexAgent, id: "codex-app", available: true };
+  const account = { id: "work", provider: "codex" as const, directory: "/credentials/work" };
+  assert.equal(agentForProviderAccount([retired, working], account)?.id, "codex-app");
+  assert.equal(agentForProviderAccount([retired, working], { id: "work", provider: "codex" })?.id, "codex-app");
+  assert.equal(agentForProviderAccount([retired], account)?.id, "codex-native",
+    "retain an unavailable result when no working native alternative exists");
+  assert.equal(agentForProviderAccount([retired, working], account, ["codex"])?.id, "codex-native",
+    "an available alternative must still satisfy the caller's driver restriction");
+});
+
+test("available native alternatives preserve explicit account defaults and WSL ambiguity", () => {
+  const native = { ...codexAgent, available: true };
+  const account = { id: "work", provider: "codex" as const, directory: "/credentials/work" };
+  const ubuntu = { ...codexAgent, id: "ubuntu", available: false, context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const debian = { ...codexAgent, id: "debian", available: true, context: { kind: "wsl" as const, distro: "Debian" } };
+  assert.equal(agentForProviderAccount([
+    { ...ubuntu, defaultProviderAccountId: "work" }, native,
+  ], account, undefined, "win32")?.id, "ubuntu", "do not switch away from an explicit credential context");
+  assert.equal(agentForProviderAccount([ubuntu, debian], account, undefined, "win32"), undefined,
+    "availability does not prove which distro owns a POSIX credential path");
+  assert.equal(agentForProviderAccount([
+    { ...codexAgent, id: "explicit", available: false, defaultProviderAccountId: "work" }, native,
+  ], account)?.id, "explicit", "retain the explicit configured preference");
+});
+
 test("secret-free account definitions retain legacy target-context selection", () => {
   const first = { ...claudeAgent, id: "claude-ubuntu", context: { kind: "wsl" as const, distro: "Ubuntu" } };
   const second = { ...claudeAgent, id: "claude-debian", context: { kind: "wsl" as const, distro: "Debian" } };

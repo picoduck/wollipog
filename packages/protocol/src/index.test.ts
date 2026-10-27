@@ -112,7 +112,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 235);
+  assert.equal(PROTOCOL_VERSION, 239);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -293,8 +293,13 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 235", () => {
-  assert.equal(PROTOCOL_VERSION, 235);
+test("PROTOCOL_VERSION is 239", () => {
+  assert.equal(PROTOCOL_VERSION, 239);
+  assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
+  assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
+  // A v238 runner cannot answer the GitLab merge preflight (#3602).
+  assert.equal(runnerSupportsProtocol(238, "gitlabMergeDecisions"), false);
+  assert.equal(runnerSupportsProtocol(239, "gitlabMergeDecisions"), true);
   // A v229 runner cannot attest Full Control worktree containment (#2940).
   assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
   assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);
@@ -306,6 +311,8 @@ test("PROTOCOL_VERSION is 235", () => {
   // A v227 runner launches review sessions but neither plans rounds nor validates attempts (#3369).
   assert.equal(runnerSupportsProtocol(227, "reviewRuns"), false);
   assert.equal(runnerSupportsProtocol(228, "reviewRuns"), true);
+  assert.equal(runnerSupportsProtocol(236, "postUpvoteReviewExtensions"), false);
+  assert.equal(runnerSupportsProtocol(237, "postUpvoteReviewExtensions"), true);
   // A v228 runner cannot inspect or recover a stale provider-HOME lease (#3241).
   assert.equal(runnerSupportsProtocol(228, "providerHomeLeaseRecovery"), false);
   assert.equal(runnerSupportsProtocol(229, "providerHomeLeaseRecovery"), true);
@@ -344,8 +351,6 @@ test("PROTOCOL_VERSION is 235", () => {
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
   assert.equal(runnerSupportsProtocol(197, "campaignForgeStatus"), false);
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
-  assert.equal(runnerSupportsProtocol(198, "costReconciliation"), false);
-  assert.equal(runnerSupportsProtocol(199, "costReconciliation"), true);
   assert.equal(runnerSupportsProtocol(209, "costReconciliationIdentity"), false);
   assert.equal(runnerSupportsProtocol(210, "costReconciliationIdentity"), true);
   for (const version of [undefined, 197, 198, 199, 200, 201, 202]) {

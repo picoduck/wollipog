@@ -32,6 +32,7 @@ import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type S
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 /**
@@ -154,6 +155,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
   type RecordWorkflowActionAdmissionMessage,
+  type GitLabMergePreflightResultMessage,
   type ReconcileWorkflowActionMessage,
   type PodContextEntry,
   type PodMemberRole,
@@ -347,6 +349,8 @@ export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
 /** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
 export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const WORKFLOW_ACTION_ADMISSION_APPEND_TIMEOUT_MS = 5_000;
+/** #3602: the GitLab merge preflight reads up to three endpoints at 15 seconds each. */
+export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -778,6 +782,10 @@ export function normalizeWorkflowDecisionSnapshot(
   }
   const value = input as Record<string, unknown>;
   const category = value.category;
+  if (category === "automation_creation") {
+    const snapshot = normalizeAutomationCreationSnapshot(value);
+    return snapshot ? ok(snapshot) : fail("automation creation requires a server-prepared exact configuration");
+  }
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
     return normalized ? ok(normalized) : fail("scope changes require exact bounded repository, revision, additions, removals, and affected work");
@@ -832,7 +840,19 @@ export function normalizeWorkflowDecisionSnapshot(
       ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
   }
   if (category === "pr_merge") {
-    const repo = repository();
+    // A GitLab project is named by host and full namespace (#3602) and pins how it merges; those
+    // fields exist only for GitLab, so a GitHub snapshot and its digest are unchanged.
+    const gitlab = campaignRepositoryLocation(value.repository)?.forge === "gitlab";
+    const repo = gitlab ? value.repository as string : repository();
+    const gitlabFields = ["mergeMethod", "squash", "removeSourceBranch"];
+    if (gitlab
+      ? (value.mergeMethod !== "merge_train" && value.mergeMethod !== "merge") ||
+        typeof value.squash !== "boolean" || typeof value.removeSourceBranch !== "boolean"
+      : gitlabFields.some((key) => value[key] !== undefined)) {
+      return fail(gitlab
+        ? "a GitLab merge decision requires mergeMethod (merge_train or merge), squash, and removeSourceBranch"
+        : "mergeMethod, squash, and removeSourceBranch apply only to a GitLab merge decision");
+    }
     const pullRequest = Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0
       ? value.pullRequest as number : null;
     const headSha = sha(value.headSha);
@@ -856,7 +876,12 @@ export function normalizeWorkflowDecisionSnapshot(
     return ok({ category, repository: repo, pullRequest, headSha,
       reviewResult: value.reviewResult, requiredChecks: {
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
-      } });
+      },
+      ...(gitlab ? {
+        mergeMethod: value.mergeMethod as "merge_train" | "merge",
+        squash: value.squash as boolean,
+        removeSourceBranch: value.removeSourceBranch as boolean,
+      } : {}) });
   }
   if (category === "review_round_extension") {
     // The shape only; the requester's review run is checked against it when it is requested.
@@ -869,15 +894,16 @@ export function normalizeWorkflowDecisionSnapshot(
     const roundsUsed = count(value.roundsUsed, 1, 1000);
     const blockingFindings = count(value.blockingFindings, 0, 1000);
     const extraRounds = count(value.extraRounds, 1, 4);
+    const upvotedHeadSha = value.upvotedHeadSha === undefined ? undefined : sha(value.upvotedHeadSha);
     if (!repo || !headSha || pullRequest === null || epoch === null || roundsUsed === null || blockingFindings === null ||
-        extraRounds === null || !boundedDecisionString(value.reason, 1000) ||
+        extraRounds === null || upvotedHeadSha === null || !boundedDecisionString(value.reason, 1000) ||
         Object.keys(value).some((key) => ![
-          "category", "repository", "pullRequest", "epoch", "headSha", "roundsUsed", "blockingFindings", "extraRounds", "reason",
+          "category", "repository", "pullRequest", "epoch", "headSha", "upvotedHeadSha", "roundsUsed", "blockingFindings", "extraRounds", "reason",
         ].includes(key))) {
       return fail("a review round extension requires the repository, pull request, epoch, head, rounds used, open blocking " +
         "findings, 1 to 4 extra rounds and a reason of at most 1000 characters");
     }
-    return ok({ category, repository: repo, pullRequest, epoch, headSha, roundsUsed, blockingFindings, extraRounds,
+    return ok({ category, repository: repo, pullRequest, epoch, headSha, ...(upvotedHeadSha ? { upvotedHeadSha } : {}), roundsUsed, blockingFindings, extraRounds,
       reason: value.reason as string });
   }
   if (category === "merged_branch_deletion") {
@@ -985,7 +1011,31 @@ export function normalizeWorkflowDecisionSnapshot(
 export function canonicalPrMergeEnqueueCommand(
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
 ): string {
+  const gitlab = campaignRepositoryLocation(snapshot.repository);
+  if (gitlab?.forge === "gitlab") {
+    // #3602: one exact `glab api` call pinned to the approved head with `sha=`, always naming the
+    // host. A train merge omits `when_pipeline_succeeds`, which GitLab 17.7 rejects for an MR that
+    // is already mergeable; a direct merge is admitted only where the project runs no train.
+    const project = encodeURIComponent(gitlab.project);
+    const host = gitlab.host.toLowerCase();
+    return snapshot.mergeMethod === "merge_train"
+      ? `glab api --method POST projects/${project}/merge_trains/merge_requests/${snapshot.pullRequest} ` +
+        `--hostname ${host} -f sha=${snapshot.headSha} -F squash=${snapshot.squash === true}`
+      : `glab api --method PUT projects/${project}/merge_requests/${snapshot.pullRequest}/merge ` +
+        `--hostname ${host} -f sha=${snapshot.headSha} -F squash=${snapshot.squash === true} ` +
+        `-F should_remove_source_branch=${snapshot.removeSourceBranch === true}`;
+  }
   return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${snapshot.headSha}`;
+}
+
+/** The pull request's or merge request's web URL, as the forge proof reads it (#3602). */
+export function prMergeChangeRequestUrl(
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+): string {
+  const gitlab = campaignRepositoryLocation(snapshot.repository);
+  return gitlab?.forge === "gitlab"
+    ? `https://${gitlab.host.toLowerCase()}/${gitlab.project}/-/merge_requests/${snapshot.pullRequest}`
+    : `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
 }
 
 export function normalizeWorkflowDecisionAction(
@@ -1529,7 +1579,7 @@ export function workflowRunCapabilityError(
   return null;
 }
 
-function auditDigest(value: unknown): string | undefined {
+export function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
@@ -9099,7 +9149,8 @@ export class SessionsService {
     const reviewer = capability?.reviewers.find((entry) => entry.harness === harness);
     const label = harness === "codex" ? "Codex" : "Claude Code";
     if (!reviewer) {
-      const why = (capability?.unavailable?.[harness] ?? capability?.unavailable?.tools ?? "").slice(0, 300);
+      const why = (capability?.unavailable?.[harness] ?? capability?.unavailable?.tools ??
+        (capability ? "reviewer not advertised by the runner" : "runner reported no review-session capability")).slice(0, 500);
       return fail(`The ${label} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
@@ -9124,6 +9175,9 @@ export class SessionsService {
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
       policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha);
+      if (policy.history.postUpvoteExtension && !runnerSupportsProtocol(runner?.protocolVersion, "postUpvoteReviewExtensions")) {
+        return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "postUpvoteReviewExtensions", "post-upvote review extensions"));
+      }
       if (request.fullReason !== undefined) policy.fullReason = request.fullReason.trim();
       // An approved extension the history counts is consumed now, so a later restart, which
       // revokes unconsumed decisions, cannot take back rounds the run has been granted.
@@ -9981,7 +10035,7 @@ export class SessionsService {
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
-    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean },
+    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -10016,6 +10070,14 @@ export class SessionsService {
     if (normalized.data.category === "review_round_extension") {
       const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
       if (refused) return fail(refused, 409);
+    }
+    if (normalized.data.category === "automation_creation" && !internal?.trustedAutomationCreation) {
+      return fail("use request_automation_creation for a server-validated automation proposal", 403);
+    }
+    if (normalized.data.category === "pr_merge") {
+      const snapshot = normalized.data;
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) return fail("the current pull request head needs a valid review before merge", 409);
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
@@ -10148,6 +10210,33 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean,
   ): ServiceResult<WorkflowDecisionView> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (decision?.category === "automation_creation") {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
+      const session = this.db.getSession(childSessionId);
+      const scope = this.db.sessionScope(childSessionId);
+      if (authority !== "human" || actor.kind !== "human" || !actor.id || !scope ||
+          !this.db.automationCreationHuman(actor.id, scope.organizationId) ||
+          !this.db.isSessionOwner({ userId: actor.id, organizationId: scope.organizationId }, childSessionId)) {
+        return fail("Automation creation requires the authenticated session owner to be an owner or admin of the personal control-plane organization", 403);
+      }
+      const snapshot = decision.resourceSnapshot;
+      if (!session || isTerminal(session.status) || session.archived || decision.status !== "pending" ||
+          snapshot.category !== "automation_creation" || resolution?.outcome === "approve" && Date.now() >= snapshot.expiresAt) {
+        return fail("Automation proposal has ended, expired, or was already resolved", 409);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(session);
+      const resolved = this.db.resolveAutomationCreationDecision(occurrenceId,
+        resolution.outcome === "approve" ? "approved" : "denied", actor.id, now, oweResume);
+      if (!resolved) return fail("Automation proposal was resolved concurrently", 409);
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+      this.recordWorkflowDecisionAudit(resolved, resolution.outcome === "approve" ? "allowed" : "denied", actor, now);
+      this.hub.sessionChangedById(childSessionId);
+      return ok(resolved);
+    }
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && parentSessionId === childSessionId ||
           // A standalone session's own extra review rounds, which only a person decides (#3369).
@@ -10193,6 +10282,13 @@ export class SessionsService {
     }
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
+    }
+    if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
+      const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, actor);
+        return fail(refused, 409);
+      }
     }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
@@ -10335,6 +10431,7 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
+    if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
     if (decision.status !== "approved") {
       return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
@@ -10391,6 +10488,18 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
+    if (normalized.data.category === "pr_merge") {
+      const snapshot = normalized.data;
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("the current pull request head needs a valid review before merge", 409);
+      }
+    }
+    if (!this.reviewExtensionCurrent(child, decision)) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("the review extension no longer matches the current run", 409);
+    }
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
     if (!action.ok) return failAs(action);
     if (decision.authority === "orchestrator" && normalized.data.category === "follow_up_issue_publication" && normalized.data.issueAdmission) {
@@ -10422,6 +10531,37 @@ export class SessionsService {
           this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
           return unsupported;
         }
+      }
+    }
+    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod) {
+      // #3602: GitLab is read before arming, through the child's own glab login. A stale head or a
+      // snapshot that does not fit the project (a direct merge around an enabled train, among
+      // others) cannot be used, so it is revoked; GitLab being unreadable proves nothing either
+      // way, so nothing is armed and the child may try again.
+      const snapshot = normalized.data;
+      const unsupported = this.capabilityFailure(child.runnerId, "gitlabMergeDecisions", "GitLab merge decisions");
+      if (unsupported) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return unsupported;
+      }
+      const requestId = `gitlab_merge_preflight_${randomUUID()}`;
+      let checked: unknown;
+      try {
+        checked = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "gitlab_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+          pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, mergeMethod: snapshot.mergeMethod === "merge_train" ? "merge_train" : "merge",
+          squash: snapshot.squash === true, removeSourceBranch: snapshot.removeSourceBranch === true,
+        }, GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS);
+      } catch {
+        return fail("GitLab could not be checked before this merge, so nothing was armed. Try again.", 409);
+      }
+      const result = checked as Partial<GitLabMergePreflightResultMessage> | null;
+      if (result?.type !== "gitlab_merge_preflight_result" || result.sessionId !== child.id || result.ok !== true) {
+        if (result?.refusal === "stale_head" || result?.refusal === "mismatch") {
+          this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        }
+        const reason = typeof result?.reason === "string" ? result.reason : "GitLab could not be checked.";
+        return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
       }
     }
     const now = Date.now();
@@ -10593,7 +10733,7 @@ export class SessionsService {
       occurrenceId,
       command,
       commandDigest: admission.commandDigest,
-      pullRequestUrl: `https://github.com/${normalized.data.repository}/pull/${normalized.data.pullRequest}`,
+      pullRequestUrl: prMergeChangeRequestUrl(normalized.data),
       expectedHeadSha: normalized.data.headSha,
       ...(admission.armedAfterEventSeq !== undefined
         ? { armedAfterEventSeq: admission.armedAfterEventSeq } : {}),
@@ -10813,7 +10953,8 @@ export class SessionsService {
   /**
    * Why a review_round_extension request does not match the requester's review run (#3369), or
    * null. It must name the run's current epoch exactly as the control plane records it: every
-   * granted round used, no upvote, and the open blocking findings of its last valid round. Its
+   * granted round used and the open blocking findings of its last valid round. After an upvote,
+   * both the upvoted head and the changed head must be bound (#3641). Its
    * resource key is canonical, so a newer request for the same epoch and round count supersedes an
    * older one and a later extension is a new resource.
    */
@@ -10826,7 +10967,13 @@ export class SessionsService {
     const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.headSha);
     if (run.epoch === 0 || !run.lastValid) return "this session has no valid review of that pull request to extend";
     if (snapshot.epoch !== run.epoch) return `the review run is in epoch ${run.epoch}, not ${snapshot.epoch}`;
-    if (run.lastValid.vote === "UPVOTE") return "the pull request's last valid review is an upvote; it needs no more rounds";
+    if (run.lastValid.vote === "UPVOTE") {
+      if (snapshot.headSha === run.lastValid.headSha) return "the pull request's last valid review is an upvote; it needs no more rounds";
+      if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "postUpvoteReviewExtensions")) {
+        return "post-upvote review extensions require a compatible runner; upgrade the runner before requesting one";
+      }
+      if (snapshot.upvotedHeadSha !== run.lastValid.headSha) return "the extension must bind the last valid upvoted head";
+    } else if (snapshot.upvotedHeadSha !== undefined) return "the last valid review is not the bound upvote";
     if (run.validRounds < run.roundBudget) {
       return `the epoch has used ${run.validRounds} of its ${run.roundBudget} rounds; request a review instead`;
     }
@@ -10840,10 +10987,22 @@ export class SessionsService {
     return null;
   }
 
+  private reviewExtensionCurrent(child: SessionView, decision: WorkflowDecisionView): boolean {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "review_round_extension") return true;
+    if (snapshot.upvotedHeadSha && !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "postUpvoteReviewExtensions")) return false;
+    const extensions = this.db.reviewSessions.extensions(child.id,
+      { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.epoch, snapshot.headSha);
+    return extensions.approved.includes(decision.occurrenceId);
+  }
+
   private workflowDecisionController(child: SessionView, category?: WorkflowDecisionCategory): {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
+    if (category === "automation_creation") return {
+      session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+    };
     if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
         this.workflowDecisionRelationship(child.id, child.id)) {
       return { session: child, policy: child.parentControlPolicy };
@@ -11054,6 +11213,8 @@ export class SessionsService {
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
   ): boolean {
+    if (decision.category === "automation_creation") return decision.authority === "human" &&
+      decision.controllingSessionId === decision.sessionId;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
     if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure"].includes(decision.category)) {
@@ -11207,6 +11368,7 @@ export class SessionsService {
       merged_branch_deletion: "Merged Branch Deletion Approval Required",
       follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
       issue_closure: "Issue Closure Approval Required",
+      automation_creation: "Create Automation Approval Required",
       campaign_issue_scope: "Campaign Issue Scope Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
       review_round_extension: "Review Round Extension Approval Required",
@@ -11782,7 +11944,7 @@ export class SessionsService {
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    const pullRequestUrl = `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
+    const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
       type: "reconcile_workflow_action",

@@ -18,8 +18,9 @@ import { clearPanelScratch } from "../right-panel-scratch.js";
  */
 beforeEach(() => clearPanelScratch());
 
-// Frames are never loaded here: each test fires `load` itself, when the page it describes would.
-const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
+// happy-dom 21 never loads frame pages by default: each test fires `load` itself, when the page it
+// describes would.
+const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,

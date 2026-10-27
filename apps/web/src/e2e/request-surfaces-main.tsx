@@ -8,6 +8,7 @@ import {
   type DescendantRequestView,
   type PendingApproval,
   type SessionView,
+  type AutomationCreationSnapshot,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -287,6 +288,33 @@ function issueClosureSession(): SessionView {
     workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "issue_closure", resourceSnapshot: snapshot,
       controllingSessionId: base.id, authority: "human" },
   } };
+}
+
+function automationCreationSession(): SessionView {
+  const base = evidenceSession();
+  const snapshot: AutomationCreationSnapshot = { category: "automation_creation", targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+    effectiveTargets: [{ runnerId: "example-machine", workspaceId: "example-workspace", agentId: "example-agent", role: "agent",
+      config: { model: "example-model", effort: "high", permissionMode: "default" } }],
+    nextFireAt: Date.parse("2026-10-21T06:00:00Z"), expiresAt: Date.parse("2026-10-21T05:00:00Z"),
+    spec: { name: "Daily CI Reliability Review", cron: "0 6 * * *", timezone: "UTC", enabled: query.get("paused") !== "1",
+      action: { kind: "create_session" as const, request: { runnerId: "example-machine", workspaceId: "example-workspace", agentId: "example-agent",
+        projectId: "example-project", projectLocationId: "example-location", useWorktree: true,
+        config: { model: "example-model", effort: "high", permissionMode: "default" },
+        prompt: "Inspect CI outcomes and report reliability.\nKeep all repository protections unchanged." },
+        installationBindings: { agent: { driver: "acp" as const, context: { kind: "native" as const }, installationId: "example-installation" } } },
+      misfirePolicy: { kind: "skip" as const }, runnerPolicy: { kind: "wait" as const }, concurrencyPolicy: "wait" as const,
+      limits: { maxCostUsd: 5, maxToolCalls: 50 }, notifications: { pushEvents: ["succeeded" as const, "failed" as const] } } };
+  if (query.get("action") === "prompt") {
+    snapshot.spec.action = { kind: "prompt_session", sessionId: "example-target-session", request: { text: "", slashCommand: "/inspect-ci" } };
+    snapshot.effectiveTargets[0]!.config.permissionMode = "read-only";
+  }
+  if (query.get("action") === "workflow") {
+    snapshot.spec.action = { kind: "workflow_run", request: { runnerId: "example-machine", workspaceId: "example-workspace",
+      workflowId: "example-health-workflow", workflowVersion: 3, useWorktree: true, task: "Inspect CI outcomes and report findings." } };
+  }
+  return { ...base, title: "Automation Creation", pendingApproval: { ...base.pendingApproval!, title: "Create Automation Approval Required",
+    context: { input: JSON.stringify(snapshot) }, workflowDecision: { ...base.pendingApproval!.workflowDecision!,
+      category: "automation_creation", resourceSnapshot: snapshot, controllingSessionId: base.id, authority: "human" } } };
 }
 
 function standaloneApprovalSession(): SessionView {
@@ -650,11 +678,12 @@ function toolCallsRequest(): PendingApproval {
 }
 
 function workflowRequest(): PendingApproval {
+  const extension = scenario === "review-extension";
   return {
     requestId: "merge-occurrence",
     occurrenceId: "merge-occurrence",
     kind: "workflow_decision",
-    title: "PR Merge Approval Required",
+    title: extension ? "Review Round Extension Approval Required" : "PR Merge Approval Required",
     options: [
       { optionId: "approve", name: "Approve", kind: "allow_once" },
       { optionId: "deny", name: "Deny", kind: "reject_once" },
@@ -664,9 +693,13 @@ function workflowRequest(): PendingApproval {
       occurrenceId: "merge-occurrence",
       sessionId: "dock-session",
       controllingSessionId: "parent",
-      category: "pr_merge",
+      category: extension ? "review_round_extension" : "pr_merge",
       resourceKey: "pr-2179",
-      resourceSnapshot: {
+      resourceSnapshot: extension ? {
+        category: "review_round_extension", repository: "example/project", pullRequest: 42,
+        epoch: 1, headSha: "c".repeat(40), upvotedHeadSha: "a".repeat(40), roundsUsed: 4,
+        blockingFindings: 0, extraRounds: 1, reason: "Review the verified fix added after the fourth-round upvote.",
+      } : {
         category: "pr_merge",
         repository: "picoduck/wollipog",
         pullRequest: 2179,
@@ -718,6 +751,7 @@ const DOCK_SCENARIOS: Record<string, { title: string; requests: () => PendingApp
   "budget-estimate": { title: "Budgeted Claude Turn", requests: () => [budgetRequest(true)] },
   "daily-budget-estimate": { title: "Claude Turn Past the Daily Budget", requests: () => [dailyBudgetEstimateRequest()] },
   "tool-calls": { title: "Tool-Limited Session", requests: () => [toolCallsRequest()] },
+  "review-extension": { title: "Post-Upvote Fix", requests: () => [workflowRequest()] },
   workflow: { title: "Campaign Merge", requests: () => [workflowRequest()] },
   // Arrival order: the permission came first, the sign-in last. The dock orders them by priority.
   multiple: { title: "Three Requests at Once", requests: () => [permissionRequest(), budgetRequest(), signInRequest()] },
@@ -793,7 +827,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -942,7 +976,7 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
-  const standaloneTemplate = scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
     : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;

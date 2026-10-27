@@ -1,3 +1,4 @@
+import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
@@ -6848,6 +6849,8 @@ export class ControlPlaneDb {
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
+      "automation_creation_result TEXT",
+      "automation_creation_approved_by TEXT",
       "resume_state TEXT",
       "resume_command_id TEXT",
       "resume_updated_at INTEGER",
@@ -7756,7 +7759,9 @@ export class ControlPlaneDb {
       }
 
       const editors = meta.editors ? JSON.stringify(meta.editors) : null;
-      const runtime = meta.runtime ? JSON.stringify(meta.runtime) : null;
+      const runtime = meta.runtime ? JSON.stringify({ ...meta.runtime,
+        reviewSession: safeReviewSessionCapability(meta.runtime.reviewSession),
+      }) : null;
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
         ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
         : null;
@@ -7943,22 +7948,18 @@ export class ControlPlaneDb {
 
   /**
    * Replace a runner's review-session capability (#3369) from a discovery result: the registration
-   * frame's was derived before discovery and can name no reviewer. A malformed value is dropped
-   * rather than stored, so a review is refused as unavailable instead of launched on a bad entry.
+   * frame's was derived before discovery and can name no reviewer. Invalid reviewer identities
+   * fail closed. Diagnostic reasons are normalized independently: a bad or overlong Codex reason
+   * must never remove an otherwise valid Claude reviewer (or vice versa).
    */
   updateRunnerReviewSessionCapability(runnerId: string, capability: ReviewSessionCapability | null): void {
     const row = this.stmt("SELECT runtime FROM runners WHERE runner_id=?").get(runnerId) as { runtime: string | null } | undefined;
     if (!row?.runtime) return;
     let runtime: Record<string, unknown>;
     try { runtime = JSON.parse(row.runtime) as Record<string, unknown>; } catch { return; }
-    const valid = capability !== null && typeof capability === "object" && Array.isArray(capability.reviewers) &&
-      capability.reviewers.length <= 2 && capability.reviewers.every((reviewer) =>
-        (reviewer?.harness === "codex" || reviewer?.harness === "claude-code") &&
-        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128) &&
-      (capability.unavailable === undefined || (typeof capability.unavailable === "object" && capability.unavailable !== null &&
-        Object.values(capability.unavailable).every((reason) => typeof reason === "string" && reason.length <= 500)));
     const { reviewSession: _previous, ...rest } = runtime;
-    const next = valid ? { ...rest, reviewSession: capability } : rest;
+    const safe = safeReviewSessionCapability(capability);
+    const next = safe ? { ...rest, reviewSession: safe } : rest;
     this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
   }
 
@@ -11543,9 +11544,49 @@ export class ControlPlaneDb {
     ).get(scope.owner.teamId, principal.organizationId, principal.userId) !== undefined;
   }
 
+  /** Runner-family access: the Machines, workspaces and agent installations a principal may list,
+   * inspect and launch on. A session credential delegated as one user acts for that user (#2940):
+   * a Full Control root and its children are user-owned so the campaign allowance and controlled
+   * review charge the authorizing Human, yet they must reach the runners that Human can use. Such
+   * an agent therefore gets that user's member access while the user is an active, non-viewer
+   * member: the organization's runners, the user's own, and those of the user's teams. It never
+   * gets the owner/admin bypass, another user's runner or another team's. Every other resource
+   * kind keeps the exact delegated-owner rule in principalCanAccessScope. */
+  private principalCanUseRunnerScope(principal: AuthPrincipal, scope: ResourceScope): boolean {
+    if (principal.kind !== "agent" || principal.delegatedScope.owner.kind !== "user") {
+      return this.principalCanAccessScope(principal, scope);
+    }
+    const organizationId = principal.delegatedScope.organizationId;
+    if (principal.organizationId !== organizationId || scope.organizationId !== organizationId) return false;
+    const userId = principal.delegatedScope.owner.userId;
+    if (scope.owner.kind === "user") return scope.owner.userId === userId;
+    const member = this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role<>'viewer'`,
+    ).get(organizationId, userId) !== undefined;
+    if (!member) return false;
+    if (scope.owner.kind === "organization") return scope.owner.organizationId === organizationId;
+    return this.stmt(
+      `SELECT 1 FROM identity_teams team
+       JOIN identity_team_members member ON member.team_id=team.team_id
+       WHERE team.team_id=? AND team.organization_id=? AND member.user_id=?`,
+    ).get(scope.owner.teamId, organizationId, userId) !== undefined;
+  }
+
+  /** Whether the user is an active owner or admin of the organization: the role a Human's own
+   * device principal would carry there. */
+  userAdministersOrganization(organizationId: string, userId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role IN ('owner','admin')`,
+    ).get(organizationId, userId) !== undefined;
+  }
+
   canAccessRunner(principal: AuthPrincipal, runnerId: string): boolean {
     const scope = this.runnerScope(runnerId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
   }
 
   canManageRunner(principal: AuthPrincipal, runnerId: string): boolean {
@@ -11560,7 +11601,7 @@ export class ControlPlaneDb {
 
   canAccessWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
     const scope = this.workspaceScope(runnerId, workspaceId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
   }
 
   canManageWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
@@ -20859,6 +20900,38 @@ export class ControlPlaneDb {
     };
   }
 
+  /** Commit the authenticated approver and durable resume with the human decision. */
+  resolveAutomationCreationDecision(occurrenceId: string, outcome: "approved" | "denied", userId: string, now: number, oweResume: boolean): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.category !== "automation_creation" || decision.authority !== "human") {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const resolved = this.resolveWorkflowDecision(occurrenceId, "human", outcome, now, undefined, undefined, undefined, undefined, oweResume);
+      if (resolved) this.stmt("UPDATE workflow_decisions SET automation_creation_approved_by=? WHERE occurrence_id=?").run(userId, occurrenceId);
+      this.db.exec("COMMIT");
+      return resolved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  automationCreationApprover(occurrenceId: string): string | null {
+    return (this.stmt("SELECT automation_creation_approved_by AS id FROM workflow_decisions WHERE occurrence_id=? AND category='automation_creation'")
+      .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
+  }
+
+  /** Match the existing global automation API: active personal-organization owner/admin only. */
+  automationCreationHuman(userId: string, organizationId: string): HumanPrincipal | null {
+    if (organizationId !== PERSONAL_ORGANIZATION_ID) return null;
+    const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
+      FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
+      JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
+      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active' AND membership.role IN ('owner','admin')`)
+      .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
+    return row ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
+  }
+
   recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
     this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
       WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
@@ -28723,6 +28796,7 @@ export class ControlPlaneDb {
   /* -------------------------- Durable automations ------------------------- */
 
   createAutomation(input: {
+    approval?: { occurrenceId: string; resourceDigest: string; result: NonNullable<WorkflowDecisionView["automationCreationResult"]> };
     automationId: string;
     spec: AutomationSpec;
     nextFireAt: number | null;
@@ -28732,6 +28806,13 @@ export class ControlPlaneDb {
     const { spec } = input;
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (input.approval) {
+        const changed = this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, automation_creation_result=?
+          WHERE occurrence_id=? AND category='automation_creation' AND authority='human' AND status='approved'
+          AND resource_digest=? AND automation_creation_approved_by IS NOT NULL`)
+          .run(input.now, JSON.stringify(input.approval.result), input.approval.occurrenceId, input.approval.resourceDigest);
+        if (Number(changed.changes) !== 1) throw new Error("Automation creation approval is no longer available");
+      }
       this.stmt(
         `INSERT INTO automations
          (automation_id, name, cron_expression, timezone, enabled, next_fire_at, misfire_policy,
@@ -28746,7 +28827,8 @@ export class ControlPlaneDb {
       );
       this.insertAutomationEvent({
         automationId: input.automationId, kind: "created", actor: input.actor,
-        detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt }, now: input.now,
+        detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt,
+          ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}) }, now: input.now,
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -31020,6 +31102,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
     issue_closure_result?: string | null;
+    automation_creation_result?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -31045,6 +31128,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(humanFallback ? { humanFallback } : {}),
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
+    ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),

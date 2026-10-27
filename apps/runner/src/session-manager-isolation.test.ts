@@ -86,6 +86,7 @@ test("session launch passes one resolved isolation boundary to every driver", as
       async () => {}, async () => {},
       async (_policy, _context, _driver, _dataDir, sessionId) => { migrations.push(sessionId); },
     );
+    manager.setReviewerInstallationPaths(() => ["/reviewer-installation"]);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const internals = manager as any;
     assert.equal(await internals.acquireAdmission("s1"), true);
@@ -98,6 +99,7 @@ test("session launch passes one resolved isolation boundary to every driver", as
       sessionId: "s1",
       cwd: "/repo",
       additionalWritableRoots: [await requestedWorktreeBoundary("/repo", "s1", { dataDir }, false)],
+      reviewerInstallationPaths: ["/reviewer-installation"],
     });
     assert.deepEqual(migrations, ["s1"]);
     assert.equal(store.readMeta("s1")?.providerStateVersion, 2);

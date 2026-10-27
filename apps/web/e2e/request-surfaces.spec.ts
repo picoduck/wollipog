@@ -954,3 +954,20 @@ for (const viewport of [
     await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
 }
+
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`a post-upvote extension shows both bound heads at width ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=review-extension");
+    await expect(card(page)).toContainText("Review Round Extension Approval Required");
+    await expect(card(page)).toContainText("Head Commitcccccccccccc");
+    await expect(card(page)).toContainText("Upvoted Headaaaaaaaaaaaa");
+    await expect(card(page)).toContainText("Rounds Used4");
+    await expect(card(page)).toContainText("Extra Rounds1");
+    await assertNoHorizontalOverflow(page, ".request-card");
+    if (process.env.REVIEW_EXTENSION_EVIDENCE_DIR) {
+      await page.screenshot({ path: `${process.env.REVIEW_EXTENSION_EVIDENCE_DIR}/extension-${viewport.width}.png`, fullPage: true });
+    }
+  });
+}

@@ -907,7 +907,7 @@ function PodDetailContent({ podId, member, onNewSession }: { podId: string; memb
   const close = async (reopen: () => void) => {
     if (!await confirmWhileAllowed(confirm, () => closeBlocked.current, {
       title: "Close Pod",
-      message: "Relays and membership changes stop for this pod. Its membership stays readable.",
+      message: `Relays and membership changes stop for “${pod.title}”. Its membership stays readable.`,
       confirmLabel: "Close Pod",
       tone: "danger",
       back: { label: BACK_TO_MORE_ACTIONS, run: reopen },

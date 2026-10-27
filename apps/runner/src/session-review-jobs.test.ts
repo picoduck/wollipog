@@ -19,6 +19,7 @@ import {
   type PullRequestFacts, type SessionReviewDependencies, type SessionReviewInstallation,
 } from "./session-review-jobs.js";
 import type { SessionMeta } from "./session-store.js";
+import { reviewSessionDiscoveryReason } from "./review-sessions.js";
 
 const uid = process.getuid?.() ?? -1;
 /** Inside a user namespace host root shows as the overflow uid; the runner itself sees 0. */
@@ -42,7 +43,9 @@ test("trusted paths refuse session-writable roots and other-user-writable compon
   chmodSync(tool, 0o757);
   assert.throws(() => trustedPath(tool, [], uid, rootUid), /writable by every user/);
   chmodSync(tool, 0o775);
-  assert.equal(trustedPath(tool, [], uid, rootUid), tool, "group-write is fine below a private (0700) ancestor");
+  assert.equal(trustedPath(tool, [], uid, rootUid, undefined, () => true), tool, "proven user-private group writes are safe");
+  assert.throws(() => trustedPath(tool, [], uid, rootUid, undefined, () => false), /writable by its group/,
+    "shared groups remain untrusted even below a private ancestor");
   const link = join(root, "link"); symlinkSync(planted, link);
   assert.throws(() => trustedPath(link, [join(root, "home", ".codex")], uid, rootUid), /a session can write/, "symlinks are resolved first");
   // A trusted target reached through a link a session could repoint is refused too.
@@ -109,7 +112,7 @@ test("discovery reports an unsupported controller contract instead of using it",
   assert.match(install?.capability.unavailable?.controller ?? "", /unsupported contract/);
 });
 
-test("bridge discovery admits a protected standalone Codex reviewer and names an unprotected session", posixOnly, (t) => {
+test("bridge discovery admits the statically protected standalone Codex installation", posixOnly, (t) => {
   const f = fakeHome(t);
   const bin = join(f.home, ".codex", "packages", "standalone", "version", "bin");
   mkdirSync(bin, { recursive: true });
@@ -117,10 +120,6 @@ test("bridge discovery admits a protected standalone Codex reviewer and names an
   const env = { home: f.home, dataDir: f.dataDir, uid, rootUid, pathEnv: `${f.bin}:${bin}`, temporaryRoots };
   assert.equal(discoverSessionReviewInstallation(env)?.reviewers.codex, undefined);
   assert.equal(discoverSessionReviewInstallation({ ...env, codexProtection: { home: f.home } })?.reviewers.codex, binary);
-  const refused = discoverSessionReviewInstallation({ ...env,
-    codexProtection: { home: f.home, refusal: "Codex packages are unprotected from session s_tui (Agent TUI)" } });
-  assert.equal(refused?.reviewers.codex, undefined);
-  assert.match(refused?.capability.unavailable?.codex ?? "", /session s_tui/);
 });
 
 test("discovery never finds the controller through a provider home's skills directory", posixOnly, (t) => {
@@ -456,17 +455,45 @@ test("a job restored after a runner restart in `prepared` reports that it never 
 });
 
 /** Run the runner's own advertisement functions from index.ts without booting a runner. */
-function advertisedRuntime(platform: string, capability: () => unknown, runtime: Record<string, unknown>): Record<string, unknown> {
+function advertisedRuntime(platform: string, capability: () => unknown, runtime: Record<string, unknown>,
+  reviewCapability: () => unknown = () => undefined, update = false): Record<string, unknown> {
   const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const start = index.indexOf("function sessionReviewCapability(");
   const end = index.indexOf("\nfunction startTrackedSession(", start);
   assert.ok(start > 0 && end > start, "index.ts defines the session review advertisement");
-  const context = vm.createContext({ process: { platform }, sessionReviewJobs: { capability }, log: () => {},
+  const context = vm.createContext({ process: { platform }, sessionReviewJobs: { capability }, reviewSessionLauncher: { capability: reviewCapability },
+    reviewSessionDiscoveryReason, log: () => {},
+    config: { runnerId: "runner" }, ws: null, outbox: { enqueue: (message: unknown) => { context.result = message; } },
     errText: (error: unknown) => String(error) });
-  vm.runInContext(`${transformSync(index.slice(start, end), { loader: "ts", format: "cjs" }).code}
-    globalThis.result = withSessionReviewRuntime(${JSON.stringify(runtime)});`, context);
+  const sendStart = index.indexOf("function sendUp(");
+  const sendEnd = index.indexOf("\n/** Agent Control answers", sendStart);
+  const source = index.slice(start, end) + (update ? index.slice(sendStart, sendEnd) : "");
+  vm.runInContext(`${transformSync(source, { loader: "ts", format: "cjs" }).code}
+    ${update ? 'sendUp({ type: "agents_updated", runnerId: "runner", agents: [] });'
+      : `globalThis.result = withSessionReviewRuntime(${JSON.stringify(runtime)});`}`, context);
   return JSON.parse(JSON.stringify(context.result)) as Record<string, unknown>;
 }
+
+test("review-session advertisement publishes a discovery failure and recovers at the next publication", () => {
+  let failed = true;
+  const reviewCapability = () => {
+    if (failed) throw new Error("tool discovery failed during startup");
+    return { reviewers: [{ harness: "claude-code", agentId: "claude" }] };
+  };
+  assert.deepEqual(advertisedRuntime("linux", () => undefined, {}, reviewCapability), {
+    reviewSession: { reviewers: [], unavailable: { tools: "tool discovery failed during startup" } },
+  });
+  assert.deepEqual(advertisedRuntime("linux", () => undefined, {}, reviewCapability, true), {
+    type: "agents_updated", runnerId: "runner", agents: [],
+    reviewSession: { reviewers: [], unavailable: { tools: "tool discovery failed during startup" } },
+  });
+  failed = false;
+  assert.deepEqual(advertisedRuntime("linux", () => undefined, {}, reviewCapability), { reviewSession: reviewCapability() });
+  assert.deepEqual(advertisedRuntime("linux", () => undefined, {}, reviewCapability, true), {
+    type: "agents_updated", runnerId: "runner", agents: [], reviewSession: reviewCapability(),
+  });
+  assert.deepEqual(advertisedRuntime("darwin", () => undefined, {}, reviewCapability), {});
+});
 
 test("the runner advertises session review on Linux only and wires its commands (#3306)", () => {
   const capability = { controllerDigest: "d".repeat(64), reviewers: ["codex"] };

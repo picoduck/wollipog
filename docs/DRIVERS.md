@@ -1100,6 +1100,11 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 
 #### OpenAI Inference Transport
 
+The credential-free upgrade suite, `pnpm probe:codex-assumptions`, measures optional diagnostic
+shapes using scripted loopback providers; see [Codex Assumption Probes](codex-assumption-probes.md).
+Optional drift remains advisory and never changes launch eligibility or proves WebSocket traffic.
+The authenticated real-traffic probe below is deliberately excluded from that suite.
+
 The supported Codex App Server builds use WebSockets by default for the built-in OpenAI Responses
 provider. This is Codex-to-model traffic; Wollipog's manager connection remains stdio. Native defaults
 are verified in official source at [0.147.0](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/model-provider-info/src/lib.rs)

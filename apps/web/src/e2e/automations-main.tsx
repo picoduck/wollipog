@@ -123,6 +123,11 @@ if (params.has("waiting-target")) {
   };
 }
 
+// A saved configured exec agent stays visible, with its retirement reason.
+if (params.has("retired-exec")) {
+  runner.agents[0] = { ...runner.agents[0]!, name: "Codex Non-Interactive", driver: "codex", available: true };
+}
+
 if (params.has("saved-installation")) {
   runner.protocolVersion = 175;
   runner.agents[0]!.installation = {

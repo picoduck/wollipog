@@ -597,7 +597,7 @@ export class CodexAppServerDriver implements Driver {
   private readonly kill: typeof killTree;
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
   /** Every process this instance starts; its owner is each spawn's descendantOwner. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
   private readonly initializationRequestTimeoutMs: number;
   private readonly forkRequestTimeoutMs: number;
@@ -641,6 +641,7 @@ export class CodexAppServerDriver implements Driver {
       archiveRequestTimeoutMs: number;
     }> = {},
   ) {
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.cwd = opts.cwd;
     this.config = opts.config;
     this.spawn = deps.spawn ?? spawnAgent;
@@ -918,7 +919,7 @@ export class CodexAppServerDriver implements Driver {
     const launchArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
     this.managedWorktreeGuardActive = codexGuardActiveInArgs(launchArgs);
     this.processes.assertOpen();
-    const child = this.processes.record(this.spawn({
+    const child = this.processes.launch(this.spawn, {
       command: this.opts.command,
       args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
       cwd: this.cwd,
@@ -932,7 +933,7 @@ export class CodexAppServerDriver implements Driver {
       cloudAgentLaunch: true,
       descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    }));
+    });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;

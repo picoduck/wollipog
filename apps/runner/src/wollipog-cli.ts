@@ -17,6 +17,7 @@ import {
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
 import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
@@ -179,6 +180,8 @@ export async function runPullRequestCli(
   signal?: AbortSignal,
   /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
   graceMs = PULL_REQUEST_WAIT_READ_GRACE_MS,
+  /** `glab` for a GitLab merge request (#3602); defaults to this machine's own login. */
+  glab?: GlabRunner,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
@@ -220,6 +223,7 @@ export async function runPullRequestCli(
     ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
   }, {
     fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh,
+    ...(glab ? { glab } : {}),
     ...(signal ? { signal } : {}),
     ...(readGraceMs !== undefined ? { pullRequestReadGraceMs: readGraceMs } : {}),
   });
@@ -241,6 +245,22 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "automation") {
+    if (optionPresent(args, "--session")) return { error: "automation commands act only on the injected session" };
+    const groupIndex = args.indexOf("automation");
+    const verb = args[groupIndex + 1];
+    if (verb === "request") {
+      const proposal = jsonObjectOption(args, "--proposal");
+      return "error" in proposal ? proposal : { tool: "request_automation_creation", input: proposal.value };
+    }
+    const occurrenceId = args[groupIndex + 2];
+    if (verb === "get" && occurrenceId && !occurrenceId.startsWith("--")) return { tool: "get_automation_creation", input: { occurrenceId } };
+    const resourceDigest = option(args, "--digest");
+    if (verb === "execute" && occurrenceId && !occurrenceId.startsWith("--") && resourceDigest) {
+      return { tool: "execute_automation_creation", input: { occurrenceId, resourceDigest } };
+    }
+    return { error: "use automation request --proposal <json>, automation get <occurrence-id>, or automation execute <occurrence-id> --digest <digest>" };
+  }
   if (words[0] === "issue-scope") {
     if (optionPresent(args, "--session")) return { error: "issue-scope commands act only on the injected session" };
     if (words[1] === "get") {

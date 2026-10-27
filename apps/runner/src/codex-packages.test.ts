@@ -33,7 +33,7 @@ function fixture(t: TestContext) {
   return { root, home, codexHome, packages, standalone, binary, bin, command };
 }
 
-test("the standalone reviewer needs proof; every other writable root and ownership check still applies", posixOnly, (t) => {
+test("the standalone reviewer uses a static installation exception; every other writable root and ownership check still applies", posixOnly, (t) => {
   const f = fixture(t);
   const roots = sessionWritableRoots(f.home, join(f.root, "state"), [], []);
   const uid = process.getuid!();
@@ -42,8 +42,6 @@ test("the standalone reviewer needs proof; every other writable root and ownersh
   assert.throws(() => verifySpawnedCommand(f.command, f.bin, roots, uid, rootUid), /a session can write/);
   assert.equal(verifySpawnedCommand(f.command, f.bin, roots, uid, rootUid, proof), f.binary);
   assert.equal(verifySpawnedCommand("codex", f.bin, roots, uid, rootUid, proof), f.binary);
-  assert.throws(() => verifySpawnedCommand(f.command, f.bin, roots, uid, rootUid,
-    { ...proof, refusal: "Codex packages are unprotected from session s_unsafe" }), /session s_unsafe/);
   for (const extra of [f.home, f.packages, f.standalone, join(f.standalone, "releases"), f.root]) {
     assert.throws(() => verifySpawnedCommand(f.command, f.bin, [...roots, extra], uid, rootUid, proof), /a session can write/);
   }
@@ -73,6 +71,19 @@ test("all configured HOME, CODEX_HOME and account homes are inventoried across h
 });
 
 for (const mode of ["bwrap", "seatbelt"] as const) {
+  test(`${mode} pins an initially missing Codex package tree before granting provider writes`, posixOnly, async (t) => {
+    const f = fixture(t);
+    rmSync(f.packages, { recursive: true });
+    const isolation = await resolveExecutionIsolation({ mode, network: "inherit" }, { kind: "native" }, {
+      platform: mode === "bwrap" ? "linux" : "darwin", uid: () => 1000,
+      nativeHome: () => f.home, nativeEnvironment: () => ({}), nativeTmp: () => f.root,
+      resolveNative: async () => ({ path: "/bin/boundary", via: "path", launch: { command: "/bin/boundary", args: [] } }),
+    }, { driver: "acp", dataDir: join(f.root, "state"), env: { HOME: f.home }, sessionId: "s1", cwd: f.root,
+      additionalWritableRoots: [f.codexHome] });
+    assert.ok(statSync(f.packages).isDirectory());
+    assert.ok(isolation?.backend === mode);
+    assert.ok((isolation.backend === "bwrap" ? isolation.readOnlyBinds : isolation.backend === "seatbelt" ? isolation.readOnlyPaths : [])?.includes(f.packages));
+  });
   test(`${mode} protects default and configured packages after all writable grants, for every harness`, posixOnly, async (t) => {
     const f = fixture(t);
     const otherHome = join(f.root, "account");
@@ -112,7 +123,7 @@ for (const mode of ["bwrap", "seatbelt"] as const) {
   });
 }
 
-test("readonly account aliases add no host bind; writable package aliases fail closed", posixOnly, async (t) => {
+test("package aliases into writable roots fail closed without binding host temporary roots", posixOnly, async (t) => {
   const f = fixture(t);
   rmSync(f.packages, { recursive: true });
   symlinkSync("/tmp", f.packages);
@@ -123,12 +134,10 @@ test("readonly account aliases add no host bind; writable package aliases fail c
     resolveNative: async () => ({ path: "/bin/bwrap", via: "path" as const, launch: { command: "/bin/bwrap", args: [] } }),
   } as const;
   const state = { driver: "claude-code" as const, dataDir: f.root, env: { HOME: f.home }, sessionId: "s1", cwd };
-  const isolation = await resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, deps, state);
-  assert.ok(isolation?.backend === "bwrap");
-  assert.equal(isolation.readOnlyBinds, undefined, "the host's /tmp must not replace the sandbox's private /tmp");
-  assert.equal(isolation.codexPackageReadOnlyPaths, undefined);
-  await assert.rejects(resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, deps,
-    { ...state, additionalWritableRoots: [f.codexHome] }), /packages in a writable home must be a real directory/);
+  for (const additionalWritableRoots of [[], [f.codexHome]]) {
+    await assert.rejects(resolveExecutionIsolation({ mode: "bwrap", network: "inherit" }, { kind: "native" }, deps,
+      { ...state, additionalWritableRoots }), /packages exposed to writable roots must be a real directory/);
+  }
   assert.throws(() => trustedPath(f.command, [f.codexHome], process.getuid!(), statSync("/").uid, { home: f.home }),
     /a session can write/);
 });
@@ -155,41 +164,33 @@ test("foreign or traversal-containing installation hints do not fail unrelated L
   assert.equal(isolation?.backend, "bwrap");
 });
 
-test("reviewer admission names each unprotected writer and requires exact live launch proof", posixOnly, (t) => {
-  const f = fixture(t);
-  const store = new SessionStore(join(f.root, "sessions"));
-  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, f.root,
-    undefined, undefined, undefined, undefined, { mode: "bwrap", network: "inherit" });
-  t.after(() => manager.shutdownAll());
-  const active = (manager as unknown as { active: Map<string, unknown> }).active;
-  const id = "s_writer";
-  const makeMeta = (driver: SessionMeta["driver"]) => ({
-    sessionId: id, agentId: "fixture", workspaceId: "fixture", driver, context: { kind: "native" }, env: {}, repoPath: f.root, worktreePath: null,
-    status: "idle", title: "writer", config: {}, args: [], command: "fixture", agentSessionId: null,
-    tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
-  }) as SessionMeta;
-  for (const driver of ["codex-app-server", "claude-code", "pi", "acp"] as const) {
-    store.create(makeMeta(driver));
-    active.set(id, { codexPackageReadOnlyPaths: [] });
-    assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/);
-    active.set(id, { codexPackageReadOnlyPaths: [f.packages] });
-    assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
-    active.delete(id);
-    store.patchMeta(id, { status: "starting" });
-    assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/);
-    store.patchMeta(id, { status: "idle" });
+test("static admission ignores current, stale and legacy writers across runner reconstruction", posixOnly, (t) => {
+  const f = fixture(t), directory = join(f.root, "writers");
+  mkdirSync(directory);
+  writeFileSync(join(directory, "legacy.json"), JSON.stringify({ sessionId: "s_legacy", kind: "agent_tui" }));
+  const registry = new ReviewWriterRegistry(directory, undefined, { reconcile: false });
+  registry.acquire("s_live", "provider");
+  for (const runner of ["original", "restarted"]) {
+    const store = new SessionStore(join(f.root, "sessions"));
+    const manager = new SessionManager(() => {}, () => {}, store, runner);
+    manager.setReviewWriterRegistry(registry);
+    t.after(() => manager.shutdownAll());
+    const internal = manager as unknown as { launchGenerations: Map<string, number>; active: Map<string, unknown> };
+    internal.launchGenerations.set("s_orchestrator", 1);
+    internal.active.set("s_tui", { codexPackageSandboxed: false });
+    // Admission must not even inspect runtime state or retained writer diagnostics.
+    store.listSessions = () => { throw new Error("no session status scan"); };
+    registry.reconcileRecovered = () => { throw new Error("no writer reconciliation at admission"); };
+    registry.inspect = () => { throw new Error("no writer inspection at admission"); };
+    const protection = manager.codexReviewerProtection(f.home);
+    assert.equal(verifySpawnedCommand(f.command, f.bin, sessionWritableRoots(f.home, join(f.root, "state"), [], []),
+      process.getuid!(), statSync("/").uid, protection), f.binary);
+    internal.active.clear();
+    internal.launchGenerations.clear();
   }
-  assert.equal(store.acquireWorktreeLease(id, "other-runner"), true);
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/,
-    "an idle provider owned by another manager has no attested boundary here");
-  store.releaseWorktreeLease(id, "other-runner");
-  const providerManager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, f.root);
-  t.after(() => providerManager.shutdownAll());
-  assert.equal(providerManager.codexReviewerProtection(f.home).refusal, undefined,
-    "future unisolated launches do not block admission when there is no live unprotected writer");
 });
 
-test("a stopped structured writer remains refused until its asynchronous full-tree proof succeeds", posixOnly, async (t) => {
+test("writer diagnostics retain uncertain process trees without affecting admission", posixOnly, async (t) => {
   const f = fixture(t);
   const store = new SessionStore(join(f.root, "sessions"));
   const directory = join(f.root, "writers");
@@ -209,27 +210,76 @@ test("a stopped structured writer remains refused until its asynchronous full-tr
   let resolveProof!: (proven: boolean) => void;
   const proof = new Promise<boolean>((resolve) => { resolveProof = resolve; });
   const client = { dispose: () => {}, proveProcessTreeExit: () => proof };
-  const token = internal.beginProviderReviewWriter(meta, undefined, f.home)!;
+  const writable: SpawnIsolation = { backend: "bwrap", command: "/bin/bwrap", args: [], network: "inherit" };
+  const token = internal.beginProviderReviewWriter(meta, writable, f.home)!;
   internal.driverReviewWriterTokens.set(client, token);
   internal.disposeDriver(client);
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
-    "the root is disposed and no active session/lease remains, but the tree proof is pending");
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
   assert.deepEqual(new ReviewWriterRegistry(directory).sessions(), ["s_retiring"]);
   resolveProof(true);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
 
   const failed = { dispose: () => {}, proveProcessTreeExit: async () => false };
-  internal.driverReviewWriterTokens.set(failed, internal.beginProviderReviewWriter(meta, undefined, f.home)!);
+  internal.driverReviewWriterTokens.set(failed, internal.beginProviderReviewWriter(meta, writable, f.home)!);
   internal.disposeDriver(failed);
   await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_retiring/);
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
   const afterRestart = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "empty-store")), "runner2",
     undefined, undefined, f.root);
   afterRestart.setReviewWriterRegistry(new ReviewWriterRegistry(directory));
   t.after(() => afterRestart.shutdownAll());
-  assert.match(afterRestart.codexReviewerProtection(f.home).refusal!, /session s_retiring/,
-    "uncertain retired writers survive both session removal and runner reconstruction");
+  assert.deepEqual(afterRestart.codexReviewerProtection(f.home), { home: f.home });
+});
+
+test("a sandbox needs read-only proof for configured package directories as well as the default install", posixOnly, (t) => {
+  const f = fixture(t), account = join(f.root, "account"), packages = join(account, "packages");
+  mkdirSync(packages, { recursive: true });
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setCodexHomes(() => [account]);
+  t.after(() => manager.shutdownAll());
+  const internal = manager as unknown as {
+    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation, home: string): string | undefined;
+  };
+  const meta = { sessionId: "s_account_writer", context: { kind: "native" } } as SessionMeta;
+  const isolation: SpawnIsolation = { backend: "bwrap", command: "/bin/bwrap", args: [], network: "inherit",
+    codexPackageReadOnlyPaths: [f.packages, packages] };
+  assert.equal(internal.beginProviderReviewWriter(meta, isolation, f.home), undefined);
+  assert.ok(internal.beginProviderReviewWriter(meta, { ...isolation, codexPackageReadOnlyPaths: [f.packages] }, f.home));
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
+});
+
+test("each exact launch is classified anew; unsandboxed and remote launches create no durable writer", posixOnly, (t) => {
+  const f = fixture(t), directory = join(f.root, "writers");
+  const registry = new ReviewWriterRegistry(directory, undefined, { createGroup: () => { throw new Error("must not create a native group"); } });
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  manager.setReviewWriterRegistry(registry);
+  t.after(() => manager.shutdownAll());
+  const internal = manager as unknown as {
+    beginProviderReviewWriter(meta: SessionMeta, isolation: SpawnIsolation | undefined, home: string): string | undefined;
+  };
+  for (const backend of [undefined, "windows-job", "container", "cloud"] as const) {
+    const token = internal.beginProviderReviewWriter({ sessionId: `s_${backend}`, context: { kind: "native" } } as SessionMeta,
+      backend ? { backend } as SpawnIsolation : undefined, f.home);
+    assert.ok(token);
+    assert.equal(registry.group(token), undefined);
+  }
+  assert.deepEqual(registry.sessions(), []);
+  assert.equal(registry.unsandboxedSessions().length, 4);
+  assert.deepEqual(readdirSync(directory), []);
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
+  // Reusing a session id never borrows an earlier launch's host-access classification.
+  const blocking = new ReviewWriterRegistry(directory, undefined, { createGroup: () => undefined });
+  const fresh = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "fresh")), "runner");
+  fresh.setReviewWriterRegistry(blocking);
+  t.after(() => fresh.shutdownAll());
+  const begin = (fresh as unknown as typeof internal).beginProviderReviewWriter.bind(fresh);
+  const meta = { sessionId: "s_transition", context: { kind: "native" } } as SessionMeta;
+  begin(meta, undefined, f.home);
+  for (const backend of ["bwrap", "seatbelt"] as const) {
+    begin(meta, { backend, codexPackageReadOnlyPaths: [] } as unknown as SpawnIsolation, f.home);
+    assert.deepEqual(fresh.codexReviewerProtection(f.home), { home: f.home });
+  }
 });
 
 test("graceful shutdown retires only exact proven provider writers before restart", posixOnly, async (t) => {
@@ -269,7 +319,7 @@ test("graceful shutdown retires only exact proven provider writers before restar
   assert.deepEqual(proofs, ["proven"]);
   assert.deepEqual(new Set(registry.sessions()), new Set([...Object.keys(cases).filter((id) => id !== "proven"), "interrupted"]));
   assert.equal(readdirSync(directory).length, Object.keys(cases).length);
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /independently prove the tree gone/);
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
   assert.ok(new ReviewWriterRegistry(directory).sessions().includes("live"));
 });
 
@@ -283,7 +333,7 @@ test("a cleanly proven writer permits the standalone reviewer after graceful shu
   const internal = manager as unknown as { active: Map<string, unknown>; driverReviewWriterTokens: Map<unknown, string> };
   internal.driverReviewWriterTokens.set(client, registry.acquire("s_clean", "provider"));
   internal.active.set("s_clean", { sessionId: "s_clean", client });
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /s_clean/);
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
   assert.equal(manager.shutdownAll(), true);
   await manager.retireReviewWritersAfterShutdown();
   assert.deepEqual(readdirSync(directory), []);
@@ -291,7 +341,7 @@ test("a cleanly proven writer permits the standalone reviewer after graceful shu
   restarted.setReviewWriterRegistry(new ReviewWriterRegistry(directory));
   t.after(() => restarted.shutdownAll());
   const protection = restarted.codexReviewerProtection(f.home);
-  assert.equal(protection.refusal, undefined);
+  assert.deepEqual(protection, { home: f.home });
   assert.equal(verifySpawnedCommand(f.command, f.bin, sessionWritableRoots(f.home, join(f.root, "state"), [], []),
     process.getuid!(), statSync("/").uid, protection), f.binary);
 });
@@ -317,7 +367,7 @@ test("shutdown retires a real provider ledger after its earlier non-killing proo
   internal.driverReviewWriterTokens.set(client, token);
   internal.active.set("s_real", { sessionId: "s_real", client });
   assert.equal(await ledger.prove({ terminate: false }), false);
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /s_real/);
+  assert.deepEqual(manager.codexReviewerProtection(f.home), { home: f.home });
   assert.equal(manager.shutdownAll(), true);
   assert.equal(await waitForPendingKills(10_000), true);
   await manager.retireReviewWritersAfterShutdown();

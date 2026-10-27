@@ -1480,6 +1480,12 @@ type LinkedChangeRequest = {
   number: number;
 };
 
+/** Which forge a change-request URL names (a GitLab `/-/merge_requests/N` URL, or GitHub), for
+ * reads that must pick `glab` or `gh` from the URL alone (#3602). */
+export function changeRequestProvider(url: string): ForgeProvider {
+  return linkedChangeRequest(url)?.provider ?? "github";
+}
+
 function linkedChangeRequest(value: string): LinkedChangeRequest | null {
   try {
     const url = new URL(value);
@@ -1634,7 +1640,7 @@ export async function mergedHeadForge(
 export async function worktreePullRequestState(
   worktreePath: string,
   pullRequestUrl: string,
-  options: WorktreeOptions & { provider?: ForgeProvider } = {},
+  options: WorktreeOptions & { provider?: ForgeProvider; env?: Record<string, string> } = {},
 ): Promise<PullRequestLifecycleProof | null> {
   const request = linkedChangeRequest(pullRequestUrl);
   if (!request || (request.provider === "gitlab" && options.provider !== "gitlab")) return null;
@@ -1648,7 +1654,7 @@ export async function worktreePullRequestState(
           "api", `projects/${encodeURIComponent(request.project)}/merge_requests/${request.number}`,
           "--hostname", request.host,
         ],
-      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...(options.env ? { env: options.env } : {}) },
     );
     return parseWorktreePullRequestState(result.stdout, pullRequestUrl);
   } catch {

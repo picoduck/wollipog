@@ -71,6 +71,7 @@ import {
   SESSION_STOP_TIMEOUT_MS,
   capabilityConfigError,
   canonicalPrMergeEnqueueCommand,
+  prMergeChangeRequestUrl,
   claudeModelConfigForValidation,
   defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
@@ -4337,6 +4338,145 @@ test("PR merge action admission accepts only the canonical enqueue command", () 
   assert.equal(normalizeWorkflowDecisionAction(snapshot, {
     kind: "pr_merge_enqueue", command: canonical, extra: true,
   }).status, 400, "extra action fields fail closed");
+});
+
+const GITLAB_MERGE = {
+  category: "pr_merge" as const,
+  repository: "gitlab.example.com/platform/agents/wollipog",
+  pullRequest: 7,
+  headSha: "c".repeat(40),
+  reviewResult: "merge" as const,
+  requiredChecks: { headSha: "c".repeat(40), status: "passed" as const, checkedAt: 10,
+    checks: [{ name: "Pipeline #901", state: "passed" as const }] },
+  mergeMethod: "merge_train" as const,
+  squash: false,
+  removeSourceBranch: false,
+};
+
+test("a GitLab merge snapshot pins its merge method and a canonical glab call to the approved head (#3602)", () => {
+  const normalized = normalizeWorkflowDecisionSnapshot(GITLAB_MERGE);
+  assert.ok(normalized.ok);
+  assert.deepEqual(normalized.data, GITLAB_MERGE);
+  const github = { ...GITLAB_MERGE, repository: "picoduck/wollipog" } as Record<string, unknown>;
+  delete github.mergeMethod; delete github.squash; delete github.removeSourceBranch;
+  const githubNormalized = normalizeWorkflowDecisionSnapshot(github);
+  assert.ok(githubNormalized.ok);
+  assert.equal("mergeMethod" in githubNormalized.data!, false, "a GitHub snapshot (and its digest) gains no field");
+  for (const bad of [
+    { ...GITLAB_MERGE, mergeMethod: undefined },
+    { ...GITLAB_MERGE, mergeMethod: "rebase" },
+    { ...GITLAB_MERGE, squash: "no" },
+    { ...GITLAB_MERGE, removeSourceBranch: undefined },
+    { ...GITLAB_MERGE, repository: "group/sub/project" },
+    { ...github, mergeMethod: "merge" },
+  ]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot(bad).status, 400, JSON.stringify(bad));
+  }
+  const project = encodeURIComponent("platform/agents/wollipog");
+  assert.equal(canonicalPrMergeEnqueueCommand(GITLAB_MERGE),
+    `glab api --method POST projects/${project}/merge_trains/merge_requests/7 --hostname gitlab.example.com ` +
+    `-f sha=${"c".repeat(40)} -F squash=false`, "a train merge omits when_pipeline_succeeds and pins the head");
+  assert.equal(canonicalPrMergeEnqueueCommand({ ...GITLAB_MERGE, mergeMethod: "merge", squash: true, removeSourceBranch: true }),
+    `glab api --method PUT projects/${project}/merge_requests/7/merge --hostname gitlab.example.com ` +
+    `-f sha=${"c".repeat(40)} -F squash=true -F should_remove_source_branch=true`);
+  assert.equal(prMergeChangeRequestUrl(GITLAB_MERGE),
+    "https://gitlab.example.com/platform/agents/wollipog/-/merge_requests/7", "the forge proof reads the merge request");
+  const canonical = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
+  assert.equal(normalizeWorkflowDecisionAction(GITLAB_MERGE, { kind: "pr_merge_enqueue", command: canonical }).ok, true);
+  for (const command of [
+    canonical.replace("sha=c", "sha=d"),
+    canonical.replace("--method POST", "--method PUT"),
+    canonical.replace("gitlab.example.com", "gitlab.com"),
+    `${canonical} -F when_pipeline_succeeds=true`,
+    canonicalPrMergeEnqueueCommand({ ...GITLAB_MERGE, mergeMethod: "merge" }),
+  ]) {
+    assert.equal(normalizeWorkflowDecisionAction(GITLAB_MERGE, { kind: "pr_merge_enqueue", command }).status, 409, command);
+  }
+});
+
+test("consuming a GitLab merge first checks GitLab on the child's runner, revoking a stale or mismatched approval (#3602)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitLab Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+    const approved = (key: string) => {
+      const decision = svc.createWorkflowDecision(child.id, { requestId: key, resourceKey: key, resourceSnapshot: GITLAB_MERGE });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const command = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
+    const preflights: ControlPlaneToRunner[] = [];
+    let answer: Partial<RunnerRequestResult> | Error = { ok: true };
+    hub.requestHandler = async (msg) => {
+      if (msg.type !== "gitlab_merge_preflight") throw new Error(`unexpected ${msg.type}`);
+      preflights.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: GITLAB_MERGE, action: { kind: "pr_merge_enqueue", command } });
+
+    const armed = approved("gitlab-ok");
+    const result = await consume(armed);
+    assert.ok(result.ok, result.error);
+    assert.equal(db.workflowDecisionByOccurrence(armed)?.actionAdmission?.command, command, "the exact glab call is armed");
+    assert.deepEqual(preflights[0], {
+      type: "gitlab_merge_preflight", requestId: (preflights[0] as { requestId: string }).requestId, sessionId: child.id,
+      repository: GITLAB_MERGE.repository, pullRequest: 7, headSha: GITLAB_MERGE.headSha,
+      mergeMethod: "merge_train", squash: false, removeSourceBranch: false,
+    });
+
+    for (const [refusal, revoked] of [["stale_head", true], ["mismatch", true], ["unavailable", false]] as const) {
+      answer = { ok: false, refusal, reason: `GitLab said ${refusal}.` };
+      const occurrence = approved(`gitlab-${refusal}`);
+      const refused = await consume(occurrence);
+      assert.equal(refused.status, 409);
+      assert.match(refused.error ?? "", new RegExp(`GitLab said ${refusal}`));
+      assert.equal(db.workflowDecisionByOccurrence(occurrence)?.status, revoked ? "revoked" : "approved",
+        `${refusal} ${revoked ? "revokes the stale or unusable approval" : "arms nothing and stays retryable"}`);
+      assert.equal(db.workflowDecisionByOccurrence(occurrence)?.actionAdmission, undefined);
+    }
+    answer = new Error("runner did not respond in time");
+    const silent = approved("gitlab-silent");
+    assert.equal((await consume(silent)).status, 409);
+    assert.equal(db.workflowDecisionByOccurrence(silent)?.status, "approved", "an unanswered preflight proves nothing");
+
+    answer = { ok: true };
+    const old = approved("gitlab-old-runner");
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeDecisions - 1);
+    const refusedOld = await consume(old);
+    assert.equal(refusedOld.status, 409, "a runner that cannot answer the preflight cannot arm a GitLab merge");
+    assert.equal(db.workflowDecisionByOccurrence(old)?.status, "revoked");
+  } finally {
+    db.close();
+  }
 });
 
 test("a nested Orchestrator's verification counts toward the root campaign (#1462)", () => {

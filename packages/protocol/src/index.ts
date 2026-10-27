@@ -722,7 +722,14 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      so clients offer a recovery action per code. Older peers omit it and show only the text.
 // 235: extend v233 providerHomeRefusal with specific recovery causes and authorized, path-free
 //      lease-inspection process observations (#3585). Older peers retain the original shapes.
-export const PROTOCOL_VERSION = 235;
+// 236: human-approved automation creation proposals, exact execution and durable creation receipts.
+// 237: post-upvote review extensions (#3641): bind upvotedHeadSha and require delta scope.
+//      Older peers cannot admit these extensions or receive their review history marker.
+// 239: GitLab typed merges (#3602): a `pr_merge` snapshot for a host-qualified GitLab project pins
+//      its merge method, squash and source-branch settings; consuming it first asks the child's
+//      runner for `gitlab_merge_preflight`, which an older runner cannot answer, so the control
+//      plane refuses a GitLab merge decision for a pre-v239 child runner.
+export const PROTOCOL_VERSION = 239;
 
 export * from "./campaign-authority.js";
 export * from "./campaign-issue-publication.js";
@@ -975,6 +982,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** v237 binds post-upvote extensions and enforces their delta scope (#3641). */
+  postUpvoteReviewExtensions: 237,
   /** Review sessions preserve admitted campaign accounting through final usage settlement. */
   campaignReviewSessions: 232,
   /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
@@ -1027,6 +1036,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundRetryExhaustion: 221,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  agentAutomationCreation: 236,
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
   fullControlIssueAuthority: 217,
@@ -1038,6 +1048,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
+  /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
+  gitlabMergeDecisions: 239,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
@@ -1140,7 +1152,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   claudeLiveUsage: 216,
   /** v219 control planes price a snapshot's `ratePricedUsage` residual per cache bucket. */
   ratePricedSnapshotUsage: 219,
-  costReconciliation: 199,
   costReconciliationIdentity: 210,
   /** v129 runners report the exact threshold that cancelled a turn. */
   governanceTripReporting: 129,
@@ -2534,13 +2545,13 @@ export const WORKFLOW_DECISION_CATEGORIES = [
   "follow_up_issue_publication",
   "ui_evidence_approval",
   /** #3369: more cross-model review rounds for a pull request whose epoch used its round budget
-   * without an upvote. Human-owned unless a Parent Control grant delegates it; Full Control never
-   * takes it on its own. */
+   * including after an upvote when the head changed. Human-owned unless a Parent Control grant
+   * delegates it; Full Control never takes it on its own. */
   "review_round_extension",
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
-export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope";
+export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -4769,7 +4780,35 @@ export interface GithubIssueClosureResult {
   completedAt: number;
 }
 
+export interface AutomationCreationRequest {
+  requestId: string;
+  /** Stable identity for revisions of one intended automation. */
+  resourceKey: string;
+  spec: AutomationSpec;
+}
+
+export interface AutomationCreationSnapshot {
+  category: "automation_creation";
+  spec: AutomationSpec;
+  /** Server-calculated preview, including for a paused automation. */
+  nextFireAt: number;
+  /** Binds target identity, capabilities and ownership without retaining credentials. */
+  targetDigest: string;
+  requestedSpecDigest: string;
+  /** Observed defaults, not persisted overrides. Omitted settings inherit at each normal run. */
+  effectiveTargets: Array<{ runnerId: string; workspaceId: string; agentId: string; role: string; config: SessionConfig }>;
+  expiresAt: number;
+}
+
+export interface AutomationCreationResult {
+  automationId: string;
+  navigationPath: string;
+  spec: AutomationSpec;
+  createdAt: number;
+}
+
 export type WorkflowDecisionResourceSnapshot =
+  | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
   | {
@@ -4780,7 +4819,9 @@ export type WorkflowDecisionResourceSnapshot =
     }
   | {
       category: "pr_merge";
+      /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
       repository: string;
+      /** The pull request number, or a GitLab merge request's IID. */
       pullRequest: number;
       headSha: string;
       reviewResult: "merge" | "merge_with_acknowledged_risk";
@@ -4790,6 +4831,13 @@ export type WorkflowDecisionResourceSnapshot =
         checkedAt: number;
         checks: Array<{ name: string; state: "passed"; url?: string }>;
       };
+      /** GitLab only, and then required (#3602): through the project's merge train, or a direct
+       * merge where the project has no train. Absent on GitHub, so GitHub digests are unchanged. */
+      mergeMethod?: "merge_train" | "merge";
+      /** GitLab only: squash on merge, within the project's squash option. */
+      squash?: boolean;
+      /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
+      removeSourceBranch?: boolean;
     }
   | {
       /** #3369: more review rounds for one epoch of the requester's review run on this pull
@@ -4800,6 +4848,8 @@ export type WorkflowDecisionResourceSnapshot =
       epoch: number;
       /** The pull request head the next round would review. */
       headSha: string;
+      /** v237: required after an upvote; the exact last valid upvoted head. */
+      upvotedHeadSha?: string;
       /** Valid rounds the epoch has used, which is its current budget. */
       roundsUsed: number;
       /** Blocking findings of the epoch's last valid round, still open. */
@@ -4923,6 +4973,7 @@ export interface WorkflowDecisionView {
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   issueClosureResult?: GithubIssueClosureResult;
+  automationCreationResult?: AutomationCreationResult;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
 }
@@ -6635,8 +6686,9 @@ export interface ProviderAuthenticationAccountOptionsResponse {
 export interface SelectProviderAuthenticationAccountRequest {
   requestId: string;
   providerAccountId: string;
-  /** The session's configured account when the card was rendered; a change fails closed. */
-  expectedProviderAccountId: string;
+  /** The configured account when rendered, or explicit null for Machine default sign-in.
+   * Required: missing or empty values never skip the stale-binding check. */
+  expectedProviderAccountId: string | null;
 }
 
 export interface SelectProviderAuthenticationAccountResponse {
@@ -8892,6 +8944,36 @@ export interface RecordWorkflowActionAdmissionMessage {
   sessionTurnId: string;
 }
 
+/** v239 (#3602): before a GitLab `pr_merge` is armed, the child's runner reads GitLab through the
+ * session's own `glab` login and checks the exact snapshot against it: the merge request is open at
+ * the approved head, the merge method matches whether the project runs merge trains (so a merge
+ * never goes around an enabled train), squash fits the project's squash option, a train's
+ * source-branch setting matches, and the instance's version has the merge-train API. Read-only. */
+export interface GitLabMergePreflightMessage {
+  type: "gitlab_merge_preflight";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+  mergeMethod: "merge_train" | "merge";
+  squash: boolean;
+  removeSourceBranch: boolean;
+}
+
+/** `refusal` is set when `ok` is false: `stale_head` (the merge request moved, so the approval is
+ * stale), `mismatch` (the snapshot does not fit the project or merge request), or `unavailable`
+ * (GitLab could not be read, so nothing was proven). `reason` is a fixed sentence, never `glab`
+ * output. */
+export interface GitLabMergePreflightResultMessage {
+  type: "gitlab_merge_preflight_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "mismatch" | "unavailable";
+  reason?: string;
+}
+
 /** Runner-authoritative coordinates for one successfully appended action-arm fence. */
 export interface WorkflowActionAdmissionRecordedMessage {
   type: "workflow_action_admission_recorded";
@@ -9443,6 +9525,7 @@ export type RunnerToControlPlane =
   | PolicyHookCredentialMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
+  | GitLabMergePreflightResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
   | CampaignIssueScopeResultMessage
@@ -10322,7 +10405,8 @@ export interface SelectProviderAuthenticationAccountMessage {
   sessionId: string;
   recoveryRequestId: string;
   providerAccountId: string;
-  expectedProviderAccountId: string;
+  /** Explicit null means the session was unbound when the card opened. */
+  expectedProviderAccountId: string | null;
   /** Who chose the account (#2783), recorded on this session's `auth:select-account` resolution
    * only, as `resolve_permission`'s v211 field is. Absent from older control planes; older runners
    * ignore it. Such selections name nobody. */
@@ -11383,6 +11467,7 @@ export type ControlPlaneToRunner =
   | PolicyHookCredentialRegisteredMessage
   | RecordPolicyHookDecisionMessage
   | RecordWorkflowActionAdmissionMessage
+  | GitLabMergePreflightMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | CampaignIssueScopeMessage

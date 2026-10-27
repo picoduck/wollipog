@@ -22,7 +22,7 @@ import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPan
  * title. Escape pops it as Back does, and focus returns to the artifact's row. Like every tool's
  * page it clears on a tool switch, while the tab and the address stay in panel scratch (#1202).
  */
-const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
+const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
 let phoneViewport = false;
 Object.defineProperty(domWindow, "matchMedia", {

@@ -16,6 +16,7 @@ import {
   resolveAgentEnvironmentValue, type RunnerConfigAgent, type RunnerConfigWorkspace, type RunnerProviderAccount,
 } from "./config.js";
 import type { SessionMeta } from "./session-store.js";
+import { isUserPrivateGroup } from "./review-private-group.js";
 
 /** Home-relative caches a protected session can write (mirrors execution-isolation's list). */
 const SESSION_WRITABLE_CACHE_PATHS = [
@@ -65,20 +66,18 @@ export function sessionWritableRoots(
 export interface CodexReviewerProtection {
   /** Only the conventional native install gets an exception. */
   home: string;
-  /** Missing proof names the unprotected session. */
-  refusal?: string;
+  /** Launch-time sandbox rules, rather than live writer evidence, protect this installation. */
 }
 
 /** Check the write boundary and ownership of every component, retaining both for the exception. */
 function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number,
-  codex?: CodexReviewerProtection): void {
+  codex: CodexReviewerProtection | undefined, privateGroup: (uid: number, gid: number) => boolean): void {
   for (const root of roots) {
     if (!within(root, real)) continue;
     const codexHome = codex && join(codex.home, ".codex");
     // Broader writable roots (HOME, a checkout, /tmp, an account parent) never get an
     // exception. The symlink walker checks every link's containing directory too.
     if (codex && codexHome === root && within(join(codexHome, "packages", "standalone"), real)) {
-      if (codex.refusal) throw new Error(codex.refusal);
       continue;
     }
     throw new Error(`${real} is inside a directory a session can write (${root})`);
@@ -88,7 +87,6 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
     components.push(current);
     if (current === "/" || current === join(current, "..")) break;
   }
-  let privateAncestor = false;
   const ordered = components.reverse();
   for (const [index, component] of ordered.entries()) {
     const info = lstatSync(component);
@@ -97,8 +95,12 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
     // anyone, its group included, so it is a safe ancestor; the path itself never may be writable.
     const stickyAncestor = info.isDirectory() && (info.mode & 0o1000) !== 0 && index < ordered.length - 1;
     if ((info.mode & 0o002) && !stickyAncestor) throw new Error(`${component} is writable by every user`);
-    if ((info.mode & 0o020) && !privateAncestor && !stickyAncestor) throw new Error(`${component} is writable by its group`);
-    if (info.isDirectory() && info.uid === uid && (info.mode & 0o077) === 0) privateAncestor = true;
+    if ((info.mode & 0o020) && !stickyAncestor) {
+      let safe = false;
+      try { safe = info.uid === uid && privateGroup(uid, info.gid); }
+      catch (error) { throw new Error(`${component} is writable by its group: ${(error as Error).message}`); }
+      if (!safe) throw new Error(`${component} is writable by its group`);
+    }
   }
 }
 
@@ -106,10 +108,15 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
  * Resolve `path` and refuse it unless no other user, and no session, could have changed it.
  * Links are followed one at a time: each must be owned by `uid` or root and sit in a directory that
  * passes the same checks, so no hop on the way can be repointed. Group-write is accepted only
- * below a directory that only `uid` can enter, which keeps other users out.
+ * for a proven user-private group, even below a private ancestor.
  */
 export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0,
-  codex?: CodexReviewerProtection): string {
+  codex?: CodexReviewerProtection, privateGroup: (uid: number, gid: number) => boolean = isUserPrivateGroup): string {
+  const groups = new Map<number, boolean>();
+  const checkGroup = (owner: number, gid: number) => {
+    if (!groups.has(gid)) groups.set(gid, privateGroup(owner, gid));
+    return groups.get(gid)!;
+  };
   if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
   let resolved = "/";
   const pending = path.split("/").filter(Boolean);
@@ -124,12 +131,12 @@ export function trustedPath(path: string, roots: readonly string[], uid: number,
     if (!info.isSymbolicLink()) { resolved = next; continue; }
     if (++hops > 40) throw new Error(`${path} has too many symbolic links`);
     if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${next} is owned by another user`);
-    checkResolved(resolved, roots, uid, rootUid, codex);
+    checkResolved(resolved, roots, uid, rootUid, codex, checkGroup);
     const target = readlinkSync(next);
     if (isAbsolute(target)) resolved = "/";
     pending.unshift(...target.split("/").filter(Boolean));
   }
-  checkResolved(resolved, roots, uid, rootUid, codex);
+  checkResolved(resolved, roots, uid, rootUid, codex, checkGroup);
   return resolved;
 }
 
@@ -289,8 +296,8 @@ export interface ReviewToolEnvironment {
 
 /** Find and verify git, gh and ssh. Never throws: a refusal is returned as its reason. */
 export function discoverReviewTools(env: ReviewToolEnvironment): ReviewTools | { unavailable: string } {
-  const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
   try {
+    const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
     const git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid);
     const gh = trustedExecutable("gh", env.pathEnv, roots, env.uid, env.rootUid);
     let ssh: string | undefined;

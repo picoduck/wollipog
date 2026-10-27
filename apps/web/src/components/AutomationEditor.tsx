@@ -11,7 +11,7 @@ import {
   AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
-  automationChooseWorkflowInstallation,
+  automationChooseWorkflowInstallation, CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -625,7 +625,9 @@ function AutomationEditorForm({
     return offeredAgents(runner?.agents, current).map((agent) => ({
       value: agent.id,
       label: agentDisplayName(agent, runner?.agents),
-      ...(disabled.has(agent.id) ? { disabled: true, disabledReason: "Unavailable on this machine." } : {}),
+      ...(isRetiredCodexExec(agent)
+        ? { disabled: true, disabledReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
+        : disabled.has(agent.id) ? { disabled: true, disabledReason: "Unavailable on this machine." } : {}),
     }));
   };
   const roleOptions = (runner: Runner, boundId: string): SelectOption<string>[] => [

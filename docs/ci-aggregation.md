@@ -1,10 +1,24 @@
 # Required CI Aggregation
 
 `Typecheck, Test & Sidecar Bundle` is the protected required context in
-`.github/workflows/ci.yml`. Its `check` job waits for `checks`, all five `browser`
-shards, the `win32` reusable workflow, and the `webkit` job. It succeeds only when
-all four dependency results are `success`; failure, cancellation, unexpected skipping,
-and unknown results produce a failing shell exit with a named diagnostic.
+`.github/workflows/ci.yml`. Its `check` job waits for `checks`, `browser`, the
+`win32` reusable workflow, `webkit`, and the optional PR `suite_plan`. The four
+work results must be `success`. With the routing variable absent or ordinarily off,
+the plan must be `skipped` with no output; an activated PR requires a successful
+plan with an explicit `full` or `fast` output. Failure, cancellation, missing or
+unknown output and unexpected skipping produce a failing shell exit with a named
+diagnostic. [The exact proposed assurance contract](ci-pr-assurance.md) requires
+separate human activation approval; merging its machinery activates nothing.
+GitHub's case-insensitive expression matching admits a plan for case variants of
+`enabled`, but exact raw shell checks force those variants to full and reject a
+fast aggregate. The absent/ordinary off state still adds no executed jobs.
+
+Full coverage remains five browser shards on every event while routing is off,
+and always on merge groups, main, manual dispatch and reusable rolling validation.
+Only an activated, trusted allowlisted prose fast PR uses one critical Chromium
+job and the fast Node group. All other coverage stays mandatory. Checks/browser
+wait for optional routing and use `!cancelled()` plus the same draft guard so an
+expected disabled plan skip cannot skip full work. WebKit/Windows stay independent.
 
 For PR runs, the job condition uses `!cancelled()` with the existing draft guard.
 [GitHub's expression reference](https://docs.github.com/en/actions/reference/workflows-and-actions/expressions#status-check-functions)
@@ -16,13 +30,15 @@ by the aggregator shell while the PR workflow remains active. Whole-workflow
 cancellation permits the PR aggregator to be cancelled with its obsolete run.
 The cancellation term is `(github.event_name != 'pull_request' || !cancelled())`:
 non-PR runs retain unconditional aggregation, including after cancellation.
-This preserves the prior merge-group and main-push failure-reporting behavior
+This preserves merge-group and reusable rolling-main failure-reporting behavior
 instead of extending the PR cancellation change to those events.
 
 Draft PRs remain excluded. `ready_for_review` still runs even with a stale draft
 payload, and delayed draft events retain their separate concurrency lane.
 Workflow name, PR number or ref, and draft/active lane still define concurrency,
-so unrelated PRs, main pushes, and distinct merge-group refs remain independent.
+so unrelated PRs and distinct merge-group refs remain independent. Main-push full
+validation now uses the separate rolling worker's native active/pending lane; its
+reusable CI call does not share ordinary CI's concurrency group.
 Merge-group runs retain the same cancellation admission, dependency checks and required name.
 The separate obsolete-merge-group monitor and CI permissions are unchanged.
 
@@ -104,7 +120,7 @@ Run the dedicated source contract and aggregation fixtures:
 
 ```sh
 node --import tsx --test scripts/workflow-pr-event-contract.test.mjs scripts/workflow-ci-aggregation.test.mjs \
-  scripts/pr-ci-supersede.test.mjs
+  scripts/workflow-ci-routing.test.mjs scripts/pr-ci-supersede.test.mjs
 ```
 
 The aggregation fixtures evaluate the actual job condition using inert status

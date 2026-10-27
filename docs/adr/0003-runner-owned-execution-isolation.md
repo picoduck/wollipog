@@ -109,36 +109,32 @@ and transcripts keep their existing write permissions. Package updates must run 
 boundaries. A real Codex App smoke test exercises a failed installer write followed by two local
 mock-inference turns; a separate bwrap test verifies the mount when user namespaces are available.
 
-Reviewer admission can accept the conventional `~/.codex/packages/standalone` install only with
-package protection proven for every live agent writer. Each structured launch supplies an immutable
-denial snapshot; an unprotected session or Agent TUI is named in the refusal. Human-operated
-terminals remain the operator boundary. Unprotected structured-provider and TUI writer markers
-survive runner restarts, session removal, and a root process's disposal. Only a complete tree proof
-retires them; asynchronous or failed retirement proofs continue to refuse reviewer admission.
-The native-Linux marker directory is `unprotected-agent-writers` beneath runner data. A failed or
-interrupted constructor/spawn can retain conservative evidence too. Graceful shutdown awaits each
-TUI's exact process-tree proof and, after draining kills, bounded exact proofs from retained
-provider instances. Only successful proofs retire their individual markers; a global drain alone
-does not settle failed or untracked launches.
+Reviewer admission for review sessions and the legacy controller bridge uses only static trust
+checks, required tools and available native agents. The conventional
+`~/.codex/packages/standalone` exception follows from the launch invariant, not runtime writer
+tracking. Every native bwrap/Seatbelt launch protects configured reviewer executable, symlink
+container and interpreter installation directories as well as Codex packages. Empty package
+directories under writable grants are pinned before launch to prevent planting future installs.
+Unverifiable installation protection fails the launch with the affected path. Writable remapped
+sources that expose a protected installation are refused. Other session-writable executables,
+world-writable paths and other-user-owned components remain untrusted.
+Installations containing requested writable roots are refused with both paths rather than
+silently masking worktree or cache writes. Installation directories must be dedicated to code.
 
-New markers record the runner PID, kernel start time, boot identity, and inherited provider-HOME
-runner marker before launch. Startup reconciliation reuses provider-HOME's lifecycle proof: a
-different kernel boot proves all old trees gone; on the same boot, the exact recorded runner must
-be gone and a bounded, identity-stable process scan must find no marked survivor or potentially
-related uninspectable same-user process. A dead/reused PID alone, restart, or file age never proves
-tree exit. Recovery never signals processes. This runner-wide evidence is deliberately coarse:
-another surviving child of the old runner may keep a writer's record even after that writer exits.
-It shares the provider-HOME marker-scan limitation for descendants that scrub their environment
-and escape observed parent links; it is not kernel containment.
+A group-write bit is safe only for a proven user-private group: system passwd/group lookups must
+show the owner's primary gid, no other supplementary member and no other primary-group user.
+All same-gid group entries and any separate `initgroups` NSS source participate in this proof.
+Unknown or configured remote NSS sources fail closed. Listed but provably unconfigured and
+inactive SSSD is non-contributing; local files/systemd identity sources are supported. No
+identity evidence comes from environment variables. Shared group writes remain refused even below private ancestors; sticky-parent
+protections still apply. See [Review Writer Recovery](../review-writer-recovery.md) for details.
 
-Legacy, malformed, partial, unreadable, and otherwise unprovable records stay fail-closed. The
-refusal instructs the operator to stop the runner, independently prove that session's complete
-agent tree gone, and remove only its record when automatic reconciliation cannot do so.
-Structured launches already proving package containment need
-no marker, and the read-only review preset remains outside the agent-writer inventory.
-This is an admission-time check: it does not block future
-unisolated agent launches during a review. Those agents already have host-user write access,
-including to the runner itself. All other writable-root and executable-ownership checks still apply.
+Writer records and the offline state doctor remain non-blocking process lifecycle diagnostics.
+Retaining them preserves exact process-tree retirement and shutdown behavior without involving
+it in admission. Records from any runner generation, leases, stale statuses and launch fences
+never affect reviewer availability. Running Orchestrators, unsandboxed agents and Agent TUIs
+already have host-user access; this boundary does not defend against those processes. No release
+digest pin is implemented, so pre-existing same-user tampering remains outside static trust.
 
 Repository checkpoints use the same stable owner identity under
 `refs/{wollipog,mam}/owners/<ownerHash>/<sessionId>`. A durable layout discriminator and cleanup-ledger

@@ -5,6 +5,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { quote } from "shell-quote";
+import type { Worker } from "node:worker_threads";
+import { createGuardSocketWorker } from "./managed-worktree-guard-worker-client.js";
 import { claudeHookSessionProtectionsPath } from "./hook-settings.js";
 import {
   MAX_GUARD_SOCKET_PATH_BYTES,
@@ -251,15 +253,21 @@ test("a socket replaced at the same path is not reused as the runner's", { skip:
 });
 
 test("overlapping ensure and close for one session settle in order, leaving one listener or none", { skip: !POSIX }, async () => {
-  const { configDir, host } = fixture();
+  const { configDir } = fixture();
+  const liveWorkers = new Set<Worker>();
+  const host = new ManagedWorktreeGuardSockets(configDir, () => [], process.platform, async () => "", (data, transfers) => {
+    const worker = createGuardSocketWorker(data, transfers);
+    liveWorkers.add(worker);
+    worker.once("exit", () => liveWorkers.delete(worker));
+    return worker;
+  });
+  hosts.push(host);
   writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_race"), []);
-  // An untracked listener is the failure this guards against, and the map cannot see one, so count
-  // the process's live pipe handles instead.
-  const pipes = () => process.getActiveResourcesInfo().filter((name) => name === "PipeWrap").length;
-  const before = pipes();
+  // Count actual worker lifetime: main-thread PipeWrap resources do not include worker listeners.
   // Two launch preparations at once: both get the same, working socket, backed by one server.
   const [first, second] = await Promise.all([host.ensure("s_race"), host.ensure("s_race")]);
   assert.equal(first, second);
+  assert.equal(liveWorkers.size, 1);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.equal((host as any).servers.size, 1);
   assert.equal((await requestManagedWorktreeGuardVerdict(first, payload("git status"))).exitCode, 0);
@@ -268,17 +276,16 @@ test("overlapping ensure and close for one session settle in order, leaving one 
   await Promise.all([host.ensure("s_race"), host.close("s_race")]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.equal((host as any).servers.size, 0);
+  assert.equal(liveWorkers.size, 1, "closing one listener retains the single shared worker");
   assert.equal(statSync(managedWorktreeGuardSocketDirectory(configDir, "s_race"), { throwIfNoEntry: false }), undefined);
   const [, , again] = await Promise.all([host.close("s_race"), host.ensure("s_race"), host.ensure("s_race")]);
+  assert.equal(liveWorkers.size, 1);
   assert.equal((await requestManagedWorktreeGuardVerdict(again, payload("git status"))).exitCode, 0);
   await host.closeAll();
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   assert.equal((host as any).servers.size, 0);
-  // Client connections finish closing a few ticks later; a leaked listener never does.
-  for (let attempt = 0; attempt < 50 && pipes() > before; attempt++) {
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
-  }
-  assert.equal(pipes(), before, "every listener this test started is closed");
+  assert.equal(liveWorkers.size, 0, "every listener worker this test started has exited");
+  await assert.rejects(requestManagedWorktreeGuardVerdict(again, payload("git status")));
 });
 
 test("a socket path that cannot be bound is refused before anything is created", async () => {
@@ -371,9 +378,11 @@ test("an abstract socket answers from the runner's memory and writes nothing", {
   assert.ok((await requestManagedWorktreeGuardVerdict(one, remove)).stdout.includes(MANAGED_WORKTREE_REFUSAL));
   // A live refresh is simply the next read of memory.
   lists.set("s_one", []);
+  host.refreshMemoryProtections("s_one");
   assert.deepEqual(await requestManagedWorktreeGuardVerdict(one, remove), { stdout: "", stderr: "", exitCode: 0 });
   // No list at all is an invalidated guard: a refusal.
   lists.delete("s_one");
+  host.refreshMemoryProtections("s_one");
   const invalidated = await requestManagedWorktreeGuardVerdict(one, payload("git status"));
   assert.equal(invalidated.exitCode, 2);
 

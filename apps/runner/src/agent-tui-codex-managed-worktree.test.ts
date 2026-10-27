@@ -27,6 +27,7 @@ import {
   codexGuardActiveInArgs,
   codexGuardCommandString,
   codexGuardConfigOverride,
+  codexGuardHashTrustVersionSupported,
   codexHookInventoryProbe,
   codexHookInventoryVerdict,
   codexHookIsolationVerdict,
@@ -128,6 +129,11 @@ interface Harness {
   logs: string[];
 }
 
+function guardEvent(logs: string[]): Record<string, unknown> | undefined {
+  return logs.filter((line) => line.startsWith("{")).map((line) => JSON.parse(line) as Record<string, unknown>)
+    .find((event) => event.event === "codex_managed_worktree_guard_provisioned");
+}
+
 function dependencies(
   configDir: string,
   options: {
@@ -135,6 +141,7 @@ function dependencies(
     inventory?: (probe: CodexHookInventoryProbe) => CodexHookEntry[] | Promise<CodexHookEntry[]>;
     selfTest?: { ok: true } | { ok: false; reason: string };
     platform?: NodeJS.Platform;
+    version?: string | null;
   } = {},
   harness: Harness = { probes: [], logs: [] },
 ) {
@@ -155,6 +162,7 @@ function dependencies(
           // managed-worktree-guard.test.ts runs the real sidecar launch probe.
           verifyGuardLaunch: () => options.selfTest ?? { ok: true as const },
           readCodexHookInventory: async (probe) => {
+            probe.onVersion?.(options.version === undefined ? "0.163.0" : options.version ?? undefined);
             harness.probes.push(probe);
             return options.inventory ? options.inventory(probe) : [runnerHookEntry(probe)];
           },
@@ -207,10 +215,14 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
 
     assert.ok(launch);
     // The guard is observable in the argv the TUI launches with, never inferred.
+    assert.deepEqual(guardEvent(harness.logs), {
+      event: "codex_managed_worktree_guard_provisioned", sessionId: "s1377", entryPoint: "tui",
+      mechanism: "trusted-hash", codexVersion: "0.163.0", replacedExplicitBypass: false,
+    });
     const override = overrideArgument(launch.args);
     assert.ok(override);
     assert.ok(codexGuardArgsActive(launch.args, override));
-    assert.ok(launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
     // The catalog's own -c is kept, ahead of the runner's.
     assert.deepEqual(launch.args.slice(0, 2), ["-c", 'model="gpt-5-codex"']);
     // Durable metadata must not move under launch provisioning.
@@ -249,28 +261,23 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
   });
 });
 
-test("a foreign enabled-but-untrusted hook refuses the Codex TUI and names the hook", async () => {
+test("a foreign enabled-but-untrusted hook keeps its gate beside the trusted Codex guard", async () => {
   await withDir(async (dir) => {
     const foreign = "/home/u/.codex/config.toml:pre_tool_use:0:0";
-    await assert.rejects(
-      prepareAgentTuiLaunch(meta(), dependencies(dir, {
+    const launch = await prepareAgentTuiLaunch(meta(), dependencies(dir, {
         inventory: (probe) => [
           runnerHookEntry(probe),
           { key: foreign, enabled: true, trustStatus: "untrusted", command: "/home/u/hook.sh" },
-          // Trusted, managed, and disabled hooks are not un-gated by the bypass and do not count.
+          // Foreign trust states do not affect the runner's own hash trust.
           { key: "trusted", enabled: true, trustStatus: "trusted", command: "/t.sh" },
           { key: "managed", enabled: true, trustStatus: "managed", command: "/m.sh" },
           { key: "off", enabled: false, trustStatus: "untrusted", command: "/o.sh" },
         ],
-      })),
-      (error: Error) => {
-        assert.match(error.message, /Native TUI is unavailable/u);
-        assert.ok(error.message.includes(foreign));
-        assert.match(error.message, /Trust them in Codex \(\/hooks\) or disable them/u);
-        assert.doesNotMatch(error.message, /trusted,|managed,|\boff\b/u);
-        return true;
-      },
-    );
+      }));
+    assert.ok(launch);
+    assert.equal(launch.managedWorktreeGuard?.active, true);
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.ok(!stateOverrideOf(launch.args)?.includes(foreign));
   });
 });
 
@@ -321,20 +328,17 @@ test("with nothing to protect, a foreign untrusted hook neither refuses the Code
     }));
 
     assert.ok(launch);
-    // Exactly the launch this person had before #1438: their untrusted hook stays gated.
-    assert.deepEqual(launch.args, source.args);
+    // The guard is now available without lifting the foreign hook's trust gate.
     assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
-    assert.equal(launch.managedWorktreeGuard?.active, false);
-    assert.ok(launch.managedWorktreeGuard?.reason?.includes(foreign));
+    assert.equal(launch.managedWorktreeGuard?.active, true);
+    assert.ok(!stateOverrideOf(launch.args)?.includes(foreign));
 
-    // That TUI cannot be given the guard later, so the first worktree is announced, once.
+    // The already-guarded TUI needs no reopen notice for its first worktree.
     const registry = new UnguardedAgentTuiRegistry();
     assert.equal(registry.opened("shell-1", "s1377", launch.managedWorktreeGuard, 0), null);
     assert.equal(registry.protectionsChanged("other-session", 1), null);
     const notice = registry.protectionsChanged("s1377", 1);
-    assert.ok(notice);
-    assert.match(notice, /Close the TUI and open it again/u);
-    assert.ok(notice.includes(foreign));
+    assert.equal(notice, null);
     assert.equal(registry.protectionsChanged("s1377", 2), null);
   });
 });
@@ -366,13 +370,12 @@ test("the reopen notice is for an unguarded, still-open TUI only (#1438)", () =>
   assert.equal(registry.protectionsChanged("s4", 1), unguardedAgentTuiNotice("why"));
 });
 
-test("a modified (re-hashed) hook counts as untrusted", () => {
+test("a modified foreign hook does not prevent trusting only the runner's hook", () => {
   const verdict = codexHookInventoryVerdict([
     { key: "ours", enabled: true, trustStatus: "untrusted", command: "guard" },
     { key: "edited", enabled: true, trustStatus: "modified", command: "/e.sh" },
   ], "guard");
-  assert.equal(verdict.ok, false);
-  assert.deepEqual(!verdict.ok && verdict.foreignUntrusted, ["edited"]);
+  assert.deepEqual(verdict, { ok: true });
 });
 
 for (const trustStatus of ["untrusted", "modified"] as const) {
@@ -504,10 +507,12 @@ test("a stale runner override is replaced, never duplicated, and a later user ov
     const override = overrideArgument(first.args)!;
     assert.ok(codexGuardArgsActive(again.args, override));
     assert.equal(again.args.filter((arg) => arg.startsWith("hooks.PreToolUse=")).length, 1);
-    assert.equal(again.args.filter((arg) => arg === CODEX_HOOK_TRUST_BYPASS_FLAG).length, 1);
+    assert.equal(again.args.filter((arg) => arg === CODEX_HOOK_TRUST_BYPASS_FLAG).length, 0);
 
     assert.equal(codexGuardArgsActive([...first.args, "--config", "hooks.PreToolUse=[]"], override), false);
-    assert.equal(codexGuardArgsActive(first.args.filter((arg) => arg !== CODEX_HOOK_TRUST_BYPASS_FLAG), override), false);
+    assert.equal(codexGuardArgsActive([...first.args, CODEX_HOOK_TRUST_BYPASS_FLAG], override), false);
+    const retired = await prepareAgentTuiLaunch(meta({ args: [...first.args, CODEX_HOOK_TRUST_BYPASS_FLAG] }), dependencies(dir));
+    assert.ok(retired && !retired.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
   });
 });
 
@@ -523,7 +528,8 @@ test("guard flags go before an option terminator, and a prompt after it is never
     assert.deepEqual(launch.args.slice(terminator), ["--", "--disable=hooks please"]);
     const override = overrideArgument(launch.args)!;
     assert.ok(launch.args.indexOf(override) < terminator);
-    assert.ok(launch.args.indexOf(CODEX_HOOK_TRUST_BYPASS_FLAG) < terminator);
+    assert.ok(launch.args.indexOf(stateOverrideOf(launch.args)!) < terminator);
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
     assert.ok(codexGuardArgsActive(launch.args, override));
     // The prompt text is not replayed into the probe as an option.
     assert.deepEqual(harness.probes[0]!.args, ["app-server", "-c", "a=1", "-c", override]);
@@ -590,14 +596,14 @@ test("the probe replays every accepted spelling and follows -C/--cd (review CR-1
 });
 
 /** A stand-in app-server that answers initialize and hooks/list over stdio. */
-function fakeAppServer(dir: string, reply: string): CodexHookInventoryProbe {
+function fakeAppServer(dir: string, reply: string, userAgent: unknown = "wollipog-runner/0.163.0 (test)"): CodexHookInventoryProbe {
   const script = join(dir, "fake-app-server.mjs");
   writeFileSync(script, `
 import { createInterface } from "node:readline";
 const rl = createInterface({ input: process.stdin });
 rl.on("line", (line) => {
   const message = JSON.parse(line);
-  if (message.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: {} }) + "\\n");
+  if (message.id === 1) process.stdout.write(JSON.stringify({ id: 1, result: { userAgent: ${JSON.stringify(userAgent)} } }) + "\\n");
   if (message.id === 2 && message.method === "hooks/list" && message.params.cwds[0] === ${JSON.stringify(dir)}) {
     process.stdout.write("not json\\n");
     process.stdout.write(${JSON.stringify(reply)} + "\\n");
@@ -646,7 +652,124 @@ test("the inventory client reads hooks/list over stdio and fails closed on anyth
   });
 });
 
-const installedCodex = spawnSync("codex", ["--version"], { encoding: "utf8" });
+test("unmeasured inventory versions remain readable, but cannot select TUI hash trust", async () => {
+  await withDir(async (dir) => {
+    for (const userAgent of [
+      "wollipog-runner/0.155.0 (test)", "wollipog-runner/0.163.1 (test)",
+      "wollipog-runner/0.164.0 (test)", "wollipog-runner/0.163.0-beta (test)",
+      "wollipog-runner/0.163.00 (test)", "malformed", null, 163,
+    ]) {
+      let observed: string | undefined;
+      assert.deepEqual(await readCodexHookInventory({ ...fakeAppServer(dir,
+        JSON.stringify({ id: 2, result: { data: [] } }), userAgent),
+        onVersion: (version) => { observed = version; },
+      }), []);
+      assert.equal(codexGuardHashTrustVersionSupported(observed), false);
+    }
+  });
+});
+
+for (const version of ["0.155.0", "0.163.1", "0.164.0", null]) {
+  test(`a TUI on ${version ?? "unknown version"} verifies foreign-hook isolation before its legacy bypass`, async () => {
+    await withDir(async (dir) => {
+      const harness: Harness = { probes: [], logs: [] };
+      const launch = await prepareAgentTuiLaunch(meta(), dependencies(dir, {
+        version,
+        inventory: (probe) => [runnerHookEntry(probe), {
+          key: "foreign", command: "/foreign.sh", trustStatus: "untrusted",
+          enabled: !probe.args.some((arg) => arg.includes('"foreign"={enabled=false}')),
+        }],
+      }, harness));
+      assert.ok(launch?.managedWorktreeGuard?.active);
+      assert.ok(launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+      assert.ok(codexGuardArgsActive(launch.args, overrideArgument(launch.args)!, undefined, "legacy-bypass"));
+      assert.equal(codexGuardActiveInArgs(launch.args), false, "a structured driver cannot claim this TUI-only guard");
+      assert.equal(harness.probes.length, 2);
+      assert.ok(harness.probes.every((probe) => !probe.args.some((arg) => arg.includes("trusted_hash"))));
+      assert.deepEqual(guardEvent(harness.logs), {
+        event: "codex_managed_worktree_guard_provisioned", sessionId: "s1377", entryPoint: "tui",
+        mechanism: "legacy-bypass", codexVersion: version, replacedExplicitBypass: false,
+        fallbackReason: "unmeasured_version",
+      });
+    });
+  });
+}
+
+test("a TUI whose hash read-back fails falls back while preserving all prior foreign-hook disables", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const launch = await prepareAgentTuiLaunch(orchestratorMeta(), orchestratorDependencies(dir, {
+      inventory: (probe) => [{ ...runnerHookEntry(probe), trustStatus: "untrusted" }, {
+        key: "foreign", command: "/foreign.sh", trustStatus: "trusted",
+        enabled: !probe.args.some((arg) => arg.includes('"foreign"={enabled=false}')),
+      }],
+    }, harness));
+    assert.ok(launch?.managedWorktreeGuard?.active);
+    assert.ok(launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    assert.equal(harness.probes.length, 3);
+    assert.ok(harness.probes[1]!.args.some((arg) => arg.includes("trusted_hash")));
+    assert.ok(harness.probes[2]!.args.some((arg) => arg.includes('"foreign"={enabled=false}')));
+    assert.equal(guardEvent(harness.logs)?.mechanism, "legacy-bypass");
+    assert.equal(guardEvent(harness.logs)?.fallbackReason, "hash_verification_failed");
+  });
+});
+
+test("a TUI is refused if neither hash trust nor legacy-bypass isolation can be verified", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    await assert.rejects(prepareAgentTuiLaunch(meta(), dependencies(dir, {
+      inventory: (probe) => [{ ...runnerHookEntry(probe), trustStatus: "untrusted" },
+        { key: "foreign", command: "/foreign.sh", trustStatus: "untrusted", enabled: true }],
+    }, harness)), /hash trust failed.*legacy TUI bypass failed.*foreign/u);
+    assert.equal(harness.probes.length, 3);
+  });
+});
+
+test("structured admission remains version-independent and never falls back to the inert bypass", async () => {
+  await withDir(async (dir) => {
+    const source = meta();
+    const read = async (probe: CodexHookInventoryProbe) => {
+      probe.onVersion?.("0.999.0");
+      return [runnerHookEntry(probe)];
+    };
+    const config = { protections: PROTECTED, cwd: REPO, verifyGuardLaunch: () => ({ ok: true as const }), readHookInventory: read };
+    const guarded = await provisionCodexGuard(source, config, () => {}, hookHost(dir));
+    assert.equal(guarded.guardActive, true);
+    assert.ok(!guarded.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+    const managed = await provisionCodexGuard(source, {
+      ...config, readHookInventory: async (probe) => [{ ...runnerHookEntry(probe), trustStatus: "managed" }],
+    }, () => {}, hookHost(dir));
+    assert.equal(managed.guardActive, true, "main's managed-trust structured admission is preserved");
+    const inactive = await provisionCodexGuard({ ...source, args: [CODEX_HOOK_TRUST_BYPASS_FLAG] }, {
+      ...config, readHookInventory: async () => { throw new Error("unavailable"); },
+    }, () => {}, hookHost(dir));
+    assert.equal(inactive.guardActive, false);
+    assert.deepEqual(inactive.args, [CODEX_HOOK_TRUST_BYPASS_FLAG], "inactive preparation preserves caller-supplied flags");
+  });
+});
+
+test("the inventory version proof admits measured versions independently of the originator", async () => {
+  await withDir(async (dir) => {
+    for (const version of ["0.155.1", "0.157.0", "0.158.0", "0.159.0", "0.159.2", "0.160.0", "0.162.1", "0.163.0"]) {
+      let observed: string | undefined;
+      assert.deepEqual(await readCodexHookInventory({ ...fakeAppServer(dir,
+        JSON.stringify({ id: 2, result: { data: [] } }), `codex_cli_rs/${version} (test)`),
+        onVersion: (value) => { observed = value; },
+      }), []);
+      assert.equal(observed, version);
+      assert.equal(codexGuardHashTrustVersionSupported(observed), true);
+    }
+  });
+});
+
+function isolatedCodexEnv(home: string): NodeJS.ProcessEnv {
+  return { PATH: process.env.PATH, HOME: home, CODEX_HOME: home, XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home, XDG_STATE_HOME: home, XDG_CACHE_HOME: home };
+}
+
+const versionHome = mkdtempSync(join(tmpdir(), "wollipog-codex-version-"));
+const installedCodex = spawnSync("codex", ["--version"], { encoding: "utf8", env: isolatedCodexEnv(versionHome) });
+rmSync(versionHome, { recursive: true, force: true });
 
 test("against the installed codex, the override installs an enabled session-flags hook", {
   skip: installedCodex.status !== 0 ? "codex is not installed" : false,
@@ -658,7 +781,7 @@ test("against the installed codex, the override installs an enabled session-flag
     const launch = { command: "/bin/true", args: [MANAGED_WORKTREE_GUARD_MODE, "--protections", join(dir, "p.json")] };
     const override = codexGuardConfigOverride(launch);
     const entries = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: [], env: { CODEX_HOME: home } }, dir, override,
+      { command: "codex", args: [] }, dir, override, isolatedCodexEnv(home),
     ));
     assert.deepEqual(codexHookInventoryVerdict(entries, codexGuardCommandString(launch)), { ok: true });
     const ours = entries.find((entry) => entry.command === codexGuardCommandString(launch));
@@ -667,7 +790,7 @@ test("against the installed codex, the override installs an enabled session-flag
 
     // `--disable=hooks` in the launch turns the guard off; the replayed probe must see that.
     const disabled = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: ["--disable=hooks"], env: { CODEX_HOME: home } }, dir, override,
+      { command: "codex", args: ["--disable=hooks"] }, dir, override, isolatedCodexEnv(home),
     ));
     assert.equal(codexHookInventoryVerdict(disabled, codexGuardCommandString(launch)).ok, false);
     // An attached `-c` hook the user supplied is seen, and counted as foreign.
@@ -675,13 +798,13 @@ test("against the installed codex, the override installs an enabled session-flag
       {
         command: "codex",
         args: ['-chooks.PostToolUse=[{hooks=[{type="command",command="/x/attached.sh"}]}]'],
-        env: { CODEX_HOME: home },
       },
       dir,
       override,
+      isolatedCodexEnv(home),
     ));
     const verdict = codexHookInventoryVerdict(attached, codexGuardCommandString(launch));
-    assert.equal(verdict.ok, false);
+    assert.equal(verdict.ok, true);
   });
 });
 
@@ -803,7 +926,7 @@ test("a Codex Orchestrator TUI whose foreign hook stays enabled keeps --disable 
       inventory: (probe) => [runnerHookEntry(probe), stubborn],
     }, harness));
     assert.ok(launch);
-    assert.equal(harness.probes.length, 2, "the disable override was tried and read back");
+    assert.equal(harness.probes.length, 3, "hash trust and the legacy fallback both verify isolation");
     assert.equal(launch.managedWorktreeGuard?.active, false);
     assert.match(launch.managedWorktreeGuard?.reason ?? "", /Orchestrator launch/u);
     assert.ok(launch.managedWorktreeGuard?.reason?.includes(stubborn.key));
@@ -853,7 +976,7 @@ test("an ordinary Codex TUI still admits a trusted foreign hook and never rewrit
     // reports as such — it is not rewritten for them.
     assert.ok(launch instanceof Error);
     assert.match(launch.message, /reports the runner's PreToolUse hook as disabled/u);
-    assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");
+    assert.equal(harness.probes.length, 3, "both mechanisms observe the disabled runner hook");
     assert.ok(hasHooksDisable(harness.probes[0]!.args));
   });
 });
@@ -887,15 +1010,15 @@ test("against the installed codex, a foreign hook is disabled for the invocation
     const override = codexGuardConfigOverride(launch);
     const ours = codexGuardCommandString(launch);
     const entries = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: [], env: { CODEX_HOME: home } }, dir, override,
+      { command: "codex", args: [] }, dir, override, isolatedCodexEnv(home),
     ));
     const foreign = entries.filter((entry) => entry.enabled && entry.command !== ours);
     assert.equal(foreign.length, 1);
     assert.equal(foreign[0]!.source, "user");
     assert.equal(codexHookIsolationVerdict(entries, ours).ok, false);
     const disabled = await readCodexHookInventory(codexHookInventoryProbe(
-      { command: "codex", args: ["-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))], env: { CODEX_HOME: home } },
-      dir, override,
+      { command: "codex", args: ["-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))] },
+      dir, override, isolatedCodexEnv(home),
     ));
     assert.deepEqual(codexHookIsolationVerdict(disabled, ours), { ok: true });
     assert.equal(disabled.find((entry) => entry.key === foreign[0]!.key)?.enabled, false);

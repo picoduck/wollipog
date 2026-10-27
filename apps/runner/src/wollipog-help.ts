@@ -24,6 +24,7 @@ export function rootHelp(): string {
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
+    "  automation          Propose, inspect, and create an automation with human approval",
     "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
@@ -52,7 +53,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign, pr, review",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -227,8 +228,13 @@ export function pullRequestHelp(): string {
     "--timeout defaults to 240000 (4 minutes), up to 10800000; a slow GitHub read can add at most 20 seconds.",
     "--interval defaults to 30000, 10000-600000.",
     "--any-failure also returns when a check outside the required set fails on the head.",
-    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, queue_failed,",
-    "queue_ejected, closed, or head_changed; 124 timeout; 1 GitHub could not be read; 2 usage.",
+    "A GitLab merge request (its URL, or <gitlab-host>/group/project!<iid>, or a bare IID with",
+    "--repo <gitlab-host>/group/project) is read with this machine's `glab` login instead. It returns when",
+    "the head pipeline or merge-train pipeline finishes, it leaves the train, merges, closes, or its head",
+    "moves. Only a successful pipeline passes; a skipped or manual one returns checks_blocked.",
+    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, checks_blocked,",
+    "queue_failed, queue_ejected, closed, or head_changed; 124 timeout; 1 the forge could not be read;",
+    "2 usage.",
   ].join("\n");
 }
 
@@ -291,6 +297,8 @@ function helpForTopic(topic: string): string | null {
       return artifactHelp();
     case "issue-closure":
       return issueClosureHelp();
+    case "automation":
+      return "Usage: wollipog automation request --proposal '<json>' [--json]\n       wollipog automation get <occurrence-id> [--json]\n       wollipog automation execute <occurrence-id> --digest <resource-digest> [--json]\nNormal and Orchestrator sessions propose exact configurations for human approval. Request returns a pending decision; execute creates only the unchanged approved configuration. Reuse the same request/occurrence after an uncertain response. No automation administration or approval commands are exposed.";
     case "campaign":
       return campaignHelp();
     case "pr":
