@@ -98,7 +98,7 @@ test("installed harnesses blocked by provider HOME ownership remain visible with
     await agentRow(page, name).click();
     const details = page.getByRole("dialog", { name, exact: true });
     await expect(details.locator(".notice")).toContainText("Provider HOME ownership blocked discovery");
-    await details.getByRole("button", { name: "Close", exact: true }).click();
+    await details.getByRole("button", { name: "Close", exact: true }).last().click();
   }
   await expect(page.locator("article.machine-detail details.disclosure > summary").filter({ hasText: /Agents? Not Installed/ })).toHaveCount(0);
 });
@@ -529,23 +529,23 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
   const sub = (label: string) => accountRow(page, label).locator(".row-sub");
   const recoverItem = async (label: string) => {
     const menu = await openAccountMenu(page, label);
-    return menu.getByRole("menuitem", { name: /^Recover Lease…/u });
+    return menu.getByRole("menuitem", { name: /^Recover Account…/u });
   };
-  await expect(sub("Personal")).toHaveText("ClaudeStale Lease");
-  await expect(sub("Codex Team")).toHaveText("CodexStale Lease");
+  await expect(sub("Personal")).toHaveText("ClaudeRecovery Needed");
+  await expect(sub("Codex Team")).toHaveText("CodexRecovery Needed");
   await expect(accountRow(page, "Codex Team").locator(".provider-account-lease"))
-    .toHaveAttribute("title", "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.");
+    .toHaveAttribute("title", "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.");
   await expect(sub("Work")).toHaveText("Claude");
   await expect(await recoverItem("Codex Team")).toBeDisabled();
   await page.keyboard.press("Escape");
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/stale-leases.png" });
 
   await (await recoverItem("Personal")).click();
-  const recovery = page.getByRole("dialog", { name: "Recover Lease" });
-  await expect(recovery).toContainText("Another runner left this account's HOME leased and no longer holds it.");
+  const recovery = page.getByRole("dialog", { name: "Recover Account" });
+  await expect(recovery).toContainText("An earlier Wollipog runner left this account locked.");
   await page.screenshot({ path: "test-results/provider-accounts/recover-lease-confirm.png", fullPage: true });
-  await recovery.getByRole("button", { name: "Recover Lease" }).click();
-  await expect(page.getByText("Lease recovered.", { exact: true })).toBeVisible();
+  await recovery.getByRole("button", { name: "Recover Account" }).click();
+  await expect(page.getByText("Account unlocked.", { exact: true })).toBeVisible();
   await expect(sub("Personal")).toHaveText("Claude");
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
 
@@ -1412,4 +1412,22 @@ test("an SSH connection refused for its key says so and keeps ssh's words behind
   await notice.getByRole("button", { name: "Show Details" }).click();
   await expect(notice).toContainText("Permission denied (publickey).");
   await expect(notice.getByRole("button", { name: "Try Again" })).toBeVisible();
+});
+
+test("account recovery uses plain guidance with separate authorized process details", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?leases&lease-cause=process_uninspectable&${DESIGN_WORKSTATION}`);
+  const row = accountRow(page, "Codex Team");
+  const badge = row.locator(".provider-account-lease");
+  await expect(badge).toHaveText("Recovery Needed");
+  await expect(badge).toHaveAttribute("title", /save your work and restart the machine/);
+  expect(await badge.getAttribute("title")).not.toMatch(/journal|fallback|boundary|PID|cgroup|delegat|inspectability/i);
+  await row.getByRole("button", { name: "More Actions for Codex Team", exact: true }).click();
+  await page.getByRole("menuitem", { name: "View Recovery Details…", exact: true }).click();
+  const details = page.getByRole("dialog", { name: "Account Recovery Details" });
+  await expect(details).toContainText("process_uninspectable");
+  await expect(details).toContainText("PID 4242");
+  await expect(details).toContainText("Keep the account's files and lease journal intact.");
+  await details.getByRole("button", { name: "Close", exact: true }).last().click();
+  await expect(details).toHaveCount(0);
+  await expect(badge).toHaveText("Recovery Needed");
 });

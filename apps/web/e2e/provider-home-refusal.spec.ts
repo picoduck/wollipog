@@ -18,7 +18,7 @@ const cases = [
     query: `lease-refusal=${PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause]}&lease-cause=${cause}`,
     title: providerHomeRecoveryCauseCopy(cause, "Work Account").title,
     actions: ["holder_alive", "boundary_survivor", "process_survivor"].includes(cause)
-      ? ["Restart Session", "Switch Account…"] : ["Open Machine Accounts", "Switch Account…"],
+      ? ["Restart Session", "Switch Account…"] : ["Switch Account…", "Open Machine Accounts"],
   })),
 ] as const;
 
@@ -43,8 +43,12 @@ for (const width of [390, 1280]) for (const theme of ["dark", "light"] as const)
     const row = region.locator(".surface > .row").filter({ has: page.locator(".row-title", { hasText: "Codex Team" }) });
     await row.getByRole("button", { name: "More Actions for Codex Team" }).click();
     const menu = page.getByRole("menu", { name: "Codex Team", exact: true });
-    await expect(menu.getByRole("menuitem", { name: /^Recover Lease/ })).toBeDisabled();
-    await expect(menu).toContainText("systemd unit is not delegated");
-    await expect(menu).toContainText("PID 4242, start time 987654, uninspectable process, cgroup membership unavailable");
+    await expect(menu.getByRole("menuitem", { name: /^Recover Account/ })).toBeDisabled();
+    await expect(menu).toContainText("save your work and restart the machine");
+    expect(await menu.textContent()).not.toMatch(/systemd|delegat|PID|journal|cgroup|inspectability/iu);
+    await menu.getByRole("menuitem", { name: "View Recovery Details…", exact: true }).click();
+    const details = page.getByRole("dialog", { name: "Account Recovery Details" });
+    await expect(details).toContainText("process_uninspectable_not_delegated");
+    await expect(details).toContainText("PID 4242, start time 987654, uninspectable process, cgroup membership unavailable");
   });
 }
