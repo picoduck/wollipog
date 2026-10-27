@@ -21926,6 +21926,30 @@ export class ControlPlaneDb {
     ).get(sessionId, `runner-${trip.kind}:${trip.tripId}`, since, until));
   }
 
+  /** Same-command evidence survives receipt-time reconstruction on reconnect. Its digest pins
+   * the authenticated crossing, so restoring a displaced card cannot change its owner or bounds.
+   * Only card restoration may opt into unverified command evidence; attribution never does. */
+  hasRunnerGovernanceTripForCommand(
+    sessionId: string,
+    trip: Omit<NonNullable<AutomationExecution["governancePause"]>, "sessionId">,
+    commandId: string | undefined,
+    since: number,
+    until: number,
+    allowUnverifiedCommand = false,
+  ): boolean {
+    if (trip.commandId !== commandId) return false;
+    const crossing = [commandId, trip.kind, trip.threshold, trip.observed];
+    const digest = commandId === undefined ? null : createHash("sha256").update(JSON.stringify(crossing)).digest("hex");
+    const unverifiedDigest = allowUnverifiedCommand && commandId !== undefined
+      ? createHash("sha256").update(JSON.stringify(["unverified-command", ...crossing])).digest("hex") : digest;
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit WHERE session_id=? AND request_id=?
+       AND stage='policy_decision' AND outcome='asked'
+       AND actor_kind='system' AND actor_id='runner-governance' AND (content_digest IS ? OR content_digest IS ?)
+       AND created_at BETWEEN ? AND ? LIMIT 1`,
+    ).get(sessionId, `runner-${trip.kind}:${trip.tripId}`, digest, unverifiedDigest, since, until));
+  }
+
   pruneGovernanceAudit(createdBefore: number, limit = 1_000): number {
     const bounded = Math.max(1, Math.min(10_000, Math.trunc(limit)));
     return Number(this.stmt(

@@ -579,6 +579,15 @@ export class AutomationsService {
     message: DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage,
     now = Date.now(),
   ): boolean {
+    const command = this.db.getAutomationCommand(message.commandId);
+    if (command?.runnerId === runnerId && (message.sessionId === undefined || message.sessionId === command.sessionId)) {
+      const execution = this.db.getAutomationExecution(command.executionId);
+      // A crash can leave the validated trip durable before its automation callback runs.
+      // Recover it before retry handling can supersede the command carrying its provenance.
+      if (execution && ["dispatching", "running"].includes(execution.status)) {
+        this.pauseForGovernance(execution, now, command.sessionId);
+      }
+    }
     return this.commandOutbox.receipt(runnerId, message, now);
   }
 
@@ -966,24 +975,43 @@ export class AutomationsService {
   private pauseForGovernance(execution: AutomationExecution, now: number, onlySessionId?: string): boolean {
     const commands = this.db.listAutomationCommands(execution.executionId);
     const sources = [
-      ...commands.filter((command) => command.supersededBy === undefined && command.startedAt !== undefined)
-        .map((command) => ({ sessionId: command.sessionId, startedAt: command.startedAt!, completedAt: command.completedAt })),
+      ...commands.filter((command) => command.supersededBy === undefined)
+        .map((command) => ({ sessionId: command.sessionId, commandId: command.commandId,
+          startedAt: command.startedAt, completedAt: command.completedAt })),
       ...(execution.workflowInstanceId ? this.db.listWorkflowAttempts(execution.workflowInstanceId)
         .filter((attempt) => ["dispatching", "running", "awaiting_output"].includes(attempt.status))
         .flatMap((attempt) => attempt.sessionId ? [{ sessionId: attempt.sessionId, startedAt: attempt.startedAt,
-          completedAt: attempt.completedAt }] : []) : []),
+          completedAt: attempt.completedAt, commandId: undefined }] : []) : []),
       ...(execution.deliveryMode !== "receipted_v53" && execution.sessionId && execution.startedAt !== undefined
-        ? [{ sessionId: execution.sessionId, startedAt: execution.startedAt, completedAt: execution.completedAt }] : []),
+        ? [{ sessionId: execution.sessionId, startedAt: execution.startedAt, completedAt: execution.completedAt,
+          commandId: undefined }] : []),
     ];
-    for (const { sessionId, startedAt, completedAt } of sources) {
+    for (const { sessionId, commandId, startedAt, completedAt } of sources) {
       if (onlySessionId && sessionId !== onlySessionId) continue;
       const session = this.db.getSession(sessionId);
       if (!session) continue;
-      // A retained card is not proof this execution caused the trip. The exact authenticated
-      // report must be within this claim and command/attempt's actual execution window.
-      const trip = pendingRequests(session.pendingApproval).find((request) => request.runnerGuardrail &&
-        this.db.hasRunnerGovernanceTripInWindow(sessionId, request.runnerGuardrail,
-          Math.max(execution.createdAt, startedAt), completedAt ?? now))?.runnerGuardrail;
+      // Exact command ownership recovers missing-start and terminal-first reconnect replay.
+      // Without correlation, retain the original bounded execution-window safeguard. Explicit
+      // ownership of another command must never fall back to a coincidental timestamp match.
+      const trip = pendingRequests(session.pendingApproval).find(({ runnerGuardrail: evidence }) => {
+        if (!evidence) return false;
+        if (evidence.commandId !== undefined && commandId !== undefined) {
+          return this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, commandId, execution.createdAt, now);
+        }
+        if (startedAt === undefined) return false;
+        const since = Math.max(execution.createdAt, startedAt);
+        const until = completedAt ?? now;
+        if (evidence.commandId === undefined) {
+          return this.db.hasRunnerGovernanceTripInWindow(sessionId, evidence, since, until);
+        }
+        // CP-dispatched attempts (including workflows with launch commands) and legacy
+        // execution sources retain their original bounded window for ordinary durable prompts.
+        // Launch IDs cannot use this path: only the separate prompt-command table resolves here.
+        const prompt = this.db.getSessionPromptCommand(evidence.commandId);
+        return prompt?.sessionId === sessionId && prompt.runnerId === session.runnerId &&
+          prompt.createdAt >= since && prompt.createdAt <= until &&
+          this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, evidence.commandId, since, until);
+      })?.runnerGuardrail;
       if (!trip) continue;
       if (execution.actionKind === "workflow_run") {
         this.failWorkflowExecution(execution, commands, sessionId,
