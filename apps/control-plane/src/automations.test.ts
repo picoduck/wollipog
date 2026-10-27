@@ -436,6 +436,29 @@ test("a pinned trip card restores after its terminal prompt command expires", (t
   } finally { db.close(); }
 });
 
+test("legacy CP trip audits restore cards from correlation-capable runners without upgrading attribution", (t) => {
+  t.mock.method(Date, "now", () => 60_003);
+  const { db, hub, service } = harness();
+  try {
+    const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+    service.tick(60_000);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    const command = execution.commands![0]!;
+    const trip = { tripId: "old-cp-audit", kind: "cost_budget" as const, threshold: 1.5, observed: 2 };
+    // The older CP ignored the newer runner's optional command ID when persisting this trip.
+    runnerPause(db, command.sessionId, 60_002, trip);
+    db.setPendingApproval(command.sessionId, null);
+    const ingestion = new RealSessionsService(db, hub, { info() {}, warn() {} } as never);
+    assert.equal(ingestion.onGovernanceTripped("runner-1", { type: "governance_tripped",
+      sessionId: command.sessionId, ...trip, commandId: command.commandId }), true);
+    assert.deepEqual(db.getSession(command.sessionId)!.pendingApproval?.runnerGuardrail, trip);
+    service.onDurableCommandReceipt("runner-1", { type: "durable_session_command_update", commandId: command.commandId,
+      sessionId: command.sessionId, state: "completed", revision: 2 }, 60_004);
+    assert.equal(db.getAutomationExecution(execution.executionId)?.status, "running");
+    assert.equal(db.listGovernanceAudit(command.sessionId).filter((entry) => entry.stage === "policy_decision").length, 1);
+  } finally { db.close(); }
+});
+
 test("uncorrelated reconnect trips retain ordinary terminal-first settlement", () => {
   for (const kind of ["cost_budget", "max_tool_calls"] as const) {
     for (const state of ["completed", "failed"] as const) {

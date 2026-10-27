@@ -15115,8 +15115,15 @@ export class SessionsService {
       "asked",
     );
     // Never enrich an already recorded trip with a different command or crossing on replay.
+    let replayCommandId = message.commandId;
     if (alreadyAsked &&
-        !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now(), true)) return false;
+        !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now(), true)) {
+      // An older CP ignored optional command metadata when recording this trip. Restore its
+      // original uncorrelated card and timestamp bounds, without upgrading the legacy proof.
+      if (message.commandId === undefined || !this.db.hasRunnerGovernanceTripForCommand(session.id,
+        { ...message, commandId: undefined }, undefined, 0, Date.now())) return false;
+      replayCommandId = undefined;
+    }
     // A matching immutable audit already proves ownership even after terminal command retention
     // expires. A missing/superseded command cannot authorize automation attribution, but the
     // authenticated runner crossing still needs its Continue/Stop card. Pin it as unverified.
@@ -15137,7 +15144,7 @@ export class SessionsService {
       kind: message.kind,
       threshold: message.threshold,
       observed: message.observed,
-      ...(message.commandId !== undefined ? { commandId: message.commandId } : {}),
+      ...(replayCommandId !== undefined ? { commandId: replayCommandId } : {}),
     };
     // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
     // have parked the same crossing. Promote that card with the runner evidence instead of asking
