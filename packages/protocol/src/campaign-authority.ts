@@ -2,6 +2,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, supportsPacedVideoReviewPeer } from ".
 import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "./campaign-evidence-authority.js";
 import { parentControlRequestEligible } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
+import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 export type CampaignControlMode = "custom" | "full_control";
@@ -91,7 +92,7 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
     Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key)) &&
     (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority)) &&
     (b.budgetAuthority === undefined || validCampaignBudgetAuthority(b.budgetAuthority)) &&
-    Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && /^[\w.-]+\/[\w.-]+$/u.test(b.repository) &&
+    Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && campaignRepositoryLocation(b.repository) !== null &&
     Number.isSafeInteger(b.issueScopeRevision) && b.issueScopeRevision > 0 &&
     bounded(b.objective, 4000) && bounded(b.authorizedByUserId, 256) && Number.isSafeInteger(b.authorizedAt) && b.authorizedAt > 0 &&
     Array.isArray(b.operations) && b.operations.length <= operations.length && new Set(b.operations).size === b.operations.length &&

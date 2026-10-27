@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import type { AgentContext, GithubIssueClosureInspection, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import { campaignRepositoryLocation } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { githubSlug } from "./git-ops.js";
+import { closeGitlabIssue, gitlabIssueOrigin, inspectGitlabIssueClosure } from "./gitlab-issue-closure.js";
 
 /** Bounded authoritative reads; incomplete conflict evidence is a refusal, never an empty list. */
 const INSPECTION_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
@@ -42,14 +44,21 @@ function nodes(value: unknown): unknown[] {
 export function issueClosureRun(context: AgentContext, cwd: string): Run {
   return async (command, args) => (await runContextCommand(context, command, args, {
     cwd, timeoutMs: 25_000, maxBuffer: 2 * 1024 * 1024,
-    env: { GH_PROMPT_DISABLED: "1", GH_PAGER: "cat" },
+    env: { GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_PROMPT: "1" },
   })).stdout;
 }
 
+/** Inspect an issue of the origin's repository: GitHub through `gh`, or a GitLab project (#3539,
+ * v249) through `glab` with the same result shape and digest. */
 export async function inspectGithubIssueClosure(issue: number, run: Run, deliveryPullRequests?: Array<{number:number;headSha:string}>): Promise<GithubIssueClosureInspection> {
   if (!Number.isSafeInteger(issue) || issue < 1) throw new IssueClosureInspectionError("issue must be a positive integer");
-  const repository = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim());
-  if (!repository) throw new IssueClosureInspectionError("Issue closure requires an exact github.com origin remote");
+  const origin = (await run("git", ["remote", "get-url", "origin"])).trim();
+  const repository = githubSlug(origin);
+  if (!repository) {
+    const gitlab = gitlabIssueOrigin(origin);
+    if (gitlab) return inspectGitlabIssueClosure(issue, run, gitlab, deliveryPullRequests);
+    throw new IssueClosureInspectionError("Issue closure requires an exact github.com or GitLab origin remote");
+  }
   const [owner, repo] = repository.split("/");
   const response = object(JSON.parse(await run("gh", ["api", "graphql", "--hostname", "github.com",
     "-f", `query=${INSPECTION_QUERY}`, "-f", `owner=${owner}`, "-f", `repo=${repo}`, "-F", `number=${issue}`])));
@@ -113,7 +122,8 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
 }
 
 /** Called only by the trusted runner command, after CP atomically consumes the human decision.
- * The durable attempt fence is written before any GitHub mutation; failures are never replayed. */
+ * The durable attempt fence is written before any forge mutation; failures are never replayed.
+ * On GitLab the note (a not-planned closure always states its reason) precedes the close. */
 export async function executeGithubIssueClosure(
   snapshot: GithubIssueClosureSnapshot,
   run: Run,
@@ -127,7 +137,8 @@ export async function executeGithubIssueClosure(
   if (snapshot.issueAdmission && (current.openPullRequests.length || JSON.stringify(current.delivery) !== JSON.stringify(snapshot.delivery))) return result("refused");
   if (!begin()) return result("refused");
   try {
-    await run("gh", ["issue", "close", current.url, "--reason", snapshot.reason === "completed" ? "completed" : "not planned",
+    if (campaignRepositoryLocation(current.repository)?.forge === "gitlab") await closeGitlabIssue(run, snapshot);
+    else await run("gh", ["issue", "close", current.url, "--reason", snapshot.reason === "completed" ? "completed" : "not planned",
       ...(snapshot.comment === undefined ? [] : ["--comment", snapshot.comment])]);
     const verified = await inspectGithubIssueClosure(snapshot.issue, run);
     return result(verified.repository === snapshot.repository && verified.state === "CLOSED" ? "closed" : "uncertain");

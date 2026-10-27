@@ -1,5 +1,5 @@
-import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement,
-  normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails,
+import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
+  gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails,
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
@@ -9,9 +9,19 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
   return [root, ...db.campaignDescendantIds(root.id).flatMap((id) => { const s = db.getSession(id); return s?.orchestratorPolicy && !s.archived && !isTerminal(s.status) ? [s] : []; })];
 }
 
+/** GitLab issue closure and scope (#3539) need every participating Orchestrator runner at v249: an
+ * older runner reads only GitHub issues. Null for a GitHub (or not yet known) repository. */
+export function gitlabIssueCompatibility(db: ControlPlaneDb, root: SessionView, repository: string | undefined): ({ error: string } & RunnerCapabilityRequirementDetails) | null {
+  if (campaignRepositoryLocation(repository)?.forge !== "gitlab") return null;
+  const outdated = scopeParticipants(db, root).find((s) => !runnerSupportsProtocol(db.getRunner(s.runnerId)?.protocolVersion, "gitlabCampaignIssues"));
+  return outdated ? gitlabCampaignIssuesRequirement(db.getRunner(outdated.runnerId)?.protocolVersion) : null;
+}
+
 /** The runner floor that blocks issue scope work, as the shared sentence plus the versions of the
- * first participant below it, or null when every participating Orchestrator runner is current. */
-export function scopeCompatibility(db: ControlPlaneDb, root: SessionView): ({ error: string } & RunnerCapabilityRequirementDetails) | null {
+ * first participant below it, or null when every participating Orchestrator runner is current.
+ * `repository` defaults to the stored scope's; a GitLab one also needs `gitlabCampaignIssues`. */
+export function scopeCompatibility(db: ControlPlaneDb, root: SessionView,
+  repository: string | undefined = root.orchestratorPolicy?.issueScope?.repository): ({ error: string } & RunnerCapabilityRequirementDetails) | null {
   const participants = scopeParticipants(db, root);
   if (root.orchestratorPolicy?.control?.mode === "full_control" && root.orchestratorPolicy.control.boundary.issueAuthority) {
     const outdated = participants.find((s) =>
@@ -19,7 +29,8 @@ export function scopeCompatibility(db: ControlPlaneDb, root: SessionView): ({ er
     if (outdated) return campaignIssueLimitsRequirement(db.getRunner(outdated.runnerId)?.protocolVersion);
   }
   const outdated = participants.find((s) => !runnerSupportsProtocol(db.getRunner(s.runnerId)?.protocolVersion, "campaignIssueScopeChanges"));
-  return outdated ? campaignIssueScopeChangesRequirement(db.getRunner(outdated.runnerId)?.protocolVersion) : null;
+  return outdated ? campaignIssueScopeChangesRequirement(db.getRunner(outdated.runnerId)?.protocolVersion)
+    : gitlabIssueCompatibility(db, root, repository);
 }
 
 /** A view's compatibility notice: the sentence, with the versions beside it rather than inside it. */

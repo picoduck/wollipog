@@ -1,11 +1,24 @@
-import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationTitle, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationTitle, campaignRepositoryLocation, type CampaignIssueScopeView } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
 import { githubSlug } from "./git-ops.js";
+import { gitlabIssueOrigin, readGitlabIssue, readGitlabProject } from "./gitlab-issue-closure.js";
 
 type Run = (command: string, args: string[]) => Promise<string>;
-export async function inspectCampaignIssueScope(run: Run, epic?: number, issues: number[] = [], publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; candidates: NonNullable<CampaignIssueScopeView["candidates"]> }> {
-  const repository = githubSlug((await run("git", ["remote", "get-url", "origin"])).trim())?.toLowerCase();
-  if (!repository) throw new Error("Campaign issue scope requires an exact github.com origin remote");
+type Candidates = NonNullable<CampaignIssueScopeView["candidates"]>;
+
+/** A fixed refusal whose sentence is safe to return to the control plane as is. */
+export class CampaignIssueScopeRefusal extends Error {}
+
+export const GITLAB_PUBLICATION_REFUSAL = "Campaign issue publication supports GitHub repositories only";
+
+export async function inspectCampaignIssueScope(run: Run, epic?: number, issues: number[] = [], publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; candidates: Candidates }> {
+  const origin = (await run("git", ["remote", "get-url", "origin"])).trim();
+  const repository = githubSlug(origin)?.toLowerCase();
+  if (!repository) {
+    const gitlab = gitlabIssueOrigin(origin);
+    if (!gitlab) throw new Error("Campaign issue scope requires an exact github.com or GitLab origin remote");
+    return inspectGitlabIssueScope(run, gitlab, epic, issues, publication);
+  }
   const candidates: NonNullable<CampaignIssueScopeView["candidates"]> = [];
   const readIssue = async (number: number) => {
     const raw = JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/issues/${number}`]));
@@ -52,10 +65,49 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
   return { repository, candidates };
 }
 
-/** Search both states and the latest issue page; bounded overflow cannot prove deduplication. */
+/** GitLab scope (#3539, v249): issues are read with `glab`, and an epic is an ordinary issue of the
+ * same project whose member checklist names its members. GitLab epics, issue links and work-item
+ * children are never read, so there is no `sub_issue` source. The repository is the lower-case
+ * `<host>/<project>`, so scope comparisons stay case-insensitive and stable. */
+async function inspectGitlabIssueScope(run: Run, origin: { host: string; project: string }, epic: number | undefined, issues: number[],
+  publication: { sanitizedTitle: string; sanitizedBody: string; labels: string[] } | undefined): Promise<{ repository: string; candidates: Candidates }> {
+  if (publication) throw new CampaignIssueScopeRefusal(GITLAB_PUBLICATION_REFUSAL);
+  const repository = `${origin.host}/${origin.project}`.toLowerCase();
+  const candidates: Candidates = [];
+  if (epic === undefined && !issues.length) return { repository, candidates };
+  const fail = (message: string) => new Error(message);
+  const project = await readGitlabProject(run, origin, fail);
+  if (project.repository.toLowerCase() !== repository) throw new Error("GitLab project identity is invalid");
+  const readIssues = async (numbers: number[]) => {
+    if (candidates.length + numbers.length > 100) throw new Error("Issue selection exceeds 100 issues; select a smaller explicit scope");
+    const results: Array<{ number: number; title: string }> = [];
+    for (let offset = 0; offset < numbers.length; offset += 4) {
+      results.push(...await Promise.all(numbers.slice(offset, offset + 4).map(async (number) =>
+        ({ number, title: (await readGitlabIssue(run, project, number, fail)).title }))));
+    }
+    return results;
+  };
+  if (epic !== undefined) {
+    const umbrella = await readGitlabIssue(run, project, epic, fail);
+    candidates.push({ issue: { repository, number: epic }, title: umbrella.title, source: "umbrella" });
+    const checklist = epicChecklistMembers(umbrella.description, repository).filter((number) => number !== epic);
+    for (const member of await readIssues(checklist)) {
+      candidates.push({ issue: { repository, number: member.number }, title: member.title, source: "member_checklist" });
+    }
+  }
+  const explicit = issues.filter((number) => !candidates.some((c) => c.issue.number === number));
+  for (const issue of await readIssues(explicit)) {
+    candidates.push({ issue: { repository, number: issue.number }, title: issue.title, source: "member_checklist" });
+  }
+  return { repository, candidates };
+}
+
+/** Search both states and the latest issue page; bounded overflow cannot prove deduplication.
+ * GitHub only: a GitLab repository is refused with a fixed sentence (#3539). */
 export async function inspectCampaignPublication(run: Run, publication: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; publicationDigest: string }> {
   if (!campaignPublicationSafe(publication.sanitizedTitle, publication.sanitizedBody, publication.labels)) throw new Error("Publication requires sanitized issue-reporting content");
   const { repository } = await inspectCampaignIssueScope(run);
+  if (campaignRepositoryLocation(repository)?.forge !== "github") throw new CampaignIssueScopeRefusal(GITLAB_PUBLICATION_REFUSAL);
   const recent = JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/issues?state=all&sort=created&direction=desc&per_page=100`]));
   const search = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "search/issues", "-X", "GET", "-f",
     `q=repo:${repository} is:issue in:title ${publication.sanitizedTitle}`, "-f", "per_page=100"]));

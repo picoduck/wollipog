@@ -113,7 +113,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 248);
+  assert.equal(PROTOCOL_VERSION, 249);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -319,8 +319,8 @@ test("a provider-HOME wait is accepted only when well formed and content-free", 
   ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 248", () => {
-  assert.equal(PROTOCOL_VERSION, 248);
+test("PROTOCOL_VERSION is 249", () => {
+  assert.equal(PROTOCOL_VERSION, 249);
   // A v246 runner cannot release a queue hold on request (#3752).
   assert.equal(runnerSupportsProtocol(246, "queueHoldRelease"), false);
   assert.equal(runnerSupportsProtocol(247, "queueHoldRelease"), true);
@@ -330,6 +330,9 @@ test("PROTOCOL_VERSION is 248", () => {
   // A v243 runner cannot bind a review session to a GitLab merge request (#3539).
   assert.equal(runnerSupportsProtocol(243, "gitlabReviewSessions"), false);
   assert.equal(runnerSupportsProtocol(244, "gitlabReviewSessions"), true);
+  // A v248 runner cannot inspect, close or scope GitLab issues (#3539).
+  assert.equal(runnerSupportsProtocol(248, "gitlabCampaignIssues"), false);
+  assert.equal(runnerSupportsProtocol(249, "gitlabCampaignIssues"), true);
   assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
   assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
   // A v238 runner cannot answer the GitLab merge preflight (#3602).

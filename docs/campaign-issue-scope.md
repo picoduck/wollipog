@@ -39,6 +39,29 @@ active participant synchronize? Workflow audit plus `campaign_issue_scope_approv
 `campaign_issue_scope_synchronized`, and `campaign_issue_scope_sync_pending` answer these with session,
 occurrence, and revision identifiers, without logging prompts, credentials, or issue bodies.
 
+## GitLab Repositories
+
+Protocol v249 (`gitlabCampaignIssues`, #3539) extends issue scope and issue closure to a GitLab origin.
+The campaign repository is the host-qualified project in lower case, `<host>/group[/subgroup…]/project`,
+and the runner reads it with the session's own `glab` login, always naming the host. The control plane
+refuses GitLab scope inspection, proposals, approval and closure while any participating Orchestrator
+runner is older than v249.
+
+- **Epics are checklists.** A GitLab umbrella is an ordinary issue of the same project; its members are
+  the leading checklist entries under the named member headings, written as `#N` or as
+  `http(s)://<host>/<project>/-/issues/N` of the same project. GitLab epics, issue links and work-item
+  children are never read, so GitLab candidates have no `sub_issue` source.
+- **Closure evidence.** Open merge requests of the project that GitLab relates to the issue, that close
+  it on merge, or that mention it (`#N` or the issue address) are conflict evidence. Any list that
+  reaches its 100-row read is a refusal. Delivery proof requires each merge request merged at the
+  verified head into the default branch, with its merge (or squash) commit contained in that branch.
+- **Closing.** A `completed` closure posts the supplied comment as a note, if any, then closes the
+  issue. A `not_planned` closure first posts `Closed as not planned: <explanation>`, followed by the
+  comment when one was supplied, then closes the issue; the decision still records `not_planned`.
+  Neither mutation is retried; a failure after either is reported as uncertain.
+- **Publication stays GitHub-only.** Follow-up issue publication refuses a GitLab repository with
+  "Campaign issue publication supports GitHub repositories only".
+
 ## Bounded Full Control Issue Authority
 
 The authenticated human admission may additionally establish `control.boundary.issueAuthority`:

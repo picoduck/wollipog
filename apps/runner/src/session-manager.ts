@@ -4,8 +4,8 @@ import { shellGuidance } from "./shell-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
-import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
+import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { boundedIssueNumbers, campaignRepositoryLocation, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage } from "@wollipog/protocol";
@@ -18520,7 +18520,7 @@ export class SessionManager {
       if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
       const scope = message.scope;
       if (!scope || !boundedIssueNumbers(scope.issueNumbers) || !Number.isSafeInteger(scope.revision) || scope.revision < 1 ||
-          typeof scope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(scope.repository) ||
+          typeof scope.repository !== "string" || !campaignRepositoryLocation(scope.repository) ||
           !scope.authorizedByUserId || !Number.isSafeInteger(scope.authorizedAt) || scope.authorizedAt < 1) return { ...base, ok: false, error: "Invalid authoritative scope" };
       const { repository } = await inspectCampaignIssueScope(run);
       if (repository !== scope.repository.toLowerCase()) return { ...base, ok: false, error: "Scope repository differs from the runner's origin" };
@@ -18543,7 +18543,10 @@ export class SessionManager {
       if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; if (control !== undefined) live.control = control; }
       this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
       return { ...base, ok: true, repository, revision: scope.revision };
-    } catch { return { ...base, ok: false, error: "Cannot inspect or synchronize campaign scope; verify origin and gh authentication" }; }
+    } catch (error) {
+      return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message
+        : "Cannot inspect or synchronize campaign scope; verify origin and gh or glab authentication" };
+    }
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
@@ -18605,7 +18608,7 @@ export class SessionManager {
       return { ...base, ok: true, result };
     } catch (error) {
       return { ...base, ok: false, error: error instanceof IssueClosureInspectionError ? error.message
-        : "GitHub issue inspection failed; verify gh authentication and complete conflict evidence" };
+        : "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
     }
   }
 

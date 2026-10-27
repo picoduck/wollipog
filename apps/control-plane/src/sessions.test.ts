@@ -28182,3 +28182,81 @@ test("Wait for Account restarts the session with the runner told to wait, only o
   assert.equal(hub.sentOfType("start_session").length, sent, "an older runner is never asked, so it can't fail the launch again");
   assert.equal(db.getSession(id)?.status, "failed");
 });
+
+test("GitLab campaign scope and issue closure require a v249 runner and then reach it (#3539)", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
+    };
+    const register = (version: number) => db.registerRunner(meta, Date.now(), version);
+    const previous = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabCampaignIssues - 1;
+    register(PROTOCOL_VERSION);
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+    assert.ok(created.ok && created.data, created.error);
+    const id = created.data.id;
+    db.updateSessionStatus(id, "running", Date.now());
+    const repository = "gitlab.example.com/platform/backend/service";
+    const web = "https://gitlab.example.com/Platform/Backend/Service";
+    const requests: string[] = [];
+    hub.requestHandler = (message) => {
+      requests.push(`${message.type}:${"operation" in message ? message.operation : ""}`);
+      if (message.type === "campaign_issue_scope") return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId,
+        ok: true, repository, ...(message.operation === "synchronize" ? { revision: message.scope.revision } :
+          { candidates: (message.issues ?? [123]).map((number) => ({ issue: { repository, number }, title: `Issue ${number}`, source: "member_checklist" as const })) }) };
+      if (message.type === "github_issue_closure" && message.operation === "inspect") {
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ok: true,
+          inspection: { repository: "gitlab.example.com/Platform/Backend/Service", issue: message.issue, title: "Member", url: `${web}/-/issues/${message.issue}`,
+            state: "OPEN", forgeDigest: "a".repeat(64), openPullRequests: [{ number: 7, title: "Work", url: `${web}/-/merge_requests/7`, headSha: "b".repeat(40) }] } };
+      }
+      throw new Error("unexpected fixture command");
+    };
+    const current = await svc.campaignIssueScope(id);
+    assert.ok(current.ok && current.data, current.error);
+    assert.equal(current.data.repository, repository);
+    assert.equal(current.data.supported, true);
+
+    register(previous);
+    const outdatedView = await svc.campaignIssueScope(id);
+    assert.ok(outdatedView.ok && outdatedView.data, outdatedView.error);
+    assert.equal(outdatedView.data.supported, false);
+    assert.equal(outdatedView.data.compatibilityMessage, "This machine needs a newer runner for GitLab campaign issues. Update and restart the runner.");
+    const proposal = { requestId: "gitlab-scope", expectedRevision: 0, additions: [{ repository, number: 123 }], removals: [], explanation: "Include the umbrella" };
+    const refusedProposal = await svc.proposeCampaignIssueScope(id, proposal);
+    assert.equal(refusedProposal.status, 409);
+    assert.equal(refusedProposal.capabilityRequirement?.requiredRunnerProtocolVersion, 249);
+    assert.equal(refusedProposal.capabilityRequirement?.runnerProtocolVersion, previous);
+
+    register(PROTOCOL_VERSION);
+    const proposed = await svc.proposeCampaignIssueScope(id, proposal);
+    assert.ok(proposed.ok && proposed.data, proposed.error);
+    const approved = svc.resolveWorkflowDecision(id, id, proposed.data.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true);
+    assert.ok(approved.ok, approved.error);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope!.repository, repository);
+
+    register(previous);
+    const before = requests.length;
+    const closureRequest = { requestId: "gitlab-closure", issue: 123, reason: "not_planned" as const, explanation: "Superseded.", evidence: ["Replaced by #200"] };
+    const refusedClosure = await svc.requestGithubIssueClosure(id, closureRequest);
+    assert.equal(refusedClosure.status, 409);
+    assert.equal(refusedClosure.error, "This machine needs a newer runner for GitLab campaign issues. Update and restart the runner.");
+    assert.equal(refusedClosure.capabilityRequirement?.requiredRunnerProtocolVersion, 249);
+    const storedView = await svc.campaignIssueScope(id);
+    assert.equal(storedView.data?.supported, false, "a stored GitLab scope is unsupported on an older runner");
+    assert.deepEqual(requests.slice(before), [], "nothing reaches an older runner");
+
+    register(PROTOCOL_VERSION);
+    const requested = await svc.requestGithubIssueClosure(id, closureRequest);
+    assert.ok(requested.ok && requested.data?.decision, requested.error);
+    assert.ok(requests.slice(before).includes("github_issue_closure:inspect"));
+    const snapshot = requested.data.decision.resourceSnapshot;
+    assert.equal(snapshot.category, "issue_closure");
+    if (snapshot.category !== "issue_closure") return;
+    assert.equal(snapshot.repository, "gitlab.example.com/Platform/Backend/Service");
+    assert.equal(snapshot.url, `${web}/-/issues/123`);
+    assert.equal(snapshot.reason, "not_planned");
+    assert.deepEqual(snapshot.openPullRequests.map((mr) => mr.url), [`${web}/-/merge_requests/7`]);
+  } finally { db.close(); }
+});
