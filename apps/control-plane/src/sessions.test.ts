@@ -5,6 +5,7 @@ import { test } from "node:test";
 import fc from "fast-check";
 import type {
   ControlPlaneToRunner,
+  CreateSessionRequest,
   DurableSessionCommand,
   GitSummaryInfo,
   PodContextEntry,
@@ -22,6 +23,7 @@ import type {
   SessionEventPayload,
   SessionStatus,
   OrchestratorSettingsView,
+  PendingApproval,
   SetSessionReminderRequest,
   SessionSnapshot,
   SessionView,
@@ -3219,11 +3221,11 @@ for (const kind of ["session", "run", "workflow"] as const) {
     const { db, svc, hub, parent, create, requestId, approval, sessionRequest, children } = pendingSpawnFixture(kind);
     try {
       if (kind === "session") {
-        assert.equal(requestId, `spawn_${createHash("sha256").update(JSON.stringify({
+        assert.equal(requestId, `spawn_${createHash("sha256").update(canonicalAutomationCommandJson({
           request: sessionRequest,
           parentSessionId: parent.id,
           ordinal: 0,
-        })).digest("hex")}`, "the request fingerprint is unchanged");
+        })).digest("hex")}`, "the request fingerprint is the canonical form of the request");
       }
       const returnedAt = approval().lastPolledAt;
       assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
@@ -3249,6 +3251,155 @@ for (const kind of ["session", "run", "workflow"] as const) {
     } finally { db.close(); }
   });
 }
+
+/** One child request as a REST client orders it and as the MCP `create_session` tool orders it,
+ * with a nested object whose keys are reordered too. */
+function spawnRequestInTwoKeyOrders() {
+  const rest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "Build it",
+    useWorktree: false, title: "Requested Child", config: { model: "opus", effort: "high" } };
+  const tool = { config: { effort: "high", model: "opus" }, title: "Requested Child", runnerId: RUNNER_ID,
+    agentId: AGENT_ID, workspaceId: WORKSPACE_ID, prompt: "Build it", useWorktree: false };
+  assert.notEqual(JSON.stringify(rest), JSON.stringify(tool));
+  assert.deepEqual(rest, tool);
+  return { rest, tool };
+}
+
+test("a spawn approval is honored when the same request arrives with its keys in another order", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "wollipog.create_session" },
+    }).ok);
+    const { rest, tool } = spawnRequestInTwoKeyOrders();
+    const create = (request: typeof rest) =>
+      svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+
+    const asked = create(rest);
+    assert.equal(asked.status, 428, asked.error);
+    const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
+    const reordered = create(tool);
+    assert.equal(reordered.status, 428, reordered.error);
+    assert.match(reordered.error!, new RegExp(`\\(request ${requestId}\\)`), "both orders name one approval");
+    assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+
+    const launched = hub.sentOfType("start_session").length;
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    const created = create(tool);
+    assert.ok(created.ok, created.error);
+    assert.equal(created.data!.parentSessionId, parent.id);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "exactly one child is created");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+    assert.equal(create(rest).status, 428, "the approval authorized one creation only");
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
+test("spawn approvals still separate requests that differ in any field or value", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "wollipog.create_session" },
+    }).ok);
+    const { rest, tool } = spawnRequestInTwoKeyOrders();
+    const requestIdFor = (request: CreateSessionRequest) => {
+      const result = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      assert.equal(result.status, 428, result.error);
+      return /\(request (spawn_[0-9a-f]{64})\)/.exec(result.error!)![1]!;
+    };
+    const base = requestIdFor(rest);
+    assert.equal(requestIdFor(tool), base);
+    const variants: CreateSessionRequest[] = [
+      { ...tool, prompt: "Build something else" },
+      { ...tool, title: "Another Child" },
+      { ...tool, useWorktree: true },
+      { ...tool, config: { effort: "low", model: "opus" } },
+      { ...tool, config: { effort: "high", model: "opus", permissionMode: "plan" } },
+      { ...tool, images: [] },
+    ];
+    const ids = variants.map(requestIdFor);
+    assert.equal(new Set([base, ...ids]).size, variants.length + 1, "each different request gets its own fingerprint");
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+for (const outcome of ["rejected", "expired"] as const) {
+  test(`a ${outcome} spawn approval answers 403 for the same request in any key order`, () => {
+    const { db, svc } = makeHarness();
+    try {
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      assert.ok(svc.upsertGovernancePolicy({
+        policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+        enabled: true, scope: { toolName: "wollipog.create_session" },
+      }).ok);
+      const { rest, tool } = spawnRequestInTwoKeyOrders();
+      const create = (request: typeof rest) =>
+        svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      assert.equal(create(tool).status, 428);
+      const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
+      if (outcome === "rejected") assert.ok(svc.approve(parent.id, requestId, "deny").ok);
+      else {
+        const returnedAt = db.getPolicyHookApproval(parent.id, requestId)!.lastPolledAt;
+        assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + SPAWN_APPROVAL_ABANDONMENT_MS), 1);
+      }
+      for (const request of [rest, tool]) {
+        const refused = create(request);
+        assert.equal(refused.status, 403, refused.error);
+        assert.equal(refused.error, "child session creation was rejected or its approval expired");
+      }
+      assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    } finally { db.close(); }
+  });
+}
+
+test("a spawn approval pending under the pre-canonical fingerprint still resolves for its request", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "wollipog.create_session" },
+    }).ok);
+    const { rest } = spawnRequestInTwoKeyOrders();
+    // An older control plane hashed the body in the order the client sent it.
+    const legacyFingerprint = createHash("sha256").update(JSON.stringify({
+      request: rest, parentSessionId: parent.id, ordinal: 0,
+    })).digest("hex");
+    const legacyRequestId = `spawn_${legacyFingerprint}`;
+    const approval: PendingApproval = {
+      requestId: legacyRequestId, kind: "policy_hook", title: `${parent.title} requests a child: Requested Child`,
+      context: { toolName: "wollipog.create_session" }, governancePolicyId: "ask-child-spawn",
+      options: [
+        { optionId: "allow", name: "Create Child", kind: "allow_once" },
+        { optionId: "deny", name: "Reject", kind: "reject_once" },
+      ],
+    };
+    assert.equal(db.beginPolicyHookApproval({
+      sessionId: parent.id, requestId: legacyRequestId, requestFingerprint: legacyFingerprint,
+      governancePolicyId: "ask-child-spawn", approval, now: Date.now(),
+    }).kind, "created");
+    const create = () =>
+      svc.createSession(rest, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+
+    const retried = create();
+    assert.equal(retried.status, 428, retried.error);
+    assert.match(retried.error!, new RegExp(`\\(request ${legacyRequestId}\\)`), "the retry finds the upgraded approval");
+    assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, legacyRequestId);
+    const launched = hub.sentOfType("start_session").length;
+    assert.ok(svc.approve(parent.id, legacyRequestId, "allow").ok);
+    const created = create();
+    assert.ok(created.ok, created.error);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+  } finally { db.close(); }
+});
 
 test("an older runner's within-30 s identical retries still hold a spawn approval and create once", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });

@@ -268,6 +268,7 @@ import {
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
 import { capabilityRefusal, failureBody } from "./capability-refusal.js";
@@ -3657,15 +3658,29 @@ export class SessionsService {
         this.db.sessionWasHumanCreatedOrchestrator(parent.id),
       ),
     ]);
-    const fingerprint = createHash("sha256").update(JSON.stringify({
+    const identity = {
       request,
       ...(childCount === 1 ? {} : { childCount }),
       parentSessionId,
       ordinal: this.db.childSessionAllocations(parentSessionId).count,
-    })).digest("hex");
-    const requestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
+    };
+    // Keys are sorted at every depth so a REST body and the MCP tool's body for the same request
+    // share one approval whatever order their fields arrive in (#3685).
+    const fingerprint = createHash("sha256").update(canonicalAutomationCommandJson(identity)).digest("hex");
+    let requestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
     this.reconcilePolicyHookTimeouts(now, parentSessionId);
-    const stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
+    let stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
+    if (!stored) {
+      // An approval recorded before the upgrade is keyed to the client's key order. It keeps
+      // resolving for the exact body that created it until it settles or its fence expires.
+      const legacyRequestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${
+        createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+      const legacy = this.db.getPolicyHookApproval(parentSessionId, legacyRequestId);
+      if (legacy) {
+        stored = legacy;
+        requestId = legacyRequestId;
+      }
+    }
     if (stored) {
       if (stored.status === "allowed") return ok(null);
       if (stored.status !== "pending" && stored.status !== "queued") {
