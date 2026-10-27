@@ -1024,7 +1024,8 @@ const svc = new SessionsService(
 videoEvidence.attach(svc, hub);
 db.setCampaignVideoReviewSource((root, uiEvidenceOwner) => svc.campaignVideoReview(root, uiEvidenceOwner));
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
-  app.log.info({ event, ...fields }, "session role conversion"));
+  app.log.info({ event, ...fields }, "session role conversion"), () => svc.expireAutomationCreationDecisions());
+svc.expireAutomationCreationDecisions();
 if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
   app.log.warn({ controllingSessionId: VIDEO_FRAME_VALIDATION_SESSION_ID },
     "experimental video-frame review validation is enabled for one controlling Session");

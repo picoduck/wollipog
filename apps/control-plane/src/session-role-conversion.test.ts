@@ -12,6 +12,8 @@ import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-rol
 import type { HumanPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
+import { AutomationCreationService } from "./automation-creation.js";
+import type { AgentPrincipal } from "./identity.js";
 
 const OLDER_RUNNER_REFUSAL = "This machine needs a newer runner for changing session roles. Update and restart the runner.";
 
@@ -49,9 +51,49 @@ function harness(role: SessionRole = "normal", protocol = PROTOCOL_VERSION) {
       receipt: { conversionId: command.conversionId, state: command.type === "prepare_session_role" ? "prepared" : "applied" } };
   };
   const events: string[] = [];
-  const conversions = new SessionRoleConversions(db, hub, (event) => events.push(event));
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  const conversions = new SessionRoleConversions(db, hub, (event) => events.push(event),
+    () => svc.expireAutomationCreationDecisions());
   return { db, hub, conversions, defaults, commands, events, svc, metadata };
+}
+
+for (const role of ["normal", "orchestrator"] as const) {
+  test(`an expired automation approval stops blocking conversion from ${role}`, async (t) => {
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    const { db, hub, conversions, defaults, metadata, svc } = harness(role);
+    try {
+      db.registerRunner({ ...metadata, agents: [{ ...metadata.agents[0]!, capabilities: {
+        ...metadata.agents[0]!.capabilities!, models: [{ id: "opus", default: true, efforts: ["high"] }], effortLevels: ["high"],
+      } }] }, now, PROTOCOL_VERSION);
+      const scope = db.sessionScope("s")!;
+      const principal: AgentPrincipal = { kind: "agent", actorId: "s", credentialSessionId: "s",
+        organizationId: scope.organizationId, delegatedScope: scope };
+      const automation = new AutomationCreationService(db, svc, hub);
+      const proposal = automation.request("s", { requestId: "expiry", resourceKey: "expiry", spec: {
+        name: "Review", cron: "0 8 * * 2", timezone: "UTC", enabled: false,
+        action: { kind: "create_session", request: { runnerId: "r", workspaceId: "w", agentId: "claude", prompt: "Review only" } },
+        misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
+        limits: { maxCostUsd: 5, maxToolCalls: 50 }, notifications: { pushEvents: [] },
+      } }, principal);
+      assert.equal(proposal.ok, true, proposal.error ?? "Automation proposal should be admitted");
+      const decision = proposal.data!;
+      const owner = db.localIdentityContext().userId;
+      hub.isRunnerOnline = () => false;
+      assert.equal(svc.resolveWorkflowDecision("s", "s", decision.occurrenceId, { outcome: "approve" },
+        "human", { kind: "human", id: owner }, () => true).ok, true);
+      hub.isRunnerOnline = () => true;
+      const target = role === "normal" ? "orchestrator" : "normal";
+      assert.match(conversions.preview("s", target, defaults, () => null).reason!, /unconsumed decisions/);
+      now += 30 * 60_000;
+      assert.equal(conversions.preview("s", target, defaults, () => null).available, true);
+      await conversions.change("s", target, role, defaults, () => null);
+      assert.equal(db.getSession("s")!.role, target);
+      assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+      assert.equal(db.listAutomations().length, 0);
+      assert.equal(db.heldWorkflowDecisionResumes("s").length, 0);
+    } finally { db.close(); }
+  });
 }
 
 for (const role of ["normal", "orchestrator"] as const) test(`role conversion from ${role} preserves identity, transcript, permissions and child links`, async () => {

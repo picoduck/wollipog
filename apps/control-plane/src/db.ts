@@ -7,6 +7,7 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
   installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable, validProviderPublicationInput,
   type PublicationDispatchKind, type PublicationObservation,
@@ -854,6 +855,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_decisions_session_request
   ON workflow_decisions(session_id, request_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_decisions_automation_expiry
+  ON workflow_decisions(category, status) WHERE category='automation_creation' AND status IN ('pending','approved');
+-- Durable post-commit work: lifecycle callbacks can send prompts and open their own transactions.
+CREATE TABLE IF NOT EXISTS automation_expiration_effects (
+  occurrence_id TEXT PRIMARY KEY,
+  session_before TEXT NOT NULL,
+  effect_kind TEXT NOT NULL CHECK (effect_kind IN ('idle','active')),
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE
+);
 -- The restart notice a child is owed for each decision its restart revoked (#1779, #1861). A
 -- guardrail that refuses the notice leaves it held rather than forcing it through; the first
 -- boundary that finds the guardrail cleared delivers every held row in one notice. See
@@ -20153,6 +20164,49 @@ export class ControlPlaneDb {
     );
   }
 
+  /** Only outstanding grants are swept; consumed creation receipts never expire. */
+  expiredAutomationCreationDecisions(now: number, sessionId?: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT * FROM workflow_decisions
+      WHERE category='automation_creation' AND status IN ('pending','approved')
+        ${sessionId ? "AND session_id=?" : ""}
+        AND (json_extract(resource_snapshot, '$.expiresAt')<=?
+          OR (status='approved' AND resolved_at<=?))
+      ORDER BY created_at, occurrence_id`)
+      .all(...(sessionId ? [sessionId] : []), now, now - AUTOMATION_APPROVAL_TTL_MS) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
+  /** Expiration, resume retirement, card settlement and its audit either all commit or all retry. */
+  expireAutomationCreationDecision(occurrenceId: string, now: number, settle: () => void): boolean {
+    return this.atomic(() => {
+      const eligible = this.stmt(`SELECT 1 FROM workflow_decisions
+        WHERE occurrence_id=? AND category='automation_creation' AND status IN ('pending','approved')
+          AND (json_extract(resource_snapshot, '$.expiresAt')<=? OR (status='approved' AND resolved_at<=?))`)
+        .get(occurrenceId, now, now - AUTOMATION_APPROVAL_TTL_MS);
+      if (!eligible) return false;
+      this.markWorkflowDecisionRevoked(occurrenceId, now, false, true);
+      settle();
+      return true;
+    });
+  }
+
+  queueAutomationExpirationEffect(occurrenceId: string, previous: SessionView, kind: "idle" | "active", now: number): void {
+    this.stmt(`INSERT INTO automation_expiration_effects (occurrence_id,session_before,effect_kind,created_at)
+      VALUES (?,?,?,?)`).run(occurrenceId, JSON.stringify(previous), kind, now);
+  }
+
+  automationExpirationEffects(sessionId?: string): Array<{ occurrenceId: string; previous: SessionView; kind: "idle" | "active" }> {
+    return (this.stmt(`SELECT effect.* FROM automation_expiration_effects effect
+      JOIN workflow_decisions decision ON decision.occurrence_id=effect.occurrence_id
+      ${sessionId ? "WHERE decision.session_id=?" : ""} ORDER BY effect.created_at,effect.occurrence_id`)
+      .all(...(sessionId ? [sessionId] : [])) as Array<{ occurrence_id: string; session_before: string; effect_kind: "idle" | "active" }>)
+      .map((row) => ({ occurrenceId: row.occurrence_id, previous: JSON.parse(row.session_before) as SessionView, kind: row.effect_kind }));
+  }
+
+  completeAutomationExpirationEffect(occurrenceId: string): void {
+    this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
+  }
+
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND status IN ('pending','approved')
@@ -20722,7 +20776,7 @@ export class ControlPlaneDb {
    * already handed to the runner cannot be recalled: at-least-once transport leaves that to the
    * resume's own text, which defers to the decision record, and the record now says revoked.
    */
-  private retireWorkflowDecisionResume(occurrenceId: string, now: number): void {
+  private retireWorkflowDecisionResume(occurrenceId: string, now: number, stopDelivery = false): void {
     const row = this.stmt(
       "SELECT session_id, resume_state, resume_command_id FROM workflow_decisions WHERE occurrence_id=?",
     ).get(occurrenceId) as {
@@ -20732,6 +20786,16 @@ export class ControlPlaneDb {
     const withdrawn = row.resume_state === "delivering" && row.resume_command_id !== null &&
       this.cancelPendingSessionPromptCommand(row.session_id, row.resume_command_id, now) === "cancelled";
     if (withdrawn) this.dismissTerminalSessionPromptCommand(row.session_id, row.resume_command_id!, now);
+    if (stopDelivery && row.resume_state === "delivering" && !withdrawn) {
+      // A sent command may already have reached the provider. Fence further retries and retain
+      // uncertainty, rather than claiming it was recalled or allowing a late receipt to re-hold it.
+      this.stmt(`UPDATE session_prompt_commands SET state='uncertain',revision=revision+1,
+        error='automation approval expired after delivery may have begun',next_attempt_at=NULL,
+        expires_at=?,updated_at=? WHERE command_id=? AND state IN ('sent','accepted','queued','started')`)
+        .run(now + SESSION_PROMPT_TERMINAL_RETENTION_MS, now, row.resume_command_id);
+      this.setWorkflowDecisionResume(occurrenceId, "uncertain", row.resume_command_id, now);
+      return;
+    }
     if (row.resume_state !== "held" && !withdrawn) return;
     this.stmt(
       `UPDATE workflow_decisions SET resume_state='abandoned', resume_command_id=NULL, resume_updated_at=?
@@ -20742,11 +20806,10 @@ export class ControlPlaneDb {
   /** `oweRestartNotice` records, in the revocation's own transaction, the notice a restart owes
    * the child for this occurrence (#1861): no crash can leave the revocation without it, and it
    * stays owed whatever the decision's status becomes later (a forge-settled merge, say). */
-  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false): WorkflowDecisionView | null {
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false, stopResumeDelivery = false): WorkflowDecisionView | null {
     // One transaction, so a restart can never leave a revoked decision with its resume still
     // waiting to be sent.
-    this.db.exec("BEGIN");
-    try {
+    return this.atomic(() => {
       const prior = this.stmt(
         "SELECT status FROM workflow_decisions WHERE occurrence_id=? AND status IN ('pending','approved')",
       ).get(occurrenceId) as { status: "pending" | "approved" } | undefined;
@@ -20754,7 +20817,7 @@ export class ControlPlaneDb {
         `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
          WHERE occurrence_id=? AND status IN ('pending','approved')`,
       ).run(now, occurrenceId).changes) === 1;
-      if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now);
+      if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now, stopResumeDelivery);
       if (revoked && prior && oweRestartNotice) {
         this.stmt(
           `INSERT OR IGNORE INTO session_restart_notices
@@ -20764,12 +20827,8 @@ export class ControlPlaneDb {
         ).run(prior.status, now, now, occurrenceId);
       }
       this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.workflowDecisionByOccurrence(occurrenceId);
+      return this.workflowDecisionByOccurrence(occurrenceId);
+    });
   }
 
   /** Record one delivery. Redelivering the same item replaces its receipt and restarts its expiry. */
@@ -23678,12 +23737,19 @@ export class ControlPlaneDb {
 
   dueSessionPromptCommands(now: number, runnerId?: string, limit = 100): SessionPromptCommandRecord[] {
     const runner = runnerId ? "AND command.runner_id=?" : "";
-    const params = runnerId ? [now, now, runnerId, limit] : [now, now, limit];
+    const approvalNow = Math.min(now, Date.now());
+    const params = [now, now, approvalNow, approvalNow - AUTOMATION_APPROVAL_TTL_MS, ...(runnerId ? [runnerId] : []), limit];
     const rows = this.stmt(
       `SELECT command.* FROM session_prompt_commands command
        JOIN sessions session ON session.id=command.session_id
        WHERE command.state IN ('pending','sent','accepted','queued','started')
          AND command.next_attempt_at IS NOT NULL AND command.next_attempt_at<=? AND command.expires_at>?
+         AND NOT EXISTS (SELECT 1 FROM workflow_decisions decision
+           WHERE decision.resume_command_id=command.command_id AND decision.resume_state='delivering'
+             AND decision.category='automation_creation'
+             AND (decision.status IN ('revoked','superseded') OR (decision.status IN ('pending','approved')
+               AND (json_extract(decision.resource_snapshot, '$.expiresAt')<=?
+                 OR (decision.status='approved' AND decision.resolved_at<=?)))))
          AND session.status NOT IN ('completed','failed','stopped') ${runner}
        ORDER BY command.created_at,command.rowid LIMIT ?`,
     ).all(...params) as unknown as SessionPromptCommandRow[];

@@ -100,6 +100,15 @@ const client: ApiClient = {
     return session;
   },
 };
+// The expiration regression supplies real control-plane results through intercepted HTTP routes.
+if (scenario === "approval-expiration") {
+  client.sessionRolePreview = api.sessionRolePreview;
+  client.changeSessionRole = async (...args) => {
+    session = await api.changeSessionRole(...args);
+    push?.({ type: "session_upsert", session });
+    return session;
+  };
+}
 declare global {
   interface Window {
     __WOLLIPOG_ROLE_E2E__: { session(): SessionView; calls(): number; reconnect(): void; reconnectToOlderWollipog(): void };
