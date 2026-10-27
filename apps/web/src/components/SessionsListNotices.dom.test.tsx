@@ -5,7 +5,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { ProviderLoginView, SessionView } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -330,6 +330,48 @@ test("a sign-in that expects a code shows the labeled field and Submit Code, bus
   await act(settle);
   assert.equal(submit.getAttribute("aria-busy"), null);
   assert.equal(field.value, "", "the code is never kept");
+});
+
+test("the sign-in notice's code field never puts the code in the DOM: typed, rejected, failed or submitted (#3529)", async () => {
+  const submitted: string[] = [];
+  const replies: Array<() => void> = [
+    () => { throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409); },
+    () => { throw new TypeError("Failed to fetch"); },
+    () => {},
+  ];
+  const view = await mount(client({
+    listSkills: async () => ({ skills: [] }),
+    submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+      submitted.push(code);
+      replies.shift()!();
+    },
+  }), { signIns: [{ runnerId: "runner-1", login: login({ status: "awaiting_code", userCode: undefined, expectsCode: true }) }] });
+  const notice = view.notices()[0]!;
+  const field = notice.querySelector<HTMLInputElement>("form input")!;
+  const submit = view.button("Submit Code")!;
+  await act(async () => { fireDomEvent.change(field, { target: { value: " \t " } } as never); });
+  assert.equal(submit.disabled, true, "a whitespace-only field has nothing to submit");
+  await act(async () => { fireDomEvent.change(field, { target: { value: "notice-secret" } } as never); });
+  assert.equal(submit.disabled, false);
+  assert.equal(field.getAttribute("value"), null, "the code is not a value attribute");
+  assert.doesNotMatch(view.container.innerHTML, /notice-secret/, "a typed code is not in the DOM");
+
+  await act(async () => { submit.click(); });
+  await act(settle);
+  assert.equal(notice.querySelector(".notice-error")?.textContent, "The provider rejected this code. Paste the code the page shows.");
+  assert.equal(field.value, "notice-secret", "a rejected code stays in the field to correct");
+  assert.doesNotMatch(view.container.innerHTML, /notice-secret/, "a rejected code is not in the DOM");
+
+  await act(async () => { submit.click(); });
+  await act(settle);
+  assert.equal(notice.querySelector(".notice-error")?.textContent, "Failed to fetch");
+  assert.doesNotMatch(view.container.innerHTML, /notice-secret/, "a code whose request failed is not in the DOM");
+
+  await act(async () => { submit.click(); });
+  await act(settle);
+  assert.deepEqual(submitted, ["notice-secret", "notice-secret", "notice-secret"]);
+  assert.equal(field.value, "", "a submitted code is cleared");
+  assert.equal(submit.disabled, true, "nothing to submit after it");
 });
 
 test("a failed sign-in is a danger notice with its reason and Dismiss", async () => {

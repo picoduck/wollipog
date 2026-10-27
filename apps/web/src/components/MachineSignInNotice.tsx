@@ -1,4 +1,4 @@
-import React, { useId, useState, type ReactNode } from "react";
+import React, { useId, useRef, useState, type ReactNode } from "react";
 import type { ProviderLoginView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { CopyButton } from "./common.js";
@@ -59,7 +59,10 @@ export function MachineSignInNotice({ runnerId, machine, login, running, onRunni
 }) {
   const api = useApi();
   const codeId = `machine-sign-in-code-${useId().replace(/:/gu, "")}`;
-  const [code, setCode] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  // The field is uncontrolled (#3529): a controlled input mirrors what is typed into its `value`
+  // attribute, and the code must never be in the DOM. Only whether there is something to submit is state.
+  const [hasCode, setHasCode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pending = machineSignInPending(login);
   const title = machineSignInTitle(login, machine);
@@ -70,7 +73,10 @@ export function MachineSignInNotice({ runnerId, machine, login, running, onRunni
     setError(null);
     try {
       await operation();
-      if (action === "submit") setCode("");
+      if (action === "submit" && inputRef.current) {
+        inputRef.current.value = "";
+        setHasCode(false);
+      }
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -78,6 +84,7 @@ export function MachineSignInNotice({ runnerId, machine, login, running, onRunni
     }
   };
   const submit = () => {
+    const code = inputRef.current?.value ?? "";
     if (!code.trim()) return;
     void run("submit", () => api.submitProviderLoginCode(runnerId, login.operationId, code));
   };
@@ -124,15 +131,15 @@ export function MachineSignInNotice({ runnerId, machine, login, running, onRunni
         <form className="machine-sign-in-form" onSubmit={(event) => { event.preventDefault(); submit(); }}>
           <label htmlFor={codeId}>Authorization Code</label>
           <input
+            ref={inputRef}
             id={codeId}
             type="password"
             autoComplete="off"
-            value={code}
             maxLength={4_096}
-            onChange={(event) => setCode(event.target.value)}
+            onChange={(event) => setHasCode(event.target.value.trim() !== "")}
           />
           <BusyButton type="submit" className="btn sm" busy={running === "submit"} progress="Submitting the code…"
-            disabled={!code.trim() || (running !== null && running !== "submit")}>
+            disabled={!hasCode || (running !== null && running !== "submit")}>
             Submit Code
           </BusyButton>
         </form>

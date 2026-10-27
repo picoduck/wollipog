@@ -1,3 +1,4 @@
+import { fireDomEvent } from "../test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act, useRef, useState } from "react";
@@ -602,6 +603,41 @@ test("a device-code sign-in in the Request Card shows the provider's link and it
     assert.equal(code?.querySelector("code")?.textContent, "WOLL-IPOGS", "the whole code is in the DOM to read and select");
     assert.equal(card.querySelector("input")?.outerHTML ?? null, null, "a device-code sign-in has nothing to paste");
     assert.deepEqual(footer(view.container), ["Cancel Sign-In"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a code pasted into the Request Card's sign-in is never in the DOM, before or after a rejected submit (#3529)", async () => {
+  const request = recovery([AUTH.cancel], "Signing In — Claude Code");
+  const submitted: string[] = [];
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />,
+    {
+      providerLogins: [{
+        operationId: "login_code", accountId: "claude-work", label: "Claude Work", provider: "claude",
+        status: "awaiting_code", verificationUrl: "https://claude.ai/oauth/authorize", expectsCode: true,
+        sessionId: "session-dock", startedAt: 1,
+      }],
+    },
+    {
+      submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+        submitted.push(code);
+        throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409);
+      },
+    },
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    const input = card.querySelector<HTMLInputElement>('input[type="password"]')!;
+    const submit = [...card.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Submit Code")!;
+    await act(async () => { fireDomEvent.change(input, { target: { value: "request-card-secret" } }); });
+    assert.equal(submit.disabled, false);
+    assert.doesNotMatch(view.container.innerHTML, /request-card-secret/, "a typed code is not in the DOM");
+    await act(async () => { fireDomEvent.submit(card.querySelector("form")!); await tick(); await tick(); });
+    assert.deepEqual(submitted, ["request-card-secret"]);
+    assert.equal(card.querySelector(".form-error")?.textContent, "The provider rejected this code. Paste the code the page shows.");
+    assert.doesNotMatch(view.container.innerHTML, /request-card-secret/, "a rejected code is not in the DOM");
   } finally {
     await view.unmount();
   }
