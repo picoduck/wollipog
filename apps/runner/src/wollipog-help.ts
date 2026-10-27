@@ -215,6 +215,8 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
+    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",
     "UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires.",
     "A failed merge-group check alone does not end the wait: GitHub may rebuild the group and merge it.",
@@ -235,6 +237,17 @@ export function pullRequestHelp(): string {
     "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, checks_blocked,",
     "queue_failed, queue_ejected, closed, or head_changed; 124 timeout; 1 the forge could not be read;",
     "2 usage.",
+    "",
+    "pr closures lists every issue merging a GitHub pull request would close: a closing keyword (close,",
+    "fix or resolve, in any tense) directly before an issue reference in its description closes it even in",
+    "a negated or hyphenated phrase such as \"does not close #N\" or \"auto-close #N\", and so does an issue",
+    "linked on GitHub. Code spans, code blocks and HTML comments do not close. --file reads a draft",
+    "description instead, before it is published. Pass each issue the merge should close with --intended",
+    "(#N, owner/name#N, or an issue URL), and write \"Refs #N\" for one that must stay open. It reads locally",
+    "with this machine's `gh` login, like pr wait. A GitHub pr_merge decision makes the same read and is",
+    "refused unless its intendedClosures match.",
+    "Exit status: 0 the closures are exactly the intended ones; 3 they differ (see undeclared and unmade);",
+    "1 GitHub or the file could not be read; 2 usage.",
   ].join("\n");
 }
 
@@ -324,7 +337,7 @@ export function resolveHelp(args: string[]): HelpResponse | null {
   const helpAt = (index: number) => args[index] === "--help" || args[index] === "-h";
   const aliasHelpFlag = (["init", "update", "doctor"].includes(args[0] ?? "") && helpAt(1))
     || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))))
-    || (args[0] === "pr" && (helpAt(1) || (args[1] === "wait" && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
+    || (args[0] === "pr" && (helpAt(1) || (["wait", "closures"].includes(args[1] ?? "") && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
   if (!helpCommand && !rootHelpFlag && !aliasHelpFlag) return null;
 
   const topic = helpCommand

@@ -7,6 +7,7 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  canonicalIssueReference,
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
@@ -18,7 +19,8 @@ import {
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import type { GlabRunner } from "./campaign-gitlab-status.js";
-import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
+import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS, parsePullRequestRef } from "./pull-request-wait.js";
+import { inspectPullRequestClosures, pullRequestClosures } from "./github-merge-preflight.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import {
@@ -187,7 +189,8 @@ export async function runPullRequestCli(
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
     return code;
   };
-  const words = positional(args, ["--repo", "--head"]);
+  const words = positional(args, ["--repo", "--head", "--file", "--intended"]);
+  if (words[1] === "closures") return runPullRequestClosuresCli(args, words, json, io, gh, signal);
   if (words[1] !== "wait" || words.length !== 3) return fail(pullRequestHelp(), 2);
   const timeoutMs = numeric(option(args, "--timeout"));
   const intervalMs = numeric(option(args, "--interval"));
@@ -233,6 +236,77 @@ export async function runPullRequestCli(
   const outcome = (data as { outcome?: unknown }).outcome;
   if (outcome === "timeout") return 124;
   return PULL_REQUEST_WAIT_SUCCESS.has(String(outcome)) ? 0 : 3;
+}
+
+/** The largest draft description `pr closures --file` reads; GitHub's own limit is 65,536 characters. */
+const CLOSURES_FILE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * `wollipog pr closures` (#3713): every issue merging a pull request would close, or a draft
+ * description would, compared with the ones meant to close (`--intended`). Local and read-only, like
+ * `pr wait`, and the same read the control plane makes before a GitHub merge decision.
+ */
+async function runPullRequestClosuresCli(
+  args: string[],
+  words: string[],
+  json: boolean,
+  io: { stdout: Write; stderr: Write },
+  gh: GhRunner,
+  signal?: AbortSignal,
+): Promise<number> {
+  const fail = (message: string, code: number): number => {
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    return code;
+  };
+  const file = option(args, "--file");
+  if ((optionPresent(args, "--file") && (!file || file.startsWith("--"))) || (file ? words.length !== 2 : words.length !== 3) ||
+      options(args, "--intended").length !== args.filter((arg) => arg === "--intended" || arg.startsWith("--intended=")).length) {
+    return fail(pullRequestHelp(), 2);
+  }
+  let repository = option(args, "--repo");
+  if (!repository && (file || /^#?\d+$/u.test(words[2]!))) {
+    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], signal);
+    repository = resolved.code === null ? resolved.stdout.trim() : "";
+    if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
+  }
+  let pullRequest: number | undefined;
+  if (!file) {
+    const parsed = parsePullRequestRef(words[2], repository);
+    if ("error" in parsed) return fail(parsed.error, 2);
+    repository = parsed.repository;
+    pullRequest = parsed.number;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
+    return fail("pr closures reads GitHub pull requests only; pass a GitHub owner/name", 2);
+  }
+  const intended: string[] = [];
+  for (const value of options(args, "--intended")) {
+    const issue = canonicalIssueReference(value, repository);
+    if (!issue) return fail(`--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    if (!intended.includes(issue)) intended.push(issue);
+  }
+  let read: { state?: string; headSha?: string; closures: ReturnType<typeof pullRequestClosures> };
+  if (file) {
+    let text: string;
+    try {
+      const bytes = readFileSync(resolvePath(file));
+      if (bytes.length > CLOSURES_FILE_MAX_BYTES) return fail(`${file} is larger than ${CLOSURES_FILE_MAX_BYTES} bytes`, 2);
+      text = bytes.toString("utf8");
+    } catch {
+      return fail(`could not read ${file}`, 1);
+    }
+    read = { closures: pullRequestClosures(text, repository!, []) };
+  } else {
+    const inspected = await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
+    if (!inspected.ok) return fail(inspected.reason, 1);
+    read = inspected;
+  }
+  const undeclared = read.closures.map((closure) => closure.issue).filter((issue) => !intended.includes(issue));
+  const unmade = intended.filter((issue) => !read.closures.some((closure) => closure.issue === issue));
+  const data = { repository, ...(pullRequest ? { pullRequest, state: read.state, headSha: read.headSha } : {}),
+    closures: read.closures, undeclared, unmade };
+  io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
+  return undeclared.length || unmade.length ? 3 : 0;
 }
 
 function invocationArgs(argv: string[]): string[] {

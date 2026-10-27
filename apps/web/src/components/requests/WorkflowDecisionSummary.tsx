@@ -1,12 +1,29 @@
 import React from "react";
 import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
-import type { WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 
+/** The issues a GitHub merge would close (#3713). The control plane creates the decision only when
+ * they are exactly the snapshot's declared ones, so with a check this is what GitHub reported; a
+ * runner that predates the check reports nothing, and then only the declaration is known. */
+function MergeClosures({ declared, check }: { declared: string[]; check?: PullRequestClosingReferenceCheck }) {
+  if (!check) {
+    return <>Not checked: the runner predates this check.{declared.length ? ` Declared: ${declared.join(", ")}.` : ""}</>;
+  }
+  if (!check.closures.length) return <>None</>;
+  return <ul>{check.closures.map((closure) => <li key={closure.issue}>
+    {closure.issue}{closure.excerpt ? <>: <q>{closure.excerpt}</q></> : " (linked on GitHub)"}
+  </li>)}</ul>;
+}
+
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without
  * a review of their own, and the read-only summary of a decision the Orchestrator owns. */
-export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisionResourceSnapshot }) {
+export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
+  snapshot: WorkflowDecisionResourceSnapshot;
+  /** The server-recorded closing-reference read of a GitHub merge, when there was one. */
+  closingReferenceCheck?: PullRequestClosingReferenceCheck;
+}) {
   switch (snapshot.category) {
     case "automation_creation":
       return <AutomationCreationSummary snapshot={snapshot} />;
@@ -24,6 +41,9 @@ export function WorkflowDecisionSummary({ snapshot }: { snapshot: WorkflowDecisi
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>
         <div><dt>Pull Request</dt><dd>#{snapshot.pullRequest}</dd></div>
         <div><dt>Head Commit</dt><dd><code>{snapshot.headSha.slice(0, 12)}</code></dd></div>
+        {snapshot.mergeMethod === undefined && <div><dt>Closes on Merge</dt><dd>
+          <MergeClosures declared={snapshot.intendedClosures ?? []} {...(closingReferenceCheck ? { check: closingReferenceCheck } : {})} />
+        </dd></div>}
       </dl>;
     case "review_round_extension":
       // What the person is asked to grant: more cross-model review rounds, and why (#3369).

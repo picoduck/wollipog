@@ -2537,6 +2537,15 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }).then(sendUp));
       break;
     }
+    case "github_merge_preflight": {
+      // The child's own gh login and environment, as its agent would run the merge (#3713).
+      runCommandTask("github_merge_preflight", sessions.githubMergePreflight(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
     case "reconcile_workflow_action": {
       runCommandTask("reconcile_workflow_action", sessions.reconcileWorkflowAction(msg.sessionId, {
         occurrenceId: msg.occurrenceId,

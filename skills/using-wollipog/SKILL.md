@@ -27,6 +27,8 @@ wollipog session wait <session-id> --for input_required,completed,failed,stopped
 wollipog session stop <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
 wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
+wollipog pr closures <number|owner/name#number|url> [--intended <issue>]... --json
+wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... --json
 wollipog review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path> [--full-reason <text>] --json
 wollipog review session get <review-session-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
@@ -246,6 +248,28 @@ position and state, failed jobs with run links, and whether it merged.
   124 for `timeout`; 1 when GitHub could not be read.
 - Where the command or tool is missing (an older runner) or `gh` cannot read the repository, fall
   back to one long blocking shell loop that sleeps minutes between checks.
+
+## Issue References in Pull Requests
+
+GitHub closes an issue when a merged pull request's description puts a closing keyword (close, fix
+or resolve, in any tense or case) directly before the issue's reference, whatever the sentence says:
+"does not close #12", "must not auto-close #12" and "doesn't resolve #12's cause" all close #12. An
+issue linked in the pull request's Development section closes too.
+
+- Write "Refs #N" for every issue that must stay open, in the description, the title and commit
+  messages. Never put a closing verb directly before such a reference, not even in an example that
+  describes this rule; paraphrase it instead.
+- Check a draft description before publishing it with `wollipog pr closures --file <draft> --json`,
+  and an open pull request with `wollipog pr closures <pr> --json`. Pass each issue the merge should
+  close with `--intended`. Exit status 3 lists `undeclared` closures and `unmade` declarations; 0
+  means the merge closes exactly the intended issues.
+- A GitHub `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
+  `owner/repo#N`, or an issue URL); omit it when the merge must close none. A current runner reads
+  the pull request before the decision is created and again before it is armed. If GitHub would
+  close anything else, or not close a declared issue, the request is refused with each reference and
+  its line, and a changed description revokes an approval at consume. Fix the text or the
+  declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what the
+  merge closes; it is absent when the child's runner predates the check.
 
 ## Review Sessions
 

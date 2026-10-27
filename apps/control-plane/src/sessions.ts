@@ -33,6 +33,7 @@ import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type S
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
+import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 /**
@@ -156,6 +157,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type RecordPolicyHookDecisionMessage,
   type RecordWorkflowActionAdmissionMessage,
   type GitLabMergePreflightResultMessage,
+  type GithubMergePreflightResultMessage,
+  type PullRequestClosingReferenceCheck,
   type ReconcileWorkflowActionMessage,
   type PodContextEntry,
   type PodMemberRole,
@@ -352,6 +355,9 @@ export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const WORKFLOW_ACTION_ADMISSION_APPEND_TIMEOUT_MS = 5_000;
 /** #3602: the GitLab merge preflight reads up to three endpoints at 15 seconds each. */
 export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
+/** The child runner's GitHub read for a merge's closing references (#3713): one `gh` call of at
+ * most 30 seconds. The session tools wait 75 seconds for a merge request or consume. */
+export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -874,10 +880,20 @@ export function normalizeWorkflowDecisionSnapshot(
         !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
+    // #3713: the issues a GitHub merge is meant to close; the runner's check compares them with
+    // what GitHub would close. Omitted when none are declared, so earlier digests are unchanged.
+    if (gitlab && value.intendedClosures !== undefined) {
+      return fail("intendedClosures applies only to a GitHub merge decision");
+    }
+    const intendedClosures = gitlab ? undefined : normalizeIntendedClosures(value.intendedClosures, repo);
+    if (intendedClosures === null) {
+      return fail(`intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
+    }
     return ok({ category, repository: repo, pullRequest, headSha,
       reviewResult: value.reviewResult, requiredChecks: {
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
       },
+      ...(intendedClosures ? { intendedClosures } : {}),
       ...(gitlab ? {
         mergeMethod: value.mergeMethod as "merge_train" | "merge",
         squash: value.squash as boolean,
@@ -9525,6 +9541,9 @@ export class SessionsService {
       const { recommendationId: _recommendationId, ...snapshot } = normalized.data;
       return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess);
     }
+    if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
+      return this.createGithubMergeDecision(sessionId, request, normalized.data, canAccess);
+    }
     if (!normalized.ok || normalized.data?.category !== "ui_evidence_approval") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
     }
@@ -10032,11 +10051,69 @@ export class SessionsService {
     return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
   }
 
+  /** #3713: a GitHub merge is requested only after the child's runner reports the issues it would
+   * close, so a closure the snapshot does not declare is refused before anyone reviews it. A
+   * request the ordinary path refuses anyway, or one from a pre-v240 runner, is not checked. */
+  private async createGithubMergeDecision(
+    sessionId: string,
+    request: CreateWorkflowDecisionRequest,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+    canAccess: (sessionId: string) => boolean,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const child = this.db.getSession(sessionId);
+    if (!child || isTerminal(child.status) || !canAccess(sessionId) ||
+        !boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
+      return this.createWorkflowDecision(sessionId, request, canAccess);
+    }
+    const checked = await this.githubMergeClosures(child, snapshot);
+    if (!checked.ok) return fail(checked.message, 409);
+    return this.createWorkflowDecision(sessionId, request, canAccess,
+      checked.check ? { closingReferenceCheck: checked.check } : undefined);
+  }
+
+  /** What merging would close, read from GitHub through the child's runner and compared with the
+   * snapshot's `intendedClosures` (#3713). Without a check when the runner predates v240. `revoke`
+   * says the snapshot itself is wrong (a stale head or a different set of closures); otherwise
+   * GitHub could not be read and the same snapshot may be tried again. */
+  private async githubMergeClosures(
+    child: { id: string; runnerId: string },
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+  ): Promise<{ ok: true; check?: PullRequestClosingReferenceCheck } | { ok: false; revoke: boolean; message: string }> {
+    const runner = this.db.getRunner(child.runnerId);
+    if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "githubMergeClosingReferences")) return { ok: true };
+    const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
+      message: `GitHub could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
+    const requestId = `github_merge_preflight_${randomUUID()}`;
+    let answer: unknown;
+    try {
+      answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+        type: "github_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
+      }, GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
+    } catch {
+      return unreadable("the runner did not answer.");
+    }
+    const result = answer as Partial<GithubMergePreflightResultMessage> | null;
+    const reason = typeof result?.reason === "string" && result.reason.length <= 300 ? result.reason : "GitHub could not be checked.";
+    if (result?.type !== "github_merge_preflight_result" || result.sessionId !== child.id) return unreadable("GitHub could not be checked.");
+    if (result.ok !== true) {
+      return result.refusal === "stale_head"
+        ? { ok: false, revoke: true, message: `This merge no longer matches the pull request: ${reason}` }
+        : unreadable(reason);
+    }
+    const check = validClosingReferenceCheck(result.check);
+    if (!check) return unreadable("the runner's answer was incomplete.");
+    const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures);
+    return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
-    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean },
+    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
+      /** #3713: the child runner's GitHub read, taken just before this request. */
+      closingReferenceCheck?: PullRequestClosingReferenceCheck },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -10151,6 +10228,7 @@ export class SessionsService {
       authority,
       authorityEvaluation,
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
+      ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
@@ -10566,6 +10644,18 @@ export class SessionsService {
         }
         const reason = typeof result?.reason === "string" ? result.reason : "GitLab could not be checked.";
         return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
+      }
+    }
+    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
+      // #3713: the description can change after approval, so GitHub is read again before arming.
+      // A closure the approval does not describe revokes it; GitHub being unreadable proves
+      // nothing either way, so nothing is armed and the child may try again.
+      const checked = await this.githubMergeClosures(child, normalized.data);
+      if (!checked.ok) {
+        if (checked.revoke) this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(checked.revoke
+          ? `${checked.message} This approval was revoked, so nothing was armed; request a new merge decision.`
+          : checked.message, 409);
       }
     }
     const now = Date.now();

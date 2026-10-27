@@ -295,6 +295,9 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
 
 test("PROTOCOL_VERSION is 240", () => {
   assert.equal(PROTOCOL_VERSION, 240);
+  // A v241 runner cannot report the closing references of a GitHub merge (#3713).
+  assert.equal(runnerSupportsProtocol(241, "githubMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(242, "githubMergeClosingReferences"), true);
   assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
   assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
   // A v238 runner cannot answer the GitLab merge preflight (#3602).

@@ -353,6 +353,7 @@ class FakeHub {
   runnerChangedCalls: string[] = [];
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
   requestHandler?: (msg: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult>;
+  githubMergePreflight?: (msg: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
   activeTurnIds = new Map<string, string>();
   queuedPrompts = new Map<string, QueuedPromptView[]>();
 
@@ -400,6 +401,13 @@ class FakeHub {
         historyEpoch: 0,
         eventSeq: 1,
       };
+    }
+    if (msg.type === "github_merge_preflight") {
+      // A pull request that closes no issue, unless a test answers otherwise (#3713).
+      return this.githubMergePreflight
+        ? await this.githubMergePreflight(msg)
+        : { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId,
+            ok: true, check: { checkedAt: 1, closures: [] } };
     }
     if (!this.requestHandler) throw new Error("runner did not respond in time");
     return await this.requestHandler(msg);
@@ -4673,6 +4681,169 @@ test("consuming a GitLab merge first checks GitLab on the child's runner, revoki
     const refusedOld = await consume(old);
     assert.equal(refusedOld.status, 409, "a runner that cannot answer the preflight cannot arm a GitLab merge");
     assert.equal(db.workflowDecisionByOccurrence(old)?.status, "revoked");
+  } finally {
+    db.close();
+  }
+});
+
+const GITHUB_MERGE = {
+  category: "pr_merge" as const,
+  repository: "picoduck/wollipog",
+  pullRequest: 3729,
+  headSha: "d".repeat(40),
+  reviewResult: "merge" as const,
+  requiredChecks: { headSha: "d".repeat(40), status: "passed" as const, checkedAt: 10,
+    checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+};
+
+test("a GitHub merge snapshot's intendedClosures normalize to sorted unique issues and leave other digests unchanged (#3713)", () => {
+  const plain = normalizeWorkflowDecisionSnapshot(GITHUB_MERGE);
+  assert.ok(plain.ok && plain.data);
+  assert.equal("intendedClosures" in plain.data, false, "a merge that declares none keeps its pre-v240 digest");
+  const empty = normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures: [] });
+  assert.deepEqual(empty.data, plain.data, "an empty list is the same snapshot as none");
+  const declared = normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE,
+    intendedClosures: ["#3713", "https://github.com/Picoduck/Wollipog/issues/12", "other/repo#4", "picoduck/wollipog#3713"] });
+  assert.deepEqual(declared.data && "intendedClosures" in declared.data && declared.data.intendedClosures,
+    ["other/repo#4", "picoduck/wollipog#12", "picoduck/wollipog#3713"]);
+  for (const intendedClosures of [["3713"], ["closes #1"], "#1", [1], Array.from({ length: 101 }, (_, i) => `#${i + 1}`)]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures).slice(0, 60));
+  }
+  assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: ["#1"] }).status, 400,
+    "GitLab closes issues by its own rules, which this check does not read");
+});
+
+test("a GitHub merge is requested and armed only while GitHub would close exactly its intendedClosures (#3713)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitHub Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const preflights: Array<Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>> = [];
+    let answer: Record<string, unknown> | Error = { ok: true, check: { checkedAt: 5, closures: [] } };
+    hub.githubMergePreflight = async (msg) => {
+      preflights.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const negated = { issue: "picoduck/wollipog#3635", sources: ["description"], excerpt: "This PR does not close #3635." };
+    const delivered = { issue: "picoduck/wollipog#3713", sources: ["description", "linked"], excerpt: "Closes #3713." };
+    const ask = (key: string, snapshot: Record<string, unknown> = GITHUB_MERGE) =>
+      svc.createWorkflowDecisionWithVideo(child.id, { requestId: key, resourceKey: key,
+        resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+
+    // The incident: a negated closing phrase the snapshot does not declare never reaches review.
+    answer = { ok: true, check: { checkedAt: 5, closures: [negated] } };
+    const refused = await ask("negated");
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /would close an issue that intendedClosures does not list: picoduck\/wollipog#3635, from the description: “This PR does not close #3635\.”/u);
+    assert.match(refused.error ?? "", /Write “Refs #N” for an issue that must stay open/u);
+    assert.deepEqual(preflights[0], { type: "github_merge_preflight", requestId: preflights[0]!.requestId, sessionId: child.id,
+      repository: "picoduck/wollipog", pullRequest: 3729, headSha: GITHUB_MERGE.headSha });
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "no decision was created");
+
+    // An issue linked by hand is a closure too.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "picoduck/wollipog#9", sources: ["linked"] }] } };
+    assert.match((await ask("linked")).error ?? "", /picoduck\/wollipog#9, which is linked to the pull request on GitHub/u);
+
+    // A declared closure GitHub would not make leaves the snapshot describing another merge.
+    answer = { ok: true, check: { checkedAt: 5, closures: [] } };
+    const unmade = await ask("unmade", { ...GITHUB_MERGE, intendedClosures: ["#3713"] });
+    assert.equal(unmade.status, 409);
+    assert.match(unmade.error ?? "", /intendedClosures lists picoduck\/wollipog#3713, but merging this pull request would not close it/u);
+
+    for (const [refusal, pattern] of [["stale_head", /no longer matches the pull request: GitHub said stale_head/u],
+      ["unavailable", /could not be read .*GitHub said unavailable Try again/u]] as const) {
+      answer = { ok: false, refusal, reason: `GitHub said ${refusal}` };
+      const failed = await ask(`refused-${refusal}`);
+      assert.equal(failed.status, 409);
+      assert.match(failed.error ?? "", pattern);
+    }
+    answer = new Error("runner did not respond in time");
+    assert.match((await ask("silent")).error ?? "", /the runner did not answer/u);
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "not a reference", sources: ["linked"] }] } };
+    assert.match((await ask("malformed")).error ?? "", /the runner's answer was incomplete/u);
+
+    // A merge that closes exactly what it declares is created, and records what was read.
+    answer = { ok: true, check: { checkedAt: 5, closures: [delivered] } };
+    const intended = await ask("intended", { ...GITHUB_MERGE, intendedClosures: ["https://github.com/picoduck/wollipog/issues/3713"] });
+    assert.ok(intended.ok && intended.data, intended.error);
+    assert.deepEqual(intended.data.resourceSnapshot, { ...GITHUB_MERGE, intendedClosures: ["picoduck/wollipog#3713"] });
+    assert.deepEqual(intended.data.closingReferenceCheck, { checkedAt: 5, closures: [delivered] });
+    assert.deepEqual(db.workflowDecisionByOccurrence(intended.data.occurrenceId)?.closingReferenceCheck,
+      { checkedAt: 5, closures: [delivered] }, "the check is stored with the decision");
+
+    // Arming reads GitHub again: the description may have changed since approval.
+    const snapshot = intended.data.resourceSnapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>;
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    const approve = async (key: string) => {
+      const decision = await ask(key, snapshot);
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
+    const edited = await approve("edited-after-approval");
+    answer = { ok: true, check: { checkedAt: 6, closures: [negated, delivered] } };
+    const revoked = await consume(edited);
+    assert.equal(revoked.status, 409);
+    assert.match(revoked.error ?? "", /picoduck\/wollipog#3635.*This approval was revoked, so nothing was armed/u);
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.status, "revoked");
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.actionAdmission, undefined);
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const moved = await approve("moved-head");
+    answer = { ok: false, refusal: "stale_head", reason: "The pull request's head is no longer the decision's head." };
+    assert.equal((await consume(moved)).status, 409);
+    assert.equal(db.workflowDecisionByOccurrence(moved)?.status, "revoked", "a stale head cannot be armed");
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const retried = await approve("unreadable-then-armed");
+    answer = { ok: false, refusal: "unavailable", reason: "github.com could not be reached." };
+    const unreadable = await consume(retried);
+    assert.equal(unreadable.status, 409);
+    assert.match(unreadable.error ?? "", /github\.com could not be reached\. Try again\./u);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.status, "approved", "an unreadable GitHub proves nothing; retry is allowed");
+    answer = { ok: true, check: { checkedAt: 7, closures: [delivered] } };
+    const armed = await consume(retried);
+    assert.ok(armed.ok, armed.error);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.actionAdmission?.command, command);
+
+    // A runner that predates the check is not asked; its decision says nothing was read.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences - 1);
+    const asked = preflights.length;
+    answer = { ok: true, check: { checkedAt: 8, closures: [negated] } };
+    const legacy = await ask("legacy-runner");
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    assert.equal(legacy.data.closingReferenceCheck, undefined);
+    assert.equal(preflights.length, asked, "a pre-v240 runner receives no github_merge_preflight");
   } finally {
     db.close();
   }

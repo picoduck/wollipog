@@ -1344,6 +1344,43 @@ decision. GitLab being unreadable proves nothing, so nothing is armed and the ch
 The forge proof reads the merge request's own URL through `glab`. A failed train pipeline is not
 retried: `wait_pull_request` reports it as `queue_failed`, and the child requests a new decision.
 
+### Closing References in GitHub Merges
+
+GitHub closes an issue when a merged pull request's description puts a closing keyword (close, fix
+or resolve, in any tense, any case, optionally followed by a colon) directly before the issue's
+reference, whatever the sentence says. "This PR does not close #3635" closed #3635 on 2026-10-26,
+"does not resolve #3157's" closed #3157, and "must not auto-close #N" would have closed #N. An issue
+linked by hand in the pull request's Development section closes the same way. A campaign that closes
+issues through the typed `issue_closure` route therefore writes "Refs #N" and never puts a closing
+verb before a reference that must stay open (#3713).
+
+Protocol v240 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
+`pr_merge` snapshot may carry `intendedClosures`: every issue the merge is meant to close, as `#N`,
+`owner/repo#N`, or an issue URL, normalized to sorted unique `owner/repo#N`. It is omitted when the
+merge must close nothing, so earlier digests are unchanged; GitLab snapshots refuse it. When the
+child's runner is v240, the control plane asks it for `github_merge_preflight` before creating the
+decision. The runner reads the open pull request through the child's own `gh` login: its head, its
+description and GitHub's `closingIssuesReferences`. It reports every issue either would close, with
+the description's line for each. The decision is created only when those issues are exactly the
+declared ones. Otherwise the request is refused, naming each undeclared issue with its line (or as
+linked on GitHub) and each declared issue the merge would not close, and nothing is pending for a
+reviewer. The created decision records the read as `closingReferenceCheck`, which the request card
+shows as **Closes on Merge**. Consuming the approval reads GitHub again, because the description can
+change after approval: a different set of closures, a moved head, or a pull request that is no
+longer open revokes the decision, and GitHub being unreadable arms nothing and may be retried. A
+pre-v240 child runner is not asked; its decisions carry no `closingReferenceCheck`, and the card says
+the closures were not checked.
+
+The description matcher follows GitHub's measured behavior (each case was checked against
+`closingIssuesReferences` on a draft pull request): `#N`, `GH-N`, `owner/repo#N`, an `https` issue or
+pull URL, and a Markdown link to one all count, in any block outside code; inline code, fenced and
+indented code, HTML comments, a line break or no-break space between keyword and reference, a missing
+space, a parenthesis, emphasis that ends between the two, and a second reference after one keyword
+(`Closes #1, #2` closes only #1) do not. Indented code is still reported, as the simpler rule. The
+title and commit messages are not read: GitHub never links from the title, and a merge-queue squash
+commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
+an open pull request, or for a draft description with `--file`, compared with `--intended`.
+
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
 child verification settles an approved evidence decision as consumed instead of requiring the child

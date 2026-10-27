@@ -8,10 +8,11 @@ import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaig
 import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
+import { githubMergePreflight } from "./github-merge-preflight.js";
 /**
  * Runner-side session orchestration. For each control-plane `start_session`:
  *  - optionally create an isolated git worktree,
@@ -18263,6 +18264,28 @@ export class SessionManager {
       return result.ok ? { ...base, ok: true } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitLab could not be checked." };
+    }
+  }
+
+  /** v240 (#3713): read a GitHub `pr_merge` snapshot's pull request through the child session's own
+   * `gh` login and context, and report every issue merging it would close. Read-only; a refusal is
+   * a fixed sentence, never `gh` output. */
+  async githubMergePreflight(
+    message: GithubMergePreflightMessage,
+    options: { gh?: GhRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<GithubMergePreflightResultMessage> {
+    const base = { type: "github_merge_preflight_result" as const, requestId: message.requestId, sessionId: message.sessionId };
+    const meta = this.store.readMeta(message.sessionId);
+    const cwd = meta ? meta.worktreePath ?? meta.repoPath : null;
+    if (!meta || !cwd) {
+      return { ...base, ok: false, refusal: "unavailable", reason: "The session has no repository on this runner to check from." };
+    }
+    try {
+      const result = await githubMergePreflight(message,
+        options.gh ?? contextGhRunner(meta.context, cwd, options.agentEnv?.(meta) ?? {}));
+      return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
+    } catch {
+      return { ...base, ok: false, refusal: "unavailable", reason: "GitHub could not be checked." };
     }
   }
 

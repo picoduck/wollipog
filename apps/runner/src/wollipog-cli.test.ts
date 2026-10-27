@@ -154,7 +154,8 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["campaign", ["plan --input", "update-item <work-item-id>", "assign <work-item-id>", "adjudicate <recommendation-id>", "work-items", "protocol v196+", "grant no authority"]],
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
-    ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane"]],
+    ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane",
+      "pr closures", "--intended", "--file", "does not close #N", "Refs #N", "intendedClosures"]],
   ];
   for (const [topic, expected] of topics) {
     const result = await captureCli(["help", topic]);
@@ -312,6 +313,71 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
     assert.equal(help.code, 0, argv.join(" "));
     assert.match(help.stdout, /^Usage: wollipog pr wait/u);
   }
+});
+
+test("pr closures reports what merging a pull request or a draft would close, against --intended (#3713)", async () => {
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const calls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    calls.push(args);
+    if (args[0] === "repo") return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
+    return { stdout: JSON.stringify({ data: { repository: { nameWithOwner: "picoduck/wollipog", pullRequest: {
+      number: 7, state: "OPEN", headRefOid: head, body: "Refs #3635. This PR does not close #3635.",
+      closingIssuesReferences: { nodes: [{ number: 3713, repository: { nameWithOwner: "picoduck/wollipog" } }], pageInfo: { hasNextPage: false } },
+    } } } }), stderr: "", code: null, timedOut: false };
+  };
+  const run = async (args: string[], runner: GhRunner = gh) => {
+    let stdout = "";
+    let stderr = "";
+    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } }, runner);
+    return { code, stdout, stderr };
+  };
+
+  const flagged = await run(["pr", "closures", "picoduck/wollipog#7", "--intended", "https://github.com/picoduck/wollipog/issues/3713", "--json"]);
+  assert.equal(flagged.code, 3, "an undeclared closure fails the check");
+  assert.deepEqual(JSON.parse(flagged.stdout), {
+    repository: "picoduck/wollipog", pullRequest: 7, state: "OPEN", headSha: head,
+    closures: [
+      { issue: "picoduck/wollipog#3635", sources: ["description"], excerpt: "Refs #3635. This PR does not close #3635." },
+      { issue: "picoduck/wollipog#3713", sources: ["linked"] },
+    ],
+    undeclared: ["picoduck/wollipog#3635"], unmade: [],
+  });
+  assert.equal(calls.some((args) => args[0] === "repo"), false, "an owner/name reference needs no repository lookup");
+
+  const matched = await run(["pr", "closures", "7", "--intended", "#3635", "--intended=#3713", "--json"]);
+  assert.equal(matched.code, 0);
+  assert.deepEqual(JSON.parse(matched.stdout).undeclared, []);
+  assert.deepEqual(calls.at(-2), ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], "a bare number uses this checkout");
+
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-closures-"));
+  try {
+    const draft = join(root, "body.md");
+    writeFileSync(draft, "Slice one. Refs #12.\n\n`closes #13` is how GitHub closes an issue.\n\nIt must not auto-close #14.\n");
+    const fromFile = await run(["pr", "closures", "--file", draft, "--repo", "picoduck/wollipog", "--intended", "#15", "--json"]);
+    assert.equal(fromFile.code, 3);
+    assert.deepEqual(JSON.parse(fromFile.stdout), { repository: "picoduck/wollipog",
+      closures: [{ issue: "picoduck/wollipog#14", sources: ["description"], excerpt: "It must not auto-close #14." }],
+      undeclared: ["picoduck/wollipog#14"], unmade: ["picoduck/wollipog#15"] });
+    writeFileSync(draft, "Refs #12 and #14.\n");
+    assert.equal((await run(["pr", "closures", "--file", draft, "--json"])).code, 0, "a clean draft passes; the repository comes from gh");
+    assert.equal((await run(["pr", "closures", "--file", join(root, "missing.md"), "--repo", "a/b", "--json"])).code, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const unreadable: GhRunner = async () => ({ stdout: "", stderr: "HTTP 401: Bad credentials", code: 1, timedOut: false });
+  const denied = await run(["pr", "closures", "picoduck/wollipog#7", "--json"], unreadable);
+  assert.equal(denied.code, 1);
+  assert.equal(JSON.parse(denied.stdout).error, "gh in this session's context is not signed in to github.com.");
+  for (const args of [["pr", "closures"], ["pr", "closures", "7", "8"], ["pr", "closures", "--file"],
+    ["pr", "closures", "7", "--intended"], ["pr", "closures", "7", "--repo", "a/b", "--intended", "nope"],
+    ["pr", "closures", "gitlab.example.com/group/project!7"], ["pr", "closures", "--file", "body.md", "7", "--repo", "a/b"]]) {
+    assert.equal((await run([...args, "--json"])).code, 2, args.join(" "));
+  }
+  const help = await captureCli(["pr", "closures", "--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /wollipog pr closures --file <description\.md>/u);
 });
 
 test("local init succeeds without control-plane credentials and emits stable content-safe JSON", async () => {

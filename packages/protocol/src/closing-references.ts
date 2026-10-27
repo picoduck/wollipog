@@ -1,12 +1,23 @@
 /**
  * GitHub closing-keyword references (#3713).
  *
- * GitHub closes an issue when a merged pull request's description, or a commit that lands on the
- * default branch, puts a closing keyword directly before the issue's reference. The sentence
- * around it does not matter: "This PR does not close #12" and "must not auto-close #12" both
- * close #12. This matcher follows GitHub's rules where they are known and reports a reference
- * wherever they are not, because a false report costs a reworded sentence and a missed one closes
- * an issue that must stay open.
+ * GitHub closes an issue when a merged pull request's description puts a closing keyword directly
+ * before the issue's reference, whatever the sentence around it says: "This PR does not close #12"
+ * and "must not auto-close #12" both close #12, and "does not resolve #12's cause" closes it too.
+ * The rules below were measured against GitHub's own `closingIssuesReferences` on a draft pull
+ * request (2026-10-27). Where GitHub's behavior is unknown the matcher reports the reference: a
+ * false report costs a reworded sentence, while a missed one closes an issue that must stay open.
+ *
+ * Measured as closing: any keyword case, a colon after the keyword (`Closes: #12`, `closes : #12`),
+ * spaces or a tab before the reference, `#12`, `GH-12`, `owner/repo#12`, an `https` issue or pull
+ * URL, a Markdown link to one (`closes [the issue](https://github.com/o/r/issues/12)`) or whose
+ * text is one, `\#12`, `#12's`, `#12-part`, `#12.5`, and every block (heading, list, table, quote,
+ * HTML) outside code. Measured as not closing: inline code, fenced and indented code blocks, HTML
+ * comments, a line break or no-break space between keyword and reference, no space at all
+ * (`closes#12`, `closes:#12`), `closes (#12)`, emphasis that ends between the two
+ * (`**Closes:** #12`, `_closes_ #12`), a keyword that is itself a link, `http` URLs, `#12_x`, a
+ * second reference after one keyword (`Closes #11, #12` closes only #11), and the title.
+ * Indented code and `#12_x` are still reported, as the simpler rule; neither is common.
  */
 
 /** GitHub's documented closing keywords, matched without regard to case. */
@@ -21,41 +32,116 @@ export interface ClosingReference {
   keyword: string;
   /** Offset of the keyword in the scanned text. */
   index: number;
-  /** One bounded line of the text around the reference, for showing where it is. */
+  /** One bounded line of the text around the reference, for showing the author where it is. */
   excerpt: string;
 }
 
-const OWNER = String.raw`[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})`;
+const OWNER = String.raw`[A-Za-z0-9][A-Za-z0-9-]{0,38}`;
 const NAME = String.raw`[A-Za-z0-9._-]{1,100}`;
-const NUMBER = String.raw`([0-9]{1,10})`;
-const END = String.raw`(?![\p{L}\p{N}_])`;
-/** A reference GitHub resolves to an issue: `#N`, `GH-N`, `owner/repo#N`, or an issue URL. */
-const REFERENCE = String.raw`(?:#${NUMBER}|[Gg][Hh]-${NUMBER}|(${OWNER})\/(${NAME})#${NUMBER}|` +
-  String.raw`https?:\/\/(?:www\.)?github\.com\/(${OWNER})\/(${NAME})\/(?:issues|pull)\/${NUMBER})${END}`;
-/** The keyword starts a word (so `auto-close` counts and `disclose` does not), may take a colon,
- * and may be wrapped in Markdown emphasis on either side of the space before the reference. */
-const CLOSING = new RegExp(
-  String.raw`(?<![\p{L}\p{N}_])(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?![\p{L}\p{N}_])` +
-  String.raw`[*_]*:?[*_]*[ \t]*(?:\r?\n[ \t]*)?[*_]*${REFERENCE}`,
-  "giu",
-);
-
-const ISSUE_REFERENCE = new RegExp(String.raw`^(?:#${NUMBER}|(${OWNER})\/(${NAME})#${NUMBER}|` +
-  String.raw`https?:\/\/(?:www\.)?github\.com\/(${OWNER})\/(${NAME})\/(?:issues|pull)\/${NUMBER}\/?)$`, "u");
+const NUMBER = String.raw`[0-9]{1,10}`;
+const URL = String.raw`https:\/\/(?:www\.)?github\.com\/${OWNER}\/${NAME}\/(?:issues|pull)\/${NUMBER}`;
+/** A keyword that starts a word (so `auto-close` counts and `disclose` does not), then a space or a
+ * tab, optionally around a colon. */
+const KEYWORD = /(?<![\p{L}\p{N}])(close[sd]?|fix(?:e[sd])?|resolve[sd]?)(?![\p{L}\p{N}_])(?:[ \t]+(?::[ \t]*)?|:[ \t]+)/giu;
+/** What may follow it: a plain reference, an autolinked URL, or a Markdown inline link. */
+const TARGET = new RegExp(String.raw`(?:\\?#${NUMBER}|gh-${NUMBER}|${OWNER}\/${NAME}#${NUMBER}|<?${URL}|` +
+  String.raw`\[[^\]\n]{0,256}\]\(<?[^)\s>]{0,2048}>?(?:[ \t]+"[^"\n]{0,256}")?\))(?![\p{L}\p{N}])`, "iuy");
+const LINK = /^\[([^\]\n]*)\]\(<?([^)\s>]*)>?/u;
 const REPOSITORY = new RegExp(String.raw`^${OWNER}\/${NAME}$`, "u");
+const PLAIN = new RegExp(String.raw`^(?:#(${NUMBER})|gh-(${NUMBER}))$`, "iu");
+const QUALIFIED = new RegExp(String.raw`^(${OWNER}\/${NAME})#(${NUMBER})$`, "u");
+const ISSUE_URL = new RegExp(String.raw`^https:\/\/(?:www\.)?github\.com\/(${OWNER}\/${NAME})\/(?:issues|pull)\/(${NUMBER})(?:[/?#].*)?$`, "iu");
 
 function issue(repository: string, number: string): string | null {
   const value = Number(number);
   return Number.isSafeInteger(value) && value > 0 ? `${repository.toLowerCase()}#${value}` : null;
 }
 
+function reference(value: string, repository: string | undefined): string | null {
+  const plain = PLAIN.exec(value);
+  if (plain) return repository && REPOSITORY.test(repository) ? issue(repository, (plain[1] ?? plain[2])!) : null;
+  const qualified = QUALIFIED.exec(value) ?? ISSUE_URL.exec(value);
+  return qualified ? issue(qualified[1]!, qualified[2]!) : null;
+}
+
+/** Orders canonical `owner/repo#N` references by repository, then by issue number. */
+export function compareIssueReferences(a: string, b: string): number {
+  const [repositoryA = "", numberA] = a.split("#");
+  const [repositoryB = "", numberB] = b.split("#");
+  return repositoryA === repositoryB ? Number(numberA) - Number(numberB) : repositoryA < repositoryB ? -1 : 1;
+}
+
 /** `owner/repo#N` for `#N` (in `repository`), `owner/repo#N`, or a GitHub issue URL; else null. */
 export function canonicalIssueReference(value: string, repository?: string): string | null {
-  const match = ISSUE_REFERENCE.exec(value.trim());
-  if (!match) return null;
-  if (match[1] !== undefined) return repository && REPOSITORY.test(repository) ? issue(repository, match[1]) : null;
-  if (match[4] !== undefined) return issue(`${match[2]}/${match[3]}`, match[4]);
-  return issue(`${match[5]}/${match[6]}`, match[7]!);
+  return reference(value.trim(), repository);
+}
+
+const MASK = "\u0000";
+const FENCE = /^(?:[ ]{0,3}>[ ]?)*[ ]{0,3}(`{3,}|~{3,})(.*)$/u;
+
+/** The text with code and HTML comments blanked out, at the same offsets. A blank never reads as
+ * a space, so nothing hidden can join a keyword to a reference either. */
+function maskMarkdown(text: string): string {
+  const out = text.split("");
+  const blank = (from: number, to: number) => {
+    for (let i = from; i < to; i += 1) if (out[i] !== "\n") out[i] = MASK;
+  };
+  // Fenced code blocks, line by line. An unclosed fence runs to the end, as CommonMark reads it.
+  let offset = 0;
+  let open: { char: string; length: number; from: number } | null = null;
+  for (const line of text.split("\n")) {
+    const fence = FENCE.exec(line);
+    if (open) {
+      if (fence && fence[1]![0] === open.char && fence[1]!.length >= open.length && !fence[2]!.trim()) {
+        blank(open.from, offset + line.length);
+        open = null;
+      }
+    } else if (fence && !(fence[1]![0] === "`" && fence[2]!.includes("`"))) {
+      open = { char: fence[1]![0]!, length: fence[1]!.length, from: offset };
+    }
+    offset += line.length + 1;
+  }
+  if (open) blank(open.from, text.length);
+  // Inline code: a run of N backticks up to the next run of exactly N in the same paragraph.
+  // Linear in the number of runs: each length keeps a cursor that only moves forward.
+  const masked = out.join("");
+  const runs = [...masked.matchAll(/(?<!\\)`+/gu)].map((match) => ({ start: match.index, length: match[0].length }));
+  const paragraphEnds = [...masked.matchAll(/\n[ \t]*\n/gu)].map((match) => match.index);
+  const paragraph: number[] = [];
+  for (let i = 0, p = 0; i < runs.length; i += 1) {
+    while (p < paragraphEnds.length && paragraphEnds[p]! < runs[i]!.start) p += 1;
+    paragraph.push(p);
+  }
+  const byLength = new Map<number, number[]>();
+  runs.forEach((run, i) => {
+    const same = byLength.get(run.length);
+    if (same) same.push(i);
+    else byLength.set(run.length, [i]);
+  });
+  const next = new Map<number, number>();
+  let cursor = 0;
+  for (let i = 0; i < runs.length; i += 1) {
+    const { start, length } = runs[i]!;
+    if (start < cursor) continue;
+    const same = byLength.get(length)!;
+    let k = next.get(length) ?? 0;
+    while (k < same.length && same[k]! <= i) k += 1;
+    next.set(length, k);
+    const close = same[k];
+    if (close === undefined || paragraph[close] !== paragraph[i]) continue;
+    cursor = runs[close]!.start + length;
+    blank(start, cursor);
+  }
+  // HTML comments. One left open is not a comment GitHub hides, so it stays readable.
+  const commented = out.join("");
+  for (let from = commented.indexOf("<!--"); from >= 0; from = commented.indexOf("<!--", from + 4)) {
+    if (out[from] === MASK) continue;
+    const end = commented.indexOf("-->", from + 4);
+    if (end < 0) break;
+    blank(from, end + 3);
+    from = end;
+  }
+  return out.join("");
 }
 
 function excerpt(text: string, start: number, end: number): string {
@@ -68,18 +154,25 @@ function excerpt(text: string, start: number, end: number): string {
   return `${from > lineStart ? "…" : ""}${line}${to < lineEnd ? "…" : ""}`;
 }
 
-/** Every closing reference in `text`, in order; `#N` and `GH-N` name issues in `repository`. */
+/** Every closing reference in a Markdown description, in order. `#N` and `GH-N` name issues in
+ * `repository`. Code and HTML comments are blanked first, as GitHub ignores them. */
 export function findClosingReferences(text: string, repository: string): ClosingReference[] {
   if (!REPOSITORY.test(repository)) throw new Error("repository must be owner/name");
+  const scanned = maskMarkdown(text);
   const found: ClosingReference[] = [];
-  for (const match of text.matchAll(CLOSING)) {
-    const [, keyword, local, gh, owner, name, number, urlOwner, urlName, urlNumber] = match;
-    const target = (local ?? gh) !== undefined
-      ? issue(repository, (local ?? gh)!)
-      : owner !== undefined ? issue(`${owner}/${name}`, number!) : issue(`${urlOwner}/${urlName}`, urlNumber!);
+  for (const match of scanned.matchAll(KEYWORD)) {
+    TARGET.lastIndex = match.index + match[0].length;
+    const target = TARGET.exec(scanned);
     if (!target) continue;
-    found.push({ issue: target, keyword: keyword!, index: match.index,
-      excerpt: excerpt(text, match.index, match.index + match[0].length) });
+    const token = target[0];
+    const link = token.startsWith("[") ? LINK.exec(token) : null;
+    const issues = link
+      ? [reference(link[1]!.trim(), repository), reference(link[2]!, repository)]
+      : [reference(token.replace(/^[\\<]/u, ""), repository)];
+    const shown = excerpt(text, match.index, target.index + token.length);
+    for (const target of new Set(issues)) {
+      if (target) found.push({ issue: target, keyword: match[1]!, index: match.index, excerpt: shown });
+    }
   }
   return found;
 }
