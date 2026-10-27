@@ -163,6 +163,10 @@ test("reviewer admission names each unprotected writer and requires exact live l
   t.after(() => manager.shutdownAll());
   const active = (manager as unknown as { active: Map<string, unknown> }).active;
   const id = "s_writer";
+  const launch = manager as unknown as {
+    beginLaunchGeneration(sessionId: string): number;
+    finishLaunchGeneration(sessionId: string, generation: number): void;
+  };
   const makeMeta = (driver: SessionMeta["driver"]) => ({
     sessionId: id, agentId: "fixture", workspaceId: "fixture", driver, context: { kind: "native" }, env: {}, repoPath: f.root, worktreePath: null,
     status: "idle", title: "writer", config: {}, args: [], command: "fixture", agentSessionId: null,
@@ -178,17 +182,92 @@ test("reviewer admission names each unprotected writer and requires exact live l
     assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined, "a known unsandboxed launch is admitted");
     active.delete(id);
     store.patchMeta(id, { status: "starting" });
+    const generation = launch.beginLaunchGeneration(id);
+    assert.equal(active.has(id), false, "launch preparation has not installed a live provider yet");
     assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/);
+    launch.finishLaunchGeneration(id, generation);
     store.patchMeta(id, { status: "idle" });
   }
   assert.equal(store.acquireWorktreeLease(id, "other-runner"), true);
-  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/,
-    "an idle provider owned by another manager has no attested boundary here");
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined,
+    "a lease without a current provider is not writer evidence; previous writers have durable records");
+  for (const status of ["starting", "running", "input_required"] as const) {
+    store.patchMeta(id, { status });
+    const restarted = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "restarted");
+    t.after(() => restarted.shutdownAll());
+    assert.equal(restarted.codexReviewerProtection(f.home).refusal, undefined,
+      `restart leaves stale ${status} and a lease, but no current writer`);
+  }
+  const closing = (manager as unknown as { closing: Map<string, unknown> }).closing;
+  closing.set(id, { entry: { codexPackageSandboxed: true }, unconfirmed: true });
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_writer/, "an unproven closing provider still blocks");
+  closing.delete(id);
   store.releaseWorktreeLease(id, "other-runner");
   const providerManager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, f.root);
   t.after(() => providerManager.shutdownAll());
   assert.equal(providerManager.codexReviewerProtection(f.home).refusal, undefined,
     "future unisolated launches do not block admission when there is no live unprotected writer");
+});
+
+test("a launch before session persistence still blocks admission", posixOnly, (t) => {
+  const f = fixture(t);
+  const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
+  t.after(() => manager.shutdownAll());
+  const internal = manager as unknown as {
+    beginLaunchGeneration(id: string): number;
+    finishLaunchGeneration(id: string, generation: number): void;
+    preparedReviewRounds: Map<string, unknown>;
+  };
+  const generation = internal.beginLaunchGeneration("s_before_meta");
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_before_meta/);
+  internal.preparedReviewRounds.set("s_before_meta", {});
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined, "a prepared read-only reviewer has attested identity before persistence");
+  internal.preparedReviewRounds.delete("s_before_meta");
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_before_meta/, "ordinary launches still require proof");
+  internal.finishLaunchGeneration("s_before_meta", generation);
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
+});
+
+test("waiting only for capacity and parking a known unsandboxed provider keep review admission", posixOnly, async (t) => {
+  const f = fixture(t);
+  const store = new SessionStore(join(f.root, "sessions"));
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, f.root, 1);
+  t.after(() => manager.shutdownAll());
+  const internal = manager as unknown as {
+    beginLaunchGeneration(id: string): number;
+    finishLaunchGeneration(id: string, generation: number): void;
+    acquireAdmission(id: string): Promise<boolean>;
+    cancelAdmissionWait(id: string): boolean;
+    active: Map<string, unknown>;
+    closing: Map<string, unknown>;
+    parkingSessions: Set<string>;
+  };
+  for (const id of ["s_resident", "s_queued"]) store.create({
+    sessionId: id, agentId: "fixture", workspaceId: "fixture", driver: "claude-code", context: { kind: "native" }, env: {},
+    repoPath: f.root, worktreePath: null, status: "idle", title: "writer", config: {}, args: [], command: "fixture",
+    agentSessionId: null, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+  } as SessionMeta);
+  assert.equal(await internal.acquireAdmission("s_resident"), true);
+  internal.active.set("s_resident", { codexPackageSandboxed: false });
+  const queuedGeneration = internal.beginLaunchGeneration("s_queued");
+  const waiting = internal.acquireAdmission("s_queued");
+  assert.equal(store.readMeta("s_queued")?.status, "queued");
+  assert.equal(store.readWorktreeLease("s_queued"), null);
+  const queuedRefusal = manager.codexReviewerProtection(f.home).refusal;
+  internal.cancelAdmissionWait("s_queued");
+  assert.equal(await waiting, false);
+  internal.finishLaunchGeneration("s_queued", queuedGeneration);
+  internal.active.delete("s_resident");
+  await t.test("capacity wait", () => assert.equal(queuedRefusal, undefined, "no provider can run while its capacity request is queued"));
+
+  const parkingGeneration = internal.beginLaunchGeneration("s_resident");
+  internal.parkingSessions.add("s_resident");
+  internal.closing.set("s_resident", { entry: { codexPackageSandboxed: false }, unconfirmed: true });
+  const parkingRefusal = manager.codexReviewerProtection(f.home).refusal;
+  internal.closing.delete("s_resident");
+  internal.parkingSessions.delete("s_resident");
+  internal.finishLaunchGeneration("s_resident", parkingGeneration);
+  await t.test("parking", () => assert.equal(parkingRefusal, undefined, "parking retires the known host-access provider; it launches no new writer"));
 });
 
 test("a stopped structured writer remains refused until its asynchronous full-tree proof succeeds", posixOnly, async (t) => {

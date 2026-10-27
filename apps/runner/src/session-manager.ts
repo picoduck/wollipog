@@ -2076,17 +2076,29 @@ export class SessionManager {
       return { home, refusal: retaining.length
         ? `Codex packages cannot be resolved. Retaining writers:\n${retaining.join("\n")}` : "Codex packages cannot be resolved" };
     }
-    for (const meta of this.store.listSessions()) {
-      if (meta.context.kind !== "native" || meta.review) continue;
-      const live = this.active.get(meta.sessionId);
-      const retiring = this.closing.get(meta.sessionId)?.entry;
-      if (live?.codexPackageSandboxed === false || (!live && retiring?.codexPackageSandboxed === false)) continue;
-      if (this.closing.has(meta.sessionId) ||
-          (live && !live.codexPackageReadOnlyPaths?.includes(canonical)) ||
-          (!live && (["starting", "running", "input_required"].includes(meta.status) ||
-            this.store.readWorktreeLease(meta.sessionId) !== null))) {
-        if (!writers.some((writer) => writer.sessionId === meta.sessionId)) {
-          retaining.push(`session ${meta.sessionId} (current runner session lacks package-protection proof). End its complete process tree and retry; a retained worktree lease requires its owning runner to settle exit.`);
+    const capacityWaiters = new Set(this.admissionQueue.map((entry) => entry.request.sessionId));
+    // Include launches that have not persisted their session row yet. Idle durable rows add no
+    // evidence: only this runner's live lifecycle maps and the durable writer registry can do so.
+    const current = new Set([...this.launchGenerations.keys(), ...this.active.keys(), ...this.closing.keys()]);
+    for (const sessionId of current) {
+      // Review preparation attests this identity before the review's session row is persisted.
+      if (this.preparedReviewRounds.has(sessionId)) continue;
+      const meta = this.store.readMeta(sessionId);
+      if (meta && (meta.context.kind !== "native" || meta.review)) continue;
+      const live = this.active.get(sessionId);
+      const retiring = this.closing.get(sessionId)?.entry;
+      // The current process records a generation before asynchronous launch preparation, even
+      // before active is populated. Saved statuses and worktree leases are not writer evidence;
+      // writers surviving a previous runner are covered by the durable registry above.
+      // A capacity waiter has not begun provider launch; parking uses a generation to retire
+      // an existing provider, whose exact boundary remains available in the closing entry.
+      const launching = this.launchGenerations.has(sessionId) && !capacityWaiters.has(sessionId) &&
+        !this.parkingSessions.has(sessionId);
+      if (!launching && (live?.codexPackageSandboxed === false || (!live && retiring?.codexPackageSandboxed === false))) continue;
+      if (launching || this.closing.has(sessionId) ||
+          (live && !live.codexPackageReadOnlyPaths?.includes(canonical))) {
+        if (!writers.some((writer) => writer.sessionId === sessionId)) {
+          retaining.push(`session ${sessionId} (current runner session lacks package-protection proof). Wait for its launch or complete process-tree exit to settle and retry.`);
         }
       }
     }

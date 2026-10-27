@@ -7945,8 +7945,9 @@ export class ControlPlaneDb {
 
   /**
    * Replace a runner's review-session capability (#3369) from a discovery result: the registration
-   * frame's was derived before discovery and can name no reviewer. A malformed value is dropped
-   * rather than stored, so a review is refused as unavailable instead of launched on a bad entry.
+   * frame's was derived before discovery and can name no reviewer. Invalid reviewer identities
+   * fail closed. Diagnostic reasons are normalized independently: a bad or overlong Codex reason
+   * must never remove an otherwise valid Claude reviewer (or vice versa).
    */
   updateRunnerReviewSessionCapability(runnerId: string, capability: ReviewSessionCapability | null): void {
     const row = this.stmt("SELECT runtime FROM runners WHERE runner_id=?").get(runnerId) as { runtime: string | null } | undefined;
@@ -7956,11 +7957,28 @@ export class ControlPlaneDb {
     const valid = capability !== null && typeof capability === "object" && Array.isArray(capability.reviewers) &&
       capability.reviewers.length <= 2 && capability.reviewers.every((reviewer) =>
         (reviewer?.harness === "codex" || reviewer?.harness === "claude-code") &&
-        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128) &&
-      (capability.unavailable === undefined || (typeof capability.unavailable === "object" && capability.unavailable !== null &&
-        Object.values(capability.unavailable).every((reason) => typeof reason === "string" && reason.length <= 500)));
+        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128);
     const { reviewSession: _previous, ...rest } = runtime;
-    const next = valid ? { ...rest, reviewSession: capability } : rest;
+    let next = rest;
+    if (valid) {
+      const unavailable: NonNullable<ReviewSessionCapability["unavailable"]> = {};
+      const reasons = capability.unavailable;
+      if (reasons !== undefined) {
+        if (!reasons || typeof reasons !== "object" || Array.isArray(reasons)) {
+          unavailable.tools = "runner reported invalid review-session unavailability reasons";
+        } else {
+          for (const key of ["claude-code", "codex", "tools"] as const) {
+            const reason = reasons[key];
+            if (reason === undefined) continue;
+            unavailable[key] = typeof reason !== "string" || !reason.trim()
+              ? "runner reported an invalid review-session unavailability reason"
+              : reason.length <= 500 ? reason : `${reason.slice(0, 450)}… (+${reason.length - 450} more characters)`;
+          }
+        }
+      }
+      next = { ...rest, reviewSession: { reviewers: capability.reviewers,
+        ...(Object.keys(unavailable).length ? { unavailable } : {}) } };
+    }
     this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
   }
 
