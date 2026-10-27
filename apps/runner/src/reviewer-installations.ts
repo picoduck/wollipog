@@ -20,7 +20,7 @@ export function reviewerInstallationPaths(
         if (!isAbsolute(dir)) continue;
         const path = join(dir, command);
         try { if (statSync(path).isFile() && (statSync(path).mode & 0o111)) { candidate = path; break; } }
-        catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+        catch { /* Match spawn/admission: an unsearchable PATH entry is not a candidate. */ }
       }
     }
     if (!candidate) return;
@@ -46,7 +46,14 @@ export function reviewerInstallationPaths(
     }
     directories.add(dirname(resolved));
     // Read only the shebang, without executing any installation or provider code.
-    const descriptor = openSync(resolved, "r");
+    let descriptor: number;
+    try { descriptor = openSync(resolved, "r"); }
+    catch (error) {
+      // Admission also reads the shebang and will refuse this reviewer. An installed but
+      // unreadable command must not disable unrelated sandboxed providers.
+      if ((error as NodeJS.ErrnoException).code === "EACCES") return;
+      throw new Error(`Cannot inspect reviewer installation ${resolved}: ${(error as Error).message}`);
+    }
     let line: string;
     try {
       const head = Buffer.alloc(256);

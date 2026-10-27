@@ -294,6 +294,13 @@ async function reviewerInstallationDirectories(
     if (!paths.some((entry) => entry.path === path)) paths.push({ path, writable: writable.some((root) => pathsOverlap(root, path)) });
   }
   for (const { path } of paths) {
+    for (const root of writable) {
+      let canonical: string;
+      try { canonical = await runtime.realpathNative(root); } catch { canonical = root; }
+      if (pathWithinOrEqual(path, canonical)) {
+        throw new Error(`Cannot protect reviewer installation ${path}: it contains a writable root ${root}; use a dedicated installation directory`);
+      }
+    }
     if (remapped.some((bind) => pathsOverlap(bind.source, path))) {
       throw new Error(`Cannot protect reviewer installation ${path}: a writable remapped source exposes the installation`);
     }

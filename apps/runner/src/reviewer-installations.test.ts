@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,6 +21,15 @@ test("inventory pins configured reviewers, symlink containers and script interpr
   assert.deepEqual(reviewerInstallationPaths([{ id: "remote", command: cli, driver: "claude-code", context: { kind: "wsl", distro: "Ubuntu" } }], () => "", ""), []);
   assert.ok(!reviewerInstallationPaths([{ id: "shell", command: "/bin/sh", driver: "claude-code" }], () => "", "").includes("/"),
     "a system directory symlink must not turn the whole filesystem into an installation overlay");
+  const invalidPathEntry = join(root, "regular-file");
+  writeFileSync(invalidPathEntry, "fixture");
+  assert.deepEqual(new Set(reviewerInstallationPaths([], () => "", `${invalidPathEntry}:${join(root, "bin")}`)), new Set(paths),
+    "spawn skips PATH entries that are not searchable directories");
+  const executeOnly = join(root, "release", "execute-only");
+  writeFileSync(executeOnly, "native fixture", { mode: 0o111 });
+  chmodSync(executeOnly, 0o111);
+  assert.deepEqual(reviewerInstallationPaths([{ id: "unreadable", command: executeOnly, driver: "claude-code" }], () => "", ""), [join(root, "release")],
+    "an unreadable reviewer still has its directory protected without blocking unrelated providers");
 });
 
 for (const mode of ["bwrap", "seatbelt"] as const) {
@@ -35,7 +44,7 @@ for (const mode of ["bwrap", "seatbelt"] as const) {
       resolveNative: async () => ({ path: "/bin/boundary", via: "path" as const, launch: { command: "/bin/boundary", args: [] } }),
     };
     const state = { driver: "acp" as const, sessionId: "s1", dataDir: root, cwd: root, env: {},
-      additionalWritableRoots: [installation], reviewerInstallationPaths: [installation] };
+      additionalWritableRoots: [root], reviewerInstallationPaths: [installation] };
     const isolation = await resolveExecutionIsolation({ mode, network: "inherit" }, { kind: "native" }, deps, state);
     assert.ok(isolation?.backend === mode);
     if (isolation.backend === "bwrap") {
@@ -51,6 +60,11 @@ for (const mode of ["bwrap", "seatbelt"] as const) {
     await assert.rejects(resolveExecutionIsolation({ mode, network: "inherit" }, { kind: "native" }, {
       ...deps, isExposableEntryNative: async (path) => path !== installation,
     }, state), new RegExp(`Cannot protect reviewer installation ${installation}`));
+    const child = join(installation, "cache");
+    mkdirSync(child);
+    await assert.rejects(resolveExecutionIsolation({ mode, network: "inherit" }, { kind: "native" }, deps,
+      { ...state, cwd: child, additionalWritableRoots: [] }), /reviewer installation .*contains a writable root/,
+    "an ancestor overlay must never silently mask a writable worktree or cache");
     if (mode === "bwrap") {
       await assert.rejects(resolveExecutionIsolation({ mode, network: "inherit" }, { kind: "native" }, deps,
         { ...state, driver: "claude-code", dataDir: installation }), /reviewer installation .*writable remapped source/);

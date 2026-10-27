@@ -45,9 +45,11 @@ function inactiveSssd(db: GroupDatabase): boolean {
 
 function assertEnumerable(db: GroupDatabase): void {
   const config = db.read("/etc/nsswitch.conf");
-  for (const database of ["passwd", "group"]) {
+  for (const database of ["passwd", "group", "initgroups"]) {
     const lines = config.split("\n").map((line) => line.split("#")[0]!.trim())
       .filter((line) => line.startsWith(`${database}:`));
+    // NSS defaults initgroups to the group database only when it has no separate declaration.
+    if (!lines.length && database === "initgroups") continue;
     if (lines.length !== 1) throw new Error(`cannot prove complete ${database} membership from NSS configuration`);
     const sources = lines[0]!.slice(database.length + 1).replace(/\[[^\]]*\]/gu, "").trim().split(/\s+/u);
     if (!sources.includes("files")) throw new Error(`cannot prove complete ${database} membership without NSS files`);
@@ -66,13 +68,21 @@ export function isUserPrivateGroup(uid: number, gid: number, db: GroupDatabase =
   const users = db.lookup("passwd").trim().split("\n").filter(Boolean).map((line) => line.split(":"));
   const owners = db.lookup("passwd", String(uid)).trim().split("\n").filter(Boolean).map((line) => line.split(":"));
   const groups = db.lookup("group", String(gid)).trim().split("\n").filter(Boolean).map((line) => line.split(":"));
+  const allGroups = db.lookup("group").trim().split("\n").filter(Boolean).map((line) => line.split(":"));
   if (owners.length !== 1 || groups.length !== 1 || users.some((fields) => fields.length !== 7) ||
-      owners[0]!.length !== 7 || groups[0]!.length !== 4) throw new Error("system passwd/group lookup returned incomplete membership");
+      owners[0]!.length !== 7 || groups[0]!.length !== 4 || allGroups.some((fields) => fields.length !== 4)) {
+    throw new Error("system passwd/group lookup returned incomplete membership");
+  }
   const owner = owners[0]!, group = groups[0]!;
   if (owner[2] !== String(uid) || owner[3] !== String(gid) || group[2] !== String(gid)) return false;
   if (!users.some((user) => user[0] === owner[0] && user[2] === owner[2] && user[3] === owner[3])) {
     throw new Error("system passwd enumeration omitted the owning user");
   }
   if (users.some((user) => user[3] === String(gid) && user[2] !== String(uid))) return false;
-  return group[3]!.split(",").filter(Boolean).every((member) => member === owner[0]);
+  if (!allGroups.some((entry) => entry.join(":") === group.join(":"))) {
+    throw new Error("system group enumeration omitted the owning group");
+  }
+  // initgroups can grant membership from every same-gid entry, not only getgrgid's first match.
+  return allGroups.filter((entry) => entry[2] === String(gid))
+    .every((entry) => entry[3]!.split(",").filter(Boolean).every((member) => member === owner[0]));
 }

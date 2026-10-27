@@ -13,13 +13,16 @@ places read-only mounts after writable grants; macOS denies writes and pins ance
 renaming. An unverifiable installation fails the launch with its path. Missing package trees
 beneath writable roots are created empty and protected before launch, so a sandbox cannot plant
 a future installation. Other session-writable executable locations remain refused at admission.
+An installation that contains a requested writable worktree, cache or state root also fails with
+both paths instead of silently making that root read-only. Use a dedicated installation directory.
 
 Both review sessions and the older bridge accept the conventional
 `~/.codex/packages/standalone` installation based on that launch invariant. Trust still rejects
 other-user ownership, session-writable locations outside that exception, world-writable paths
 and shared writable groups. A writable user-private group is accepted only when the system
 passwd/group database proves the owning user's primary gid and no other primary or supplementary
-members. Environment variables supply no identity evidence. Unknown or remote NSS sources fail
+members across all same-gid group entries. A separately configured `initgroups` NSS database is
+checked too. Environment variables supply no identity evidence. Unknown or remote NSS sources fail
 closed with the source named. `files` and local `systemd` sources are supported; a listed `sss`
 source is non-contributing only when SSSD configuration, fragments, sockets and processes are
 provably absent. Unreadable evidence refuses the exception.

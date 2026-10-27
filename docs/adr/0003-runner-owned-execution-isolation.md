@@ -118,9 +118,12 @@ directories under writable grants are pinned before launch to prevent planting f
 Unverifiable installation protection fails the launch with the affected path. Writable remapped
 sources that expose a protected installation are refused. Other session-writable executables,
 world-writable paths and other-user-owned components remain untrusted.
+Installations containing requested writable roots are refused with both paths rather than
+silently masking worktree or cache writes. Installation directories must be dedicated to code.
 
 A group-write bit is safe only for a proven user-private group: system passwd/group lookups must
 show the owner's primary gid, no other supplementary member and no other primary-group user.
+All same-gid group entries and any separate `initgroups` NSS source participate in this proof.
 Unknown or configured remote NSS sources fail closed. Listed but provably unconfigured and
 inactive SSSD is non-contributing; local files/systemd identity sources are supported. No
 identity evidence comes from environment variables. Shared group writes remain refused even below private ancestors; sticky-parent

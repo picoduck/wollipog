@@ -6,18 +6,18 @@ import { test } from "node:test";
 import { isUserPrivateGroup, type GroupDatabase } from "./review-private-group.js";
 import { trustedPath } from "./review-trust.js";
 
-function database(options: { source?: string; members?: string; otherPrimary?: boolean; configured?: string; process?: string; denied?: boolean; hidden?: boolean } = {}): GroupDatabase {
+function database(options: { source?: string; members?: string; otherPrimary?: boolean; configured?: string; process?: string; denied?: boolean; hidden?: boolean; duplicateGroup?: boolean; initgroups?: string } = {}): GroupDatabase {
   const user = "owner:x:1000:1000::/home/owner:/bin/sh";
   return {
     read: (path) => {
-      if (path === "/etc/nsswitch.conf") return `passwd: files systemd ${options.source ?? "sss"}\ngroup: files systemd ${options.source ?? "sss"}\n`;
+      if (path === "/etc/nsswitch.conf") return `passwd: files systemd ${options.source ?? "sss"}\ngroup: files systemd ${options.source ?? "sss"}\n${options.initgroups ? `initgroups: ${options.initgroups}\n` : ""}`;
       if (path === "/proc/mounts") return `proc /proc proc rw${options.hidden ? ",hidepid=2" : ""} 0 0\n`;
       if (options.denied) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
       return options.process ?? "node";
     },
     entries: (path) => path === "/proc" ? ["123"] : options.configured === "drop-in" ? ["domain.conf"] : [],
     exists: (path) => path === options.configured || (path === "/etc/sssd/conf.d" && options.configured === "drop-in"),
-    lookup: (kind, key) => kind === "group" ? `owner:x:1000:${options.members ?? ""}`
+    lookup: (kind, key) => kind === "group" ? `owner:x:1000:${options.members ?? ""}${!key && options.duplicateGroup ? "\nshared:x:1000:other" : ""}`
       : key ? user : user + (options.otherPrimary ? "\nother:x:1001:1000::/home/other:/bin/sh" : ""),
   };
 }
@@ -29,6 +29,9 @@ test("a user-private group is proven from passwd/group with Ubuntu's inactive ss
   for (const options of [{ members: "other" }, { members: "owner,other" }, { otherPrimary: true }]) {
     assert.equal(isUserPrivateGroup(1000, 1000, database(options)), false);
   }
+  assert.equal(isUserPrivateGroup(1000, 1000, database({ duplicateGroup: true })), false,
+    "all group entries with the same gid contribute supplementary membership");
+  assert.throws(() => isUserPrivateGroup(1000, 1000, database({ initgroups: "files ldap" })), /NSS source ldap/);
 });
 
 test("configured or running SSSD and non-enumerable NSS sources fail closed by name", () => {
