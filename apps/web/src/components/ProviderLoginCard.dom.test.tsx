@@ -116,6 +116,56 @@ test("a rejected code is a field error under the field, with the field invalid a
   }
 });
 
+test("the embedded sign-in's code field never puts the code in the DOM: typed, rejected, failed or submitted (#3529)", async () => {
+  const submitted: string[] = [];
+  const replies: Array<() => never | undefined> = [
+    () => { throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409); },
+    () => { throw new TypeError("Failed to fetch"); },
+    () => undefined,
+  ];
+  const view = await mount(<ProviderLoginCard runnerId="runner-1" login={login} embedded />, {
+    submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+      submitted.push(code);
+      replies.shift()!();
+      return { login };
+    },
+  });
+  try {
+    const card = view.container.querySelector<HTMLElement>("article.provider-login-card")!;
+    assert.equal(card.dataset.embedded, "true");
+    const input = card.querySelector<HTMLInputElement>("input")!;
+    assert.equal(input.type, "password");
+    const submit = view.button("Submit Code");
+    assert.equal(submit.disabled, true, "nothing to submit yet");
+    await act(async () => fireDomEvent.change(input, { target: { value: "   " } }));
+    assert.equal(submit.disabled, true, "a whitespace-only field has nothing to submit");
+    await act(async () => fireDomEvent.change(input, { target: { value: "embedded-secret" } }));
+    assert.equal(submit.disabled, false);
+    assert.equal(input.getAttribute("value"), null, "the code is not a value attribute");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/, "a typed code is not in the DOM");
+
+    await act(async () => fireDomEvent.submit(card.querySelector("form")!));
+    await view.settle();
+    assert.equal(card.querySelector(".form-error")?.textContent, "The provider rejected this code. Paste the code the page shows.");
+    assert.equal(input.value, "embedded-secret", "a rejected code stays in the field to correct");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/, "a rejected code is not in the DOM");
+
+    await act(async () => fireDomEvent.submit(card.querySelector("form")!));
+    await view.settle();
+    assert.equal(card.querySelector(".form-error")?.textContent, "Failed to fetch");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/, "a code whose request failed is not in the DOM");
+
+    await act(async () => fireDomEvent.submit(card.querySelector("form")!));
+    await view.settle();
+    assert.deepEqual(submitted, ["embedded-secret", "embedded-secret", "embedded-secret"]);
+    assert.equal(input.value, "", "a submitted code is cleared");
+    assert.equal(submit.disabled, true, "nothing to submit after it");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a device-code sign-in shows the code with its copy button and the waiting line, with nothing to paste", async () => {
   const view = await mount(<ProviderSignIn runnerId="runner-1" login={device} />);
   try {

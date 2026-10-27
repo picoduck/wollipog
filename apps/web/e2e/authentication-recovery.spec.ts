@@ -284,6 +284,24 @@ test("while a sign-in runs, what the person must do is in view without scrolling
   }
 });
 
+test("a code pasted into the sign-in card is never in the page, even after the provider rejects it (#3529)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  const card = await open(page, "scenario=signing-in&rejectCode=1", "Signing In — Claude Code");
+  const field = card.getByLabel("Authorization Code");
+  const submit = card.getByRole("button", { name: "Submit Code" });
+  await expect(submit).toBeDisabled();
+  await field.fill("   ");
+  await expect(submit).toBeDisabled();
+  await field.fill("rejected-code-3529");
+  await expect(submit).toBeEnabled();
+  expect(await page.evaluate(() => document.documentElement.outerHTML.includes("rejected-code-3529"))).toBe(false);
+  await submit.click();
+  await expect(card.locator(".form-error")).toHaveText("The provider rejected this code. Paste the code the page shows.");
+  expect(await page.evaluate(() => window.__WOLLIPOG_AUTH_RECOVERY_E2E__.codes())).toEqual(["rejected-code-3529"]);
+  await expect(field).toHaveValue("rejected-code-3529");
+  expect(await page.evaluate(() => document.documentElement.outerHTML.includes("rejected-code-3529"))).toBe(false);
+});
+
 test("a body cut by the dock's cap draws a hairline at its lower edge, never a fade, so a cut line never reads as a stray mark (#2715)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const scenario of ["email", "older", "readonly", "methods"] as const) {

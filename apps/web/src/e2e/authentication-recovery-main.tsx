@@ -38,6 +38,7 @@ import "../styles.css";
  * `?emailLabels=1` names two of the other accounts with an email, as people often do.
  * `?deviceCode=1` makes the `signing-in` sign-in a device-code one: the provider shows a code to
  * enter on its page, and nothing is pasted back.
+ * `?rejectCode=1` has the provider reject every code submitted on the `signing-in` card.
  * `?chooserSignIn=1` has a sign-in running for the signed-out Team account, started from Choose
  * Another Account, so the dialog shows its steps (#2996).
  * `__WOLLIPOG_AUTH_RECOVERY_E2E__.removeAccount(id)` removes an account from the Machine, as the
@@ -50,6 +51,7 @@ const frameHeight = Number(params.get("height") ?? "760");
 const emailLabels = params.get("emailLabels") === "1";
 const deviceCode = params.get("deviceCode") === "1";
 const chooserSignIn = params.get("chooserSignIn") === "1";
+const rejectCode = params.get("rejectCode") === "1";
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
 declare global {
@@ -376,6 +378,7 @@ const client = {
   // The sign-in keeps waiting, so a capture shows the card the code was submitted from.
   submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
     codes.push(code);
+    if (rejectCode) throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409);
     return {};
   },
   // The card stays as it is, so a capture shows what the person pressed rather than the next state.

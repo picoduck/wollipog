@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -338,6 +339,39 @@ test("while a sign-in runs only the session's account is a fact, and the sign-in
       "This Session Uses already names the account; the sentence carries the status");
     assert.equal(view.container.querySelector(".sign-in-sentence")?.textContent,
       "Sign in to Claude Code with Open Provider Sign-In, then paste the authorization code here.");
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("a code pasted into the recovery panel's sign-in is never in the DOM, before or after a failed request (#3529)", async () => {
+  const submitted: string[] = [];
+  const api = client();
+  const signingIn = { ...approval, title: "Signing In — Claude Code",
+    options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" }] } as PendingApproval;
+  const login = { operationId: "op-1", accountId: "claude-work", label: "Claude Work", provider: "claude",
+    status: "awaiting_code", expectsCode: true, sessionId: "session-auth", startedAt: 1 };
+  const view = await render(
+    <AuthenticationRecoveryPanel session={session()} approval={signingIn}
+      runner={runner({ providerLogins: [login] } as unknown as Partial<RunnerView>)} runnerOnline />,
+    {
+      ...api.value,
+      submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+        submitted.push(code);
+        throw new TypeError("Failed to fetch");
+      },
+    } as ApiClient,
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    const input = card.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await act(async () => { fireDomEvent.change(input, { target: { value: "recovery-secret" } }); });
+    assert.equal(view.button("Submit Code")?.disabled, false);
+    assert.doesNotMatch(view.container.innerHTML, /recovery-secret/, "a typed code is not in the DOM");
+    await act(async () => { fireDomEvent.submit(card.querySelector("form")!); await tick(); await tick(); });
+    assert.deepEqual(submitted, ["recovery-secret"]);
+    assert.equal(card.querySelector(".form-error")?.textContent, "Failed to fetch");
+    assert.doesNotMatch(view.container.innerHTML, /recovery-secret/, "a code whose request failed is not in the DOM");
   } finally {
     await view.cleanup();
   }

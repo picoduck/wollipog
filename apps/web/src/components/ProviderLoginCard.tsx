@@ -251,7 +251,7 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
   const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const name = `${accountLabelText(login.label, undefined, privacy.hide)} Provider Sign-In`;
-  if (embedded) return <EmbeddedSignIn runnerId={runnerId} login={login} name={name} />;
+  if (embedded) return <EmbeddedSignIn key={login.operationId} runnerId={runnerId} login={login} name={name} />;
 
   const running = providerLoginRunning(login);
   const hiddenTitle = providerSignInHiddenTitle(login, privacy.hide);
@@ -296,17 +296,22 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
  * field as they were before the shared steps (#2198). */
 function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: ProviderLoginView; name: string }) {
   const api = useApi();
-  const [code, setCode] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Uncontrolled, like `ProviderSignIn`'s field (#3529): the code is never in the DOM.
+  const [hasCode, setHasCode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
-    if (busy || !code.trim()) return;
+    const input = inputRef.current;
+    const code = input?.value ?? "";
+    if (busy || !input || !code.trim()) return;
     setBusy(true);
     setError(null);
     try {
       await api.submitProviderLoginCode(runnerId, login.operationId, code);
-      setCode("");
+      input.value = "";
+      setHasCode(false);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -332,14 +337,14 @@ function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: Pr
           <label>
             <span>Authorization Code</span>
             <input
+              ref={inputRef}
               type="password"
               autoComplete="off"
-              value={code}
               maxLength={4_096}
-              onChange={(event) => setCode(event.target.value)}
+              onChange={(event) => setHasCode(event.target.value.trim() !== "")}
             />
           </label>
-          <BusyButton type="submit" className="btn sm" busy={busy} progress="Submitting the code…" disabled={!code.trim()}>
+          <BusyButton type="submit" className="btn sm" busy={busy} progress="Submitting the code…" disabled={!hasCode}>
             Submit Code
           </BusyButton>
         </form>
