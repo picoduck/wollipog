@@ -147,8 +147,8 @@ function occurrences(text: string, needle: string): number[] {
   return found;
 }
 
-/** The first position in sorted `positions` at or after `at`, or -1. */
-function nextAt(positions: readonly number[], at: number): number {
+/** How many of sorted `positions` come before `at`. */
+function indexAt(positions: readonly number[], at: number): number {
   let low = 0;
   let high = positions.length;
   while (low < high) {
@@ -156,7 +156,13 @@ function nextAt(positions: readonly number[], at: number): number {
     if (positions[middle]! < at) low = middle + 1;
     else high = middle;
   }
-  return low < positions.length ? positions[low]! : -1;
+  return low;
+}
+
+/** The first position in sorted `positions` at or after `at`, or -1. */
+function nextAt(positions: readonly number[], at: number): number {
+  const index = indexAt(positions, at);
+  return index < positions.length ? positions[index]! : -1;
 }
 
 /**
@@ -224,19 +230,20 @@ function maskMarkdown(text: string): string {
     offset = lineEnd + 1;
   }
   // Inline code and HTML comments, in one left-to-right pass as cmark-gfm reads them: whichever
-  // starts first wins, and a comment's end is found in the text itself, even inside what would
-  // otherwise read as a code span. Both hide text only within one line: a later line might start a
-  // block (a heading, a list item) that ends the paragraph first, and then GitHub shows the text.
+  // starts first wins, a comment's end is found in the text itself (even inside what would
+  // otherwise read as a code span), and backtick runs pair across the paragraph. Text is hidden only
+  // within one line, though: a later line might start a block (a heading, a list item) that ends the
+  // paragraph first, and then GitHub shows the text and pairs that line's backticks afresh. So a
+  // pair that crosses a line hides nothing, and neither does anything else on the lines it reaches.
   const masked = out.join("");
   const inline = out.slice();
   for (const [from, to] of raw) for (let i = from; i < to; i += 1) if (inline[i] === "`") inline[i] = LITERAL_BACKTICK;
   const runs = [...inline.join("").matchAll(/(?<!\\)`+/gu)].map((match) => ({ start: match.index, length: match[0].length }));
   const newlines = occurrences(masked, "\n");
-  const lineOf: number[] = [];
-  for (let i = 0, n = 0; i < runs.length; i += 1) {
-    while (n < newlines.length && newlines[n]! < runs[i]!.start) n += 1;
-    lineOf.push(n);
-  }
+  const lineAt = (at: number) => indexAt(newlines, at);
+  const paragraphEnds = [...masked.matchAll(/\n[ \t]*\n/gu)].map((match) => match.index);
+  const paragraph = runs.map((run) => indexAt(paragraphEnds, run.start));
+  const unsure = new Set<number>();
   const byLength = new Map<number, number[]>();
   runs.forEach((run, i) => {
     const same = byLength.get(run.length);
@@ -280,7 +287,7 @@ function maskMarkdown(text: string): string {
       if (from < cursor) continue;
       const end = commentEnd(from);
       if (end >= 0) {
-        blank(from, end);
+        if (!unsure.has(lineAt(from))) blank(from, end);
         cursor = end;
       }
       continue;
@@ -293,9 +300,11 @@ function maskMarkdown(text: string): string {
     while (k < same.length && same[k]! <= i) k += 1;
     next.set(length, k);
     const close = same[k];
-    if (close === undefined || lineOf[close] !== lineOf[i]) continue;
+    if (close === undefined || paragraph[close] !== paragraph[i]) continue;
     cursor = runs[close]!.start + length;
-    blank(start, cursor);
+    const [first, last] = [lineAt(start), lineAt(runs[close]!.start)];
+    for (let line = first + 1; line <= last; line += 1) unsure.add(line);
+    if (first === last && !unsure.has(first)) blank(start, cursor);
   }
   return out.join("");
 }

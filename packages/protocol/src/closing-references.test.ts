@@ -67,7 +67,8 @@ test("code and HTML comments in a Markdown description do not close", () => {
     "> ```\n>\n> closes #1\n> ```", "- item\n\n  ```\n\n  closes #1\n  ```", "```\n> ```\ncloses #1\n```",
     "<details>\n\n```\ncloses #1\n```\n\n</details>", "<!-- closes #1 -->", "<!--\ncloses #1\n-->", "closes `x` #1",
     "closes <!-- x --> #1", "<!-- a --><!-- closes #7 -->", "<!-- a -- b\ncloses #1\n-->", "> <!-- closes #1 -->",
-    "Text <!-- closes #1 --> more", "Text <!---->closes <!-- x --> #1"]) {
+    "Text <!-- closes #1 --> more", "Text <!---->closes <!-- x --> #1", "`a` b\n`closes #1` c",
+    "x `a\nb` y\n\n`closes #1`"]) {
     assert.deepEqual(issues(text), [], text);
   }
   // Outside the code, or where code or a comment never closes, the reference still counts.
@@ -97,8 +98,10 @@ test("code and HTML comments in a Markdown description do not close", () => {
     "Text <!-- a `-->` closes #1 -->", "<!--> This PR does not close #1 <!-- note -->", "<!---> closes #1",
     "<!-- x --!> closes #1 -->", "Text <!-- a -- b closes #1 -->", "Text <!--> closes #1 -->", "Text <!-- x - closes #1 --->",
     "Text <!-- a\n\ncloses #1 -->", "Text <!-- a\n# closes #1 -->", "- <!-- a -- b closes #1 -->",
-    // A code span crossing a line may be cut by a block that starts the next line.
-    "Text `a\n- closes #1 `",
+    // A code span crossing a line may be cut by a block that starts the next line, and pairs
+    // backticks so that a later span on the next line is not what it seems.
+    "Text `a\n- closes #1 `", "a `b\nc` closes #1 `d`", "Text `a\n- `x` closes #1 `y`", "x `a\nb` y\n`c` closes #1 `d`",
+    "Text `a\nx` <!-- `closes #1 -->",
   ]) {
     assert.deepEqual(issues(text), ["team/repo#1"], text);
   }
