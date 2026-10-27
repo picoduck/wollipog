@@ -47,6 +47,7 @@ interface IsolationDeps {
   /** A real file, directory, or socket at exactly this path — never a symlink, which a bind or a
    * Seatbelt allow would follow somewhere the runner did not choose. */
   isExposableEntryNative: (path: string) => Promise<boolean>;
+  isSymbolicLinkNative: (path: string) => Promise<boolean>;
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   forkSizeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   wait: (ms: number) => Promise<void>;
@@ -112,6 +113,7 @@ const defaultDeps: IsolationDeps = {
     (value) => value.isFile() || value.isDirectory() || value.isSocket(),
     () => false,
   ),
+  isSymbolicLinkNative: async (path) => lstat(path).then((value) => value.isSymbolicLink(), () => false),
   forkSizeNative: async (location, driver, providerSessionId) => {
     return findProviderForkSizeNative(location.leaf, driver, providerSessionId, 0);
   },
@@ -168,8 +170,11 @@ export interface IsolationStateOptions {
   readOnlyPaths?: string[];
   /** All configured Codex homes, including homes used by other harnesses. */
   codexHomes?: readonly string[];
-  /** Canonical reviewer executable, symlink-container and interpreter installation directories. */
+  /** Canonical reviewer executable and interpreter installation directories. */
   reviewerInstallationPaths?: readonly string[];
+  /** Link entries on reviewer resolution paths, with canonical parents. Never bind these paths:
+   * bwrap follows symlinks, so doing so would protect the target rather than the link entry. */
+  reviewerSymlinkPaths?: readonly string[];
   /** The runner's hook state directory, hidden from the provider and everything it spawns, and
    * the few entries inside it the provider must still read (#1336). Native bwrap and Seatbelt
    * express it; every other mode is documented as not enforcing it. */
@@ -285,24 +290,55 @@ async function reviewerInstallationDirectories(
   remapped: readonly { source: string; target: string }[] = [],
 ): Promise<Array<{ path: string; writable: boolean }>> {
   const paths = await codexPackageDirectories(state, runtime, writable, remapped.map((bind) => bind.target));
+  const writableRoots = await Promise.all(writable.map(async (root) => {
+    try { return { root, canonical: await runtime.realpathNative(root) }; }
+    catch { return { root, canonical: root }; }
+  }));
   for (const path of state.reviewerInstallationPaths ?? []) {
     try {
       if (!posix.isAbsolute(path) || await runtime.realpathNative(path) !== path || !await runtime.isExposableEntryNative(path)) {
         throw new Error("directory is missing, aliased, or not a real installation directory");
       }
     } catch (error) { throw new Error(`Cannot protect reviewer installation ${path}: ${(error as Error).message}`); }
-    if (!paths.some((entry) => entry.path === path)) paths.push({ path, writable: writable.some((root) => pathsOverlap(root, path)) });
+    if (!paths.some((entry) => entry.path === path)) {
+      paths.push({ path, writable: writableRoots.some(({ canonical }) => pathsOverlap(canonical, path)) });
+    }
   }
   for (const { path } of paths) {
-    for (const root of writable) {
-      let canonical: string;
-      try { canonical = await runtime.realpathNative(root); } catch { canonical = root; }
+    for (const { root, canonical } of writableRoots) {
       if (pathWithinOrEqual(path, canonical)) {
         throw new Error(`Cannot protect reviewer installation ${path}: it contains a writable root ${root}; use a dedicated installation directory`);
       }
     }
     if (remapped.some((bind) => pathsOverlap(bind.source, path))) {
       throw new Error(`Cannot protect reviewer installation ${path}: a writable remapped source exposes the installation`);
+    }
+  }
+  for (const link of state.reviewerSymlinkPaths ?? []) {
+    const parent = posix.dirname(link);
+    try {
+      if (!posix.isAbsolute(link) || posix.normalize(link) !== link ||
+          await runtime.realpathNative(parent) !== parent || !await runtime.isSymbolicLinkNative(link)) {
+        throw new Error("entry is missing, not a symlink, or its parent is aliased");
+      }
+    } catch (error) { throw new Error(`Cannot protect reviewer symlink ${link}: ${(error as Error).message}`); }
+    // The read-only root already pins entries outside writable mounts. Protected installations
+    // (notably Codex packages) also pin their own links after the containing writable grant.
+    // A writable child of HOME does not make HOME's directory entries writable.
+    const protectedParent = paths.some(({ path }) => pathWithinOrEqual(path, parent));
+    for (const { root, canonical } of writableRoots) {
+      if (pathWithinOrEqual(canonical, parent) && !protectedParent) {
+        throw new Error(`Cannot protect reviewer symlink ${link}: its parent is inside writable root ${root}`);
+      }
+    }
+    for (const bind of remapped) {
+      for (const root of [bind.source, bind.target]) {
+        let canonical: string;
+        try { canonical = await runtime.realpathNative(root); } catch { canonical = root; }
+        if (pathWithinOrEqual(canonical, parent)) {
+          throw new Error(`Cannot protect reviewer symlink ${link}: writable remapped root ${root} exposes its parent`);
+        }
+      }
     }
   }
   return paths;
@@ -569,6 +605,7 @@ function renderSeatbeltProfile(
   readOnlyPaths: readonly string[] = [],
   guardStateMask?: SeatbeltGuardStateMask,
   pinnedPackageAncestors: readonly string[] = [],
+  readOnlyLinks: readonly string[] = [],
 ): string {
   const writeRules = writableRoots
     .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
@@ -602,6 +639,13 @@ function renderSeatbeltProfile(
         ")",
       ]
       : []),
+    // Exact link entries only: a subpath deny on HOME or another container would also deny
+    // writes to unrelated caches and worktrees. Ancestor entries are pinned separately below.
+    ...(readOnlyLinks.length ? [
+      "(deny file-write*",
+      ...readOnlyLinks.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+      ")",
+    ] : []),
     // The runner's hook state directory (#1336): unreadable and unwritable, although the data
     // directory that contains it is a writable root above. The later allows re-expose, read-only,
     // exactly the entries the provider needs: its own settings documents and its own verdict
@@ -948,6 +992,11 @@ export async function resolveExecutionIsolation(
         packageAncestors.add(ancestor);
       }
     }
+    for (const link of state.reviewerSymlinkPaths ?? []) {
+      for (let ancestor = link; ancestor !== "/"; ancestor = posix.dirname(ancestor)) {
+        packageAncestors.add(ancestor);
+      }
+    }
     const guardStateMask = await resolveGuardStateMask(state.guardStateMask, runtime);
     return {
       backend: "seatbelt",
@@ -960,6 +1009,7 @@ export async function resolveExecutionIsolation(
         readOnlyPaths,
         guardStateMask ? await seatbeltGuardStateMask(guardStateMask, runtime) : undefined,
         [...packageAncestors],
+        state.reviewerSymlinkPaths,
       ),
       writableRoots,
       ...(packages.length ? { codexPackageReadOnlyPaths: packages.map(({ path }) => path) } : {}),

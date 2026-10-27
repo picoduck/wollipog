@@ -5,12 +5,19 @@ import { closeSync, lstatSync, openSync, readSync, readlinkSync, realpathSync, s
 import { dirname, isAbsolute, join } from "node:path";
 import type { AgentDefinition } from "@wollipog/protocol";
 
-export function reviewerInstallationPaths(
+export interface ReviewerInstallations {
+  reviewerInstallationPaths: string[];
+  /** Each link is expressed through its canonical parent, without following the entry itself. */
+  reviewerSymlinkPaths: string[];
+}
+
+export function reviewerInstallations(
   agents: readonly Pick<AgentDefinition, "id" | "command" | "driver" | "context">[],
   agentPath: (id: string, driver: AgentDefinition["driver"]) => string | undefined,
   hostPath = process.env.PATH,
-): string[] {
+): ReviewerInstallations {
   const directories = new Set<string>();
+  const links = new Set<string>();
   const seen = new Set<string>();
   const inspect = (command: string, pathEnv: string | undefined, depth = 0): void => {
     if (depth > 8) throw new Error(`reviewer interpreter chain is too deep: ${command}`);
@@ -30,16 +37,19 @@ export function reviewerInstallationPaths(
     const key = `${candidate}\0${pathEnv}`;
     if (seen.has(key)) return;
     seen.add(key);
-    // Pin all symlink containers, not just the final target. Otherwise a writable link could
-    // redirect the runner's subsequent PATH lookup to planted code.
+    // Record each link entry, not its whole container. HOME can hold a PATH link alongside
+    // writable worktrees and caches without making all of HOME an installation directory.
     let current = "/";
     const pending = candidate.split("/").filter(Boolean);
     let hops = 0;
     while (pending.length) {
-      const next = join(current, pending.shift()!);
+      const name = pending.shift()!;
+      if (name === ".") continue;
+      if (name === "..") { current = dirname(current); continue; }
+      const next = join(current, name);
       if (!lstatSync(next).isSymbolicLink()) { current = next; continue; }
       if (++hops > 40) throw new Error(`reviewer installation has too many symbolic links: ${candidate}`);
-      if (current !== "/") directories.add(current);
+      links.add(next);
       const target = readlinkSync(next);
       if (isAbsolute(target)) current = "/";
       pending.unshift(...target.split("/").filter(Boolean));
@@ -74,5 +84,5 @@ export function reviewerInstallationPaths(
         !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "")) continue;
     inspect(agent.command, agentPath(agent.id, agent.driver));
   }
-  return [...directories];
+  return { reviewerInstallationPaths: [...directories], reviewerSymlinkPaths: [...links] };
 }
