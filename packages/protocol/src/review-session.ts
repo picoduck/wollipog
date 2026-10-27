@@ -51,6 +51,8 @@ export interface ReviewSessionLink {
 }
 
 export interface ReviewSessionRequest {
+  /** A GitHub `owner/name` and pull request number, or (v244, #3539) a GitLab project named by its
+   * host and full namespace and a merge request IID. */
   pullRequest: { repository: string; number: number };
   /** The exact head to review; it must be the pull request's pushed head. */
   headSha: string;
@@ -181,6 +183,8 @@ const REVIEW_SESSION_REASONS = new Set([
   "the runner cannot launch this reviewer",
   "the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches",
   "the runner is missing a trusted git or gh for reviews",
+  "the runner is missing a trusted gh for GitHub reviews",
+  "the runner is missing a trusted glab for GitLab reviews",
   "the review session could not be launched",
   "the review was cancelled",
   "the review ended without a result",

@@ -575,7 +575,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const headSha = option(args, "--head");
       const briefFile = option(args, "--brief-file");
       if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha || !briefFile || briefFile.startsWith("--")) {
-        return { error: "review session run requires --repo <owner/name>, --pr <number>, --head <sha> and --brief-file <path>" };
+        return { error: "review session run requires --repo <owner/name or GitLab host/group/project>, --pr <number or merge request IID>, --head <sha> and --brief-file <path>" };
       }
       let brief: string;
       try { brief = readFileSync(resolvePath(briefFile), "utf8"); }

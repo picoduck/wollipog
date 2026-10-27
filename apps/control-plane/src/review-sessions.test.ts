@@ -480,6 +480,56 @@ test("reviews under a campaign remain outside its membership, counts, requests a
   } finally { h.db.close(); }
 });
 
+const GITLAB = "gitlab.example.com/acme/team/widget";
+
+test("a GitLab merge request is reviewed by host-qualified project and IID, only on a v240 runner", () => {
+  const h = harness();
+  try {
+    const result = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: GITLAB, number: 12 } }));
+    assert.ok(result.ok && result.data, result.error ?? "request refused");
+    const [start] = h.starts();
+    assert.deepEqual(start?.spec.review, {
+      requesterSessionId: "s1", pullRequest: { repository: GITLAB, number: 12 }, headSha: HEAD, harness: "codex",
+      history: EMPTY_HISTORY,
+    });
+    assert.equal(h.db.getSession(result.data.reviewSessionId)!.title, `Codex Review of ${GITLAB}!12`);
+  } finally { h.db.close(); }
+  // A pre-v240 runner cannot read a merge request, so it is refused with an update message, while
+  // its GitHub reviews still work.
+  const old = harness({ protocol: 239 });
+  try {
+    const refused = old.svc.requestReviewSession("s1", request({ pullRequest: { repository: GITLAB, number: 12 } }));
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /review sessions of GitLab merge requests/u);
+    assert.deepEqual(old.sent, []);
+    assert.ok(old.svc.requestReviewSession("s1", request()).ok);
+  } finally { old.db.close(); }
+  // A bare namespace names no host, and a host-qualified GitHub path is not a GitLab project.
+  const malformed = harness();
+  try {
+    for (const repository of ["acme/team/widget", "github.com/acme/widget", "gitlab.example.com/widget", `${GITLAB}.git`]) {
+      assert.equal(malformed.svc.requestReviewSession("s1", request({ pullRequest: { repository, number: 12 } })).status, 400, repository);
+    }
+    assert.deepEqual(malformed.sent, []);
+  } finally { malformed.db.close(); }
+});
+
+test("a review-round extension can name a GitLab merge request's run", () => {
+  const h = harness();
+  try {
+    const snapshot = {
+      category: "review_round_extension" as const, repository: GITLAB, pullRequest: 12, epoch: 1,
+      headSha: "c".repeat(40), roundsUsed: 4, blockingFindings: 1, extraRounds: 2, reason: "One blocker left.",
+    };
+    const key = `review_round_extension:${GITLAB}#12:epoch-1:rounds-4`;
+    // The shape is accepted; the run is then checked, and this session has none.
+    assert.match(h.svc.createWorkflowDecision("s1", { requestId: "gl", resourceKey: key, resourceSnapshot: snapshot }).error!,
+      /no valid review of that pull request/u);
+    assert.equal(h.svc.createWorkflowDecision("s1", { requestId: "bare", resourceKey: key,
+      resourceSnapshot: { ...snapshot, repository: "acme/team/widget" } }).status, 400);
+  } finally { h.db.close(); }
+});
+
 test("malformed review session requests are refused before anything is created or sent", () => {
   const h = harness();
   try {

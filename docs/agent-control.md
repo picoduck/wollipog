@@ -169,7 +169,7 @@ wollipog worktree discard [--session ID] --path PATH --json
 wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
 wollipog pr wait PR [--repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
-wollipog review session run --repo OWNER/NAME --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
+wollipog review session run --repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
 wollipog review session get REVIEW_SESSION_ID --json
 wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
 wollipog review session cancel REVIEW_SESSION_ID --json
@@ -405,6 +405,19 @@ calling session's own pull request at its pushed head, with the same scope as th
 native managed worktree the session created, an open pull request from the same repository on that
 worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
 100 KiB) is required and is the reviewer's only context besides the pinned patch.
+
+Protocol v244 (#3539) adds GitLab merge requests. `--repo` (MCP `repository`) names the project by
+its host and full namespace, `<host>/group[/subgroup…]/project`, and `--pr` (MCP `number`) is the
+merge request's IID. The project checkout's `origin` must name exactly that host and project. The
+runner reads the merge request with a trusted `glab` (`glab api projects/<project>/merge_requests/<iid>
+--hostname <host>`, with the user's own glab login) and requires it to be `opened` (a `locked` merge
+request is not), from the same project, on the worktree's branch, at `--head`. The base is GitLab's
+merge base for that head (`diff_refs.base_sha`), so the head and base normally come from the session's
+own branch without a forge fetch. The runner needs a trusted `gh` only for GitHub reviews and a
+trusted `glab` only for GitLab reviews; it refuses with `the runner is missing a trusted glab for
+GitLab reviews` (or `gh for GitHub reviews`) otherwise. A pre-v244 runner is refused with an update
+message, and review-round extensions name a GitLab run the same way.
+
 
 The control plane creates the review session on the requester's runner. By default, the reviewer is the other
 model family, through the native agent the runner advertises for that harness in

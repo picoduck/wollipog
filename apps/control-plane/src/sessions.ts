@@ -721,7 +721,8 @@ const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
 function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
   const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch})` : "";
-  const head = `${review.pullRequest.repository}#${review.pullRequest.number} at ${review.headSha.slice(0, 12)}`;
+  const separator = campaignRepositoryLocation(review.pullRequest.repository)?.forge === "gitlab" ? "!" : "#";
+  const head = `${review.pullRequest.repository}${separator}${review.pullRequest.number} at ${review.headSha.slice(0, 12)}`;
   const verdict = review.verdict;
   let outcome: string;
   if (review.state === "completed" && verdict?.valid) {
@@ -924,8 +925,10 @@ export function normalizeWorkflowDecisionSnapshot(
       } : {}) });
   }
   if (category === "review_round_extension") {
-    // The shape only; the requester's review run is checked against it when it is requested.
-    const repo = repository();
+    // The shape only; the requester's review run is checked against it when it is requested. A
+    // GitLab merge request's run is named by host and full namespace (v244, #3539).
+    const repo = repository() ?? (campaignRepositoryLocation(value.repository)?.forge === "gitlab"
+      ? value.repository as string : null);
     const headSha = sha(value.headSha);
     const count = (candidate: unknown, min: number, max: number) =>
       Number.isSafeInteger(candidate) && (candidate as number) >= min && (candidate as number) <= max ? candidate as number : null;
@@ -9189,10 +9192,14 @@ export class SessionsService {
     if (!request || typeof request !== "object" || Array.isArray(request) ||
         Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "fullReason"].includes(key)) ||
         !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
-        typeof pullRequest.repository !== "string" || !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
+        typeof pullRequest.repository !== "string" ||
+        // A GitHub `owner/name`, or (v244, #3539) a GitLab `<host>/group[/subgroup…]/project`.
+        !(/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
+          campaignRepositoryLocation(pullRequest.repository)?.forge === "gitlab") ||
         !Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
-      return fail("a review needs pullRequest {repository: \"owner/name\", number: a positive integer}", 400);
+      return fail("a review needs pullRequest {repository: \"owner/name\" or a GitLab \"<host>/group/project\", number: a positive pull request number or merge request IID}", 400);
     }
+    const gitlab = campaignRepositoryLocation(pullRequest.repository)?.forge === "gitlab";
     if (typeof request.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(request.headSha)) {
       return fail("headSha must be the pull request's full 40-character lowercase head commit", 400);
     }
@@ -9208,6 +9215,9 @@ export class SessionsService {
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));
+    }
+    if (gitlab && !runnerSupportsProtocol(runner?.protocolVersion, "gitlabReviewSessions")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "gitlabReviewSessions", "review sessions of GitLab merge requests"));
     }
     let configured: ReturnType<typeof configuredReview>;
     try { configured = configuredReview(this.db, session, runner, resolveEffectiveModelEffort); }
@@ -9274,7 +9284,7 @@ export class SessionsService {
       workspaceId: session.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
       agentId: reviewer.agentId,
-      title: `${harness === "codex" ? "Codex" : "Claude"} Review of ${pullRequest.repository}#${pullRequest.number}`,
+      title: `${harness === "codex" ? "Codex" : "Claude"} Review of ${pullRequest.repository}${gitlab ? "!" : "#"}${pullRequest.number}`,
       prompt: request.brief,
       useWorktree: false,
       config: {
