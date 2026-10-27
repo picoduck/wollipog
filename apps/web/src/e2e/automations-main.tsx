@@ -256,7 +256,8 @@ const triggerItems: AutomationTriggerView[] = [{
   name: "Issue Intake",
   generation: 1,
   invocationCount: 12,
-  lastInvokedAt: Date.now() - 2 * 3_600_000,
+  // Two hours ago, but never before midnight, so the row says Today at any time of day (#3617).
+  lastInvokedAt: Math.max(Date.now() - 2 * 3_600_000, new Date().setHours(0, 0, 0, 0)),
   createdBy: { kind: "human", id: "e2e" },
   createdAt: 1,
   updatedAt: 1,

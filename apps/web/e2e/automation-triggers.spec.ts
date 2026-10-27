@@ -63,6 +63,18 @@ test.describe("at 1440×900", () => {
     await expect(menu.getByRole("menuitem")).toHaveText(["Copy URL", "How to Call…", "Rotate Secret…", "Revoke Trigger…"]);
     await expect(menu.locator("> *").last()).toHaveText("Revoke Trigger…");
   });
+
+  test.describe("just after midnight UTC", () => {
+    test.use({ timezoneId: "UTC" });
+
+    // The fixture's last call is two hours ago, kept within today, so a run at 00:01 still says Today (#3617).
+    test("the webhook row says it was last called today", async ({ page }) => {
+      await page.clock.setFixedTime(new Date("2026-10-22T00:01:00Z"));
+      await open(page, "dark");
+      await expect(row(page, "atr_issue_intake").locator(".automation-trigger-meta")).toHaveText(
+        /^WebhookLast called Today, 12:00 AM12 calls/);
+    });
+  });
 });
 
 test.describe("at 390×844", () => {
