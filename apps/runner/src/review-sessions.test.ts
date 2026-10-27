@@ -242,7 +242,8 @@ test("capability names one available native agent per reviewer harness and repor
 });
 
 test("long writer refusals stay within the control plane capability limit", () => {
-  const reason = "Codex packages are unprotected from the following writers: " + "session s_writer (complete exit unproven). ".repeat(20);
+  const reason = "Codex packages are unprotected from the following writers: " + Array.from({ length: 10 }, (_, index) =>
+    `session s_writer_${index} (complete exit unproven; ${"retained writer detail ".repeat(7)}).`).join("\n");
   const logs: string[] = [];
   const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
     exec: async () => "", pullRequest: async () => { throw new Error("unused"); },
@@ -251,9 +252,10 @@ test("long writer refusals stay within the control plane capability limit", () =
   });
   const capability = launcher.capability(undefined, "linux")!;
   assert.ok(capability.unavailable!.codex!.length <= 500, "otherwise agents_updated discards the whole capability");
-  assert.match(capability.unavailable!.codex!, /session s_writer/u);
+  assert.match(capability.unavailable!.codex!, /10 retaining sessions: s_writer_0, s_writer_1, s_writer_2 \(\+7 more\).*--state-doctor review-writers inspect/u);
   assert.deepEqual(capability.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
-  assert.ok(logs.some((message) => message.includes(reason)), "retain the complete refusal in the runner log");
+  assert.ok(logs.some((message) => String((JSON.parse(message) as { reason: string }).reason).includes(reason)),
+    "retain the complete refusal in the runner log");
 });
 
 test("unchanged discovery failures log once, and recovery allows a recurrence to be logged", () => {

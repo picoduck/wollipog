@@ -294,9 +294,16 @@ export interface ReviewLaunch {
  * at 500 characters. Keep the useful prefix; callers log the complete diagnostic locally. */
 export function reviewSessionDiscoveryReason(error: unknown): string {
   const reason = (error instanceof Error ? error.message : String(error)) || "review-session discovery failed";
+  if (reason.length > 500 && reason.startsWith("Codex packages are unprotected")) {
+    const ids = [...new Set([...reason.matchAll(/\bsession (s_[A-Za-z0-9_-]+)/gu)].map((match) => match[1]!))];
+    if (ids.length) {
+      const first = ids.slice(0, 3).map((id) => id.slice(0, 64)).join(", ");
+      return `Codex packages are unprotected from ${ids.length} retaining sessions: ${first}${ids.length > 3 ? ` (+${ids.length - 3} more)` : ""}. Run --state-doctor review-writers inspect for full writer details.`;
+    }
+  }
   return reason.length <= 500
     ? reason
-    : `${reason.slice(0, 480)}… see runner log`;
+    : `${reason.slice(0, 450)}… (+${reason.length - 450} more characters; see runner log)`;
 }
 
 /** The agent a harness's reviews launch through: the first available native agent using its driver. */

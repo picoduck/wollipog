@@ -2081,6 +2081,8 @@ export class SessionManager {
     // evidence: only this runner's live lifecycle maps and the durable writer registry can do so.
     const current = new Set([...this.launchGenerations.keys(), ...this.active.keys(), ...this.closing.keys()]);
     for (const sessionId of current) {
+      // Review preparation attests this identity before the review's session row is persisted.
+      if (this.preparedReviewRounds.has(sessionId)) continue;
       const meta = this.store.readMeta(sessionId);
       if (meta && (meta.context.kind !== "native" || meta.review)) continue;
       const live = this.active.get(sessionId);

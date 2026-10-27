@@ -9137,7 +9137,7 @@ export class SessionsService {
     const label = harness === "codex" ? "Codex" : "Claude Code";
     if (!reviewer) {
       const why = (capability?.unavailable?.[harness] ?? capability?.unavailable?.tools ??
-        (capability ? "reviewer not advertised by the runner" : "review-session capability not reported by the runner")).slice(0, 300);
+        (capability ? "reviewer not advertised by the runner" : "runner reported no review-session capability")).slice(0, 500);
       return fail(`The ${label} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);

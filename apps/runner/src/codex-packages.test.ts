@@ -213,9 +213,17 @@ test("a launch before session persistence still blocks admission", posixOnly, (t
   const f = fixture(t);
   const manager = new SessionManager(() => {}, () => {}, new SessionStore(join(f.root, "sessions")), "runner");
   t.after(() => manager.shutdownAll());
-  const internal = manager as unknown as { beginLaunchGeneration(id: string): number; finishLaunchGeneration(id: string, generation: number): void };
+  const internal = manager as unknown as {
+    beginLaunchGeneration(id: string): number;
+    finishLaunchGeneration(id: string, generation: number): void;
+    preparedReviewRounds: Map<string, unknown>;
+  };
   const generation = internal.beginLaunchGeneration("s_before_meta");
   assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_before_meta/);
+  internal.preparedReviewRounds.set("s_before_meta", {});
+  assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined, "a prepared read-only reviewer has attested identity before persistence");
+  internal.preparedReviewRounds.delete("s_before_meta");
+  assert.match(manager.codexReviewerProtection(f.home).refusal!, /session s_before_meta/, "ordinary launches still require proof");
   internal.finishLaunchGeneration("s_before_meta", generation);
   assert.equal(manager.codexReviewerProtection(f.home).refusal, undefined);
 });

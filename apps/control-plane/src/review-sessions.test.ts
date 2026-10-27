@@ -359,6 +359,41 @@ test("a tool discovery failure is named in the refusal and a refreshed capabilit
   } finally { h.db.close(); }
 });
 
+test("an overlong Codex reason preserves a valid Claude reviewer and remains visible in Codex refusals", () => {
+  const reason = "Codex packages are unprotected: " + "x".repeat(2000 - "Codex packages are unprotected: ".length);
+  const capability: ReviewSessionCapability = {
+    reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable: { codex: reason },
+  };
+  const claude = harness({ driver: "codex-app-server" });
+  const codex = harness();
+  try {
+    for (const h of [claude, codex]) h.db.updateRunnerReviewSessionCapability("r", capability);
+    const stored = claude.db.getRunner("r")!.runtime!.reviewSession!;
+    assert.deepEqual(stored.reviewers, capability.reviewers);
+    assert.ok(stored.unavailable!.codex!.length <= 500);
+    assert.match(stored.unavailable!.codex!, /^Codex packages are unprotected: .*\+\d+ more/u);
+    assert.ok(claude.svc.requestReviewSession("s1", request()).ok, "the unrelated valid Claude reviewer still launches");
+    const refusal = codex.svc.requestReviewSession("s1", request());
+    assert.equal(refusal.ok, false);
+    assert.ok(refusal.error!.includes(stored.unavailable!.codex!), "the refusal preserves the complete clamped diagnostic");
+  } finally { claude.db.close(); codex.db.close(); }
+});
+
+test("invalid unavailability reasons never discard valid reviewer entries", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    for (const unavailable of [{ codex: 42 }, { codex: null }, { codex: "" }, null, []]) {
+      h.db.updateRunnerReviewSessionCapability("r", {
+        reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable,
+      } as never);
+      const stored = h.db.getRunner("r")!.runtime!.reviewSession!;
+      assert.deepEqual(stored.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+      assert.ok(Object.values(stored.unavailable!).every((reason) => typeof reason === "string" && reason.length > 0 && reason.length <= 500));
+    }
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+  } finally { h.db.close(); }
+});
+
 test("a review session is refused without a supporting runner, reviewer or connection, and for unsupported requesters", () => {
   const old = harness({ protocol: 223 });
   try {
@@ -367,7 +402,7 @@ test("a review session is refused without a supporting runner, reviewer or conne
     assert.match(result.error!, /review sessions/u);
   } finally { old.db.close(); }
   const none = harness({ reviewSession: null });
-  try { assert.match(none.svc.requestReviewSession("s1", request()).error!, /review-session capability not reported by the runner/u); } finally { none.db.close(); }
+  try { assert.match(none.svc.requestReviewSession("s1", request()).error!, /runner reported no review-session capability/u); } finally { none.db.close(); }
   const partial = harness({ reviewSession: { reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable: { codex: "codex is not installed" } } });
   try {
     assert.match(partial.svc.requestReviewSession("s1", request()).error!, /Codex reviewer is unavailable on this session's runner: codex is not installed/u);
