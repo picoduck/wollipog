@@ -344,6 +344,16 @@ export class ReviewSessionLauncher {
   /** Each prepared review's evaluation context, until it is released. A runner restart fails
    * every unsettled review, so nothing here needs to outlive the process. */
   private readonly contexts = new Map<string, EvaluationContext>();
+  /** Keep complete local diagnostics without repeating a steady unavailable state on every
+   * inventory publication. A successful probe clears its key, so a recurrence is logged anew. */
+  private readonly discoveryFailures = new Map<SessionReviewHarness | "tools", string>();
+
+  private logDiscoveryFailure(component: SessionReviewHarness | "tools", error: unknown): void {
+    const reason = String(error);
+    if (this.discoveryFailures.get(component) === reason) return;
+    this.discoveryFailures.set(component, reason);
+    this.deps.log(JSON.stringify({ event: "review_session_discovery_failed", component, reason }));
+  }
 
   constructor(
     private readonly root: string,
@@ -361,22 +371,28 @@ export class ReviewSessionLauncher {
       const tools = this.deps.tools();
       agents ??= this.deps.agents();
       if ("unavailable" in tools) {
-        this.deps.log(JSON.stringify({ event: "review_session_discovery_unavailable", component: "tools", reason: tools.unavailable }));
+        this.logDiscoveryFailure("tools", tools.unavailable);
         return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
       }
+      this.discoveryFailures.delete("tools");
     } catch (error) {
-      this.deps.log(JSON.stringify({ event: "review_session_discovery_failed", component: "tools_or_agents", reason: String(error) }));
+      this.logDiscoveryFailure("tools", error);
       return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
     }
     const reviewers: ReviewSessionCapability["reviewers"] = [];
     for (const harness of ["claude-code", "codex"] as const) {
       const agent = reviewerAgent(agents, harness);
-      if (!agent) { unavailable[harness] = "no available native agent uses this harness"; continue; }
+      if (!agent) {
+        this.discoveryFailures.delete(harness);
+        unavailable[harness] = "no available native agent uses this harness";
+        continue;
+      }
       try {
         this.deps.verifyCommand(agent.command, this.deps.agentPath(agent.id, agent.driver));
         reviewers.push({ harness, agentId: agent.id });
+        this.discoveryFailures.delete(harness);
       } catch (error) {
-        this.deps.log(JSON.stringify({ event: "review_session_discovery_failed", harness, reason: String(error) }));
+        this.logDiscoveryFailure(harness, error);
         unavailable[harness] = reviewSessionDiscoveryReason(error);
       }
     }

@@ -256,6 +256,26 @@ test("long writer refusals stay within the control plane capability limit", () =
   assert.ok(logs.some((message) => message.includes(reason)), "retain the complete refusal in the runner log");
 });
 
+test("unchanged discovery failures log once, and recovery allows a recurrence to be logged", () => {
+  let unavailable = true;
+  const logs: string[] = [];
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    exec: async () => "", pullRequest: async () => { throw new Error("unused"); },
+    tools: () => ({ git: GIT, gh: "/trusted/gh" }), agents: () => AGENTS, agentPath: () => "/trusted",
+    verifyCommand: (command) => { if (command === "codex" && unavailable) throw new Error("codex unavailable"); },
+    log: (message) => logs.push(message),
+  });
+  launcher.capability(undefined, "linux");
+  launcher.capability(undefined, "linux");
+  assert.equal(logs.length, 1);
+  unavailable = false;
+  launcher.capability(undefined, "linux");
+  unavailable = true;
+  launcher.capability(undefined, "linux");
+  assert.equal(logs.length, 2);
+  assert.deepEqual(JSON.parse(logs[0]!), { event: "review_session_discovery_failed", component: "codex", reason: "Error: codex unavailable" });
+});
+
 test("capability contains tool-root and agent discovery exceptions and recovers on the next computation", () => {
   let failure: "tools" | "agents" | null = "tools";
   const deps = defaultReviewSessionDependencies("/state", () => {}, () => {
