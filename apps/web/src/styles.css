@@ -10567,6 +10567,12 @@ textarea {
   gap: var(--space-2);
 }
 .machine-agent-launch > :is(h3, p) { margin: 0; }
+/* Agent Details' Updates fact (#3523): the runner's release guidance, 4px under the label. */
+.machine-agent-update-guidance {
+  margin-top: var(--space-1);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 /* Wrapped onto two rows, the notice's buttons each borrow 4px for a 44px target (§2.8, §15.3), so
    the rows sit 12px apart and a tap below one never lands on the next. */
 @media (pointer: coarse) {
