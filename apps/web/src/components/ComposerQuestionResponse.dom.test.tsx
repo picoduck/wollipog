@@ -35,7 +35,7 @@ for (const [name, value] of Object.entries({
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
 afterEach(() => {
-  for (const requestId of ["ask-single", "ask-flow", "ask-choices", "ask-replacement", "ask-context", "ask-steps", "ask-busy"]) {
+  for (const requestId of ["ask-single", "ask-flow", "ask-choices", "ask-replacement", "ask-context", "ask-steps", "ask-busy", "ask-many"]) {
     clearQuestionDrafts("session-1", requestId);
   }
 });
@@ -380,6 +380,36 @@ test("several questions step with Back from question 2, and a masked secret surv
     assert.deepEqual(calls, [{
       requestId: "ask-flow",
       answers: { target: "Production", region: "East", token: "page-only-secret" },
+      action: "submit",
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a Codex async card with the runner's maximum of 20 questions steps through and submits every answer (#3724)", async () => {
+  const { container, root } = mount();
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  // The runner's normalized Codex async shape: index ids, string-only choices, free text allowed.
+  const questions: AgentQuestion[] = Array.from({ length: 20 }, (_, index) => ({
+    id: String(index), question: `Authorize decision ${index + 1}?`,
+    options: [{ label: "Approve" }, { label: "Hold" }],
+    allowOther: true, inputFormat: "text", maxLength: 4000,
+  }));
+  try {
+    await act(async () => root.render(<Harness client={recordingClient(calls)} questions={questions} requestId="ask-many" />));
+    for (let index = 0; index < questions.length; index++) {
+      assert.equal(container.querySelector(".answer-step")?.textContent, `Question ${index + 1} of 20`);
+      await act(async () => { row(container, index % 2 ? "Hold" : "Approve").click(); });
+      await act(async () => {
+        press(answerInput(container), "Enter");
+        await tick();
+      });
+    }
+    assert.deepEqual(calls, [{
+      requestId: "ask-many",
+      answers: Object.fromEntries(questions.map((question, index) => [question.id, index % 2 ? "Hold" : "Approve"])),
       action: "submit",
     }]);
   } finally {
