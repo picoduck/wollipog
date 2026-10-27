@@ -46,7 +46,10 @@ The runner injects these non-transcript environment values at launch:
 - `WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`: native Linux provider-mode FIFO channel directory for the
   same relay. Only the CLI reads it; the MCP adapter keeps the loopback endpoint.
 - `WOLLIPOG_CLI`: directly executable session CLI launcher on POSIX and WSL.
-- `WOLLIPOG_CLI_ARGS`: empty on POSIX and WSL; native Windows retains JSON-encoded re-entry arguments. The launcher never contains a bearer credential.
+- `WOLLIPOG_CLI_ARGS`: the empty string on POSIX and WSL, where the launcher already carries its
+  re-entry arguments, so `"$WOLLIPOG_CLI" $WOLLIPOG_CLI_ARGS session list --json` adds nothing.
+  Native Windows retains a JSON-encoded re-entry argument array. The launcher never contains a
+  bearer credential.
 
 The standalone installer publishes the same verified SEA bytes as both `wollipog-runner` and
 `wollipog` (`wollipog.exe` on Windows). The invocation name selects the user-facing CLI; no Node
