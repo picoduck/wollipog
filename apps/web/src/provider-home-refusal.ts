@@ -1,8 +1,9 @@
 import type { ProviderHomeBlockingProcess, ProviderHomeLaunchRefusalCode, ProviderHomeLaunchRefusalView, ProviderHomeRecoveryCause } from "@wollipog/protocol";
 
-/** What a launch refusal's notice offers (#3240): restart the session, switch its account, or open
- * the Machine's accounts, where an Owner or Admin adopts a profile or recovers a lease. */
-export type ProviderHomeRefusalAction = "restart" | "switch_account" | "open_accounts";
+/** What a launch refusal's notice offers (#3240): restart the session, switch its account, open the
+ * Machine's accounts, set up a managed profile there (Add Account for this control plane), or
+ * recover the existing one (Adopt as Profile, then Recover Account, for an Owner or Admin). */
+export type ProviderHomeRefusalAction = "restart" | "switch_account" | "open_accounts" | "set_up_profile" | "recover_profile";
 
 export interface ProviderHomeRefusalCopy {
   title: string;
@@ -55,29 +56,33 @@ export function providerHomeRefusalCopy(
     const contention = ["holder_alive", "boundary_survivor", "process_survivor"].includes(refusal.cause);
     return {
       ...providerHomeRecoveryCauseCopy(refusal.cause, subject),
-      actions: account ? contention ? ["restart", "switch_account"] : ["switch_account", "open_accounts"] : contention ? ["restart"] : ["open_accounts"],
+      // The Machine's own HOME is shared by every control plane on the account; a managed profile
+      // gives this one its own.
+      actions: account ? contention ? ["restart", "switch_account"] : ["switch_account", "open_accounts"]
+        : contention ? ["restart", "set_up_profile"] : ["set_up_profile"],
     };
   }
   const builders: Record<ProviderHomeLaunchRefusalCode, () => ProviderHomeRefusalCopy> = {
     busy: () => ({
       title: "Account in Use",
       body: `Another runner, provider, helper, or lease publication is using ${subject}, so this session didn't start. ` +
-        (account ? "Restart the session once it's free, or switch to another account." : "Restart the session once it's free."),
-      actions: account ? ["restart", "switch_account"] : ["restart"],
+        (account ? "Restart the session once it's free, or switch to another account."
+          : "Restart the session once it's free, or set up a managed profile so this control plane has its own sign-in."),
+      actions: account ? ["restart", "switch_account"] : ["restart", "set_up_profile"],
     }),
     foreign_owner: () => ({
       title: "Account Locked by Another Runner",
       body: account
-        ? `A runner or control plane that stopped left ${account} locked. An Owner or Admin can recover the lease from the Machine's accounts, or you can switch to another account.`
-        : `A runner or control plane that stopped left ${subject} locked. Add an account for this control plane in the Machine's accounts.`,
-      actions: account ? ["open_accounts", "switch_account"] : ["open_accounts"],
+        ? `A runner or control plane that stopped left ${account} locked. An Owner or Admin can unlock it with Recover Existing Profile, or you can switch to another account.`
+        : `A runner or control plane that stopped left ${subject} locked. Set up a managed profile so this control plane has its own sign-in.`,
+      actions: account ? ["recover_profile", "switch_account"] : ["set_up_profile"],
     }),
     foreign_host: () => ({
       title: "Account in Use on Another Host",
       body: account
-        ? `A runner on another host uses ${account}, so this Machine can't share it. Switch to another account, or add one for this Machine.`
-        : `A runner on another host uses ${subject}. Add an account for this control plane in the Machine's accounts.`,
-      actions: account ? ["switch_account", "open_accounts"] : ["open_accounts"],
+        ? `A runner on another host uses ${account}, so this Machine can't share it. Switch to another account, or set up a managed profile for this Machine.`
+        : `A runner on another host uses ${subject}. Set up a managed profile so this control plane has its own sign-in.`,
+      actions: account ? ["switch_account", "set_up_profile"] : ["set_up_profile"],
     }),
     unavailable: () => ({
       title: "Lease Helper Unavailable",
@@ -94,8 +99,8 @@ export function providerHomeRefusalCopy(
     profile_not_granted: () => ({
       title: "Profile Not Granted",
       body: `The provider profile of ${subject} isn't granted to this control plane. ` +
-        "An Owner or Admin can grant it with Adopt as Profile in the Machine's accounts.",
-      actions: account ? ["open_accounts", "switch_account"] : ["open_accounts"],
+        "An Owner or Admin can grant it with Recover Existing Profile.",
+      actions: account ? ["recover_profile", "switch_account"] : ["open_accounts"],
     }),
     profile_changed: () => ({
       title: "Profile Changed",
@@ -111,4 +116,20 @@ export function providerHomeRefusalCopy(
     }),
   };
   return builders[refusal.code]();
+}
+
+/**
+ * The actions this viewer can complete (#3240). Set Up Managed Profile needs manage rights on the
+ * Machine; Recover Existing Profile needs an Owner or Admin of the personal organization as well.
+ * Either one that isn't available falls back to Open Machine Accounts, which explains why there.
+ */
+export function availableProviderHomeRefusalActions(
+  actions: readonly ProviderHomeRefusalAction[],
+  viewer: { canSetUpProfile: boolean; canRecoverProfile: boolean },
+): ProviderHomeRefusalAction[] {
+  const available = actions.map((action): ProviderHomeRefusalAction =>
+    action === "set_up_profile" && !viewer.canSetUpProfile ? "open_accounts"
+      : action === "recover_profile" && !viewer.canRecoverProfile ? "open_accounts"
+        : action);
+  return [...new Set(available)];
 }

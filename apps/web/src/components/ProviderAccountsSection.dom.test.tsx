@@ -15,6 +15,7 @@ import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY, setHideAccountEmails } from "../accoun
 import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import type { MachineAccountsIntent } from "../navigation.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
@@ -101,21 +102,26 @@ function client(handlers: {
   return { client: value, calls };
 }
 
-async function render(props: {
+type RenderProps = {
   runner?: RunnerView; online?: boolean; canManageProfiles?: boolean; api?: ApiClient; machineName?: string;
-}) {
+  intent?: MachineAccountsIntent;
+};
+
+async function render(props: RenderProps) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const settle = () => act(async () => { for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });
-  await act(async () => root.render(
-    <ApiProvider client={props.api ?? client().client}>
+  const apiClient = props.api ?? client().client;
+  const draw = (next: RenderProps) => root.render(
+    <ApiProvider client={apiClient}>
       <FeedbackProvider>
-        <ProviderAccountsSection runner={props.runner ?? runnerView()} online={props.online ?? true}
-          machineName={props.machineName ?? "Studio Mac"} canManageProfiles={props.canManageProfiles ?? true} />
+        <ProviderAccountsSection runner={next.runner ?? runnerView()} online={next.online ?? true}
+          machineName={next.machineName ?? "Studio Mac"} canManageProfiles={next.canManageProfiles ?? true} intent={next.intent} />
       </FeedbackProvider>
     </ApiProvider>,
-  ));
+  );
+  await act(async () => draw(props));
   await settle();
   const body = domWindow.document.body as unknown as HTMLElement;
   const dialog = () => body.querySelector('[role="dialog"]') as HTMLElement | null;
@@ -164,6 +170,8 @@ async function render(props: {
   const toasts = () => [...body.querySelectorAll<HTMLElement>(".toast")].map((toast) => toast.textContent ?? "");
   return {
     container, body, dialog, rows, row, buttons, button, more, menu, openMenu, menuItems, choose, closeMenu, toasts, settle,
+    /** Draws the section again with changed props, as a new runner snapshot would. */
+    rerender: async (next: RenderProps) => { await act(async () => draw({ ...props, ...next })); await settle(); },
     badge: (label: string) => row(label).querySelector<HTMLElement>(".status"),
     sub: (label: string) => [...row(label).querySelectorAll(".provider-account-sub > span")].map((part) => part.textContent),
     notice: () => container.querySelector<HTMLElement>('.notice[role="alert"]'),
@@ -1312,4 +1320,170 @@ test("authorized recovery details respect hidden account emails", async () => {
       assert.match(ui.dialog()?.textContent ?? "", /PID 4242/);
     } finally { await ui.unmount(); }
   });
+});
+
+// --- Set Up Managed Profile and Recover Existing Profile from a refused session (#3240) ---
+
+async function typeAccountLabel(dialog: HTMLElement, value: string) {
+  const labelFor = [...dialog.querySelectorAll("label")].find((label) => label.textContent === "Account Label")!;
+  const input = dialog.querySelector<HTMLInputElement>(`#${labelFor.getAttribute("for")}`)!;
+  await act(async () => {
+    input.focus();
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    // react-dom loads before these globals exist, so it detects changes on keyup.
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+  });
+}
+
+const selectedProvider = (dialog: HTMLElement) =>
+  dialog.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim();
+
+test("Set Up Managed Profile opens Add Account for the refused session's provider, once per activation", async () => {
+  const api = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const intent: MachineAccountsIntent = { kind: "add_account", provider: "codex", activationId: 1 };
+  const ui = await render({ api: api.client, intent });
+  try {
+    const dialog = ui.dialog()!;
+    assert.ok(dialog, "Add Account opens on arrival");
+    assert.equal(selectedProvider(dialog), "Codex");
+    await act(async () => { ui.button(dialog, "Cancel").click(); });
+    await ui.settle();
+    await ui.rerender({ intent });
+    assertNoDomNode(ui.dialog(), "the same activation does not open it again");
+    await ui.rerender({ intent: { ...intent, activationId: 2 } });
+    assert.ok(ui.dialog(), "a new activation opens it again");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Set Up Managed Profile on an offline Machine opens nothing and the section says why", async () => {
+  const ui = await render({ online: false, intent: { kind: "add_account", provider: "claude", activationId: 1 } });
+  try {
+    assertNoDomNode(ui.dialog());
+    assert.match(ui.container.textContent ?? "", /This machine is offline\./);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("once the sign-in it started records its account, an Owner can use it for new sessions", async () => {
+  const saved: unknown[] = [];
+  const base = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const api = {
+    ...base.client,
+    updateMachineProviderAccountDefault: async (runnerId: string, provider: string, body: unknown) => {
+      saved.push({ runnerId, provider, body });
+      return { providerAccountDefault: { provider, accountId: "codex-new", revision: 4 } };
+    },
+  } as unknown as ApiClient;
+  const defaults = [{ provider: "codex" as const, accountId: null, revision: 3 }];
+  const ui = await render({ api, runner: runnerView({ providerAccountDefaults: defaults }),
+    intent: { kind: "add_account", provider: "codex", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    await typeAccountLabel(dialog, "Codex New");
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+    assert.deepEqual(base.calls.filter((call) => call.kind === "login").map((call) => call.body), [{ provider: "codex", label: "Codex New" }]);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "not offered before the account exists");
+
+    await ui.rerender({ runner: runnerView({ providerAccountDefaults: defaults, providerAccounts: [...ACCOUNTS,
+      { id: "codex-new", label: "Codex New", provider: "codex", authStatus: "authenticated", profile: { id: "p9", access: "granted" } }] }) });
+    const offer = ui.container.querySelector<HTMLElement>('[aria-label="Use for New Sessions"]');
+    assert.ok(offer, "offered once the sign-in recorded the account");
+    assert.match(offer.textContent ?? "", /New Codex sessions on this machine that don't choose an account will use it\./);
+    await act(async () => { ui.button(offer, "Use for New Sessions").click(); });
+    await ui.settle();
+    assert.deepEqual(saved, [{ runnerId: "runner-1", provider: "codex", body: { accountId: "codex-new", expectedRevision: 3 } }]);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "the offer ends once saved");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Use for New Sessions is not offered to a member who can add accounts but not save Machine defaults", async () => {
+  const api = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const ui = await render({ api: api.client, canManageProfiles: false, intent: { kind: "add_account", provider: "codex", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    await typeAccountLabel(dialog, "Codex New");
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+    assert.equal(api.calls.filter((call) => call.kind === "login").length, 1, "the member's sign-in started");
+    await ui.rerender({ runner: runnerView({ providerAccounts: [...ACCOUNTS,
+      { id: "codex-new", label: "Codex New", provider: "codex", authStatus: "authenticated" }] }) });
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+async function confirmDialog(ui: Awaited<ReturnType<typeof render>>, label: string) {
+  const dialog = ui.dialog()!;
+  assert.ok(dialog, "a confirmation opens");
+  await act(async () => { ui.button(dialog, label).click(); });
+  await ui.settle();
+}
+
+test("Recover Existing Profile adopts a pending profile, inspects the lock again, then unlocks it in one confirmation", async () => {
+  const api = leaseClient();
+  const adopted: string[] = [];
+  const recovering = { ...api.client, adoptProviderProfile: async (_runnerId: string, accountId: string) => {
+    adopted.push(accountId); return { status: "active", profileId: "p2", grantId: "g" };
+  } } as unknown as ApiClient;
+  const ui = await render({ api: recovering, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    assert.match(dialog.textContent ?? "", /Recover Existing Profile/);
+    assert.match(dialog.textContent ?? "", /adopts the account as its profile/);
+    assert.match(dialog.textContent ?? "", /unlocks it only after checking that no earlier session is still using it/);
+    assert.match(dialog.textContent ?? "", /Locked since/);
+    await confirmDialog(ui, "Recover Existing Profile");
+    assert.deepEqual(adopted, ["pending"]);
+    assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }]);
+    assert.ok(ui.toasts().some((toast) => toast.includes("Profile recovered.")), ui.toasts().join("|"));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile explains a lock the runner still refuses after adoption, and never forces it", async () => {
+  const api = leaseClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "other", activationId: 1 } });
+  try {
+    await confirmDialog(ui, "Recover Existing Profile");
+    assert.deepEqual(api.recovered, [], "a lock without reboot proof is not recovered");
+    assert.match(ui.error() ?? "", /until this machine has restarted/);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile is refused with its reason for a viewer who isn't an Owner or Admin", async () => {
+  const api = leaseClient();
+  const ui = await render({ api: api.client, canManageProfiles: false, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
+  try {
+    assertNoDomNode(ui.dialog());
+    assert.equal(ui.error(), "Only an Owner or Admin can recover an account's profile.");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile waits for the account it names to be listed", async () => {
+  const api = leaseClient();
+  const intent: MachineAccountsIntent = { kind: "recover_profile", accountId: "pending", activationId: 1 };
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY, providerAccounts: [] }), intent });
+  try {
+    assertNoDomNode(ui.dialog(), "nothing opens before the account is listed");
+    await ui.rerender({ runner: runnerView({ protocolVersion: LEASE_RECOVERY }), intent });
+    assert.ok(ui.dialog(), "it opens once the account arrives");
+  } finally {
+    await ui.unmount();
+  }
 });

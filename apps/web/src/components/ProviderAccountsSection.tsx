@@ -1,4 +1,4 @@
-import React, { Fragment, useEffect, useId, useState, type ReactNode } from "react";
+import React, { Fragment, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   runnerSupportsProtocol, type ProviderAccountDefinition, type ProviderHomeLeaseInspection, type ProviderLoginView, type RunnerView,
 } from "@wollipog/protocol";
@@ -8,6 +8,7 @@ import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { runnerDisplay } from "../runners.js";
+import type { MachineAccountsIntent } from "../navigation.js";
 import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "../provider-home-refusal.js";
 import { statusMeta } from "../status-meta.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -143,7 +144,7 @@ const PROFILE_ACCESS: Readonly<Record<NonNullable<ProviderAccountDefinition["pro
   not_granted: "Not Granted",
 };
 
-type BusyAction = "sign_in" | "cancel" | "remove" | "adopt" | "revoke" | "recover";
+type BusyAction = "sign_in" | "cancel" | "remove" | "adopt" | "revoke" | "recover" | "default";
 
 interface RowMenuItem {
   label: string;
@@ -280,7 +281,7 @@ type SectionNotice = { title: ReactNode; body: string; details?: string };
  * and Add Account…, then one surface of account rows, each with one status. Removal and the profile
  * actions live in each row's ⋯; a refusal is one compact notice between the title and the rows.
  */
-export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false }: {
+export function ProviderAccountsSection({ runner, online, machineName, canManageProfiles = false, intent }: {
   runner: RunnerView;
   online: boolean;
   /** The machine's display name, for Add Account and the removal confirmation. */
@@ -288,13 +289,20 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   /** The viewer is an organization Owner or Admin. Profile routes are not member-scoped, so a member
    * with manage rights on this Machine does not get the profile actions. */
   canManageProfiles?: boolean;
+  /** Set Up Managed Profile or Recover Existing Profile from a refused session (#3240): each new
+   * activation scrolls here and opens it once. */
+  intent?: MachineAccountsIntent;
 }) {
   const privacy = useAccountEmailPrivacy();
   const api = useApi();
   const { confirm, showToast } = useFeedback();
   const headingId = `provider-accounts-${useId().replace(/:/g, "")}`;
   const offlineId = `${headingId}-offline`;
-  const [adding, setAdding] = useState(false);
+  // The provider Add Account opens with, while it is open.
+  const [adding, setAdding] = useState<ProviderAccountDefinition["provider"] | null>(null);
+  // A sign-in this section started: once it records its account, Use for New Sessions is offered.
+  const [started, setStarted] = useState<{ operationId: string; accountId: string; provider: ProviderAccountDefinition["provider"] } | null>(null);
+  const sectionRef = useRef<HTMLElement>(null);
   const [recoveryDetails, setRecoveryDetails] = useState<{ runnerId: string; accountId: string } | null>(null);
   const [busy, setBusy] = useState<Readonly<Record<string, BusyAction>>>({});
   const [notice, setNotice] = useState<SectionNotice | null>(null);
@@ -490,6 +498,103 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     });
   };
 
+  /**
+   * Recover Existing Profile (#3240), opened from a refused session: one confirmation for what a
+   * configured account needs before this control plane can use it again. Adopt as Profile when its
+   * profile isn't granted here, then Recover Account when an earlier runner left it locked. Each
+   * step keeps its own checks; a lock the runner still refuses to recover is explained instead.
+   */
+  const recoverExistingProfile = async (account: ProviderAccountDefinition) => {
+    const fail = (body: string) => setNotice({ title: <>Couldn't Recover {identifier(account)}</>, body });
+    if (!canManageProfiles || !canManage) return fail("Only an Owner or Admin can recover an account's profile.");
+    if (!online) return fail(OFFLINE);
+    const adoptable = profileActions && runner.os !== "windows" && account.profile?.access !== "granted";
+    const lease = leaseActions
+      ? await api.inspectProviderHomeLease(runner.runnerId, account.id).catch(() => undefined)
+      : undefined;
+    if (lease) setLeases((current) => ({ ...current, [account.id]: lease }));
+    const stale = lease?.state === "stale";
+    // Without adoption, a lock the runner already refuses to recover cannot be helped here.
+    const blocked = stale && !adoptable && (lease.cause || lease.refusal) ? providerHomeLeaseDescription(lease) : undefined;
+    if (blocked) return fail(blocked);
+    if (!adoptable && !stale) {
+      showToast("This account can already be used here.", { tone: "success" });
+      return;
+    }
+    const recorded = stale && lease.createdAt ? new Date(lease.createdAt) : null;
+    const when = recorded && !Number.isNaN(recorded.getTime()) ? `Locked since ${recorded.toLocaleString()}` : undefined;
+    const approved = await confirm({
+      title: "Recover Existing Profile",
+      message: adoptable && stale
+        ? "This control plane adopts the account as its profile, so other control planes that share this Machine's account " +
+          "lose access to it. Wollipog then unlocks it only after checking that no earlier session is still using it."
+        : adoptable
+          ? "This control plane adopts the account as its profile, so other control planes that share this Machine's account " +
+            "lose access to it. Existing sessions keep working as before; new sessions record the profile."
+          : "An earlier Wollipog runner left this account locked. Wollipog will unlock it only after checking that no earlier session is still using it.",
+      detailRows: [...accountRows(account), ...(when ? [{ label: when }] : [])],
+      confirmLabel: "Recover Existing Profile",
+      tone: stale ? "danger" : undefined,
+    });
+    if (!approved) return;
+    if (adoptable) {
+      let adopted = false;
+      await runProfileAction(account, "adopt", async () => {
+        await api.adoptProviderProfile(runner.runnerId, account.id);
+        adopted = true;
+      });
+      if (!adopted) return;
+    }
+    if (!stale) {
+      showToast("Account adopted as a profile.", { tone: "success" });
+      return;
+    }
+    // Adoption can change what the runner says about the lock, so it is inspected again.
+    const fresh = await api.inspectProviderHomeLease(runner.runnerId, account.id).catch(() => undefined);
+    if (fresh) setLeases((current) => ({ ...current, [account.id]: fresh }));
+    if (fresh && fresh.state !== "stale") {
+      showToast(adoptable ? "Account adopted as a profile." : "Account unlocked.", { tone: "success" });
+      return;
+    }
+    if (!fresh?.tipHash || fresh.cause || fresh.refusal) {
+      return fail((fresh && providerHomeLeaseDescription(fresh)) ?? LEASE_RECOVERY_REFUSALS.UNVERIFIABLE!);
+    }
+    let unlocked = false;
+    await runProfileAction(account, "recover", async () => {
+      try {
+        await api.recoverProviderHomeLease(runner.runnerId, account.id, fresh.tipHash!);
+        unlocked = true;
+      } finally {
+        void inspectLease(account.id);
+      }
+    });
+    if (unlocked) showToast(adoptable ? "Profile recovered." : "Account unlocked.", { tone: "success" });
+  };
+
+  // Set Up Managed Profile (#3240): once the sign-in this section started records its account, the
+  // account is offered as the Machine's default for its provider. Saving a default is, like the
+  // profile actions, an Owner/Admin route of the personal organization.
+  const startedAccount = started ? accounts.find((account) => account.id === started.accountId) : undefined;
+  const savedDefault = startedAccount
+    ? runner.providerAccountDefaults?.find((entry) => entry.provider === startedAccount.provider)
+    : undefined;
+  const defaultOffer = startedAccount && canManageProfiles && canManage &&
+    runnerSupportsProtocol(runner.protocolVersion, "providerAccounts") && savedDefault?.accountId !== startedAccount.id
+    ? startedAccount : undefined;
+  const useForNewSessions = (account: ProviderAccountDefinition) => track(account.id, "default", async () => {
+    setNotice(null);
+    try {
+      await api.updateMachineProviderAccountDefault(runner.runnerId, account.provider, {
+        accountId: account.id,
+        expectedRevision: savedDefault?.revision ?? 0,
+      });
+      setStarted(null);
+      showToast(`New ${providerName(account.provider)} sessions on this machine use this account.`, { tone: "success" });
+    } catch (cause) {
+      setNotice({ title: <>Couldn't Make {identifier(account)} the Default</>, body: (cause as Error).message });
+    }
+  });
+
   const menuItems = (account: ProviderAccountDefinition, signingIn: boolean): RowMenuItem[] => {
     if (!canManage) return [];
     const offline = online ? {} : { disabled: true, description: OFFLINE };
@@ -545,11 +650,29 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
     </BusyButton>
   );
 
+  // Each new activation of an intent is handled once, when the account it names is listed.
+  const handledIntent = useRef<number | undefined>(undefined);
+  useEffect(() => {
+    const activation = intent?.activationId;
+    if (!intent || activation === undefined || handledIntent.current === activation) return;
+    if (intent.kind === "recover_profile" && !accounts.some((account) => account.id === intent.accountId)) return;
+    handledIntent.current = activation;
+    sectionRef.current?.scrollIntoView?.({ block: "start" });
+    if (intent.kind === "add_account") {
+      // The section says why Add Account isn't available (offline, or no manage rights).
+      if (supported && canManage && online) setAdding(intent.provider);
+      return;
+    }
+    const account = accounts.find((candidate) => candidate.id === intent.accountId)!;
+    void recoverExistingProfile(account);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- handled once per activation, when its account is listed
+  }, [intent?.activationId, accountKey]);
+
   if (!supported && accounts.length === 0) return null;
   const canAdd = supported && canManage;
   const count = accounts.length + newLogins.length;
   return (
-    <section className="section" aria-labelledby={headingId}>
+    <section ref={sectionRef} className="section" aria-labelledby={headingId}>
       <div className="section-head">
         <h3 id={headingId} className="section-title">
           Provider Accounts <span className="count">{accounts.length}</span>
@@ -557,7 +680,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         {canAdd && (
           <div className="actions">
             <button type="button" className="btn sm" disabled={!online} aria-describedby={online ? undefined : offlineId}
-              onClick={() => setAdding(true)}>
+              onClick={() => setAdding("claude")}>
               Add Account…
             </button>
           </div>
@@ -574,6 +697,21 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         <Notice compact tone="danger" role="alert" title={notice.title} details={notice.details}
           actions={<button type="button" className="btn sm" onClick={() => setNotice(null)}>Dismiss</button>}>
           {notice.body}
+        </Notice>
+      )}
+      {defaultOffer && (
+        <Notice compact tone="info" role="status" title={<>Use {identifier(defaultOffer)} for New Sessions?</>}
+          ariaLabel="Use for New Sessions"
+          actions={(
+            <>
+              <BusyButton className="btn primary sm" busy={busy[defaultOffer.id] === "default"} progress="Saving the default…"
+                disabled={!online} onClick={() => void useForNewSessions(defaultOffer)}>
+                Use for New Sessions
+              </BusyButton>
+              <button type="button" className="btn sm" onClick={() => setStarted(null)}>Not Now</button>
+            </>
+          )}>
+          New {providerName(defaultOffer.provider)} sessions on this machine that don't choose an account will use it.
         </Notice>
       )}
       {count > 0 && (
@@ -656,7 +794,9 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           machineName={machine}
           accounts={accounts}
           logins={logins}
-          onClose={() => setAdding(false)}
+          initialProvider={adding}
+          onStarted={(login) => setStarted({ operationId: login.operationId, accountId: login.accountId, provider: login.provider })}
+          onClose={() => setAdding(null)}
         />
       )}
     </section>

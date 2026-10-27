@@ -2592,6 +2592,26 @@ test("New Session shows the saved default but leaves the server to resolve it wh
   }
 });
 
+test("New Session shows the first account this control plane may use, as the server would choose it (#3240)", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    providerAccounts: [
+      { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "p1", access: "not_granted" } },
+      { id: "ours", label: "Ours", provider: "claude", authStatus: "authenticated" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.match(fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "",
+      /Account: Ours/u);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined, "the untouched picker still leaves the choice to the server");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("New Session sends a deliberately selected account as a one-session override", async () => {
   const accountRunner: RunnerView = {
     ...runner,

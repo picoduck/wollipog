@@ -16,7 +16,7 @@ import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { RunnersView } from "../components/RunnersView.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import type { MachineAccountsIntent, View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
@@ -367,8 +367,16 @@ const connection: UiConnectionRuntime = {
 
 // `machine=<runnerId>` opens that machine's route, as a link or a reload does (#2985).
 const initialMachine = fixtureParams.get("machine");
+// Set Up Managed Profile and Recover Existing Profile from a refused session (#3240), with
+// `accounts=add-<provider>` or `accounts=recover-<accountId>`: the intent the session notice sends.
+const accountsParam = fixtureParams.get("accounts");
+const accountsIntent: MachineAccountsIntent | undefined = accountsParam?.startsWith("add-")
+  ? { kind: "add_account", provider: accountsParam.slice(4) === "codex" ? "codex" : "claude", activationId: 1 }
+  : accountsParam?.startsWith("recover-")
+    ? { kind: "recover_profile", accountId: accountsParam.slice(8), activationId: 1 }
+    : undefined;
 const initialView: View = initialMachine
-  ? { name: "runners", section: "machines", machineId: initialMachine }
+  ? { name: "runners", section: "machines", machineId: initialMachine, ...(accountsIntent ? { accounts: accountsIntent } : {}) }
   : { name: "runners", section: "machines" };
 const navigation: ViewNavigation = {
   current: () => initialView,
@@ -604,6 +612,13 @@ const client = {
     if (!login) throw new Error("login not found");
     const completed = { ...login, status: "succeeded" as const, expectsCode: false };
     runner.providerLogins = [completed];
+    // The runner records a new account when its sign-in succeeds; Add Account's is a managed profile.
+    if (!runner.providerAccounts?.some((account) => account.id === login.accountId)) {
+      runner.providerAccounts = [...(runner.providerAccounts ?? []), {
+        id: login.accountId, label: login.label, provider: login.provider, authStatus: "authenticated",
+        profile: { id: `profile-${login.accountId}`, access: "granted" },
+      }];
+    }
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: completed };
   },

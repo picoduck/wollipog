@@ -561,8 +561,10 @@ export function NewSessionDialog({
     if (accountChosenByUser.current && providerAccounts.some((account) => account.id === providerAccountId)) return;
     accountChosenByUser.current = false;
     const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
+    // Like the control plane's implicit choice, never a profile only other control planes may use (#3240).
     setProviderAccountId(savedProviderAccountMissing ? "" :
-      providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
+      providerAccounts.find((account) => account.id === preferred)?.id ??
+      providerAccounts.find((account) => account.profile?.access !== "not_granted")?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
     savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);

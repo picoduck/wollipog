@@ -37,11 +37,15 @@ function runnerLabelError(message: string, provider: Provider, label: string): L
  * runner's own refusals of the same kind land there too, so the client check is only a shortcut.
  * Any other failure is a danger notice above the footer. Start Sign-In stays enabled.
  */
-export function AddProviderAccountDialog({ runnerId, machineName, accounts, logins, onClose }: {
+export function AddProviderAccountDialog({ runnerId, machineName, accounts, logins, initialProvider = "claude", onStarted, onClose }: {
   runnerId: string;
   machineName: string;
   accounts: readonly ProviderAccountDefinition[];
   logins: readonly ProviderLoginView[];
+  /** The provider selected on open; Set Up Managed Profile opens it for the refused session's (#3240). */
+  initialProvider?: Provider;
+  /** The started sign-in, which names the account it will record. */
+  onStarted?: (login: ProviderLoginView) => void;
   onClose: () => void;
 }) {
   const api = useApi();
@@ -51,7 +55,7 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   const helperId = `${ids}-helper`;
   const errorId = `${ids}-error`;
   const fieldRef = useRef<HTMLInputElement>(null);
-  const [provider, setProvider] = useState<Provider>("claude");
+  const [provider, setProvider] = useState<Provider>(initialProvider);
   const [label, setLabel] = useState("");
   const [error, setError] = useState<LabelError | null>(null);
   const [failure, setFailure] = useState<string | null>(null);
@@ -84,8 +88,9 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
     submittingRef.current = true;
     setSubmitting(true);
     try {
-      await api.startProviderLogin(runnerId, { provider, label: trimmed });
+      const started = await api.startProviderLogin(runnerId, { provider, label: trimmed });
       submittingRef.current = false;
+      if (started?.login) onStarted?.(started.login);
       onClose();
       return;
     } catch (cause) {

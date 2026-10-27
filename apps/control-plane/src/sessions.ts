@@ -4174,8 +4174,10 @@ export class SessionsService {
       runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
       ? this.db.machineProviderAccountDefault(runner.runnerId, launchProvider)?.accountId
       : undefined;
+    // The implicit choice skips a profile this control plane may not use (#3240): another control
+    // plane connected to the same runner reports its accounts as not granted here.
     const implicitProviderAccountId = (launch.context?.kind ?? "native") === "native"
-      ? compatibleProviderAccounts[0]?.id
+      ? compatibleProviderAccounts.find((account) => account.profile?.access !== "not_granted")?.id
       : undefined;
     const providerAccountId = usesRunnerProviderAccount
       ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??

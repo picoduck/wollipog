@@ -8203,6 +8203,39 @@ test("saved per-provider defaults govern new sessions but explicit choices and e
   assert.equal(override.data.providerAccountId, "personal");
 });
 
+test("a session without a chosen account never takes a profile only other control planes may use (#3240)", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
+    { id: "ours", label: "Ours", provider: "claude", authStatus: "authenticated", profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "granted" } },
+  ];
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, "ours", "the first account this control plane may use");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "ours");
+
+  // Only the implicit choice skips it: naming the account is still the person's decision.
+  const explicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "theirs" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountId, "theirs");
+});
+
+test("with only profiles of other control planes, a session without a chosen account binds none (#3240)", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
+  ];
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, undefined);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, undefined);
+});
+
 test("a WSL agent does not implicitly inherit a runner-host provider account", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();

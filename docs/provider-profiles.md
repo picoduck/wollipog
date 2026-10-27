@@ -213,17 +213,18 @@ the code, with the recovery it needs:
 | Code | Notice | Actions |
 | --- | --- | --- |
 | `busy` | **Account in Use** | Restart Session, Switch Account… |
-| `foreign_owner` | **Account Locked by Another Runner** | Open Machine Accounts (where an Owner or Admin can **Recover Account**), Switch Account… |
-| `foreign_host` | **Account in Use on Another Host** | Switch Account…, Open Machine Accounts |
+| `foreign_owner` | **Account Locked by Another Runner** | Recover Existing Profile…, Switch Account… |
+| `foreign_host` | **Account in Use on Another Host** | Switch Account…, Set Up Managed Profile… |
 | `unavailable` | **Lease Helper Unavailable** | Restart Session |
 | `unverifiable` | **Lease Can't Be Verified** | Switch Account… |
-| `profile_not_granted` | **Profile Not Granted** | Open Machine Accounts (where an Owner or Admin can **Adopt as Profile**), Switch Account… |
+| `profile_not_granted` | **Profile Not Granted** | Recover Existing Profile…, Switch Account… |
 | `profile_changed` | **Profile Changed** | Switch Account…, Open Machine Accounts |
 | `profile_unverifiable` | **Profile Can't Be Read** | Open Machine Accounts, Switch Account… |
 
 A refusal of the runner's own provider HOME (no account bound) names it as "this Machine's Claude
-sign-in" (or Codex) and offers no account switch: the way out is an account for this control plane,
-added from the Machine's accounts. Older runners report only text; the session's **Turn Failed**
+sign-in" (or Codex) and offers no account switch: the way out is a managed profile of this control
+plane, so a busy, locked or foreign-host refusal of that HOME offers **Set Up Managed Profile…**
+(after **Restart Session** when it is only busy). Older runners report only text; the session's **Turn Failed**
 notice says that the runner couldn't use the session's provider account, with the runner's message
 under its details.
 
@@ -234,6 +235,36 @@ Machine Accounts**. The transcript keeps the established `provider account unava
 both launch paths so older clients still recognize the account-specific error; its explanation no
 longer includes process-boundary or journal instructions. Technical recovery codes and process
 metadata stay in the authorized account details rather than the badge tooltip.
+
+## Set Up and Recover Onboarding
+
+Two control planes connected to the same SSH account share the runner user's own provider HOME,
+so the second one's sessions are refused at its lease. The refusal notice leads to the Machine's
+accounts with one of two actions (#3240):
+
+- **Set Up Managed Profile…** opens **Add Account** with the session's provider selected. The
+  sign-in creates a managed profile granted to this control plane only (see
+  [Managed Profiles](#managed-profiles)). Once it records the account, the section offers
+  **Use for New Sessions**, which saves it as the Machine's default account for that provider, so new
+  sessions that don't choose an account use it.
+- **Recover Existing Profile…** is for a configured account. One confirmation covers what the
+  account needs before this control plane can use it again: **Adopt as Profile** when its profile
+  isn't granted here, then, after inspecting the lock again, **Recover Account** when an earlier
+  runner left it locked. Each step keeps its own checks; a lock the runner still refuses to recover
+  (for example one without reboot proof) is explained in the section and left alone.
+
+The actions follow the routes' authority. Set Up Managed Profile needs manage rights on the
+Machine and a v225 runner; Use for New Sessions and Recover Existing Profile need an Owner or Admin
+of the personal organization as well. A viewer who can't complete one gets **Open Machine
+Accounts** instead, where the section says why. Recover Existing Profile is not offered for the
+runner's own HOME, which has no account to adopt. Importing an existing sign-in into a managed
+profile is tracked separately (#3719).
+
+A session that doesn't choose an account never takes one whose profile only other control planes
+may use (`profile.access` of `not_granted`): the control plane's implicit choice, and New Session's
+displayed preselection, skip it. Such an account can't be saved as the Machine's default either
+(409 `PROVIDER_PROFILE_NOT_GRANTED`); Machine Settings leaves it out of the choices unless it is the
+saved one, which says why. Naming the account explicitly is still the person's decision.
 
 ## Registration and Use
 
