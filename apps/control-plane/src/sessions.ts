@@ -11355,9 +11355,9 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controllerBefore);
   }
 
-  /** Control-plane lifecycle, independent of runner availability and safe to replay after restart. */
   private expiringAutomationDecisions = false;
 
+  /** Control-plane lifecycle, independent of runner availability and safe to replay after restart. */
   expireAutomationCreationDecisions(now = Date.now(), sessionId?: string): number {
     if (this.expiringAutomationDecisions) return 0;
     this.expiringAutomationDecisions = true;
@@ -11365,15 +11365,35 @@ export class SessionsService {
     try {
       for (const decision of this.db.expiredAutomationCreationDecisions(now, sessionId)) {
         const controllerBefore = this.db.getSession(decision.controllingSessionId);
-        const changed = this.db.expireAutomationCreationDecision(decision.occurrenceId, now, () => {
-          this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-          this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "system", id: "automation-approval-expiration" },
-            now, "automation proposal or approval execution deadline elapsed");
-        });
-        if (!changed) continue;
-        count++;
-        this.hub.sessionChangedById(decision.sessionId);
-        this.publishCampaignAttentionTransition(controllerBefore);
+        try {
+          const changed = this.db.expireAutomationCreationDecision(decision.occurrenceId, now, () => {
+            this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now, undefined,
+              (kind, previous) => this.db.queueAutomationExpirationEffect(decision.occurrenceId, previous, kind, now));
+            this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "system", id: "automation-approval-expiration" },
+              now, "automation proposal or approval execution deadline elapsed");
+          });
+          if (!changed) continue;
+          count++;
+          this.hub.sessionChangedById(decision.sessionId);
+          this.publishCampaignAttentionTransition(controllerBefore);
+        } catch (error) {
+          this.log.warn(`automation expiration ${decision.occurrenceId} deferred: ${(error as Error).message}`);
+        }
+      }
+      for (const effect of this.db.automationExpirationEffects(sessionId)) {
+        try {
+          const current = this.db.getSession(effect.previous.id);
+          if (current && !isTerminal(current.status)) {
+            if (effect.kind === "idle" && current.status === "idle") this.replayRestoredPolicyIdle(effect.previous, current.id, now);
+            else {
+              if (!current.pendingApproval) this.gateOnPolicy(current.id, now);
+              this.clearSettledPolicyResumeStatus(current.id);
+            }
+          }
+          this.db.completeAutomationExpirationEffect(effect.occurrenceId);
+        } catch (error) {
+          this.log.warn(`automation expiration ${effect.occurrenceId} lifecycle recovery deferred: ${(error as Error).message}`);
+        }
       }
       return count;
     } finally { this.expiringAutomationDecisions = false; }
@@ -11383,12 +11403,15 @@ export class SessionsService {
    * `resume` delivers a turn that continues the child; it returns whether the turn was admitted.
    * It is told whether the child had settled idle behind the card, so its admission can say
    * `queued` until the runner starts the turn, rather than `running` for a turn that has not begun
-   * (#1651). A child still inside its turn queues the resume behind that turn and stays running. */
+   * (#1651). A child still inside its turn queues the resume behind that turn and stays running.
+   * Expiration can defer lifecycle effects: only card/status writes run in its transaction, while
+   * workflow/pod settlement and notifications are recorded as durable post-commit work. */
   private settleWorkflowDecisionPause(
     sessionId: string,
     occurrenceId: string,
     now: number,
     resume?: (childIdle: boolean) => boolean,
+    deferLifecycle?: (kind: "idle" | "active", previous: SessionView) => void,
   ): void {
     const current = this.db.getSession(sessionId);
     if (!current) return;
@@ -11425,13 +11448,17 @@ export class SessionsService {
     if (restoreIdle) {
       // No resume, a guardrail that would gate it (and parks the child here), or an open hook
       // approval: any message stays on the decision record.
-      this.replayRestoredPolicyIdle(current, sessionId, now);
+      if (deferLifecycle) deferLifecycle("idle", current);
+      else this.replayRestoredPolicyIdle(current, sessionId, now);
     } else {
       // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
       // the card is present, so the last settlement must immediately surface any deferred gate.
-      if (!remaining) this.gateOnPolicy(sessionId, now);
-      this.clearSettledPolicyResumeStatus(sessionId);
-      resume?.(false);
+      if (deferLifecycle) deferLifecycle("active", current);
+      else {
+        if (!remaining) this.gateOnPolicy(sessionId, now);
+        this.clearSettledPolicyResumeStatus(sessionId);
+        resume?.(false);
+      }
     }
   }
 

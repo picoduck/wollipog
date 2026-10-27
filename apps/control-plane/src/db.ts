@@ -856,6 +856,14 @@ CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_automation_expiry
   ON workflow_decisions(category, status) WHERE category='automation_creation' AND status IN ('pending','approved');
+-- Durable post-commit work: lifecycle callbacks can send prompts and open their own transactions.
+CREATE TABLE IF NOT EXISTS automation_expiration_effects (
+  occurrence_id TEXT PRIMARY KEY,
+  session_before TEXT NOT NULL,
+  effect_kind TEXT NOT NULL CHECK (effect_kind IN ('idle','active')),
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE
+);
 -- The restart notice a child is owed for each decision its restart revoked (#1779, #1861). A
 -- guardrail that refuses the notice leaves it held rather than forcing it through; the first
 -- boundary that finds the guardrail cleared delivers every held row in one notice. See
@@ -20143,6 +20151,23 @@ export class ControlPlaneDb {
     });
   }
 
+  queueAutomationExpirationEffect(occurrenceId: string, previous: SessionView, kind: "idle" | "active", now: number): void {
+    this.stmt(`INSERT INTO automation_expiration_effects (occurrence_id,session_before,effect_kind,created_at)
+      VALUES (?,?,?,?)`).run(occurrenceId, JSON.stringify(previous), kind, now);
+  }
+
+  automationExpirationEffects(sessionId?: string): Array<{ occurrenceId: string; previous: SessionView; kind: "idle" | "active" }> {
+    return (this.stmt(`SELECT effect.* FROM automation_expiration_effects effect
+      JOIN workflow_decisions decision ON decision.occurrence_id=effect.occurrence_id
+      ${sessionId ? "WHERE decision.session_id=?" : ""} ORDER BY effect.created_at,effect.occurrence_id`)
+      .all(...(sessionId ? [sessionId] : [])) as Array<{ occurrence_id: string; session_before: string; effect_kind: "idle" | "active" }>)
+      .map((row) => ({ occurrenceId: row.occurrence_id, previous: JSON.parse(row.session_before) as SessionView, kind: row.effect_kind }));
+  }
+
+  completeAutomationExpirationEffect(occurrenceId: string): void {
+    this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
+  }
+
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND status IN ('pending','approved')
@@ -23649,12 +23674,18 @@ export class ControlPlaneDb {
 
   dueSessionPromptCommands(now: number, runnerId?: string, limit = 100): SessionPromptCommandRecord[] {
     const runner = runnerId ? "AND command.runner_id=?" : "";
-    const params = runnerId ? [now, now, runnerId, limit] : [now, now, limit];
+    const params = [now, now, now, now - AUTOMATION_APPROVAL_TTL_MS, ...(runnerId ? [runnerId] : []), limit];
     const rows = this.stmt(
       `SELECT command.* FROM session_prompt_commands command
        JOIN sessions session ON session.id=command.session_id
        WHERE command.state IN ('pending','sent','accepted','queued','started')
          AND command.next_attempt_at IS NOT NULL AND command.next_attempt_at<=? AND command.expires_at>?
+         AND NOT EXISTS (SELECT 1 FROM workflow_decisions decision
+           WHERE decision.resume_command_id=command.command_id AND decision.resume_state='delivering'
+             AND decision.category='automation_creation'
+             AND (decision.status IN ('revoked','superseded') OR (decision.status IN ('pending','approved')
+               AND (json_extract(decision.resource_snapshot, '$.expiresAt')<=?
+                 OR (decision.status='approved' AND decision.resolved_at<=?)))))
          AND session.status NOT IN ('completed','failed','stopped') ${runner}
        ORDER BY command.created_at,command.rowid LIMIT ?`,
     ).all(...params) as unknown as SessionPromptCommandRow[];
