@@ -60,6 +60,7 @@ import {
   runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
+  validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
   isWorkspaceReference,
@@ -133,7 +134,6 @@ import {
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
-  validProviderHomeLaunchRefusal,
 } from "@wollipog/protocol";
 import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
