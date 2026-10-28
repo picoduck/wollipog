@@ -677,8 +677,14 @@ function toolCallsRequest(): PendingApproval {
   };
 }
 
+// `closures=checked` gives the `workflow` merge a runner's closing-reference read with one declared
+// closure, `closures=none` a read that found none, and `closures=declared` a declaration from a
+// runner that predates the check (#3713). Without it, the merge has neither.
+const closuresParam = query.get("closures");
+
 function workflowRequest(): PendingApproval {
   const extension = scenario === "review-extension";
+  const declared = closuresParam === "checked" || closuresParam === "declared";
   return {
     requestId: "merge-occurrence",
     occurrenceId: "merge-occurrence",
@@ -706,7 +712,13 @@ function workflowRequest(): PendingApproval {
         headSha: "c0ffee".repeat(6) + "c0ff",
         reviewResult: "merge",
         requiredChecks: { headSha: "c0ffee".repeat(6) + "c0ff", status: "passed", checkedAt: 1, checks: [] },
+        ...(declared ? { intendedClosures: ["picoduck/wollipog#2178", "picoduck/wollipog#2180"] } : {}),
       },
+      ...(closuresParam === "checked" ? { closingReferenceCheck: { checkedAt: 1, closures: [
+        { issue: "picoduck/wollipog#2178", sources: ["description", "linked"],
+          excerpt: "Closes #2178: the request dock now keeps its card above the keyboard." },
+        { issue: "picoduck/wollipog#2180", sources: ["linked"] },
+      ] } } : closuresParam === "none" ? { closingReferenceCheck: { checkedAt: 1, closures: [] } } : {}),
       resourceDigest: "d".repeat(64),
       policyRevision: 1,
       authority: "human",

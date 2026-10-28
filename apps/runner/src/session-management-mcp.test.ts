@@ -414,7 +414,7 @@ test("PR merge action admission fails closed against mixed-version control plane
   assert.equal(calls.length, 0, "an old peer never receives an action-bearing consume request");
 });
 
-test("a GitLab merge consume outlasts the control plane's GitLab preflight; other consumes keep their timeout (#3602)", async () => {
+test("a merge request or consume outlasts the control plane's forge preflight; other decisions keep their timeout (#3602, #3713)", async () => {
   const { deps } = makeDeps();
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   deps.requestTimeoutMs = 50;
@@ -430,14 +430,38 @@ test("a GitLab merge consume outlasts the control plane's GitLab preflight; othe
     category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42, headSha: "a".repeat(40), reviewResult: "merge",
     requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [{ name: "Required", state: "passed" }] },
   };
-  const github = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_github", resourceSnapshot: snapshot,
-    action: { kind: "pr_merge_enqueue", command: "gh pr merge" } });
-  assert.equal(github.isError, true, "an ordinary consume keeps its own timeout");
+  const question = { category: "implementation_question", question: "Which?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+  const ordinary = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_question", resourceSnapshot: question });
+  assert.equal(ordinary.isError, true, "an ordinary consume keeps its own timeout");
+  const ordinaryRequest = await callTool(deps, "request_workflow_decision", { requestId: "q", resourceKey: "q", resourceSnapshot: question });
+  assert.equal(ordinaryRequest.isError, true, "an ordinary request keeps its own timeout");
+  const github = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_github",
+    resourceSnapshot: { ...snapshot, intendedClosures: ["#3713"] }, action: { kind: "pr_merge_enqueue", command: "gh pr merge" } });
+  assert.equal(github.isError, undefined, "a GitHub merge consume waits for the closing-reference read");
+  const githubRequest = await callTool(deps, "request_workflow_decision", { requestId: "m", resourceKey: "m", resourceSnapshot: snapshot });
+  assert.equal(githubRequest.isError, undefined, "a GitHub merge request waits for the closing-reference read");
   const gitlab = await callTool(deps, "consume_workflow_decision", { occurrenceId: "workflow_gitlab",
     resourceSnapshot: { ...snapshot, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train", squash: false,
       removeSourceBranch: false },
     action: { kind: "pr_merge_enqueue", command: "glab api" } });
   assert.equal(gitlab.isError, undefined, "a GitLab merge consume waits for the preflight to finish");
+});
+
+test("declared merge closures fail closed against a control plane that would drop them (#3713)", async () => {
+  const { deps, calls } = makeDeps();
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences - 1;
+  const snapshot = {
+    category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42, headSha: "a".repeat(40), reviewResult: "merge",
+    requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [{ name: "Required", state: "passed" }] },
+  };
+  const result = await callTool(deps, "request_workflow_decision", { requestId: "m", resourceKey: "m",
+    resourceSnapshot: { ...snapshot, intendedClosures: ["#3713"] } });
+  assert.equal(result.isError, true);
+  assert.equal(resultJson(result).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences);
+  assert.match(JSON.stringify(resultJson(result)), /wollipog pr closures/u);
+  assert.equal(calls.length, 0, "an old control plane never receives a declaration it would drop");
+  await callTool(deps, "request_workflow_decision", { requestId: "m", resourceKey: "m", resourceSnapshot: snapshot });
+  assert.equal(calls.length, 1, "a merge that declares no closure is still requested");
 });
 
 test("PR merge reconciliation fails closed against mixed-version control planes", async () => {

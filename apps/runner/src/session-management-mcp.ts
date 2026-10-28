@@ -49,8 +49,10 @@ const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orch
 /** Default cap on one CP round-trip. Without it, a half-open connection (the documented
  * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
-/** The control plane's GitLab merge preflight (50 s) plus the Codex admission fence (5 s) and margin. */
-const GITLAB_MERGE_CONSUME_TIMEOUT_MS = 75_000;
+/** The control plane's forge preflight (GitLab 50 s, GitHub 45 s) plus the Codex admission fence
+ * (5 s) and margin. A merge request or consume waits this long, so the server never creates or arms
+ * a merge after the call gave up (#3602, #3713). */
+const MERGE_DECISION_TIMEOUT_MS = 75_000;
 const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
 /** Every status `wait_session` can wait for. A Record so a new SessionStatus fails to compile here
  * until it is listed; the handler refuses anything else (#3269). */
@@ -499,6 +501,24 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
     ? null
     : controlPlaneUpdateRequired(needsNewerWollipog("A child-facing decision message needs",
       "Resolve without childMessage and send it with prompt_session, or update Wollipog."), required, actual);
+}
+
+/** A pre-v242 control plane drops an unknown intendedClosures and creates the merge decision
+ * without reading GitHub, so the requester would believe its closures were checked (#3713). */
+async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("declared merge closures", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Declared merge closures (intendedClosures) need",
+      "Check them with `wollipog pr closures <pr> --intended <issue>` and request without intendedClosures, or update Wollipog."), required, actual);
 }
 
 /** An 8 MiB image is about 10.7 MiB of base64. The ordinary RPC deadline would fail a valid upload
@@ -959,6 +979,14 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },
         removeSourceBranch: { type: "boolean" },
+        // GitHub only (#3713): the issues this merge should close; omit it when it must close none.
+        intendedClosures: {
+          type: "array", maxItems: 100, items: { type: "string", minLength: 1, maxLength: 512 },
+          description: "GitHub only: every issue this merge is meant to close, as #N, owner/repo#N, or an issue URL. " +
+            "Omit it when the merge must close no issue. Before the decision is created and again before it is armed, " +
+            "the runner reads what GitHub would close (closing keywords in the description, even negated as in " +
+            "\"does not close #N\", and issues linked by hand); any difference is refused with each reference and its line.",
+        },
       },
       required: ["category", "repository", "pullRequest", "headSha", "reviewResult", "requiredChecks"],
       additionalProperties: false,
@@ -1975,7 +2003,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_workflow_decision",
-    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate.",
+    description: "Create an explicit typed workflow gate bound to this session, its controlling Orchestrator, the current human-owned policy revision, and an exact resource snapshot. Generic questions and approvals cannot satisfy this gate. A GitHub pr_merge is created only when the issues GitHub would close on merge are exactly its intendedClosures; reference an issue that must stay open as \"Refs #N\".",
     inputSchema: {
       type: "object",
       properties: {
@@ -1988,11 +2016,17 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.intendedClosures !== undefined) {
+        const compatibilityError = await intendedClosuresCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions`,
         { requestId: args?.requestId, resourceKey: args?.resourceKey, resourceSnapshot: args?.resourceSnapshot },
+        // A merge is created only after the control plane reads the pull request through this runner.
+        args?.resourceSnapshot?.category === "pr_merge" ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },
@@ -2058,7 +2092,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "consume_workflow_decision",
-    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
+    description: "Immediately before the approved external action begins, consume its one-shot authorization using the exact current resource snapshot. PR merge approvals instead arm one canonical enqueue command pinned to the approved head (gh pr merge with --match-head-commit, after the runner reads again which issues GitHub would close: any the snapshot's intendedClosures does not list revoke the approval; for a GitLab merge request, one glab api merge-train or merge call with sha=, which the runner first checks against GitLab: a stale head, or a direct merge where the project runs merge trains, is refused) and are consumed when its matching runner permission is delivered, or, when no permission prompt occurs (Claude Code in auto or Full Access), by reconcile_workflow_decision after the PR reads MERGED. Revoked, changed, replayed, stale, or superseded grants fail closed.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2089,15 +2123,16 @@ export const TOOLS: McpTool[] = [
         const compatibilityError = await workflowDecisionActionCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
-      // A GitLab merge is checked against GitLab before it is armed (up to 50 seconds, #3602), so
-      // its consume must outlast that check; otherwise the server could arm after the call gave up.
-      const gitlabMerge = args?.resourceSnapshot?.category === "pr_merge" && args.resourceSnapshot.mergeMethod !== undefined;
+      // A merge is checked against its forge before it is armed (GitLab up to 50 seconds, #3602;
+      // GitHub's closing references up to 45, #3713), so its consume must outlast that check;
+      // otherwise the server could arm after the call gave up.
+      const merge = args?.resourceSnapshot?.category === "pr_merge";
       const r = await cpFetch(
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/consume`,
         { resourceSnapshot: args?.resourceSnapshot, ...(args?.action ? { action: args.action } : {}) },
-        gitlabMerge ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, GITLAB_MERGE_CONSUME_TIMEOUT_MS) : undefined,
+        merge ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },

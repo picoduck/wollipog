@@ -112,7 +112,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 240);
+  assert.equal(PROTOCOL_VERSION, 242);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -293,8 +293,11 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 240", () => {
-  assert.equal(PROTOCOL_VERSION, 240);
+test("PROTOCOL_VERSION is 242", () => {
+  assert.equal(PROTOCOL_VERSION, 242);
+  // A v241 runner cannot report the closing references of a GitHub merge (#3713).
+  assert.equal(runnerSupportsProtocol(241, "githubMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(242, "githubMergeClosingReferences"), true);
   assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
   assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
   // A v238 runner cannot answer the GitLab merge preflight (#3602).

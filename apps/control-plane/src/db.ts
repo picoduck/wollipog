@@ -6864,6 +6864,8 @@ export class ControlPlaneDb {
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
       "automation_creation_result TEXT",
+      // #3713: the child runner's GitHub closing-reference read for a GitHub merge request.
+      "closing_reference_check TEXT",
       "automation_creation_approved_by TEXT",
       "resume_state TEXT",
       "resume_command_id TEXT",
@@ -20100,14 +20102,16 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
-          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation,
+          closing_reference_check, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
         input.policyRevision, input.authority,
         input.humanFallback ? JSON.stringify(input.humanFallback) : null,
-        input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null, input.createdAt,
+        input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null,
+        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -31201,6 +31205,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     child_message?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
+    closing_reference_check?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -31211,6 +31216,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
   const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
+  const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   return {
     requestId: row.request_id,
     occurrenceId: row.occurrence_id,
@@ -31227,6 +31233,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
+    ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),

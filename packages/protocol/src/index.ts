@@ -730,9 +730,15 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      runner for `gitlab_merge_preflight`, which an older runner cannot answer, so the control
 //      plane refuses a GitLab merge decision for a pre-v239 child runner.
 // 240: display-only background follow-up execution, queue timing and blocker facts (#3682).
-export const PROTOCOL_VERSION = 240;
+// 242: closing references in GitHub merges (#3713): a GitHub `pr_merge` snapshot may declare
+//      `intendedClosures`, and requesting or arming it first asks the child's runner for
+//      `github_merge_preflight`, which reports every issue the merge would close. The control plane
+//      refuses an undeclared closure and records the check on the decision. A pre-v242 child runner
+//      is not asked; its decisions carry no `closingReferenceCheck`.
+export const PROTOCOL_VERSION = 242;
 
 export * from "./campaign-authority.js";
+export * from "./closing-references.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
@@ -1052,6 +1058,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
+  /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
+  githubMergeClosingReferences: 242,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
@@ -4840,6 +4848,10 @@ export type WorkflowDecisionResourceSnapshot =
       squash?: boolean;
       /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
       removeSourceBranch?: boolean;
+      /** GitHub only (v242, #3713): every issue this merge is meant to close, as sorted unique
+       * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
+       * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
+      intendedClosures?: string[];
     }
   | {
       /** #3369: more review rounds for one epoch of the requester's review run on this pull
@@ -4976,6 +4988,9 @@ export interface WorkflowDecisionView {
   actionAdmission?: WorkflowDecisionActionAdmission;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
+  /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
+   * Absent when the runner predates the check, so the closures it would make are unknown. */
+  closingReferenceCheck?: PullRequestClosingReferenceCheck;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
 }
@@ -9009,6 +9024,45 @@ export interface GitLabMergePreflightResultMessage {
   reason?: string;
 }
 
+/** One issue a GitHub merge would close (#3713). `description` is the description's text, with
+ * its line in `excerpt`; `linked` is GitHub's own `closingIssuesReferences`, which also covers an
+ * issue linked by hand. Either alone closes the issue. */
+export interface PullRequestClosure {
+  issue: string;
+  sources: Array<"description" | "linked">;
+  excerpt?: string;
+}
+
+export interface PullRequestClosingReferenceCheck {
+  checkedAt: number;
+  closures: PullRequestClosure[];
+}
+
+/** v242 (#3713): before a GitHub `pr_merge` is requested or armed, the child's runner reads the open
+ * pull request through the session's own `gh` login: its head, its description and GitHub's closing
+ * links. Read-only; the control plane compares the closures with the snapshot's `intendedClosures`. */
+export interface GithubMergePreflightMessage {
+  type: "github_merge_preflight";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+}
+
+/** `refusal` is set when `ok` is false: `stale_head` (the pull request is not open at the snapshot's
+ * head, so that snapshot cannot merge) or `unavailable` (GitHub could not be read, so nothing was
+ * proven). `reason` is a fixed sentence, never `gh` output. */
+export interface GithubMergePreflightResultMessage {
+  type: "github_merge_preflight_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "unavailable";
+  reason?: string;
+  check?: PullRequestClosingReferenceCheck;
+}
+
 /** Runner-authoritative coordinates for one successfully appended action-arm fence. */
 export interface WorkflowActionAdmissionRecordedMessage {
   type: "workflow_action_admission_recorded";
@@ -9565,6 +9619,7 @@ export type RunnerToControlPlane =
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
+  | GithubMergePreflightResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
   | CampaignIssueScopeResultMessage
@@ -11507,6 +11562,7 @@ export type ControlPlaneToRunner =
   | RecordPolicyHookDecisionMessage
   | RecordWorkflowActionAdmissionMessage
   | GitLabMergePreflightMessage
+  | GithubMergePreflightMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | CampaignIssueScopeMessage

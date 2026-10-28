@@ -45,6 +45,11 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   hub.sessionChangedById = () => {};
   const sent: unknown[] = [];
   hub.sendToRunner = (_id, message) => { sent.push(message); return true; };
+  // A GitHub merge's closing-reference read (#3713): these pull requests close no issue.
+  const request = hub.requestFromRunner.bind(hub);
+  hub.requestFromRunner = async (runnerId, requestId, message, timeoutMs) => message.type === "github_merge_preflight"
+    ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } }
+    : request(runnerId, requestId, message, timeoutMs);
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const enable = (delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
     operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],

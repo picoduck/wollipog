@@ -957,6 +957,23 @@ for (const viewport of [
 
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`a GitHub merge card shows what merging closes at width ${viewport.width} (#3713)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    for (const [closures, expected] of [
+      ["checked", /Closes on Merge\s*picoduck\/wollipog#2178: “?Closes #2178: the request dock now keeps its card above the keyboard\.”?\s*picoduck\/wollipog#2180 \(linked on GitHub\)/u],
+      ["none", /Closes on Merge\s*None/u],
+      ["declared", /Closes on Merge\s*Not checked: the runner predates this check\. Declared: picoduck\/wollipog#2178, picoduck\/wollipog#2180\./u],
+    ] as const) {
+      await page.goto(`/request-surfaces-e2e.html?scenario=workflow&closures=${closures}`);
+      await expect(card(page)).toContainText("PR Merge Approval Required");
+      await expect(card(page)).toContainText(expected);
+      await assertNoHorizontalOverflow(page, ".request-card");
+      if (process.env.MERGE_CLOSURES_EVIDENCE_DIR) {
+        await card(page).screenshot({ path: `${process.env.MERGE_CLOSURES_EVIDENCE_DIR}/merge-closures-${closures}-${viewport.width}.png` });
+      }
+    }
+  });
+
   test(`a post-upvote extension shows both bound heads at width ${viewport.width}`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/request-surfaces-e2e.html?scenario=review-extension");

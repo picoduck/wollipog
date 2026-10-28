@@ -44,7 +44,13 @@ retain the drafting context, exact sanitized payload, fresh duplicate checks and
 Follow-up recommendations go to the parent for recording and deduplication before anyone acts.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
-references in campaigns so merge cannot bypass the closure gate. Delivery comments compare every
+references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put
+close, fix or resolve (any tense, even negated as in "does not close" or hyphenated as in
+"auto-close") directly before an issue reference that must stay open, in a PR description, title or
+commit message. Code spans do not close an issue, but paraphrase rather than rely on them. Check a
+draft with `wollipog pr closures --file <draft>` and an open PR with `wollipog pr closures <url>`. A
+GitHub `pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge
+would close (#3713). Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
