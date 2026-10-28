@@ -37,6 +37,8 @@ interface ProviderProcess {
   cb: DriverCallbacks;
   /** Task ids the runner seeded into this provider as still pending. */
   seeded: string[];
+  /** Task ids the runner told this provider had already ended (#3752). */
+  ended: string[];
 }
 
 /**
@@ -52,11 +54,12 @@ function fakeProvider(options: {
   const prompts: Array<{ provider: number; cwd: string; text: string }> = [];
   const factory = (
     _driver: unknown,
-    launch: { cwd: string; initialBackgroundTaskIds?: string[] },
+    launch: { cwd: string; initialBackgroundTaskIds?: string[]; endedBackgroundTaskIds?: string[] },
     cb: DriverCallbacks,
   ) => {
     const provider: ProviderProcess = {
       index: providers.length, cb, seeded: [...(launch.initialBackgroundTaskIds ?? [])],
+      ended: [...(launch.endedBackgroundTaskIds ?? [])],
     };
     providers.push(provider);
     let endHeldTurn: (() => void) | undefined;
@@ -734,6 +737,9 @@ test("a job the restarted conversation starts under a reused task id gets its ow
     manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
       fake.factory as never, f.dataDir, 1);
     assert.equal(await manager.start(spec), true);
+    // #3752: only the resumed conversation's ended jobs stay ended in a new provider. A fresh
+    // conversation may reuse a replaced conversation's id, so that id must still be tracked.
+    assert.deepEqual(fake.providers[0]!.ended, [], "a replaced conversation's ended id is not passed on");
     manager.prompt(spec.sessionId, "start work");
     await waitFor(() => f.store.readMeta(spec.sessionId)?.status === "idle" && fake.prompts.length === 1,
       "the launching turn did not finish");
