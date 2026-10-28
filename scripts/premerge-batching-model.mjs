@@ -186,7 +186,13 @@ export function simulate(inputs, design, params = {}, seed = 1) {
         // within one merge (max_entries_to_merge 5). A still-running later group is awaited.
         const later = units.slice(1, 5);
         const vouch = later.findIndex((unit) => unit.build?.done && !unit.build.fails);
-        if (vouch >= 0) { land({ entries: units.splice(0, vouch + 2).flatMap((unit) => unit.entries) }); continue; }
+        if (vouch >= 0) {
+          const vouched = units.splice(0, vouch + 2);
+          // Intermediate groups still running are superseded by the passing group: free their slots.
+          for (const unit of vouched) cancel(unit);
+          land({ entries: vouched.flatMap((unit) => unit.entries) });
+          continue;
+        }
         if (later.some((unit) => unit.build && !unit.build.done)) break;
       }
       for (const unit of units.slice(1)) cancel(unit);
@@ -234,7 +240,8 @@ export function simulate(inputs, design, params = {}, seed = 1) {
     }
   }
 
-  for (let guard = 0; guard < 1_000_000; guard++) {
+  for (let guard = 0; ; guard++) {
+    if (guard === 1_000_000) throw new Error("Simulation did not settle within 1,000,000 events");
     schedule();
     pending.sort((a, b) => a.at - b.at);
     const buildEnds = units.filter((unit) => unit.build && !unit.build.done).map((unit) => unit.build.end);

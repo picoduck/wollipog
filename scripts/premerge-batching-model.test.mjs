@@ -49,6 +49,12 @@ test("HEADGREEN lets a later passing group vouch for a flaky earlier entry but s
   const vouched = pairs.find(({ all, head }) => head.fullBuilds === 2 && head.landings[0] === 2 && all.fullBuilds > 2);
   assert.ok(vouched, "expected a seed where HEADGREEN absorbs the head's flake");
   assert.deepEqual(vouched.head.merged, [30, 30]);
+  // A vouching group frees the slots of earlier groups that are still running.
+  const staggered = inputs([0, 0, 0], { passingExecutionMinutes: [30, 45] });
+  for (let seed = 1; seed <= 200; seed++) {
+    const run = simulate(staggered, { kind: "native", depth: 3, headGreen: true }, { ...clean, flakeRate: 0.4, slots: 3 }, seed);
+    assert.equal(run.merged.length, 3);
+  }
   // A defect is never vouched for: every later group contains it.
   const defect = simulate(trace, { kind: "native", depth: 2, headGreen: true }, { ...clean, defects: [0] });
   assert.equal(defect.rejected, 1);
