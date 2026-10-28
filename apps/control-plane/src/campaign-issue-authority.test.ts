@@ -290,9 +290,22 @@ test("human verified scope settles a consumed publication without delegated admi
   const h=harness(true,2);
   try {
     const p=await consumedPublication(h);
+    const held=()=>h.db.getSession("root")!.orchestratorPolicy!.issueNumbers!.length+h.db.unsettledPublicationSlots("root");
+    // A follow-up lineage the caller names settles nothing by itself (#2940): unrelated #999 claiming
+    // the publication carries no verified payload or issue admission, so its slot still counts.
+    const claimed=await h.svc.proposeCampaignIssueScope("root",{requestId:"claimed-lineage",expectedRevision:1,additions:[{repository:"team/repo",number:999}],removals:[],
+      explanation:"An unrelated issue claiming the publication",lineage:{kind:"follow_up",publicationOccurrenceId:p.decision.occurrenceId}},()=>true,h.principal);
+    assert.ok(claimed.ok,claimed.error ?? "claimed lineage proposal"); assert.equal(claimed.data!.authority,"human");
+    const claim=claimed.data!.resourceSnapshot as Extract<WorkflowDecisionView["resourceSnapshot"],{category:"campaign_issue_scope"}>;
+    assert.equal(claim.verifiedPublications,undefined); assert.equal(claim.issueAdmission,undefined);
+    const refused=h.approve(claimed.data!); assert.equal(refused.ok,false);
+    assert.match(refused.error!,/give the campaign 3 issues, counting 1 published follow-up not yet in scope, more than the 2/);
+    assert.equal(held(),2); assert.equal(h.db.admittedCampaignPublicationIssue("root",p.decision.occurrenceId),null);
+    assert.ok(h.svc.resolveWorkflowDecision("root","root",claimed.data!.occurrenceId,{outcome:"deny"},"human",{kind:"human",id:h.principal.userId},()=>true).ok);
     const direct=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-settlement",expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Human adopts the exact published payload"},()=>true,h.principal);
     assert.ok(direct.ok); assert.equal(direct.data!.authority,"human"); assert.ok(h.approve(direct.data!).ok);
     assert.equal(h.db.admittedCampaignPublicationIssue("root",p.decision.occurrenceId),101);
+    assert.ok(held()<=2,"scope and held slots never exceed the limit");
   } finally {h.db.close();}
 });
 
