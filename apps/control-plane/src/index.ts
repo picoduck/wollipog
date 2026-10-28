@@ -1087,6 +1087,7 @@ const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullReq
   });
 });
 svc.campaignForgeRefresh = refreshCampaignForge;
+svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
 registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,

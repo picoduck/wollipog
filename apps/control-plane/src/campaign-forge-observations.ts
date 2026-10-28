@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS campaign_forge_observations (
 
 export type ForgeFact = CampaignObservedFact<CampaignForgeChangeRequestObservation>;
 export type ForgeFactEntry = { ref: CampaignPullRequestRef; fact: ForgeFact };
+/** One validated answer for one ref: an observation or a recognized failure. */
+export type ForgeReadResult = { ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation; failure?: CampaignForgeObservationFailure };
 
 /** How the runner hosting the campaign stands right now. */
 export type ForgeObserverState = "online" | "offline" | "unsupported";
@@ -238,7 +240,7 @@ export class CampaignForgeObserver {
       if (this.queue.length >= MAX_QUEUED_READS) break;
       const keys = batch.map((ref) => `${campaignId}|${forgeRefKey(ref)}`);
       for (const key of keys) this.lastRead.set(key, now);
-      const read = this.limited(() => this.read(campaignId, runner.runnerId, batch)).finally(() => {
+      const read = this.limited(async () => { await this.read(campaignId, runner.runnerId, batch); }).finally(() => {
         // The interval runs from when the read finished, whatever it learned: a read that waited in
         // the queue or timed out is not repeated at once, by a caller or by the background pass.
         const finished = this.now();
@@ -251,6 +253,25 @@ export class CampaignForgeObserver {
       waits.push(read);
     }
     await Promise.all(waits);
+  }
+
+  /** One authoritative read of these refs now, for proof that must not rest on an earlier answer
+   * (#2940 closure execution). It skips the rate limit, the stored facts and any read already in
+   * flight, which may predate a change, but keeps the shared concurrency limit, the bounded queue
+   * and the runner's per-request limit. Resolves to one result per ref in order, or null when the
+   * runner cannot be asked, the queue is full, or any batch was not answered; never rejects. */
+  async readNow(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
+    const runner = this.deps.observingRunner(campaignId);
+    if (!refs.length || !runner || !runner.online || !runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return null;
+    const batches: CampaignPullRequestRef[][] = [];
+    for (let start = 0; start < refs.length; start += CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
+      batches.push(refs.slice(start, start + CAMPAIGN_FORGE_OBSERVATION.refsPerRequest));
+    }
+    if (this.queue.length + batches.length > MAX_QUEUED_READS) return null;
+    const answers = await Promise.all(batches.map((batch) => new Promise<ForgeReadResult[] | null>((resolve) => {
+      void this.limited(async () => resolve(await this.read(campaignId, runner.runnerId, batch))).finally(() => resolve(null));
+    })));
+    return answers.every((answer): answer is ForgeReadResult[] => answer !== null) ? answers.flat() : null;
   }
 
   /** One background pass: unfinished items' pull requests not read for `backgroundIntervalMs`,
@@ -318,7 +339,7 @@ export class CampaignForgeObserver {
     });
   }
 
-  private async read(campaignId: string, runnerId: string, refs: CampaignPullRequestRef[]): Promise<void> {
+  private async read(campaignId: string, runnerId: string, refs: CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
     const requestId = this.deps.newRequestId();
     let response: unknown;
     try {
@@ -334,24 +355,26 @@ export class CampaignForgeObserver {
       // Disconnected or timed out: nothing was learned. The facts keep their last state, a missing
       // one reads `runner_disconnected` while the runner is gone, and every value ages into stale.
       this.deps.warn(`campaign forge read for ${campaignId} did not complete: ${String(error)}`);
-      return;
+      return null;
     }
     try {
       // Validation itself must not throw past here: a malformed answer only stores nothing.
       const results = validForgeResults(response, campaignId, refs);
       if (!results) {
         this.deps.warn(`campaign forge read for ${campaignId} returned a malformed answer`);
-        return;
+        return null;
       }
       if (this.deps.store.record(campaignId, runnerId, results, this.now())) this.deps.changed(campaignId);
+      return results;
     } catch (error) {
       this.deps.warn(`campaign forge observation for ${campaignId} could not be stored: ${String(error)}`);
+      return null;
     }
   }
 }
 
 /** Accept only an answer for exactly the refs asked, in order, with recognized failures. */
-export function validForgeResults(
+function validForgeResults(
   response: unknown,
   campaignId: string,
   refs: readonly CampaignPullRequestRef[],

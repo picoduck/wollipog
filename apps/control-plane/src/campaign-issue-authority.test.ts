@@ -627,10 +627,17 @@ function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOptio
   };
   const verified: Array<Array<{ number: number; headSha: string }> | undefined> = [];
   const forgeReads: number[][] = [];
+  /** While `hold` is set, each forge read is sent but waits for `release()` before GitHub answers. */
+  const reads = { hold: false, waiting: [] as Array<() => void>, release() { for (const resume of this.waiting.splice(0)) resume(); } };
   const runner = h.hub.requestFromRunner;
   h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
     if (message.type === "campaign_forge_observe") {
       forgeReads.push(message.pullRequests.map((pr) => pr.number));
+      if (reads.hold) await new Promise<void>((resume) => reads.waiting.push(resume));
+      // The runner's own per-request limit (campaign-forge-status.ts).
+      if (message.pullRequests.length > CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
+        return { type: "campaign_forge_observe_result", requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: false, failure: "forge_error" as const };
+      }
       return { type: "campaign_forge_observe_result", requestId, sessionId: message.sessionId, observedAt: Date.now(), ok: true,
         results: message.pullRequests.map((pr) => forge.has(pr.number)
           ? { ref: pr, ok: true as const, observation: forge.get(pr.number)! }
@@ -688,7 +695,21 @@ function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOptio
   }
   const close = (requestId: string) => h.svc.requestGithubIssueClosure("root", { requestId, issue: 100, reason: "completed",
     explanation: "Delivered by the merged pull request", evidence: ["Verified report"] });
-  return { h, head, observe, setForge, forgeReads, verified, close };
+  /** The real observer behind both service hooks, its clock held inside one minIntervalMs. */
+  const useObserver = () => {
+    const clock = Date.now();
+    let ids = 0;
+    const observer = new CampaignForgeObserver({
+      observingRunner: (id) => h.db.campaignForgeObservingRunner(id), store: h.db.campaignForgeObservations,
+      requestFromRunner: (runnerId, requestId, message, timeoutMs) => h.hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
+      backgroundTargets: () => [], changed() {}, warn() {}, newRequestId: () => `forge_${++ids}`, now: () => clock,
+    });
+    h.svc.campaignForgeRefresh = (campaignId, refs) => observer.refresh(campaignId, refs);
+    h.svc.campaignForgeReadNow = (campaignId, refs) => observer.readNow(campaignId, refs);
+    return observer;
+  };
+  const settle = async (until: () => boolean) => { while (!until()) await new Promise((resolve) => setImmediate(resolve)); };
+  return { h, head, observe, setForge, forgeReads, reads, verified, close, useObserver, settle };
 }
 
 test("#2940 a verified issue delivered through a consumed merge gate gets Orchestrator-owned closure after an on-demand refresh", async () => {
@@ -750,18 +771,11 @@ test("#2940 a closed-unmerged pull request does not poison an issue another gate
 
 test("#2940 execution re-reads an excluded pull request past the observer's cache and rate limit (CR-1.2)", async () => {
   for (const reopened of [true, false]) {
-    const { h, setForge, forgeReads, close } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+    const { h, setForge, forgeReads, close, useObserver } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
     try {
       setForge(9, "closed"); setForge(10, "merged");
-      // The real observer, its clock held inside one minIntervalMs, so a repeat read is suppressed.
-      const clock = Date.now();
-      let ids = 0;
-      const observer = new CampaignForgeObserver({
-        observingRunner: (id) => h.db.campaignForgeObservingRunner(id), store: h.db.campaignForgeObservations,
-        requestFromRunner: (runnerId, requestId, message, timeoutMs) => h.hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
-        backgroundTargets: () => [], changed() {}, warn() {}, newRequestId: () => `forge_${++ids}`, now: () => clock,
-      });
-      h.svc.campaignForgeRefresh = (campaignId, refs) => observer.refresh(campaignId, refs);
+      // The real observer, its clock held inside one minIntervalMs, so a repeat refresh is suppressed.
+      useObserver();
       const c = await close(`excluded-${reopened}`);
       assert.ok(c.ok, c.error ?? "closure");
       const d = c.data!.decision!;
@@ -809,5 +823,94 @@ test("#2940 a gate that names this issue among its intended closures still prove
     const c = await close("named-closure");
     assert.ok(c.ok, c.error ?? "closure");
     assert.equal(c.data!.decision!.authority, "orchestrator", JSON.stringify(c.data!.decision!.authorityEvaluation));
+  } finally { h.db.close(); }
+});
+
+test("#2940 work assigned while the excluded-pull-request read is pending is never closed (CR-2.1)", async () => {
+  const { h, setForge, reads, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+  try {
+    setForge(9, "closed"); setForge(10, "merged");
+    useObserver();
+    const c = await close("assigned-mid-read");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.ok(h.approve(d).ok);
+    reads.hold = true;
+    const pending = h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    await settle(() => reads.waiting.length > 0);
+    // The delivered item gets new work while execution waits on GitHub.
+    h.db.createSession({ id: "late", runnerId: "r", workspaceId: "w", agentId: "codex", title: "late", useWorktree: false,
+      driver: "codex-app-server", now: Date.now(), config: {}, parentSessionId: "root" });
+    h.db.updateSessionStatus("late", "running", Date.now());
+    const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "late" });
+    assert.ok(assigned.ok, assigned.error ?? "assign");
+    reads.release();
+    const executed = await pending;
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "approved", "the approval stays unconsumed");
+  } finally { h.db.close(); }
+});
+
+test("#2940 more excluded pull requests than one runner request admits are read in batches (CR-2.2)", async () => {
+  const closed = Array.from({ length: 16 }, (_, index) => ({ number: 20 + index }));
+  const { h, setForge, forgeReads, close, useObserver } = delivery({ gate: "consumed", stage: closed });
+  try {
+    for (const { number } of closed) setForge(number, "closed");
+    setForge(10, "merged");
+    // A second item for the same issue, delivered by another child, names a 17th closed pull request.
+    const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 100 } },
+      { key: "issue:100:part-2", issue: { repository: "team/repo", number: 100 } }], planComplete: true });
+    assert.ok(plan.ok, plan.error ?? "plan");
+    const second = plan.data!.items.find((item) => item.key === "issue:100:part-2")!.workItemId;
+    h.db.createSession({ id: "child2", runnerId: "r", workspaceId: "w", agentId: "codex", title: "child2", useWorktree: false,
+      driver: "codex-app-server", now: Date.now(), config: {}, parentSessionId: "root" });
+    h.db.updateSessionStatus("child2", "running", Date.now());
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: second, childSessionId: "child2" }).ok);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: second, stage: { stage: "merged",
+      pullRequests: [{ repository: "team/repo", number: 36 }, { repository: "team/repo", number: 37 }] } }).ok);
+    setForge(36, "closed"); setForge(37, "merged");
+    h.svc.onSessionStatus("child2", "idle");
+    const report = h.db.appendEvent("child2", { kind: "agent_message", text: "Delivered.", final: true }, Date.now()).seq;
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child2", reportEventSeq: report, followUpsAccounted: true,
+      workItem: { id: second, outcome: "delivered" } }).ok);
+    useObserver();
+    const c = await close("seventeen-excluded");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.ok(h.approve(d).ok);
+    const before = forgeReads.length;
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.deepEqual(forgeReads.slice(before).map((batch) => batch.length).sort((a, b) => a - b), [1, 16],
+      "17 excluded refs go out as one full batch and one more");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
+test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)", async () => {
+  const { h, setForge, forgeReads, reads, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+  try {
+    setForge(9, "closed"); setForge(10, "merged");
+    useObserver();
+    const c = await close("concurrent-executes");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.ok(h.approve(d).ok);
+    const before = forgeReads.length;
+    reads.hold = true;
+    const executes = Array.from({ length: 4 }, () => h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest));
+    await settle(() => reads.waiting.length > 0);
+    for (let tick = 0; tick < 20; tick++) await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(forgeReads.slice(before), [[9]], "one read in flight for every concurrent execute");
+    reads.hold = false;
+    reads.release();
+    const results = await Promise.all(executes);
+    assert.equal(results.filter((result) => result.ok).length, 1, "exactly one execute dispatches");
+    assert.equal(h.state.executes, 1);
+    // A settled answer is never reused: a later execute of the consumed occurrence reads nothing new and is refused.
+    assert.equal((await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest)).ok, false);
+    assert.deepEqual(forgeReads.slice(before), [[9]]);
   } finally { h.db.close(); }
 });
