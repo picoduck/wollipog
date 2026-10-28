@@ -202,9 +202,10 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
       !reviewModelSupported(reviewer.capabilities, model, effort)) {
     throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine. ${snapshot ? "Restore it or launch a new child with an updated review policy." : "Restore it or change Settings → Reviews."}`, 409);
   }
-  if (!rule?.allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
-    throw new ReviewSettingsError("The configured reviewer belongs to the implementer's model family. Explicitly allow same-family reviews in Settings → Reviews or choose another reviewer.", 409);
+  const allowSameFamily = rule?.harness === harness && rule.allowSameFamily;
+  if (!allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
+    throw new ReviewSettingsError(`The configured ${harness} reviewer (${model}) belongs to the implementer's model family. Select this reviewer harness and explicitly allow same-family reviews in Settings → Reviews, or choose another reviewer.`, 409);
   }
   return { harness, configuration: { ...(model ? { model } : {}), effort,
-    allowSameFamily: rule?.allowSameFamily ?? false, roundBudget: snapshot?.reviewRoundBudget ?? effective.settings.roundBudget } };
+    allowSameFamily, roundBudget: snapshot?.reviewRoundBudget ?? effective.settings.roundBudget } };
 }

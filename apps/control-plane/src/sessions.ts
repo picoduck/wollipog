@@ -4500,6 +4500,7 @@ export class SessionsService {
       ) ? DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.parentControl : "off";
       const inheritedCampaign = parentSessionId ? campaignController?.orchestratorPolicy : undefined;
       const campaignBase = inheritedCampaign ? {
+        ...(inheritedCampaign.reviewPolicySnapshotVersion === 1 ? { reviewPolicySnapshotVersion: 1 as const } : {}),
         behavior: { ...inheritedCampaign.behavior },
         delegation: {
           parentControl: inheritedCampaign.delegation.parentControl,

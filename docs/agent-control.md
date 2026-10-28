@@ -363,7 +363,9 @@ complete project override, then personal settings, then built-in defaults. Fixed
 take precedence. New campaigns carry `reviewPolicySnapshotVersion: 1`; each child's selected fields,
 including its concrete discovered model when available, are persisted atomically at launch and
 projected as `SessionView.reviewPolicy`. Later settings or campaign edits affect future children.
-Same-family consent is never frozen: admission rechecks the current user's effective permission.
+Same-family consent is never frozen: admission rechecks the current user's effective project-over-user
+rule. Its explicit consent applies only when that rule selects the actual reviewer harness; a retained
+toggle on another harness cannot authorize a campaign override.
 Missing configured harnesses and models refuse with an actionable reason and no fallback. Legacy
 campaigns without the marker retain their existing behavior; older clients omitting the fields
 preserve saved review policy. `campaign_child_review_policy_snapshot` logs the selected launch

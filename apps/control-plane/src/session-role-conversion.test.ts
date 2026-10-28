@@ -316,24 +316,70 @@ test("runtime hydration and an existing attention batch preserve committed role 
   } finally { h.db.close(); }
 });
 
-test("nested promotion preserves its controlling campaign policy and refuses settings that would shadow it", async () => {
+function useLegacyReviewPolicy(h: ReturnType<typeof harness>) {
+  const policy = h.db.getSession("s")!.orchestratorPolicy!;
+  delete policy.reviewPolicySnapshotVersion;
+  for (const key of ["reviewHarness", "reviewModel", "reviewEffort", "reviewRoundBudget"] as const) {
+    delete policy.behavior[key];
+    delete policy.sources.behavior[key];
+  }
+  h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='s'").run(JSON.stringify(policy));
+}
+
+for (const legacy of [false, true]) test(`nested promotion preserves its ${legacy ? "legacy" : "current"} controlling policy and refuses shadow settings`, async () => {
   const h = harness("orchestrator");
   try {
+    if (legacy) useLegacyReviewPolicy(h);
     h.db.createSession({ id: "nested", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Nested",
       driver: "claude-code", config: { permissionMode: "auto" }, useWorktree: false, now: 20, parentSessionId: "s" });
     h.db.updateSessionStatus("nested", "idle", 21);
     const policy = h.db.getSession("s")!.orchestratorPolicy!;
     h.defaults.defaults.behavior.maximumConcurrentChildren = 1;
     const preview = h.conversions.preview("nested", "orchestrator", h.defaults, () => null);
-    assert.equal(preview.available, true);
+    assert.equal(preview.available, true, preview.reason ?? "promotion should be available");
     assert.equal(preview.policyInherited, true);
     assert.deepEqual(preview.orchestratorPolicy, policy);
     await assert.rejects(h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null,
       { behavior: { maximumConcurrentChildren: 7 } }), /controlling campaign/);
     assert.equal(h.commands.length, 0);
-    await h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null);
+    const normalRequest = h.hub.requestFromRunner.bind(h.hub);
+    h.hub.requestFromRunner = async () => { throw new Error("prepare never arrived"); };
+    await assert.rejects(h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null), /never arrived/);
+    h.hub.requestFromRunner = normalRequest;
+    // An unchanged selection remains a valid retry of the recorded, unfinished intent.
+    await h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null,
+      { behavior: { maximumConcurrentChildren: policy.behavior.maximumConcurrentChildren } });
     assert.deepEqual(h.db.getSession("nested")!.orchestratorPolicy, policy);
     assert.equal(h.db.getSession("nested")!.parentSessionId, "s");
+  } finally { h.db.close(); }
+});
+
+for (const legacy of [false, true]) test(`nested Orchestrators preserve ${legacy ? "legacy live" : "current snapshot"} review semantics`, () => {
+  const h = harness("orchestrator");
+  try {
+    if (legacy) useLegacyReviewPolicy(h);
+    h.db.updateSessionStatus("s", "running", Date.now());
+    h.hub.sendToRunner = () => true;
+    const createChild = (parentSessionId: string, title: string, role: SessionRole = "normal") => {
+      const create = () => h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", role,
+        title, useWorktree: true, config: { permissionMode: "auto" } },
+      undefined, undefined, false, false, false, { parentSessionId });
+      const result = create();
+      if (!result.ok && result.error?.includes("requires approval")) {
+        const requestId = /request (spawn_[a-f0-9]+)/u.exec(result.error)![1]!;
+        assert.equal(h.db.resolvePolicyHookApproval(parentSessionId, requestId, "allowed", Date.now())?.changed, true);
+        return create();
+      }
+      return result;
+    };
+    const nested = createChild("s", "Nested", "orchestrator");
+    assert.ok(nested.ok && nested.data, nested.error ?? "nested launch should succeed");
+    h.db.updateSessionStatus(nested.data.id, "running", Date.now());
+    const grandchild = createChild(nested.data.id, "Grandchild");
+    assert.ok(grandchild.ok && grandchild.data, grandchild.error ?? "grandchild launch should succeed");
+    assert.equal(grandchild.data.reviewPolicy !== undefined, !legacy, "the outer controlling policy determines capture");
+    assert.equal(nested.data.orchestratorPolicy?.reviewPolicySnapshotVersion, legacy ? undefined : 1);
+    assert.equal(Object.hasOwn(nested.data.orchestratorPolicy!.behavior, "reviewHarness"), !legacy);
   } finally { h.db.close(); }
 });
 

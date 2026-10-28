@@ -249,12 +249,15 @@ function mergeModels(installations: AgentCapabilities[]): AgentModel[] {
 }
 
 export function resolveOrchestratorCampaignPolicy(
-  defaults: OrchestratorDefaults,
+  defaults: OrchestratorDefaults & Pick<OrchestratorCampaignPolicy, "reviewPolicySnapshotVersion">,
   baseSource: Extract<OrchestratorPolicySource,
     "system_default" | "user_default" | "legacy_session" | "active_campaign">,
   overrides: OrchestratorCampaignOverrides = {},
 ): OrchestratorCampaignPolicy {
-  const behavior = { ...DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ...defaults.behavior, ...(overrides.behavior ?? {}) };
+  // Inheriting a legacy campaign must not opt it into child review snapshots or add keys
+  // that make an unchanged policy look like a forbidden descendant override.
+  const snapshotReviews = baseSource !== "active_campaign" || defaults.reviewPolicySnapshotVersion === 1;
+  const behavior = { ...(snapshotReviews ? DEFAULT_ORCHESTRATOR_REVIEW_POLICY : {}), ...defaults.behavior, ...(overrides.behavior ?? {}) };
   const decisions = { ...defaults.delegation.decisions, ...(overrides.delegation?.decisions ?? {}) };
   const execution = { ...defaults.execution, ...(overrides.execution ?? {}) };
   const behaviorSources = Object.fromEntries(
@@ -276,7 +279,7 @@ export function resolveOrchestratorCampaignPolicy(
   return {
     version: 1,
     childHarnessMatch: "harness",
-    reviewPolicySnapshotVersion: 1,
+    ...(snapshotReviews ? { reviewPolicySnapshotVersion: 1 as const } : {}),
     behavior,
     delegation: {
       parentControl: overrides.delegation?.parentControl ?? defaults.delegation.parentControl,

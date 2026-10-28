@@ -1451,7 +1451,7 @@ test("Automatic campaign fields freeze the child's personal review choices and p
   }
 });
 
-test("a child snapshot never overrides a later same-family consent revocation", () => {
+test("same-family campaign consent must target the actual reviewer harness", () => {
   const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
   try {
     const user = h.db.localIdentityContext().userId;
@@ -1460,13 +1460,56 @@ test("a child snapshot never overrides a later same-family consent revocation", 
     h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
     const child = campaignReviewChild(h);
     assert.equal(child.reviewPolicy?.reviewModel, "claude-opus-5-5", "a fixed Claude harness resolves its own default instead of inheriting the Codex rule's model");
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    assert.equal(h.starts().filter(start => start.spec.review).length, 0, "consent refusal never falls back to another reviewer");
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [
+      { ...rule, harness: "claude-code", model: "claude-opus-5-5" },
+    ] });
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.model, "claude-opus-5-5");
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+test("a project override replaces personal same-family consent for a captured reviewer", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    const project = h.db.createProject({ name: "Consent Override" });
+    h.db.setSessionProject(child.id, project.id);
+    h.db.reviewSettings.set(user, project.id, { version: 1, roundBudget: 4, reviewers: [
+      { ...rule, harness: "codex", model: "gpt-6.1-sol" },
+    ] });
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    h.db.reviewSettings.set(user, project.id, null);
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+test("a child snapshot never overrides a later matching same-family consent revocation", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
     h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [{ ...rule, allowSameFamily: false }] });
     const refused = h.svc.requestReviewSession(child.id, request());
     assert.equal(refused.ok, false);
-    assert.match(refused.error!, /same-family/u);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
     h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
     requested(h, child.id);
-    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.model, "claude-opus-5-5");
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
   } finally { h.db.close(); }
 });
 
