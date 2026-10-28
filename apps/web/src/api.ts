@@ -926,7 +926,12 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify({ action }) },
     ),
 
-  restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+  /** `waitForProviderHome` (#3240): wait for a busy provider account instead of failing. */
+  restart: (id: string, options?: { waitForProviderHome?: boolean }) =>
+    req<SessionView>(`/api/sessions/${id}/restart`, {
+      method: "POST",
+      ...(options?.waitForProviderHome ? { body: JSON.stringify({ waitForProviderHome: true }) } : {}),
+    }),
   sessionRolePreview: (id: string, role: import("@wollipog/protocol").SessionRole) =>
     req<import("@wollipog/protocol").SessionRoleConversionPreview>(`/api/sessions/${encodeURIComponent(id)}/role?role=${role}`),
   changeSessionRole: (id: string, role: import("@wollipog/protocol").SessionRole,

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PROVIDER_HOME_LAUNCH_REFUSAL_CODES, PROVIDER_HOME_RECOVERY_CAUSES, PROVIDER_HOME_RECOVERY_CAUSE_CODES } from "@wollipog/protocol";
-import { availableProviderHomeRefusalActions, providerHomeRefusalCopy } from "./provider-home-refusal.js";
+import { availableProviderHomeRefusalActions, providerHomeRefusalCopy, providerHomeWaitCopy } from "./provider-home-refusal.js";
 
 test("every launch refusal code has its own state, a short sentence-case body and a recovery", () => {
   const titles = new Set<string>();
@@ -74,4 +74,42 @@ test("Set Up Managed Profile and Recover Existing Profile fall back to Open Mach
     ["restart", "open_accounts"]);
   assert.deepEqual(availableProviderHomeRefusalActions(["switch_account", "set_up_profile", "open_accounts"], { canSetUpProfile: false, canRecoverProfile: false }),
     ["switch_account", "open_accounts"], "the fallback is listed once");
+});
+
+test("a busy refusal offers Wait for Account instead of Restart Session only when the runner can wait (#3240)", () => {
+  const copy = (account: string | undefined, cause?: "holder_alive" | "no_reboot_proof", code: "busy" | "unverifiable" = "busy") =>
+    providerHomeRefusalCopy({ code, provider: "claude", ...(cause ? { cause } : {}) }, account, { canWait: true });
+  // Waiting starts the session at once when the account is already free, so it replaces Restart.
+  assert.deepEqual(copy("Work").actions, ["wait", "switch_account"]);
+  assert.deepEqual(copy(undefined).actions, ["wait", "set_up_profile"]);
+  assert.deepEqual(copy("Work", "holder_alive").actions, ["wait", "switch_account"], "a specific busy cause waits too");
+  assert.match(copy("Work").body, /Wait for the account to start the session as soon as it's free/u);
+  assert.ok(!copy("Work", "no_reboot_proof", "unverifiable").actions.includes("wait"), "only a busy HOME frees itself");
+  assert.ok(!providerHomeRefusalCopy({ code: "busy", provider: "claude" }, "Work").actions.includes("wait"),
+    "an older runner keeps today's actions");
+  assert.match(providerHomeRefusalCopy({ code: "busy", provider: "claude" }, "Work").body, /Restart the session once it's free/u);
+});
+
+test("a refused fork has the session launch's state and a fork's next step (#3240)", () => {
+  for (const code of PROVIDER_HOME_LAUNCH_REFUSAL_CODES) {
+    const session = providerHomeRefusalCopy({ code, provider: "claude" }, "Work");
+    const fork = providerHomeRefusalCopy({ code, provider: "claude" }, "Work", { launch: "fork", canWait: true });
+    assert.equal(fork.title, session.title, `${code}: the same state`);
+    assert.ok(!fork.actions.includes("wait"), `${code}: a fork is tried again, never waited for`);
+    assert.doesNotMatch(fork.body, /restart the session|this session didn't start|start the session/iu, `${code}: ${fork.body}`);
+  }
+  assert.match(providerHomeRefusalCopy({ code: "busy", provider: "codex" }, undefined, { launch: "fork" }).body,
+    /Codex sign-in, so the fork didn't start\. Try again once it's free\./u);
+});
+
+test("a waiting session names the account, the holder and how long it waits (#3240)", () => {
+  const base = { provider: "claude" as const, waitingSince: 0, waitUntil: 8 * 3_600_000 };
+  const copy = providerHomeWaitCopy(base, "Work");
+  assert.equal(copy.title, "Waiting for Account");
+  assert.match(copy.body, /^Another runner, provider, helper, or lease publication is using Work\. This session starts as soon as it's free\./u);
+  assert.match(copy.body, /after 8 hours/u);
+  assert.match(providerHomeWaitCopy({ ...base, cause: "boundary_survivor" }, "Work").body, /earlier session is still using Work/u);
+  assert.match(providerHomeWaitCopy({ ...base, provider: "codex", waitUntil: 3_600_000 }, undefined).body,
+    /this Machine's Codex sign-in.*after 1 hour,/u);
+  assert.ok(!/[/\\]|HOME/u.test(copy.body));
 });

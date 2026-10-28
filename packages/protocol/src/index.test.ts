@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   queueHoldReason,
   validProviderHomeLaunchRefusal,
+  validProviderHomeWait,
   queueHoldRecoveryAction,
   sessionHolds,
   worktreeRecoveryAction,
@@ -112,7 +113,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 242);
+  assert.equal(PROTOCOL_VERSION, 244);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -293,8 +294,33 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 242", () => {
-  assert.equal(PROTOCOL_VERSION, 242);
+test("waiting for a busy provider account requires v244 runners", () => {
+  assert.equal(runnerSupportsProtocol(243, "providerHomeWait"), false);
+  assert.equal(runnerSupportsProtocol(244, "providerHomeWait"), true);
+  assert.equal(runnerSupportsProtocol(243, "providerHomeForkRefusals"), false);
+  assert.equal(runnerSupportsProtocol(244, "providerHomeForkRefusals"), true);
+});
+
+test("a provider-HOME wait is accepted only when well formed and content-free", () => {
+  const wait = { provider: "claude", cause: "holder_alive", providerAccountId: "work", providerAccountLabel: "Work", waitingSince: 5, waitUntil: 10 };
+  assert.deepEqual(validProviderHomeWait(wait), wait);
+  assert.deepEqual(validProviderHomeWait({ provider: "codex", waitingSince: 0, waitUntil: 0 }),
+    { provider: "codex", waitingSince: 0, waitUntil: 0 }, "the runner's own HOME names no account");
+  for (const invalid of [
+    null, [], "busy",
+    { ...wait, provider: "pi" },
+    { ...wait, cause: "no_reboot_proof" },
+    { ...wait, waitingSince: Number.NaN },
+    { ...wait, waitUntil: 4 },
+    { ...wait, home: "/home/user/.claude" },
+    { ...wait, providerAccountId: "../work" },
+    { ...wait, providerAccountLabel: "" },
+    { provider: "claude", providerAccountLabel: "Work", waitingSince: 1, waitUntil: 2 },
+  ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
+});
+
+test("PROTOCOL_VERSION is 244", () => {
+  assert.equal(PROTOCOL_VERSION, 244);
   // A v241 runner cannot report the closing references of a GitHub merge (#3713).
   assert.equal(runnerSupportsProtocol(241, "githubMergeClosingReferences"), false);
   assert.equal(runnerSupportsProtocol(242, "githubMergeClosingReferences"), true);

@@ -8,6 +8,7 @@ import { PROTOCOL_VERSION, type AgentDefinition, type AgentDriverKind, type Runn
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
+import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import { type LaunchPreparationCancellation, SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ShellManager } from "./shell-manager.js";
@@ -973,6 +974,24 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       assert.equal(store.has("s_claude_lease_refused"), false);
       assert.equal(forkSources.length, forksBeforeLeaseFailure,
         "a rejected provider-home lease must stop before Claude forks its transcript");
+      assert.equal(refusedLease.providerHomeRefusal, undefined, "an untyped failure stays text only");
+
+      // A lease refusal of the fork's own provider launch carries the code a session launch would
+      // record (#3240), naming the source's provider and never a path.
+      let typedAttempts = 0;
+      leaseInternals.providerHomeLeases = leaseStub(async () => {
+        if (++typedAttempts === 2) throw new ProviderHomeLeaseError("holder_alive");
+      });
+      const typedRefusal = await manager.forkConversation(
+        "s_claude_source", "s_claude_lease_busy", 2, "Lease Busy",
+      );
+      assert.equal(typedRefusal.ok, false);
+      assert.equal(typedRefusal.providerHomeRefusal?.code, "busy");
+      assert.equal(typedRefusal.providerHomeRefusal?.cause, "holder_alive");
+      assert.equal(typedRefusal.providerHomeRefusal?.provider, "claude");
+      assert.doesNotMatch(JSON.stringify(typedRefusal.providerHomeRefusal), /\//u, "the refusal names no path");
+      assert.equal(store.has("s_claude_lease_busy"), false);
+      assert.equal(forkSources.length, forksBeforeLeaseFailure);
 
       let entered!: () => void;
       let release!: () => void;

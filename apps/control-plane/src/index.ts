@@ -133,6 +133,7 @@ import {
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
+  validProviderHomeLaunchRefusal,
 } from "@wollipog/protocol";
 import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
@@ -5245,9 +5246,15 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
   respond(reply, await svc.cancelTurn((req.params as { id: string }).id)),
 );
 
-app.post("/api/sessions/:id/restart", async (req, reply) =>
-  respond(reply, svc.restart((req.params as { id: string }).id)),
-);
+app.post("/api/sessions/:id/restart", async (req, reply) => {
+  // #3240: `waitForProviderHome` asks the runner to wait for a busy provider account.
+  const body = (req.body ?? {}) as { waitForProviderHome?: unknown };
+  if (body.waitForProviderHome !== undefined && typeof body.waitForProviderHome !== "boolean") {
+    return reply.code(400).send({ error: "waitForProviderHome must be a boolean" });
+  }
+  return respond(reply, svc.restart((req.params as { id: string }).id,
+    body.waitForProviderHome ? { waitForProviderHome: true } : {}));
+});
 
 // #1780: end one managed background job without ending the session. The auth gate has already
 // confined an agent credential to its descendants; only the direct parent Orchestrator remains.
@@ -5835,11 +5842,18 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       65 * 60_000,
     );
     if (res.type !== "fork_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) return reply.code(409).send({
-      error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
-        ? "Update the runner to support handoffs from in-place sessions."
-        : res.error ?? "conversation fork failed",
-    });
+    if (!res.ok || !res.snapshot) {
+      // #3240: the fork's provider launch was refused at the account's lease; the client shows the
+      // same state a refused session launch does. A malformed refusal falls back to the text.
+      const providerHomeRefusal = res.providerHomeRefusal === undefined ? null
+        : validProviderHomeLaunchRefusal(res.providerHomeRefusal);
+      return reply.code(409).send({
+        error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
+          ? "Update the runner to support handoffs from in-place sessions."
+          : res.error ?? "conversation fork failed",
+        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
+      });
+    }
     const snapshotIdError = providerForkSnapshotIdError(targetSessionId, res.snapshot.id);
     if (snapshotIdError) {
       forkCreatedOnRunner = true;

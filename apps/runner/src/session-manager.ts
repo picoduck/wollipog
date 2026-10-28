@@ -60,6 +60,7 @@ import type {
   PromptImageReference,
   ProviderAccountSwitchFailureView,
   ProviderHomeLaunchRefusalView,
+  ProviderHomeWaitView,
   ProviderAuthenticationAccountSelectionError,
   ProviderAuthenticationCurrentIdentity,
   ProviderHistoryRecoveryMode,
@@ -364,7 +365,13 @@ export function sessionProviderProfileBinding(
 /** The second argument of `prepareLaunch`: lease cancellation plus the caller's launch reference. */
 export interface LaunchPreparationCancellation extends LeaseCancellation {
   providerHome?: LaunchProviderHome;
+  /** Present when this launch waits for a busy provider HOME (#3240): every HOME acquisition the
+   * launch makes runs through it, so a busy lease is retried instead of refusing the launch. */
+  providerHomeWait?: ProviderHomeWaiter;
 }
+
+/** Runs one provider-HOME acquisition, retrying it while the lease is busy (#3240). */
+export type ProviderHomeWaiter = <T>(acquire: () => Promise<T>) => Promise<T>;
 
 /** The settleable side of a `LaunchProviderHome`, held only by the session manager. */
 class LaunchProviderHomeScope implements LaunchProviderHome {
@@ -989,6 +996,22 @@ const LOCK_REFRESH_MS = 20_000;
  * before #3238. */
 const DRIVER_PROVIDER_HOME_HANDLE_BUDGET = 512;
 
+/** How a launch that asked to wait retries a busy provider HOME (#3240): exponential backoff
+ * between attempts, capped, and a limit after which the launch fails with the busy refusal so a
+ * forgotten wait never holds its runner slot indefinitely. Stop is noticed within `pollMs`. */
+export interface ProviderHomeWaitSchedule {
+  initialMs: number;
+  maxMs: number;
+  limitMs: number;
+  pollMs: number;
+}
+const PROVIDER_HOME_WAIT_SCHEDULE: ProviderHomeWaitSchedule = {
+  initialMs: 2_000,
+  maxMs: 30_000,
+  limitMs: 8 * 60 * 60_000,
+  pollMs: 1_000,
+};
+
 /** Static guidance for a quarantined conversation. It names no provider text, no prompt content
  * and no thread identifier, so it is safe on every surface that shows a rejected submission. */
 const PROVIDER_HISTORY_QUARANTINE_GUIDANCE =
@@ -1476,6 +1499,14 @@ export class SessionManager {
   private readonly deletedExpiry = new Map<string, ReturnType<typeof setTimeout>>();
   /** Every start captures one generation; delete/restart invalidates all older async continuations. */
   private readonly launchGenerations = new Map<string, number>();
+  /** The launch generation, per session, whose start asked to wait for a busy provider HOME
+   * (#3240). Only that generation waits; a later launch of the same session does not. */
+  private readonly providerHomeWaitLaunches = new Map<string, number>();
+  /** The busy provider HOME each waiting launch is retrying, projected on its snapshots. In memory
+   * only: a runner restart ends the wait with the launch it belonged to. */
+  private readonly providerHomeWaits = new Map<string, ProviderHomeWaitView>();
+  /** Overridable by tests. */
+  providerHomeWaitSchedule: ProviderHomeWaitSchedule = PROVIDER_HOME_WAIT_SCHEDULE;
   /** The exact worktree path each live launch generation captured, which is NOT the same thing as
    * the session's selected path: a selection made while a launch is preparing changes the row but
    * not the path that launch will start in. Ownership must be read from here, never inferred from
@@ -4966,9 +4997,10 @@ export class SessionManager {
     /** The session whose launch this prepares: its recorded profile id is expected of `home`. */
     session?: Pick<SessionMeta, "providerProfileId" | "providerCredentialHome">,
   ): Promise<LaunchProviderHome | null> {
-    const { providerHome, ...lease } = cancellation;
-    const reference = await this.acquireSkillReconciliationProviderHome(home, lease,
+    const { providerHome, providerHomeWait, ...lease } = cancellation;
+    const acquire = () => this.acquireSkillReconciliationProviderHome(home, lease,
       session ? sessionProviderProfileBinding(session, home) : {});
+    const reference = await (providerHomeWait ? providerHomeWait(acquire) : acquire());
     if (!reference) return null;
     if (providerHome instanceof LaunchProviderHomeScope && providerHome.adopt(reference)) return providerHome;
     await this.retainProviderHomeReference(reference);
@@ -5539,9 +5571,13 @@ export class SessionManager {
       this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion),
       protocolVersion,
     ), protocolVersion);
-    return runnerSupportsProtocol(protocolVersion, "backgroundFollowUp")
-      ? { ...snapshot, backgroundFollowUp: this.backgroundFollowUp(meta) }
-      : snapshot;
+    return {
+      ...snapshot,
+      ...(runnerSupportsProtocol(protocolVersion, "backgroundFollowUp")
+        ? { backgroundFollowUp: this.backgroundFollowUp(meta) } : {}),
+      ...(runnerSupportsProtocol(protocolVersion, "providerHomeWait")
+        ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId) ?? null } : {}),
+    };
   }
 
   /** Project execution evidence, never infer it from the session lifecycle alone. */
@@ -6533,6 +6569,7 @@ export class SessionManager {
     }
     const launchGeneration = this.beginLaunchGeneration(spec.sessionId);
     this.preLaunchAdmissionGenerations.set(spec.sessionId, launchGeneration);
+    if (spec.waitForProviderHome === true) this.providerHomeWaitLaunches.set(spec.sessionId, launchGeneration);
     let started = false;
     try {
       return started = await this.startGeneration(
@@ -7711,6 +7748,7 @@ export class SessionManager {
     // replaced before it finishes would otherwise leave an entry its successor refuses to touch,
     // and a deletion marker generation never records a path of its own to overwrite it.
     this.launchingWorktreePaths.delete(sessionId);
+    this.providerHomeWaitLaunches.delete(sessionId);
     const generation = ++this.nextLaunchGeneration;
     this.launchGenerations.set(sessionId, generation);
     this.latestLaunchGenerations.set(sessionId, generation);
@@ -7720,6 +7758,7 @@ export class SessionManager {
   private finishLaunchGeneration(sessionId: string, generation: number): void {
     if (this.launchGenerations.get(sessionId) !== generation) return;
     this.launchGenerations.delete(sessionId);
+    this.providerHomeWaitLaunches.delete(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
     // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
     // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
@@ -7736,6 +7775,7 @@ export class SessionManager {
       this.worktreePreparations.has(generation);
     const queuedPreparation = this.cancelWorktreePreparationWait(sessionId);
     this.launchGenerations.delete(sessionId);
+    this.providerHomeWaitLaunches.delete(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
     return activePreparation || queuedPreparation || setupActive;
   }
@@ -8657,11 +8697,84 @@ export class SessionManager {
     // Launch preparation's provider-HOME reference (#3238). A launch that reaches its driver
     // reference settles it there; every path that gives up earlier settles it on the way out.
     const preparationHome = this.launchPreparationProviderHome();
+    const waitGeneration = this.providerHomeWaitLaunches.get(meta.sessionId);
+    const providerHomeWait = waitGeneration !== undefined && waitGeneration === launchGeneration
+      ? this.providerHomeWaiter(meta, () => this.launchIsCurrent(meta.sessionId, launchGeneration))
+      : undefined;
     try {
-      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome);
+      return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome, providerHomeWait);
     } finally {
+      if (providerHomeWait) this.endProviderHomeWait(meta.sessionId);
       await preparationHome.settle();
     }
+  }
+
+  /** Retries a launch's provider-HOME acquisitions while the lease is busy (#3240), so a person
+   * who chose to wait for the account doesn't have to restart the session by hand. Only `busy` is
+   * waited out: it clears once the other holder finishes. Every other refusal, a cancelled launch
+   * (Stop, restart, delete, shutdown) and the schedule's limit end the wait with the acquisition's
+   * own error, so the launch reports exactly what it would have without waiting. Nothing is held
+   * between attempts, and the provider starts only after a granted acquisition. */
+  private providerHomeWaiter(meta: SessionMeta, isCurrent: () => boolean): ProviderHomeWaiter {
+    let waitingSince: number | undefined;
+    let attempt = 0;
+    return async <T>(acquire: () => Promise<T>): Promise<T> => {
+      while (true) {
+        try {
+          const acquired = await acquire();
+          this.endProviderHomeWait(meta.sessionId);
+          return acquired;
+        } catch (error) {
+          const refusal = providerHomeLaunchRefusal(error, meta);
+          const now = Date.now();
+          waitingSince ??= now;
+          const { initialMs, maxMs, limitMs } = this.providerHomeWaitSchedule;
+          const waitUntil = waitingSince + limitMs;
+          if (refusal?.code !== "busy" || !isCurrent() || now >= waitUntil) throw error;
+          const cause = refusal.cause;
+          this.publishProviderHomeWait(meta.sessionId, {
+            provider: refusal.provider,
+            ...(cause === "holder_alive" || cause === "boundary_survivor" || cause === "process_survivor" ? { cause } : {}),
+            ...(refusal.providerAccountId ? {
+              providerAccountId: refusal.providerAccountId,
+              providerAccountLabel: refusal.providerAccountLabel,
+            } : {}),
+            waitingSince,
+            waitUntil,
+          });
+          const delay = Math.min(maxMs, initialMs * 2 ** Math.min(attempt++, 20), waitUntil - now);
+          if (!await this.sleepWhileCurrent(delay, isCurrent)) throw new Error("provider-home acquisition was cancelled");
+        }
+      }
+    };
+  }
+
+  /** Resolves true after `ms`, or false as soon as `isCurrent` fails (checked every `pollMs`). */
+  private async sleepWhileCurrent(ms: number, isCurrent: () => boolean): Promise<boolean> {
+    const deadline = Date.now() + ms;
+    while (isCurrent()) {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) return true;
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(remaining, this.providerHomeWaitSchedule.pollMs)).unref?.();
+      });
+    }
+    return false;
+  }
+
+  private publishProviderHomeWait(sessionId: string, wait: ProviderHomeWaitView): void {
+    const previous = this.providerHomeWaits.get(sessionId);
+    this.providerHomeWaits.set(sessionId, wait);
+    if (previous && JSON.stringify(previous) === JSON.stringify(wait)) return;
+    if (!previous) this.log(`session ${boundedSessionIdForLog(sessionId)} is waiting for its busy provider HOME`);
+    const meta = this.store.readMeta(sessionId);
+    if (meta) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
+  }
+
+  private endProviderHomeWait(sessionId: string): void {
+    if (!this.providerHomeWaits.delete(sessionId)) return;
+    const meta = this.store.readMeta(sessionId);
+    if (meta) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
   }
 
   private async launchPrepared(
@@ -8670,6 +8783,7 @@ export class SessionManager {
     launchGeneration: number,
     approvedAuthentication: ApprovedProviderAuthentication | undefined,
     preparationHome: LaunchProviderHomeScope,
+    providerHomeWait?: ProviderHomeWaiter,
   ): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
@@ -8738,6 +8852,7 @@ export class SessionManager {
       launchPreparation = await this.prepareLaunch?.(meta, {
         isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration),
         providerHome: preparationHome,
+        ...(providerHomeWait ? { providerHomeWait } : {}),
       });
       // Launch preparation may await filesystem/provider discovery. A restart can replace this
       // session with a new generation (and even a different provider) during that window; the old
@@ -8886,13 +9001,14 @@ export class SessionManager {
     let launchHome: ProviderHomeReference | null = null;
     let driverConstructionStarted = false;
     try {
-      launchHome = await this.acquireDriverProviderHome({
+      const acquireLaunchHome = () => this.acquireDriverProviderHome({
         driver: meta.driver,
         command: meta.command,
         context: meta.context,
         env: meta.env,
         isolation,
       }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) }, meta);
+      launchHome = await (providerHomeWait ? providerHomeWait(acquireLaunchHome) : acquireLaunchHome());
       if (!this.launchIsCurrent(sessionId, launchGeneration)) throw new Error("session launch changed during provider-home acquisition");
       // The driver's reference now holds the HOME (or the launch needs no shared one), so the
       // preparation's reference covered only finished work: settle it on that work's proofs.
@@ -15035,7 +15151,7 @@ export class SessionManager {
     deferHistory = false,
     handoff?: { agent: AgentDefinition; config: SessionConfig },
     recovery = false,
-  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft; retainedPrompt?: { text: string; images: PromptImageInput[] } }> {
+  ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft; retainedPrompt?: { text: string; images: PromptImageInput[] }; providerHomeRefusal?: ProviderHomeLaunchRefusalView }> {
     const source = this.store.readMeta(sourceSessionId);
     if (!source) return { ok: false, error: "source session not found on this box" };
     try {
@@ -15738,7 +15854,10 @@ export class SessionManager {
       if (this.store.has(targetSessionId)) this.store.remove(targetSessionId);
       this.forgetCapacityInventorySession(targetSessionId);
       await this.cleanupProviderState(targetSessionId, source.driver, source.context, providerStateJournaled);
-      return { ok: false, error: errText(err) };
+      // The fork's own provider launch takes the source account's HOME lease: its refusal carries
+      // the same code a session launch would record (#3240).
+      const providerHomeRefusal = providerHomeLaunchRefusal(err, source);
+      return { ok: false, error: errText(err), ...(providerHomeRefusal ? { providerHomeRefusal } : {}) };
     } finally {
       if (temporary) {
         if (forkHome) this.driverProviderHomes.set(temporary, forkHome);

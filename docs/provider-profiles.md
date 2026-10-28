@@ -238,6 +238,45 @@ both launch paths so older clients still recognize the account-specific error; i
 longer includes process-boundary or journal instructions. Technical recovery codes and process
 metadata stay in the authorized account details rather than the badge tooltip.
 
+### Waiting for a Busy Account
+
+A busy account frees itself once the other holder finishes, so with a v244 runner a **busy** refusal
+(including its live-runner and surviving-session causes) offers **Wait for Account** in place of
+**Restart Session**: its launch starts at once when the account is already free, so a plain restart
+would only risk a second refusal. It restarts the session with `waitForProviderHome` (`POST /api/sessions/:id/restart` with
+`{ "waitForProviderHome": true }`); the control plane refuses the request for an older runner rather
+than letting it fail the launch again.
+
+The runner waits, not the browser. Only that launch waits: every provider-HOME acquisition it makes
+(launch preparation's account HOME and the driver's) retries a `busy` lease with backoff from 2
+seconds up to 30 seconds between attempts. Nothing is held between attempts, and the provider
+starts only after an acquisition is granted. While it waits the session stays **starting** and
+reports `providerHomeWait` in its snapshots: the provider, the busy cause, the bound account and
+when the wait started and ends, never a path. The control plane stores it in
+`sessions.provider_home_wait` and projects it only while the session is starting. The session shows
+**Waiting for Account** (an info notice, not a failure) with **Stop Waiting**, and lists show a
+**Waiting for Account** condition.
+
+- **Stop** (or **Stop Waiting**), a restart, deletion or runner shutdown ends the wait; nothing
+  started, so nothing needs to be stopped, and no refusal is recorded.
+- Any other refusal ends the wait with that refusal, exactly as a launch that didn't wait.
+- After 8 hours the wait gives up and the launch fails with the ordinary **Account in Use**
+  refusal, so a forgotten wait doesn't hold its runner slot indefinitely. A waiting launch keeps
+  the runner capacity it was admitted with, as any starting launch does.
+- The wait is in the runner's memory only and does not survive a runner restart, which ends the
+  launch it belonged to. A later launch of the session, including an account switch or an ordinary
+  restart, doesn't wait unless it is asked to.
+
+### Refused Forks
+
+A conversation fork (including Recover Conversation and Edit in Fork) launches its own provider
+under the source session's account, so its lease can refuse it too. A v244 runner returns the same
+typed `providerHomeRefusal` in `fork_result` for a v244 control plane, which passes it on in the
+fork's 409 response. The fork's failure notice then has the same title as a refused session launch
+and the same guidance, worded for a fork ("so the fork didn't start. Try again once it's free."),
+with the runner's message under its details. A fork is never waited for. The source session is
+unaffected. Older peers keep the text-only failure.
+
 ## Set Up and Recover Onboarding
 
 Two control planes connected to the same SSH account share the runner user's own provider HOME,

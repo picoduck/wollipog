@@ -92,7 +92,7 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
   const unsupported = await post(handoff);
   assert.equal(unsupported.status, 409);
   assert.match(String(unsupported.body.error), /runner/i);
-  let legacyRefusal = true;
+  let reply: "legacy" | "lease" | "ok" = "legacy";
   let forks = 0;
   const socket = new WebSocket(`ws://127.0.0.1:${port}/runner`);
   sockets.push(socket);
@@ -105,8 +105,12 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
     forks++;
     assert.equal(message.sourceSessionId, source.id);
     assert.equal(message.handoff.agentId, "destination");
-    if (legacyRefusal) socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId,
+    if (reply === "legacy") socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId,
       ok: false, error: "conversation fork requires a worktree session" }));
+    // #3240: the fork's provider launch was refused at the account's lease.
+    else if (reply === "lease") socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId,
+      ok: false, error: "Provider HOME is already in use.",
+      providerHomeRefusal: { code: "busy", cause: "holder_alive", provider: "claude", detectedAt: 7 } }));
     else socket.send(JSON.stringify({ type: "fork_result", requestId: message.requestId, ok: true,
       snapshot: { ...source, id: message.targetSessionId, agentId: "destination", driver: "claude-code",
         useWorktree: true, worktreePath: "/fixture/new-worktree", config: handoff.handoff.config },
@@ -126,12 +130,18 @@ test("fork route admits an in-place handoff, retains native and protocol gates, 
   const legacy = await post(handoff);
   assert.equal(legacy.status, 409);
   assert.match(String(legacy.body.error), /Update the runner to support handoffs from in-place sessions/);
-  legacyRefusal = false;
+  reply = "lease";
+  const refused = await post(handoff);
+  assert.equal(refused.status, 409);
+  assert.equal(refused.body.error, "Provider HOME is already in use.");
+  assert.deepEqual(refused.body.providerHomeRefusal, { code: "busy", cause: "holder_alive", provider: "claude", detectedAt: 7 },
+    "the typed refusal reaches the client beside the text");
+  reply = "ok";
   const result = await post(handoff);
   assert.equal(result.status, 201, JSON.stringify(result.body));
   assert.equal(result.body.workspaceId, source.workspaceId);
   assert.equal(result.body.worktreePath, "/fixture/new-worktree");
   assert.equal(result.body.agentId, "destination");
   assert.deepEqual(result.body.handoffDraft, { text: "Files reflect the repository at hand-off time.", images: [], disclosure: "Current files." });
-  assert.equal(forks, 2);
+  assert.equal(forks, 3);
 });

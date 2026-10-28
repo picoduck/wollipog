@@ -28081,3 +28081,28 @@ for (const protocol of [199, 209, PROTOCOL_VERSION]) test(`fenced Claude usage i
       event.event === "cost_reconciliation_price_deferred" && event.sessionId === id && event.entryPoint === "runner"));
   } finally { db.close(); }
 });
+
+test("Wait for Account restarts the session with the runner told to wait, only on a v244 runner (#3240)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "failed", Date.now());
+  const restarted = svc.restart(id, { waitForProviderHome: true });
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.waitForProviderHome, true);
+
+  db.updateSessionStatus(id, "failed", Date.now());
+  assert.ok(svc.restart(id).ok);
+  assert.equal("waitForProviderHome" in hub.sentOfType("start_session").at(-1)!.spec, false,
+    "an ordinary restart does not wait");
+
+  db.updateSessionStatus(id, "failed", Date.now());
+  const sent = hub.sentOfType("start_session").length;
+  db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeWait - 1);
+  const refused = svc.restart(id, { waitForProviderHome: true });
+  assert.equal(refused.ok, false);
+  assertRunnerRefusal(refused, refused.error!, RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeWait,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeWait - 1);
+  assert.match(refused.error ?? "", /waiting for a busy account/);
+  assert.equal(hub.sentOfType("start_session").length, sent, "an older runner is never asked, so it can't fail the launch again");
+  assert.equal(db.getSession(id)?.status, "failed");
+});

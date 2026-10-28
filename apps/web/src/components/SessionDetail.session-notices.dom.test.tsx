@@ -560,6 +560,55 @@ test("an archived session's refusal offers no ordinary restart, and says to unar
   }
 });
 
+test("a busy account on a v244 runner offers Wait for Account, which restarts the session waiting (#3240)", async () => {
+  const restarts: Array<[string, unknown]> = [];
+  const current = sessionView({ status: "failed", providerHomeRefusal: launchRefusal("busy") });
+  const fixture = await mount(current, {
+    runner: { protocolVersion: 244 },
+    client: { restart: async (id: string, options?: unknown) => {
+      restarts.push([id, options]);
+      return { ...current, status: "starting" };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.deepEqual(actionNames(notice), ["Wait for Account", "Switch Account…"]);
+    assert.match(notice.querySelector(".notice-body")?.textContent ?? "",
+      /Wait for the account to start the session as soon as it's free, or switch to another account\./);
+    await act(async () => { fixture.button("Wait for Account")!.click(); });
+    await flush();
+    assert.deepEqual(restarts, [[current.id, { waitForProviderHome: true }]]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a starting session waiting for its account says so, and Stop Waiting stops it (#3240)", async () => {
+  const stops: string[] = [];
+  const current = sessionView({ status: "starting", providerHomeWait: {
+    provider: "codex", cause: "holder_alive", providerAccountId: "acct-1", providerAccountLabel: "Work",
+    waitingSince: 0, waitUntil: 8 * 3_600_000,
+  } });
+  const fixture = await mount(current, {
+    runner: { protocolVersion: 244 },
+    client: { stop: async (id: string) => { stops.push(id); return { ...current, status: "stopped", providerHomeWait: undefined }; } } as Partial<ApiClient>,
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Waiting for Account");
+    assert.ok(notice.classList.contains("t-info"), "waiting is a state, not a failure");
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "Another Wollipog runner is using Work. This session starts as soon as it's free. If it's still in use after 8 hours, the session stops waiting and doesn't start.");
+    assert.deepEqual(actionNames(notice), ["Stop Waiting"]);
+    await act(async () => { fixture.button("Stop Waiting")!.click(); });
+    await flush();
+    assert.deepEqual(stops, [current.id]);
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Waiting for Account"]'), "a stopped session no longer waits");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a running session never shows a refusal a summary kept (#3240)", async () => {
   const fixture = await mount(sessionView({ status: "running", providerHomeRefusal: launchRefusal("busy") }));
   try {

@@ -7555,7 +7555,11 @@ export class SessionsService {
     return this.restart(sessionId, { unarchive: true });
   }
 
-  restart(sessionId: string, options: { unarchive?: boolean } = {}): ServiceResult<SessionView> {
+  restart(sessionId: string, options: {
+    unarchive?: boolean;
+    /** #3240: wait for a busy provider account instead of failing the launch. */
+    waitForProviderHome?: boolean;
+  } = {}): ServiceResult<SessionView> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
@@ -7604,6 +7608,11 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    // An older runner would ignore the request and fail the launch on the busy account again.
+    if (options.waitForProviderHome) {
+      const unsupported = this.capabilityFailure(session.runnerId, "providerHomeWait", "waiting for a busy account");
+      if (unsupported) return unsupported;
+    }
     // The workspace strategy is not frozen at creation, and the runner derives the placement it
     // expects from the launch's own `useWorktree`. A selected session worktree is what decides
     // where this relaunch lands — the runner reattaches one whether or not the flag asks it to — so
@@ -7745,6 +7754,7 @@ export class SessionsService {
     const spec: SessionLaunchSpec = {
       sessionId,
       controlPlaneLaunchId: restartLaunchId,
+      ...(options.waitForProviderHome ? { waitForProviderHome: true } : {}),
       workspaceId: session.workspaceId,
       workspacePath,
       agentId,
