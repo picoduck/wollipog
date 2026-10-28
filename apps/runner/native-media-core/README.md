@@ -36,3 +36,20 @@ Pure standard-library tests can be compiled directly with the existing Rust tool
 resolving or initializing any SDK dependencies. Full `cargo check/test --features native-core`
 needs an explicit host scheduling slot; use task-private Cargo/target caches, never mutate
 installed SDKs, user configuration, credentials, protected policy or the hosting stack.
+
+## Dependency Advisories
+
+`Cargo.lock` resolves the pinned Codex release's dependency tree behind `native-core`. No workflow,
+script or package manifest builds that feature, so none of those crates reach a Wollipog artifact,
+and an advisory against this lockfile is not a shipped vulnerability. The policy (#3766):
+
+- Dependabot alerts for `apps/runner/native-media-core/Cargo.lock` are dismissed as "vulnerable
+  code is not actually used", citing this section.
+- Dependabot security pull requests for this path are closed rather than merged. No build compiles
+  them, so CI cannot verify them, and the lockfile moves with the Codex pin rather than crate by
+  crate.
+- Before any workflow builds `--features native-core`, it runs
+  `cargo audit --file apps/runner/native-media-core/Cargo.lock`, which fails on vulnerabilities
+  that are not explicitly ignored. `scripts/native-media-core-advisory-gate.test.mjs` refuses a
+  workflow that builds the feature without that audit, and a feature build from anywhere else.
+- Moving the Codex pin re-resolves this lockfile; clear or record its advisories then.
