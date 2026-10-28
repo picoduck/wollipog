@@ -803,8 +803,8 @@ test("runtime runs keep per-session order, and the newest snapshot wins", () => 
       "single:child-2=Ended",
       "run:child-3=After",
     ]);
-    assert.deepEqual(reconciled, ["child-0=Older", "child-1=Older", "child-0=Newest", "child-2=Ended", "child-3=After"],
-      "every snapshot is offered for role-conversion reconciliation exactly once, in arrival order");
+    assert.deepEqual(reconciled, ["child-2=Ended"],
+      "only the single-snapshot path reconciles role conversions; none is unapplied in a run");
     assert.equal(db.getSession("child-0")?.preview, "Newest");
     assert.equal(db.isRepeatedRuntimeSnapshot("child-0", newest), true, "the stored fingerprint is the newest snapshot's");
     assert.equal(db.getSession("child-2")?.status, "stopped");
@@ -864,3 +864,29 @@ for (const failure of ["commit", "write"] as const) {
     } finally { db.close(); }
   });
 }
+
+test("a later snapshot's role conversion is reconciled only after the earlier run has committed", () => {
+  const { db, svc, snapshots } = fixture(2);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    db.beginSessionRoleConversion({ type: "prepare_session_role", sessionId: "child-1", conversionId: "conversion-1" } as
+      Parameters<ControlPlaneDb["beginSessionRoleConversion"]>[0], undefined, 3);
+    const log: string[] = [];
+    let failCommit = true;
+    recordTransactions(db, log, (sql) => failCommit && sql === "COMMIT");
+    const reconcile = (snap: SessionSnapshot) => {
+      assert.equal(inTransaction(db), false);
+      log.push(`reconcile:${snap.id}`);
+    };
+    const burst = snapshots.map((snap) => ({ ...snap, preview: "Converted" }));
+    assert.throws(() => svc.applySessionRuntimeUpdates("runner", burst, svc.beginRunnerAttentionBatch("runner"), reconcile),
+      /Synthetic commit failure/);
+    assert.deepEqual(log, ["BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"],
+      "the converting session's reconciliation, which can commit and publish, never ran ahead of the failed run");
+    log.length = 0;
+    failCommit = false;
+    svc.applySessionRuntimeUpdates("runner", burst, svc.beginRunnerAttentionBatch("runner"), reconcile);
+    assert.deepEqual(log.slice(0, 3), ["BEGIN IMMEDIATE", "COMMIT", "reconcile:child-1"]);
+    assert.equal(db.getSession("child-1")?.preview, "Converted");
+  } finally { db.close(); }
+});

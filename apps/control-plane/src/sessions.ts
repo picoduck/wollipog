@@ -16950,26 +16950,21 @@ export class SessionsService {
    * RUNTIME_UPDATE_RUN_LIMIT snapshots, for distinct sessions, whose reconciliation needs nothing
    * beyond database writes shares one durable transaction, and nothing about the run is published
    * or sent before it commits. Every other snapshot takes the exact single-snapshot path, in turn.
-   * `beforeApply` runs for each snapshot, outside any transaction, before it is applied. */
+   * `reconcileRoleConversion` can commit, broadcast and send, so it runs only on that path, after
+   * every earlier snapshot has committed. A snapshot whose session has an unapplied role
+   * conversion never joins a run; for the rest it has nothing to do. */
   applySessionRuntimeUpdates(
     runnerId: string,
     snapshots: readonly SessionSnapshot[],
     batch?: RunnerAttentionBatch,
-    beforeApply?: (snapshot: SessionSnapshot) => void,
+    reconcileRoleConversion?: (snapshot: SessionSnapshot) => void,
   ): void {
     let next = 0;
-    let readied = 0;
-    const ready = (index: number) => {
-      if (index < readied) return;
-      readied = index + 1;
-      beforeApply?.(snapshots[index]!);
-    };
     while (next < snapshots.length) {
       const run: Array<CommittedRuntimeUpdate & { before: () => void }> = [];
       const sessions = new Set<string>();
       // Distinct sessions: each is classified against exactly the state it is applied to.
       while (next < snapshots.length && run.length < RUNTIME_UPDATE_RUN_LIMIT && !sessions.has(snapshots[next]!.id)) {
-        ready(next);
         const update = this.batchableRuntimeUpdate(runnerId, snapshots[next]!, batch);
         if (!update) break;
         run.push(update);
@@ -16980,7 +16975,7 @@ export class SessionsService {
         this.commitRuntimeUpdates(run, batch);
         continue;
       }
-      ready(next);
+      reconcileRoleConversion?.(snapshots[next]!);
       this.applySessionRuntimeUpdate(runnerId, snapshots[next]!, batch);
       next++;
     }
@@ -16999,6 +16994,9 @@ export class SessionsService {
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(sessionId) ||
         this.pendingMediaLifecycle(existing) || this.db.hasSessionStopIntent(sessionId) ||
         (existing.archived && !isTerminal(snapshot.status))) return null;
+    // Role-conversion reconciliation acts only on an unapplied conversion, and it can publish.
+    const conversion = this.db.sessionRoleConversion(sessionId);
+    if (conversion && conversion.state !== "applied") return null;
     // Cost reconciliation that can neither send a repair nor refuse the snapshot.
     if (reconciliationRevision(this.db, sessionId) !== 0 || latestReconciliationRepair(this.db, sessionId) ||
         !reconciliationSnapshotAvailable(this.db, snapshot)) return null;
