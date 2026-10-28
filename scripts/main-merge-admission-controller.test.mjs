@@ -295,6 +295,7 @@ test("shared live rebuild performs one health report then one complete census, r
     reports++;
     assert.deepEqual(argv, ["report"]);
     assert.equal(options.env.GITHUB_REF, "refs/heads/main");
+    assert.equal(options.now(), at(11), "the rebuild's clock reaches the health observer");
     await options.api("/inert-health");
     options.log(JSON.stringify(red())); return 0;
   };

@@ -6,6 +6,9 @@ optional advisory workflow job and this operator runbook. The recovery slice add
 a [dry-run controller, default-deny code-only writer and complete recovery rehearsal](main-merge-recovery.md).
 No workflow grants the writer permissions. Operator providers, status-writing
 authority, required-context wiring and activation remain separate human steps.
+The inert [fast-gate cutover recovery rehearsal](main-fast-gate-rehearsal.md)
+(#3637) composes this controller with the health, rolling, investigation,
+repair and release modules across all seven pre-cutover recovery flows.
 
 ## Shipped Mechanism and Contexts
 

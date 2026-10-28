@@ -94,7 +94,7 @@ export async function observeAdmission({ integration, env = process.env, api, re
   if (validIntegration(integration)) {
     try {
       result = await report(["report"], { env: { ...env, GITHUB_REF: "refs/heads/main" }, api,
-        log: line => { health = JSON.parse(line); }, error });
+        log: line => { health = JSON.parse(line); }, error, now });
     } catch { /* The decision below remains a hold; never print response bodies. */ }
   }
   const decision = evaluateAdmission({ integration, health, now: now() });
