@@ -27,7 +27,7 @@ test("measured virtual detection, hold and recovery times are reproducible", asy
   assert.equal(JSON.stringify(first), JSON.stringify(second), "the rehearsal is deterministic");
   const flows = byId(first);
   assert.deepEqual(flows["missed-failure"].times, { landingToFailedVerdictMs: 2_117_800, landingToHealthFailingObservedMs: 2_178_100,
-    failureToLastHoldReceiptMs: 70_700, exposureAdmissionsBeforeHold: 3, failureToReleaseReceiptMs: 4_059_600, landingToReleaseReceiptMs: 6_177_400 });
+    failureToLastHoldReceiptMs: 70_700, exposureAdmissionsBeforeHold: 2, failureToReleaseReceiptMs: 4_059_500, landingToReleaseReceiptMs: 6_177_300 });
   assert.deepEqual(flows["queued-entry-hold"].times, { failureToLastHoldReceiptMs: 67_500, lastPlannedBlockLatencyMs: 67_500, landingToFailedVerdictMs: 2_117_800 });
   assert.deepEqual(flows["validator-outage"].times, { firstHoldProbeAfterLandingMs: 7_200_000, workerStartToUnknownMs: 7_262_000 });
   assert.equal(flows["stale-backlogged-health"].times.firstAgeHoldProbeSeconds, 7_200);

@@ -8,6 +8,12 @@ import { admissionEvidenceApi } from "./main-merge-admission-evidence.mjs";
 
 export const ADMISSION_CONTEXT = "Regression Admission";
 export const CONTROLLER = Object.freeze({ maxEntries: 100, maxCycleAgeMs: 60_000, reevaluateMs: 60_000 });
+// Just-in-time group admission (docs/main-merge-admission.md#fail-closed-group-admission). A merge
+// group's success is written only after its own required aggregator succeeded on that exact SHA,
+// from the pinned GitHub Actions issuer, while the group is next to land (its base is live main).
+// Until then nothing is written: a missing required result fails closed through the queue's
+// check-response timeout, so no earlier success can outlive a controller or forge outage.
+export const REQUIRED_RESULT = Object.freeze({ context: "Typecheck, Test & Sidecar Bundle", appId: 15368, maxContexts: 100 });
 const SHA = /^[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const positive = n => Number.isSafeInteger(n) && n > 0;
@@ -82,13 +88,13 @@ export async function readAdmissionEntries(api, repository) {
   if (!REPOSITORY.test(repository ?? "")) throw new Error("Invalid admission repository");
   const [owner, name] = repository.split("/");
   const body = await api("/graphql", { method: "POST", body: { query:
-    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{name target{oid}} pullRequests(first:100,states:OPEN,baseRefName:\"main\"){pageInfo{hasNextPage} nodes{number isDraft headRefOid baseRefOid mergeQueueEntry{state position headCommit{oid} baseCommit{oid}}}}}}",
+    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{name target{oid}} pullRequests(first:100,states:OPEN,baseRefName:\"main\"){pageInfo{hasNextPage} nodes{number isDraft headRefOid baseRefOid mergeQueueEntry{state position headCommit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{name status conclusion checkSuite{app{databaseId}}}}}}} baseCommit{oid}}}}}}",
     variables: { owner, name } } });
   const repo = body?.data?.repository, list = repo?.pullRequests;
   if (body?.errors?.length || repo?.defaultBranchRef?.name !== "main" || !SHA.test(repo.defaultBranchRef.target?.oid ?? "") ||
       !Array.isArray(list?.nodes) || list.nodes.length > CONTROLLER.maxEntries || list.pageInfo?.hasNextPage !== false)
     throw new Error("Admission census unavailable");
-  const entries = [], groups = new Map(), numbers = new Set();
+  const entries = [], groups = new Map(), numbers = new Set(), requiredResults = {};
   for (const p of list.nodes) {
     if (!positive(p?.number) || numbers.has(p.number) || typeof p.isDraft !== "boolean" ||
         !SHA.test(p.headRefOid ?? "") || !SHA.test(p.baseRefOid ?? "")) throw new Error("Invalid admission entry");
@@ -103,11 +109,27 @@ export async function readAdmissionEntries(api, repository) {
       headSha: p.headRefOid, baseSha: q.baseCommit.oid, integrationSha: q.headCommit.oid, members: [] };
     if (group.baseSha !== q.baseCommit.oid) throw new Error("Queue group changed");
     group.members.push({ pullRequest: p.number, headSha: p.headRefOid }); groups.set(group.integrationSha, group);
+    requiredResults[q.headCommit.oid] = requiredResult(q.headCommit.statusCheckRollup);
   }
   entries.push(...groups.values());
   if (entries.length > CONTROLLER.maxEntries) throw new Error("Admission census capacity");
   entries.sort((a, b) => `${a.kind}:${target(a)}`.localeCompare(`${b.kind}:${target(b)}`, "en"));
-  return { repository, mainSha: repo.defaultBranchRef.target.oid, entries, complete: true, fingerprint: hash(entries) };
+  // Required results stay outside entry identity: an aggregator finishing between plan and write
+  // changes what may be written, never which integration a decision targets.
+  return { repository, mainSha: repo.defaultBranchRef.target.oid, entries, requiredResults, complete: true, fingerprint: hash(entries) };
+}
+
+/** Pure: the group's own required aggregator, from the pinned issuer only. `success` needs every
+ * matching check run completed successfully; anything partial, foreign or paginated is not success. */
+export function requiredResult(rollup) {
+  const contexts = rollup?.contexts;
+  if (!Array.isArray(contexts?.nodes) || contexts.pageInfo?.hasNextPage !== false || contexts.nodes.length > REQUIRED_RESULT.maxContexts)
+    return "unavailable";
+  const runs = contexts.nodes.filter(n => n?.__typename === "CheckRun" && n.name === REQUIRED_RESULT.context);
+  if (!runs.length) return "pending";
+  if (runs.some(n => n.checkSuite?.app?.databaseId !== REQUIRED_RESULT.appId)) return "unavailable";
+  if (runs.some(n => n.status !== "COMPLETED")) return "pending";
+  return runs.every(n => n.conclusion === "SUCCESS") ? "success" : "failure";
 }
 
 /** Complete plan before any optional writer is considered. Previous successes
@@ -133,6 +155,13 @@ export async function planAdmissionCycle({ repository, census, health, control, 
     const repair = reasons.length && !global.length ? await authorizedRepair(entry, health, grant,
       { now, verifyAuthority, verifyChecks }) : null;
     const eligible = !reasons.length || Boolean(repair);
+    // Merge groups get a success only when their own aggregator already succeeded (just in time);
+    // a group held only because it is stacked behind another is waiting, not failed: no write.
+    const group = entry.kind === "merge_group";
+    const result = group ? census.requiredResults?.[entry.integrationSha] ?? "unavailable" : null;
+    const state = !group ? eligible ? "success" : "failure"
+      : eligible ? result === "success" ? "success" : "none"
+        : reasons.length === 1 && reasons[0] === "base-moved" ? "none" : "failure";
     const expiresAt = new Date(Math.min(Date.parse(now) + CONTROLLER.maxCycleAgeMs,
       date(health?.observedAt) ? Date.parse(health.observedAt) + POLICY.maxObservationAgeSeconds * 1000 : Date.parse(now),
       repair ? Date.parse(repair.expiresAt) : Infinity,
@@ -145,9 +174,10 @@ export async function planAdmissionCycle({ repository, census, health, control, 
         ? Date.parse(health.observedAt) + POLICY.maxObservationAgeSeconds * 1000 :
       ordinary.reasons.includes("unvalidated-age-limit") && date(health?.backlog?.oldestUnvalidatedAt)
         ? Date.parse(health.backlog.oldestUnvalidatedAt) + POLICY.maxUnvalidatedAgeSeconds * 1000 : null;
-    decisions.push({ entry, targetSha: target(entry), context: ADMISSION_CONTEXT, state: eligible ? "success" : "failure",
+    decisions.push({ entry, targetSha: target(entry), context: ADMISSION_CONTEXT, state,
       decision: repair ? "authorized-repair-eligible" : eligible ? "ordinary-admission-eligible" : "hold",
       reasons: repair ? ["operator-authorized-exact-repair"] : reasons, repair, expiresAt,
+      ...(group ? { requiredResult: result, awaiting: state !== "none" ? null : eligible ? "required-result" : "queue-head" } : {}),
       plannedBlockLatencyMs: !eligible && trigger !== null && trigger <= Date.parse(now) ? Date.parse(now) - trigger : null });
   }
   return { schema: "main-merge-admission-cycle-v1", mode: "dry-run", enforcement: "none", repository,
@@ -231,19 +261,21 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
     for (const d of fresh.decisions) {
       if (!validEntry(d.entry) || d.entry.repository !== configuration.repository || d.targetSha !== target(d.entry) ||
           !identities.has(d.targetSha) || identities.get(d.targetSha) !== hash(d.entry) || seen.has(d.targetSha) ||
-          !["success", "failure"].includes(d.state) || d.context !== ADMISSION_CONTEXT ||
-          d.state === "success" && (!date(d.expiresAt) || Date.parse(d.expiresAt) <= checked))
+          !["success", "failure", "none"].includes(d.state) || d.context !== ADMISSION_CONTEXT ||
+          d.state === "success" && (!date(d.expiresAt) || Date.parse(d.expiresAt) <= checked) ||
+          d.state === "success" && d.entry.kind === "merge_group" && d.requiredResult !== "success")
         throw new Error("Writer evidence expired or changed");
       seen.add(d.targetSha);
     }
     const usage = writerApi.budget;
-    capacity = { plannedWrites: fresh.decisions.length, callsUsed: usage.calls, callLimit: usage.limit,
+    capacity = { plannedWrites: fresh.decisions.filter(d => d.state !== "none").length, callsUsed: usage.calls, callLimit: usage.limit,
       callsAvailable: usage.limit - usage.calls, restRemaining: usage.rateRemaining, remainingFloor: usage.remainingFloor,
       quotaAvailable: usage.rateRemaining - usage.remainingFloor };
     capacity.writesAvailable = Math.max(0, Math.min(capacity.callsAvailable, capacity.quotaAvailable));
     capacity.shortfall = Math.max(0, capacity.plannedWrites - capacity.writesAvailable);
     if (capacity.shortfall) throw new Error("Writer complete batch exceeds remaining budget");
     for (const current of fresh.decisions) {
+      if (current.state === "none") continue;
       const checked = checkTime();
       if (current.state === "success" && Date.parse(current.expiresAt) <= checked)
         throw new Error("Writer evidence expired or changed");
@@ -274,7 +306,8 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
       writes, attemptedWrites, plannedWrites: requested.length, complete: false,
       reason: writerApi.budget.reason ?? (capacity?.shortfall ? "complete-batch-capacity-shortfall" : "revalidation-or-delivery-unavailable"), capacity: capacity ?? null, apiBudget: { ...writerApi.budget } };
     log(JSON.stringify(failure));
-    // A prior success is sticky even on a zero-write budget refusal. Never call
+    // A prior PR-head success is sticky even on a zero-write refusal, but only gates enqueueing;
+    // a merge group's success exists only once it is ready to land (just in time). Never call
     // this enforcement success or retry with another token; reconcile explicitly.
     throw Object.assign(new Error("Admission batch incomplete", { cause }), failure);
   }

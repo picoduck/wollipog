@@ -92,7 +92,9 @@ acknowledged and attempted write counts (a failed request may have reached the
 forge). Receipt timestamps, cumulative API calls and planned block latency
 are auditable through the last completed hold. No automatic retry is configured.
 A batch refusal is not an enforcement success: existing forge successes remain
-sticky until explicitly replaced. The callback is an operator trust boundary,
+until explicitly replaced. Merge groups receive a success only just in time, once
+ready to land ([fail-closed group admission](main-merge-admission.md#fail-closed-group-admission)),
+so only pull-request head successes, which gate enqueueing alone, can outlive an outage. The callback is an operator trust boundary,
 never a deserialized artifact or an author-provided function.
 
 No workflow grants `statuses:write`. Simply merging this module, setting an
@@ -342,10 +344,12 @@ This episode illustrates an external scheduling limit; it does not demonstrate
 an admission-policy hold or justify changing queue rules, budgets or thresholds.
 
 **Actual enforcement bound remains none while disabled.** After future activation,
-a status success remains sticky if the controller stops. Lease expiry does not
-make GitHub expire the status. Full controller outage, API outage, incomplete
-census, quota stops and a race between the last check/write and landing can leave
-a prior status unchanged. The adapter checks time/expiry before each write and binds all targets to one
+a merge group's success exists only once its own aggregator succeeded and it is next
+to land ([fail-closed group admission](main-merge-admission.md#fail-closed-group-admission)).
+A controller or forge outage before that write leaves no success, and the queue removes
+the group at its check-response timeout. Lease expiry still does not make GitHub expire
+a status. A race between the last check/write and landing remains, bounded by
+observation age, cycle age and GitHub's unmeasured landing latency. The adapter checks time/expiry before each write and binds all targets to one
 independent census; it cannot make that snapshot or the writes atomic with GitHub
 merging. New entries after the census wait for the next cycle. These races must be
 included in a separately approved activation design. No finite unconditional

@@ -124,18 +124,81 @@ validate merge groups until a separately reviewed cutover proves the replacement
 | Entry State | Required Future Behavior | Current Dry Run |
 | --- | --- | --- |
 | New PR/enqueue | Bind evaluation to repository, PR head and integration/base; hold ordinary work if health fails or exceeds budget. | Observe ready PRs; never gate. |
-| Queued | Reevaluate every current integration on failure, expiry and base movement; withdraw prior success. | Observe delivered merge-group events only. |
-| Building | Final fresh check after tests; a health change or threshold crossing holds despite successful tests. | Advisory sibling after tests. |
-| Already green | Expire/revoke a stale success before ordinary admission; audit each revocation. | No invalidation or status writes. |
-| Controller/API outage | Missing fresh authorization must hold; never keep an old cached green as proof. | Explicit hold or unavailable observation; existing full queue CI continues. |
+| Queued | Reevaluate every current integration on failure, expiry and base movement. A group receives no success until it is ready to land (below). | Observe delivered merge-group events only. |
+| Building | No success while its own checks run; a health change or threshold crossing writes a failure. | Advisory sibling after tests. |
+| Already green | A group's success is written only once its own aggregator succeeded and its base is main, so it lands within GitHub's merge latency. | No invalidation or status writes. |
+| Controller/API outage | No fresh write means no group success; the queue's missing-result timeout removes the group. | Explicit hold or unavailable observation; existing full queue CI continues. |
 
-**Actual shipped enforcement bound: none.** This slice intentionally blocks zero
-merges. Fixtures prove policy decisions at expiry, not forge enforcement. Even the
-planned final check leaves a race between its last read, success publication and
-GitHub landing. Scheduled invalidation is best effort; a controller outage can
-leave a previously green check sticky indefinitely. A 120-second policy lease does
-not cause GitHub to expire success automatically. No finite unconditional
-failure-to-block bound may be claimed from Actions cron or webhook timing.
+**Actual shipped enforcement bound: none while disabled.** This code blocks zero
+merges: no writer is configured and no context is required. The design below
+bounds what activation could achieve. It is proven on inert fixtures, not on the
+forge.
+
+## Fail-Closed Group Admission
+
+Refs #3633 (AC1, AC5). Commit statuses and check runs never expire on GitHub, so a
+success written early stays valid however stale its evaluation becomes. Before this
+change the controller wrote `success` to every eligible merge group on every cycle,
+while the group's own checks were still running. A controller or forge outage after
+that write, followed by a health failure, let the group land on a minutes-old
+evaluation when its checks finished. The rehearsal reproduces exactly this landing
+for the earlier behavior (`pre-change-early-success-lands-stale`: a 539.7-second-old
+evaluation lands after health failed).
+
+| Mechanism | Fails Closed in an Outage? | Assessment |
+| --- | --- | --- |
+| **Just-in-time group admission** (adopted) | Yes: no write means no success, and the queue's missing-result timeout removes the group | Uses only what the merge queue already enforces: every required context must succeed on the exact group SHA |
+| Aggregator or merge-group gate checks admission freshness | No | Circular (admission is written after the aggregator); it runs inside the group's own workflow, and a check only covers its own run time |
+| Write `pending` first on every cycle | No | Whatever was written last still stands after the writer stops; costs an extra write per target per cycle |
+| Check run instead of commit status | No | Check runs never expire either; the `integration_id` pin works for both |
+| GitHub-native expiry | Not available | Rulesets, merge queues and statuses offer no success expiry; the check-response timeout covers only missing results |
+
+**Contract.** A merge group's `Regression Admission` success is written only when:
+
+1. its own required aggregator, `Typecheck, Test & Sidecar Bundle`, already completed
+   successfully on that exact group SHA, reported by the pinned GitHub Actions issuer
+   (app 15368). A missing, partial, rerunning, foreign or paginated result is not
+   success. The census reads it from the queue entry's head commit in the same single
+   GraphQL request, so no call is added. The result stays outside the entry's identity,
+   so an aggregator finishing mid-cycle changes only what may be written;
+2. the group is next to land: its base is current main. A group stacked behind
+   another has `base-moved` as its only reason. It now gets **no write**, rather than
+   a failure that would eject it from the queue;
+3. health admits it under the unchanged policy, with the writer's unchanged ≤ 60-second
+   cycle and ≤ 120-second observation lease checked immediately before the write.
+
+A waiting group gets no status at all. A health hold still writes `failure`, which
+ejects the group. Pull-request heads keep their earlier statuses, because they only
+gate enqueueing: a sticky head success cannot land code without the group's own
+just-in-time success. An exact repair follows the same rule. The writer refuses any
+merge-group success whose fresh decision lacks the aggregator result.
+
+**Proof (inert).** `node scripts/rehearse-admission-lease.mjs` drives the delivered
+controller, real health report, census and writer over the #3637 fake forge on a
+virtual clock. A fixture merge-queue rule lands a group only when both contexts
+succeed on its SHA and its base is main; a failure ejects it; a missing result is
+removed after the live 120-minute `check_response_timeout_minutes`. The rehearsal
+runs controller outages of 5, 30 and 130 minutes, starting 2 or 9.5 minutes into a
+group's life, with health failing during each outage. No group lands: each is either
+ejected when the controller returns or removed at the timeout. A healthy group lands
+7.1 seconds after its aggregator. A failure while the controller is up ejects the
+group at the next cycle.
+
+**Disclosed race.** Between the just-in-time write and GitHub's landing, a newly
+failing health cannot be withdrawn if the controller stops. The landing evaluation's
+age is bounded by observation age + cycle age + GitHub's landing latency: at most
+120 s + 60 s + L. The rehearsal shows a stale landing on a 39.7-second-old
+evaluation, with a fixture L of 30 seconds. **L is not measured**: GitHub publishes
+no merge-latency bound, and a forge outage between write and landing extends it.
+This window replaces the earlier unbounded window, which lasted from first admission
+to landing, including a whole outage.
+
+**Availability cost.** Each group waits for the next controller cycle after its
+aggregator: up to 60 seconds plus cycle time, counted in required-result latency.
+During a controller outage the queue stalls, and groups are removed after 120
+minutes instead of landing. This is the fail-closed choice. Do not raise the timeout
+or relax the contract to recover availability; restore the controller or roll back
+to full queue validation.
 
 Before activation, measure failure-to-observation, observation-to-invalidation and
 last-check-to-landing in real shadow traffic. Specify an approved bound and outage
