@@ -196,6 +196,34 @@ test("the cache serves settled responses, refetches unsettled ones and stops at 
   assert.deepEqual(await cached("/done"), { workflow_runs: [{ status: "completed" }] });
 });
 
+test("the wrapper's own calls never take a quota below the floor", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "occupancy-floor-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let remaining = 1003;
+  const api = async (path) => path === "/rate_limit"
+    ? { resources: { core: { remaining }, graphql: { remaining: 5000 } } }
+    : (remaining--, { status: "completed" });
+  const cached = cachedApi(api, dir, { floor: 1000 });
+  let served = 0;
+  await assert.rejects(async () => {
+    for (let i = 0; i < 10; i++, served++) await cached(`/item/${i}`);
+  }, /budget floor 1000 reached after 3 calls/);
+  assert.equal(served, 3);
+  assert.equal(remaining, 1000);
+});
+
+test("combining refreshed snapshots of the same hours counts their time once", () => {
+  const report = { kind: "runner-occupancy", repository, since: at(0), until: at(60), collectedAt: at(70),
+    runListingTruncated: false, jobListingsTruncated: 0, attemptsTruncated: 0, runs: [], jobs: [job(1, "a", 0, 10, 20, { id: 1 })] };
+  const twice = combineOccupancy([report, { ...report, collectedAt: at(80) }]);
+  assert.deepEqual(twice.windows, [{ since: at(0), until: at(60) }]);
+  assert.equal(analyze(twice).occupancy.observedMinutes, 60);
+  assert.equal(analyze(twice).occupancy.queuedJobMinutes, 10);
+  const partial = combineOccupancy([report, { ...report, since: at(30), until: at(90), collectedAt: at(95) }]);
+  assert.deepEqual(partial.windows, [{ since: at(0), until: at(90) }]);
+  assert.equal(analyze(partial).occupancy.observedMinutes, 90);
+});
+
 test("options require a repository and cache to collect, and nothing to analyze offline", () => {
   assert.throws(() => options(["--since", at(0), "--until", at(1)]), /--repo/);
   assert.throws(() => options(["--repo", repository, "--since", at(0), "--until", at(1)]), /--cache/);
@@ -248,10 +276,28 @@ test("scenarios replace critical-path waits to model merge-group latency", () =>
     job(9, AGGREGATOR, 58, 62, 63, { id: 3 })];
   const [result] = scenarios(jobs, jobs, runs, [parseScenario("capacity=10")]);
   assert.equal(result.mergeGroupRequired.observed.median, 63);
-  // With free slots the browser job and aggregator start when created: 18 + 1 minutes of execution.
-  assert.equal(result.mergeGroupRequired.modeled.median, 19);
+  // With free slots unit/build (19 minutes) now finishes after the browser job (18), and the
+  // aggregator, created when its last dependency finishes, adds its 1 minute.
+  assert.equal(result.mergeGroupRequired.modeled.median, 20);
   assert.equal(result.mergeGroupRequired.overSixty.observed, 1);
   assert.equal(result.mergeGroupRequired.overSixty.modeled, 0);
+});
+
+test("modeled latency waits for every required branch, not only the observed critical one", () => {
+  const runs = [{ id: 9, createdAt: at(0) }];
+  // The browser job ended the observed critical path only because it waited 50 minutes.
+  const jobs = [job(9, "Typecheck, Unit Tests & Bundles", 0, 0, 40, { id: 1 }), job(9, "Browser End-to-End Tests (3)", 0, 50, 51, { id: 2 }),
+    job(9, AGGREGATOR, 51, 51, 52, { id: 3 })];
+  const [result] = scenarios(jobs, jobs, runs, [parseScenario("capacity=10")]);
+  assert.equal(result.mergeGroupRequired.observed.median, 52);
+  assert.equal(result.mergeGroupRequired.modeled.median, 41);
+  // A called workflow's later job is created when its own earlier job finishes.
+  const called = [job(9, "Typecheck, Unit Tests & Bundles", 0, 0, 5, { id: 1 }),
+    job(9, "Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 0, 20, 21, { id: 4 }),
+    job(9, "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 21, 60, 70, { id: 5 }),
+    job(9, AGGREGATOR, 70, 70, 71, { id: 3 })];
+  const [modeled] = scenarios(called, called, runs, [parseScenario("capacity=10")]);
+  assert.equal(modeled.mergeGroupRequired.modeled.median, 12);
 });
 
 test("scenario specs are validated", () => {

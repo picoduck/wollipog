@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { githubApi } from "./merge-group-cleanup.mjs";
-import { AGGREGATOR, collect, collectEvents, criticalPath, listJobs, markdown as queueWaitMarkdown, MAX_PAGES, quantile, ReportError, summarize } from "./merge-queue-wait-report.mjs";
+import { AGGREGATOR, collect, collectEvents, criticalPath, DEPENDENCY_SLACK_MS, dependencyCandidates, listJobs, markdown as queueWaitMarkdown, MAX_PAGES, quantile, ReportError, summarize } from "./merge-queue-wait-report.mjs";
 
 // Measures how every workflow in the repository shares the hosted-runner pool (#2674): runner
 // occupancy over time, queued demand, and runner-minutes and runner waits per workflow and event.
@@ -19,12 +19,14 @@ const UNSETTLED = /"status":"(queued|in_progress|waiting|pending|requested)"/;
 /**
  * Wraps a GitHub API function with a response cache in `dir` and a rate-limit floor. Only
  * settled responses are cached: a listing that still shows queued or running work is refetched.
- * Before the first network call and every `checkEvery` calls, it reads the exempt rate-limit
- * endpoint and refuses to continue below `floor` remaining on either quota, so a partial
- * collection resumes from the cache instead of exhausting quota shared with other consumers.
+ * Before network calls it reads the exempt rate-limit endpoint and admits at most `checkEvery`
+ * calls, and never more than the remaining quota above `floor` on either quota, before reading it
+ * again. Its own calls therefore never take a quota below the floor, so a partial collection
+ * resumes from the cache instead of exhausting quota shared with other consumers.
  */
 export function cachedApi(api, dir, { floor = 1500, checkEvery = 100 } = {}) {
   const stats = { hits: 0, calls: 0 };
+  let admitted = 0;
   const wrapped = async (path, body) => {
     const key = createHash("sha256").update(JSON.stringify([path, body ?? null])).digest("hex");
     const file = join(dir, `${key}.json`);
@@ -35,13 +37,15 @@ export function cachedApi(api, dir, { floor = 1500, checkEvery = 100 } = {}) {
     } catch (error) {
       if (error?.code !== "ENOENT") throw new ReportError("Unreadable API cache entry");
     }
-    if (stats.calls % checkEvery === 0) {
+    if (admitted <= 0) {
       const limits = await api("/rate_limit");
       const remaining = [limits?.resources?.core?.remaining, limits?.resources?.graphql?.remaining];
       if (!remaining.every(Number.isSafeInteger)) throw new ReportError("Unreadable rate limit");
-      if (Math.min(...remaining) < floor)
+      admitted = Math.min(checkEvery, Math.min(...remaining) - floor);
+      if (admitted <= 0)
         throw new ReportError(`API budget floor ${floor} reached after ${stats.calls} calls; rerun later to resume from the cache`);
     }
+    admitted--;
     stats.calls++;
     const response = await api(path, body);
     if (!UNSETTLED.test(JSON.stringify(response))) {
@@ -164,7 +168,20 @@ export async function collectOccupancy(api, { repository, since, until }) {
   };
 }
 
-/** Combine collections, deduplicating runs by id and jobs by id. Later collections win. */
+/** The union of half-open windows, as ordered, nonoverlapping windows. Adjacent windows join. */
+export function unionWindows(windows) {
+  const merged = [];
+  for (const [a, b] of windows.map((item) => [Date.parse(item.since), Date.parse(item.until)]).sort((x, y) => x[0] - y[0])) {
+    if (merged.length && a <= merged.at(-1)[1]) merged.at(-1)[1] = Math.max(merged.at(-1)[1], b);
+    else merged.push([a, b]);
+  }
+  return merged.map(([a, b]) => ({ since: new Date(a).toISOString(), until: new Date(b).toISOString() }));
+}
+
+/**
+ * Combine collections, deduplicating runs by id and jobs by id; later collections win. Collected
+ * windows are unioned, so a refreshed snapshot of the same hours is not counted twice.
+ */
 export function combineOccupancy(reports) {
   if (!reports.length || reports.some((report) => report.kind !== "runner-occupancy" || report.repository !== reports[0].repository))
     throw new ReportError("Inputs must be runner-occupancy reports for one repository");
@@ -172,7 +189,7 @@ export function combineOccupancy(reports) {
   const since = sorted.map((report) => report.since).sort()[0];
   const until = sorted.map((report) => report.until).sort().at(-1);
   return { ...sorted.at(-1), since, until,
-    windows: sorted.flatMap((report) => report.windows ?? [{ since: report.since, until: report.until }]),
+    windows: unionWindows(sorted.flatMap((report) => report.windows ?? [{ since: report.since, until: report.until }])),
     runListingTruncated: sorted.some((report) => report.runListingTruncated),
     jobListingsTruncated: sorted.reduce((sum, report) => sum + report.jobListingsTruncated, 0),
     attemptsTruncated: sorted.reduce((sum, report) => sum + report.attemptsTruncated, 0),
@@ -189,12 +206,8 @@ export function withinWindow(report, windows) {
   const wanted = (Array.isArray(windows) ? windows : [windows]).map((item) => [Date.parse(item.since), Date.parse(item.until)])
     .sort((a, b) => a[0] - b[0]);
   if (wanted.some(([a, b], i) => !(a < b) || (i > 0 && a < wanted[i - 1][1]))) throw new ReportError("Analysis windows must be ordered and nonoverlapping");
-  const collected = [];
-  for (const [a, b] of (report.windows ?? [{ since: report.since, until: report.until }])
-    .map((item) => [Date.parse(item.since), Date.parse(item.until)]).sort((x, y) => x[0] - y[0])) {
-    if (collected.length && a <= collected.at(-1)[1]) collected.at(-1)[1] = Math.max(collected.at(-1)[1], b);
-    else collected.push([a, b]);
-  }
+  const collected = unionWindows(report.windows ?? [{ since: report.since, until: report.until }])
+    .map((item) => [Date.parse(item.since), Date.parse(item.until)]);
   if (!wanted.every(([a, b]) => collected.some(([c, d]) => c <= a && b <= d)))
     throw new ReportError("Each analysis window must lie inside the collected windows");
   const inside = (time) => wanted.some(([a, b]) => Date.parse(time) >= a && Date.parse(time) < b);
@@ -431,9 +444,36 @@ export function replay(jobs, { capacity, priority = null, drop = null, limit = n
 }
 
 /**
- * Modeled merge-group latency: each measured first attempt's required-result time with the
- * observed runner waits of its critical-path jobs replaced by modeled waits.
+ * Modeled merge-group latency. Each executed job of a measured first attempt finishes at its
+ * modeled creation plus its modeled runner wait plus its observed execution. A job created with the
+ * run keeps that creation time. A job GitHub created later, when its dependencies finished, is
+ * created when the last of those dependencies (the merge-queue report's dependency model, limited
+ * to jobs that had finished by its observed creation) finishes in the model. The aggregator thus
+ * waits for every required branch, never only the observed critical one.
  */
+export function modeledRequiredMinutes(runCreatedAt, list, waits) {
+  const runStart = Date.parse(runCreatedAt);
+  const raw = list.map((job) => ({ id: job.jobId, name: job.name, conclusion: job.conclusion,
+    created_at: job.createdAt, started_at: job.apiStartedAt, completed_at: job.completedAt }));
+  const aggregator = raw.find((job) => job.name === AGGREGATOR);
+  if (!aggregator || !Number.isFinite(runStart) || raw.some((job) => !waits.has(job.id) ||
+      ![job.created_at, job.started_at, job.completed_at].every((time) => Number.isFinite(Date.parse(time))))) return null;
+  const work = raw.filter((job) => job !== aggregator);
+  const finished = new Map();
+  const finish = (job) => {
+    if (finished.has(job.id)) return finished.get(job.id);
+    const created = Date.parse(job.created_at);
+    const dependencies = created - runStart > DEPENDENCY_SLACK_MS
+      ? dependencyCandidates(job, work, aggregator).filter((other) => other !== job && Date.parse(other.completed_at) <= created + DEPENDENCY_SLACK_MS)
+      : [];
+    const ready = dependencies.length ? Math.max(...dependencies.map(finish)) : created;
+    const value = ready + waits.get(job.id) * MINUTE + (Date.parse(job.completed_at) - Date.parse(job.started_at));
+    finished.set(job.id, value);
+    return value;
+  };
+  return (finish(aggregator) - runStart) / MINUTE;
+}
+
 function modeledRequired(jobs, runs, waits) {
   const created = new Map(runs.map((run) => [run.id, run.createdAt]));
   const byRun = new Map();
@@ -441,16 +481,13 @@ function modeledRequired(jobs, runs, waits) {
     byRun.set(job.runId, [...(byRun.get(job.runId) ?? []), job]);
   const observed = [], modeled = [];
   for (const [runId, list] of byRun) {
-    const raw = list.map((job) => ({ id: job.jobId, name: job.name, conclusion: job.conclusion,
-      created_at: job.createdAt, started_at: job.apiStartedAt, completed_at: job.completedAt }));
-    const aggregator = raw.find((job) => job.name === AGGREGATOR);
+    const aggregator = list.find((job) => job.name === AGGREGATOR);
     if (!aggregator || !created.has(runId)) continue;
-    const path = criticalPath({ created_at: created.get(runId) }, aggregator, raw.filter((job) => job !== aggregator));
-    if (!path || path.some((job) => !waits.has(job.id))) continue;
-    const required = span(created.get(runId), aggregator.completed_at);
-    if (required === null) continue;
+    const required = span(created.get(runId), aggregator.completedAt);
+    const value = modeledRequiredMinutes(created.get(runId), list, waits);
+    if (required === null || value === null) continue;
     observed.push(required);
-    modeled.push(required + path.reduce((sum, job) => sum + waits.get(job.id) - span(job.created_at, job.started_at), 0));
+    modeled.push(value);
   }
   return { observed: distribution(observed), modeled: distribution(modeled),
     overSixty: { observed: observed.filter((value) => value > 60).length, modeled: modeled.filter((value) => value > 60).length },

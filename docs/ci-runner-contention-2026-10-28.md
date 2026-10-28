@@ -33,7 +33,7 @@ money is a proposal for the human owner.
   job by 15:19:19 UTC. Its required aggregator then waited 43m23s for a runner and succeeded at
   16:02:45, 3m15s after the 15:59:30 removal.
 - **Capacity is the lever with the largest modeled effect.** A trace-driven replay, calibrated at
-  20 slots to within 2.2 minutes of the observed trial p90, models merge-group p90 of **39.2
+  20 slots to within 3.3 minutes of the observed trial p90, models merge-group p90 of **39.4
   minutes at 60 slots**, essentially execution time alone. GitHub Team gives 60 concurrent standard
   jobs. Standard runners stay free for public repositories, so the cost is the per-seat plan price.
   Reaching 60 slots therefore costs about **$4 per month** at today's single filled seat.
@@ -208,34 +208,38 @@ result p50/p90/max **41.3/119.9/214.5**, critical-path waiting p90 86.0, aggrega
 `--scenario` replays every collected job that held a runner. Each job becomes ready at its
 observed creation time and runs for its observed execution time on `capacity` uniform slots,
 first-come first-served unless a category is prioritized. A merge group's modeled
-required-result time replaces the observed runner waits of its critical-path jobs with modeled
-waits. Assumptions, stated with every result:
+required-result time recomputes every executed job's finish: modeled creation plus modeled
+runner wait plus observed execution. A job created later than the run waits in the model for the
+last of its dependencies, using the merge-queue report's dependency model. The aggregator therefore
+waits for every required branch, so a model result never falls below the slowest branch's
+execution. Assumptions, stated with every result:
 
-- Creation times stay as observed. A dependent job is not created earlier when its dependencies
-  finish sooner, which understates the benefit of extra capacity slightly.
+- In the slot replay itself, creation times stay as observed, so jobs whose dependencies finish
+  sooner do not compete for slots earlier. This slightly understates contention under small
+  capacity increases.
 - Execution time does not change with load. The macOS limit of five is ignored (macOS jobs are 3.1%
   of allocations). Jobs cancelled before a runner stay unrun.
 - Fewer cancellations, faster merges and changed author behavior are not modeled. The model ranks
   options; it does not predict exact latency.
 
-Calibration: at 20 slots the model gives trial p50/p90 39.4/68.1 against observed 39.2/65.9
-(151 runs), and October 27–28 45.1/97.5 against observed 41.0/100.2 (66 runs whose critical path
-could be replayed, of 67).
+Calibration: at 20 slots the model gives trial p50/p90 40.1/69.2 against observed 39.2/65.9
+(151 runs), and October 27–28 46.4/97.5 against observed 41.0/100.2 (66 runs whose executed jobs
+could all be replayed, of 67).
 
 | Scenario | Trial Group p90 (Observed 65.9) | Trial Groups > 60 / > 120 | Oct 27–28 Group p90 (Observed 100.2) | Oct 27–28 > 60 / > 120 | Trial PR Job Wait p90 |
 | --- | ---: | --- | ---: | --- | ---: |
-| 20 slots, today | 68.1 | 19 / 2 | 97.5 | 14 / 5 | 73.1 |
-| 20, merge groups served first | 44.3 | 1 / 0 | 45.9 | 0 / 0 | 78.5 |
-| 20, PR browser `max-parallel: 2` | 62.0 | 17 / 2 | 84.6 | 12 / 5 | 80.1 |
-| 20, no PR Chromium shards 2–5 on ~50% of PRs | 44.9 | 2 / 0 | 61.2 | 8 / 0 | 32.3 |
-| 20, no PR Chromium shards 2–5 on any PR | 40.6 | 0 / 0 | 40.3 | 0 / 0 | 9.1 |
-| 20, no superseded-PR canceller or cleanup monitor jobs | 62.2 | 16 / 2 | 83.0 | 12 / 5 | 70.5 |
-| 20, no Platform Isolation on PRs | 58.2 | 14 / 1 | 73.7 | 10 / 2 | 61.6 |
-| 20, no `windows-2025` Platform Isolation lane (upper bound) | 65.6 | 17 / 1 | 83.4 | 12 / 3 | 67.0 |
-| 25 slots | 45.6 | 2 / 0 | 56.0 | 4 / 0 | 42.6 |
-| 30 slots | 40.6 | 2 / 0 | 42.1 | 0 / 0 | 28.7 |
-| 40 slots | 39.3 | 0 / 0 | 36.3 | 0 / 0 | 10.2 |
-| 60 slots (GitHub Team) | 39.2 | 0 / 0 | 36.1 | 0 / 0 | 0.0 |
+| 20 slots, today | 69.2 | 20 / 4 | 97.5 | 16 / 5 | 73.1 |
+| 20, merge groups served first | 46.8 | 2 / 0 | 47.3 | 0 / 0 | 78.5 |
+| 20, PR browser `max-parallel: 2` | 62.8 | 19 / 4 | 84.6 | 12 / 5 | 80.1 |
+| 20, no PR Chromium shards 2–5 on ~50% of PRs | 47.4 | 2 / 0 | 61.9 | 8 / 0 | 32.3 |
+| 20, no PR Chromium shards 2–5 on any PR | 43.5 | 1 / 0 | 40.7 | 0 / 0 | 9.1 |
+| 20, no superseded-PR canceller or cleanup monitor jobs | 66.7 | 18 / 4 | 83.0 | 12 / 5 | 70.5 |
+| 20, no Platform Isolation on PRs | 61.7 | 16 / 2 | 73.7 | 10 / 2 | 61.6 |
+| 20, no `windows-2025` Platform Isolation lane (upper bound) | 66.2 | 18 / 3 | 83.4 | 12 / 4 | 67.0 |
+| 25 slots | 47.3 | 5 / 0 | 56.4 | 4 / 1 | 42.6 |
+| 30 slots | 41.0 | 2 / 0 | 42.1 | 1 / 0 | 28.7 |
+| 40 slots | 39.9 | 0 / 0 | 36.5 | 0 / 0 | 10.2 |
+| 60 slots (GitHub Team) | 39.4 | 0 / 0 | 36.3 | 0 / 0 | 0.0 |
 
 The "~50% of PRs" row drops shards for PR runs with an even run ID, a stand-in for an unknown
 eligible fraction. #3630's routing is inactive and its eligible fraction is WS2's measurement.
@@ -249,24 +253,24 @@ execution from the trial cohort (17,015 per working day: PR 7,208, merge groups 
 
 | Option | Modeled Effect | Cost | Risks and Dependencies | Rollback |
 | --- | --- | --- | --- | --- |
-| **C1. GitHub Team for the organization** (60 concurrent standard jobs) | Group p90 65.9 → 39.2 (trial), 100.2 → 36.1 (Oct 27–28); PR wait p90 73 → 0; no modeled timeout | $4 per user per month ([pricing](https://github.com/pricing), read 2026-10-28); 1 filled seat today. Standard runners stay free for public repositories. No runner-minute charge. | Organization billing decision and payment method (human). Seat count grows with members. Higher concurrency raises workflow API traffic (health/controller budgets are per invocation and remain bounded). | Downgrade to Free; no repository change to revert. |
+| **C1. GitHub Team for the organization** (60 concurrent standard jobs) | Group p90 65.9 → 39.4 (trial), 100.2 → 36.3 (Oct 27–28); PR wait p90 73 → 0; no modeled timeout | $4 per user per month ([pricing](https://github.com/pricing), read 2026-10-28); 1 filled seat today. Standard runners stay free for public repositories. No runner-minute charge. | Organization billing decision and payment method (human). Seat count grows with members. Higher concurrency raises workflow API traffic (health/controller budgets are per invocation and remain bounded). | Downgrade to Free; no repository change to revert. |
 | C2. GitHub Support concurrency increase | Unknown size | None stated | GitHub documents that Support can raise concurrency limits; eligibility on Free is not documented. | None needed. |
-| C3. Larger runners reserved for merge groups | Equivalent to "merge groups served first" plus their own slots: p90 ≈ 39–44 | Requires Team. Linux 4-core x64 $0.012/min ([runner pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing)); at today's ~5,203 merge-group minutes per working day ≈ $62/day, about $1,500/month at unchanged minutes. Larger runners are billed for public repositories. | Execution on 4 cores is unmeasured, so minutes may fall. A runner-label change to `ci.yml`. | Revert the label. |
+| C3. Larger runners reserved for merge groups | Equivalent to "merge groups served first" plus their own slots: p90 ≈ 39–47 | Requires Team. Linux 4-core x64 $0.012/min ([runner pricing](https://docs.github.com/en/billing/reference/actions-runner-pricing)); at today's ~5,203 merge-group minutes per working day ≈ $62/day, about $1,500/month at unchanged minutes. Larger runners are billed for public repositories. | Execution on 4 cores is unmeasured, so minutes may fall. A runner-label change to `ci.yml`. | Revert the label. |
 | C4. Self-hosted runners for trusted events only | Like C3 at hardware cost | No GitHub platform charge per the billing page read 2026-10-28; hardware and operations not priced. | Public repository: must never run pull-request code; restrict to `merge_group` and `main` dispatch. Needs a separately authorized operator and host. Never the Wollipog hosting machine. Overlaps #3509's finalizer label. | Remove the label and deregister. |
 
 ### Admission
 
 | Option | Modeled Effect | Cost | Risks and Dependencies |
 | --- | --- | --- | --- |
-| A1. Activate #3630 PR routing | ~50% routed: trial p90 44.9, Oct 27–28 61.2; 100%: 40.6/40.3. PR wait p90 also falls. | Removes four of five Chromium jobs per routed PR; shards 2–5 are 67% of PR CI runner-minutes | Owned by #3629/#3630 and their approval; selection safety is their contract. This report only supplies the capacity value. |
-| A2. PR browser `max-parallel: 2` | p90 62.0 / 84.6: small gain, PR waits worse | None | Lengthens PR feedback by about two shard durations. Not recommended. |
-| A3. Runner-free superseded-PR cancellation | Removing canceller and monitor jobs: p90 62.2 / 83.0. Measured: cancelled PR jobs used 4,071 minutes (11% of PR minutes) in the trial cohort. | External poller holding `actions:write`, or a dedicated trusted runner | #3420 closed this as not planned for those reasons. Revisit only with C4. |
-| A4. Stop running the shared Windows Platform Isolation steps twice | Upper bound (lane removed): p90 65.6 / 83.4. Measured: the `windows-2025` lane ran 289 jobs and 3,743 of 8,789 Platform Isolation PR minutes over October 20–28. `windows-latest` and `windows-2025` are the same image today. In 152 successful jobs, about 19 of each lane's ~21 minutes are steps both lanes run (mostly the 15–16 minute provider-HOME lease protocol). Only the native-skill steps (`windows-latest`) and the WSL boundary step (`windows-2025`, ~2 minutes) differ. | None | Merging the lanes moves about 2 minutes onto one job and removes about 19 minutes per run. If two images or a second lease-protocol sample is intended, pin `windows-2022` instead. Owner decision. |
+| A1. Activate #3630 PR routing | ~50% routed: trial p90 47.4, Oct 27–28 61.9; 100%: 43.5/40.7. PR wait p90 also falls. | Removes four of five Chromium jobs per routed PR; shards 2–5 are 67% of PR CI runner-minutes | Owned by #3629/#3630 and their approval; selection safety is their contract. This report only supplies the capacity value. |
+| A2. PR browser `max-parallel: 2` | p90 62.8 / 84.6: small gain, PR waits worse | None | Lengthens PR feedback by about two shard durations. Not recommended. |
+| A3. Runner-free superseded-PR cancellation | Removing canceller and monitor jobs: p90 66.7 / 83.0. Measured: cancelled PR jobs used 4,071 minutes (11% of PR minutes) in the trial cohort. | External poller holding `actions:write`, or a dedicated trusted runner | #3420 closed this as not planned for those reasons. Revisit only with C4. |
+| A4. Stop running the shared Windows Platform Isolation steps twice | Upper bound (lane removed): p90 66.2 / 83.4. Measured: the `windows-2025` lane ran 289 jobs and 3,743 of 8,789 Platform Isolation PR minutes over October 20–28. `windows-latest` and `windows-2025` are the same image today. In 152 successful jobs, about 19 of each lane's ~21 minutes are steps both lanes run (mostly the 15–16 minute provider-HOME lease protocol). Only the native-skill steps (`windows-latest`) and the WSL boundary step (`windows-2025`, ~2 minutes) differ. | None | Merging the lanes moves about 2 minutes onto one job and removes about 19 minutes per run. If two images or a second lease-protocol sample is intended, pin `windows-2022` instead. Owner decision. |
 | A5. Ready-slot discipline (at most two ready CI-heavy PRs across campaigns) | Not modeled. It is an agent operating rule, not enforcement. | None | Already in use for campaigns. Human and other-tool PRs are outside it. |
 
 ### Scheduling
 
-GitHub-hosted runners have no job priority. "Merge groups served first" (p90 44.3 / 45.9) can only
+GitHub-hosted runners have no job priority. "Merge groups served first" (p90 46.8 / 47.3) can only
 be built from a separate pool (C3 or C4) or by keeping other demand out (A1, A3, A4). Job ordering
 inside `ci.yml` cannot reserve a slot. The aggregator's waits (p90 6.8 and 23.2 minutes, 43 minutes
 in the all-green timeout) are slot waits on the smallest runner, and only capacity or lower
