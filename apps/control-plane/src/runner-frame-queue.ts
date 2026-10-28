@@ -59,10 +59,23 @@ export interface RunnerFramePreparation<T, P> {
   discard(prepared: P): void;
 }
 
+/** Hands a run of consecutive already-queued frames of one kind to a single handler call, so they
+ * can share one durable commit (#2601). Only unprepared frames join a run; the queue still yields
+ * to the event loop between runs, so `limit` bounds how long one run can block it (#2125). */
+export interface RunnerFrameRuns<T> {
+  /** Whether a frame may share a run with the consecutive frames around it. */
+  batchable(message: T): boolean;
+  /** At most this many frames are handed over at once. */
+  limit: number;
+  /** Handles two or more frames, in arrival order. A single frame still goes to the queue's handler. */
+  handle(messages: T[]): Promise<void>;
+}
+
 interface QueuedFrame<T, P> {
   message: T;
   bytes: number;
   runnerWide: boolean;
+  batchable: boolean;
   prepared?: P;
 }
 
@@ -85,6 +98,7 @@ export class RunnerFrameQueue<T, P = never> {
     private readonly afterDrain: () => Promise<void> = async () => {},
     private readonly onPressure: (paused: boolean) => void = () => {},
     private readonly preparation?: RunnerFramePreparation<T, P>,
+    private readonly runs?: RunnerFrameRuns<T>,
   ) {}
 
   /** The early registration ACK legitimately triggers one negotiated frame per retained session.
@@ -109,7 +123,13 @@ export class RunnerFrameQueue<T, P = never> {
     } catch {
       // A frame that cannot be classified is treated as acting on the whole runner.
     }
-    this.pending.push({ message, bytes, runnerWide });
+    let batchable = false;
+    try {
+      batchable = this.runs ? this.runs.batchable(message) : false;
+    } catch {
+      // A frame that cannot be classified is handled on its own.
+    }
+    this.pending.push({ message, bytes, runnerWide, batchable });
     this.bytes += bytes;
     this.updatePressure();
     this.prepareAhead();
@@ -151,6 +171,18 @@ export class RunnerFrameQueue<T, P = never> {
     }
   }
 
+  private takeNext(): QueuedFrame<T, P> {
+    const next = this.pending.shift()!;
+    this.preparedCount = Math.max(0, this.preparedCount - 1);
+    this.bytes -= next.bytes;
+    return next;
+  }
+
+  /** A prepared value belongs to the single-frame handler, so a frame carrying one never joins a run. */
+  private joinsRun(frame: QueuedFrame<T, P>): boolean {
+    return frame.batchable && frame.prepared === undefined;
+  }
+
   private updatePressure(): void {
     // Pause well below the hard ceiling, leaving room for the socket's already-buffered data
     // and one full legal frame. Hysteresis prevents pause/resume chatter on a busy stream.
@@ -178,15 +210,20 @@ export class RunnerFrameQueue<T, P = never> {
           continue;
         }
         this.prepareAhead();
-        const next = this.pending.shift()!;
-        this.preparedCount = Math.max(0, this.preparedCount - 1);
-        this.bytes -= next.bytes;
+        const run = [this.takeNext()];
+        // Only frames already queued join a run; nothing waits for more to arrive. With preparation,
+        // a frame must also be in the prepared prefix, so it is known to carry no prepared value.
+        while (this.runs && run.length < this.runs.limit && this.joinsRun(run[0]!) && this.pending.length > 0 &&
+            this.joinsRun(this.pending[0]!) && (!this.preparation || this.preparedCount > 0)) {
+          run.push(this.takeNext());
+        }
         this.updatePressure();
-        this.handlingRunnerWide = next.runnerWide;
+        this.handlingRunnerWide = run.some((frame) => frame.runnerWide);
         this.prepareAhead();
         // The handler may wait for its own preparation; frames behind it stay queued and counted.
         try {
-          await this.handle(next.message, next.prepared);
+          if (run.length === 1) await this.handle(run[0]!.message, run[0]!.prepared);
+          else await this.runs!.handle(run.map((frame) => frame.message));
         } finally {
           this.handlingRunnerWide = false;
         }

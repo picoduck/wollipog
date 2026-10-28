@@ -16301,6 +16301,26 @@ export class ControlPlaneDb {
     return histories;
   }
 
+  /** Apply a run of live runtime snapshots in one durable transaction (#2601), in order. `before`
+   * runs each snapshot's own control-plane writes inside the same transaction and must not
+   * publish anything; a failure rolls the whole run back. */
+  updateSessionsFromRuntimeSnapshots(
+    updates: ReadonlyArray<{ snapshot: SessionSnapshot; before?: () => void }>,
+    now: number,
+  ): Array<RunnerHistoryReconciliation | null> {
+    if (updates.length === 0) return [];
+    if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("updateSessionsFromRuntimeSnapshots requires an autocommit connection");
+    }
+    const histories = this.atomic(() => updates.map(({ snapshot, before }) => {
+      before?.();
+      return this.updateSessionFromSnapshotInTransaction(snapshot.id, snapshot, now, "runtime");
+    }));
+    if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
+    this.maybeMaintainUsageAggregation();
+    return histories;
+  }
+
   private updateSessionFromSnapshotInTransaction(
     id: string,
     snap: SessionSnapshot,
@@ -23935,6 +23955,14 @@ export class ControlPlaneDb {
       sessions.add(row.session_id);
     }
     return [...sessions];
+  }
+
+  /** Whether cancelSessionPromptCommands would find anything of this session's to end. */
+  hasActiveSessionPromptCommands(sessionId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM session_prompt_commands
+       WHERE session_id=? AND state IN ('pending','sent','accepted','queued','started') LIMIT 1`,
+    ).get(sessionId) !== undefined;
   }
 
   /**

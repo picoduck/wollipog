@@ -268,6 +268,7 @@ import {
   tailnetIpv4,
 } from "./net.js";
 import {
+  RUNTIME_UPDATE_RUN_LIMIT,
   SESSION_COMMAND_INVOCATION_RETENTION_MS,
   sessionBlocksConversationFork,
   SessionsService,
@@ -1938,6 +1939,55 @@ app.register(async (instance) => {
     }
   };
 
+  // A run of consecutive queued runtime updates shares one durable commit (#2601). Each frame gets
+  // the same authority checks, activity refresh and attention batching as in handleRunnerFrame.
+  const handleRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
+    const updates = messages as Array<Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>>;
+    try {
+      if (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient)) return;
+      if (!credentialId || !db.isRunnerCredentialActive(runnerId, credentialId)) {
+        socket.close(1008, "runner credential is no longer active");
+        return;
+      }
+      if (runtimeAttentionBatch && (runtimeAttentionFrames >= 1024 || performance.now() - runtimeAttentionStarted >= 1000)) {
+        await flushRuntimeAttention();
+        // The socket may have been replaced while its campaign publications yielded.
+        if (!currentSocket()) return;
+      }
+      const owner = runnerId!;
+      hub.noteRunnerFrameActivity(owner, runnerClient, Date.now());
+      const startedAt = performance.now();
+      if (!runtimeAttentionBatch) {
+        runtimeAttentionBatch = svc.beginRunnerAttentionBatch(owner);
+        runtimeAttentionFrames = 0;
+        runtimeAttentionStarted = performance.now();
+      }
+      runtimeAttentionFrames += updates.length;
+      svc.applySessionRuntimeUpdates(owner, updates.map((msg) => msg.snapshot), runtimeAttentionBatch,
+        (snapshot) => roleConversions.reconcile(owner, snapshot));
+      const durationMs = performance.now() - startedAt;
+      if (durationMs >= 250) {
+        app.log.warn({
+          event: "session_runtime_update_slow",
+          entryPoint: "runner_socket",
+          runnerId: owner,
+          frameCount: updates.length,
+          durationMs: Math.round(durationMs),
+        }, "session runtime update blocked the control plane");
+      }
+    } catch (error) {
+      app.log.error(
+        { err: error, runnerId, messageType: "session_runtime_updated", frameCount: updates.length },
+        "runner frame handler threw — closing offending runner socket",
+      );
+      try {
+        socket.close(1008, "malformed runner frame");
+      } catch {
+        /* socket already tearing down */
+      }
+    }
+  };
+
   type Staging = Promise<StagedSessionEventPayload | null>;
   const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
     try {
@@ -1967,6 +2017,11 @@ app.register(async (instance) => {
       ? svc.stageLiveSessionEventPayload(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
       : undefined,
     discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
+  }, {
+    // A malformed frame is never batched: it reaches handleRunnerFrame and is rejected there.
+    batchable: (msg) => msg.type === "session_runtime_updated" && typeof msg.snapshot?.id === "string",
+    limit: RUNTIME_UPDATE_RUN_LIMIT,
+    handle: handleRuntimeUpdateRun,
   });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());

@@ -16,6 +16,15 @@ recovers it.
   still fails fast, and periodic work defers its tick as before.
 - `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
   control-plane decision is durable once it has been acknowledged.
+- Live runtime snapshots (`session_runtime_updated`) stay `FULL` but are grouped. After
+  registration a runner republishes one snapshot per retained session, and a separate flush for
+  each held newer live snapshots back for tens of seconds under disk contention (#2601). A run of
+  up to 32 consecutive queued snapshots from one runner, for distinct sessions, now commits in one
+  transaction (`updateSessionsFromRuntimeSnapshots`). Nothing about the run is broadcast or sent
+  to a runner until that commit returns, and a failed commit rolls back the whole run. A snapshot
+  with stop, decision, hook, policy, media or cost-repair work keeps its own commit, in order. The
+  event loop still yields between runs. A crash before a run commits loses only frames that nothing
+  has acknowledged yet, and the runner republishes them when it next registers.
 - `secure_delete=ON`: SQLite overwrites deleted ordinary-table content with zeros rather than
   leaving session text, credentials or decision content recoverable from free pages in the main
   database file. The extra delete I/O is an intentional privacy tradeoff; reducing maintenance
