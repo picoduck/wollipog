@@ -22,6 +22,7 @@ import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePri
 import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -15778,6 +15779,20 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Issue slots consumed publications still hold, by recommendation, until a consumed scope decision
+   * admits their issue; `settling` names publications the scope change being decided admits. A
+   * pending grant is not counted: a boundary change revokes it in the same transaction. */
+  unsettledPublicationSlots(rootId: string, settling: readonly string[] = []): number {
+    const slots = new Set<string>();
+    for (const decision of this.campaignPublicationReservations(rootId)) {
+      const snapshot = decision.resourceSnapshot;
+      if (decision.status !== "consumed" || settling.includes(decision.occurrenceId) || snapshot.category !== "follow_up_issue_publication" ||
+          this.admittedCampaignPublicationIssue(rootId, decision.occurrenceId) !== null) continue;
+      slots.add(snapshot.recommendationId ?? decision.occurrenceId);
+    }
+    return slots.size;
+  }
+
   admittedCampaignPublicationIssue(rootId: string, publicationOccurrenceId: string): number | null {
     const row = this.stmt(`SELECT json_extract(proof.value, '$.issue') AS issue FROM workflow_decisions decision,
         json_each(decision.resource_snapshot, '$.verifiedPublications') proof
@@ -15829,8 +15844,10 @@ export class ControlPlaneDb {
       // scope its boundary does not name. A boundary stale for any other reason is not extended.
       const reminted = !agentSessionId && boundary && this.boundaryTrailsHumanScope(root.id, policy)
         ? remintCampaignBoundary(boundary, scope, userId, now) : null;
-      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority &&
-          scope.issueNumbers.length > reminted.boundary.issueAuthority.maxIssues) {
+      // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
+      // still reserves, as an explicit authorization's does.
+      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
+          this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > reminted.boundary.issueAuthority.maxIssues) {
         this.db.exec("ROLLBACK"); return null;
       }
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
@@ -15918,7 +15935,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
         ? remintCampaignBoundary(control.boundary, scope, userId, scope.authorizedAt) : null;
       if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
-          scope!.issueNumbers.length > reminted.boundary.issueAuthority.maxIssues) {
+          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > reminted.boundary.issueAuthority.maxIssues) {
         this.db.exec("ROLLBACK"); return null;
       }
       for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {

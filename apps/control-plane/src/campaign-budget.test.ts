@@ -316,6 +316,51 @@ test("human-only grant, CAS, runner compatibility, and revocation preserve usage
   try { assert.equal(old.enable().ok, false); } finally { old.db.close(); }
 });
 
+test("a worker that runs again under Custom counts against the allowance its Human authorizes again (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    h.make("worker", "root", { maxToolCalls: 40 });
+    h.db.updateSessionStatus("worker", "completed", 4);
+    const settled = h.db.campaignBudgets.dispatch("worker")!.generation;
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation: settled, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 0 }));
+    assert.equal(h.db.campaignBudgets.active("worker"), false);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const restarted = h.svc.restart("worker");
+    assert.ok(restarted.ok, restarted.error ?? "restart under Custom");
+    assert.equal(h.db.campaignBudgets.active("worker"), false, "Custom admits no allowance");
+
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.active("worker"), true, "the running worker counts again");
+    assert.notEqual(h.db.campaignBudgets.dispatch("worker")!.generation, settled, "with a fresh dispatch generation");
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
+    assert.throws(() => h.make("second", "root", { maxToolCalls: 10 }), /concurrency/);
+  } finally { h.db.close(); }
+});
+
+test("a session limit the person lowers under Custom survives authorizing the allowance again (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+    h.make("worker", "root", { maxToolCalls: 40 });
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.toolCalls, 40);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const lowered = h.svc.setConfig("worker", { maxToolCalls: 5 });
+    assert.ok(lowered.ok, lowered.error ?? "lower the limit under Custom");
+    h.sent.length = 0;
+
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.toolCalls, 5);
+    assert.equal(h.db.campaignBudgets.userLimits("worker")!.maxToolCalls, 5);
+    assert.equal(h.db.getSession("worker")!.maxToolCalls, 5);
+    const rearmed = h.sent.filter((message) => (message as { type: string; sessionId?: string }).type === "rearm_governance" &&
+      (message as { sessionId?: string }).sessionId === "worker") as Array<{ config: { maxToolCalls?: number } }>;
+    assert.ok(rearmed.length > 0 && rearmed.every((message) => (message.config.maxToolCalls ?? 0) <= 5), JSON.stringify(rearmed));
+    assert.throws(() => h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 6 }, {}), /tighter/);
+  } finally { h.db.close(); }
+});
+
 test("root, nested reviewers and replacements share reservations without double counting", () => {
   const h = harness();
   try {

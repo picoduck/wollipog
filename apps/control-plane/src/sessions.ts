@@ -23,7 +23,7 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
@@ -10616,13 +10616,16 @@ export class SessionsService {
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
       if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved > boundary.issueAuthority!.maxIssues)) return fail("Scope capacity or its human boundary changed before resolution", 409);
       // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
-      // within the scope limit that boundary names: only a fresh authorization can raise that limit.
+      // within the scope limit that boundary names, counting the slots consumed publications still
+      // hold other than those this change admits: only a fresh authorization can raise that limit.
       const control = currentChild.orchestratorPolicy?.control;
       const limit = authority === "human" && control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
-      const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length;
+      const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
+      const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + held;
       if (limit !== undefined && total > limit) {
-        return fail(`This change would give the campaign ${total} issues, more than the ${limit} its Full Control boundary allows. ` +
-          "Deny it and propose fewer issues, or Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize a larger scope.", 409);
+        return fail(`This change would give the campaign ${total} issues${held ? `, counting ${held} published follow-up${held === 1 ? "" : "s"} not yet in scope` : ""}, ` +
+          `more than the ${limit} its Full Control boundary allows. Deny it and propose fewer issues, or Revoke Full Control in ` +
+          "Orchestrator Controls, then Enable Full Control to authorize a larger scope.", 409);
       }
       if (!latest || auditDigest(latest) !== decision.resourceDigest ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {

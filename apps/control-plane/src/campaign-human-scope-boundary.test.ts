@@ -234,6 +234,30 @@ test("a campaign stuck by a pre-fix Human scope approval is restored by that Hum
   } finally { h.db.close(); }
 });
 
+test("repair never re-mints a boundary whose issue limit the scope and a consumed publication's slot exceed", async () => {
+  const h = harness(2);
+  try {
+    const previous = structuredClone(h.db.getSession("root")!.orchestratorPolicy!.control!);
+    const previousRevision = h.db.getSession("root")!.parentControlPolicy!.revision;
+    assert.ok(h.approve(await h.humanProposal("human-add", 1, [101])).ok);
+    h.leaveAsBeforeFix(previous, previousRevision);
+    // A follow-up publication consumed under the earlier boundary still holds an issue slot.
+    const snapshot = { category: "follow_up_issue_publication" as const, repository: REPOSITORY, sanitizedTitle: "Published repair",
+      sanitizedBody: "Body", labels: [], recommendationId: "recommendation", issueAdmission: { boundaryRevision: previousRevision, evidenceDigest: "a".repeat(64) } };
+    assert.ok(h.db.createWorkflowDecision({ requestId: "publication", occurrenceId: "workflow_publication", sessionId: "root", controllingSessionId: "root",
+      category: "follow_up_issue_publication", resourceKey: "publication", resourceSnapshot: snapshot, resourceDigest: "b".repeat(64),
+      policyRevision: previousRevision, authority: "orchestrator", createdAt: 3 }));
+    assert.ok(h.db.resolveWorkflowDecision("workflow_publication", "orchestrator", "approved", 4));
+    assert.ok(h.db.consumeWorkflowDecision("workflow_publication", 4));
+    assert.equal(h.db.unsettledPublicationSlots("root"), 1);
+
+    const refused = await h.svc.promptFromHuman(h.principal, "root", "Continue");
+    assert.equal(refused.ok, false);
+    assert.equal(refused.errorDetails?.code, "campaign_authority_stale");
+    assert.deepEqual(h.boundary(), (previous as Extract<CampaignControl, { mode: "full_control" }>).boundary, "never re-minted over its limit");
+  } finally { h.db.close(); }
+});
+
 test("only the Human whose approval wrote the scope can restore it; another owner is told who can, and how to recover", async () => {
   const h = harness();
   try {

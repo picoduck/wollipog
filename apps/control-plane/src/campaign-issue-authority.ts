@@ -70,6 +70,12 @@ export function publicationEvidence(db: ControlPlaneDb, root: SessionView,
   return { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision };
 }
 
+/** The publications a scope change admits: its follow-up lineage and the exact payloads it verified. */
+export function scopeSettlements(snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "campaign_issue_scope" }>): string[] {
+  return [...(snapshot.lineage?.kind === "follow_up" ? [snapshot.lineage.publicationOccurrenceId] : []),
+    ...(snapshot.verifiedPublications ?? []).map((proof) => proof.publicationOccurrenceId)];
+}
+
 export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, exceptOccurrence?: string, exceptRecommendation?: string, consumedOnly = false): number {
   const recommendations = new Set<string>();
   for (const d of db.campaignPublicationReservations(root.id)) {

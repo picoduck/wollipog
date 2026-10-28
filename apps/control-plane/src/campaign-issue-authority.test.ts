@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
-  type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
+  type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -234,16 +234,28 @@ test("reauthorization counts reservations, while fresh human verified scope sett
   const h=harness(true,2);
   try {
     const p=await consumedPublication(h);
-    const added=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-other",expectedRevision:1,additions:[{repository:"team/repo",number:999}],removals:[],explanation:"Human adds separate scope"},()=>true,h.principal);
-    assert.ok(added.ok); assert.ok(h.approve(added.data!).ok);
-    // The Human approval re-minted the boundary at the next policy revision (#2940).
-    const revision=h.db.getSession("root")!.parentControlPolicy!.revision; assert.equal(revision,3);
+    const other=(requestId:string)=>h.svc.proposeCampaignIssueScope("root",{requestId,expectedRevision:1,additions:[{repository:"team/repo",number:999}],removals:[],explanation:"Human adds separate scope"},()=>true,h.principal);
+    // A Human approval re-mints the boundary (#2940) only within its issue limit, which counts the
+    // consumed publication's slot: one scoped issue, that held slot and #999 would make three.
+    const added=await other("human-other"); assert.ok(added.ok);
+    const refused=h.approve(added.data!); assert.equal(refused.ok,false);
+    assert.match(refused.error!,/give the campaign 3 issues, counting 1 published follow-up not yet in scope, more than the 2/);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers,[100]);
     const proposal={mode:"full_control" as const,objective:"Implement epic 100",operations:["campaign_issue_scope","follow_up_issue_publication"] as Array<"campaign_issue_scope"|"follow_up_issue_publication">,delegatablePolicyIds:[],
       issueAuthority:{epics:[100],relatedFollowUps:true,maxIssues:2,closureReasons:[]}};
-    assert.equal(h.svc.setCampaignControl("root",proposal,revision,h.principal).error,"The issue boundary exceeds its human-set scope limit.","scope plus the consumed unscoped slot exceeds two");
-    assert.ok(h.svc.setCampaignControl("root",{...proposal,issueAuthority:{...proposal.issueAuthority,maxIssues:3}},revision,h.principal).ok);
+    assert.ok(h.svc.setCampaignControl("root",{...proposal,issueAuthority:{...proposal.issueAuthority,maxIssues:3}},2,h.principal).ok);
+    const readded=await other("human-other-again"); assert.ok(readded.ok,readded.error ?? "proposal"); assert.ok(h.approve(readded.data!).ok);
+    // Right after the Human approval, the re-minted boundary holds the scope and every held slot.
+    const root=h.db.getSession("root")!;
+    const boundary=(root.orchestratorPolicy!.control as Extract<CampaignControl,{mode:"full_control"}>).boundary;
+    assert.equal(campaignBoundaryCurrent(root),true); assert.equal(root.parentControlPolicy!.revision,4);
+    assert.equal(root.orchestratorPolicy!.issueNumbers!.length+h.db.unsettledPublicationSlots("root"),3);
+    assert.ok(root.orchestratorPolicy!.issueNumbers!.length+h.db.unsettledPublicationSlots("root")<=boundary.issueAuthority!.maxIssues);
+    assert.equal(h.svc.setCampaignControl("root",proposal,4,h.principal).error,"The issue boundary exceeds its human-set scope limit.","scope plus the consumed unscoped slot exceeds two");
+    // Adopting the published issue itself settles its slot, so it fits the same limit.
     const direct=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-published",expectedRevision:2,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Human explicitly adopts the verified publication"},()=>true,h.principal);
-    assert.ok(direct.ok,direct.error ?? "human publication scope"); assert.equal(direct.data!.authority,"human"); assert.ok(h.approve(direct.data!).ok);
+    assert.ok(direct.ok,direct.error ?? "human publication scope"); assert.equal(direct.data!.authority,"human");
+    const adopted=h.approve(direct.data!); assert.ok(adopted.ok,adopted.error ?? "adoption");
     assert.equal(h.db.admittedCampaignPublicationIssue("root",p.decision.occurrenceId),101,"independent read-back and human consumption settle the slot");
   } finally {h.db.close();}
 });
