@@ -4,6 +4,7 @@ import {
   reviewModelSupported, reviewerHarnessFor, sameReviewFamily,
   type AgentCapabilities, type AgentDriverKind, type AgentHarnessIdentity, type ReviewConfiguration, type ReviewReviewerRule, type ReviewSettings, type ReviewSettingsView,
   type RunnerView, type SessionView,
+  type OrchestratorReviewPolicy, type SessionReviewPolicySnapshot,
 } from "@wollipog/protocol";
 import { agentHarnessIdentityFor, parseAgentHarnessIdentity } from "./agent-harness-defaults.js";
 import type { ControlPlaneDb } from "./db.js";
@@ -11,6 +12,21 @@ import type { HumanPrincipal } from "./identity.js";
 
 const object = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
 const identifier = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 256 && v.trim() === v && !/[\x00-\x1f\x7f]/u.test(v);
+
+export function reviewReviewerCatalog(runners: readonly RunnerView[]): ReviewSettingsView["reviewers"] {
+  return runners.filter(r => r.status === "online" && r.runtime?.reviewSession?.configuration === true).flatMap(r =>
+    (r.runtime?.reviewSession?.reviewers ?? []).flatMap(entry => {
+      const agent = r.agents.find(a => a.id === entry.agentId && a.available === true);
+      return agent?.capabilities ? [{ ...entry, name: entry.harness === "codex" ? "Codex" : "Claude Code",
+        runnerId: r.runnerId, capabilities: agent.capabilities }] : [];
+    }));
+}
+
+export interface ReviewPolicyCapture {
+  fields: OrchestratorReviewPolicy;
+  implementer: AgentHarnessIdentity;
+  resolveModel?: (harness: "codex" | "claude-code", model: string | null, effort: string) => string | null;
+}
 
 export function parseReviewSettings(value: unknown): ReviewSettings | null {
   if (!object(value) || Object.keys(value).some(k => !["version", "roundBudget", "reviewers"].includes(k)) || value.version !== 1 ||
@@ -43,6 +59,10 @@ export class ReviewSettingsStore {
     CREATE TABLE IF NOT EXISTS review_settings_session_users (
       session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
       user_id TEXT NOT NULL REFERENCES identity_users(user_id) ON DELETE CASCADE
+    );
+    CREATE TABLE IF NOT EXISTS session_review_policy_snapshots (
+      session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+      policy TEXT NOT NULL
     )`);
   }
   sessionUser(sessionId: string): string | null {
@@ -73,6 +93,31 @@ export class ReviewSettingsStore {
     return project ? { settings: project, source: "project_override" } : user ? { settings: user, source: "user_default" }
       : { settings: structuredClone(DEFAULT_REVIEW_SETTINGS), source: "system_default" };
   }
+  captureSessionPolicy(sessionId: string, userId: string | null, projectId: string | null, capture: ReviewPolicyCapture): void {
+    const effective = userId ? this.effective(userId, projectId) : { settings: DEFAULT_REVIEW_SETTINGS, source: "system_default" as const };
+    const rule = effective.settings.reviewers.find(r => agentHarnessIdentityKey(r.implementer) === agentHarnessIdentityKey(capture.implementer));
+    const fields = capture.fields;
+    const fixed = Object.values(fields).some(value => value !== null);
+    const harness = fields.reviewHarness ?? rule?.harness ?? reviewerHarnessFor(capture.implementer.driver);
+    // A model/effort saved for Codex cannot become a Claude choice when policy fixes the harness.
+    const matchingRule = rule?.harness === harness ? rule : undefined;
+    const effort = fields.reviewEffort ?? matchingRule?.effort ?? "high";
+    const requestedModel = fields.reviewModel ?? matchingRule?.model ?? null;
+    const policy: SessionReviewPolicySnapshot = {
+      reviewHarness: harness,
+      reviewModel: requestedModel ?? (harness ? capture.resolveModel?.(harness, requestedModel, effort) : null) ?? null,
+      reviewEffort: effort,
+      reviewRoundBudget: fields.reviewRoundBudget ?? effective.settings.roundBudget,
+      configured: fixed || effective.source !== "system_default",
+      source: fixed ? "campaign_policy" : effective.source,
+    };
+    this.sql.prepare("INSERT INTO session_review_policy_snapshots(session_id,policy) VALUES (?,?)").run(sessionId, JSON.stringify(policy));
+  }
+  sessionPolicy(sessionId: string): SessionReviewPolicySnapshot | undefined {
+    const row = this.sql.prepare("SELECT policy FROM session_review_policy_snapshots WHERE session_id=?").get(sessionId) as { policy: string } | undefined;
+    if (!row) return undefined;
+    return JSON.parse(row.policy) as SessionReviewPolicySnapshot;
+  }
 }
 
 export class ReviewSettingsService {
@@ -91,12 +136,9 @@ export class ReviewSettingsService {
       implementers.set(agentHarnessIdentityKey(rule.implementer), { ...rule.implementer,
         name: builtInAgentHarnessName(rule.implementer.driver) ?? rule.implementer.agentId });
     }
-    const reviewers = runners.filter(r => r.status === "online" && r.runtime?.reviewSession?.configuration === true).flatMap(r =>
-      (r.runtime?.reviewSession?.reviewers ?? []).flatMap(entry => {
-        const agent = r.agents.find(a => a.id === entry.agentId && a.available === true);
-        return agent?.capabilities ? [{ ...entry, name: entry.harness === "codex" ? "Codex" : "Claude Code",
-          runnerId: r.runnerId, capabilities: agent.capabilities }] : [];
-      }));
+    // Runtime diagnostics are redacted from ordinary members' runner projections. Discover the
+    // safe reviewer catalog internally after filtering runner access; expose no diagnostic paths.
+    const reviewers = reviewReviewerCatalog(runners.map(r => this.db.getRunner(r.runnerId)!));
     return { ...effective, projectId, projects: this.db.listProjectsForPrincipal(principal).map(p => ({ id: p.id, name: p.name })),
       implementers: [...implementers.values()], reviewers };
   }
@@ -133,33 +175,36 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
   { harness: "codex" | "claude-code"; configuration: ReviewConfiguration } | null {
   const scope = db.sessionScope(session.id);
   const userId = db.reviewSettings.sessionUser(session.id) ?? (scope?.owner.kind === "user" ? scope.owner.userId : null);
-  if (!userId) return null;
-  const effective = db.reviewSettings.effective(userId, session.projectId ?? null);
-  if (effective.source === "system_default") return null;
+  const snapshot = db.reviewSettings.sessionPolicy(session.id);
+  if (!userId && !snapshot) return null;
+  const effective = userId ? db.reviewSettings.effective(userId, session.projectId ?? null)
+    : { settings: DEFAULT_REVIEW_SETTINGS, source: "system_default" as const };
+  if (snapshot ? !snapshot.configured : effective.source === "system_default") return null;
   if (runner?.runtime?.reviewSession?.configuration !== true) {
     throw new ReviewSettingsError("This machine cannot apply your review settings. Update Wollipog on it before requesting a review.", 409);
   }
   const agent = runner.agents.find(a => a.id === session.agentId);
   const identity = agent ? agentHarnessIdentityFor(agent) : { agentId: session.agentId ?? "unknown", driver: session.driver ?? "acp", context: { kind: "native" as const } };
   const rule = effective.settings.reviewers.find(r => agentHarnessIdentityKey(r.implementer) === agentHarnessIdentityKey(identity));
-  const harness = rule?.harness ?? reviewerHarnessFor(session.driver);
+  const harness = snapshot ? snapshot.reviewHarness : rule?.harness ?? reviewerHarnessFor(session.driver);
   if (!harness) throw new ReviewSettingsError("Choose a reviewer for this implementing harness in Settings → Reviews.", 409);
   const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
   const reviewer = runner.agents.find(a => a.id === reviewerId && a.available === true);
-  const effort = rule?.effort ?? "high";
+  const requestedModel = snapshot ? snapshot.reviewModel : rule?.model;
+  const effort = (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
   // Use the same concrete-model resolution as createSession. The catalog's "default" entry is a
   // UI placeholder, never an immutable launch model that the runner can compare with its spec.
-  const resolved = resolveModelEffort({ ...(rule?.model ? { model: rule.model } : {}), effort }, reviewer?.capabilities,
+  const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer?.capabilities,
     harness === "codex" ? "codex-app-server" : "claude-code");
   const model = resolved.value?.model;
   if (!reviewer || resolved.error || !model ||
-      rule?.model != null && !reviewModelSupported(reviewer.capabilities, rule.model, effort) ||
+      requestedModel != null && !reviewModelSupported(reviewer.capabilities, requestedModel, effort) ||
       !reviewModelSupported(reviewer.capabilities, model, effort)) {
-    throw new ReviewSettingsError(`The configured ${harness} reviewer (${rule?.model ?? "default model"}, ${effort} effort) is unavailable on this session's machine. Restore it or change Settings → Reviews.`, 409);
+    throw new ReviewSettingsError(`The configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort) is unavailable on this session's machine. ${snapshot ? "Restore it or launch a new child with an updated review policy." : "Restore it or change Settings → Reviews."}`, 409);
   }
   if (!rule?.allowSameFamily && sameReviewFamily(session.driver, session.model, harness, model)) {
     throw new ReviewSettingsError("The configured reviewer belongs to the implementer's model family. Explicitly allow same-family reviews in Settings → Reviews or choose another reviewer.", 409);
   }
   return { harness, configuration: { ...(model ? { model } : {}), effort,
-    allowSameFamily: rule?.allowSameFamily ?? false, roundBudget: effective.settings.roundBudget } };
+    allowSameFamily: rule?.allowSameFamily ?? false, roundBudget: snapshot?.reviewRoundBudget ?? effective.settings.roundBudget } };
 }

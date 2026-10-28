@@ -64,6 +64,8 @@ test("settings writes require a discovered model/effort pair and explicit same-f
     db.updateRunnerReviewSessionCapability("r", { configuration: true, reviewers: [{ harness: "claude-code", agentId: "claude" }] });
     const service = new ReviewSettingsService(db);
     assert.equal(service.view(principal, null).reviewers.length, 1, "registration and refresh preserve configuration support");
+    assert.equal(service.view({ ...principal, role: "viewer" }, null).reviewers.length, 1,
+      "personal reviewer choices remain available when runtime diagnostics are redacted");
     const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
       harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: false };
     assert.throws(() => service.update(principal, null, { ...DEFAULT_REVIEW_SETTINGS, reviewers: [rule] }), /model family/u);
@@ -92,4 +94,30 @@ test("the route authenticates humans, validates project access and stores only t
     assert.equal((await app.inject("/api/review-settings")).statusCode, 403);
     assert.equal((await app.inject({ method: "PUT", url: "/api/review-settings", payload: { settings: null } })).statusCode, 403);
   } finally { await app.close(); db.close(); }
+});
+
+test("project review snapshots survive restart and contain only the selected child's settings", () => {
+  const dir = mkdtempSync(join(tmpdir(), "review-policy-snapshot-"));
+  const file = join(dir, "control.sqlite");
+  let db = ControlPlaneDb.open(file);
+  try {
+    const principal = human(db);
+    db.registerRunner({ runnerId: "r", hostname: "runner", os: "linux", version: "test", workspaces: [], agents: [] }, 1, PROTOCOL_VERSION);
+    const project = db.createProject({ name: "Snapshot Project" });
+    db.reviewSettings.set(principal.userId, null, { version: 1, roundBudget: 8, reviewers: [] });
+    db.reviewSettings.set(principal.userId, project.id, { version: 1, roundBudget: 2, reviewers: [] });
+    db.createSession({ id: "captured", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Child", driver: "claude-code", useWorktree: true, config: {}, now: 2,
+      projectId: project.id, reviewSettingsUserId: principal.userId, reviewPolicyCapture: {
+        fields: { reviewHarness: null, reviewModel: null, reviewEffort: null, reviewRoundBudget: null },
+        implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      } });
+    db.close(); db = ControlPlaneDb.open(file);
+    const snapshot = db.getSession("captured")?.reviewPolicy;
+    assert.equal(snapshot?.reviewRoundBudget, 2);
+    assert.equal(snapshot?.source, "project_override");
+    assert.equal(snapshot?.reviewHarness, "codex");
+    assert.equal(Object.hasOwn(snapshot!, "reviewers"), false);
+    db.reviewSettings.set(principal.userId, project.id, { version: 1, roundBudget: 9, reviewers: [] });
+    assert.equal(db.getSession("captured")?.reviewPolicy?.reviewRoundBudget, 2);
+  } finally { db.close(); rmSync(dir, { recursive: true, force: true }); }
 });

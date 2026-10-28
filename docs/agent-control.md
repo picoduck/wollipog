@@ -356,6 +356,19 @@ with update guidance. The permission preset, trusted command checks and read-onl
 runner-owned. The `review_session_requested` event records the resolved configuration; admission
 refusals emit `review_configuration_refused`, correlated by the requesting session ID.
 
+Settings → Orchestrator and the launch policy editor expose Review Harness, Review Model, Review
+Effort and Review Round Budget when `reviewPolicySupported` is advertised. Each accepts Automatic
+or a fixed discovered choice (a round budget is 1–32). Automatic inherits the launching user's
+complete project override, then personal settings, then built-in defaults. Fixed campaign fields
+take precedence. New campaigns carry `reviewPolicySnapshotVersion: 1`; each child's selected fields,
+including its concrete discovered model when available, are persisted atomically at launch and
+projected as `SessionView.reviewPolicy`. Later settings or campaign edits affect future children.
+Same-family consent is never frozen: admission rechecks the current user's effective permission.
+Missing configured harnesses and models refuse with an actionable reason and no fallback. Legacy
+campaigns without the marker retain their existing behavior; older clients omitting the fields
+preserve saved review policy. `campaign_child_review_policy_snapshot` logs the selected launch
+snapshot with the child and parent session IDs, without exposing the user's other review rules.
+
 `wollipog review session run` (MCP `request_review_session`, #561) is the default route for a
 session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
 **review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog

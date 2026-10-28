@@ -1,3 +1,5 @@
+import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy, orchestratorReviewPolicyProblem } from "@wollipog/protocol";
+import { reviewReviewerCatalog } from "./review-settings.js";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
@@ -54,7 +56,7 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       !delegation || typeof delegation !== "object" || Array.isArray(delegation) ||
       !execution || typeof execution !== "object" || Array.isArray(execution)) return null;
   if (Object.keys(behavior).some((key) => ![
-    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion", ...ORCHESTRATOR_REVIEW_POLICY_KEYS,
   ].includes(key)) || Object.keys(delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
   if (!Object.hasOwn(behavior, "childHarness")) return null;
   const parsedHarness = behavior.childHarness === null
@@ -74,6 +76,8 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
       Object.keys(execution).length !== EXECUTION_KEYS.length ||
       typeof execution.strictProjectIsolation !== "boolean" ||
       typeof execution.integrationIsolation !== "boolean") return null;
+  const reviewPolicy = parseOrchestratorReviewPolicy(behavior);
+  if (!reviewPolicy) return null;
   // Defaults saved before a later category existed read it as human-owned.
   const decisions = completeParentControlDecisions(delegation.decisions);
   if (!decisions) return null;
@@ -82,6 +86,7 @@ export function parseOrchestratorDefaults(value: unknown): OrchestratorDefaults 
     ...(input.campaignBudget === undefined ? {} : { campaignBudget: input.campaignBudget === null ? null
       : { costUsd: input.campaignBudget.costUsd, toolCalls: input.campaignBudget.toolCalls } }),
     behavior: {
+      ...(ORCHESTRATOR_REVIEW_POLICY_KEYS.some(key => Object.hasOwn(behavior, key)) ? reviewPolicy : {}),
       childHarness,
       childModel: behavior.childModel,
       childEffort: behavior.childEffort,
@@ -128,7 +133,7 @@ export function parseOrchestratorOverrides(value: unknown): OrchestratorCampaign
   const normalized = parseOrchestratorDefaults(complete);
   if (!normalized) return null;
   if (input.behavior && Object.keys(input.behavior).some((key) => ![
-    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+    "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion", ...ORCHESTRATOR_REVIEW_POLICY_KEYS,
   ].includes(key))) return null;
   if (input.delegation && Object.keys(input.delegation).some((key) => !["parentControl", "decisions"].includes(key))) return null;
   if (input.delegation?.decisions && Object.keys(input.delegation.decisions).some((key) =>
@@ -249,11 +254,11 @@ export function resolveOrchestratorCampaignPolicy(
     "system_default" | "user_default" | "legacy_session" | "active_campaign">,
   overrides: OrchestratorCampaignOverrides = {},
 ): OrchestratorCampaignPolicy {
-  const behavior = { ...defaults.behavior, ...(overrides.behavior ?? {}) };
+  const behavior = { ...DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ...defaults.behavior, ...(overrides.behavior ?? {}) };
   const decisions = { ...defaults.delegation.decisions, ...(overrides.delegation?.decisions ?? {}) };
   const execution = { ...defaults.execution, ...(overrides.execution ?? {}) };
   const behaviorSources = Object.fromEntries(
-    (Object.keys(defaults.behavior) as Array<keyof OrchestratorDefaults["behavior"]>).map((key) => [
+    (Object.keys(behavior) as Array<keyof OrchestratorDefaults["behavior"]>).map((key) => [
       key,
       Object.hasOwn(overrides.behavior ?? {}, key) ? "session_override" : baseSource,
     ]),
@@ -271,6 +276,7 @@ export function resolveOrchestratorCampaignPolicy(
   return {
     version: 1,
     childHarnessMatch: "harness",
+    reviewPolicySnapshotVersion: 1,
     behavior,
     delegation: {
       parentControl: overrides.delegation?.parentControl ?? defaults.delegation.parentControl,
@@ -366,6 +372,7 @@ export class OrchestratorSettings {
     defaults.behavior.childModel) : null;
     return {
       harnesses,
+      reviewers: reviewReviewerCatalog(onlineRunners.map(runner => this.db.getRunner(runner.runnerId)!)),
       models,
       effortLevels,
       supportedPairs,
@@ -392,11 +399,14 @@ export class OrchestratorSettings {
       source: record ? "user_default" : "system_default",
       capabilities: this.capabilities(principal, defaults),
       controlModeSupported: true,
+      reviewPolicySupported: true,
     };
   }
 
   compatibilityError(principal: HumanPrincipal, defaults: OrchestratorDefaults): string | null {
     const capabilities = this.capabilities(principal, defaults);
+    const reviewError = reviewPolicyCompatibilityError(defaults, capabilities);
+    if (reviewError) return reviewError;
     return capabilities.status === "unavailable"
       ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON
       : null;
@@ -405,7 +415,13 @@ export class OrchestratorSettings {
   update(principal: HumanPrincipal, request: unknown, now = Date.now()): OrchestratorSettingsView {
     const defaults = parseOrchestratorDefaults((request as { defaults?: unknown } | null)?.defaults);
     if (!defaults) throw new OrchestratorSettingsInputError("a complete valid Orchestrator default is required");
+    const previous = this.db.getOrchestratorDefaults(principal.userId)?.defaults.behavior;
+    if (!ORCHESTRATOR_REVIEW_POLICY_KEYS.some(key => Object.hasOwn(defaults.behavior, key))) {
+      Object.assign(defaults.behavior, parseOrchestratorReviewPolicy(previous ?? {}) ?? DEFAULT_ORCHESTRATOR_REVIEW_POLICY);
+    }
     const capabilities = this.capabilities(principal, defaults);
+    const reviewError = reviewPolicyCompatibilityError(defaults, capabilities);
+    if (reviewError) throw new OrchestratorSettingsUnavailableError(reviewError);
     if ((defaults.behavior.childHarness !== null || defaults.behavior.childModel !== null ||
         defaults.behavior.childEffort !== null) &&
         capabilities.compatibleInstallations === 0) {
@@ -488,4 +504,9 @@ export function childModelMachines(
         installationSupportsBehavior({ identity, capabilities: agent.capabilities }, pair);
     }),
   })).sort((left, right) => left.machineName.localeCompare(right.machineName) || left.runnerId.localeCompare(right.runnerId));
+}
+
+
+export function reviewPolicyCompatibilityError(defaults: OrchestratorDefaults, capabilities: OrchestratorSettingsCapabilities): string | null {
+  return orchestratorReviewPolicyProblem(defaults.behavior, capabilities.reviewers ?? []);
 }

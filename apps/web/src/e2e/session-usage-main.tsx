@@ -335,7 +335,12 @@ if (composerFixture) {
       },
     };
     if (params.get("campaign-state") !== "off") {
-      session.orchestratorCampaign = {
+      if (params.get("reviewPolicy") === "1") {
+      session.orchestratorPolicy.reviewPolicySnapshotVersion = 1;
+      Object.assign(session.orchestratorPolicy.behavior, { reviewHarness: "codex", reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2 });
+      Object.assign(session.orchestratorPolicy.sources.behavior, { reviewHarness: "session_override", reviewModel: "session_override", reviewEffort: "session_override", reviewRoundBudget: "session_override" });
+    }
+    session.orchestratorCampaign = {
         status: "waiting_human",
         policyRevision: 4,
         decisionOwners: { ...session.parentControlPolicy.decisions },

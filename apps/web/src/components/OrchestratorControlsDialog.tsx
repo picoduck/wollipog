@@ -571,6 +571,13 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
           value={behavior.childEffort ? titleCaseLabel(behavior.childEffort) : "Automatic"}
           source={sourceLabel(sources.behavior.childEffort)}
         />
+        {policy.reviewPolicySnapshotVersion === 1 && <>
+          <Fact label="Review Harness" value={behavior.reviewHarness === "codex" ? "Codex" : behavior.reviewHarness === "claude-code" ? "Claude Code" : "Automatic"}
+            source={sourceLabel(sources.behavior.reviewHarness ?? "compatibility_fallback")} />
+          <Fact label="Review Model" value={behavior.reviewModel ?? "Automatic"} source={sourceLabel(sources.behavior.reviewModel ?? "compatibility_fallback")} />
+          <Fact label="Review Effort" value={behavior.reviewEffort ? titleCaseLabel(behavior.reviewEffort) : "Automatic"} source={sourceLabel(sources.behavior.reviewEffort ?? "compatibility_fallback")} />
+          <Fact label="Review Round Budget" value={behavior.reviewRoundBudget ?? "Automatic"} source={sourceLabel(sources.behavior.reviewRoundBudget ?? "compatibility_fallback")} />
+        </>}
         <Fact
           label="Maximum Concurrent Children"
           value={behavior.maximumConcurrentChildren}

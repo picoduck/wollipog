@@ -1,3 +1,4 @@
+import { ORCHESTRATOR_REVIEW_POLICY_KEYS, orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import {
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
@@ -148,6 +149,9 @@ export function policyOverrides(draft: OrchestratorPolicyDraft, defaults: Orches
   const overrides = new Set<OrchestratorPolicyPath>();
   const { behavior, delegation, execution } = draft.values;
   if (harnessKey(behavior.childHarness) !== harnessKey(defaults.behavior.childHarness)) overrides.add("behavior.childHarness");
+  for (const key of ORCHESTRATOR_REVIEW_POLICY_KEYS) {
+    if ((behavior[key] ?? null) !== (defaults.behavior[key] ?? null)) overrides.add(`behavior.${key}`);
+  }
   if (behavior.childModel !== defaults.behavior.childModel) overrides.add("behavior.childModel");
   if (behavior.childEffort !== defaults.behavior.childEffort) overrides.add("behavior.childEffort");
   // An unreadable entry is a change too: it can never equal the default, and it blocks the launch.
@@ -449,6 +453,8 @@ export function evaluateOrchestratorPolicy(context: OrchestratorPolicyContext, d
 
   // Problems, in the order Create Session reports them.
   const problems: PolicyProblem[] = [];
+  const reviewProblem = context.view.reviewPolicySupported ? orchestratorReviewPolicyProblem(behavior, capabilities?.reviewers ?? []) : null;
+  if (reviewProblem) problems.push({ tab: "behavior", path: "behavior.reviewHarness", message: reviewProblem });
   if (fixedChildHarness && !fixedHarnessSupported) {
     problems.push({ tab: "behavior", path: "behavior.childHarness", message: update("choose a fixed Child Harness") });
   } else if (!fixedHarnessAvailable) {

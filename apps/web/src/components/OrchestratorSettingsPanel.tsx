@@ -1,3 +1,5 @@
+import { OrchestratorReviewFields } from "./OrchestratorReviewFields.js";
+import { orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_LIVE_CHILD_LIMIT,
@@ -405,7 +407,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         : view?.defaults.campaignBudget !== undefined ? { ...rest, campaignBudget: null } : rest;
     });
   };
-  const invalidCount = [harnessError ?? pairFallbackError, modelError, effortError, limitError, budgetError].filter(Boolean).length;
+  const reviewError = view?.reviewPolicySupported && draft ? orchestratorReviewPolicyProblem(draft.behavior, view.capabilities.reviewers ?? []) : null;
+  const invalidCount = [reviewError, harnessError ?? pairFallbackError, modelError, effortError, limitError, budgetError].filter(Boolean).length;
 
   // No connected machine reports child capabilities at all: the group says so once, at its top, and
   // a model or effort left on Automatic has nothing else to offer until one does.
@@ -603,6 +606,8 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         error={effortError}
         onChange={(value) => updateBehavior("childEffort", value === AUTO ? null : value)}
       />
+      {view.reviewPolicySupported && <OrchestratorReviewFields value={draft.behavior} reviewers={view.capabilities.reviewers ?? []}
+        problem={reviewError} onChange={patch => setDraft(current => current ? { ...current, behavior: { ...current.behavior, ...patch } } : current)} />}
       <NumberRow
         title="Maximum Concurrent Children"
         description={`0 pauses new children. Up to ${MAX_LIVE_CHILD_LIMIT}.`}
