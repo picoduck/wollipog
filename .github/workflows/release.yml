@@ -470,6 +470,16 @@ jobs:
             process.stdout.write(`TAURI_UPDATER_CONFIG=${overlay.replace(/\\/g, "/")}\n`);
           ' >>"$GITHUB_ENV"
 
+      # GitHub's Intel macOS runners intermittently lose Apple's HTTP/3 ticket requests.
+      # Use the runner team's TCP fallback on this disposable VM before Tauri notarizes
+      # and staples the app; the signature, Gatekeeper, and stapled-ticket gates stay mandatory.
+      # https://github.com/actions/runner-images/issues/14924
+      - name: Use TCP for Intel macOS Notarization
+        if: matrix.os == 'macos-15-intel'
+        run: |
+          echo 'block return out quick proto udp from any to any port 443' | sudo pfctl -f -
+          sudo pfctl -E
+
       - name: Build & publish desktop bundles
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:

@@ -134,7 +134,11 @@ notarizes, and staples; a post-build step then requires `codesign --verify --dee
 `spctl --assess`, and a stapled ticket, so a signing or notarization failure fails the release rather
 than publishing an unsigned macOS bundle. The macOS legs run under a 120-minute timeout (other
 platforms 45) because the notary wait is unbounded on Tauri's side and a first submission has taken
-over 40 minutes.
+over 40 minutes. Intel macOS jobs apply the GitHub runner team's temporary
+[HTTP/3 transport workaround](https://github.com/actions/runner-images/issues/14924) before
+bundling: the disposable runner blocks outbound UDP port 443 so Apple's ticket retrieval uses
+HTTPS over TCP. This does not change product networking or signing requirements; the job still
+requires Developer ID signatures, Gatekeeper acceptance, and a valid stapled ticket.
 
 Windows bundles are **Authenticode signed** through Azure Artifact Signing. The Azure identity lives
 in the `release` GitHub environment as six variables, not secrets: `AZURE_CLIENT_ID`,
