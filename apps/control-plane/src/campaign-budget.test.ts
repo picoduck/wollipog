@@ -304,7 +304,13 @@ test("human-only grant, CAS, runner compatibility, and revocation preserve usage
     assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
     assert.equal(h.db.campaignBudgets.view("root")!.state, "revoked");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
-    assert.equal(h.enable(allowance({ toolCalls: 1000 }), 3).ok, false, "a new grant cannot reset an exhausted/revoked ledger");
+    // The Human's next explicit grant resumes the allowance that Human revoked (#2940), never refunding usage.
+    assert.ok(h.enable(allowance({ toolCalls: 1000 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
+    h.db.campaignBudgets.stop("root", "exhausted", "Campaign allowance reached; unfinished work remains incomplete.");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 4, h.principal).ok);
+    assert.equal(h.enable(allowance({ toolCalls: 2000 }), 5).ok, false, "a new grant cannot reset an exhausted ledger");
   } finally { h.db.close(); }
   const old = harness(":memory:", 217);
   try { assert.equal(old.enable().ok, false); } finally { old.db.close(); }

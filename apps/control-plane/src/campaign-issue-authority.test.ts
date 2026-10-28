@@ -236,10 +236,12 @@ test("reauthorization counts reservations, while fresh human verified scope sett
     const p=await consumedPublication(h);
     const added=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-other",expectedRevision:1,additions:[{repository:"team/repo",number:999}],removals:[],explanation:"Human adds separate scope"},()=>true,h.principal);
     assert.ok(added.ok); assert.ok(h.approve(added.data!).ok);
+    // The Human approval re-minted the boundary at the next policy revision (#2940).
+    const revision=h.db.getSession("root")!.parentControlPolicy!.revision; assert.equal(revision,3);
     const proposal={mode:"full_control" as const,objective:"Implement epic 100",operations:["campaign_issue_scope","follow_up_issue_publication"] as Array<"campaign_issue_scope"|"follow_up_issue_publication">,delegatablePolicyIds:[],
       issueAuthority:{epics:[100],relatedFollowUps:true,maxIssues:2,closureReasons:[]}};
-    assert.equal(h.svc.setCampaignControl("root",proposal,2,h.principal).ok,false,"scope plus the consumed unscoped slot exceeds two");
-    assert.ok(h.svc.setCampaignControl("root",{...proposal,issueAuthority:{...proposal.issueAuthority,maxIssues:3}},2,h.principal).ok);
+    assert.equal(h.svc.setCampaignControl("root",proposal,revision,h.principal).error,"The issue boundary exceeds its human-set scope limit.","scope plus the consumed unscoped slot exceeds two");
+    assert.ok(h.svc.setCampaignControl("root",{...proposal,issueAuthority:{...proposal.issueAuthority,maxIssues:3}},revision,h.principal).ok);
     const direct=await h.svc.proposeCampaignIssueScope("root",{requestId:"human-published",expectedRevision:2,additions:[{repository:"team/repo",number:101}],removals:[],explanation:"Human explicitly adopts the verified publication"},()=>true,h.principal);
     assert.ok(direct.ok,direct.error ?? "human publication scope"); assert.equal(direct.data!.authority,"human"); assert.ok(h.approve(direct.data!).ok);
     assert.equal(h.db.admittedCampaignPublicationIssue("root",p.decision.occurrenceId),101,"independent read-back and human consumption settle the slot");

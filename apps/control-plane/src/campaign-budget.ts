@@ -135,6 +135,22 @@ export class CampaignBudgetLedger {
     return (this.sql.prepare("SELECT root_id FROM campaign_budget_members WHERE session_id=?").get(sessionId) as { root_id: string } | undefined)?.root_id ?? null;
   }
 
+  /** The allowance that governs a member's admission: its root's, only while that root's current
+   * control is Full Control with a Human-authorized allowance. A campaign the Human revoked to Custom
+   * (or authorized without an allowance) runs under ordinary session rules, so a revoked allowance
+   * never stops, refuses or deadlocks it; its members' spend is still recorded, and counts against
+   * any allowance the Human authorizes again (#2940). Accounting reads use `root`. */
+  governingRoot(sessionId: string): string | null {
+    const rootId = this.root(sessionId);
+    if (!rootId) return null;
+    const row = this.sql.prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(rootId) as { orchestrator_policy: string | null } | undefined;
+    // A missing root keeps governing: losing its row must never release the allowance.
+    if (!row) return rootId;
+    let control: { mode?: string; boundary?: { budgetAuthority?: unknown } } | undefined;
+    try { control = (JSON.parse(row.orchestrator_policy ?? "null") as { control?: typeof control } | null)?.control; } catch { return rootId; }
+    return control?.mode === "full_control" && control.boundary?.budgetAuthority !== undefined ? rootId : null;
+  }
+
   view(rootId: string): CampaignBudgetView | undefined {
     // First, so the header read below includes any accounting stop a settlement makes.
     this.settleEnded(rootId);
@@ -200,10 +216,12 @@ export class CampaignBudgetLedger {
     if (!validCampaignBudgetAuthority(authority)) throw new Error("invalid campaign allowance");
     this.atomic(() => {
       const old = this.view(rootId);
-      // A new human grant can enlarge ceilings, but cannot silently resume revoked accounting.
-      if (old && old.state !== "active") throw new Error("a stopped campaign allowance cannot be reset; start an explicitly authorized new campaign");
+      // A new human grant can enlarge ceilings, but cannot silently resume stopped accounting. Only the
+      // Human's own revocation is resumed, by that Human's next explicit authorization (#2940); the
+      // spend recorded before and since still counts against it.
+      if (old && old.state !== "active" && old.state !== "revoked") throw new Error("a stopped campaign allowance cannot be reset; start an explicitly authorized new campaign");
       this.sql.prepare(`INSERT INTO campaign_budgets(root_id,authority) VALUES (?,?)
-        ON CONFLICT(root_id) DO UPDATE SET authority=excluded.authority`).run(rootId, JSON.stringify(authority));
+        ON CONFLICT(root_id) DO UPDATE SET authority=excluded.authority,state='active',reason=NULL`).run(rootId, JSON.stringify(authority));
       const existingFollowUps = this.sql.prepare("SELECT id FROM campaign_work_items WHERE campaign_session_id=? AND origin='follow_up'").all(rootId) as unknown as Array<{ id: string }>;
       for (const item of existingFollowUps) {
         const inserted = this.sql.prepare("INSERT OR IGNORE INTO campaign_budget_follow_ups VALUES (?,?)").run(rootId,item.id);
@@ -491,7 +509,7 @@ export class CampaignBudgetLedger {
   }
 
   admissionError(sessionId: string): string | null {
-    const rootId = this.root(sessionId); if (!rootId) return null;
+    const rootId = this.governingRoot(sessionId); if (!rootId) return null;
     const v = this.view(rootId)!;
     if (v.state !== "active") return v.reason ?? "campaign allowance unavailable";
     const row = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m

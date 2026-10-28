@@ -707,6 +707,11 @@ const client = {
   },
   prompt: async () => {
     document.body.dataset.composerAction = "send";
+    // A Full Control campaign whose authority is stale refuses the person's message (#2940).
+    if (params.get("prompt-refusal") === "campaign-authority") {
+      throw new ApiError("This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+        "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.", 409, "campaign_authority_stale");
+    }
     return { ...session, status: "running" as const };
   },
   cancelTurn: async () => {
