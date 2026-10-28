@@ -13,7 +13,7 @@ for (const width of [1280, 390]) test(`review defaults, same-family consent and 
   await page.setViewportSize({ width, height: 900 });
   const errors: string[] = [];
   page.on("pageerror", error => errors.push(error.message));
-  await page.goto("/settings-rows-e2e.html?section=reviews&theme=dark");
+  await page.goto("/settings-rows-e2e.html?route=/settings/reviews&theme=dark");
   await expect(page.getByRole("spinbutton", { name: "Valid Rounds", exact: true })).toHaveValue("4");
   const claude = page.locator("section.settings-group").filter({ has: page.getByRole("heading", { name: "Claude Code Reviewer", exact: true }) });
   const codex = page.locator("section.settings-group").filter({ has: page.getByRole("heading", { name: "Codex App Server Reviewer", exact: true }) });
@@ -56,4 +56,18 @@ for (const width of [1280, 390]) test(`review defaults, same-family consent and 
   await expectTextFits(page.locator(".settings-panel"), "Reviews");
   expect(await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth)).toBeLessThanOrEqual(0);
   expect(errors).toEqual([]);
+});
+
+test("the phone Settings index describes Reviews without truncation and opens its deep link", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/settings-rows-e2e.html?route=/settings&theme=dark");
+  const review = page.locator(".settings-index a").filter({ has: page.getByText("Reviews", { exact: true }) });
+  await expect(review).toBeVisible();
+  const description = review.locator(".row-sub");
+  await expect(description).toHaveText("Reviewers, rounds and project rules.");
+  expect(await description.evaluate(e => e.scrollWidth <= e.clientWidth)).toBe(true);
+  await page.screenshot({ path: testInfo.outputPath("reviews-index-390.png") });
+  await review.click();
+  await expect(page.locator("#settings-panel-heading")).toHaveText("Reviews");
+  expect(new URL(page.url()).searchParams.get("route")).toBe("/settings/reviews");
 });
