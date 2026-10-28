@@ -51,6 +51,6 @@ and an advisory against this lockfile is not a shipped vulnerability. The policy
 - Before any workflow builds `--features native-core`, it runs
   `cargo audit --file apps/runner/native-media-core/Cargo.lock`, which fails on vulnerabilities
   that are not explicitly ignored. `scripts/native-media-core-advisory-gate.test.mjs` refuses a
-  workflow build unless that audit runs earlier in the same job and its failure stops the build,
-  and refuses a feature build from anywhere else.
+  workflow build unless an earlier step of the same job runs that audit as its only command, with
+  nothing that could mask its failure, and refuses a feature build from anywhere else.
 - Moving the Codex pin re-resolves this lockfile; clear or record its advisories then.

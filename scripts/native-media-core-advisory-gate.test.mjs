@@ -11,9 +11,12 @@ import test from "node:test";
 const ROOT = resolve(import.meta.dirname, "..");
 const CRATE = "native-media-core";
 const AUDIT = /\bcargo audit --file apps\/runner\/native-media-core\/Cargo\.lock\b/;
+// The whole command: plain flags may follow, but no pipe, list, negation, redirection or
+// substitution that could mask the audit's exit status.
+const AUDIT_COMMAND = /^cargo audit --file apps\/runner\/native-media-core\/Cargo\.lock(?:\s+[\w.=/-]+)*$/;
 // Whitespace includes newlines, so folded YAML and argument arrays (`"--features", "native-core"`)
-// match as well as a single shell line.
-const FEATURE_FLAG = /(?:--features|(?<![\w-])-F)[\s"'`,=[\]]+[^\s"'`]*\bnative-core\b/;
+// match as well as a single shell line; `-Fnative-core` needs no separator at all.
+const FEATURE_FLAG = /(?:--features|(?<![\w-])-F)[\s"'`,=[\]]*(?:[^\s"'`]*[^\w\s"'`])?native-core\b/;
 const TOLERATED = /^\s*(?:-\s+)?continue-on-error:\s*(?!false\b)\S/m;
 const RUNS_AFTER_FAILURE = /^\s*(?:-\s+)?if:.*\b(?:always|failure|cancelled)\(\)/m;
 const SCRIPT = /\.(?:mjs|cjs|js|sh|ps1)$/;
@@ -56,9 +59,30 @@ function jobs(workflow) {
   });
 }
 
+// The commands of a step's `run:` value. A literal block (`|`) keeps one command per line; a
+// folded block (`>`) or a plain scalar is one command.
+function runCommands(step) {
+  const lines = step.split("\n");
+  const at = lines.findIndex((line) => /^\s*(?:-\s+)?run:/.test(line));
+  if (at < 0) return [];
+  const value = lines[at].replace(/^\s*(?:-\s+)?run:\s*/, "").trim();
+  if (!/^[|>]/.test(value)) return [value.replace(/^(["'])(.*)\1$/, "$2")];
+  const keyIndent = indent(lines[at]);
+  const block = [];
+  for (const line of lines.slice(at + 1)) {
+    if (line.trim() !== "" && indent(line) <= keyIndent) break;
+    block.push(line.trim());
+  }
+  const commands = block.filter((line) => line !== "" && !line.startsWith("#"));
+  return value.startsWith(">") ? [commands.join(" ")] : commands;
+}
+
+// A step's exit status is its last command's under every shell, so an audit stops the job only
+// as the step's sole, unmasked command, without continue-on-error or a condition that skips it.
 function stopsOnFailure(step) {
-  return AUDIT.test(step) && !TOLERATED.test(step) && !/^\s*(?:-\s+)?if:/m.test(step)
-    && !/cargo audit --file apps\/runner\/native-media-core\/Cargo\.lock[^\n]*(?:\|\||;)/.test(step);
+  const commands = runCommands(step);
+  return commands.length === 1 && AUDIT_COMMAND.test(commands[0])
+    && !TOLERATED.test(step) && !/^\s*(?:-\s+)?if:/m.test(step);
 }
 
 function auditProblems(path, workflow) {
@@ -71,9 +95,9 @@ function auditProblems(path, workflow) {
       if (!buildsNativeCore(step, crateInScope)) return;
       located = true;
       const where = `${path} job ${job.name} step ${index + 1}`;
-      const audited = job.steps.slice(0, index).some(stopsOnFailure)
-        || (stopsOnFailure(step) && step.search(AUDIT) < step.search(FEATURE_FLAG));
-      if (!audited) problems.push(`${where} builds native-core without an earlier failure-stopping cargo audit --file apps/runner/native-media-core/Cargo.lock in the same job`);
+      if (!job.steps.slice(0, index).some(stopsOnFailure)) {
+        problems.push(`${where} builds native-core without an earlier step in the same job whose only command is cargo audit --file apps/runner/native-media-core/Cargo.lock`);
+      }
       if (TOLERATED.test(job.header)) problems.push(`${where} is in a continue-on-error job, so a failing audit cannot stop it`);
       if (RUNS_AFTER_FAILURE.test(step)) problems.push(`${where} runs after a failed step, so a failing audit cannot stop it`);
     });
@@ -109,6 +133,9 @@ const BUILD_STEP = "      - run: cargo check --manifest-path apps/runner/native-
 test("the detector recognises native-core feature builds and ignores unrelated cargo commands", () => {
   assert.ok(buildsNativeCore("cargo check --manifest-path apps/runner/native-media-core/Cargo.toml --features native-core"));
   assert.ok(buildsNativeCore("cargo test -F wollipog-native-media-core/native-core"));
+  assert.ok(buildsNativeCore("cargo check --manifest-path apps/runner/native-media-core/Cargo.toml -Fnative-core"),
+    "an attached short flag must be detected");
+  assert.ok(buildsNativeCore("cargo check --features=native-core"));
   assert.ok(buildsNativeCore("run: >-\n  cargo check --manifest-path apps/runner/native-media-core/Cargo.toml\n  --features native-core\n"),
     "a folded YAML command must be detected");
   assert.ok(buildsNativeCore('spawnSync("cargo", ["build", "--features", "native-core"])'), "an argument array must be detected");
@@ -120,12 +147,19 @@ test("the detector recognises native-core feature builds and ignores unrelated c
 
 test("the workflow rule accepts only an earlier audit that can stop the build", () => {
   assert.deepEqual(auditProblems("ok.yml", workflow(AUDIT_STEP, BUILD_STEP)), []);
-  assert.deepEqual(auditProblems("same-step.yml", workflow(
-    "      - run: |", "          cargo audit --file apps/runner/native-media-core/Cargo.lock",
-    "          cargo check --manifest-path apps/runner/native-media-core/Cargo.toml --features native-core")), []);
+  assert.deepEqual(auditProblems("named-block.yml", workflow(
+    "      - name: Audit native-media-core", "        run: |", "          # Required before any native-core build (#3766).",
+    "          cargo audit --file apps/runner/native-media-core/Cargo.lock --deny warnings", BUILD_STEP)), []);
   const rejected = {
     "no audit": workflow(BUILD_STEP),
     "audit after the build": workflow(BUILD_STEP, AUDIT_STEP),
+    "audit sharing the build step": workflow("      - run: |", "          cargo audit --file apps/runner/native-media-core/Cargo.lock",
+      "          cargo check --manifest-path apps/runner/native-media-core/Cargo.toml --features native-core"),
+    "audit piped through tee": workflow(`${AUDIT_STEP} | tee audit.log`, BUILD_STEP),
+    "negated audit": workflow("      - run: ! cargo audit --file apps/runner/native-media-core/Cargo.lock", BUILD_STEP),
+    "audit followed by another command": workflow("      - run: |", "          cargo audit --file apps/runner/native-media-core/Cargo.lock",
+      "          echo audited", BUILD_STEP),
+    "compact flag without audit": workflow("      - run: cargo check --manifest-path apps/runner/native-media-core/Cargo.toml -Fnative-core"),
     "audit in another job": [workflow(AUDIT_STEP), "  native:", "    runs-on: ubuntu-latest", "    steps:", BUILD_STEP].join("\n"),
     "continue-on-error audit": workflow(AUDIT_STEP, "        continue-on-error: true", BUILD_STEP),
     "audit failure swallowed": workflow(`${AUDIT_STEP} || true`, BUILD_STEP),
