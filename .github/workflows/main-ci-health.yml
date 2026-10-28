@@ -54,6 +54,14 @@ jobs:
           MAIN_CI_HEALTH_WORKER_RUN_ID: ${{ inputs.worker_run_id }}
           MAIN_CI_HEALTH_WORKER_ATTEMPT: ${{ inputs.worker_attempt }}
         run: node scripts/main-ci-health.mjs
+      # Disabled unless MAIN_REGRESSION_ESCALATION_MENTION is set: one marked incident comment per
+      # exhausted investigation attempt, with this job's existing token (docs/main-regression-automation.md).
+      - name: Deliver Exhausted Investigation Escalation
+        if: ${{ !cancelled() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_REGRESSION_ESCALATION_MENTION: ${{ vars.MAIN_REGRESSION_ESCALATION_MENTION }}
+        run: node scripts/main-regression-escalation.mjs
       - name: Retain Main Health Observation
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
