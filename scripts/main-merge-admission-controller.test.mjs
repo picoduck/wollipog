@@ -200,9 +200,9 @@ test("merge groups get a success only just in time; waiting groups get no write 
       admissionStates: published === undefined ? undefined : { [group]: published } } }));
     assert.deepEqual([rerun.state, rerun.awaiting, rerun.admissionState], [expected, "required-result", published ?? "unknown"], String(published));
   }
-  // An identical group success is not rewritten: it refreshes nothing on GitHub.
+  // An existing success of unproven issuer never suppresses the pinned writer's own success (#3768 review).
   const again = groupDecision(await cycle({ census: { ...census(), admissionStates: { [group]: "success" } } }));
-  assert.deepEqual([again.state, again.decision], ["none", "ordinary-admission-eligible"]);
+  assert.deepEqual([again.state, again.decision], ["success", "ordinary-admission-eligible"]);
   const movedAfterSuccess = groupDecision(await cycle({ census: { ...census(), entries: [{ ...entry(), baseSha: head }],
     admissionStates: { [group]: "success" } } }));
   assert.deepEqual([movedAfterSuccess.state, movedAfterSuccess.awaiting], ["pending", "queue-head"]);

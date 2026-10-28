@@ -32,7 +32,10 @@ test("the earlier every-cycle success reproduces the sticky landing this change 
   const before = await byId("pre-change-early-success-lands-stale");
   assert.deepEqual([before.outcome, before.staleLanding], ["landed", true]);
   assert.ok(before.successWrittenAtMs < before.failedAtMs, "the success predates the failure");
-  assert.equal(before.evaluationAgeAtLandingMs, 596_000, "a ten-minute-old evaluation lands after health failed");
+  // The earlier controller rewrote success on every eligible cycle until the outage (#3768 review).
+  assert.equal(before.successWrites, 2, "both cycles before the outage write success");
+  assert.equal(before.successWrittenAtMs, 67_000);
+  assert.equal(before.evaluationAgeAtLandingMs, 536_000, "a nine-minute-old evaluation lands after health failed");
 });
 
 test("healthy groups land just in time and failures with the controller up eject; the race window is bounded and disclosed", async () => {
@@ -56,7 +59,8 @@ test("an aggregator rerun after the just-in-time write withdraws that success un
   const rerun = await byId("rerun-after-success-withdrawn");
   assert.deepEqual([rerun.outcome, rerun.staleLanding, rerun.withdrawals], ["landed", false, 1]);
   assert.ok(rerun.successWrittenAtMs >= rerun.rerunAtMs + rerun.rerunMs, "the landing success is written after the rerun");
-  assert.equal(rerun.evaluationAgeAtLandingMs, 123_000);
+  // Each eligible cycle rewrites the success from a fresh evaluation; the landing relies on the latest.
+  assert.equal(rerun.evaluationAgeAtLandingMs, 3_100);
   assert.ok(rerun.evaluationAgeAtLandingMs <= POLICY.maxObservationAgeSeconds * 1000 + CONTROLLER.maxCycleAgeMs + rerun.forgeLandingMs);
   // Disclosed limit: a rerun begun inside the race window while the controller is down extends it by the rerun.
   const outage = await byId("rerun-during-outage-disclosed");

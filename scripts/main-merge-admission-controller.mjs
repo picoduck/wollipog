@@ -178,9 +178,9 @@ export async function planAdmissionCycle({ repository, census, health, control, 
     // A waiting group must not keep a success published earlier (for example before its aggregator
     // was rerun): withdraw it to pending. A group that never had one, or is already pending, gets no write.
     const current = group ? census.admissionStates?.[entry.integrationSha] ?? "unknown" : null;
-    // Rewriting an identical group success refreshes nothing on GitHub; skip it to save writes.
-    const state = waiting === "none" && !["none", "pending"].includes(current) ? "pending"
-      : group && waiting === "success" && current === "success" ? "none" : waiting;
+    // Never skip a success because one is already shown: the rollup does not prove its issuer, and
+    // only the pinned writer's own status satisfies the required context (#3768 review).
+    const state = waiting === "none" && !["none", "pending"].includes(current) ? "pending" : waiting;
     const expiresAt = new Date(Math.min(Date.parse(now) + CONTROLLER.maxCycleAgeMs,
       date(health?.observedAt) ? Date.parse(health.observedAt) + POLICY.maxObservationAgeSeconds * 1000 : Date.parse(now),
       repair ? Date.parse(repair.expiresAt) : Infinity,

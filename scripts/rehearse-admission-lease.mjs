@@ -49,7 +49,7 @@ export async function leaseCase({ id, outageStartMs = null, outageMs = 0, failAt
     while (i > 0 && history[i - 1].state === "success") i--;
     return i < history.length ? Date.parse(history[i].at) : null;
   };
-  let nextCycle = t0, failedAt = null, success = null, outcome = null, cycles = 0, withdrawals = 0;
+  let nextCycle = t0, failedAt = null, success = null, outcome = null, cycles = 0, withdrawals = 0, successWrites = 0;
   for (let tick = t0; !outcome; tick += TICK) {
     if (tick > w.now) w.at(tick);
     if (failAtMs !== null && failedAt === null && tick >= t0 + failAtMs) { w.finishRun(worker.run, "failure", w.now); failedAt = w.now; }
@@ -63,8 +63,10 @@ export async function leaseCase({ id, outageStartMs = null, outageMs = 0, failAt
       const after = w.latestStatus(group.sha);
       if (after !== before && after?.state === "pending") withdrawals++;
       // Evaluation age is measured from the observation the writer itself rebuilt and used.
-      if (delivered.complete && after !== before && after?.state === "success")
+      if (delivered.complete && after !== before && after?.state === "success") {
+        successWrites++;
         success = { writtenAt: Date.parse(after.at), observedAt: Date.parse(delivered.revalidatedObservedAt) };
+      }
     }
     // Fixture model of the merge queue's landing rule.
     const status = w.latestStatus(group.sha);
@@ -76,7 +78,7 @@ export async function leaseCase({ id, outageStartMs = null, outageMs = 0, failAt
   }
   const rel = value => value === null || value === undefined ? null : value - t0;
   const landed = outcome.kind === "landed";
-  return { id, preChange, outageStartMs, outageMs, failAtMs, forgeLandingMs, rerunAtMs, rerunMs, withdrawals, outcome: outcome.kind,
+  return { id, preChange, outageStartMs, outageMs, failAtMs, forgeLandingMs, rerunAtMs, rerunMs, withdrawals, successWrites, outcome: outcome.kind,
     outcomeAtMs: rel(outcome.at),
     failedAtMs: rel(failedAt), successWrittenAtMs: rel(success?.writtenAt), successObservedAtMs: rel(success?.observedAt),
     // Landed although main's health had already failed: the evaluation behind its success was stale.
