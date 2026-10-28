@@ -94,11 +94,22 @@ mismatch.
    [admission runbook](main-merge-admission.md#dry-run-evidence-and-separate-operator-steps).
    Report `base-moved` holds separately from health holds.
 3. **Enforce admission.** Provision the controller on the operator host. Prime
-   `Regression Admission` for current entries. Re-read ruleset `22200037` and confirm
-   its own `rules` still equal the snapshot in the readiness report, apart from
-   `updated_at`. The body is built from this ruleset's rules, not from the effective
-   branch rules, which other rulesets could contribute to. Then
-   save the [ruleset body](#ruleset-body) as `ruleset-proposed.json`, replace the
+   `Regression Admission` for current entries. The PUT replaces every field it names,
+   so first confirm that ruleset `22200037` still equals the snapshot in **all** of them:
+   `name`, `target`, `enforcement`, `conditions`, `bypass_actors` and its own `rules`.
+   Any difference, for example a bypass actor removed since the snapshot, stops here:
+   regenerate the body from a fresh snapshot instead of restoring old settings. The
+   body is built from this ruleset's rules, not from the effective branch rules, which
+   other rulesets could contribute to.
+
+   ```sh
+   fields='{name, target, enforcement, conditions, bypass_actors, rules: [.rules[] | {type, parameters}]}'
+   gh api repos/picoduck/wollipog/rulesets/22200037 | jq -S "$fields" > ruleset-now.json
+   jq -S ".ruleset | $fields" scripts/fixtures/fast-gate-live-settings-2026-10-28.json > ruleset-snapshot.json
+   diff ruleset-now.json ruleset-snapshot.json   # must print nothing
+   ```
+
+   Then save the [ruleset body](#ruleset-body) as `ruleset-proposed.json`, replace the
    placeholder with the integer App ID, and apply it:
 
    ```sh

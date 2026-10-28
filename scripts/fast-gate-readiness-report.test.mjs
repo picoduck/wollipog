@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { ADMISSION_CONTEXT, admissionEnforcement, REQUIRED_CONTEXT } from "./ci-merge-group-gate.mjs";
 import { ADMISSION_ISSUER_PLACEHOLDER, buildReadiness, holdKind, LIVE_SETTINGS, main, markdown, MEASUREMENTS, PROPOSAL,
-  proposedRuleset, REPORT_PATH } from "./fast-gate-readiness-report.mjs";
+  proposedRuleset, REPORT_PATH, RULESET_FIELDS, rulesetDrift } from "./fast-gate-readiness-report.mjs";
 import { rehearseFastGateRollback } from "./fast-gate-rollback.mjs";
 import { rehearseFastGateCutover } from "./rehearse-fast-gate-cutover.mjs";
 
@@ -87,6 +87,21 @@ test("the proposed ruleset adds only an issuer-pinned admission context, and the
   assert.ok(readFileSync(PROPOSAL, "utf8").includes(JSON.stringify(body, null, 2)));
   // The snapshot retains variable names only and finds every CI switch absent.
   assert.deepEqual(live.gateVariables, { CI_MERGE_GROUP_GATE: null, CI_REGRESSION_ADMISSION: null, CI_PR_SUITE_ROUTING: null });
+});
+
+test("any drift in a field the PUT replaces blocks applying the body (#3759 review)", () => {
+  const fresh = { ...structuredClone(live.ruleset), id: live.ruleset.id, updated_at: "2026-11-01T00:00:00Z", _links: {}, current_user_can_bypass: "never" };
+  assert.deepEqual(rulesetDrift(fresh, live), [], "read-only metadata is not drift");
+  for (const field of RULESET_FIELDS) {
+    const changed = structuredClone(fresh);
+    changed[field] = field === "bypass_actors" ? [] : field === "rules" ? changed.rules.slice(1) : field === "conditions" ? { ref_name: { include: [], exclude: [] } } : "changed";
+    assert.deepEqual(rulesetDrift(changed, live), [field], field);
+  }
+  // Every field the body replaces is covered by the drift check, and the proposal runs it before the PUT.
+  assert.deepEqual(Object.keys(proposedRuleset(live)).sort(), [...RULESET_FIELDS].sort());
+  const proposal = readFileSync(PROPOSAL, "utf8");
+  assert.ok(proposal.indexOf("diff ruleset-now.json ruleset-snapshot.json") < proposal.indexOf("gh api -X PUT repos/picoduck/wollipog/rulesets/22200037"));
+  assert.ok(proposal.includes("fields='{name, target, enforcement, conditions, bypass_actors, rules: [.rules[] | {type, parameters}]}'"));
 });
 
 test("every quoted measurement still appears verbatim in its committed source", () => {

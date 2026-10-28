@@ -55,6 +55,16 @@ export function proposedRuleset(live, issuer = ADMISSION_ISSUER_PLACEHOLDER) {
   return { name, target, enforcement, conditions, bypass_actors, rules };
 }
 
+/** The PUT replaces every field it names. Pure: the fields of a fresh read-back of the ruleset that differ
+ * from the snapshot the body was built from; any difference means regenerate, never apply. */
+export const RULESET_FIELDS = Object.freeze(["name", "target", "enforcement", "conditions", "bypass_actors", "rules"]);
+export function rulesetDrift(current, live) {
+  const normalize = (ruleset) => ({ ...Object.fromEntries(RULESET_FIELDS.map((field) => [field, ruleset?.[field] ?? null])),
+    rules: Array.isArray(ruleset?.rules) ? ruleset.rules.map(({ type, parameters }) => ({ type, parameters: parameters ?? null })) : null });
+  const [now, snapshot] = [normalize(current), normalize(live.ruleset)];
+  return RULESET_FIELDS.filter((field) => JSON.stringify(now[field]) !== JSON.stringify(snapshot[field]));
+}
+
 /** A hold whose only reason is a moved base is a re-sync artifact, not a health hold; measure them apart. */
 export function holdKind(decision) {
   if (decision?.decision !== "hold") return null;
