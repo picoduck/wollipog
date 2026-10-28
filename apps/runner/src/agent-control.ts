@@ -714,7 +714,7 @@ export function provisionAgentControl(
         WOLLIPOG_SESSION_ID: spec.sessionId,
         WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
         WOLLIPOG_CLI: `${WSL_AGENT_CONTROL_PRIVATE_DIR}/cli`,
-        WOLLIPOG_CLI_ARGS: "[]",
+        WOLLIPOG_CLI_ARGS: "",
       };
       spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
       spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver, runnerOwnedClaudeSettings);
@@ -766,7 +766,7 @@ export function provisionAgentControl(
     // loopback relay, so its environment stays exactly `transportEnv`.
     ...(memory && config.providerRelayFifo ? { [AGENT_CONTROL_RELAY_FIFO_ENV]: config.providerRelayFifo } : {}),
     WOLLIPOG_CLI: nativeWindows ? cli.command : cliPath,
-    WOLLIPOG_CLI_ARGS: nativeWindows ? JSON.stringify(cli.args) : "[]",
+    WOLLIPOG_CLI_ARGS: nativeWindows ? JSON.stringify(cli.args) : "",
   };
   delete spec.env[ORCHESTRATOR_ENV_KEY];
   // Both role markers are re-established below for the shape this launch actually uses, so a value

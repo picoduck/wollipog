@@ -474,8 +474,9 @@ hosts and WSL:
 "$WOLLIPOG_CLI" session list --json
 ```
 
-The POSIX and WSL launcher includes its own re-entry arguments; do not parse or
-append `WOLLIPOG_CLI_ARGS`. On native Windows, including Git Bash sessions, run
+The POSIX and WSL launcher includes its own re-entry arguments, so
+`WOLLIPOG_CLI_ARGS` is empty there: do not parse it, and appending it adds
+nothing. On native Windows, including Git Bash sessions, run
 this PowerShell form so the runner receives its mode argument. It reads the
 injected JSON argument array without copying a launcher path into a prompt:
 
