@@ -234,11 +234,11 @@ test("capability names one available native agent per reviewer harness and repor
   ] as unknown as AgentDefinition[];
   assert.equal(f.launcher.capability(agents, "darwin"), undefined);
   assert.deepEqual(f.launcher.capability(agents, "linux"), {
-    reviewers: [{ harness: "claude-code", agentId: "claude" }],
+    configuration: true, reviewers: [{ harness: "claude-code", agentId: "claude" }],
     unavailable: { codex: "no available native agent uses this harness" },
   });
   const noTools = fixture(t, { tools: { unavailable: "git is not installed" } });
-  assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], unavailable: { tools: "git is not installed" } });
+  assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], configuration: true, unavailable: { tools: "git is not installed" } });
 });
 
 test("long writer refusals stay within the control plane capability limit", () => {
@@ -292,15 +292,15 @@ test("capability contains tool-root and agent discovery exceptions and recovers 
     ...deps, tools: () => failure === "tools" ? tools() : { git: GIT, gh: "/trusted/gh" }, verifyCommand: () => {},
   });
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    reviewers: [], unavailable: { tools: "tool roots unavailable during startup" },
+    reviewers: [], configuration: true, unavailable: { tools: "tool roots unavailable during startup" },
   });
   failure = "agents";
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    reviewers: [], unavailable: { tools: "agent catalog unavailable during startup" },
+    reviewers: [], configuration: true, unavailable: { tools: "agent catalog unavailable during startup" },
   });
   failure = null;
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
+    configuration: true, reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
   });
 });
 
@@ -585,4 +585,16 @@ test("an extra round after an upvote snapshots only the post-upvote delta", asyn
   assert.match(prepared.prompt, /Verified correction after upvote/u);
   assert.doesNotMatch(prepared.prompt, /answer = 42/u);
   f.launcher.release("s_review");
+});
+
+test("configured review launches recheck model, effort and explicit same-family consent on the runner", async (t) => {
+  const agents = structuredClone(AGENTS);
+  for (const agent of agents) agent.capabilities = { models: [{ id: agent.id === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", default: true }],
+    effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true };
+  const f = fixture(t, { agents, requester: { driver: "codex-app-server", config: { model: "gpt-6.1-sol" } } });
+  const configuration = { model: "gpt-6.1-sol", effort: "high", roundBudget: 2, allowSameFamily: false };
+  await assert.rejects(f.launcher.prepare("s_refused", f.policy({ harness: "codex", configuration }), { ...CODEX, model: "gpt-6.1-sol", effort: "high" }, "brief"), /model family without explicit permission/u);
+  await assert.rejects(f.launcher.prepare("s_changed", f.policy({ harness: "codex", configuration: { ...configuration, allowSameFamily: true } }), { ...CODEX, model: "retired", effort: "high" }, "brief"), /configured reviewer/u);
+  const prepared = await f.launcher.prepare("s_allowed", f.policy({ harness: "codex", configuration: { ...configuration, allowSameFamily: true } }), { ...CODEX, model: "gpt-6.1-sol", effort: "high" }, "brief");
+  assert.equal(prepared.round.round, 1);
 });

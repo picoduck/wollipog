@@ -27,5 +27,5 @@ export function safeReviewSessionCapability(value: unknown): ReviewSessionCapabi
   }
   reviewers.sort((a, b) => input.reviewers.findIndex((entry) => entry?.harness === a.harness) -
     input.reviewers.findIndex((entry) => entry?.harness === b.harness));
-  return { reviewers, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
+  return { reviewers, ...(input.configuration === true ? { configuration: true as const } : {}), ...(Object.keys(unavailable).length ? { unavailable } : {}) };
 }

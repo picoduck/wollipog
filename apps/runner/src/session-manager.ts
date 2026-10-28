@@ -2140,7 +2140,8 @@ export class SessionManager {
     this.reviewsPreparing.add(spec.sessionId);
     try {
       this.reviewSessions.markPreparing(spec.sessionId);
-      prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, { driver, agentId: spec.agentId, command: spec.command }, brief);
+      prepared = await this.reviewSessions.prepare(spec.sessionId, spec.review!, { driver, agentId: spec.agentId, command: spec.command,
+        ...(spec.review?.configuration ? { model: spec.config?.model, effort: spec.config?.effort } : {}) }, brief);
     } catch (error) {
       this.reviewsStoppedBeforeLaunch.delete(spec.sessionId);
       if (!(error instanceof ReviewScopeRefusal)) this.log(`review session ${spec.sessionId} preparation failed: ${errText(error)}`);

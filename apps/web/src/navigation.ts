@@ -37,7 +37,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "storage" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "network" | "storage" | "experimental" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -98,6 +98,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   },
   { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
   { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
+  { id: "reviews", title: "Reviews", description: "Reviewers, rounds and project overrides.", scope: "Your Account" },
   // No scope: the panel names where its defaults come from instead, "Your Defaults" or "Wollipog
   // Defaults", once it has loaded them (#3026).
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },

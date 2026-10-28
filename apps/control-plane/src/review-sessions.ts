@@ -118,6 +118,7 @@ function boundedText(text: string, limit: number): { text: string; truncated: bo
 }
 
 export interface NewReviewSession {
+  roundBudget?: number;
   reviewSessionId: string;
   requesterSessionId: string;
   runnerId: string;
@@ -148,6 +149,7 @@ export class ReviewSessions {
       WHERE state IN ${ACTIVE};`);
     // v228 (#3369): each attempt's planned round, its contract verdict and a valid report's findings.
     const columns = new Set((sql.prepare("PRAGMA table_info(review_sessions)").all() as Array<{ name: string }>).map((c) => c.name));
+    if (!columns.has("round_budget")) sql.exec("ALTER TABLE review_sessions ADD COLUMN round_budget INTEGER NOT NULL DEFAULT 4");
     // #3369: the one continuation each finished review owes its requester, and the durable prompt
     // command that carries it: held -> delivering -> delivered | uncertain | failed, or abandoned.
     for (const column of ["round_json", "verdict_json", "findings_json", "continuation_state", "continuation_command_id", "admission_json"]) {
@@ -189,6 +191,8 @@ export class ReviewSessions {
       input.reviewSessionId, input.requesterSessionId, input.runnerId, input.pullRequest.repository, input.pullRequest.number,
       input.headSha, input.reviewer, now, now,
     );
+    this.sql.prepare("UPDATE review_sessions SET round_budget=? WHERE review_session_id=?")
+      .run(input.roundBudget ?? REVIEW_ROUND_BUDGET, input.reviewSessionId);
   }
 
   /** What every review session of a requester has cost so far, settled usage only. */
@@ -321,7 +325,12 @@ export class ReviewSessions {
     return { rounds, approved, ...(postUpvoteExtension ? { postUpvoteExtension } : {}) };
   }
 
-  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true): ReviewRunHistory {
+  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true,
+    initialBudget = REVIEW_ROUND_BUDGET): ReviewRunHistory {
+    // A setting change never expands an ongoing run. Only typed extensions grant more rounds.
+    const saved = this.sql.prepare(`SELECT round_budget FROM review_sessions WHERE requester_session_id=?
+      AND repository=? COLLATE NOCASE AND pr_number=? ORDER BY rowid LIMIT 1`)
+      .get(requesterSessionId, pullRequest.repository, pullRequest.number) as { round_budget: number } | undefined;
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
       WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
       .all(requesterSessionId, pullRequest.repository, pullRequest.number) as Array<Pick<Row, "head_sha" | "round_json" | "verdict_json" | "findings_json">>;
@@ -331,7 +340,7 @@ export class ReviewSessions {
     });
     const history: ReviewRunHistory = {
       epoch: 0, lastValid: null, lastAttempt: null, validRounds: 0, consumedInLastRound: 0,
-      roundBudget: REVIEW_ROUND_BUDGET, attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
+      roundBudget: saved?.round_budget ?? initialBudget, attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
     };
     const epoch = Math.max(0, ...attempts.map((attempt) => attempt.round.epoch));
     if (!epoch) return history;

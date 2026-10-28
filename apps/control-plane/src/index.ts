@@ -230,6 +230,8 @@ import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-rou
 import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
+import { registerReviewSettingsRoutes } from "./review-settings-route.js";
+import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
@@ -1040,6 +1042,7 @@ const workflowEventRetention = new WorkflowEventRetention(db, { env: process.env
 registerWorkflowEventRetentionRoutes(app, workflowEventRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
+registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });

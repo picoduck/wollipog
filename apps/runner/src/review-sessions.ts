@@ -26,6 +26,7 @@ import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import {
   compactReviewFinding, evaluateReviewAttempt, planReviewRound, REVIEW_ATTEMPTS_PER_ROUND, REVIEW_CONTRACT,
+  sameReviewFamily, reviewModelSupported,
   REVIEW_FULL_REASON_LIMIT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_BUDGET, REVIEW_ROUND_REFUSALS, reviewerHarnessFor,
   type AgentDefinition, type ReviewAttemptEvidence, type ReviewAttemptRound, type ReviewAttemptVerdictView,
   type ReviewLaunchPolicy, type ReviewReportFinding, type ReviewRunHistory, type ReviewSessionCapability,
@@ -285,6 +286,8 @@ export type ReviewObservation = Omit<ReviewAttemptEvidence, "snapshotChanged">;
 
 /** The exact launch the runner authorized for a review session. */
 export interface ReviewLaunch {
+  model?: string;
+  effort?: string;
   driver: AgentDefinition["driver"];
   agentId: string;
   command: string;
@@ -309,7 +312,8 @@ export function reviewSessionDiscoveryReason(error: unknown): string {
 /** The agent a harness's reviews launch through: the first available native agent using its driver. */
 function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionReviewHarness): AgentDefinition | undefined {
   return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
-    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true);
+    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true &&
+    candidate.installation?.selection !== "other" && candidate.harnessSelectionBlocked !== true);
 }
 
 /** What the session manager needs to launch and retire a review session. */
@@ -379,12 +383,12 @@ export class ReviewSessionLauncher {
       agents ??= this.deps.agents();
       if ("unavailable" in tools) {
         this.logDiscoveryFailure("tools", tools.unavailable);
-        return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
+        return { reviewers: [], configuration: true, unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
       }
       this.discoveryFailures.delete("tools");
     } catch (error) {
       this.logDiscoveryFailure("tools", error);
-      return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
+      return { reviewers: [], configuration: true, unavailable: { tools: reviewSessionDiscoveryReason(error) } };
     }
     const reviewers: ReviewSessionCapability["reviewers"] = [];
     for (const harness of ["claude-code", "codex"] as const) {
@@ -403,7 +407,7 @@ export class ReviewSessionLauncher {
         unavailable[harness] = reviewSessionDiscoveryReason(error);
       }
     }
-    return { reviewers, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
+    return { reviewers, configuration: true, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
   }
 
   checkoutPath(sessionId: string): string {
@@ -427,13 +431,20 @@ export class ReviewSessionLauncher {
     const requester = this.store.readMeta(policy.requesterSessionId);
     if (!requester || requester.review) refuseReview("the review must cover the session's own native managed worktree");
     // The reviewer is always the other model family, and it launches through its own driver.
-    if (reviewerHarnessFor(requester!.driver) !== policy.harness || REVIEWER_DRIVERS[policy.harness] !== driver) {
+    if ((!policy.configuration && reviewerHarnessFor(requester!.driver) !== policy.harness) || REVIEWER_DRIVERS[policy.harness] !== driver) {
       refuseReview("the runner cannot launch this reviewer");
     }
     // Only the advertised reviewer agent, and only while the exact command spawn will run (on the
     // PATH that agent's provider gets) still passes the trust checks.
     const agent = reviewerAgent(this.deps.agents(), policy.harness);
     if (!agent || agent.id !== launch.agentId || agent.command !== launch.command) refuseReview("the runner cannot launch this reviewer");
+    const configured = policy.configuration;
+    if (configured && (typeof configured.allowSameFamily !== "boolean" || !Number.isSafeInteger(configured.roundBudget) ||
+        configured.roundBudget < 1 || configured.roundBudget > 32 || configured.model !== launch.model || configured.effort !== launch.effort ||
+        !reviewModelSupported(agent!.capabilities, configured.model, configured.effort) ||
+        !configured.allowSameFamily && sameReviewFamily(requester!.driver, requester!.config?.model, policy.harness, configured.model))) {
+      refuseReview("the configured reviewer is unavailable or belongs to the implementer's model family without explicit permission");
+    }
     try {
       this.deps.verifyCommand(launch.command, this.deps.agentPath(launch.agentId, driver));
     } catch (error) {
@@ -464,7 +475,7 @@ export class ReviewSessionLauncher {
         (await diff(["--name-only", "-z", "--diff-filter=ACDMRTUXB"], ...revisions)).split("\0").filter(Boolean);
 
       // Plan the attempt from the run's history; ancestry is proven here, from the mirror.
-      const history = policy.history ?? EMPTY_HISTORY;
+      const history = policy.history ?? { ...EMPTY_HISTORY, roundBudget: configured?.roundBudget ?? EMPTY_HISTORY.roundBudget };
       const reference = history.lastValid ?? history.lastAttempt;
       let descends: boolean | null = null;
       if (reference && reference.headSha !== policy.headSha && PUSHED_HEAD.test(reference.headSha) && await has(reference.headSha)) {
