@@ -55,7 +55,7 @@ JSON as is.
 | Missed failure | health, rolling, controller, automation, investigation, repair, candidates | The fast gate admits the regression. Its worker fails **35.30 min** after landing. Holds are delivered **70.7 s** after the verdict. **3** exposure-window admissions are withdrawn. The exact revert is the only exception. Release comes **67.66 min** after the failure. |
 | Validator outage | admission, health, rolling, controller | A stalled worker admits until **120 min** of lag, then holds. Health turns unknown (`validation-stalled`) and the scheduler reports `stalled-active-run`. A health-observer outage or crash is an explicit hold. The writer refuses with **0** writes, so **2** earlier successes stay sticky. |
 | Exhausted investigation budget | automation, investigation, controller | Exhausted delivery attempts and elapsed time give `*-exhausted-operator-required` with zero deliveries. Re-planning stays blocked, holds remain, and the helper budget refuses extra work before running it. |
-| Stale or backlogged health | admission, health, rolling, controller | Commits 1–4 admit and the 5th unvalidated commit holds. At 7,195 s the decision is eligible; at 7,200 s it holds, with a planned block 3.6 s later. Health reports stale only after strictly two hours. |
+| Stale or backlogged health | admission, health, rolling, controller | Commits 1–4 admit and the 5th unvalidated commit holds. Every ready PR opened before a landing holds as `base-moved`. At 7,195 s the decision is eligible; at 7,200 s it holds, with a planned block 3.6 s later. Health reports stale only after strictly two hours. |
 | Queued-entry hold | controller, admission | One ready PR, a queued group and a stacked two-PR group (6 targets). All are held **67.5 s** after the failure. All **5** earlier successes are withdrawn by exact-SHA failures. The stacked group holds `base-moved` even while healthy. |
 | Exact-head repair | controller, repair | Only the exact single-PR group is eligible. Refusals: changed head, base or group, a batched group, a stale failure set, an expired grant, unverified fast checks, an expired observation, a mismatched squash tree, and a competing repair during reconciliation. |
 | Exact-candidate release | rolling, candidates, certification | A skipped intermediate SHA reads `missing`, and its receipt certifies `none`. The candidate is dispatched only after main is validated and the 60-minute cooldown has passed: `pending`, then `certified`, **95.32 min** after the request. Off-main, failed and changed-suite candidates are refused. |
@@ -104,6 +104,12 @@ code:
   outside these modules.
 - **Exposure window.** Work admitted between landing and the failed verdict
   (35 min here) lands on a broken main and depends on repair.
+- **Ready-PR `base-moved` holds.** On GitHub, `baseRefOid` stays at an open
+  PR's last sync. A read-only GraphQL check of the 8 oldest open PRs on
+  2026-10-27 found none whose base equalled the main tip. The fake forge models
+  this, so the controller holds every ready PR as `base-moved` after any
+  landing until that PR is re-synced. Under fast-gate traffic, measured false
+  holds must separate this from health holds before thresholds are approved.
 
 The fast-gate mode, observed traffic, approved thresholds and outage bounds,
 and the operator's approval of the workflow, status and ruleset changes all

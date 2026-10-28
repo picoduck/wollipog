@@ -19,7 +19,7 @@ test("all seven #3637 AC2 flows are decided by delivered modules and match their
     assert.ok(flow.steps.every(s => /^main-|^release-certification/.test(s.decidedBy)), `${flow.id} names a deciding module for every step`);
     assert.ok(flow.gaps.length > 0, `${flow.id} discloses its limits`);
   }
-  assert.deepEqual(report.summary, { flows: 7, passed: 7, steps: 50 });
+  assert.deepEqual(report.summary, { flows: 7, passed: 7, steps: 51 });
 });
 
 test("measured virtual detection, hold and recovery times are reproducible", async () => {
@@ -65,6 +65,14 @@ test("inert forge serves only its fixture repository and refuses unknown mutatio
   const w = inertForge();
   await assert.rejects(w.api("/repos/picoduck/wollipog/git/ref/heads/main"), /only its fixture repository/);
   await assert.rejects(w.api(`/repos/${REPOSITORY}/issues`, { method: "POST", body: {} }), /refuses this mutation/);
+  await assert.rejects(w.api(`/repos/another/repository/statuses/${w.tip()}`, { method: "POST", body: { state: "success", context: "Regression Admission" } }),
+    /only its fixture repository/);
+  await assert.rejects(w.api("/graphql", { method: "POST", body: { query: "query{repository{pullRequests(first:1){nodes{number}}}}",
+    variables: { owner: "another", name: "repository" } } }), /only its fixture repository/);
+  assert.equal(w.state.statuses.length, 0);
+  w.open(1); const advanced = w.land("advanced", { pull: 2 });
+  const census = await w.api("/graphql", { method: "POST", body: { query: "pullRequests(", variables: { owner: "fixture", name: "fast-gate-rehearsal" } } });
+  assert.notEqual(census.data.repository.pullRequests.nodes[0].baseRefOid, advanced, "an open PR's base stays at its last sync, as on GitHub");
   await assert.rejects(w.api(`/repos/${REPOSITORY}/git/ref/heads/ci/main-health-state`), error => error.status === 404);
   assert.throws(() => w.at(w.now - 1), /cannot move backwards/);
   w.state.outage = true;

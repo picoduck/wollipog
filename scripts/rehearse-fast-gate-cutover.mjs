@@ -364,8 +364,14 @@ async function staleBacklog() {
     const d = plan.decisions.find(x => x.entry.pullRequest === 150 + i);
     backlogPlan = plan;
     lagging.push({ landed: i, backlog: health.backlog.commits, health: health.status, decision: d.decision, reasons: d.reasons,
-      healthCalls: health.apiBudget.calls });
+      healthCalls: health.apiBudget.calls, earlierReady: plan.decisions.filter(x => x.entry.pullRequest < 150 + i)
+        .map(x => ({ pullRequest: x.entry.pullRequest, decision: x.decision, reasons: x.reasons })) });
   }
+  // GitHub's baseRefOid stays at an open PR's last sync (read-only check of 8 live PRs on 2026-10-27),
+  // so every ready PR opened before a landing holds as base-moved until rebuilt.
+  f.check("earlier ready PRs hold only as base-moved until rebuilt on current main", MODULES.admission, true,
+    lagging.slice(1).every(l => l.earlierReady.length === l.landed - 1 &&
+      l.earlierReady.every(x => x.decision === "hold" && (l.landed < 5 ? x.reasons.join() === "base-moved" : x.reasons.includes("base-moved")))));
   f.check("backlog below five admits; the fifth unvalidated commit holds", MODULES.admission,
     ["ordinary-admission-eligible", "ordinary-admission-eligible", "ordinary-admission-eligible", "ordinary-admission-eligible", "hold"],
     lagging.map(l => l.decision));

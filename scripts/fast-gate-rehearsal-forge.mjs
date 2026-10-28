@@ -70,6 +70,7 @@ export function inertForge({ start = START } = {}) {
   const census = () => ({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: tip().sha } },
     pullRequests: { pageInfo: { hasNextPage: false }, nodes: [...f.pulls.values()].filter(p => p.state === "open").map(p => {
       const group = p.group && f.groups.get(p.group);
+      // Like GitHub's baseRefOid, an open PR's base stays at its last sync, not the moving main tip.
       return { number: p.number, isDraft: p.draft, headRefOid: p.head, baseRefOid: p.base,
         mergeQueueEntry: group ? { state: group.state, position: group.position, headCommit: { oid: group.sha },
           baseCommit: { oid: group.base } } : null };
@@ -148,6 +149,9 @@ export function inertForge({ start = START } = {}) {
   };
   const write = (path, body) => {
     if (path === "/graphql") {
+      const v = body.variables ?? {};
+      const fixture = `${v.owner}/${v.name}` === REPOSITORY || v.input?.repositoryId === "inert-fixture-repository";
+      if (!fixture) throw new Error("Inert forge serves only its fixture repository");
       if (body.query.includes("AdmissionWorkflowEvidence")) {
         f.graphqlQueries++;
         const commit = commitOf(body.variables.revision);
@@ -183,7 +187,8 @@ export function inertForge({ start = START } = {}) {
       createRun(body.inputs.target_sha, body.inputs.claim_id, f.clock);
       return null;
     }
-    const status = /^\/repos\/[^/]+\/[^/]+\/statuses\/([a-f0-9]{40})$/.exec(path);
+    if (!path.startsWith(ROOT + "/")) throw new Error("Inert forge serves only its fixture repository");
+    const status = /^\/statuses\/([a-f0-9]{40})$/.exec(path.slice(ROOT.length));
     if (status) {
       const record = { id: f.nextStatus++, targetSha: status[1], state: body.state, context: body.context, at: iso(f.clock) };
       f.statuses.push(record);
