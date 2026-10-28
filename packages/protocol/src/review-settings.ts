@@ -36,8 +36,14 @@ export interface ReviewConfiguration {
 }
 
 export function reviewModelFamily(driver: string | null | undefined, model?: string | null): string | null {
-  if (model && /^(claude|opus|fable|sonnet|haiku)(?:[-[\d.]|$)/iu.test(model)) return "claude";
-  if (model && /^(gpt|codex|o[134])(?:[-\d.]|$)/iu.test(model)) return "openai";
+  // Pi persists provider/model, and routed catalogs may nest another provider prefix. Bedrock
+  // qualifies its Claude ids with a region and vendor separated by dots.
+  const modelId = model?.split("/").at(-1);
+  if (modelId && /(?:^|[.:])(claude|opus|fable|sonnet|haiku)(?:[-[\d.]|$)/iu.test(modelId)) return "claude";
+  if (modelId && /^(gpt|codex|o[134])(?:[-\d.]|$)/iu.test(modelId)) return "openai";
+  const provider = model?.includes("/") ? model.split("/")[0]?.toLowerCase() : undefined;
+  if (provider === "anthropic") return "claude";
+  if (["openai", "openai-codex", "azure-openai", "azure-openai-responses"].includes(provider ?? "")) return "openai";
   if (driver === "claude-code") return "claude";
   if (driver === "codex" || driver === "codex-app-server") return "openai";
   return model ? model.toLowerCase() : null;

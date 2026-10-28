@@ -10,6 +10,11 @@ test("same-family consent covers every discovered Claude alias across implementi
   }
   assert.equal(sameReviewFamily("pi", "gpt-6.1-sol", "codex", null), true);
   assert.equal(sameReviewFamily("codex-app-server", null, "claude-code", null), false);
+  for (const model of ["anthropic/claude-opus-5-5", "openrouter/anthropic/claude-fable-5-1", "anthropic/fable",
+    "amazon-bedrock/us.anthropic.claude-opus-5-5"]) {
+    assert.equal(sameReviewFamily("pi", model, "claude-code", null), true, model);
+  }
+  assert.equal(sameReviewFamily("pi", "openai/gpt-6.1-sol", "codex", null), true);
 });
 
 test("configured model/effort pairs must name a visible concrete discovered model", () => {
