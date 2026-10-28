@@ -746,8 +746,9 @@ function messageNotSent(cause: unknown, machineName: string | undefined, retry?:
   }
   const detail = cause.message.trim();
   // A Full Control campaign's stale authority is explained for the person, with its recovery (#2940).
+  // No Retry: until that recovery, resending meets the same refusal; the kept draft sends after it.
   if (cause.code === "campaign_authority_stale" && detail) {
-    return { title: "Message Not Sent", message: `${detail}${kept}`, ...(retry ? { retry } : {}) };
+    return { title: "Message Not Sent", message: `${detail}${kept}` };
   }
   return {
     title: "Message Not Sent",

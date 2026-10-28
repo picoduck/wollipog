@@ -1265,6 +1265,8 @@ test("a stale Full Control authority refusal says what happened and how to recov
     assert.equal(notice.getAttribute("aria-label"), "Message Not Sent");
     assert.equal(notice.querySelector(".notice-body p")?.textContent, `${reason} Your draft is kept.`);
     assert.equal(fixture.button("Show Details"), undefined, "nothing is held back behind details");
+    assert.equal(fixture.button("Retry"), undefined, "resending before the recovery would meet the same refusal");
+    assert.equal((fixture.container.querySelector("textarea") as HTMLTextAreaElement).value, "Hello", "the draft waits in the composer");
   } finally {
     await fixture.unmount();
   }
