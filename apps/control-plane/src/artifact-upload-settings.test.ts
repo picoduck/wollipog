@@ -92,9 +92,11 @@ test("reconnect shares one retained-session scan and preserves both metadata str
     { id: "older", runnerId: "older", projectId: null, status: "idle", archived: false },
   ];
   let scans = 0;
+  let fullScans = 0;
   let automatic = "wollipog_automatic";
   const db = {
-    listSessions: (options: { includeArchived?: boolean }) => { assert.equal(options.includeArchived, true); scans++; return sessions; },
+    listSessions: (options: { includeArchived?: boolean }) => { assert.equal(options.includeArchived, true); fullScans++; return sessions; },
+    runnerSessionInventory: (runnerId: string) => { scans++; return sessions.filter((session) => session.runnerId === runnerId); },
     getRunner: (id: string) => ({ protocolVersion: id === "older" ? 200 : 201 }),
     sessionOwnerUser: (id: string) => id === "unowned" ? null : { userId: id === "external" ? "second" : "first" },
     artifactUploadPreference: (id?: string) => id === "first" ? automatic : id === "second" ? "external_hosting" : "manual",
@@ -105,8 +107,10 @@ test("reconnect shares one retained-session scan and preserves both metadata str
   hub.attachRunner("current", { send: (data) => sent.push(data) });
   hub.attachRunner("older", { send: (data) => sent.push(data) });
   scans = 0;
+  fullScans = 0;
   hub.syncProjectMemory(undefined, "current");
   assert.equal(scans, 1, "reconnect must hydrate retained sessions only once");
+  assert.equal(fullScans, 0, "reconnect must not materialize every runner's retained sessions");
   const frames = sent.map((data) => JSON.parse(data));
   assert.deepEqual(frames.filter((m) => m.type === "set_session_artifact_uploads").map((m) => [m.sessionId, m.preference]),
     [["automatic", "wollipog_automatic"], ["external", "external_hosting"], ["unowned", "manual"]]);

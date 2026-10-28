@@ -612,7 +612,7 @@ export class Hub {
     return msg;
   }
 
-  private syncSessionArtifactUploads(session: SessionView, userId?: string): void {
+  private syncSessionArtifactUploads(session: Pick<SessionView, "id" | "runnerId">, userId?: string): void {
     const owner = this.db.sessionOwnerUser(session.id);
     if (userId && owner?.userId !== userId) return;
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(session.runnerId), "artifactSessionGuidance")) return;
@@ -1394,7 +1394,7 @@ export class Hub {
     this.broadcast({ type: "project_upsert", project });
   }
 
-  private syncSessionProjectMemory(session: SessionView): void {
+  private syncSessionProjectMemory(session: Pick<SessionView, "id" | "runnerId" | "projectId">): void {
     if ((this.runnerProtocolVersion(session.runnerId) ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return;
     this.sendToRunner(session.runnerId, { type: "set_session_project_memory", sessionId: session.id,
       projectMemory: { projectId: session.projectId ?? null,
@@ -1402,10 +1402,11 @@ export class Hub {
   }
 
   syncProjectMemory(projectId?: string, runnerId?: string): void {
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (runnerId && session.runnerId !== runnerId) continue;
-      // Reconnect already hydrates every retained session; share that scan so artifact metadata
-      // does not add another synchronous full inventory before credential handshakes can run.
+    // Reconnect runs this before credential handshakes can be answered: read only this runner's
+    // routing fields, never a full view of every retained session (#2601). Artifact metadata
+    // shares the same pass instead of adding another inventory.
+    const sessions = runnerId ? this.db.runnerSessionInventory(runnerId) : this.db.listSessions({ includeArchived: true });
+    for (const session of sessions) {
       if (runnerId) this.syncSessionArtifactUploads(session);
       if (projectId && session.projectId !== projectId) continue;
       this.syncSessionProjectMemory(session);

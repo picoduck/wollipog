@@ -24723,6 +24723,22 @@ export class ControlPlaneDb {
     ).get(targetSessionId, ancestorSessionId));
   }
 
+  /** The fields runner registration fans out over, for every session this runner owns, archived
+   * included, in `listSessions` order. A full view per retained session costs a synchronous scan
+   * of every runner's history; registration did three of them in one event-loop turn (#2601). */
+  runnerSessionInventory(runnerId: string): Array<Pick<SessionView,
+    "id" | "runnerId" | "projectId" | "status" | "archived" | "worktreePath" | "worktrees">> {
+    const rows = this.stmt(`SELECT id, runner_id, project_id, status, archived, worktree_path, worktrees
+      FROM sessions WHERE runner_id=? ORDER BY created_at DESC`).all(runnerId) as unknown as Array<Pick<SessionRow,
+      "id" | "runner_id" | "project_id" | "status" | "archived" | "worktree_path" | "worktrees">>;
+    return rows.map((row) => {
+      const worktrees = parseJson<SessionWorktreeView[]>(row.worktrees);
+      return { id: row.id, runnerId: row.runner_id, projectId: row.project_id, status: row.status as SessionStatus,
+        archived: row.archived === 1, worktreePath: row.worktree_path,
+        worktrees: Array.isArray(worktrees) ? worktrees : undefined };
+    });
+  }
+
   listSessions(opts: { includeArchived?: boolean } = {}): SessionView[] {
     const where = opts.includeArchived ? "" : "WHERE archived=0";
     const rows = this.stmt(`SELECT * FROM sessions ${where} ORDER BY created_at DESC`)

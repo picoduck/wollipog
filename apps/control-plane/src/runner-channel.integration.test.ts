@@ -286,15 +286,29 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: liveSnapshot }));
     const probe = async () => {
       const start = performance.now();
+      const answered: { HTTP?: number; pong?: number } = {};
       const pong = new Promise<void>((resolvePromise, reject) => {
-        const timer = setTimeout(() => reject(new Error(`pong exceeded 2s during reconciliation\n${failureContext(pass, start)}\n${output}`)), 2000);
-        socket.once("pong", () => { clearTimeout(timer); maxPongMs = Math.max(maxPongMs, performance.now() - start); resolvePromise(); });
+        const timer = setTimeout(() => reject(new Error("pong exceeded 2s")), 2000);
+        socket.once("pong", () => {
+          clearTimeout(timer);
+          answered.pong = performance.now() - start;
+          maxPongMs = Math.max(maxPongMs, answered.pong);
+          resolvePromise();
+        });
       });
       socket.ping();
       socket.send(JSON.stringify({ type: "heartbeat" }));
-      const [response] = await Promise.all([
-        fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) }), pong,
-      ]).catch((error: unknown) => { throw new Error(`HTTP/pong probe failed during inventory\n${failureContext(pass, start)}\n${output}`, { cause: error }); });
+      const http = fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) })
+        .then((response) => { answered.HTTP = performance.now() - start; return response; });
+      // Name each starved path with its own latency; a shared failure hides which one stalled.
+      const [response] = await Promise.all([http, pong]).catch((error: unknown) => {
+        const elapsed = Math.round(performance.now() - start);
+        const paths = (["HTTP", "pong"] as const).map((path) => answered[path] === undefined
+          ? `${path} unanswered after ${elapsed}ms` : `${path} answered in ${Math.round(answered[path])}ms`);
+        const starved = (["HTTP", "pong"] as const).filter((path) => answered[path] === undefined).join(" and ");
+        throw new Error(`${starved} probe starved during inventory (${paths.join(", ")})\n${failureContext(pass, start)}\n${output}`,
+          { cause: error });
+      });
       assert.equal(response.status, 200);
       maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
     };
