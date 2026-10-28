@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
@@ -135,12 +136,61 @@ test("skipped routing anchors delayed full work without counting its API start p
   assert.equal(collected.jobs[0].executionMinutes, null, "anchor is never charged runner minutes");
 });
 
+test("an executed merge-group gate is critical-path execution, not waiting (#3637)", () => {
+  const work = [job("Typecheck, Unit Tests & Bundles", 2, 2, 10), job("Browser End-to-End Tests (1)", 2, 3, 9),
+    job(AGGREGATOR, 10, 10, 11)];
+  const routing = job("PR Suite Routing", 0, 0, 0.01, "skipped");
+  // The gate waited one minute for a runner, then executed for one; checks/browser follow it.
+  const metrics = runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 0, 1, 2), ...work]);
+  assert.equal(metrics.criticalExecutionMinutes, 10, "1 gate + 8 checks + 1 aggregate");
+  assert.equal(metrics.criticalWaitMinutes, 1, "only the gate's runner wait is waiting");
+  assert.equal(metrics.longestJobWaitMinutes, 1);
+  const collected = attemptRecord(repository, run(11, 1, 11), [{ ...routing, status: "completed", steps: [] },
+    ...[job("Merge Group Gate", 0, 1, 2), ...work].map((item) => ({ ...item, status: "completed", steps: [{ name: "Executed Work",
+      conclusion: "success", started_at: item.started_at, completed_at: item.completed_at }] }))], {});
+  assert.equal(collected.metrics.criticalExecutionMinutes, 10, "attempt collection keeps the executed gate");
+  assert.equal(collected.metrics.criticalWaitMinutes, 1);
+  // A failed gate still precedes the full fallback; its execution is still not waiting.
+  assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 0, 1, 2, "failure"), ...work]).criticalWaitMinutes, 1);
+  // The gate itself is created with the run; it never depends on other work.
+  assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 3, 3, 4), ...work.slice(2)]).criticalExecutionMinutes, null);
+});
+
+test("a skipped merge-group gate leaves every disabled-gate measurement byte-for-byte unchanged", () => {
+  const shapes = [
+    [job("Typecheck, Unit Tests & Bundles", 0, 2, 20), job("Browser End-to-End Tests (3)", 0, 40, 58), job(AGGREGATOR, 58, 62, 63)],
+    [job("PR Suite Routing", 0, 0, 0.01, "skipped"), job("Typecheck, Unit Tests & Bundles", 0.02, 2, 9),
+      job("Browser End-to-End Tests (1)", 0.02, 3, 15), job(AGGREGATOR, 15, 15, 16)],
+    [job("PR Suite Routing", 0, null, 1, "skipped"), job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
+      job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)],
+    [job("Typecheck, Unit Tests & Bundles", 10, 12, 28), job(AGGREGATOR, 28, 29, 30)],
+  ];
+  for (const [index, jobs] of shapes.entries()) {
+    for (const placeholder of [null, 0, 0.01]) {
+      const gate = job("Merge Group Gate", 0, placeholder, 0.01, "skipped");
+      assert.deepEqual(runMetrics(run(12, 1, 63), [gate, ...jobs]), runMetrics(run(12, 1, 63), jobs), `shape ${index}`);
+      const record = (items) => attemptRecord(repository, run(12, 1, 63), items.map((item) => ({ ...item, status: "completed",
+        steps: item.conclusion === "skipped" ? [] : [{ name: "Executed Work", conclusion: "success", started_at: item.started_at,
+          completed_at: item.completed_at }] })), {});
+      const [withGate, without] = [record([gate, ...jobs]), record(jobs)];
+      assert.deepEqual(withGate.metrics, without.metrics, `shape ${index} attempt metrics`);
+    }
+  }
+  // Offline recomputation of the committed baseline is unchanged (pinned at the pre-#3637 report).
+  const outputs = [];
+  return Promise.all([["--json"], []].map(async (flags) => {
+    const lines = [];
+    assert.equal(await main(["--input", "docs/ci-baseline-2026-10-22.json", ...flags], { out: (line) => lines.push(line) }), 0);
+    outputs.push(createHash("sha256").update(lines.join("\n") + "\n").digest("hex"));
+  })).then(() => assert.deepEqual(outputs.sort(), ["370a9e29dcf50f05510a7214a4aee0e961d3d677f0b753eff930b209aaaa2f46",
+    "e5858c017efe0d2fe7f41f8698351ba4bf7713c26207be6ea51478c9d8bb65c0"].sort()));
+});
+
 test("the assumed dependency structure matches the CI workflow files", () => {
   // Checks/browser wait for optional PR routing and the disabled merge-group gate. Both are
-  // skipped when the run is created, so neither delays work today. An active gate's execution
-  // would be counted as waiting; activation must model it first. Windows/WebKit stay
-  // independent, and only the aggregator consumes all required work. Advisory shadows never
-  // supply a required result.
+  // skipped when the run is created, so neither delays work today. An executed gate is modelled
+  // as critical-path execution (see the gate tests above). Windows/WebKit stay independent, and
+  // only the aggregator consumes all required work. Advisory shadows never supply a required result.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
   assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
     "needs: [suite_plan, merge_group_gate]", "needs: [checks, browser, win32, webkit]",

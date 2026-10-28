@@ -87,7 +87,10 @@ readiness is claimed. This policy alignment grants no live configuration or paid
 
 Before merge, verify the reviewed head equals the pushed head and required CI passed on that SHA.
 The required check is `Typecheck, Test & Sidecar Bundle`; an empty required list into `main` with
-an active workflow is pending. Draft-skipped and absent runs need repair. Inspect dependencies and
+an active workflow is pending. Merge groups run full regression: the fast merge-group gate and
+regression admission are disabled, and activating them needs the separate human approvals in
+`docs/fast-gate-activation-proposal.md`. Agents never set `CI_MERGE_GROUP_GATE`,
+`CI_REGRESSION_ADMISSION` or `CI_PR_SUITE_ROUTING`, or change the ruleset. Draft-skipped and absent runs need repair. Inspect dependencies and
 direct stacked children. Request the exact typed merge decision and arm/execute the canonical
 `gh pr merge URL --squash --match-head-commit SHA` command; never use `--delete-branch` on enqueue.
 Wait for merge-group CI and actual `MERGED` state. Obtain a separate typed branch-deletion approval

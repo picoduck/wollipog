@@ -71,6 +71,9 @@ failed runs, missing the ejection that carried the #1819 evidence. In this repos
 ejections and as browser jobs that failed once and passed on retry, which still fail the run
 because `playwright.config.ts` sets `failOnFlakyTests` under CI. A 20-run window missed the
 2026-09-22 phone-viewport flake and four merge-queue ejections entirely.
+Merge groups still run the full suite today. The fast merge-group gate (`CI_MERGE_GROUP_GATE`) is
+disabled; if it is ever activated, ordinary groups run a reduced suite and a flake in skipped work
+surfaces only in Main Rolling Validation (see `docs/fast-gate-activation-proposal.md`).
 
 ## Gate
 

@@ -185,6 +185,28 @@ trusted commit, with its `workflowBlobs`); it still needs separate operator hold
 approval. The jobs API cannot show which shell branch a step took: Node coverage rests
 on the verified definition plus the skipped gate, which make the reduced branch unreachable.
 
+### Readiness, Rollback Triggers and Activation Proposal
+
+Three inert companions prepare a later, separately approved cutover; none changes a
+setting or reads GitHub:
+
+- `scripts/fast-gate-rollback.mjs` defines the rollback triggers and proposed thresholds
+  (`approved: false`; unapproved thresholds always evaluate to rollback). Its rehearsal
+  drives each trigger from an active fast gate to `CI_MERGE_GROUP_GATE=disabled`, this
+  verifier's proof and `planRollback`, and checks that hold removal is refused without
+  a verified proof. `plan --proof restoration.json` runs `planRollback` offline.
+- `scripts/fast-gate-readiness-report.mjs` generates the dated
+  [readiness report](fast-gate-readiness-2026-10-28.md). It separates criteria that are
+  met from observation, approval and code gaps, and reports too little data as incomplete.
+  `--check` fails when the committed report drifts.
+- The [activation proposal](fast-gate-activation-proposal.md) lists the exact variable
+  values, the ruleset body, the status-writing identity, the thresholds and their basis,
+  the bounded rollout, the measurement plan, rollback commands with read-back, and the
+  guidance text to apply at activation.
+
+Merge-queue wait measurement models an executed `Merge Group Gate` as critical-path
+execution ([Merge-Queue Wait](merge-queue-wait.md)).
+
 ## Bounds and Evidence Limits
 
 The aggregator owns one shell step and retains a five-minute job budget, measured
@@ -214,7 +236,8 @@ Run the dedicated source contract and aggregation fixtures:
 ```sh
 node --import tsx --test scripts/workflow-pr-event-contract.test.mjs scripts/workflow-ci-aggregation.test.mjs \
   scripts/workflow-ci-routing.test.mjs scripts/pr-ci-supersede.test.mjs \
-  scripts/ci-merge-group-gate.test.mjs scripts/ci-merge-group-restoration.test.mjs
+  scripts/ci-merge-group-gate.test.mjs scripts/ci-merge-group-restoration.test.mjs \
+  scripts/fast-gate-rollback.test.mjs scripts/fast-gate-readiness-report.test.mjs
 ```
 
 The aggregation fixtures evaluate the actual job condition using inert status
