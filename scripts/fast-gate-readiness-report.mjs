@@ -210,7 +210,13 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
     `Bounded by 120 s observation + 60 s cycle + unmeasured landing latency L (rehearsal: ${ls.raceWindow.evaluationAgeAtLandingMs / 1000} s with a fixture L); a rerun begun in that window during an outage extends it (${ls.rerunDuringOutage.evaluationAgeAtLandingMs / 1000} s)`);
   add("admission-outage-availability", "Approval", "Accept the fail-closed availability cost of just-in-time admission", "approval-gap",
     `Up to ${ls.availabilityCost.maxAddedLatencyMs / 1000} s added per group; a controller outage stalls the queue and removes groups after ${ls.availabilityCost.outageStallUntilRemovalMs / 60_000} min`);
-  add("escalation-delivery", "Operations", "Exhausted investigation escalation reaches a human", "code-gap", "Outside the delivered modules; not rehearsed");
+  // Met only by the cutover rehearsal's exhausted-investigation flow proving exactly-once incident delivery.
+  const escalationStep = flows["exhausted-investigation-budget"]?.steps.find((step) => step.step === "each exhaustion reaches the open incident exactly once");
+  add("escalation-delivery", "Operations", "Exhausted investigation escalation reaches a human", "met",
+    escalationStep ? "Each exhaustion is one marked comment on the open Main CI Health incident; a repeat finds the marker (scripts/main-regression-escalation.mjs)"
+      : "No exactly-once delivery evidence in the cutover rehearsal", escalationStep?.match === true);
+  add("escalation-target", "Approval", "Escalation target configured (disabled by default)", "approval-gap",
+    "Set MAIN_REGRESSION_ESCALATION_MENTION to an approved user or team and read it back; delivery runs on Main CI Health's next invocation and cannot prove a human read it");
   add("exposure-window", "Operations", "Accepted exposure between fast landing and the full verdict", "approval-gap",
     `Rehearsal: ${minutes(flows["missed-failure"].times.landingToFailedVerdictMs)} min, ${flows["missed-failure"].times.exposureAdmissionsBeforeHold} admissions withdrawn (virtual)`);
   add("status-writing-identity", "Approval", "Status-writing app, operator host and pinned integration_id for Regression Admission", "approval-gap", "Not provisioned; no workflow grants statuses: write");

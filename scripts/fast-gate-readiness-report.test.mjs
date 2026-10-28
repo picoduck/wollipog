@@ -40,7 +40,9 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     assert.equal(by[id].classification, "observation-gap", id);
   for (const id of ["detection-backlog-recovery", "status-writing-identity", "agents-md-active", "reconcile-2674"])
     assert.equal(by[id].classification, "approval-gap", id);
-  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "escalation-delivery", "planrollback-run-level-proof"])
+  // Escalation delivery is met through the rehearsal's exactly-once step; configuring its target is an approval.
+  assert.deepEqual([by["escalation-delivery"].status, by["escalation-target"].classification], ["met", "approval-gap"]);
+  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "planrollback-run-level-proof"])
     assert.equal(by[id].classification, "code-gap", id);
   // #3633 just-in-time admission closes the sticky-success code gap; its race and availability remain.
   assert.deepEqual([by["sticky-success"].classification, by["admission-landing-race"].classification,
@@ -53,13 +55,15 @@ test("a failing rehearsal flow or rollback scenario is reported as a failing cod
   const { cutover, rollback, lease } = await inputs();
   const broken = structuredClone(cutover);
   broken.flows[0].pass = false; broken.flows[0].steps[0].match = false;
+  broken.flows.find((flow) => flow.id === "exhausted-investigation-budget").steps
+    .find((step) => step.step === "each exhaustion reaches the open incident exactly once").match = false;
   const brokenRollback = structuredClone(rollback);
   brokenRollback.summary.pass = false;
   brokenRollback.scenarios[0].steps.find((step) => step.step === "every unverified, reduced, forged or foreign proof is refused").match = false;
   const brokenLease = structuredClone(lease); brokenLease.summary.pass = false;
   const report = await buildReadiness({ cutover: broken, rollback: brokenRollback, lease: brokenLease });
   const by = Object.fromEntries(report.criteria.map((row) => [row.id, row]));
-  for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal", "sticky-success"]) {
+  for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal", "sticky-success", "escalation-delivery"]) {
     assert.equal(by[id].classification, "code-gap", id); assert.equal(by[id].status, "failing", id);
   }
 });

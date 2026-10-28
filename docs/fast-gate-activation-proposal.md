@@ -33,12 +33,14 @@ All must hold before step 1. The readiness report tracks each one.
 
 1. **Code gaps closed.** At the five-commit backlog limit the writer has 41 status
    writes for a 45-target fan-out, and the batched 45-target set uses 96/96 calls
-   (#3711). Either outcome refuses with zero writes. Exhausted investigation
-   escalation has no delivery path to a human. Each needs a reviewed fix or an
+   (#3711). Either outcome refuses with zero writes. Each needs a reviewed fix or an
    explicit decision to keep full queue validation. Sticky merge-group success is
    addressed by [just-in-time group admission](main-merge-admission.md#fail-closed-group-admission).
    Approve its availability cost (a stalled queue during a controller outage) and its
-   remaining write-to-landing race.
+   remaining write-to-landing race. Exhausted investigation escalation is
+   delivered to the open incident once per attempt
+   ([escalation delivery](main-regression-automation.md#escalation-delivery)), but only
+   after `MAIN_REGRESSION_ESCALATION_MENTION` is set to an approved target and read back.
 2. **#3633 enforcement bound.** A measured, approved failure-to-block bound from
    natural shadow traffic (shipped bound today: none), plus an accepted forge race.
 3. **Prerequisite windows.** #3628/#3629 long-window comparisons complete;
