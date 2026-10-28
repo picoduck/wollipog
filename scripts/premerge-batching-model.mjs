@@ -281,6 +281,8 @@ export function simulate(inputs, design, params = {}, seed = 1) {
       enqueue(entry, now);
     }
   }
+  // A settled simulation holds no slot; anything else is a leaked build.
+  stats.slotsHeldAtEnd = slotsUsed + fastSlotsUsed;
   if (holdSince !== null) stats.holdMinutes += now - holdSince;
   if (redSince !== null) stats.redMinutes += now - redSince;
   return stats;

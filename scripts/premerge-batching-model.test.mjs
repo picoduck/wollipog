@@ -50,10 +50,12 @@ test("HEADGREEN lets a later passing group vouch for a flaky earlier entry but s
   assert.ok(vouched, "expected a seed where HEADGREEN absorbs the head's flake");
   assert.deepEqual(vouched.head.merged, [30, 30]);
   // A vouching group frees the slots of earlier groups that are still running.
-  const staggered = inputs([0, 0, 0], { passingExecutionMinutes: [30, 45] });
-  for (let seed = 1; seed <= 200; seed++) {
+  // Uneven durations make a later group vouch while an intermediate group still runs.
+  const staggered = inputs(Array.from({ length: 200 }, (_, i) => i), { passingExecutionMinutes: [10, 60] });
+  for (let seed = 1; seed <= 20; seed++) {
     const run = simulate(staggered, { kind: "native", depth: 3, headGreen: true }, { ...clean, flakeRate: 0.4, slots: 3 }, seed);
-    assert.equal(run.merged.length, 3);
+    assert.equal(run.merged.length, 200);
+    assert.equal(run.slotsHeldAtEnd, 0);
   }
   // A defect is never vouched for: every later group contains it.
   const defect = simulate(trace, { kind: "native", depth: 2, headGreen: true }, { ...clean, defects: [0] });
@@ -125,6 +127,7 @@ test("a hold withdraws an ordinary entry already in flight until recovery", () =
   assert.equal(run.exposedMerges, 0);
   assert.equal(run.redMinutes, 90);
   assert.equal(run.holdMinutes, 60);
+  assert.equal(run.slotsHeldAtEnd, 0);
 });
 
 test("a fast-gate catch rejects the defect without reaching main", () => {
