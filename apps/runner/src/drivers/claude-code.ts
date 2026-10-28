@@ -1914,7 +1914,9 @@ export class ClaudeCodeDriver implements Driver {
         if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
         else if (status === "killed" && this.stopWasRequested(taskId)) this.completeProviderStop(taskId, toolUseId);
         else if (status === "killed" && this.pendingBackgroundTasks.get(taskId)?.launchType === "monitor") {
-          this.completeMonitorTask(taskId, toolUseId);
+          this.completeEndedTask(taskId, toolUseId);
+        } else if (status === "killed" && this.canSettleUnrequestedShellStop(taskId)) {
+          this.completeEndedTask(taskId, toolUseId);
         }
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
@@ -1924,7 +1926,10 @@ export class ClaudeCodeDriver implements Driver {
           this.completeProviderStop(taskId, toolUseId);
         } else if ((status === "stopped" || status === "killed" || status === "completed" || status === "failed") &&
             this.pendingBackgroundTasks.get(taskId)?.launchType === "monitor") {
-          this.completeMonitorTask(taskId, toolUseId, status === "failed" ? "failed" : status === "completed" ? "completed" : "killed");
+          this.completeEndedTask(taskId, toolUseId, status === "failed" ? "failed" : status === "completed" ? "completed" : "killed");
+        } else if ((status === "killed" || (status === "stopped" && this.pendingBackgroundTasks.get(taskId)?.launchType === "shell")) &&
+            this.canSettleUnrequestedShellStop(taskId)) {
+          this.completeEndedTask(taskId, toolUseId);
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
         } else {
@@ -1974,7 +1979,7 @@ export class ClaudeCodeDriver implements Driver {
         if (stopTarget && block.is_error === true &&
             this.pendingBackgroundTasks.get(stopTarget)?.launchType === "monitor" &&
             block.content === `<tool_use_error>No task found with ID: ${stopTarget}</tool_use_error>`) {
-          this.completeMonitorTask(stopTarget);
+          this.completeEndedTask(stopTarget);
         }
         this.modelTaskStops.delete(block.tool_use_id);
         // Monitor's observed launch result has taskId but no async_launched status. Its prose
@@ -2160,25 +2165,38 @@ export class ClaudeCodeDriver implements Driver {
     return this.activePersistentTurn?.id ?? this.activeOneShotTurnId ?? undefined;
   }
 
-  /** Expiry and an exact missing-task response prove a monitor ended. Remember both identities
-   * before publishing its terminal record, so trailing notifications/results cannot revive it. */
-  private completeMonitorTask(id: string, toolUseId?: string, status: "completed" | "failed" | "killed" = "killed"): void {
+  /** An open persistent transport distinguishes a provider's shell timeout from the identical
+   * reports it emits when stdin closes. The latter still belong to orphan recovery (#3204). */
+  private canSettleUnrequestedShellStop(id: string): boolean {
+    const task = this.pendingBackgroundTasks.get(id);
+    return (task?.launchType === "shell" || task?.launchType === "unknown") &&
+      this.persistentTransport && !this.intentionalPersistentStop && this.child != null &&
+      !this.child.stdin.writableEnded && !this.child.stdin.destroyed;
+  }
+
+  /** Remember both identities before publishing an authoritative terminal report, so trailing
+   * notifications, launch results and markerless output files cannot revive the job. */
+  private completeEndedTask(
+    id: string,
+    toolUseId?: string,
+    status: "completed" | "failed" | "killed" = "killed",
+    provenance: Partial<Pick<DriverBackgroundTerminalJob, "continuationRequired">> = {},
+  ): void {
     const task = this.pendingBackgroundTasks.get(id);
     const alias = toolUseId ?? task?.toolUseId;
     this.endedBackgroundTaskIds.add(id);
     if (alias) this.endedBackgroundTaskIds.add(`tool:${alias}`);
-    this.completePendingTask(id, alias, status);
+    this.completePendingTask(id, alias, status, provenance);
   }
 
   /** A restart seed gets one recovery turn. If that live process did not re-observe the id, the
    * seed is handled rather than being carried into an automatic replay loop forever. */
   private settleUnverifiedBackgroundTasks(): void {
-    let changed = false;
-    for (const id of this.unverifiedBackgroundTaskIds) {
-      if (this.pendingBackgroundTasks.delete(id)) changed = true;
+    for (const id of [...this.unverifiedBackgroundTaskIds]) {
+      // Recovery already handled this seed and did not re-observe it. Publish its settlement as
+      // well as removing the driver entry, otherwise its durable row holds handoffs forever.
+      this.completeEndedTask(id, undefined, "killed", { continuationRequired: false });
     }
-    this.unverifiedBackgroundTaskIds.clear();
-    if (changed) this.pendingWorkChanged();
   }
 
   private pendingWorkChanged(terminalJobs: DriverBackgroundTerminalJob[] = []): void {
@@ -2255,16 +2273,29 @@ export class ClaudeCodeDriver implements Driver {
       if (task) {
         terminalJobs.push({
           ...driverBackgroundJob(task),
-          status: "completed",
+          status: inspection.terminalTaskStatuses?.get(id) ?? "completed",
           terminalAt: this.deps.now(),
           continuationRequired,
         });
         this.pendingBackgroundTasks.delete(id);
         this.unverifiedBackgroundTaskIds.delete(id);
+        // Agent/workflow ids can be resumed after completion. Only non-resumable jobs need
+        // protection from the trailing stopped report or markerless shell output file.
+        if (task.launchType !== "agent" && task.launchType !== "workflow") {
+          this.endedBackgroundTaskIds.add(id);
+          if (task.toolUseId) this.endedBackgroundTaskIds.add(`tool:${task.toolUseId}`);
+        }
         changed = true;
       }
     }
     if (changed) this.pendingWorkChanged(terminalJobs);
+    for (const job of terminalJobs) {
+      const stop = this.stoppingBackgroundTasks.get(job.id);
+      if (stop && !stop.ended) {
+        stop.ended = { stopped: false, job };
+        stop.wake?.();
+      }
+    }
   }
 
   private providerProjectsRoot(): string | undefined {
@@ -2293,18 +2324,28 @@ export class ClaudeCodeDriver implements Driver {
     ), continuationRequired);
   }
 
-  private async reconcilePendingTaskFilesInContext(continuationRequired = false): Promise<void> {
-    this.applyBackgroundInspection(await this.deps.inspectBackgroundWork(
+  private async reconcilePendingTaskFilesInContext(continuationRequired = false, onlyTaskId?: string): Promise<void> {
+    const child = this.child;
+    const task = onlyTaskId ? this.pendingBackgroundTasks.get(onlyTaskId) : undefined;
+    const inspection = await this.deps.inspectBackgroundWork(
       this.opts.context,
       this.cwd,
       this.sessionId,
-      this.pendingBackgroundTasks.keys(),
+      onlyTaskId ? [onlyTaskId] : this.pendingBackgroundTasks.keys(),
       { env: {
         ...this.opts.env,
         ...(claudeNamespaceTempRoot(this.processes.owner)
           ? { TMPDIR: claudeNamespaceTempRoot(this.processes.owner) } : {}),
       }, projectsRoot: this.providerProjectsRoot() },
-    ), continuationRequired);
+    );
+    if (onlyTaskId) {
+      // A live report or transport replacement during the receipt read supersedes it. Do not
+      // rediscover unrelated artifacts as a side effect of stopping this one task.
+      if (this.disposed || this.child !== child || this.pendingBackgroundTasks.get(onlyTaskId) !== task) return;
+      this.applyBackgroundInspection({ ...inspection, incompleteArtifacts: [],
+        terminalTaskIds: new Set([...inspection.terminalTaskIds].filter(id => id === onlyTaskId)),
+      }, continuationRequired);
+    } else this.applyBackgroundInspection(inspection, continuationRequired);
   }
 
   private finishIdleEvictionAfterReconcile(): void {
@@ -2461,6 +2502,12 @@ export class ClaudeCodeDriver implements Driver {
       if (stop.ended) return { status: stop.ended.stopped ? "stopped" : "finished", job: stop.ended.job };
       if (this.child !== child) return { status: "refused", reason: "no_live_process" };
       if (response && !succeeded) return { status: "refused", reason: "provider_rejected" };
+      // A forgotten task may have a durable terminal receipt but no live stop report. Success
+      // alone still proves nothing; reconcile the exact provider ledger before returning 409.
+      await this.reconcilePendingTaskFilesInContext(true, jobId);
+      const reconciled = this.stoppingBackgroundTasks.get(jobId)?.ended;
+      if (reconciled) return { status: reconciled.stopped ? "stopped" : "finished", job: reconciled.job };
+      if (this.child !== child) return { status: "refused", reason: "no_live_process" };
       this.rememberUnconfirmedStop(jobId);
       return { status: "refused", reason: "unconfirmed" };
     } finally {
