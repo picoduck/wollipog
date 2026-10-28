@@ -41,9 +41,12 @@ export const MEASUREMENTS = Object.freeze([
   { id: "suite-shadow-local", value: "Node fast entry point 231 tests in 36.830 s; five critical Chromium files 3.3 min (local, not CI)", source: "docs/ci-suite-evidence-2026-10-23.md", quote: "passed **231 tests in 36.830 s**" },
 ]);
 
-/** The exact PUT body for the main ruleset: every live rule unchanged except one added admission context. */
+/** The exact PUT body for the target ruleset, built from its own rules (never the effective branch rules,
+ * which can come from other rulesets): every rule unchanged except one added admission context. */
 export function proposedRuleset(live, issuer = ADMISSION_ISSUER_PLACEHOLDER) {
-  const rules = live.branchRules.map(({ type, parameters }) => parameters === null ? { type } : { type, parameters: structuredClone(parameters) });
+  if (live.ruleset?.id !== RULESET_ID || !Array.isArray(live.ruleset.rules)) throw new Error("Unexpected live ruleset");
+  const rules = live.ruleset.rules.map(({ type, parameters }) => parameters === undefined || parameters === null ? { type }
+    : { type, parameters: structuredClone(parameters) });
   const checks = rules.find((rule) => rule.type === "required_status_checks");
   if (!checks || checks.parameters.required_status_checks.some((check) => check.context === ADMISSION_CONTEXT) ||
       !checks.parameters.required_status_checks.some((check) => check.context === REQUIRED_CONTEXT)) throw new Error("Unexpected live ruleset");
@@ -109,8 +112,8 @@ export async function buildReadiness({ cutover, rollback } = {}) {
     batched46Writes: fanout.batchedMeasuredCost46Targets.writes,
     rehearsalHolds: { baseMovedOnly: holds.filter((kind) => kind === "base-moved").length, healthOrPolicy: holds.filter((kind) => kind === "health-or-policy").length },
   };
-  const liveRequired = live.branchRules.find((rule) => rule.type === "required_status_checks").parameters.required_status_checks;
-  const queue = live.branchRules.find((rule) => rule.type === "merge_queue").parameters;
+  const liveRequired = live.ruleset.rules.find((rule) => rule.type === "required_status_checks").parameters.required_status_checks;
+  const queue = live.ruleset.rules.find((rule) => rule.type === "merge_queue").parameters;
   const workflow = text(".github/workflows/ci.yml");
   const linked = GUIDANCE.filter((path) => text(path).includes("fast-gate-activation-proposal.md"));
   const decided = (label) => gate.find((row) => row.label === label);
@@ -152,9 +155,15 @@ export async function buildReadiness({ cutover, rollback } = {}) {
     `Proposed: detection ≤ ${PROPOSED_THRESHOLDS.maxDetectionMinutes} min, backlog ≤ ${PROPOSED_THRESHOLDS.maxUnvalidatedCommits} commits / ${PROPOSED_THRESHOLDS.maxUnvalidatedAgeSeconds} s, recovery ≤ ${PROPOSED_THRESHOLDS.maxRecoveryMinutes} min; then observation`);
   add("rollback-triggers", "AC5", "Rollback triggers defined and each exercised through restoration", "met",
     `${rollback.summary.passed}/${rollback.summary.scenarios} trigger scenarios, ${rollback.summary.steps} steps (scripts/fast-gate-rollback.mjs)`, rollback.summary.pass);
+  // Every refusal step before the full certification must match, in every trigger scenario.
+  const refusals = rollback.scenarios.map((s) => s.steps.slice(0, s.steps.findIndex((step) => /certifies full queue validation/.test(step.step))));
   add("restore-before-hold-removal", "AC5", "Full queue validation verified before any health-policy hold is removed", "met",
-    "planRollback refuses without fullQueueProof, with a reduced, unfinished or forged proof, and with an approval for another digest",
-    rollback.scenarios.every((s) => s.steps.find((step) => step.step === "hold removal refused without fullQueueProof")?.match));
+    `The fast-gate plan path refuses without a proof, with reduced, unfinished, forged or foreign proofs, and with an approval for another digest (${refusals.reduce((n, steps) => n + steps.length, 0)} refusal steps)`,
+    refusals.every((steps) => steps.length >= 6 && steps.every((step) => step.match)));
+  const delivered = rollback.checks.deliveredPlanRollbackOnForgedProof;
+  criteria.push({ id: "planrollback-run-level-proof", acceptance: "AC5", criterion: "#3633's planRollback checks run-level certification itself",
+    classification: delivered === "restore-full-queue-validation-first" ? "met" : "code-gap", status: delivered === "restore-full-queue-validation-first" ? "met" : "open",
+    evidence: `On a forged proof with top-level fields edited to verified and runs certified none, the delivered planRollback returns ${delivered}; only the fast-gate plan path's consistency check refuses it. A fully hand-edited proof still passes: take proofs only from the verifier` });
   add("no-auto-expansion", "AC5", "No budget, timeout, paid capacity or bypass right is expanded", "met",
     `Rehearsals made ${cutover.liveMutations + rollback.liveMutations} live mutations; proposal keeps check_response_timeout_minutes ${queue.check_response_timeout_minutes}, max_entries_to_build ${queue.max_entries_to_build} and bypass actors unchanged`,
     JSON.stringify(ruleset.bypass_actors) === JSON.stringify(live.ruleset.bypass_actors) &&
@@ -194,7 +203,7 @@ export async function buildReadiness({ cutover, rollback } = {}) {
   return { schema: SCHEMA, issue: "#3637 AC1", date: REPORT_DATE, activationReady: false, liveMutations: 0,
     verdict: "Not ready to activate: observation, approval and code gaps remain. Insufficient data is reported as incomplete, never as passing.",
     counts, criteria, gate, ruleset: { id: RULESET_ID, put: ruleset }, capacity, baseline,
-    live: { observedAt: live.observedAt, method: live.method, repositoryVariableNames: live.repositoryVariableNames, gateVariables: live.gateVariables,
+    live: { observedAt: live.observedAt, rulesetRereadAt: live.rulesetRereadAt ?? null, method: live.method, repositoryVariableNames: live.repositoryVariableNames, gateVariables: live.gateVariables,
       requiredStatusChecks: liveRequired, mergeQueue: queue, bypassActors: live.ruleset.bypass_actors },
     rehearsals: {
       cutover: { schema: cutover.schema, summary: cutover.summary, timing: cutover.timing,
@@ -228,7 +237,7 @@ export function markdown(report) {
     "| Criterion | Acceptance | Classification | Status | Evidence |", "| --- | --- | --- | --- | --- |",
     ...report.criteria.map((row) => `| ${cell(row.criterion)} | ${row.acceptance} | ${LABEL[row.classification]} | ${STATUS[row.status]} | ${cell(row.evidence)} |`), "",
     "## Live Settings Snapshot", "",
-    `Observed **${report.live.observedAt}**. ${report.live.method}`, "",
+    `Observed **${report.live.observedAt}**${report.live.rulesetRereadAt ? `; ruleset re-read **${report.live.rulesetRereadAt}**` : ""}. ${report.live.method}`, "",
     `- Repository variables present: ${report.live.repositoryVariableNames.map((name) => `\`${name}\``).join(", ") || "none"}.`,
     `- ${Object.entries(report.live.gateVariables).map(([name, value]) => `\`${name}\` ${value === null ? "absent" : `\`${value}\``}`).join("; ")}.`,
     `- Required status checks: \`${JSON.stringify(report.live.requiredStatusChecks)}\`.`,

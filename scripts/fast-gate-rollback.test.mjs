@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { GATE_VARIABLE, ROLLBACK_VALUE } from "./ci-merge-group-gate.mjs";
-import { evaluateRollbackTriggers, main, OBSERVATION_SCHEMA, PROPOSED_THRESHOLDS, REHEARSAL_THRESHOLDS, rehearseFastGateRollback,
+import { evaluateRollbackTriggers, main, OBSERVATION_SCHEMA, planFastGateRollback, PROPOSED_THRESHOLDS, REHEARSAL_THRESHOLDS,
+  rehearseFastGateRollback, restorationProofRefusal,
   rollbackCommands, ROLLBACK_TRIGGERS } from "./fast-gate-rollback.mjs";
 import { POLICY } from "./main-merge-admission.mjs";
 
@@ -39,7 +40,12 @@ test("unapproved, malformed or unreadable inputs always roll back", () => {
   assert.equal(PROPOSED_THRESHOLDS.approved, false);
   assert.deepEqual(ids(evaluateRollbackTriggers(healthy(), PROPOSED_THRESHOLDS)), ["thresholds-unapproved"]);
   for (const broken of [undefined, {}, { ...REHEARSAL_THRESHOLDS, version: 2 }, { ...REHEARSAL_THRESHOLDS, maxRecoveryMinutes: "240" },
-    { ...REHEARSAL_THRESHOLDS, maxDetectionMinutes: -1 }]) assert.deepEqual(ids(evaluateRollbackTriggers(healthy(), broken)), ["thresholds-unapproved"]);
+    { ...REHEARSAL_THRESHOLDS, maxDetectionMinutes: -1 }, { ...REHEARSAL_THRESHOLDS, latencyWindowIntegrations: 20.5 },
+    { ...REHEARSAL_THRESHOLDS, latencyWindowIntegrations: 0 }, { ...REHEARSAL_THRESHOLDS, maxRegressionEscapes: 0.5 },
+    { ...REHEARSAL_THRESHOLDS, maxUnvalidatedCommits: 5.5 }]) assert.deepEqual(ids(evaluateRollbackTriggers(healthy(), broken)), ["thresholds-unapproved"]);
+  // A fractional window could never fill and would hide a uniform breach (#3759 review).
+  const slow = healthy({ integrations: healthy().integrations.map((row) => ({ ...row, requiredMinutes: 100 })) });
+  assert.equal(evaluateRollbackTriggers(slow, { ...REHEARSAL_THRESHOLDS, latencyWindowIntegrations: 20.5 }).rollback, true);
   for (const observation of [undefined, {}, healthy({ schema: "other" }), healthy({ observedAt: "yesterday" }), healthy({ integrations: null }),
     healthy({ repository: "not-a-repository" }), healthy({ health: null })]) assert.deepEqual(ids(evaluateRollbackTriggers(observation, REHEARSAL_THRESHOLDS)), ["observation-unavailable"]);
 });
@@ -55,6 +61,8 @@ test("thresholds are boundaries: equality keeps the gate, the next step beyond i
   assert.equal(evaluate({ integrations: [...healthy().integrations, ...Array(10).fill({ eligible: false, passing: true, requiredMinutes: 60 })] }).rollback, false);
   assert.deepEqual(ids(evaluate({ integrations: [...healthy().integrations, { eligible: true, passing: true, expiredMissingRequired: true, requiredMinutes: null }] })),
     ["required-latency-breach"], "one all-green expiry is a breach regardless of sample size");
+  assert.deepEqual(ids(evaluate({ integrations: [...healthy().integrations, { eligible: false, passing: true, expiredMissingRequired: true, requiredMinutes: null }] })),
+    ["required-latency-breach"], "a full-fallback group's all-green expiry is a breach too (#3759 review)");
   const sparse = evaluate({ integrations: healthy().integrations.slice(0, 19) });
   assert.equal(sparse.rollback, false); assert.equal(sparse.requiredLatencyP90Minutes, null);
   assert.deepEqual(sparse.incomplete.map((row) => row.id), ["required-latency-breach"], "insufficient traffic is incomplete, never passing");
@@ -73,12 +81,44 @@ test("thresholds are boundaries: equality keeps the gate, the next step beyond i
   assert.deepEqual(ids(evaluate(unknown(null))), ["validator-outage"], "an outage of unknown length is not bounded");
   assert.deepEqual(ids(evaluate({ controllerAvailable: false, validatorUnavailableSince: at(-45) })), ["validator-outage"]);
   assert.deepEqual(ids(evaluate({ health: { status: "passing", reasons: [], backlog: null } })), ["validator-outage"]);
+  // Negative or sentinel backlog values are not measurements (#3759 review).
+  for (const backlog of [{ commits: -1, oldestUnvalidatedAgeSeconds: 0 }, { commits: 0, oldestUnvalidatedAgeSeconds: -1 },
+    { commits: 1.5, oldestUnvalidatedAgeSeconds: 10 }]) assert.deepEqual(ids(evaluate({ health: { status: "passing", reasons: [], backlog } })),
+    ["validator-outage"], JSON.stringify(backlog));
   // The hold point is #3633's threshold; only beyond it did holds fail to bound the backlog.
   const backlog = (commits, age) => ({ health: { status: "pending", reasons: [], backlog: { commits, oldestUnvalidatedAgeSeconds: age } } });
   assert.equal(evaluate(backlog(POLICY.maxUnvalidatedCommits, POLICY.maxUnvalidatedAgeSeconds)).rollback, false);
   assert.deepEqual(ids(evaluate(backlog(POLICY.maxUnvalidatedCommits + 1, 0))), ["backlog-beyond-limit"]);
   assert.deepEqual(ids(evaluate(backlog(1, POLICY.maxUnvalidatedAgeSeconds + 1))), ["backlog-beyond-limit"]);
   assert.equal(PROPOSED_THRESHOLDS.maxDetectionMinutes, POLICY.maxUnvalidatedAgeSeconds / 60);
+});
+
+test("a forged or inconsistent restoration proof is refused before #3633's planRollback, which alone checks only top-level fields", async () => {
+  const report = await rehearseFastGateRollback();
+  assert.equal(report.checks.deliveredPlanRollbackOnForgedProof, "operator-hold-removal-approval-required",
+    "disclosed: the delivered pure planRollback does not inspect runs");
+  const repository = "fixture/fast-gate-rollback";
+  const sha = (c) => c.repeat(40);
+  const proof = { schema: "merge-group-restoration-v1", repository, since: "2026-11-02T15:05:00Z", verified: true, coverage: "full-merge-group-v1",
+    requiredContext: "Typecheck, Test & Sidecar Bundle", workflowSha: sha("c"), reasons: [],
+    workflowBlobs: { ".github/workflows/ci.yml": sha("1"), ".github/workflows/settings-rows-win32.yml": sha("2") },
+    runs: [{ runId: 1, attempt: 1, headSha: sha("d"), createdAt: "2026-11-02T15:09:00Z", certification: "full", reasons: [] }] };
+  assert.deepEqual(restorationProofRefusal(proof, repository), []);
+  assert.equal(planFastGateRollback({ repository, fullQueueProof: proof }).decision, "operator-hold-removal-approval-required");
+  for (const [change, reason] of [
+    [(p) => { p.runs[0].certification = "none"; p.runs[0].reasons = ["merge-group-gate-active"]; }, "proof-run-not-certified-full"],
+    [(p) => { p.runs = []; }, "proof-run-not-certified-full"],
+    [(p) => { p.reasons = ["run-not-certified-full"]; }, "proof-not-verified"],
+    [(p) => { p.schema = "other"; }, "proof-identity-unavailable"],
+    [(p) => { p.repository = "another/repository"; }, "proof-identity-unavailable"],
+    [(p) => { delete p.workflowBlobs[".github/workflows/settings-rows-win32.yml"]; }, "proof-workflow-blobs-unavailable"],
+    [(p) => { p.workflowSha = null; }, "proof-coverage-unavailable"],
+  ]) {
+    const forged = structuredClone(proof); change(forged);
+    assert.ok(restorationProofRefusal(forged, repository).includes(reason), reason);
+    const plan = planFastGateRollback({ repository, fullQueueProof: forged });
+    assert.equal(plan.decision, "restore-full-queue-validation-first", reason); assert.equal(plan.holdRetained, true);
+  }
 });
 
 test("rollback commands name the gate variable and value, and the workflow admits the gate only for the exact enabled value", () => {

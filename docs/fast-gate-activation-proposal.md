@@ -94,8 +94,10 @@ mismatch.
    [admission runbook](main-merge-admission.md#dry-run-evidence-and-separate-operator-steps).
    Report `base-moved` holds separately from health holds.
 3. **Enforce admission.** Provision the controller on the operator host. Prime
-   `Regression Admission` for current entries. Re-read the ruleset and confirm it
-   still equals the snapshot in the readiness report, apart from `updated_at`. Then
+   `Regression Admission` for current entries. Re-read ruleset `22200037` and confirm
+   its own `rules` still equal the snapshot in the readiness report, apart from
+   `updated_at`. The body is built from this ruleset's rules, not from the effective
+   branch rules, which other rulesets could contribute to. Then
    save the [ruleset body](#ruleset-body) as `ruleset-proposed.json`, replace the
    placeholder with the integer App ID, and apply it:
 
@@ -271,10 +273,17 @@ node scripts/fast-gate-rollback.mjs plan --repository picoduck/wollipog --proof 
 
 The verifier exits 0 only when the newest completed group after the switch-back
 executed the trusted workflow blobs, the full job and step inventory, and a skipped
-gate. `plan` runs #3633's `planRollback` offline. Without a verified proof it returns
-`restore-full-queue-validation-first`. With one, it returns
-`operator-hold-removal-approval-required` and a `fullQueueProofDigest`. Only an
+gate. `plan` works offline. It first refuses a proof that is not internally consistent
+verifier output: the restoration schema, no refusal reasons, both trusted workflow
+blobs, and every selected run certified `full`. It then runs #3633's `planRollback`.
+Without a usable proof it returns `restore-full-queue-validation-first`. With one, it
+returns `operator-hold-removal-approval-required` and a `fullQueueProofDigest`. Only an
 approval bound to that digest (`--approval`) yields `operator-hold-removal-planned`.
+
+Use only the verifier's own output as the proof, written by the command above.
+#3633's `planRollback` checks only the proof's top-level fields, and no offline check
+can detect a proof that was edited by hand consistently. This is a known code gap in the
+[readiness report](fast-gate-readiness-2026-10-28.md).
 
 Removing the admission context afterwards is a separate manual operation: PUT the
 ruleset without the `Regression Admission` entry and read it back, delete

@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { ADMISSION_CONTEXT, admissionEnforcement, computeMergeGroupGate, GATE_ENABLED, GATE_VARIABLE, gateDecision,
   REQUIRED_CONTEXT, ROLLBACK_VALUE } from "./ci-merge-group-gate.mjs";
-import { CHECK_STEPS, COVERAGE, FULL_JOBS, verifyRestoration } from "./ci-merge-group-restoration.mjs";
+import { CHECK_STEPS, COVERAGE, FULL_JOBS, RESTORATION_SCHEMA, verifyRestoration, WORKFLOW_FILES } from "./ci-merge-group-restoration.mjs";
 import { planRollback } from "./main-merge-admission-controller.mjs";
 import { POLICY } from "./main-merge-admission.mjs";
 
@@ -44,8 +44,13 @@ export const ROLLBACK_TRIGGERS = Object.freeze([
   { id: "backlog-beyond-limit", condition: "unvalidated commits above maxUnvalidatedCommits or oldest unvalidated age above maxUnvalidatedAgeSeconds: holds failed to bound the backlog" },
 ]);
 
-const THRESHOLD_KEYS = ["requiredLatencyP90Minutes", "latencyWindowIntegrations", "maxRegressionEscapes", "maxDetectionMinutes",
-  "maxRecoveryMinutes", "maxValidatorOutageMinutes", "maxUnvalidatedCommits", "maxUnvalidatedAgeSeconds"];
+// Counts are integers (a fractional window would never fill and could hide a breach); durations are finite.
+const COUNT_THRESHOLDS = { latencyWindowIntegrations: 1, maxRegressionEscapes: 0, maxUnvalidatedCommits: 0 };
+const DURATION_THRESHOLDS = ["requiredLatencyP90Minutes", "maxDetectionMinutes", "maxRecoveryMinutes", "maxValidatorOutageMinutes",
+  "maxUnvalidatedAgeSeconds"];
+const validThresholds = (t) => t?.approved === true && t.version === 1 &&
+  Object.entries(COUNT_THRESHOLDS).every(([key, min]) => Number.isSafeInteger(t[key]) && t[key] >= min) &&
+  DURATION_THRESHOLDS.every((key) => Number.isFinite(t[key]) && t[key] >= 0);
 
 /**
  * Pure. `integrations` are in landing order; the latency window is the newest eligible ones.
@@ -55,8 +60,7 @@ const THRESHOLD_KEYS = ["requiredLatencyP90Minutes", "latencyWindowIntegrations"
 export function evaluateRollbackTriggers(observation, thresholds) {
   const fired = [], incomplete = [];
   const fire = (id, reason) => fired.push({ id, reason });
-  if (thresholds?.approved !== true || thresholds.version !== 1 ||
-      THRESHOLD_KEYS.some((key) => !Number.isFinite(thresholds[key]) || thresholds[key] < 0))
+  if (!validThresholds(thresholds))
     return { rollback: true, triggers: [{ id: "thresholds-unapproved", reason: "Unapproved or malformed thresholds cannot keep a fast gate active" }], incomplete };
   const observedAt = time(observation?.observedAt);
   if (observation?.schema !== OBSERVATION_SCHEMA || !REPOSITORY.test(observation.repository ?? "") || !Number.isFinite(observedAt) ||
@@ -64,9 +68,10 @@ export function evaluateRollbackTriggers(observation, thresholds) {
     return { rollback: true, triggers: [{ id: "observation-unavailable", reason: "An unreadable operating observation is a validator outage" }], incomplete };
   const elapsed = (from, to = observedAt) => Number.isFinite(time(from)) ? (to - time(from)) / MINUTE : null;
 
-  const eligible = observation.integrations.filter((row) => row?.eligible === true);
-  if (eligible.some((row) => row.passing === true && row.expiredMissingRequired === true))
+  // Any all-green expiry breaches AC4, including full-fallback groups; only the p90 uses the eligible cohort.
+  if (observation.integrations.some((row) => row?.passing === true && row.expiredMissingRequired === true))
     fire("required-latency-breach", "A passing group expired for missing required results");
+  const eligible = observation.integrations.filter((row) => row?.eligible === true);
   const window = eligible.slice(-thresholds.latencyWindowIntegrations).map((row) => row.requiredMinutes);
   const p90 = window.length >= thresholds.latencyWindowIntegrations && window.every(Number.isFinite) ? nearestRank(window, 0.9) : null;
   if (p90 === null) incomplete.push({ id: "required-latency-breach", reason: `Fewer than ${thresholds.latencyWindowIntegrations} measured eligible integrations` });
@@ -94,13 +99,39 @@ export function evaluateRollbackTriggers(observation, thresholds) {
       fire("validator-outage", `Validator or controller unavailable for ${outage ?? "an unknown time"} min`);
   }
   const commits = health.backlog?.commits, age = health.backlog?.oldestUnvalidatedAgeSeconds;
-  if (!unavailable && (!Number.isSafeInteger(commits) || !Number.isFinite(age)))
-    fire("validator-outage", "Health reported no measurable backlog");
+  // Missing, negative or sentinel backlog values are an unusable observation, never a healthy one.
+  if (!unavailable && !(Number.isSafeInteger(commits) && commits >= 0 && Number.isFinite(age) && age >= 0))
+    fire("validator-outage", "Health reported no valid backlog measurement");
   if (commits > thresholds.maxUnvalidatedCommits) fire("backlog-beyond-limit", `${commits} unvalidated commits above ${thresholds.maxUnvalidatedCommits}`);
   if (age > thresholds.maxUnvalidatedAgeSeconds) fire("backlog-beyond-limit", `Oldest unvalidated age ${age} s above ${thresholds.maxUnvalidatedAgeSeconds}`);
   const ids = [...new Set(fired.map((row) => row.id))];
   return { rollback: ids.length > 0, triggers: ids.map((id) => ({ id, reasons: fired.filter((row) => row.id === id).map((row) => row.reason) })),
     incomplete, requiredLatencyP90Minutes: p90 };
+}
+
+/**
+ * Pure. #3633's planRollback checks only a proof's top-level fields. Before it, require the proof to be
+ * internally consistent verifier output: the restoration schema, no refusal reasons, the trusted
+ * workflow blobs and every selected run certified full. A hand-edited proof can still pass; the
+ * operator must take the proof from ci-merge-group-restoration.mjs, never from another source.
+ */
+export function restorationProofRefusal(proof, repository) {
+  const reasons = [];
+  if (proof?.schema !== RESTORATION_SCHEMA || proof.repository !== repository) reasons.push("proof-identity-unavailable");
+  if (proof?.verified !== true || !Array.isArray(proof.reasons) || proof.reasons.length) reasons.push("proof-not-verified");
+  if (proof?.coverage !== COVERAGE || proof.requiredContext !== REQUIRED_CONTEXT || !SHA.test(proof.workflowSha ?? "")) reasons.push("proof-coverage-unavailable");
+  if (!proof?.workflowBlobs || WORKFLOW_FILES.some((path) => !SHA.test(proof.workflowBlobs[path] ?? ""))) reasons.push("proof-workflow-blobs-unavailable");
+  if (!Array.isArray(proof?.runs) || !proof.runs.length || proof.runs.some((run) => run?.certification !== "full" ||
+      !Array.isArray(run.reasons) || run.reasons.length || !SHA.test(run.headSha ?? ""))) reasons.push("proof-run-not-certified-full");
+  return reasons;
+}
+
+/** The fast-gate rollback plan: the consistency refusal above, then #3633's planRollback unchanged. */
+export function planFastGateRollback({ repository, fullQueueProof, operatorApproval } = {}) {
+  const refusal = restorationProofRefusal(fullQueueProof, repository);
+  if (refusal.length) return { decision: "restore-full-queue-validation-first", holdRetained: true, enforcement: "none", proofRefusal: refusal,
+    steps: ["Restore full merge-group validation", "Run ci-merge-group-restoration.mjs for a complete proof", "Obtain separate operator hold-removal approval"] };
+  return planRollback({ repository, fullQueueProof, operatorApproval });
 }
 
 /** The exact operator commands. They are printed for a human; this module never runs them. */
@@ -157,6 +188,12 @@ function restoration(since, runs) {
     workflowsByRun: Object.fromEntries(runs.map((r) => [r.run.id, WORKFLOWS])) });
 }
 
+/** A reduced proof whose top-level fields were edited to look verified; its runs still say otherwise. */
+function forgedProof(since) {
+  const reduced = restoration(since, [groupRun(301, 6, { reduced: true })]);
+  return { ...reduced, verified: true, reasons: [], workflowSha: TRUSTED, workflowBlobs: restoration(since, [groupRun(303, 8)]).workflowBlobs };
+}
+
 /** A healthy fast-gate operating observation, then exactly one trigger per scenario. */
 function observation(overrides = {}) {
   return { schema: OBSERVATION_SCHEMA, repository: REPOSITORY_FIXTURE, observedAt: iso(0), controllerAvailable: true,
@@ -188,8 +225,9 @@ function scenario(trigger, observed) {
     gateDecision({ ...ACTIVE, gate: ROLLBACK_VALUE, enforcement }));
   // Switched back at minute 5; a group built from the stale value before propagation is not evidence.
   const since = iso(5);
-  const noProof = planRollback({ repository: REPOSITORY_FIXTURE });
-  check("hold removal refused without fullQueueProof", "main-merge-admission-controller",
+  const PLAN = "fast-gate-rollback+main-merge-admission-controller";
+  const noProof = planFastGateRollback({ repository: REPOSITORY_FIXTURE });
+  check("hold removal refused without fullQueueProof", PLAN,
     { decision: "restore-full-queue-validation-first", holdRetained: true }, { decision: noProof.decision, holdRetained: noProof.holdRetained });
   const reduced = restoration(since, [groupRun(301, 6, { reduced: true })]);
   check("a reduced group after the switch-back is not restoration", "ci-merge-group-restoration",
@@ -198,22 +236,23 @@ function scenario(trigger, observed) {
   const inProgress = restoration(since, [groupRun(302, 7, { status: "in_progress" })]);
   check("an unfinished full group is not restoration", "ci-merge-group-restoration",
     { verified: false, reasons: ["insufficient-completed-merge-group-runs"] }, { verified: inProgress.verified, reasons: inProgress.reasons });
-  const refusedProofs = [reduced, inProgress, { ...reduced, verified: true }, { ...restoration(since, [groupRun(303, 8)]), coverage: "rolling-full-v1" }];
-  check("planRollback refuses every unverified, forged or foreign proof", "main-merge-admission-controller", refusedProofs.map(() => "restore-full-queue-validation-first"),
-    refusedProofs.map((fullQueueProof) => planRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof }).decision));
+  const refusedProofs = [reduced, inProgress, forgedProof(since), { ...restoration(since, [groupRun(303, 8)]), coverage: "rolling-full-v1" },
+    { ...restoration(since, [groupRun(303, 8)]), repository: "another/repository" }];
+  check("every unverified, reduced, forged or foreign proof is refused", PLAN, refusedProofs.map(() => "restore-full-queue-validation-first"),
+    refusedProofs.map((fullQueueProof) => planFastGateRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof }).decision));
   const proof = restoration(since, [groupRun(301, 6, { reduced: true }), groupRun(304, 9)]);
   check("the newest completed group after the switch-back certifies full queue validation", "ci-merge-group-restoration",
     { verified: true, coverage: COVERAGE, requiredContext: REQUIRED_CONTEXT, workflowSha: TRUSTED, runs: [304] },
     { verified: proof.verified, coverage: proof.coverage, requiredContext: proof.requiredContext, workflowSha: proof.workflowSha, runs: proof.runs.map((r) => r.runId) });
-  const pending = planRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: proof });
-  check("a verified proof still needs separate operator approval", "main-merge-admission-controller",
+  const pending = planFastGateRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: proof });
+  check("a verified proof still needs separate operator approval", PLAN,
     { decision: "operator-hold-removal-approval-required", holdRetained: true, enforcement: "none" },
     { decision: pending.decision, holdRetained: pending.holdRetained, enforcement: pending.enforcement });
   const approval = (digest) => ({ repository: REPOSITORY_FIXTURE, fullQueueProofDigest: digest, action: "remove-admission-hold", approved: true });
-  const stale = planRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: proof, operatorApproval: approval("0".repeat(64)) });
-  check("an approval bound to another proof grants nothing", "main-merge-admission-controller", "operator-hold-removal-approval-required", stale.decision);
-  const planned = planRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: proof, operatorApproval: approval(pending.fullQueueProofDigest) });
-  check("only then may the operator remove the health-policy hold; full CI stays required", "main-merge-admission-controller",
+  const stale = planFastGateRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: proof, operatorApproval: approval("0".repeat(64)) });
+  check("an approval bound to another proof grants nothing", PLAN, "operator-hold-removal-approval-required", stale.decision);
+  const planned = planFastGateRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: proof, operatorApproval: approval(pending.fullQueueProofDigest) });
+  check("only then may the operator remove the health-policy hold; full CI stays required", PLAN,
     { decision: "operator-hold-removal-planned", holdRetained: true, enforcement: "none" },
     { decision: planned.decision, holdRetained: planned.holdRetained, enforcement: planned.enforcement });
   return { trigger, pass: steps.every((s) => s.match), steps, fullQueueProofDigest: pending.fullQueueProofDigest };
@@ -229,6 +268,8 @@ export async function rehearseFastGateRollback() {
   const scenarios = SCENARIOS.map(([trigger, make]) => scenario(trigger, make()));
   const checks = {
     liveAdapterAtRollbackValue: live,
+    // Disclosed limitation of the delivered pure planRollback: it advances a scalar-consistent forged proof.
+    deliveredPlanRollbackOnForgedProof: planRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: forgedProof(iso(5)) }).decision,
     healthyObservationKeepsGate: { rollback: control.rollback, requiredLatencyP90Minutes: control.requiredLatencyP90Minutes },
     sparseSampleIsIncomplete: { rollback: sparse.rollback, incomplete: sparse.incomplete.map((row) => row.id) },
     unapprovedThresholdsRollBack: unapproved.triggers.map((row) => row.id),
@@ -257,8 +298,9 @@ export async function main(argv = process.argv.slice(2), { log = console.log, er
     return result.rollback ? 1 : 0;
   }
   if (command === "plan" && REPOSITORY.test(values.repository ?? "") && values.proof) {
-    // Offline only: #3633's planRollback over a saved restoration proof. It plans; it never removes a hold.
-    const plan = planRollback({ repository: values.repository, fullQueueProof: read(values.proof),
+    // Offline only: the consistency refusal, then #3633's planRollback, over a saved restoration proof.
+    // It plans; it never removes a hold.
+    const plan = planFastGateRollback({ repository: values.repository, fullQueueProof: read(values.proof),
       operatorApproval: values.approval ? read(values.approval) : undefined });
     log(JSON.stringify(plan, null, 2));
     return 0;

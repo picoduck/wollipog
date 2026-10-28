@@ -38,7 +38,7 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     assert.equal(by[id].classification, "observation-gap", id);
   for (const id of ["detection-backlog-recovery", "status-writing-identity", "agents-md-active", "reconcile-2674"])
     assert.equal(by[id].classification, "approval-gap", id);
-  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "sticky-success", "escalation-delivery"])
+  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "sticky-success", "escalation-delivery", "planrollback-run-level-proof"])
     assert.equal(by[id].classification, "code-gap", id);
   for (const flow of report.rehearsals.cutover.flows) assert.equal(by[`ac2-${flow.id}`].status, "met", flow.id);
   assert.deepEqual(Object.values(report.counts).reduce((a, b) => a + b, 0), report.criteria.length);
@@ -50,7 +50,7 @@ test("a failing rehearsal flow or rollback scenario is reported as a failing cod
   broken.flows[0].pass = false; broken.flows[0].steps[0].match = false;
   const brokenRollback = structuredClone(rollback);
   brokenRollback.summary.pass = false;
-  brokenRollback.scenarios[0].steps.find((step) => step.step === "hold removal refused without fullQueueProof").match = false;
+  brokenRollback.scenarios[0].steps.find((step) => step.step === "every unverified, reduced, forged or foreign proof is refused").match = false;
   const report = await buildReadiness({ cutover: broken, rollback: brokenRollback });
   const by = Object.fromEntries(report.criteria.map((row) => [row.id, row]));
   for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal"]) {
@@ -68,7 +68,9 @@ test("capacity findings are computed from the delivered rehearsals", async () =>
 
 test("the proposed ruleset adds only an issuer-pinned admission context, and the unfilled template fails closed", async () => {
   const body = proposedRuleset(live);
-  const liveRules = live.branchRules.map(({ type, parameters }) => parameters === null ? { type } : { type, parameters });
+  // The body comes from the target ruleset's own rules; the effective branch rules are only evidence.
+  const liveRules = live.ruleset.rules;
+  assert.deepEqual([...new Set(live.branchRules.map((rule) => rule.ruleset_id))], [live.ruleset.id], "every effective main rule is owned by the target ruleset");
   const checks = (rules) => rules.find((rule) => rule.type === "required_status_checks").parameters.required_status_checks;
   assert.deepEqual(checks(body.rules), [...checks(liveRules), { context: ADMISSION_CONTEXT, integration_id: ADMISSION_ISSUER_PLACEHOLDER }]);
   assert.deepEqual(body.rules.filter((rule) => rule.type !== "required_status_checks"), liveRules.filter((rule) => rule.type !== "required_status_checks"));
@@ -76,7 +78,11 @@ test("the proposed ruleset adds only an issuer-pinned admission context, and the
   assert.deepEqual(body.bypass_actors, live.ruleset.bypass_actors);
   assert.deepEqual(admissionEnforcement(body.rules), { active: false, reason: "admission-issuer-unpinned" });
   assert.deepEqual(admissionEnforcement(proposedRuleset(live, 4242).rules), { active: true, reason: null });
-  assert.throws(() => proposedRuleset({ ...live, branchRules: proposedRuleset(live, 1).rules }), /Unexpected live ruleset/);
+  assert.throws(() => proposedRuleset({ ...live, ruleset: { ...live.ruleset, rules: proposedRuleset(live, 1).rules } }), /Unexpected live ruleset/);
+  assert.throws(() => proposedRuleset({ ...live, ruleset: { ...live.ruleset, id: 1 } }), /Unexpected live ruleset/);
+  // A rule only present in the effective branch rules (another ruleset) is never copied into this body.
+  const foreign = { ...live, branchRules: [...live.branchRules, { type: "creation", ruleset_id: 1, parameters: null }] };
+  assert.deepEqual(proposedRuleset(foreign), body);
   // The operator proposal embeds exactly this body.
   assert.ok(readFileSync(PROPOSAL, "utf8").includes(JSON.stringify(body, null, 2)));
   // The snapshot retains variable names only and finds every CI switch absent.
