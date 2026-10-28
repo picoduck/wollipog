@@ -1359,7 +1359,7 @@ test("configured reviews refuse unavailable models, same-family selection withou
       if (scenario === "allowed") { assert.ok(result.ok, result.error ?? "request refused"); assert.equal(h.starts().at(-1)?.spec.agentId, "claude"); }
       else {
         assert.equal(result.ok, false);
-        assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /Update Wollipog/u);
+        assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /configured codex reviewer \(default model, high effort\).*Update Wollipog/u);
         assert.equal(h.starts().length, 0);
       }
     } finally { h.db.close(); }

@@ -180,18 +180,18 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
   const effective = userId ? db.reviewSettings.effective(userId, session.projectId ?? null)
     : { settings: DEFAULT_REVIEW_SETTINGS, source: "system_default" as const };
   if (snapshot ? !snapshot.configured : effective.source === "system_default") return null;
-  if (runner?.runtime?.reviewSession?.configuration !== true) {
-    throw new ReviewSettingsError("This machine cannot apply your review settings. Update Wollipog on it before requesting a review.", 409);
-  }
-  const agent = runner.agents.find(a => a.id === session.agentId);
+  const agent = runner?.agents.find(a => a.id === session.agentId);
   const identity = agent ? agentHarnessIdentityFor(agent) : { agentId: session.agentId ?? "unknown", driver: session.driver ?? "acp", context: { kind: "native" as const } };
   const rule = effective.settings.reviewers.find(r => agentHarnessIdentityKey(r.implementer) === agentHarnessIdentityKey(identity));
   const harness = snapshot ? snapshot.reviewHarness : rule?.harness ?? reviewerHarnessFor(session.driver);
   if (!harness) throw new ReviewSettingsError("Choose a reviewer for this implementing harness in Settings → Reviews.", 409);
-  const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
-  const reviewer = runner.agents.find(a => a.id === reviewerId && a.available === true);
   const requestedModel = snapshot ? snapshot.reviewModel : rule?.model;
   const effort = (snapshot ? snapshot.reviewEffort : rule?.effort) ?? "high";
+  if (runner?.runtime?.reviewSession?.configuration !== true) {
+    throw new ReviewSettingsError(`This machine cannot apply the configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort). Update Wollipog on it before requesting a review.`, 409);
+  }
+  const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
+  const reviewer = runner.agents.find(a => a.id === reviewerId && a.available === true);
   // Use the same concrete-model resolution as createSession. The catalog's "default" entry is a
   // UI placeholder, never an immutable launch model that the runner can compare with its spec.
   const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer?.capabilities,
