@@ -770,7 +770,7 @@ export async function reconcile(target, { api, log = console.log, collect = coll
 }
 
 export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error,
-  waitForWorker = awaitWorkerTerminal } = {}) {
+  waitForWorker = awaitWorkerTerminal, now = () => new Date().toISOString() } = {}) {
   let bounded, workerHandoff;
   const entryPoint = env.GITHUB_EVENT_NAME ?? "cli";
   const observationId = positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID();
@@ -789,7 +789,8 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
       const previous = await readHealthState(api, repository);
       const issue = await readAlert(api, repository);
       const incidentRunId = Number(LATEST.exec(issue?.body ?? "")?.[1]);
-      const health = await collectHealth(repository, { api, incidentRunId,
+      // A caller-owned clock lets an injected forge replay virtual time; production uses wall time.
+      const health = await collectHealth(repository, { api, incidentRunId, now,
         pointers: [...new Set([...previous.pointers, ...(positive(incidentRunId) ? [incidentRunId] : [])])] });
       health.apiBudget = { ...api.budget };
       if (issue && !positive(incidentRunId)) {

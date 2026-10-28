@@ -186,7 +186,7 @@ export async function rebuildAdmissionCycle({ repository, api, env = process.env
   let health = null, census;
   try {
     const result = await report(["report"], { env: { ...env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main" },
-      api: admissionEvidenceApi(api, repository), log: line => { health = JSON.parse(line); }, error });
+      api: admissionEvidenceApi(api, repository), log: line => { health = JSON.parse(line); }, error, now });
     if (result !== 0) health = { ...health, status: "unknown", reasons: ["health-report-unavailable"] };
     census = await readAdmissionEntries(api, repository);
   } catch { census = { repository, complete: false, entries: [] }; }

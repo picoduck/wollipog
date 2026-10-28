@@ -95,7 +95,8 @@ test("live adapter exclusively requests the authoritative read-only report and r
   let called = 0;
   const result = await observeAdmission({ integration, env: { GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/pull/1/merge" }, now: () => at(1),
     report: async (args, options) => { called++; assert.deepEqual(args, ["report"]);
-      assert.equal(options.env.GITHUB_REF, "refs/heads/main"); options.log(JSON.stringify(passing())); return 0; } });
+      assert.equal(options.env.GITHUB_REF, "refs/heads/main"); assert.equal(options.now(), at(1));
+      options.log(JSON.stringify(passing())); return 0; } });
   assert.equal(called, 1); assert.equal(result.decision, "ordinary-admission-eligible");
   assert.deepEqual(result.healthReport, passing()); assert.equal(result.evidenceSource, "live-health-report");
   for (const report of [async () => { throw new Error("secret response"); }, async () => 1,

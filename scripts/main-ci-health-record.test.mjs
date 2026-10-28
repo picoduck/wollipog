@@ -335,6 +335,9 @@ test("report is read-only, schema-versioned JSON; invalid modes are refused", as
   const f = forge(), output = [], env = { GITHUB_REPOSITORY: repository, GITHUB_TOKEN: "test", GITHUB_REF: "refs/heads/main" };
   assert.equal(await main(["report"], { env, api: f.api, log: (line) => output.push(JSON.parse(line)) }), 0);
   assert.equal(output[0].schema, HEALTH_SCHEMA); assert.deepEqual(f.data.mutations, []);
+  assert.equal(await main(["report"], { env, api: f.api, now: () => at(40), log: (line) => output.push(JSON.parse(line)) }), 0);
+  assert.equal(output[1].observedAt, at(40), "an injected virtual clock reaches the collector");
+  assert.equal(output[1].status, "passing");
   assert.equal(await main(["invalid"], { env, api: f.api, error: () => {} }), 1);
 });
 
