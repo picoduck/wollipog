@@ -9,6 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { ReviewSettingsPanel } from "./ReviewSettingsPanel.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const dom = new Window({ url: "http://localhost/settings/reviews" });
 for (const [name, value] of Object.entries({ window: dom, document: dom.document, navigator: dom.navigator,
@@ -47,7 +48,7 @@ test("invalid budgets block writes, failed saves retain the draft, and a retry r
     assert.match(container.textContent!, /Could not save review settings/u);
     await act(async () => { fireDomEvent.click(button("Try Again")); });
     assert.equal(attempts, 2);
-    assert.equal(container.querySelector(".save-bar"), null);
+    assertNoDomNode(container.querySelector(".save-bar"));
     assert.equal(input.value, "6");
   } finally { await act(async () => root.unmount()); container.remove(); }
 });
@@ -61,7 +62,7 @@ test("a failed read shows an actionable retry and recovers without mounting stal
   try {
     await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><ReviewSettingsPanel /></FeedbackProvider></ApiProvider>));
     assert.match(container.textContent!, /Reviews Unavailable/u);
-    assert.equal(container.querySelector("input"), null);
+    assertNoDomNode(container.querySelector("input"));
     await act(async () => { fireDomEvent.click([...container.querySelectorAll("button")].find(b => b.textContent === "Try Again")!); });
     assert.equal(container.querySelector("input")?.value, "4");
   } finally { await act(async () => root.unmount()); container.remove(); }
