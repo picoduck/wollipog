@@ -12,6 +12,12 @@ Current protocol 222, including child-at-create attribution/transaction rollback
 rejection recovery, stays intact. The merged #3230 touch behavior and #3260 settled opening-frame
 fixtures are preserved without editing their implementation or tests. Preparation tests do not complete the original live release criteria.
 
+Protocol 245 retires the native code-review job used by the historical v1 plan. The offline
+checker retains that shape for historical completeness and always reports blocked; it now names
+`review_session_plan_migration` as an independent requirement. Current code review uses admitted
+review sessions and managed Session usage. Updating the live plan's admission/evidence schema is
+a separate follow-up; do not run the retired adapter or treat old profile digests as current proof.
+
 ## Executable Preparation
 
 From this worktree:
@@ -113,7 +119,7 @@ to prove blindness. Native dispatch/usage receipts remain separate from media de
 | Review feedback and repair | Different screenshot bytes, original occurrence denial, replacement receipt/consumption; driver/service tests | Verify the actual reviewer identified a defect, independently reproduce it, repair code, review changed head and bytes; synthetic rejection is not a quality verdict |
 | Screenshot delivery | Existing delegated-image HTTP/browser digest/receipt route coverage; joined service test | Actual selected model receives private attached bytes and answers a fresh blind image challenge; identifiers and acknowledgments alone are insufficient |
 | Normal video | Existing candidate complete-frame decode/transient/integrity tests; normal video fails closed on foundation | #1321 registered normal-profile runtime/transport/admission/decision bridge and trusted all-source-frame temporal proof, criteria/defect verdict and measured maximum-profile model cost |
-| Native code review and allowance | Existing bounded review/usage contracts inspected read-only | #2936 exact native controller/executable/account/profile admission, durable job identity and final priced usage settlement; native code jobs do not attest managed media delivery |
+| Review sessions and historical allowance | Review-session admission/usage tests, retired-job receipt/reconnect/liveness tests and bounded campaign accounting | Actual admitted review session with exact harness/model/effort, head/verdict and managed Session usage; migrate the historical live-plan schema first. Code review does not attest managed media delivery |
 | Exact-head CI, merge queue and delivery | Existing workflow-action reconciliation routes and ledger/forge-state tests | Actual required check on pushed reviewed SHA, matching canonical command admission, successful merge-group check, forge MERGED and commit present on default branch |
 | Recovery and decision inspection | Existing route fixtures cover agent uncertain-steering resolution, ancestor decision read/list with status and pagination, audience refusal and ancestor consume/reconcile refusal; runner steering and durable recovery suites are reused | Actual integrated recovery/read delivery and #2938 bounded single-flight recovery with unknown-outcome fences remain live proof requirements; closed #1448/#1469 alone do not satisfy them |
 | Cleanup and completion | Campaign Status cleanup refusal and report verification; attention persistence suites | Actual branch deletion after safe stacked handoff, managed worktree retirement, session Stop/Archive confirmation, informational completion with no required acknowledgment |
@@ -123,7 +129,7 @@ These files intentionally do not import sibling implementations. Historical prep
 
 - #2935 PR #3063: `1ed656018aa282bf5c084ad8ad117207088ad93a`, protocol 216 issue authority.
 - #2936 PR #3065: `828464a9a8272d42d5f49f8a1482ee5959ea0cc2` at initial inspection;
-  its continuing corrections and exact native-review contract must be read again at integration.
+  its native executor is retired. Preserve historical accounting; current review uses review sessions.
 - #1321 production preparation: `efa6ea5210ad939f2ed2af3f2ac227009ed2f935`;
   offline PR #3053: `1f379ed690d3b7bcd0850c55ef5285a4c6459de6`.
 - #2938 PR #3068: `9eb186d24593835b8ae4d83bbf6ab246d1c79365`.
@@ -234,7 +240,7 @@ result/attention/notification surfaces rather than inferred from a role or owner
 The operator's private result bundle must retain exact initial server-authorized scope/budget/evidence
 digests, effective driver/model/provider/profile and capability limits, every post-authorization
 human request/acknowledgment/policy edit, media source and ordered receipt bindings, independently
-verified blind quality answers, defect/fix/review head records, native review job/adjudication/usage,
+verified blind quality answers, defect/fix/review head records, review-session identity/verdict/adjudication/usage,
 both forge PR/check/merge-group/merge readbacks, accepted follow-up lineage/sanitized payload/dedup
 and publication readback, delivered-vs-remaining closure evidence, stacked-dependent checks,
 branch-ref absence, retired managed worktree receipts and confirmed Stop/Archive states.
