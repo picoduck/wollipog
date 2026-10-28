@@ -16,6 +16,7 @@ import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
+import { ReviewSettingsStore } from "./review-settings.js";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
@@ -4545,6 +4546,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** Authenticated launching user for personal review settings, including shared Projects. */
+  reviewSettingsUserId?: string;
   /** Trusted pre-allocation session ceilings, never from request JSON. */
   campaignBudgetUserLimits?: { costUsd?: number; toolCalls?: number };
   /** Internal review attribution: share an allowance without granting child-session authority. */
@@ -5431,6 +5434,7 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
+  readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
    * reviews, their summary (#3369); nothing else for ordinary sessions. */
   private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns"> {
@@ -5456,6 +5460,7 @@ export class ControlPlaneDb {
     });
     this.sessionReviewJobs = new SessionReviewJobs(db);
     this.reviewSessions = new ReviewSessions(db);
+    this.reviewSettings = new ReviewSettingsStore(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -16056,6 +16061,9 @@ export class ControlPlaneDb {
         ).run(input.id, input.automationOrigin.automationId, input.automationOrigin.executionId,
           triggerId, invocationId, parametersJson, input.now);
       }
+      const reviewUserId = input.reviewSettingsUserId ?? (input.parentSessionId ? this.reviewSettings.sessionUser(input.parentSessionId) : null)
+        ?? (scope.owner.kind === "user" ? scope.owner.userId : null);
+      if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",

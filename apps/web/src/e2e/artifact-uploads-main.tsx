@@ -49,7 +49,7 @@ function Surface() {
   return <div className="app" style={{ height: "100dvh", display: "block" }}><main className="main-body" style={{ height: "100%" }}>
     {view.name === "settings" ? <SettingsView section="behavior" onNavigate={navigate} panels={{
       appearance: null, notifications: null, behavior: <BehaviorPanel />, approvals: null,
-      orchestrator: null, network: null, storage: null, experimental: null, about: null,
+      orchestrator: null, reviews: null, network: null, storage: null, experimental: null, about: null,
     }} /> : <section style={{ padding: 16, maxWidth: 420 }}><h1>Session Artifacts</h1><BrowserPanel session={{ id: "synthetic-artifacts" } as SessionView} /></section>}
   </main></div>;
 }

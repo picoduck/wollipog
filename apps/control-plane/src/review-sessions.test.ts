@@ -25,6 +25,7 @@ function harness(options: {
   reviewSession?: ReviewSessionCapability | null;
   driver?: "claude-code" | "codex-app-server" | "pi";
   campaign?: boolean;
+  configuration?: boolean;
 } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
@@ -36,15 +37,17 @@ function harness(options: {
       { id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi", available: true },
     ],
     runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
-      ...(options.reviewSession === null ? {} : { reviewSession: options.reviewSession ?? CAPABILITY }) } };
+      ...(options.reviewSession === null ? {} : { reviewSession: options.reviewSession ?? { ...CAPABILITY, ...(options.configuration ? { configuration: true as const } : {}) } }) } };
   db.registerRunner(metadata, 1, options.protocol ?? PROTOCOL_VERSION);
-  if (options.campaign) {
+  if (options.configuration || options.campaign) {
     for (const agent of metadata.agents.filter((agent) => agent.id !== "pi")) {
       agent.capabilities = { models: [{ id: agent.id === "claude" ? "claude-opus-5-5" : "gpt-6.1-sol", default: true }],
         effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true,
         permissionModes: [agent.id === "claude" ? "dontAsk" : "read-only"] };
     }
     db.registerRunner(metadata, 1, options.protocol ?? PROTOCOL_VERSION);
+  }
+  if (options.campaign) {
     db.setUsageRateTable(new Map(["claude-opus-5-5", "gpt-6.1-sol"].map((model) => [model,
       { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }])));
     const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
@@ -1319,5 +1322,85 @@ test("consuming a merge decision rechecks the review run's head and revokes a st
     assert.equal(consumed.status, 409);
     assert.match(consumed.error!, /current pull request head needs a valid review/u);
     assert.equal(h.db.workflowDecisionByOccurrence(merge.data.occurrenceId)?.status, "revoked");
+  } finally { h.db.close(); }
+});
+
+
+test("configured review admission selects discovered models and pins one round budget without changing legacy defaults", () => {
+  const h = harness({ configuration: true });
+  try {
+    const userId = h.db.localIdentityContext().userId;
+    h.db.reviewSettings.set(userId, null, { version: 1, roundBudget: 2, reviewers: [{
+      implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      harness: "codex", model: "gpt-6.1-sol", effort: "high", allowSameFamily: false,
+    }] });
+    const view = requested(h);
+    const start = h.starts().at(-1)!;
+    assert.equal(start.spec.config?.model, "gpt-6.1-sol");
+    assert.equal(start.spec.review?.history?.roundBudget, 2);
+    assert.deepEqual(start.spec.review?.configuration, { model: "gpt-6.1-sol", effort: "high", allowSameFamily: false, roundBudget: 2 });
+    h.db.reviewSettings.set(userId, null, { version: 1, roundBudget: 8, reviewers: [] });
+    assert.equal(h.db.reviewSessions.history("s1", request().pullRequest).roundBudget, 2);
+    assert.equal(h.db.getSession(view.reviewSessionId)?.model, "gpt-6.1-sol");
+  } finally { h.db.close(); }
+});
+
+test("configured reviews refuse unavailable models, same-family selection without consent, and unsupported runners", () => {
+  for (const scenario of ["missing", "same-family", "old-runner", "allowed"] as const) {
+    const h = harness({ configuration: scenario !== "old-runner" });
+    try {
+      h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 4, reviewers: [{
+        implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+        harness: scenario === "same-family" || scenario === "allowed" ? "claude-code" : "codex",
+        model: scenario === "missing" ? "retired" : null, effort: "high", allowSameFamily: scenario === "allowed",
+      }] });
+      const result = h.svc.requestReviewSession("s1", request());
+      if (scenario === "allowed") { assert.ok(result.ok, result.error ?? "request refused"); assert.equal(h.starts().at(-1)?.spec.agentId, "claude"); }
+      else {
+        assert.equal(result.ok, false);
+        assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /Update Wollipog/u);
+        assert.equal(h.starts().length, 0);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+test("personal project rules replace user rules at review admission and shared sessions retain their launching user", () => {
+  const h = harness({ configuration: true });
+  try {
+    const local = h.db.localIdentityContext();
+    const project = h.db.createProject({ name: "Personal Project" });
+    h.db.setSessionProject("s1", project.id);
+    h.db.reviewSettings.set(local.userId, null, { version: 1, roundBudget: 7, reviewers: [{
+      implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      harness: "claude-code", model: null, effort: "high", allowSameFamily: true,
+    }] });
+    h.db.reviewSettings.set(local.userId, project.id, { version: 1, roundBudget: 2, reviewers: [] });
+    requested(h);
+    assert.equal(h.starts().at(-1)?.spec.agentId, "codex", "the project document replaces every user reviewer rule");
+    assert.equal(h.starts().at(-1)?.spec.review?.history?.roundBudget, 2);
+    h.db.createSession({ id: "shared", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Shared", useWorktree: true,
+      reviewSettingsUserId: local.userId, driver: "claude-code", config: {}, now: 3,
+      scope: { organizationId: local.organizationId, owner: { kind: "organization", organizationId: local.organizationId } } });
+    h.db.updateSessionStatus("shared", "running", 4);
+    requested(h, "shared");
+    assert.equal(h.starts().at(-1)?.spec.agentId, "claude");
+    assert.equal(h.starts().at(-1)?.spec.review?.history?.roundBudget, 7);
+  } finally { h.db.close(); }
+});
+
+test("Automatic reviewer models resolve catalog placeholders before the immutable launch configuration is formed", () => {
+  const h = harness({ configuration: true, driver: "codex-app-server" });
+  try {
+    h.metadata.agents.find(a => a.id === "claude")!.capabilities!.models = [
+      { id: "default", default: true, efforts: ["high"] },
+      { id: "claude-opus-5-5", efforts: ["high"] },
+    ];
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 6, reviewers: [] });
+    requested(h);
+    const start = h.starts().at(-1)!;
+    assert.equal(start.spec.review?.configuration?.model, start.spec.config?.model);
+    assert.equal(start.spec.review?.configuration?.model, "claude-opus-5-5");
   } finally { h.db.close(); }
 });

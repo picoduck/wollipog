@@ -334,6 +334,28 @@ job failed.
 
 ### Review Sessions
 
+Settings → Reviews stores personal reviewer choices in the control plane, so they follow the user
+across devices. Each configured implementing harness can select a trusted, discovered native Codex
+or Claude Code reviewer, a discovered model and an effort. Automatic uses that reviewer's discovered
+default model and high effort. A missing configured combination refuses the review with an
+actionable reason; it never substitutes another reviewer. Same-family reviews require explicit
+consent, checked at admission and again by the runner against the implementing session's model.
+
+The round budget applies to all harnesses (1–32 valid rounds, default four). A review run pins its
+initial budget; changing settings does not expand an existing run, whose additional rounds still
+require the exact typed extension. The Project selector creates a personal project override by
+copying the user's current settings. That document replaces all user defaults for the user's
+sessions in that project; Reset to User Settings removes it. Missing settings rows retain the
+original opposite-family, high-effort, four-round launch without new configuration fields.
+
+`GET` and `PUT /api/review-settings?projectId=…` require a human principal and project access; PUT
+accepts `{ settings }`, or `{ settings: null }` to reset. The caller's user ID is server-derived.
+Configured reviews require the runner's `runtime.reviewSession.configuration` capability. Older
+runners keep the original launch when there are no settings rows, and refuse configured launches
+with update guidance. The permission preset, trusted command checks and read-only snapshot remain
+runner-owned. The `review_session_requested` event records the resolved configuration; admission
+refusals emit `review_configuration_refused`, correlated by the requesting session ID.
+
 `wollipog review session run` (MCP `request_review_session`, #561) is the default route for a
 session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
 **review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
@@ -343,7 +365,7 @@ native managed worktree the session created, an open pull request from the same 
 worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
 100 KiB) is required and is the reviewer's only context besides the pinned patch.
 
-The control plane creates the review session on the requester's runner. The reviewer is the other
+The control plane creates the review session on the requester's runner. By default, the reviewer is the other
 model family, through the native agent the runner advertises for that harness in
 `runtime.reviewSession`. The runner proves the scope again against the requester's runner-recorded
 worktree, fills the same verified mirror as the bridge, and checks out the exact head into a

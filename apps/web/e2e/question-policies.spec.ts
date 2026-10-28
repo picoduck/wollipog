@@ -58,13 +58,14 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
   test.describe(`at ${viewport.width}px`, () => {
     test.use({ viewport });
 
-    test("Approvals sits between Behavior and Orchestrator and holds the three groups", async ({ page }) => {
+    test("Approvals follows Behavior, precedes Reviews and holds the three groups", async ({ page }) => {
       await page.goto(`${APPROVALS}&custom`);
       if (viewport.width > 760) {
-        await expect(page.locator(".settings-nav-item")).toContainText(["Behavior", "Approvals", "Orchestrator"]);
+        await expect(page.locator(".settings-nav-item")).toContainText(["Behavior", "Approvals", "Reviews", "Orchestrator"]);
         const titles = await page.locator(".settings-nav-item").allTextContents();
         expect(titles.indexOf("Approvals")).toBe(titles.indexOf("Behavior") + 1);
-        expect(titles.indexOf("Orchestrator")).toBe(titles.indexOf("Approvals") + 1);
+        expect(titles.indexOf("Reviews")).toBe(titles.indexOf("Approvals") + 1);
+        expect(titles.indexOf("Orchestrator")).toBe(titles.indexOf("Reviews") + 1);
         await expect(page.locator(".settings-nav-item[aria-current=page]")).toHaveText("Approvals");
       } else {
         // A phone opens the section as a page of its own, under a bar with Back to the index (#3018).

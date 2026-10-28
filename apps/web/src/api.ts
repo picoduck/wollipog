@@ -360,6 +360,10 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
+  reviewSettings: (projectId: string | null = null) => req<import("@wollipog/protocol").ReviewSettingsView>(`/api/review-settings${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
+  updateReviewSettings: (projectId: string | null, settings: import("@wollipog/protocol").ReviewSettings | null) =>
+    req<import("@wollipog/protocol").ReviewSettingsView>(`/api/review-settings${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ settings }) }),
   videoReviewStatus: () => req<import("@wollipog/protocol").VideoReviewSettingsStatus>("/api/video-evidence/review-status"),
   fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest, signal?: AbortSignal) =>
     req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight }>("/api/full-control-campaigns/preflight", {

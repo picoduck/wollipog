@@ -1,4 +1,5 @@
 import { formatCampaignAssignment } from "./campaign-assignment.js";
+import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
@@ -4968,6 +4969,7 @@ export class SessionsService {
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
+      reviewSettingsUserId: creationContext?.defaultOwnerUserId,
       campaignBudgetUserLimits,
       reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
       id,
@@ -5005,6 +5007,7 @@ export class SessionsService {
       return policy ? this.db.createReviewSession(sessionInput, {
         requesterSessionId: policy.requesterSessionId, pullRequest: policy.pullRequest,
         headSha: policy.headSha, reviewer: policy.harness,
+        roundBudget: policy.history?.roundBudget ?? policy.configuration?.roundBudget,
       }) : this.db.createSession(sessionInput);
     };
     try {
@@ -9156,7 +9159,16 @@ export class SessionsService {
     if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));
     }
-    const harness = reviewerHarnessFor(session.driver);
+    let configured: ReturnType<typeof configuredReview>;
+    try { configured = configuredReview(this.db, session, runner, resolveEffectiveModelEffort); }
+    catch (error) {
+      if (error instanceof ReviewSettingsError) {
+        this.log.info(JSON.stringify({ event: "review_configuration_refused", entryPoint: "request_review_session", sessionId: session.id }));
+        return fail(error.message, 409);
+      }
+      throw error;
+    }
+    const harness = configured?.harness ?? reviewerHarnessFor(session.driver);
     const budgetRoot = this.db.campaignBudgets.root(session.id);
     if (budgetRoot && !runnerSupportsProtocol(runner?.protocolVersion, "campaignReviewSessions")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "campaignReviewSessions", "review sessions charged to the campaign allowance"));
@@ -9188,10 +9200,11 @@ export class SessionsService {
       pullRequest: { repository: pullRequest.repository, number: pullRequest.number },
       headSha: request.headSha,
       harness,
+      ...(configured ? { configuration: configured.configuration } : {}),
     };
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
-      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha);
+      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha, true, configured?.configuration.roundBudget);
       if (policy.history.postUpvoteExtension && !runnerSupportsProtocol(runner?.protocolVersion, "postUpvoteReviewExtensions")) {
         return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "postUpvoteReviewExtensions", "post-upvote review extensions"));
       }
@@ -9216,7 +9229,8 @@ export class SessionsService {
       useWorktree: false,
       config: {
         permissionMode: harness === "claude-code" ? "dontAsk" : "read-only",
-        effort: "high",
+        effort: configured?.configuration.effort ?? "high",
+        ...(configured?.configuration.model ? { model: configured.configuration.model } : {}),
         ...(costBudgetUsd !== undefined ? { costBudgetUsd } : {}),
       },
     }, undefined, this.db.sessionScope(session.id) ?? undefined, true, false, true, { review: { policy } });
@@ -9224,7 +9238,8 @@ export class SessionsService {
     this.hub.sessionChangedById(session.id);
     this.log.info(JSON.stringify({ event: "review_session_requested", sessionId: session.id, reviewSessionId: created.data.id,
       ...(budgetRoot ? { campaignRootSessionId: budgetRoot, allocation: this.db.campaignBudgets.allocation(created.data.id) } : {}),
-      reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha }));
+      reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha,
+      configuration: configured?.configuration ?? null }));
     return ok(this.db.reviewSessions.view(created.data.id)!, 201);
   }
 

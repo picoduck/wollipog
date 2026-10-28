@@ -19,6 +19,8 @@ export type SessionKind = "standard" | "review";
 /** The reviewer harnesses a runner can launch as review sessions, each through one configured
  * native agent. Advertised with the runner's runtime metadata. */
 export interface ReviewSessionCapability {
+  /** #3370: revalidates configured reviewer/model/effort, same-family consent and round budget. */
+  configuration?: true;
   reviewers: Array<{ harness: SessionReviewHarness; agentId: string }>;
   /** Why a reviewer (or the whole feature, under "tools") is unavailable, for display. */
   unavailable?: Partial<Record<SessionReviewHarness | "tools", string>>;
@@ -27,6 +29,8 @@ export interface ReviewSessionCapability {
 /** Runner-enforced review launch, carried on the review session's `start_session`. The runner
  * proves the scope again against the requester's own runner-recorded worktree. */
 export interface ReviewLaunchPolicy {
+  /** Sent only to a runner advertising reviewSession.configuration. */
+  configuration?: import("./review-settings.js").ReviewConfiguration;
   requesterSessionId: string;
   pullRequest: { repository: string; number: number };
   headSha: string;
@@ -167,6 +171,7 @@ export function reviewerHarnessFor(driver: string | null | undefined): SessionRe
 }
 
 const REVIEW_SESSION_REASONS = new Set([
+  "the configured reviewer is unavailable or belongs to the implementer's model family without explicit permission",
   "the review must cover the session's own native managed worktree",
   "resume this session once so the runner can verify its automatic worktree before requesting a review",
   "the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review",

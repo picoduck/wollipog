@@ -1,3 +1,4 @@
+import { ReviewSettingsPanel } from "../components/ReviewSettingsPanel.js";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -220,6 +221,8 @@ harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"
 /** Behavior › Evidence's preference, kept for the page's life so a saved change reads back. */
 let artifactUploadPreference = "manual";
 /** What a save in Settings › Orchestrator stored, for as long as the page is open. */
+let reviewsSaved: import("@wollipog/protocol").ReviewSettings | null = null;
+let reviewsProjectSaved: import("@wollipog/protocol").ReviewSettings | null = null;
 let orchestratorSaved: typeof DEFAULT_ORCHESTRATOR_DEFAULTS | null = null;
 
 /**
@@ -338,6 +341,21 @@ const harnessDefaultsTransport: ApiTransport = {
       return Response.json({ error: "Not Found" }, { status: 404 });
     }
     if (path === "/api/identity") return Response.json({ context: { userId: "fixture-user", organizationId: "fixture-org" } });
+    if (path.startsWith("/api/review-settings")) {
+      const projectId = new URL(path, window.location.origin).searchParams.get("projectId");
+      if (init?.method === "PUT") {
+        const settings = (JSON.parse(String(init.body)) as { settings: import("@wollipog/protocol").ReviewSettings | null }).settings;
+        if (projectId) reviewsProjectSaved = settings; else reviewsSaved = settings;
+      }
+      const identity = (driver: "claude-code" | "codex-app-server") => ({ agentId: driver, driver, context: { kind: "native" as const } });
+      return Response.json({ projectId, source: projectId && reviewsProjectSaved ? "project_override" : reviewsSaved ? "user_default" : "system_default",
+        settings: (projectId ? reviewsProjectSaved : null) ?? reviewsSaved ?? { version: 1, roundBudget: 4, reviewers: [] },
+        projects: [{ id: "project-demo", name: "Demo Project" }],
+        implementers: [{ ...identity("claude-code"), name: "Claude Code" }, { ...identity("codex-app-server"), name: "Codex App Server" }],
+        reviewers: ["claude-code", "codex"].map(harness => ({ harness, name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
+          capabilities: { models: [{ id: harness === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", displayName: harness === "codex" ? "GPT-6.1 Sol" : "Claude Opus 5.5", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
+      });
+    }
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
       const drifted = params.get("defaults") === "agent-repair";
@@ -669,6 +687,7 @@ function Harness() {
                 </ApiProvider>
               ),
               // With the confirmation provider its leave prompt opens in, as the shell has.
+              reviews: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}><ReviewSettingsPanel /></ApiProvider></FeedbackProvider>,
               orchestrator: (
                 <FeedbackProvider>
                   <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>
