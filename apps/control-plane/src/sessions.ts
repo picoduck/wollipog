@@ -3858,7 +3858,7 @@ export class SessionsService {
       }
       const guarded = childSessionGuardrails({
         ...parent,
-        ...this.db.campaignBudgets.userLimits(parent.id),
+        ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
       }, candidate, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
@@ -4134,7 +4134,7 @@ export class SessionsService {
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const guarded = childSessionGuardrails({
         ...parent,
-        ...this.db.campaignBudgets.userLimits(parent.id),
+        ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
       }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
@@ -5281,6 +5281,13 @@ export class SessionsService {
     } finally {
       this.firstMessagesInFlight.delete(sessionId);
     }
+  }
+
+  /** The ceilings a parent's children are bounded by, over its own session fields. Under a governing
+   * allowance the parent's session limits are its campaign allocation, so its original personal
+   * limits apply; otherwise (a campaign revoked to Custom) its current session limits do (#2940). */
+  private childCeilingsOf(parent: SessionView): Partial<Record<"costBudgetUsd" | "maxToolCalls", number | null>> {
+    return this.db.campaignBudgets.governingRoot(parent.id) ? this.db.campaignBudgets.userLimits(parent.id) ?? {} : {};
   }
 
   /** Before a Human's message or restart reaches a Full Control campaign whose boundary is stale
@@ -7641,7 +7648,7 @@ export class SessionsService {
           return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
         }
         const allowanceError = childRestartAllowanceError(
-          { ...parent, ...this.db.campaignBudgets.userLimits(parent.id) },
+          { ...parent, ...this.childCeilingsOf(parent) },
           allocated,
           this.db.childSessionRestartReservation(session.id),
         );

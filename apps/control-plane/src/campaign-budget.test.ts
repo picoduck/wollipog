@@ -361,6 +361,51 @@ test("a session limit the person lowers under Custom survives authorizing the al
   } finally { h.db.close(); }
 });
 
+/** An allowance with no personal limits, revoked to Custom, then the root lowered to 5 tool calls (#2940). */
+function revokedAndLowered(before?: (h: ReturnType<typeof harness>) => void) {
+  const h = harness();
+  assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+  before?.(h);
+  assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+  const lowered = h.svc.setConfig("root", { maxToolCalls: 5 });
+  assert.ok(lowered.ok, lowered.error ?? "lower the root's limit under Custom");
+  assert.equal(h.db.campaignBudgets.userLimits("root")!.maxToolCalls, null, "the retained record has no personal limit");
+  return h;
+}
+
+test("under Custom, a child's creation is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered();
+  try {
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5", maxToolCalls: 10 },
+      prompt: "Implement #2936" }, undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.ok(child.ok, child.error ?? "child creation");
+    assert.ok(child.data!.maxToolCalls != null && child.data!.maxToolCalls <= 5, `creation: ${child.data!.maxToolCalls}`);
+  } finally { h.db.close(); }
+});
+
+test("under Custom, a batch of children is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered();
+  try {
+    const run = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Implement #2936",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 } }, { parentSessionId: "root" });
+    assert.ok(run.ok, run.error ?? "batch admission");
+    assert.ok(run.data!.sessions.every((member) => member.maxToolCalls != null && member.maxToolCalls <= 5),
+      `batch: ${run.data!.sessions.map((member) => member.maxToolCalls).join(",")}`);
+  } finally { h.db.close(); }
+});
+
+test("under Custom, a child's restart is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered((h) => {
+    h.make("worker", "root", { maxToolCalls: 10 });
+    h.db.updateSessionStatus("worker", "completed", 4);
+  });
+  try {
+    const restarted = h.svc.restart("worker");
+    assert.equal(restarted.ok, false, "restart re-reserves 10 tool calls against a current limit of 5");
+    assert.match(restarted.error!, /re-reserves 10 tool calls/);
+  } finally { h.db.close(); }
+});
+
 test("root, nested reviewers and replacements share reservations without double counting", () => {
   const h = harness();
   try {
