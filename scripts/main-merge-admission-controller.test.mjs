@@ -432,6 +432,43 @@ test("durable progress continues a partial delivery next cycle; a changed failur
     assert.equal((await deliver(progress)).result.capacity.alreadyHeld, 0);
 });
 
+test("an uncertain overwrite invalidates the earlier hold receipt, so the next hold is written again (#3783 review)", async () => {
+  // A PR-head hold (skippable class) is recorded, then a success POST lands but its response is lost.
+  const pr = { repository, kind: "pull_request", pullRequest: 7, headSha: head, baseSha: base, integrationSha: head };
+  const planFor = (health) => cycle({ census: { ...census(), entries: [pr] }, health });
+  const lose = { value: false };
+  let forgeState = null, ids = 0;
+  const api = async (path, { body } = {}) => { if (path === "/rate_limit") return {};
+    forgeState = body.state; if (lose.value) throw new Error("response lost after the forge accepted the status");
+    return { id: ++ids, context: body.context, state: body.state }; };
+  api.rateLimit = { limit: 5000, remaining: 4900 };
+  const deliver = (plan, progress) => writeAdmissionPlan(plan, { configuration: enabled, api, now: () => at(12), progress, revalidate: async () => plan });
+  const held = await deliver(await planFor(red()));
+  assert.equal(held.progress.deliveries[head].state, "failure");
+  lose.value = true;
+  const failed = await deliver(await planFor(health()), held.progress).catch(error => error);
+  assert.equal(forgeState, "success", "the success reached the forge");
+  assert.equal(failed.progress.deliveries[head], undefined, "the stale failure receipt is gone");
+  lose.value = false;
+  const again = await deliver(await planFor(red()), failed.progress);
+  assert.deepEqual([again.writes, again.capacity.alreadyHeld, forgeState], [1, 0, "failure"]);
+});
+
+test("progress without a genuine receipt ID, or for a group that may hold a success, never suppresses a hold (#3783 review)", async () => {
+  const pr = { repository, kind: "pull_request", pullRequest: 7, headSha: head, baseSha: base, integrationSha: head };
+  const plan = await cycle({ census: { ...census(), entries: [pr] }, health: red() });
+  const entry = { state: "failure", fingerprint: plan.failureFingerprint, deliveredAt: at(11) };
+  const run = async (progress, p = plan) => { const { api } = inertApi();
+    return writeAdmissionPlan(p, { configuration: enabled, api, now: () => at(12), progress, revalidate: async () => p }); };
+  for (const statusId of [undefined, null, 0, -1, 1.5, "7"])
+    assert.equal((await run({ repository, deliveries: { [head]: { ...entry, statusId } } })).writes, 1, String(statusId));
+  assert.equal((await run({ repository, deliveries: { [head]: { ...entry, statusId: 7 } } })).writes, 0, "a genuine receipt is honoured");
+  // A group that may hold a success is landing-critical: its withdrawal is always rewritten.
+  const critical = await cycle({ census: { ...census(), admissionStates: { [group]: "success" } }, health: red() });
+  const receipt = { repository, deliveries: { [group]: { state: "failure", fingerprint: critical.failureFingerprint, deliveredAt: at(11), statusId: 9 } } };
+  assert.equal((await run(receipt, critical)).writes, 1);
+});
+
 test("withdrawals of groups that may hold a success are delivered first and gate landing safety", async () => {
   const c = batch(40);
   // Two groups currently show a success (or an unreadable state); a health failure must withdraw them first.

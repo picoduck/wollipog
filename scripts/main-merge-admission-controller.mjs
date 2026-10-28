@@ -275,11 +275,13 @@ const deliveryClass = d => d.state === "success" ? d.entry.kind === "merge_group
 
 /** Pure: whether `progress` (the operator's durable record of this writer's own receipts) shows
  * this exact hold already delivered under the same failure fingerprint within the lease. Successes
- * are never skipped; malformed progress skips nothing. */
+ * and withdrawals of groups that may hold a success are never skipped; an entry without a genuine
+ * receipt ID, or otherwise malformed progress, skips nothing. */
 function alreadyHeld(progress, repository, decision, fingerprint, checked) {
   const last = progress?.repository === repository && progress.deliveries && typeof progress.deliveries === "object"
     ? progress.deliveries[decision.targetSha] : null;
-  return ["failure", "pending"].includes(decision.state) && last?.state === decision.state && last.fingerprint === fingerprint &&
+  return ["failure", "pending"].includes(decision.state) && deliveryClass(decision) !== 0 && positive(last?.statusId) &&
+    last.state === decision.state && last.fingerprint === fingerprint &&
     typeof fingerprint === "string" && date(last.deliveredAt) && Date.parse(last.deliveredAt) <= checked &&
     checked - Date.parse(last.deliveredAt) < CONTROLLER.progressLeaseMs;
 }
@@ -357,6 +359,9 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
       if (current.state === "success" && Date.parse(current.expiresAt) <= checked)
         throw new Error("Writer evidence expired or changed");
       attemptedWrites++;
+      // Any attempted write may overwrite the target, even if its response is lost: drop the old
+      // receipt first so an uncertain write never leaves a stale hold record behind (#3783 review).
+      delete deliveries[current.targetSha];
       const result = await writerApi(`/repos/${configuration.repository}/statuses/${current.targetSha}`, { method: "POST", body: {
         state: current.state, context: ADMISSION_CONTEXT,
         description: current.state === "failure" ? "Regression health hold; inspect the admission audit" :

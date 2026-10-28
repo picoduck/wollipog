@@ -51,7 +51,12 @@ export async function rehearseHoldFanout(health, { expired = false, restLimit = 
     }
     if (path.startsWith(`/repos/${repository}/statuses/`)) {
       if (body.state !== "failure") throw new Error("Fanout fixture must hold every target");
-      written.push(path.slice(`/repos/${repository}/statuses/`.length));
+      const target = path.slice(`/repos/${repository}/statuses/`.length);
+      written.push(target);
+      // The forge now shows the hold: later censuses observe the group's admission as failure.
+      for (const p of nodes) if (p.mergeQueueEntry?.headCommit.oid === target)
+        for (const c of p.mergeQueueEntry.headCommit.statusCheckRollup.contexts.nodes) if (c.context === body.context) c.state = "FAILURE";
+      if (target in census.admissionStates) census.admissionStates[target] = "failure";
       return { id: ++writes, state: body.state, context: body.context };
     }
     throw new Error("Unexpected inert fanout request");
