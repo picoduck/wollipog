@@ -4014,6 +4014,8 @@ export class SessionsService {
     }
     this.hub.sessionChanged(session);
     this.log.info(`session created ${session.id} on ${session.runnerId} (${session.agentId} @ ${session.workspaceId})`);
+    if (session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
+      entryPoint: "prepared_media", sessionId: session.id, parentSessionId: session.parentSessionId, ...session.reviewPolicy }));
   }
 
   createSession(
