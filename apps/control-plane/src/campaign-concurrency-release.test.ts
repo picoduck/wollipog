@@ -247,3 +247,40 @@ test("a campaign whose ended children leaked their slots and reservations repair
     } finally { db.close(); }
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
+
+test("a failure reported before its provider retires keeps the slot until retirement evidence arrives (#2940)", () => {
+  const h = harness(":memory:", concurrencyOnly(1));
+  try {
+    const child = spawned(h);
+    h.svc.onSessionStatus(child, "running", undefined, undefined, "r");
+    // As a history-integrity failure reports: terminal, with no stop and no final checkpoint yet.
+    h.svc.onSessionStatus(child, "failed", "session history failed integrity checks", undefined, "r");
+    assert.equal(h.db.getSession(child)!.status, "failed");
+    assert.equal(occupied(h), 1, "a failure is not proof that its provider retired");
+    assert.match(spawn(h).error ?? "", /concurrency allowance reached/u, "so no replacement runs beside it");
+    runnerEnds(h, child, 0, "failed");
+    assert.equal(occupied(h), 0, "the final checkpoint proves retirement");
+    assert.ok(spawned(h));
+  } finally { h.db.close(); }
+});
+
+test("a reconnect without a confirmed-stopped child frees its slot and keeps its reservation (#2940)", () => {
+  const h = harness(":memory:", { ...concurrencyOnly(1), toolCalls: 120 });
+  try {
+    const child = spawned(h);
+    h.svc.onSessionStatus(child, "running", undefined, undefined, "r");
+    // The runner reports the stop, which confirms it, but its final checkpoint never arrives.
+    h.svc.onSessionStatus(child, "stopped", undefined, undefined, "r");
+    assert.equal(h.db.sessionStopProvenance(child)?.confirmation, "runner_terminal");
+    assert.equal(occupied(h), 1);
+    assert.match(spawn(h).error ?? "", /concurrency allowance reached/u);
+    const reserved = h.db.campaignBudgets.view("root")!.outstanding.toolCalls;
+
+    h.svc.reconcileRunnerSessions("r", ["root"]);
+    assert.equal(occupied(h), 0, "the runner no longer holds the child alive");
+    assert.equal(h.db.sessionStopProvenance(child)?.confirmation, "runner_terminal", "the earlier confirmation stands");
+    assert.equal(h.db.campaignBudgets.active(child), true, "absence settles no usage");
+    assert.equal(h.db.campaignBudgets.view("root")!.outstanding.toolCalls, reserved, "the reservation stays");
+    assert.deepEqual(settlements(h, child), []);
+  } finally { h.db.close(); }
+});

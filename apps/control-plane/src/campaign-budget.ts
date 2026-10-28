@@ -16,17 +16,20 @@ const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live
  * A terminal status is not that proof: a runner reports `stopped` as soon as a Stop begins closing
  * the provider, which can still run until the close completes or stay unconfirmed if it fails. The
  * runner withholds its final checkpoint until retirement, so a checkpoint for the member's current
- * generation proves it, as does a reconnect inventory without the session. Until then, and while a
- * stop is pending or provisional, the session keeps its slot. A member without a session row, a
- * native review job or a deleted session whose runner may not have removed it yet, holds one until
- * its usage settles. Reviewer sessions never hold one. */
+ * generation proves it, as does a reconnect that no longer holds the session alive, recorded for
+ * that generation by `noteProviderAbsent` (a stop the runner already confirmed keeps that earlier
+ * confirmation). Until then, and while a stop is pending or provisional, the session keeps its
+ * slot. A member without a session row, a native review job or a deleted session whose runner may
+ * not have removed it yet, holds one until its usage settles. Reviewer sessions never hold one.
+ * Every comparison is NULL-safe, and an indeterminate result still holds the slot. */
 const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id) AND CASE
     WHEN s.id IS NULL THEN 1
-    ELSE NOT (s.status IN ('completed','failed','stopped')
+    ELSE COALESCE(NOT (s.status IN ('completed','failed','stopped')
       AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
-      AND (s.status<>'stopped' OR s.stop_confirmation IS NOT NULL)
-      AND (s.stop_confirmation='runner_absent' OR EXISTS (SELECT 1 FROM campaign_budget_checkpoints c
-        WHERE c.session_id=m.session_id AND json_extract(c.checkpoint,'$.generation')=m.generation))) END)`;
+      AND (s.status IS NOT 'stopped' OR s.stop_confirmation IS NOT NULL)
+      AND (s.stop_confirmation IS 'runner_absent' OR m.absent_generation IS m.generation
+        OR EXISTS (SELECT 1 FROM campaign_budget_checkpoints c
+          WHERE c.session_id=m.session_id AND json_extract(c.checkpoint,'$.generation') IS m.generation))), 1) END)`;
 
 /** Whether a runner's final checkpoint, in its local history coordinates, names the history the
  * control plane hydrated, which it stores in the wire coordinates that runner projected for it.
@@ -96,6 +99,11 @@ export class CampaignBudgetLedger {
     }
     for (const row of sql.prepare("SELECT session_id FROM campaign_budget_members WHERE generation=''").all() as Array<{session_id:string}>) {
       sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),row.session_id);
+    }
+    // The generation a reconnect proved no provider runs for (#2940). It frees only that
+    // generation's slot; a relaunch's new generation needs its own proof.
+    if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "absent_generation")) {
+      sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN absent_generation TEXT");
     }
     // Cost availability outlives the usage rows that showed it: deleting an unpriced member drops
     // its usage state, but its cost stays unknown. The marker is set once and never cleared (#2940).
@@ -386,6 +394,18 @@ export class CampaignBudgetLedger {
       this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
       if(state.checkpoint) this.sql.prepare("INSERT INTO campaign_budget_checkpoints VALUES (?,?)").run(sessionId,state.checkpoint);
     });
+  }
+
+  /** Record that the owning runner reconnected without this session alive, so no provider of its
+   * current generation runs. That proves retirement for the slot even when the stop was already
+   * confirmed by an earlier terminal status, or the final checkpoint never arrives. It settles no
+   * usage: the reservation stays until a checkpoint does. Only the reconnect reconciliation may
+   * call it. */
+  noteProviderAbsent(sessionId: string): void {
+    const dispatch = this.dispatch(sessionId);
+    if (!dispatch) return;
+    this.sql.prepare("UPDATE campaign_budget_members SET absent_generation=? WHERE session_id=? AND generation=? AND active=1")
+      .run(dispatch.generation, sessionId, dispatch.generation);
   }
 
   /** Only the authenticated owning runner may supply a checkpoint. Do not accept agent JSON. */
