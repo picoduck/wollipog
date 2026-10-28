@@ -3334,7 +3334,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
     return (
       <HistoryDivider
         icon={<ThreadForkIcon size={14} />}
-        label={`Forked from Turn ${item.turn}`}
+        label={`Forked from Turn\u00a0${item.turn}`}
         title={`Conversation forked from turn ${item.turn}`}
         description={sourceLink || undefined}
       />
@@ -3343,7 +3343,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
   return (
     <HistoryDivider
       icon={<HandOffIcon size={14} />}
-      label={`Handoff from ${agentName(item.handoff.sourceAgent)} to ${agentName(item.handoff.destinationAgent)} after Turn ${item.turn}`}
+      label={`Handoff from ${agentName(item.handoff.sourceAgent)} to ${agentName(item.handoff.destinationAgent)} after Turn\u00a0${item.turn}`}
       description={<>Fresh provider conversation. {item.handoff.disclosure}{sourceLink && <> {sourceLink}</>}</>}
     />
   );

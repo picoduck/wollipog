@@ -3,6 +3,27 @@ import { expect, test, type Locator } from "@playwright/test";
 import { pinWidestFace } from "./font-geometry";
 import { expectGeometry } from "./geometry-margins";
 
+// A narrow label may wrap, but a turn number must stay on the same line as “Turn”.
+async function expectTurnNumberTogether(divider: Locator) {
+  const lines = await divider.locator(".tl-divider-label").evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent ?? "";
+      const turn = text.lastIndexOf("Turn");
+      const number = text.match(/\d+$/);
+      if (turn < 0 || number?.index === undefined) continue;
+      const range = document.createRange();
+      range.setStart(node, turn); range.setEnd(node, turn + 4);
+      const turnTop = range.getBoundingClientRect().top;
+      range.setStart(node, number.index); range.setEnd(node, text.length);
+      return [turnTop, range.getBoundingClientRect().top];
+    }
+    throw new Error("No turn label found");
+  });
+  expect(lines[1], "the number shares Turn's rendered line").toBe(lines[0]);
+}
+
 // Insets are measured to the text column: the description's --space-6 gutters are its own inline
 // padding (#2184), so its border box may span the row on a phone while its text stays inset.
 const readDescriptionLayout = (description: Locator) => description.evaluate((element) => {
@@ -250,6 +271,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const handoff = page.getByRole("separator", { name: "Handoff from Codex to Claude Code after Turn 1" });
     await expect(handoff).toBeVisible();
     await expect(handoff).toHaveText("Handoff from Codex to Claude Code after Turn 1");
+    await expectTurnNumberTogether(handoff);
     await expect(page.locator(".composer-input")).toHaveValue(/1 event or message omitted/);
     const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
     expect(handoffDescriptionId).toBeTruthy();
@@ -292,6 +314,13 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     const historical = page.getByRole("separator", { name: "Handoff from retired-agent to historical-destination after Turn 2", exact: true });
     await expect(historical).toBeVisible();
     await expect(historical).toHaveText("Handoff from retired-agent to historical-destination after Turn 2");
+    await expectTurnNumberTogether(historical);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitSessionEvent("handoff-child", {
+      kind: "conversation_forked", sourceSessionId: "historical-source", turn: 1234,
+    }));
+    const fork = page.getByRole("separator", { name: "Forked from Turn 1234", exact: true });
+    await expect(fork).toBeVisible();
+    await expectTurnNumberTogether(fork);
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(1);
   });

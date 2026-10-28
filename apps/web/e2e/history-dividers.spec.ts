@@ -9,7 +9,7 @@ const PAGE = "/timeline-reflow-e2e.html?history=1";
 const DIVIDERS = [
   "Files Rewound to Before Turn 1",
   "Forked from Turn 1",
-  "Handoff from Claude Code to Codex After Turn 1",
+  "Handoff from Claude Code to Codex after Turn 1",
   "Automatically Switched Account to Work",
 ];
 

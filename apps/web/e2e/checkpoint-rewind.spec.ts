@@ -35,7 +35,7 @@ test("rewind stays compact on its user turn across pointer interactions", async 
   await expect(page.getByRole("separator", { name: /^(Start|End) Turn/ })).toHaveCount(0);
   await expect(page.getByRole("separator", { name: "Files Rewound to Before Turn 4" })).toBeVisible();
   await expect(page.getByRole("separator", { name: "Forked from Turn 4" })).toBeVisible();
-  const handoff = page.getByRole("separator", { name: "Handoff from Claude Code to Codex After Turn 4" });
+  const handoff = page.getByRole("separator", { name: "Handoff from Claude Code to Codex after Turn 4" });
   await expect(handoff).toBeVisible();
   const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
   expect(handoffDescriptionId).toBeTruthy();
