@@ -671,13 +671,16 @@ test("cancellation retains reservations until runner settlement; late spend stil
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
     const reserved = h.db.campaignBudgets.view("root")!.outstanding.toolCalls;
     h.svc.onSessionStatus("worker", "stopped");
-    // The stop ends the worker's slot, but not its reservation: status alone does not prove final usage (#2940).
-    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0, "a confirmed stop releases the slot");
+    // A runner reports `stopped` while its provider still closes: status alone proves neither
+    // retirement nor final usage (#2940).
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1, "status alone does not prove provider retirement");
     assert.equal(h.db.campaignBudgets.view("root")!.outstanding.toolCalls, reserved, "status alone does not prove final usage");
     h.tool("worker", "late");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
     const generation = h.db.campaignBudgets.dispatch("worker")!.generation;
     h.db.campaignBudgets.recordCheckpoint("worker", { generation, historyEpoch: 0, throughSeq: 2, costUsd: 0 });
+    // The retired runner's final checkpoint frees the slot; the reservation waits for its history.
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0, "the final checkpoint proves retirement");
     assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 1 }), false);
     assert.equal(h.db.campaignBudgets.active("worker"), true, "the reservation stays until settlement");
     assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }));

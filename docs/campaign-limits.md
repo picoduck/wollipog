@@ -38,11 +38,13 @@ replacement's allocation. A cancellation without complete final usage retains it
 The runner reports that checkpoint in its local history coordinates, and the control plane matches
 it against the wire-projected history it hydrated.
 
-A concurrency slot is separate from a reservation (#2940). A worker holds a slot while it is live,
-while a Stop is pending, and while its stop is provisional and unconfirmed. A confirmed stop,
-verification with Stop and Archive, archival or provider exit releases the slot at once, without
-reloading history, even when its final usage has not settled yet. Its unspent reservation stays
-outstanding until then. Every campaign read settles ended workers whose hydrated history covers
+A concurrency slot is separate from a reservation (#2940). A worker holds a slot until its provider
+has retired. A terminal status alone is not proof: a runner reports a Stop as soon as it begins
+closing the provider. The runner sends its final checkpoint only after retirement, so that
+checkpoint, or a reconnect inventory without the session, releases the slot after a Stop,
+verification with Stop and Archive, archival or provider exit, without reloading history and even
+when its final usage has not settled yet. A pending, provisional or unretired stop keeps the slot.
+Its unspent reservation stays outstanding until its usage settles. Every campaign read settles ended workers whose hydrated history covers
 their checkpoint, so a campaign that held slots or reservations for already-ended workers is
 repaired on its next read or startup without changing its allowance.
 

@@ -12,16 +12,21 @@ const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live
 
 /** Whether member `m` (sessions joined as `s`) holds one of its campaign's concurrent slots. A slot
  * is not a reservation (#2940): `active` keeps a member's unspent allocation outstanding until its
- * final usage settles, which can wait on history, but its slot ends with its stop. A session holds
- * one while it is live, while a stop is pending, and while its stop is unconfirmed: a provisional
- * stop may still have a running provider. A member without a session row, a native review job or
- * a deleted session whose runner may not have removed it yet, holds one until its usage settles.
- * Reviewer sessions never hold one. */
+ * final usage settles, which can wait on history, but its slot ends once its provider has retired.
+ * A terminal status is not that proof: a runner reports `stopped` as soon as a Stop begins closing
+ * the provider, which can still run until the close completes or stay unconfirmed if it fails. The
+ * runner withholds its final checkpoint until retirement, so a checkpoint for the member's current
+ * generation proves it, as does a reconnect inventory without the session. Until then, and while a
+ * stop is pending or provisional, the session keeps its slot. A member without a session row, a
+ * native review job or a deleted session whose runner may not have removed it yet, holds one until
+ * its usage settles. Reviewer sessions never hold one. */
 const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id) AND CASE
     WHEN s.id IS NULL THEN 1
-    ELSE EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
-      OR (s.status='stopped' AND s.stop_confirmation IS NULL)
-      OR (s.archived=0 AND s.status NOT IN ('completed','failed','stopped')) END)`;
+    ELSE NOT (s.status IN ('completed','failed','stopped')
+      AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
+      AND (s.status<>'stopped' OR s.stop_confirmation IS NOT NULL)
+      AND (s.stop_confirmation='runner_absent' OR EXISTS (SELECT 1 FROM campaign_budget_checkpoints c
+        WHERE c.session_id=m.session_id AND json_extract(c.checkpoint,'$.generation')=m.generation))) END)`;
 
 /** Whether a runner's final checkpoint, in its local history coordinates, names the history the
  * control plane hydrated, which it stores in the wire coordinates that runner projected for it.
