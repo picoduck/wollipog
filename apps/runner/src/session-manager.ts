@@ -41,6 +41,7 @@ import type {
   AgentDefinition,
   BackgroundJobStopActor,
   StopBackgroundJobRefusal,
+  ReleaseQueueHoldRefusal,
   AgentDriverKind,
   AgentSlashCommand,
   UnsupportedSlashCommand,
@@ -1256,6 +1257,19 @@ function backgroundWorkEndedNotice(
     ? `Wollipog ended ${described[0]}`
     : `Wollipog ended ${jobs.length} background jobs: ${described.join("; ")}`;
   const recorded = jobs.length === 1 ? "It is recorded as killed." : "Each is recorded as killed.";
+  const hold = request.hold;
+  // An account label may be an email-shaped alias, and the transcript names no account.
+  const move = hold?.kind === "worktree_rebind"
+    ? `move to worktree ${hold.target}`
+    : "switch to the selected provider account";
+  const messages = hold?.queuedPrompts === 1 ? "the queued message" : `the ${hold?.queuedPrompts} queued messages`;
+  const proceed = `The ${hold?.kind === "worktree_rebind" ? "move" : "switch"} and ${messages} proceed now.`;
+  if (request.reason === "stop_request" && hold) {
+    // A released hold (#3752): the requester chose not to wait for its deadline.
+    return `${what} at the request of ${backgroundJobEndActorLabel(request.actor)}, who released the hold on the ` +
+      `provider's ${move} after ${waitedFor(request.endedAt - hold.since)}. Wollipog stopped the provider process ` +
+      `that owned the work. ${recorded} ${proceed}`;
+  }
   if (request.reason === "stop_request") {
     const late = confirmedLate
       ? "The provider confirmed the stop only after the request had been reported as unconfirmed. "
@@ -1263,16 +1277,10 @@ function backgroundWorkEndedNotice(
     return `Wollipog stopped ${described.join("; ")} at the request of ${backgroundJobEndActorLabel(request.actor)}. ` +
       `${late}${recorded} The provider process, its conversation, and the session's other background jobs keep running.`;
   }
-  const hold = request.hold;
   if (request.reason === "handoff_wait_bound" && hold) {
-    // An account label may be an email-shaped alias, and the transcript names no account.
-    const move = hold.kind === "worktree_rebind"
-      ? `move to worktree ${hold.target}`
-      : "switch to the selected provider account";
-    const messages = hold.queuedPrompts === 1 ? "the queued message" : `the ${hold.queuedPrompts} queued messages`;
     return `${what}. The provider's ${move} had waited ${waitedFor(request.endedAt - hold.since)} for ` +
       `unfinished background work, and ${messages} waited behind it, so Wollipog stopped the provider process ` +
-      `that owned the work. ${recorded} The ${hold.kind === "worktree_rebind" ? "move" : "switch"} and ${messages} proceed now.`;
+      `that owned the work. ${recorded} ${proceed}`;
   }
   return `${what}; Wollipog stopped the provider process that owned the work. ${recorded}`;
 }
@@ -11541,6 +11549,8 @@ export class SessionManager {
     const bound = entry.client.endBackgroundWork ? entry.client.handoffWaitMaxMs ?? 0 : 0;
     const live = !meta.orphanedWork && meta.backgroundWorkState !== "orphaned";
     const bounded = bound > 0 && unfinishedBackgroundJobs > 0 && live;
+    // What the bound would end, someone may end now (#3752), whether or not the bound is enabled.
+    const releasable = !!entry.client.endBackgroundWork && unfinishedBackgroundJobs > 0 && live;
     return {
       kind,
       holdId: `${kind.replaceAll("_", "-")}:${since}`,
@@ -11551,6 +11561,7 @@ export class SessionManager {
       ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
       ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
+      ...(releasable ? { canRelease: true as const } : {}),
       restartKeepsQueue: true,
     };
   }
@@ -11643,6 +11654,37 @@ export class SessionManager {
     } finally {
       this.endingBackgroundWork.delete(sessionId);
     }
+  }
+
+  /**
+   * Release a queue hold now, at an authorized actor's request (#3752): what the hold's deadline
+   * does, without waiting for it. `holdId` must name the hold the requester saw, so a request that
+   * raced a cleared or replaced hold ends nothing. Every ended job is recorded as killed at the
+   * actor's request, the timeline names them, and the handoff and queued prompts then run in order.
+   *
+   * The caller (the control plane) has already established that the actor may act on the session.
+   */
+  async releaseQueueHold(
+    sessionId: string,
+    holdId: string,
+    actor: BackgroundJobStopActor,
+  ): Promise<{ outcome: "released"; jobIds: string[] } | { outcome: "refused"; reason: ReleaseQueueHoldRefusal }> {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || this.store.isDeleted(sessionId)) return { outcome: "refused", reason: "session_not_found" };
+    const entry = this.active.get(sessionId);
+    const hold = entry ? this.queueHoldFor(sessionId, entry) : null;
+    if (!hold) return { outcome: "refused", reason: "no_hold" };
+    if (hold.holdId !== holdId) return { outcome: "refused", reason: "hold_changed" };
+    if (!hold.canRelease) {
+      return { outcome: "refused", reason: entry?.client.endBackgroundWork ? "no_live_process" : "unsupported" };
+    }
+    const ended = await this.endBackgroundJobs(sessionId, { actor, reason: "stop_request", hold });
+    if (ended.status === "ended") return { outcome: "released", jobIds: ended.jobIds };
+    if (ended.status === "none") return { outcome: "refused", reason: "nothing_to_end" };
+    const reason = ended.reason === "no_session" ? "session_not_found"
+      : ended.reason === "unknown_job" ? "hold_changed"
+      : ended.reason;
+    return { outcome: "refused", reason };
   }
 
   /**

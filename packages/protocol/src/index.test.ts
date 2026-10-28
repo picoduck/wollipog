@@ -112,7 +112,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 244);
+  assert.equal(PROTOCOL_VERSION, 247);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -293,8 +293,11 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 244", () => {
-  assert.equal(PROTOCOL_VERSION, 244);
+test("PROTOCOL_VERSION is 247", () => {
+  assert.equal(PROTOCOL_VERSION, 247);
+  // A v246 runner cannot release a queue hold on request (#3752).
+  assert.equal(runnerSupportsProtocol(246, "queueHoldRelease"), false);
+  assert.equal(runnerSupportsProtocol(247, "queueHoldRelease"), true);
   // A v241 runner cannot report the closing references of a GitHub merge (#3713).
   assert.equal(runnerSupportsProtocol(241, "githubMergeClosingReferences"), false);
   assert.equal(runnerSupportsProtocol(242, "githubMergeClosingReferences"), true);
@@ -1984,4 +1987,27 @@ test("queue-hold advice written for a reader names only the actions that reader 
     "only when someone who can act on this session steps in; ask its owner.");
   assert.equal(queueHoldRecoveryAction(base, { canStopJobs: false, canRestart: true }), queueHoldRecoveryAction(base),
     "a hold its runner cannot stop names restarting to anyone allowed to restart");
+});
+
+test("a releasable hold names Proceed Now only to a reader who may stop its jobs (#3752)", () => {
+  // The observed case: one pending id with no listed job, so nothing can be stopped by id.
+  const hold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:9", since: 9, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1, endsAt: Date.UTC(2026, 9, 28, 5, 40),
+    canRelease: true as const, restartKeepsQueue: true as const,
+  };
+  const owner = queueHoldRecoveryAction(hold, { canStopJobs: true, canRestart: true });
+  assert.equal(owner, queueHoldRecoveryAction(hold), "a reader allowed everything reads the server's copy");
+  assert.match(owner, /release the hold with release_queue_hold \(hold worktree-rebind:9\) or with Proceed Now/u);
+  assert.match(owner, /records each as killed at your request, and then runs the handoff and the queued message in order/u);
+  assert.match(owner, /Wollipog also ends any job still running at 2026-10-28T05:40Z\./u);
+  assert.match(owner, /Prefer proceeding now to restarting the session/u);
+  assert.doesNotMatch(owner, /stop_background_job/u, "no job can be stopped by id");
+
+  const stoppable = queueHoldRecoveryAction({ ...hold, canStopJobs: true }, { canStopJobs: true, canRestart: true });
+  assert.match(stoppable, /To end only one job instead, stop it by its job id with stop_background_job/u);
+
+  const viewer = queueHoldRecoveryAction(hold, { canStopJobs: false, canRestart: false });
+  assert.match(viewer, /Only the session owner or its controlling Orchestrator can end it sooner/u);
+  assert.doesNotMatch(viewer, /release_queue_hold|Proceed Now|restart/u);
 });

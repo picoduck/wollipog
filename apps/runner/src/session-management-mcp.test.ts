@@ -625,6 +625,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "handoff_session_result",
       "stop_session",
       "stop_background_job",
+      "release_queue_hold",
       "restart_session",
       "archive_session",
       "set_guardrails",
@@ -775,7 +776,7 @@ test("mutating tools describe governance instead of promising a now-optional hum
     "create_workflow_definition", "create_workflow_version", "create_workflow_run",
     "dispatch_workflow_node", "attach_session_artifact", "create_workflow_artifact", "complete_workflow_attempt",
     "resolve_workflow_gate", "create_session", "prompt_session", "stop_session", "restart_session",
-    "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
+    "stop_background_job", "release_queue_hold", "set_guardrails", "create_run", "create_worktree", "attach_worktree", "select_worktree", "discard_worktree",
   ];
   for (const name of mutations) {
     const tool = TOOLS.find((t) => t.name === name)!;
@@ -2172,6 +2173,45 @@ test("stop_background_job -> POST /api/sessions/:id/background-jobs/:jobId/stop,
   assert.match(resultText(deniedResult), /controlling Orchestrator/);
 });
 
+test("release_queue_hold -> POST /api/sessions/:id/queue-hold/release with the hold id, and refuses its own session (#3752)", async () => {
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: 247 } }
+    : { status: 200, body: { sessionId: "s/child", holdId: "worktree-rebind:5000", outcome: "released", jobIds: ["b1", "b2"] } });
+  deps.orchestrator = true;
+  const result = await callTool(deps, "release_queue_hold", { sessionId: "s/child", holdId: "worktree-rebind:5000" });
+  assert.equal(result.isError, undefined);
+  const release = calls.find((call) => call.method === "POST")!;
+  assert.equal(release.url, `${CP_URL}/api/sessions/s%2Fchild/queue-hold/release`);
+  assert.deepEqual(release.body, { holdId: "worktree-rebind:5000" });
+  assert.deepEqual(JSON.parse(resultText(result)),
+    { sessionId: "s/child", holdId: "worktree-rebind:5000", outcome: "released", jobIds: ["b1", "b2"] });
+
+  const before = calls.length;
+  const self = await callTool(deps, "release_queue_hold", { sessionId: SELF_ID, holdId: "worktree-rebind:5000" });
+  assert.equal(self.isError, true);
+  assert.match(resultText(self), /my own session/);
+  assert.equal((await callTool(deps, "release_queue_hold", { sessionId: "s_child" })).isError, true);
+  assert.equal((await callTool(deps, "release_queue_hold", { sessionId: "s_child", holdId: "" })).isError, true);
+  assert.equal(calls.length, before, "refused before contacting the control plane");
+
+  const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 246 } }));
+  const refused = await callTool(old.deps, "release_queue_hold", { sessionId: "s_child", holdId: "worktree-rebind:5000" });
+  assert.equal(refused.isError, true);
+  assert.deepEqual(resultJson(refused), {
+    error: "Releasing a queue hold needs a newer version of Wollipog. Update Wollipog and try again.",
+    requiredControlPlaneProtocolVersion: 247,
+    controlPlaneProtocolVersion: 246,
+  });
+  assert.equal(old.calls.some((call) => call.method === "POST"), false);
+
+  const changed = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: 247 } }
+    : { status: 409, body: { error: "The hold changed before it could be released; reload the session and try again." } });
+  const changedResult = await callTool(changed.deps, "release_queue_hold", { sessionId: "s_child", holdId: "worktree-rebind:1" });
+  assert.equal(changedResult.isError, true);
+  assert.match(resultText(changedResult), /hold changed before it could be released/);
+});
+
 test("session results list unfinished background jobs by id for stop_background_job (#1780)", async () => {
   const { deps } = makeDeps(() => ({ status: 200, body: { session: {
     id: "s_child", status: "queued",
@@ -2985,6 +3025,8 @@ const NEWER_WOLLIPOG_REFUSALS: ReadonlyArray<{
     error: "Managed worktree retirement needs a newer version of Wollipog. Update Wollipog before discarding a runner-owned worktree." },
   { tool: "stop_background_job", args: { sessionId: "s_child", jobId: "b1" }, floor: "backgroundJobStop",
     error: "Stopping one background job needs a newer version of Wollipog. Update Wollipog and try again." },
+  { tool: "release_queue_hold", args: { sessionId: "s_child", holdId: "worktree-rebind:5000" }, floor: "queueHoldRelease",
+    error: "Releasing a queue hold needs a newer version of Wollipog. Update Wollipog and try again." },
   { tool: "consume_workflow_decision",
     args: { occurrenceId: "o1", resourceSnapshot: { category: "pr_merge" }, action: { kind: "pr_merge_enqueue", command: "gh pr merge" } },
     floor: "workflowDecisionActionAdmission",

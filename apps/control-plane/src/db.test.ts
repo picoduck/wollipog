@@ -2645,6 +2645,24 @@ test("a queue hold keeps the runner's word that one job can be stopped (#1780)",
   assert.equal(db.getSession("not-stoppable-hold")!.queueHold?.canStopJobs, undefined, "only an exact true is kept");
 });
 
+test("a queue hold keeps the runner's word that it can be released now (#3752)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "provider_account_switch" as const, holdId: "provider-account-switch:5000", since: 5_000, target: "Work",
+    queuedPrompts: 2, unfinishedBackgroundJobs: 1, canRelease: true as const,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "releasable-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("releasable-hold")!;
+  assert.deepEqual(held.queueHold, queueHold);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /release_queue_hold \(hold provider-account-switch:5000\)/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "not-releasable-hold", status: "queued", queueHold: { ...queueHold, canRelease: "yes" as never },
+  }), "runner-1", 6_000);
+  const unreleasable = db.getSession("not-releasable-hold")!;
+  assert.equal(unreleasable.queueHold?.canRelease, undefined, "only an exact true is kept");
+  assert.doesNotMatch(unreleasable.holds?.[0]?.recoveryAction ?? "", /release_queue_hold/u);
+});
+
 test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {
   const db = withRunner();
   const queueHold = {

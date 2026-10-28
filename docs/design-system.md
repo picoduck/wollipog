@@ -2398,7 +2398,14 @@ full-width §5.5 disclosure trigger, `--control-h` tall, reading "1 Queued Messa
 Messages" and carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
-lasts while the session stays open, and every session starts collapsed. Expanded, the tray says once
+lasts while the session stays open, and every session starts collapsed. A queue held behind a
+worktree or account handoff (#3752) says why in one sentence-case `.queue-note` right under the
+summary, collapsed or expanded (`.queue-hold`), followed by Proceed Now… (`.btn.sm`) when the runner
+can release the hold and the reader may stop the session's background jobs; a Viewer reads only the
+sentence. Proceed Now… asks first in the danger confirmation titled Proceed Now, with Cancel focused,
+saying that every unfinished background job ends and is recorded as killed and that the handoff and
+the queued messages then run in order; a refusal is a compact danger notice under the button, as
+Stop Job's is. Expanded, the tray says once
 in sentence case what holds for every row: the held explanation, a steering reason every row shares
 ("Claude Code can't take steering mid-turn, so these send when the turn ends."), a cancel none of
 them can use, or a Viewer's refusal. A row carries

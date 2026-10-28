@@ -161,7 +161,8 @@ export function agentCredentialSessionTargetError(
     routePath === "/api/sessions/:id/steering/:submissionId/resolve" ||
     routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/restart" ||
     routePath === "/api/sessions/:id/config" || routePath === "/api/sessions/:id/archive" ||
-    routePath === "/api/sessions/:id/background-jobs/:jobId/stop";
+    routePath === "/api/sessions/:id/background-jobs/:jobId/stop" ||
+    routePath === "/api/sessions/:id/queue-hold/release";
   // The config service permits a self-target only for maxChildSessions, so a live orchestrator can
   // raise its own delegation concurrency without gaining authority over its spend/tool ceilings.
   if (routePath === "/api/sessions/:id/config" &&

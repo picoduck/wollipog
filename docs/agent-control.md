@@ -1665,7 +1665,27 @@ queued behind a turn that had never started.
   hold but not the wait: the hold keeps its identity and deadline, and the work is ended as soon as
   that turn settles if the deadline has passed. Orphaned work is not bounded: its one recovery turn
   already crosses the barrier.
-- **The way out is stated.** For a bounded hold, or one whose runner can stop a single job, the
+- **It can be released now (#3752).** On protocol v247, a hold whose live provider can end its
+  background work carries `canRelease`, whether or not the bound is enabled. MCP
+  `release_queue_hold` with the session and the hold's `holdId` (CLI
+  `wollipog session release-hold <session-id> <hold-id>`), `POST /api/sessions/:id/queue-hold/release`
+  with `{ "holdId": "..." }`, or **Proceed Now** beside the queued messages runs the deadline's path
+  at once: every unfinished job ends and is recorded as `killed` with `endedBy` naming the requester
+  and the reason `stop_request`, the timeline notice names the jobs and who released the hold after
+  how long, a finished sibling's result is still delivered, and the handoff and the queued prompts
+  then run in their original order. The conversation keeps running. The answer lists the ended
+  `jobIds`. Releasing takes exactly the authority of stopping one job (#1780): the session owner or
+  its controlling Orchestrator (the direct parent), never the session itself, and the reader's
+  `canStopJobs` verdict covers both. The `holdId` must be the hold the requester read, so a request
+  that raced a cleared or replaced hold ends nothing. The request is refused with 409 when the hold
+  changed (`hold_changed`), no hold remains (`no_hold`), a turn started meanwhile (`turn_active`),
+  the work is already being ended (`in_progress`), no live provider process owns it
+  (`no_live_process`; only orphan recovery or a restart clears that hold), the provider reported
+  nothing to end (`nothing_to_end`), the harness cannot end its work (`unsupported`), or the runner
+  is offline or older than v247; with 504 when the runner does not answer in time.
+- **The way out is stated.** A releasable hold's recovery action, for a reader who may stop jobs,
+  names `release_queue_hold` with its hold id and **Proceed Now** first, then stopping a single job
+  where the runner can. For a bounded hold, or one whose runner can stop a single job, the
   recovery action says to wait or stop that job and advises against a restart. Otherwise — an older
   runner, a disabled bound, or a provider that cannot end its work — it says to wait for the job,
   or, if it never ends, to restart the session, and what that costs. What a restart costs depends
@@ -1715,7 +1735,8 @@ queued behind a turn that had never started.
   `endedBy`, and a v191 or older runner sends none, so its killed row names no actor.
 - **The advice is written for its reader (#1857, #1863).** The server's copy of a hold's recovery
   action names every way out. An agent credential reads a copy that names only the tools its
-  routes admit: `stop_background_job` only for the controlling Orchestrator (the direct parent),
+  routes admit: `stop_background_job` and `release_queue_hold` only for the controlling
+  Orchestrator (the direct parent),
   restarting only for an ancestor (a session cannot restart itself), and `select_worktree` and
   `create_worktree` only for a credential that may manage that session's worktrees (a worker its
   own session; an Orchestrator its descendants, and itself unless Strict Project Isolation is on).

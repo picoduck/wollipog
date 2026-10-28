@@ -26426,6 +26426,81 @@ test("stopBackgroundJob is refused for a runner older than v190 without contacti
   assert.equal(hub.sentOfType("stop_background_job").length, 0);
 });
 
+test("releaseQueueHold asks the runner to release the hold the requester saw and returns the ended jobs (#3752)", async () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const actor = { kind: "orchestrator" as const, sessionId: "s_parent" };
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "release_queue_hold");
+    if (msg.type !== "release_queue_hold") throw new Error("unexpected");
+    return {
+      type: "release_queue_hold_result", requestId: msg.requestId, sessionId: msg.sessionId, holdId: msg.holdId,
+      outcome: "released", jobIds: ["monitor-1", "agent-1"],
+    };
+  };
+  const result = await svc.releaseQueueHold(id, "worktree-rebind:5000", actor);
+  assert.deepEqual(result, { ok: true, status: 200, data: {
+    sessionId: id, holdId: "worktree-rebind:5000", outcome: "released", jobIds: ["monitor-1", "agent-1"],
+  } });
+  const sent = hub.sentOfType("release_queue_hold").at(-1)!;
+  assert.deepEqual({ ...sent, requestId: undefined }, {
+    type: "release_queue_hold", requestId: undefined, sessionId: id, holdId: "worktree-rebind:5000", actor,
+  });
+  assert.equal(hub.sentOfType("stop_session").length + hub.sentOfType("cancel_session").length, 0,
+    "the session itself is not stopped");
+});
+
+test("releaseQueueHold maps refusals and transport failures to actionable errors (#3752)", async () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const actor = { kind: "user" as const, userId: "usr_owner" };
+  const holdId = "provider-account-switch:5000";
+  const answer = (outcome: string, extra: Record<string, unknown> = {}) => {
+    hub.requestHandler = (msg) => msg.type === "release_queue_hold"
+      ? { type: "release_queue_hold_result", requestId: msg.requestId, sessionId: msg.sessionId, holdId: msg.holdId,
+          outcome, ...extra } as never
+      : assert.fail("unexpected request");
+  };
+  for (const [reason, pattern] of [
+    ["session_not_found", /^The runner has no record of this session\.$/],
+    ["no_hold", /no longer held/],
+    ["hold_changed", /^The hold changed before it could be released; reload the session and try again\.$/],
+    ["unsupported", /harness cannot end its background work/],
+    ["turn_active", /A turn started/],
+    ["in_progress", /try again shortly/],
+    ["no_live_process", /No running provider process owns the work/],
+    ["nothing_to_end", /no unfinished background work/],
+  ] as const) {
+    answer("refused", { reason });
+    const result = await svc.releaseQueueHold(id, holdId, actor);
+    assert.equal(result.status, 409, reason);
+    assert.match(result.error ?? "", pattern, reason);
+  }
+  answer("released", { jobIds: "monitor-1" });
+  assert.equal((await svc.releaseQueueHold(id, holdId, actor)).status, 502, "a malformed job list is rejected");
+  hub.requestHandler = (msg) => msg.type === "release_queue_hold"
+    ? { type: "release_queue_hold_result", requestId: msg.requestId, sessionId: msg.sessionId, holdId: "other",
+        outcome: "released", jobIds: [] }
+    : assert.fail("unexpected request");
+  assert.equal((await svc.releaseQueueHold(id, holdId, actor)).status, 502, "a result for another hold is rejected");
+  hub.requestHandler = undefined;
+  assert.equal((await svc.releaseQueueHold(id, holdId, actor)).status, 504);
+  hub.deliver = false;
+  assert.deepEqual(await svc.releaseQueueHold(id, holdId, actor), { ok: false, status: 409, error: "runner is offline" });
+  assert.equal((await svc.releaseQueueHold("s_missing", holdId, actor)).status, 404);
+});
+
+test("releaseQueueHold is refused for a runner older than v247 without contacting it (#3752)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.registerRunner(runnerMeta(), Date.now(), 246);
+  const result = await svc.releaseQueueHold(id, "worktree-rebind:5000", { kind: "user", userId: "usr_owner" });
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /needs a newer runner for releasing a queue hold\./);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 247);
+  assert.equal(hub.sentOfType("release_queue_hold").length, 0);
+});
+
 test("issue closure requires an exact human decision and executes one durable action", async () => {
   const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending"]);
   const uncertain = new Set(["uncertain", "invalid_result"]);

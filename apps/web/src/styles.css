@@ -6454,6 +6454,15 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
 }
 .queue-summary > .status { flex: none; }
+/* A queue held behind a worktree or account handoff (#3752) says why under the summary, collapsed or
+   expanded, with Proceed Now… under the sentence for a reader who may release it. */
+.queue-hold {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+  padding: 0 var(--space-3) var(--space-2);
+}
 /* What holds for every row, said once above them; it is hidden with them. */
 .queue-notes {
   padding: 0 var(--space-3) var(--space-2);

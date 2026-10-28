@@ -695,3 +695,68 @@ test("jobs Wollipog ended are retained like delivered ones, so repeated kills ca
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("releasing a hold on request ends its work at once, records who asked, and runs the handoff and queue (#3752)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-release-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    // A long bound: only the request can end the work within this test.
+    const fake = fakeProvider({ handoffWaitMaxMs: 3_600_000, onPrompt: (provider, text) => onPrompt(provider, text) });
+    onPrompt = launchesMonitorAndSubagent(fake.live, (provider) => fake.report(provider));
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_release", repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "watch CI and review");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(fake);
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-release" });
+    manager.prompt(spec.sessionId, "first queued");
+    manager.prompt(spec.sessionId, "second queued");
+    await waitFor(() => publishedHolds(sent).some((hold) => hold?.queuedPrompts === 2), "the prompts were not held");
+    const hold = publishedHolds(sent).find((candidate) => candidate?.queuedPrompts === 2)!;
+    assert.equal(hold.canRelease, true, "a live provider that can end its work offers the release");
+
+    // A request for a hold that is no longer the one shown ends nothing.
+    const actor = { kind: "user" as const, userId: "u_owner" };
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, "worktree-rebind:1", actor),
+      { outcome: "refused", reason: "hold_changed" });
+    assert.equal(fake.endCalls.length, 0);
+
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, hold.holdId, actor),
+      { outcome: "released", jobIds: ["monitor-1"] });
+    await waitFor(() => fake.prompts.length === 4, "the handoff and queued prompts did not run after the release");
+    assert.equal(fake.endCalls.length, 1, "the work is ended once");
+    const [, continuation, ...queued] = fake.prompts;
+    assert.ok(continuation!.text.startsWith(CONTINUATION_PREFIX), "the finished sibling's result is still delivered");
+    assert.deepEqual(queued.map((prompt) => [prompt.cwd, prompt.text]), [
+      [requested.worktree.path, "first queued"],
+      [requested.worktree.path, "second queued"],
+    ]);
+    assert.deepEqual(fake.providers.map((provider) => provider.cwd), [repo, requested.worktree.path],
+      "the conversation continues in a moved provider, not a restart");
+
+    const monitor = store.readMeta(spec.sessionId)!.backgroundJobs?.find((job) => job.id === "monitor-1");
+    assert.equal(monitor?.terminalStatus, "killed");
+    assert.deepEqual(monitor?.endedBy && { actor: monitor.endedBy.actor, reason: monitor.endedBy.reason },
+      { actor, reason: "stop_request" });
+    const notice = store.readEvents(spec.sessionId).map((event) => event.payload)
+      .find((payload) => payload.kind === "stderr" && payload.text.startsWith("Wollipog ended")) as { text: string } | undefined;
+    assert.match(notice?.text ?? "", /^Wollipog ended a monitor \(job monitor-1, started [^)]+\) at the request of the session owner, who released the hold on the provider's move to worktree /u);
+    assert.match(notice?.text ?? "", /It is recorded as killed\. The move and the 2 queued messages proceed now\.$/u);
+    assert.equal(publishedHolds(sent).at(-1), null, "the hold is cleared");
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, hold.holdId, actor),
+      { outcome: "refused", reason: "no_hold" });
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

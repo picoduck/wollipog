@@ -32,6 +32,8 @@ export interface SessionCommandPermissionFacts {
 const STOP_ROUTE = "/api/sessions/:id/stop";
 const RESTART_ROUTE = "/api/sessions/:id/restart";
 const STOP_JOB_ROUTE = "/api/sessions/:id/background-jobs/:jobId/stop";
+/** Releasing a queue hold ends every unfinished job, so Stop Job's verdict covers it too (#3752). */
+const RELEASE_HOLD_ROUTE = "/api/sessions/:id/queue-hold/release";
 const ARCHIVE_ROUTE = "/api/sessions/:id/archive";
 const UNARCHIVE_AND_RESTART_ROUTE = "/api/sessions/:id/unarchive-and-restart";
 const PROMPT_ROUTE = "/api/sessions/:id/prompt";
@@ -145,6 +147,7 @@ export function sessionCommandPermissions(
   facts: SessionCommandPermissionFacts,
 ): SessionCommandPermissions {
   const stopJobRefusal = routeRefusal(STOP_JOB_ROUTE, principal, target, facts) ??
+    routeRefusal(RELEASE_HOLD_ROUTE, principal, target, facts) ??
     (backgroundJobStopAuthorizationError(principal, target, principal.kind === "human" && facts.ownsSession)
       ? STOP_JOB_OWNER_REASON
       : null);
@@ -448,8 +451,9 @@ export function withCampaignHoldAdviceFor<T extends Pick<OrchestratorCampaignPro
       const record = records.get(child.sessionId);
       if (!record) return child;
       // Of a person's verdicts only Stop Job reads ownership, and their advice reads Stop Job only for
-      // a queue hold whose runner can stop jobs, so no other child's ownership is looked up (#1873).
-      const facts = principal.kind === "human" && !record.queueHold?.canStopJobs
+      // a queue hold whose runner can stop jobs or release the hold (#3752), so no other child's
+      // ownership is looked up (#1873).
+      const facts = principal.kind === "human" && !record.queueHold?.canStopJobs && !record.queueHold?.canRelease
         ? { ownsSession: false, isDescendant: false }
         : permissionFacts(source, principal, child.sessionId);
       // A nested Orchestrator's campaign can list its own session, where its isolation policy decides

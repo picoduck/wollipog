@@ -361,6 +361,7 @@ import {
   type QueuedPromptEditRecovery,
   type QueuedPromptEditState,
 } from "../queued-edit-recovery.js";
+import { queueHoldTrayView } from "../queue-hold-release.js";
 import { materializePromptImages } from "../prompt-image-materialization.js";
 import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionReadingTarget } from "../focus-zones.js";
@@ -7595,6 +7596,7 @@ function SessionDetailLoaded({
               sessionId={session.id}
               prompts={queuedPromptControls}
               queueHeld={session.queueHeld === true}
+              queueHold={queueHoldTrayView(session, runnerOnline)}
               agent={composerAgent}
               steering={steeringAvailabilityInput}
               requestBusy={composerRequestBusy}

@@ -469,6 +469,22 @@ async function backgroundJobStopCompatibilityError(deps: McpDeps): Promise<ToolR
     : controlPlaneUpdateRequired(needsNewerWollipog("Stopping one background job needs"), required, actual);
 }
 
+/** A pre-v247 control plane has no release route, and its refusal would not say why (#3752). */
+async function queueHoldReleaseCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.queueHoldRelease;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("releasing a queue hold", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Releasing a queue hold needs"), required, actual);
+}
+
 async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission;
   let actual = deps.controlPlaneProtocolVersion;
@@ -1084,7 +1100,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
-  "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
+  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
@@ -3320,6 +3336,35 @@ export const TOOLS: McpTool[] = [
         jobId: r.data?.jobId,
         outcome: r.data?.outcome,
         terminalStatus: r.data?.terminalStatus,
+      });
+    },
+  },
+  {
+    name: "release_queue_hold",
+    description: "Release a descendant session's current worktree or provider-account handoff hold now, instead of waiting for its deadline (the hold's endsAt) or for its background work to finish. Wollipog ends every unfinished background job of the session, records each as killed with you as the actor, and then runs the handoff and the queued prompts in order; the session's conversation keeps running, and a finished job's result from the same turn is still delivered. Take holdId from the hold get_session reports (its holds entry or queueHold); a hold that cleared or changed since you read it is refused without ending anything. To end only one job, use stop_background_job instead. Only the session's controlling Orchestrator and its owner may use it. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, holdId: { type: "string" } },
+      required: ["sessionId", "holdId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId || typeof args?.holdId !== "string" || !args.holdId) {
+        return errorResult("sessionId and holdId are required");
+      }
+      if (args.sessionId === deps.selfSessionId) {
+        return errorResult("refusing: that is my own session (an agent cannot release its own queue hold)");
+      }
+      const incompatible = await queueHoldReleaseCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/queue-hold/release`,
+        { holdId: args.holdId });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({
+        sessionId: r.data?.sessionId,
+        holdId: r.data?.holdId,
+        outcome: r.data?.outcome,
+        jobIds: Array.isArray(r.data?.jobIds) ? r.data.jobIds : [],
       });
     },
   },
