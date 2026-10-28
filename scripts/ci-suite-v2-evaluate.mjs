@@ -112,6 +112,14 @@ export function model({ inventory, selected, browserProfile, nodeProfile }) {
   };
 }
 
+/** Per-selection models; browser minutes always use the complete inventory as the denominator. */
+export function modelRow({ result, browserProfile, nodeProfile, calibration }) {
+  const of = (selected) => model({ inventory: result.inventory, selected, browserProfile, nodeProfile });
+  const m1 = of(result.v1Files), m2 = of(result.v2Files), mg = of(result.graphOnly), all = of(new Set(result.inventory.map((row) => row.file)));
+  return { modelV1: m1, modelV2: m2, modelGraphOnly: mg,
+    modeledBrowser: { v1: browserMinutes(m1, all, calibration), v2: browserMinutes(m2, all, calibration), graphOnly: browserMinutes(mg, all, calibration) } };
+}
+
 export function evaluate(input, { cwd = process.cwd(), browserProfile, fastFiles = loadFastFiles() } = {}) {
   const reader = gitReader(cwd);
   const nodeProfile = { ...input.timing.nodeProfile, totalMs: input.timing.nodeProfile.totalMs ?? 0 };
@@ -121,14 +129,10 @@ export function evaluate(input, { cwd = process.cwd(), browserProfile, fastFiles
   const calibration = Number.isFinite(job) && Number.isFinite(step) && job >= step ? { jobMs: job, stepMs: step } : null;
   const row = (kind, meta, args) => {
     const result = compare({ reader, fastFiles, ...args });
-    const m1 = model({ inventory: result.inventory, selected: result.v1Files, browserProfile, nodeProfile });
-    const m2 = model({ inventory: result.inventory, selected: result.v2Files, browserProfile, nodeProfile });
-    const mg = model({ inventory: result.inventory, selected: result.graphOnly, browserProfile, nodeProfile });
     return { kind, ...meta, changed: result.diff.entries.length, v1Mode: result.v1.mode, v1Reasons: result.v1.reasons, v2Mode: result.v2.mode,
       v2Reasons: result.v2.reasons, inventory: result.inventory.length, v1Selected: result.v1Files.size, v2Selected: result.v2Files.size,
       scopedOpaqueDeferred: result.v2.scopedOpaqueDeferred, v2SelectionReasons: result.v2.selectionReasons, triggers: result.triggers, graphOnlySelected: result.graphOnly.size,
-      modelV1: m1, modelV2: m2, modelGraphOnly: mg,
-      modeledBrowser: { v1: browserMinutes(m1, m1, calibration), v2: browserMinutes(m2, m1, calibration), graphOnly: browserMinutes(mg, m1, calibration) }, result };
+      ...modelRow({ result, browserProfile, nodeProfile, calibration }), result };
   };
   const prRows = [], groupRows = [], failureRows = [];
   for (const sample of input.samples) {

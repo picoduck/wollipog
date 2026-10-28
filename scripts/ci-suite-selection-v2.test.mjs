@@ -273,6 +273,19 @@ test("offline evaluation applies the selectors' mandatory-inventory fallback and
   assert.equal(browserMinutes(full, full, { jobMs: 40, stepMs: 30 }).runnerMs, 200);
 });
 
+test("offline timing for a fast selection uses the whole inventory as its denominator", async () => {
+  const { compareSelections, modelRow } = await import("./ci-suite-v2-evaluate.mjs");
+  const read = (oids) => new Map(oids.map((oid) => [oid, texts.get(oid)]));
+  const result = compareSelections({ diff: { entries: [entry(FAST_PROSE_FILES[0])] }, tree, fastFiles: FAST, readBlobs: read });
+  assert.equal(result.v1.mode, "fast");
+  const profile = { fallbackDurationMs: 1000, productionDurationMs: 0, files: {} };
+  const rows = modelRow({ result, browserProfile: profile, nodeProfile: { slowestFiles: [], totalMs: 0 }, calibration: { jobMs: 40, stepMs: 30 } });
+  const browser = inventory.filter((row) => row.group.startsWith("browser-")).length, critical = CRITICAL_BROWSER_FILES.length;
+  assert.equal(rows.modeledBrowser.v1.share, critical / browser);
+  assert.ok(rows.modeledBrowser.v1.runnerMs < 200);
+  assert.deepEqual(rows.modeledBrowser.v1, rows.modeledBrowser.v2);
+});
+
 test("offline evaluation classifies fallback triggers and models only selected browser weight", async () => {
   const { fallbackTriggers, model } = await import("./ci-suite-v2-evaluate.mjs");
   assert.deepEqual(fallbackTriggers({ entries: [entry("docs/a.md"), entry("apps/web/e2e/x.spec.ts"), entry("apps/web/src/a.css"),
