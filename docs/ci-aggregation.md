@@ -130,7 +130,9 @@ production smoke, WebKit and Windows comparison stay mandatory. The gate job rec
 the decision as job-level evidence: exactly one of **Record Full Merge Group Coverage**
 or **Record Reduced Merge Group Coverage** runs.
 
-The aggregator keeps its name and every existing requirement. With the gate admitted
+Checks and browser work consume a `fast` output only from a gate whose result is
+`success`; a failed, cancelled or skipped gate that retained an output still runs the
+full suite set. The aggregator keeps its name and every existing requirement. With the gate admitted
 it also requires the gate's `success` and an explicit `full` or `fast` output; failure,
 cancellation, a missing or unknown mode, or `fast` without the exact lowercase value
 fails the required check. Without admission, any gate result other than `skipped`, or
@@ -156,22 +158,32 @@ verifier:
 
 ```sh
 GITHUB_TOKEN=<read token> node scripts/ci-merge-group-restoration.mjs \
-  --repository picoduck/wollipog --since <switch-back UTC time> [--runs 1-3]
-node scripts/ci-merge-group-restoration.mjs --repository ... --since ... --fixture runs.json
+  --repository picoduck/wollipog --since <switch-back UTC time> \
+  --trusted-ref <reviewed full-coverage commit SHA> [--runs 1-3]
+node scripts/ci-merge-group-restoration.mjs --repository ... --since ... --trusted-ref ... --fixture runs.json
 ```
 
-It reads one merge-group run listing and one job listing per selected run (at most
-four GET requests), never dispatches or writes, and exits 0 only when the newest
-`--runs` completed merge-group runs created after the switch-back each prove full
-coverage on their exact attempt: a successful queue run of `ci.yml`; the rolling full
+Job and step names prove nothing about a workflow that a merge group may have edited.
+`--trusted-ref` is therefore mandatory: a reviewed commit whose `ci.yml` and
+`settings-rows-win32.yml` define full coverage with the gate disabled. Every selected
+run must have executed exactly those two Git blobs; any difference, including an
+edited Unit Tests command under the same step name, is a refusal.
+
+It reads the run listing, the trusted commit's `.github/workflows` listing, then one
+job listing and one workflow listing per selected run (at most eight GET requests,
+four for the default single run), never dispatches or writes, and exits 0 only when
+the newest `--runs` completed merge-group runs created after the switch-back each
+prove full coverage on their exact attempt: the trusted workflow blobs; a successful
+queue run of `ci.yml`; the rolling full
 inventory (`Typecheck, Unit Tests & Bundles` with every Node, engine, containment and
 bundle step, all five browser shards and no extra leg, shard 1's production smoke,
 WebKit, the win32 change detection, the aggregator); the path-scoped win32 comparison
 succeeded or was skipped; and `Merge Group Gate` absent or skipped with no reduced-coverage
 record. A failing, in-progress, partial or gate-active run is a refusal, not a pass. The
-JSON output is the `fullQueueProof` that `planRollback` requires; it still needs separate
-operator hold-removal approval. The jobs API cannot show which shell branch a step took,
-so Node coverage rests on the skipped gate making the reduced branch unreachable.
+JSON output is the `fullQueueProof` that `planRollback` requires (`workflowSha` is the
+trusted commit, with its `workflowBlobs`); it still needs separate operator hold-removal
+approval. The jobs API cannot show which shell branch a step took: Node coverage rests
+on the verified definition plus the skipped gate, which make the reduced branch unreachable.
 
 ## Bounds and Evidence Limits
 

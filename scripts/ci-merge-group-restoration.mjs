@@ -12,6 +12,9 @@ export const COVERAGE = "full-merge-group-v1";
 export const REQUIRED_CONTEXT = "Typecheck, Test & Sidecar Bundle";
 export const MAX_RUNS = 3;
 const WORKFLOW = ".github/workflows/ci.yml";
+// Job and step names only mean full coverage under a reviewed definition: every run must have
+// executed exactly the blobs of the operator-supplied trusted commit, including the called workflow.
+export const WORKFLOW_FILES = Object.freeze([WORKFLOW, ".github/workflows/settings-rows-win32.yml"]);
 const GATE_JOB = "Merge Group Gate";
 const REDUCED_STEP = "Record Reduced Merge Group Coverage";
 const SHA = /^[a-f0-9]{40}$/;
@@ -36,13 +39,27 @@ const STEPS = new Map([[CHECKS, CHECK_STEPS], [WEBKIT, ["WebKit Browser End-to-E
   [REQUIRED_CONTEXT, ["Require Every Job to Have Succeeded"]],
   ...SHARDS.map((name, index) => [name, ["Remote-Instance Browser End-to-End Tests", ...(index ? [] : ["Rendered Production Browser Smoke"])]])]);
 
-/** Pure: one exact run attempt and its complete job listing. Returns reasons; empty means full. */
-export function certifyRun(repository, run, listing) {
+/** Pure: Git blob SHAs of the workflow files from a contents listing of `.github/workflows`, or null. */
+export function workflowBlobs(listing) {
+  if (!Array.isArray(listing) || listing.length > 1000) return null;
+  const blobs = {};
+  for (const path of WORKFLOW_FILES) {
+    const entries = listing.filter((entry) => entry?.path === path);
+    if (entries.length !== 1 || entries[0].type !== "file" || !SHA.test(entries[0].sha ?? "")) return null;
+    blobs[path] = entries[0].sha;
+  }
+  return blobs;
+}
+
+/** Pure: one exact run attempt, its complete job listing and its executed workflow blobs. Returns reasons; empty means full. */
+export function certifyRun(repository, run, listing, { workflows, trusted } = {}) {
   const reasons = [];
   if (run?.event !== "merge_group" || run.path !== WORKFLOW || run.repository?.full_name !== repository ||
       typeof run.head_branch !== "string" || !run.head_branch.startsWith("gh-readonly-queue/main/") ||
       !SHA.test(run.head_sha ?? "") || !positive(run.id) || !positive(run.run_attempt)) reasons.push("run-identity-unavailable");
   if (run?.status !== "completed" || run.conclusion !== "success") reasons.push("run-not-successful");
+  const executed = workflowBlobs(workflows), reviewed = workflowBlobs(trusted);
+  if (!executed || !reviewed || WORKFLOW_FILES.some((path) => executed[path] !== reviewed[path])) reasons.push("workflow-not-trusted");
   const jobs = listing?.jobs;
   if (!Array.isArray(jobs) || listing.total_count !== jobs.length || jobs.length > 100 ||
       jobs.some((job) => job?.run_id !== run?.id || job.run_attempt !== run?.run_attempt)) {
@@ -71,21 +88,24 @@ export function certifyRun(repository, run, listing) {
 
 /**
  * Pure: the newest `count` completed merge-group runs created at or after `since` must each be
- * certified full. In-progress runs are not evidence; fewer completed runs than required is a refusal.
+ * certified full under the reviewed `trustedRef` workflow definition. In-progress runs are not
+ * evidence; fewer completed runs than required is a refusal.
  */
-export function verifyRestoration({ repository, since, count = 1, listing, jobsByRun = {} } = {}) {
+export function verifyRestoration({ repository, since, count = 1, trustedRef, listing, trustedWorkflows,
+  jobsByRun = {}, workflowsByRun = {} } = {}) {
   const reasons = [];
   const start = time(since);
   if (!REPOSITORY.test(repository ?? "")) reasons.push("repository-unavailable");
   if (!Number.isFinite(start)) reasons.push("since-unavailable");
   if (!Number.isSafeInteger(count) || count < 1 || count > MAX_RUNS) reasons.push("count-out-of-range");
+  if (!SHA.test(trustedRef ?? "")) reasons.push("trusted-ref-unavailable");
   const runs = Array.isArray(listing?.workflow_runs) ? listing.workflow_runs : null;
   if (!runs) reasons.push("run-listing-unavailable");
   const selected = (runs ?? []).filter((run) => run?.status === "completed" && time(run.created_at) >= start)
     .sort((a, b) => time(b.created_at) - time(a.created_at)).slice(0, reasons.length ? 0 : count);
   if (!reasons.length && selected.length < count) reasons.push("insufficient-completed-merge-group-runs");
   const evidence = selected.map((run) => {
-    const runReasons = certifyRun(repository, run, jobsByRun[run.id]);
+    const runReasons = certifyRun(repository, run, jobsByRun[run.id], { workflows: workflowsByRun[run.id], trusted: trustedWorkflows });
     return { runId: positive(run.id) ? run.id : null, attempt: positive(run.run_attempt) ? run.run_attempt : null,
       headSha: SHA.test(run.head_sha ?? "") ? run.head_sha : null, createdAt: run.created_at ?? null,
       certification: runReasons.length ? "none" : "full", reasons: runReasons };
@@ -93,37 +113,42 @@ export function verifyRestoration({ repository, since, count = 1, listing, jobsB
   if (evidence.some((run) => run.certification !== "full")) reasons.push("run-not-certified-full");
   const verified = !reasons.length;
   return { schema: RESTORATION_SCHEMA, repository: REPOSITORY.test(repository ?? "") ? repository : null, since: since ?? null,
-    verified, coverage: COVERAGE, requiredContext: REQUIRED_CONTEXT, workflowSha: verified ? evidence[0].headSha : null,
-    runs: evidence, reasons };
+    verified, coverage: COVERAGE, requiredContext: REQUIRED_CONTEXT, workflowSha: verified ? trustedRef : null,
+    workflowBlobs: verified ? workflowBlobs(trustedWorkflows) : null, runs: evidence, reasons };
 }
 
-/** Live and read-only: one run listing plus one job listing per selected run (at most 1 + MAX_RUNS reads). */
-export async function observeRestoration({ repository, since, count = 1, api }) {
+/** Live and read-only: the run listing, the trusted workflow directory, then one job listing and one
+ * workflow directory read per selected run (at most 2 + 2 * MAX_RUNS reads). */
+export async function observeRestoration({ repository, since, count = 1, trustedRef, api }) {
+  const directory = (ref) => api(`/repos/${repository}/contents/.github/workflows?ref=${ref}`);
   const listing = await api(`/repos/${repository}/actions/workflows/ci.yml/runs?event=merge_group&status=completed` +
     `&created=${encodeURIComponent(`>=${since}`)}&per_page=${MAX_RUNS * 4}`);
-  const preview = verifyRestoration({ repository, since, count, listing });
-  const jobsByRun = {};
+  const trustedWorkflows = await directory(trustedRef);
+  const preview = verifyRestoration({ repository, since, count, trustedRef, listing, trustedWorkflows });
+  const jobsByRun = {}, workflowsByRun = {};
   for (const run of preview.runs) {
-    if (run.runId && run.attempt) jobsByRun[run.runId] = await api(
-      `/repos/${repository}/actions/runs/${run.runId}/attempts/${run.attempt}/jobs?per_page=100`);
+    if (!run.runId || !run.attempt || !run.headSha) continue;
+    jobsByRun[run.runId] = await api(`/repos/${repository}/actions/runs/${run.runId}/attempts/${run.attempt}/jobs?per_page=100`);
+    workflowsByRun[run.runId] = await directory(run.headSha);
   }
-  return verifyRestoration({ repository, since, count, listing, jobsByRun });
+  return verifyRestoration({ repository, since, count, trustedRef, listing, trustedWorkflows, jobsByRun, workflowsByRun });
 }
 
 export async function main(argv = process.argv.slice(2), { env = process.env, log = console.log, error = console.error, api } = {}) {
   let values;
   try {
     ({ values } = parseArgs({ args: argv, options: { repository: { type: "string" }, since: { type: "string" },
-      runs: { type: "string", default: "1" }, fixture: { type: "string" } } }));
+      runs: { type: "string", default: "1" }, "trusted-ref": { type: "string" }, fixture: { type: "string" } } }));
   } catch {
-    error("Usage: ci-merge-group-restoration.mjs --repository OWNER/REPO --since ISO-TIME [--runs 1-3] [--fixture FILE]");
+    error("Usage: ci-merge-group-restoration.mjs --repository OWNER/REPO --since ISO-TIME --trusted-ref REVIEWED-COMMIT-SHA " +
+      "[--runs 1-3] [--fixture FILE]");
     return 2;
   }
-  const options = { repository: values.repository, since: values.since, count: Number(values.runs) };
+  const options = { repository: values.repository, since: values.since, count: Number(values.runs), trustedRef: values["trusted-ref"] };
   let proof;
   if (values.fixture) {
-    const { listing, jobsByRun } = JSON.parse(readFileSync(values.fixture, "utf8"));
-    proof = verifyRestoration({ ...options, listing, jobsByRun });
+    const { listing, trustedWorkflows, jobsByRun, workflowsByRun } = JSON.parse(readFileSync(values.fixture, "utf8"));
+    proof = verifyRestoration({ ...options, listing, trustedWorkflows, jobsByRun, workflowsByRun });
   } else {
     const refused = verifyRestoration({ ...options, listing: { workflow_runs: [] } }).reasons
       .filter((reason) => reason !== "insufficient-completed-merge-group-runs");
@@ -132,7 +157,7 @@ export async function main(argv = process.argv.slice(2), { env = process.env, lo
       if (!api) {
         if (!env.GITHUB_TOKEN) { error("GITHUB_TOKEN is required for a live read-only verification."); return 2; }
         const { githubApi, budgetApi } = await import("./main-ci-health.mjs");
-        api = budgetApi(githubApi(env.GITHUB_TOKEN), { limit: 1 + MAX_RUNS, reserve: 0 });
+        api = budgetApi(githubApi(env.GITHUB_TOKEN), { limit: 2 + 2 * MAX_RUNS, reserve: 0 });
       }
       try { proof = await observeRestoration({ ...options, api }); }
       catch { proof = { ...verifyRestoration(options), reasons: ["github-read-unavailable"] }; }

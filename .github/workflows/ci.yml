@@ -337,7 +337,7 @@ jobs:
           ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
           GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
-          GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
+          GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
           if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
             node scripts/test-suites.mjs --node-only --groups node-fast --ci
@@ -420,7 +420,7 @@ jobs:
         # Projects partition the live file inventory by measured duration, keeping files intact.
         # The inventory contract pins these five jobs to all five projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -544,7 +544,7 @@ jobs:
           ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
           GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
-          GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
+          GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
           if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
             pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts

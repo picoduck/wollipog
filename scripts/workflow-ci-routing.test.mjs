@@ -12,10 +12,10 @@ const job = (id) => workflow.match(new RegExp(`^  ${id}:\\n[\\s\\S]*?(?=^  [\\w-
 const expression = (text, key) => text.match(new RegExp(`^\\s+${key}: (.+)$`, "m"))?.[1];
 const shellOf = (text, name) => text.split(`      - name: ${name}\n`)[1].match(/        run: \|\n((?:          .*\n?)+)/)[1]
   .split("\n").map((line) => line.slice(10)).join("\n");
-function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "") {
+function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped") {
   const context = { github: { event_name: event, event: { action, pull_request: { draft } } },
     vars: { CI_PR_SUITE_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
-    needs: { suite_plan: { outputs: { mode } }, merge_group_gate: { outputs: { mode: gateMode } } },
+    needs: { suite_plan: { outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
     cancelled: () => cancelled, fromJSON: JSON.parse,
     ghaEqual: (a, b) => typeof a === "string" && typeof b === "string" ? a.toUpperCase() === b.toUpperCase() : a == b };
   // GitHub's documented ==/!= ignore string case. JS's native equality concealed a real
@@ -60,19 +60,21 @@ test("off switches preserve full work; case-variant plan admission cannot change
 
 test("every gate and routing variable, mode and event keeps full coverage unless exactly one admitted fast path applies", () => {
   for (const event of ["pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call"]) {
-    for (const gate of variables) for (const gateMode of ["", "full", "fast", "unknown"]) {
+    for (const gate of variables) for (const gateMode of ["", "full", "fast", "unknown"]) for (const gateResult of states) {
       for (const variable of ["", "Enabled", "enabled"]) for (const mode of ["", "full", "fast"]) {
         const prActive = event === "pull_request" && variable.toLowerCase() === "enabled";
         const gateActive = event === "merge_group" && gate.toLowerCase() === "enabled";
-        const args = [event, variable, mode, false, false, "synchronize", gate, gateMode];
+        const args = [event, variable, mode, false, false, "synchronize", gate, gateMode, gateResult];
+        // A failed, cancelled or skipped gate never reduces work, even if it retained a fast output.
+        const groupReduced = gateActive && gateResult === "success" && gateMode === "fast";
         assert.equal(evaluate(gateAdmission, ...args), gateActive, `${event}/${gate}`);
         assert.equal(evaluate(gateEnabled, ...args), String(gateActive));
-        assert.equal(evaluate(groupFast, ...args), String(gateActive && gateMode === "fast"));
+        assert.equal(evaluate(groupFast, ...args), String(groupReduced), `${event}/${gate}/${gateResult}/${gateMode}`);
         // The PR path is unaffected by any merge-group gate value or output.
         assert.equal(evaluate(fast, ...args), String(prActive && mode === "fast"));
         assert.equal(evaluate(admission, ...args), prActive);
         assert.deepEqual(Array.from(evaluate(matrix, ...args)),
-          (prActive && mode === "fast") || (gateActive && gateMode === "fast") ? [1] : [1, 2, 3, 4, 5], `${event}/${gate}/${gateMode}`);
+          (prActive && mode === "fast") || groupReduced ? [1] : [1, 2, 3, 4, 5], `${event}/${gate}/${gateResult}/${gateMode}`);
         for (const id of ["checks", "browser", "win32", "webkit", "check"]) {
           assert.equal(evaluate(expression(job(id), "if"), ...args), true, `${event}/${gate}/${id}`);
         }
