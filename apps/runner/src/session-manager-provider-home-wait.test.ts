@@ -97,10 +97,10 @@ function waits(messages: RunnerToControlPlane[]): SessionSnapshot["providerHomeW
     ? [message.snapshot.providerHomeWait] : []);
 }
 
-async function until(condition: () => boolean): Promise<void> {
+async function until(condition: () => boolean, what = "condition"): Promise<void> {
   const deadline = Date.now() + 5_000;
   while (!condition()) {
-    if (Date.now() > deadline) throw new Error("condition was not met in time");
+    if (Date.now() > deadline) throw new Error(`${what} was not met in time`);
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
@@ -147,6 +147,39 @@ test("Stop cancels the wait: nothing starts and no refusal is recorded", async (
   assert.equal(waits(h.messages).at(-1), null, "the wait clears");
   assert.equal(h.store.readMeta(SESSION)?.status, "stopped");
   assert.equal(h.store.readMeta(SESSION)?.providerHomeRefusal, undefined);
+});
+
+test("a superseded waiting launch's cleanup leaves its replacement's wait projected", async (t) => {
+  const h = harness(t);
+  const leases = (h.manager as unknown as { providerHomeLeases: { acquireReference: () => Promise<unknown> } }).providerHomeLeases;
+  // Generation A's second attempt is still in flight when a restart that also waits replaces it.
+  let attempts = 0;
+  let releaseA!: () => void;
+  const aInFlight = new Promise<void>((resolve) => { releaseA = resolve; });
+  let aEntered!: () => void;
+  const aWaiting = new Promise<void>((resolve) => { aEntered = resolve; });
+  leases.acquireReference = async () => {
+    attempts++;
+    if (attempts === 2) { aEntered(); await aInFlight; }
+    throw new ProviderHomeLeaseError("busy");
+  };
+  const first = h.launch({ wait: true });
+  await aWaiting;
+  const second = h.launch({ wait: true });
+  await until(() => attempts >= 3, "the replacement met the busy account");
+  const replacementWait = waits(h.messages).at(-1);
+  assert.ok(replacementWait, "the replacement is waiting");
+  // A's in-flight attempt now fails; A sees it was superseded and cleans up after itself only.
+  releaseA();
+  assert.equal(await first, false, "the superseded launch ends");
+  const snapshot = (h.manager as unknown as { snapshot: (meta: SessionMeta) => SessionSnapshot })
+    .snapshot(h.store.readMeta(SESSION)!);
+  assert.deepEqual(snapshot.providerHomeWait, replacementWait, "the replacement is still shown waiting");
+  assert.notEqual(waits(h.messages).at(-1), null, "no stale clear was published for the replacement");
+  h.manager.stop(SESSION);
+  assert.equal(await second, false);
+  assert.equal(waits(h.messages).at(-1), null);
+  assert.equal(h.driversCreated(), 0);
 });
 
 test("a waiting launch fails at once on a refusal that waiting can't clear", async (t) => {

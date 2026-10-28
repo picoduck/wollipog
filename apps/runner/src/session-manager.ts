@@ -1502,9 +1502,10 @@ export class SessionManager {
   /** The launch generation, per session, whose start asked to wait for a busy provider HOME
    * (#3240). Only that generation waits; a later launch of the same session does not. */
   private readonly providerHomeWaitLaunches = new Map<string, number>();
-  /** The busy provider HOME each waiting launch is retrying, projected on its snapshots. In memory
-   * only: a runner restart ends the wait with the launch it belonged to. */
-  private readonly providerHomeWaits = new Map<string, ProviderHomeWaitView>();
+  /** The busy provider HOME each waiting launch is retrying, projected on its snapshots, with the
+   * launch generation that owns it: a superseded launch's cleanup must never end its replacement's
+   * wait. In memory only: a runner restart ends the wait with the launch it belonged to. */
+  private readonly providerHomeWaits = new Map<string, { generation: number; view: ProviderHomeWaitView }>();
   /** Overridable by tests. */
   providerHomeWaitSchedule: ProviderHomeWaitSchedule = PROVIDER_HOME_WAIT_SCHEDULE;
   /** The exact worktree path each live launch generation captured, which is NOT the same thing as
@@ -5576,7 +5577,7 @@ export class SessionManager {
       ...(runnerSupportsProtocol(protocolVersion, "backgroundFollowUp")
         ? { backgroundFollowUp: this.backgroundFollowUp(meta) } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "providerHomeWait")
-        ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId) ?? null } : {}),
+        ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId)?.view ?? null } : {}),
     };
   }
 
@@ -8699,12 +8700,12 @@ export class SessionManager {
     const preparationHome = this.launchPreparationProviderHome();
     const waitGeneration = this.providerHomeWaitLaunches.get(meta.sessionId);
     const providerHomeWait = waitGeneration !== undefined && waitGeneration === launchGeneration
-      ? this.providerHomeWaiter(meta, () => this.launchIsCurrent(meta.sessionId, launchGeneration))
+      ? this.providerHomeWaiter(meta, launchGeneration)
       : undefined;
     try {
       return await this.launchPrepared(meta, resumeId, launchGeneration, approvedAuthentication, preparationHome, providerHomeWait);
     } finally {
-      if (providerHomeWait) this.endProviderHomeWait(meta.sessionId);
+      if (providerHomeWait) this.endProviderHomeWait(meta.sessionId, launchGeneration);
       await preparationHome.settle();
     }
   }
@@ -8715,14 +8716,15 @@ export class SessionManager {
    * (Stop, restart, delete, shutdown) and the schedule's limit end the wait with the acquisition's
    * own error, so the launch reports exactly what it would have without waiting. Nothing is held
    * between attempts, and the provider starts only after a granted acquisition. */
-  private providerHomeWaiter(meta: SessionMeta, isCurrent: () => boolean): ProviderHomeWaiter {
+  private providerHomeWaiter(meta: SessionMeta, generation: number): ProviderHomeWaiter {
+    const isCurrent = () => this.launchIsCurrent(meta.sessionId, generation);
     let waitingSince: number | undefined;
     let attempt = 0;
     return async <T>(acquire: () => Promise<T>): Promise<T> => {
       while (true) {
         try {
           const acquired = await acquire();
-          this.endProviderHomeWait(meta.sessionId);
+          this.endProviderHomeWait(meta.sessionId, generation);
           return acquired;
         } catch (error) {
           const refusal = providerHomeLaunchRefusal(error, meta);
@@ -8732,7 +8734,7 @@ export class SessionManager {
           const waitUntil = waitingSince + limitMs;
           if (refusal?.code !== "busy" || !isCurrent() || now >= waitUntil) throw error;
           const cause = refusal.cause;
-          this.publishProviderHomeWait(meta.sessionId, {
+          this.publishProviderHomeWait(meta.sessionId, generation, {
             provider: refusal.provider,
             ...(cause === "holder_alive" || cause === "boundary_survivor" || cause === "process_survivor" ? { cause } : {}),
             ...(refusal.providerAccountId ? {
@@ -8762,17 +8764,19 @@ export class SessionManager {
     return false;
   }
 
-  private publishProviderHomeWait(sessionId: string, wait: ProviderHomeWaitView): void {
+  private publishProviderHomeWait(sessionId: string, generation: number, wait: ProviderHomeWaitView): void {
     const previous = this.providerHomeWaits.get(sessionId);
-    this.providerHomeWaits.set(sessionId, wait);
-    if (previous && JSON.stringify(previous) === JSON.stringify(wait)) return;
-    if (!previous) this.log(`session ${boundedSessionIdForLog(sessionId)} is waiting for its busy provider HOME`);
+    this.providerHomeWaits.set(sessionId, { generation, view: wait });
+    if (previous?.generation === generation && JSON.stringify(previous.view) === JSON.stringify(wait)) return;
+    if (previous?.generation !== generation) this.log(`session ${boundedSessionIdForLog(sessionId)} is waiting for its busy provider HOME`);
     const meta = this.store.readMeta(sessionId);
     if (meta) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
   }
 
-  private endProviderHomeWait(sessionId: string): void {
-    if (!this.providerHomeWaits.delete(sessionId)) return;
+  /** Ends only the wait `generation` owns: a replacement launch's wait stays projected. */
+  private endProviderHomeWait(sessionId: string, generation: number): void {
+    if (this.providerHomeWaits.get(sessionId)?.generation !== generation) return;
+    this.providerHomeWaits.delete(sessionId);
     const meta = this.store.readMeta(sessionId);
     if (meta) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
   }
