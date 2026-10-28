@@ -5,11 +5,13 @@ import { ADMISSION_CONTEXT, admissionEnforcement, REQUIRED_CONTEXT } from "./ci-
 import { ADMISSION_ISSUER_PLACEHOLDER, buildReadiness, holdKind, LIVE_SETTINGS, main, markdown, MEASUREMENTS, PROPOSAL,
   proposedRuleset, REPORT_PATH, RULESET_FIELDS, rulesetDrift } from "./fast-gate-readiness-report.mjs";
 import { rehearseFastGateRollback } from "./fast-gate-rollback.mjs";
+import { rehearseAdmissionLease } from "./rehearse-admission-lease.mjs";
 import { rehearseFastGateCutover } from "./rehearse-fast-gate-cutover.mjs";
 
 const live = JSON.parse(readFileSync(LIVE_SETTINGS, "utf8"));
 let shared;
-const inputs = async () => shared ??= { cutover: await rehearseFastGateCutover(), rollback: await rehearseFastGateRollback() };
+const inputs = async () => shared ??= { cutover: await rehearseFastGateCutover(), rollback: await rehearseFastGateRollback(),
+  lease: await rehearseAdmissionLease() };
 
 test("the committed dated report is exactly the generator's deterministic output, built without the network", async (t) => {
   const realFetch = globalThis.fetch;
@@ -38,22 +40,26 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     assert.equal(by[id].classification, "observation-gap", id);
   for (const id of ["detection-backlog-recovery", "status-writing-identity", "agents-md-active", "reconcile-2674"])
     assert.equal(by[id].classification, "approval-gap", id);
-  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "sticky-success", "escalation-delivery", "planrollback-run-level-proof"])
+  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "escalation-delivery", "planrollback-run-level-proof"])
     assert.equal(by[id].classification, "code-gap", id);
+  // #3633 just-in-time admission closes the sticky-success code gap; its race and availability remain.
+  assert.deepEqual([by["sticky-success"].classification, by["admission-landing-race"].classification,
+    by["admission-outage-availability"].classification], ["met", "observation-gap", "approval-gap"]);
   for (const flow of report.rehearsals.cutover.flows) assert.equal(by[`ac2-${flow.id}`].status, "met", flow.id);
   assert.deepEqual(Object.values(report.counts).reduce((a, b) => a + b, 0), report.criteria.length);
 });
 
 test("a failing rehearsal flow or rollback scenario is reported as a failing code gap, never met", async () => {
-  const { cutover, rollback } = await inputs();
+  const { cutover, rollback, lease } = await inputs();
   const broken = structuredClone(cutover);
   broken.flows[0].pass = false; broken.flows[0].steps[0].match = false;
   const brokenRollback = structuredClone(rollback);
   brokenRollback.summary.pass = false;
   brokenRollback.scenarios[0].steps.find((step) => step.step === "every unverified, reduced, forged or foreign proof is refused").match = false;
-  const report = await buildReadiness({ cutover: broken, rollback: brokenRollback });
+  const brokenLease = structuredClone(lease); brokenLease.summary.pass = false;
+  const report = await buildReadiness({ cutover: broken, rollback: brokenRollback, lease: brokenLease });
   const by = Object.fromEntries(report.criteria.map((row) => [row.id, row]));
-  for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal"]) {
+  for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal", "sticky-success"]) {
     assert.equal(by[id].classification, "code-gap", id); assert.equal(by[id].status, "failing", id);
   }
 });
