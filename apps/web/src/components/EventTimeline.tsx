@@ -1,6 +1,6 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
-import type { AgentDriverKind, InPlaceHandoffTurn, WorkflowArtifactView } from "@wollipog/protocol";
+import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, WorkflowArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -557,6 +557,7 @@ interface HandoffControl {
   inPlaceTurns?: ReadonlyMap<number, InPlaceHandoffTurn>;
   historyReason?: string;
 }
+const TimelineAgentsContext = createContext<readonly Pick<AgentDefinition, "id" | "name">[] | undefined>(undefined);
 const HandoffContext = createContext<HandoffControl | undefined>(undefined);
 
 /** Retry Turn for a failed turn's notice (#2169): re-submits the turn's prompt as a new turn. */
@@ -572,6 +573,7 @@ export interface TurnRetryControl {
 const TurnRetryContext = createContext<TurnRetryControl | undefined>(undefined);
 export const EventTimeline = memo(function EventTimeline({
   handoff,
+  agents,
   turnRetry,
   items,
   onRewind,
@@ -606,6 +608,8 @@ export const EventTimeline = memo(function EventTimeline({
   subagentStatus,
 }: {
   handoff?: HandoffControl;
+  /** Current definitions on this session's runner; stored handoff IDs remain the fallback. */
+  agents?: readonly Pick<AgentDefinition, "id" | "name">[];
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
   turnRetry?: TurnRetryControl;
   items: TimelineItem[];
@@ -662,6 +666,7 @@ export const EventTimeline = memo(function EventTimeline({
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
+    <TimelineAgentsContext.Provider value={agents}>
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
     <InsertReplyContext.Provider value={onInsertReply}>
@@ -704,6 +709,7 @@ export const EventTimeline = memo(function EventTimeline({
     </InsertReplyContext.Provider>
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
+    </TimelineAgentsContext.Provider>
   );
 });
 
@@ -3319,6 +3325,8 @@ function HistoryDivider({ icon, label, title, description }: {
 /** A fork or handoff names its turn; where the app can navigate, its source session is a link. */
 function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversation_forked" }> }) {
   const openSession = useContext(TimelineSessionLinkContext);
+  const agents = useContext(TimelineAgentsContext);
+  const agentName = (id: string) => agents?.find((agent) => agent.id === id)?.name || id;
   const sourceLink = openSession && (
     <button type="button" className="link" onClick={() => openSession(item.sourceSessionId)}>Open Source Session</button>
   );
@@ -3335,7 +3343,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
   return (
     <HistoryDivider
       icon={<HandOffIcon size={14} />}
-      label={`Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} After Turn ${item.turn}`}
+      label={`Handoff from ${agentName(item.handoff.sourceAgent)} to ${agentName(item.handoff.destinationAgent)} after Turn ${item.turn}`}
       description={<>Fresh provider conversation. {item.handoff.disclosure}{sourceLink && <> {sourceLink}</>}</>}
     />
   );

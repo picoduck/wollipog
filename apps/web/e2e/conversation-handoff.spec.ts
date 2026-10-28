@@ -247,8 +247,10 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: test.info().outputPath("handoff-tier-chosen.png") });
     await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
     await expect(page.locator(".composer-input")).toHaveValue(/Keep the interface accessible on mobile/);
-    const handoff = page.getByRole("separator", { name: "Handoff from codex to claude After Turn 1" });
+    const handoff = page.getByRole("separator", { name: "Handoff from Codex to Claude Code after Turn 1" });
     await expect(handoff).toBeVisible();
+    await expect(handoff).toHaveText("Handoff from Codex to Claude Code after Turn 1");
+    await expect(page.locator(".composer-input")).toHaveValue(/1 event or message omitted/);
     const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
     expect(handoffDescriptionId).toBeTruthy();
     const description = page.locator(`[id="${handoffDescriptionId}"]`);
@@ -283,6 +285,13 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
       expectGeometry(wideLayout.leftInset, `the 60ch cap stays inside the row with ${wideFace}`)
         .toBeGreaterThanOrEqual(100);
     }
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitSessionEvent("handoff-child", {
+      kind: "conversation_forked", sourceSessionId: "historical-source", turn: 2,
+      handoff: { sourceAgent: "retired-agent", destinationAgent: "historical-destination", disclosure: "Historical hand-off." },
+    }));
+    const historical = page.getByRole("separator", { name: "Handoff from retired-agent to historical-destination after Turn 2", exact: true });
+    await expect(historical).toBeVisible();
+    await expect(historical).toHaveText("Handoff from retired-agent to historical-destination after Turn 2");
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(1);
   });

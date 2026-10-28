@@ -12,6 +12,19 @@ const agent: AgentDefinition = {
 const events = (...payloads: SessionEventPayload[]) => payloads.map((payload, i) => ({ seq: i + 1, payload }));
 const image: PromptImageReference = { artifactId: "source-image", mimeType: "image/png", sizeBytes: 10, sha256: "a".repeat(64) };
 
+for (const inPlace of [false, true]) {
+  for (const omitted of [0, 1, 3]) {
+    test(`${inPlace ? "in-place" : "worktree"} handoff disclosure counts ${omitted} omitted items`, () => {
+      const history = events({ kind: "user_message", text: "Keep this objective" },
+        ...Array.from({ length: omitted }, (): SessionEventPayload => ({ kind: "status", status: "idle" })));
+      const draft = buildConversationHandoff(history, history.length, agent, { model: "model" }, { inPlace });
+      const wording = `${omitted} ${omitted === 1 ? "event or message" : "events or messages"} omitted`;
+      assert.ok(draft.disclosure.includes(wording));
+      assert.ok(draft.text.includes(wording), "the prefilled composer includes the same disclosure");
+    });
+  }
+}
+
 test("handoff reconstructs deltas before redaction and honors the checkpoint boundary", () => {
   const draft = buildConversationHandoff(events(
     { kind: "user_message", text: "Fix the selected issue", final: true },

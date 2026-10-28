@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, type ReactNode } from "react";
 import type { SessionView } from "@wollipog/protocol";
-import type { ConnState } from "../store.js";
+import { useOptionalStoreSelector, type ConnState } from "../store.js";
 import type { TimelineItem } from "../timeline.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 import type { TranscriptPresentation } from "../transcript-presentation.js";
@@ -109,6 +109,7 @@ export function CompareMemberBody({
   onRetry: () => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const agents = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.agents);
   const notice = presentation.notice === "error" || presentation.notice === "stale" ? presentation.notice : null;
   return (
     <>
@@ -147,6 +148,7 @@ export function CompareMemberBody({
           !notice && <TranscriptEmptyState kind={transcriptEmptyKind(session)} agent={agent} project={session.workspaceName ?? undefined} />
         ) : (
           <EventTimeline
+            agents={agents}
             items={items}
             driver={session.driver}
             sessionActive={isTimelineSessionActive(session.status)}

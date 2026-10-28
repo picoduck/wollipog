@@ -7432,6 +7432,7 @@ function SessionDetailLoaded({
                   {items.length > 0 && (
                     <Profiler id={SESSION_VIEW_PROBE} onRender={reportRenderProbe}>
                       <ProfiledEventTimeline
+                        agents={runner?.agents}
                         readLocal={historyPreview.active}
                         driver={session.driver}
                         items={timelineItems}

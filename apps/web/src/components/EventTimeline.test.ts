@@ -427,6 +427,23 @@ test("checkpoints stay in the model but render no Start Turn or End Turn separat
   assert.deepEqual([...assistantForkTurns(items)], [[3, 19]], "fork still reads the conversation checkpoint");
 });
 
+for (const agents of [undefined, [{ id: "codex-app", name: "Codex (App Server)" }, { id: "claude-native", name: "Claude Code" }]]) {
+  test(`handoff divider resolves known agents and preserves historical IDs (${agents ? "definitions" : "no runner"})`, () => {
+    for (const sourceAgent of ["codex-app", "retired-agent"]) {
+      const html = renderToStaticMarkup(React.createElement(EventTimeline, { agents, items: [{
+        kind: "conversation_forked", id: 1, sourceSessionId: "historical-source", turn: 1,
+        handoff: { sourceAgent, destinationAgent: "claude-native", disclosure: "Historical disclosure." },
+      }] }));
+      const source = agents?.find((agent) => agent.id === sourceAgent)?.name ?? sourceAgent;
+      const destination = agents ? "Claude Code" : "claude-native";
+      const label = `Handoff from ${source} to ${destination} after Turn 1`;
+      assert.ok(html.includes(`aria-label="${label}"`));
+      assert.ok(html.includes(`${label}</span>`), "visible and accessible labels match");
+      assert.match(html, /Historical disclosure/);
+    }
+  });
+}
+
 const historyDividers: TimelineItem[] = [
   { kind: "checkpoint_restored", id: 1, turn: 7 },
   { kind: "conversation_forked", id: 2, sourceSessionId: "source", turn: 8 },
@@ -451,7 +468,7 @@ test("rewind, fork, handoff and account dividers expose concise accessible seman
   assert.match(html, /class="tl-divider" role="separator" aria-label="Automatically Switched Account to Work" title="Provider conversation resumed with Work"/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Conversation Compacted" title="Earlier messages were summarized to free context \(48,213 tokens before\)\."/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Conversation Compacted Automatically" title="Earlier messages were summarized to free context\."/);
-  const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex After Turn 9" aria-describedby="([^"]+)"/)?.[1];
+  const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex after Turn 9" aria-describedby="([^"]+)"/)?.[1];
   assert.ok(descriptionId, "the concise handoff separator names its visible secondary description");
   assert.ok(html.includes(`<p id="${descriptionId}" class="tl-divider-desc">Fresh provider conversation. Tool output and reasoning were omitted.</p>`));
   assert.doesNotMatch(html, /aria-label="[^"]*Tool output and reasoning/,
@@ -464,7 +481,7 @@ test("every history divider is one neutral label with a faint 14px icon and no g
   assert.deepEqual(labels.map((match) => match[2]), [
     "Files Rewound to Before Turn 7",
     "Forked from Turn 8",
-    "Handoff from Claude Code to Codex After Turn 9",
+    "Handoff from Claude Code to Codex after Turn 9",
     "Automatically Switched Account to Work",
     "Conversation Compacted",
     "Conversation Compacted Automatically",
