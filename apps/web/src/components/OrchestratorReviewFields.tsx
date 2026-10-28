@@ -27,7 +27,7 @@ export function OrchestratorReviewFields({ value, reviewers, problem, onChange, 
   }))];
   return <>
     <SelectRow title="Review Harness" value={value.reviewHarness ?? AUTO} options={[...automatic, ...harnesses]} badge={badge?.("reviewHarness")}
-      description="Automatic follows Settings → Reviews for each child's harness and project at launch." error={problem}
+      description="Automatic follows Reviews settings for each child's harness and project at launch." error={problem}
       onChange={harness => onChange({ reviewHarness: harness === AUTO ? null : harness as "codex" | "claude-code", reviewModel: null, reviewEffort: null })} />
     <SelectRow title="Review Model" value={value.reviewModel ?? AUTO} badge={badge?.("reviewModel")}
       options={[...automatic, ...[...models.values()].map(m => ({ value: m.id, label: m.displayName ?? m.id })),
@@ -37,7 +37,7 @@ export function OrchestratorReviewFields({ value, reviewers, problem, onChange, 
     <SelectRow title="Review Effort" value={value.reviewEffort ?? AUTO} badge={badge?.("reviewEffort")}
       options={[...automatic, ...efforts.map(e => ({ value: e, label: titleCaseLabel(e) })),
         ...(value.reviewEffort && !efforts.includes(value.reviewEffort) ? [{ value: value.reviewEffort, label: `${titleCaseLabel(value.reviewEffort)} (Unavailable)` }] : [])]}
-      description="Automatic inherits the selected reviewer's saved effort, then high effort. Same-family reviews still require explicit consent in Settings → Reviews."
+      description="Automatic inherits the selected reviewer's saved effort, then high effort. Same-family reviews still require explicit consent in Reviews settings."
       onChange={effort => onChange({ reviewEffort: effort === AUTO ? null : effort })} />
     <SelectRow title="Review Round Budget" value={value.reviewRoundBudget == null ? AUTO : String(value.reviewRoundBudget)} badge={badge?.("reviewRoundBudget")}
       options={[...automatic, ...Array.from({ length: 32 }, (_, i) => ({ value: String(i + 1), label: String(i + 1) }))]}
