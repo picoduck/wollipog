@@ -1354,11 +1354,11 @@ linked by hand in the pull request's Development section closes the same way. A 
 issues through the typed `issue_closure` route therefore writes "Refs #N" and never puts a closing
 verb before a reference that must stay open (#3713).
 
-Protocol v240 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
+Protocol v242 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
 `pr_merge` snapshot may carry `intendedClosures`: every issue the merge is meant to close, as `#N`,
 `owner/repo#N`, or an issue URL, normalized to sorted unique `owner/repo#N`. It is omitted when the
 merge must close nothing, so earlier digests are unchanged; GitLab snapshots refuse it. When the
-child's runner is v240, the control plane asks it for `github_merge_preflight` before creating the
+child's runner is v242, the control plane asks it for `github_merge_preflight` before creating the
 decision. The runner reads the open pull request through the child's own `gh` login: its head, its
 description and GitHub's `closingIssuesReferences`. It reports every issue either would close, with
 the description's line for each. The decision is created only when those issues are exactly the
@@ -1368,7 +1368,7 @@ reviewer. The created decision records the read as `closingReferenceCheck`, whic
 shows as **Closes on Merge**. Consuming the approval reads GitHub again, because the description can
 change after approval: a different set of closures, a moved head, or a pull request that is no
 longer open revokes the decision, and GitHub being unreadable arms nothing and may be retried. A
-pre-v240 child runner is not asked; its decisions carry no `closingReferenceCheck`, and the card says
+pre-v242 child runner is not asked; its decisions carry no `closingReferenceCheck`, and the card says
 the closures were not checked.
 
 The description matcher follows GitHub's measured behavior (each case was checked against

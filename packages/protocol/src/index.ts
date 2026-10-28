@@ -735,7 +735,7 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `github_merge_preflight`, which reports every issue the merge would close. The control plane
 //      refuses an undeclared closure and records the check on the decision. A pre-v242 child runner
 //      is not asked; its decisions carry no `closingReferenceCheck`.
-export const PROTOCOL_VERSION = 240;
+export const PROTOCOL_VERSION = 242;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1058,8 +1058,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
-  /** v240 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
-  githubMergeClosingReferences: 240,
+  /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
+  githubMergeClosingReferences: 242,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
@@ -4848,7 +4848,7 @@ export type WorkflowDecisionResourceSnapshot =
       squash?: boolean;
       /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
       removeSourceBranch?: boolean;
-      /** GitHub only (v240, #3713): every issue this merge is meant to close, as sorted unique
+      /** GitHub only (v242, #3713): every issue this merge is meant to close, as sorted unique
        * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
        * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
       intendedClosures?: string[];
@@ -4988,7 +4988,7 @@ export interface WorkflowDecisionView {
   actionAdmission?: WorkflowDecisionActionAdmission;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
-  /** v240 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
+  /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
    * Absent when the runner predates the check, so the closures it would make are unknown. */
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
   /** v166: the resolver's message to the child, present only when one was attached. */
@@ -9038,7 +9038,7 @@ export interface PullRequestClosingReferenceCheck {
   closures: PullRequestClosure[];
 }
 
-/** v240 (#3713): before a GitHub `pr_merge` is requested or armed, the child's runner reads the open
+/** v242 (#3713): before a GitHub `pr_merge` is requested or armed, the child's runner reads the open
  * pull request through the session's own `gh` login: its head, its description and GitHub's closing
  * links. Read-only; the control plane compares the closures with the snapshot's `intendedClosures`. */
 export interface GithubMergePreflightMessage {

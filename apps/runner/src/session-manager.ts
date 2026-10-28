@@ -18267,7 +18267,7 @@ export class SessionManager {
     }
   }
 
-  /** v240 (#3713): read a GitHub `pr_merge` snapshot's pull request through the child session's own
+  /** v242 (#3713): read a GitHub `pr_merge` snapshot's pull request through the child session's own
    * `gh` login and context, and report every issue merging it would close. Read-only; a refusal is
    * a fixed sentence, never `gh` output. */
   async githubMergePreflight(

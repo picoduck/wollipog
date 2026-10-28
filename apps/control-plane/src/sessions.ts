@@ -10053,7 +10053,7 @@ export class SessionsService {
 
   /** #3713: a GitHub merge is requested only after the child's runner reports the issues it would
    * close, so a closure the snapshot does not declare is refused before anyone reviews it. A
-   * request the ordinary path refuses anyway, or one from a pre-v240 runner, is not checked. */
+   * request the ordinary path refuses anyway, or one from a pre-v242 runner, is not checked. */
   private async createGithubMergeDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
@@ -10072,7 +10072,7 @@ export class SessionsService {
   }
 
   /** What merging would close, read from GitHub through the child's runner and compared with the
-   * snapshot's `intendedClosures` (#3713). Without a check when the runner predates v240. `revoke`
+   * snapshot's `intendedClosures` (#3713). Without a check when the runner predates v242. `revoke`
    * says the snapshot itself is wrong (a stale head or a different set of closures); otherwise
    * GitHub could not be read and the same snapshot may be tried again. */
   private async githubMergeClosures(

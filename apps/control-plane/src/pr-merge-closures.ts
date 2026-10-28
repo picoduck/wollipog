@@ -1,5 +1,5 @@
 /**
- * Closing references in GitHub merges (#3713, protocol v240).
+ * Closing references in GitHub merges (#3713, protocol v242).
  *
  * A GitHub `pr_merge` snapshot declares the issues the merge is meant to close in
  * `intendedClosures`. Before the decision is created and again before it is armed, the child's

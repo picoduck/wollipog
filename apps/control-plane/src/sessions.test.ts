@@ -4699,7 +4699,7 @@ const GITHUB_MERGE = {
 test("a GitHub merge snapshot's intendedClosures normalize to sorted unique issues and leave other digests unchanged (#3713)", () => {
   const plain = normalizeWorkflowDecisionSnapshot(GITHUB_MERGE);
   assert.ok(plain.ok && plain.data);
-  assert.equal("intendedClosures" in plain.data, false, "a merge that declares none keeps its pre-v240 digest");
+  assert.equal("intendedClosures" in plain.data, false, "a merge that declares none keeps its pre-v242 digest");
   const empty = normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures: [] });
   assert.deepEqual(empty.data, plain.data, "an empty list is the same snapshot as none");
   const declared = normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE,
@@ -4843,7 +4843,7 @@ test("a GitHub merge is requested and armed only while GitHub would close exactl
     const legacy = await ask("legacy-runner");
     assert.ok(legacy.ok && legacy.data, legacy.error);
     assert.equal(legacy.data.closingReferenceCheck, undefined);
-    assert.equal(preflights.length, asked, "a pre-v240 runner receives no github_merge_preflight");
+    assert.equal(preflights.length, asked, "a pre-v242 runner receives no github_merge_preflight");
   } finally {
     db.close();
   }

@@ -503,7 +503,7 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
       "Resolve without childMessage and send it with prompt_session, or update Wollipog."), required, actual);
 }
 
-/** A pre-v240 control plane drops an unknown intendedClosures and creates the merge decision
+/** A pre-v242 control plane drops an unknown intendedClosures and creates the merge decision
  * without reading GitHub, so the requester would believe its closures were checked (#3713). */
 async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;

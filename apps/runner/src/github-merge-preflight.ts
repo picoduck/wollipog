@@ -1,5 +1,5 @@
 /**
- * GitHub merge preflight (#3713, protocol v240): before a GitHub `pr_merge` decision is requested or
+ * GitHub merge preflight (#3713, protocol v242): before a GitHub `pr_merge` decision is requested or
  * armed, read the pull request through the child session's own `gh` login and report every issue
  * merging it would close. Read-only. Every failure is a fixed sentence, never `gh` output.
  *
