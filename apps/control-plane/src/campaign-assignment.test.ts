@@ -54,7 +54,8 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /native reviewer subprocess outside Session accounting/);
   assert.match(text, /not charged to that allowance/);
   assert.match(text, /actual raw cost, including invalid attempts/);
-  assert.match(text, /actual registered audited profile/);
+  assert.match(text, /review bridge and campaign review jobs are retired/);
+  assert.match(text, /without a native fallback/);
   assert.match(text, /Never update or restart the hosting stack/);
   assert.match(text, /one-shot runner permission completes consumption/);
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);

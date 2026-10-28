@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
@@ -26,6 +27,7 @@ function harness(options: {
   driver?: "claude-code" | "codex-app-server" | "pi";
   campaign?: boolean;
   configuration?: boolean;
+  delegatedMerge?: boolean;
   reviewPolicy?: Partial<import("@wollipog/protocol").OrchestratorReviewPolicy>;
 } = {}) {
   const db = ControlPlaneDb.open(":memory:");
@@ -57,7 +59,8 @@ function harness(options: {
     policy.issueNumbers = [3371];
     db.createSession({ id: "root", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Campaign", useWorktree: false,
       driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 2, role: "orchestrator", orchestratorPolicy: policy,
-      parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY,
+        ...(options.delegatedMerge ? { pr_merge: "orchestrator" as const } : {}) } },
       scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
     db.updateSessionStatus("root", "running", 3);
   }
@@ -110,6 +113,83 @@ function mergeSnapshot(reviewSessionId?: string) {
     requiredChecks: { headSha: HEAD, status: "passed" as const, checkedAt: 10,
       checks: [{ name: "required", state: "passed" as const }] } };
 }
+
+async function armCitedMerge(h: ReturnType<typeof harness>) {
+  evidenceAttempt(h, "upvote");
+  const snapshot = mergeSnapshot("upvote");
+  const created = h.svc.createWorkflowDecision("s1", { requestId: "cited-arm", resourceKey: "merge", resourceSnapshot: snapshot });
+  assert.ok(created.data, created.error ?? "refused");
+  const approved = created.data.authority === "orchestrator"
+    ? h.svc.resolveDescendantRequest("root", "s1", created.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true)
+    : h.svc.approve("s1", created.data.occurrenceId, "approve");
+  assert.ok(approved.ok, approved.error ?? "approval refused");
+  const command = `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${HEAD}`;
+  h.hub.requestFromRunner = async (_runner, requestId) => ({ type: "github_merge_preflight_result", requestId,
+    sessionId: "s1", ok: true, check: { checkedAt: 10, closures: [] } });
+  const armed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot,
+    action: { kind: "pr_merge_enqueue", command } });
+  assert.ok(armed.data?.actionAdmission, armed.error ?? "not armed");
+  assert.equal(armed.data.reviewEvidence?.status, "verified");
+  return { snapshot, command, occurrenceId: created.data.occurrenceId };
+}
+
+test("correlated authorization rechecks a cited upvote immediately before allowing the command", async () => {
+  for (const newer of ["none", "invalid", "downvote", "downgrade"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      const armed = await armCitedMerge(h);
+      if (newer === "invalid") evidenceAttempt(h, "retry", { invalid: true });
+      if (newer === "downvote") evidenceAttempt(h, "later-vote", { vote: "DOWNVOTE" });
+      if (newer === "downgrade") h.db.registerRunner(h.metadata, 30, 242);
+      h.svc.onSessionEvent("s1", { kind: "permission_request", requestId: "exact-enqueue", title: "Enqueue PR",
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+        context: { toolName: "Bash", input: armed.command } });
+      assert.equal(h.db.workflowDecisionByOccurrence(armed.occurrenceId)?.status,
+        newer === "downvote" || newer === "downgrade" ? "revoked" : "consumed", newer);
+    } finally { h.db.close(); }
+  }
+});
+
+test("record-only reconciliation preserves an already-authorized merge after a later vote or runner downgrade", async () => {
+  for (const later of ["vote", "downgrade"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      const armed = await armCitedMerge(h);
+      if (later === "vote") evidenceAttempt(h, "later-vote", { vote: "DOWNVOTE" });
+      else h.db.registerRunner(h.metadata, 30, 242);
+      let merged = false;
+      h.hub.requestFromRunner = async (_runner, requestId) => ({ type: "workflow_action_reconciliation_result", requestId,
+        sessionId: "s1", occurrenceId: armed.occurrenceId, accepted: merged,
+        commandDigest: createHash("sha256").update(armed.command).digest("hex"), forgeHeadSha: HEAD });
+      const pending = await h.svc.reconcileWorkflowDecision("s1", armed.occurrenceId, { resourceSnapshot: armed.snapshot });
+      assert.equal(pending.status, 409, "an enqueued or unproven action is never recorded as consumed");
+      assert.equal(h.db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, "approved");
+      merged = true;
+      const recorded = await h.svc.reconcileWorkflowDecision("s1", armed.occurrenceId, { resourceSnapshot: armed.snapshot });
+      assert.equal(recorded.data?.status, "consumed", recorded.error ?? "recording failed");
+      assert.equal((await h.svc.reconcileWorkflowDecision("s1", armed.occurrenceId, { resourceSnapshot: armed.snapshot })).status, 409);
+      assert.equal(h.svc.workflowDecision("s1", armed.occurrenceId).data?.reviewEvidence?.status, "refused",
+        "current evidence remains refused even though the past successful action is recorded");
+    } finally { h.db.close(); }
+  }
+});
+
+test("lifecycle settlement records a landed cited merge after a newer vote, but leaves an unproven action revoked", async () => {
+  for (const lifecycle of ["stop", "restart"] as const) for (const merged of [false, true]) {
+    const h = harness({ campaign: true, delegatedMerge: true });
+    try {
+      const armed = await armCitedMerge(h);
+      evidenceAttempt(h, "later-vote", { vote: "DOWNVOTE" });
+      h.hub.requestFromRunner = async (_runner, requestId) => ({ type: "workflow_action_reconciliation_result", requestId,
+        sessionId: "s1", occurrenceId: armed.occurrenceId, accepted: merged,
+        commandDigest: createHash("sha256").update(armed.command).digest("hex"), forgeHeadSha: HEAD });
+      assert.ok(h.svc[lifecycle]("s1").ok);
+      for (let attempt = 0; attempt < 20; attempt++) await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(h.db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, merged ? "consumed" : "revoked", `${lifecycle}/${merged}`);
+    } finally { h.db.close(); }
+  }
+});
 
 /** Insert and deliver a runner-owned attempt, including cases the admission planner would
  * normally refuse, to exercise verification independently of admission. */
@@ -1250,12 +1330,12 @@ test("campaign reviews require accounting-aware runners and priced models, while
   } finally { ordinary.db.close(); }
 });
 
-test("the legacy bridge still refuses campaign allowance members", () => {
+test("the retired bridge points campaign allowance members to their own review sessions", () => {
   const h = harness({ campaign: true });
   try {
     h.enableCampaign();
     const result = h.svc.requestSessionReviewJob("s1", request());
-    assert.match(result.error!, /part of a campaign with an allowance/);
+    assert.match(result.error!, /retired.*review session/u);
     assert.equal(h.starts().length, 0);
   } finally { h.db.close(); }
 });

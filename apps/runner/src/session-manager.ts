@@ -1655,7 +1655,7 @@ export class SessionManager {
    * released on stop/exit/failure. Oldest-eligible selection plus bounded bypass prevents both
    * head-of-line capacity waste and starvation. */
   private readonly admitted = new Set<string>();
-  private readonly controlledReviewAdmissions = new Map<string,string>();
+  private readonly mediaReviewAdmissions = new Map<string,string>();
   private readonly admissionQueue: Array<{
     request: AdmissionRequest;
     bypasses: number;
@@ -5410,35 +5410,20 @@ export class SessionManager {
     assertExecutionIsolationContextSupported(this.executionIsolation, context);
   }
 
-  reserveControlledReviewAdmission(jobId:string,agentId:string):boolean {
-    if(this.shuttingDown || this.executionIsolation.mode!=="provider") return false;
-    if(this.controlledReviewAdmissions.has(jobId)) return this.controlledReviewAdmissions.get(jobId)===agentId;
-    if(this.admissionQueue.length) return false;
-    const admitted=this.boxAdmission.acquire({sessionId:jobId,agentId,weight:this.admissionPolicy.agentWeights[agentId]??1,
-      ...(this.admissionPolicy.agentLimits[agentId]===undefined?{}:{agentLimit:this.admissionPolicy.agentLimits[agentId]})});
-    if(admitted) {this.controlledReviewAdmissions.set(jobId,agentId);this.reportCapacity();}
-    return admitted;
-  }
-
-  releaseControlledReviewAdmission(jobId:string):void {
-    this.controlledReviewAdmissions.delete(jobId);
-    this.boxAdmission.release(jobId);this.reportCapacity();this.drainAdmissionQueue();
-  }
-
-  /** Box-wide process admission for one dedicated media reviewer (#1321). Unlike the native code
-   * reviewer it needs no provider-mode isolation: its own bwrap namespace is the boundary. */
+  /** Box-wide process admission for one dedicated media reviewer (#1321). Its own bwrap
+   * namespace provides isolation independently of the ordinary provider mode. */
   reserveMediaReviewAdmission(id: string, agentId: string): boolean {
     if (this.shuttingDown || !id.startsWith("media:")) return false;
-    if (this.controlledReviewAdmissions.has(id)) return false; // one dispatch per prepared Session
+    if (this.mediaReviewAdmissions.has(id)) return false; // one dispatch per prepared Session
     if (this.admissionQueue.length) return false;
     const admitted = this.boxAdmission.acquire({ sessionId: id, agentId, weight: this.admissionPolicy.agentWeights[agentId] ?? 1,
       ...(this.admissionPolicy.agentLimits[agentId] === undefined ? {} : { agentLimit: this.admissionPolicy.agentLimits[agentId] }) });
-    if (admitted) { this.controlledReviewAdmissions.set(id, agentId); this.reportCapacity(); }
+    if (admitted) { this.mediaReviewAdmissions.set(id, agentId); this.reportCapacity(); }
     return admitted;
   }
 
   releaseMediaReviewAdmission(id: string): void {
-    if (!this.controlledReviewAdmissions.delete(id)) return;
+    if (!this.mediaReviewAdmissions.delete(id)) return;
     this.boxAdmission.release(id); this.reportCapacity(); this.drainAdmissionQueue();
   }
 

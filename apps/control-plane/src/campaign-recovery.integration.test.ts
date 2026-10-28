@@ -80,9 +80,12 @@ function nativeRecoveryFixture() {
   const request = { requestId: "native_original", workItemId, pullRequest: { repository: "picoduck/wollipog", number: 3068 },
     baseSha: "a".repeat(40), headSha: "b".repeat(40), costUsd: 5, toolCalls: 20, brief: "Private CODE fixture brief" };
   const reserve = (requestId: string, extra: Partial<typeof request> = {}) => {
-    const result = h.svc.requestCampaignReviewJob("root", { ...request, requestId, ...extra });
-    assert.ok(result.ok, result.error ?? "native fixture reservation refused");
-    return h.db.campaignReviewJobs.command(result.data!.jobId)!;
+    const item = h.db.campaignWorkLedger.detail("root", workItemId, Date.now(), () => true)!;
+    const control = h.db.getSession("root")!.orchestratorPolicy!.control!;
+    assert.equal(control.mode, "full_control");
+    if (control.mode !== "full_control") throw Error("Historical fixture boundary missing");
+    return h.db.campaignReviewJobs.reserve("root", "r", "child", control.boundary.revision,
+      profile, { ...request, requestId, ...extra }, { workItemAttemptId: item.currentAttempt!.id, issue: item.issue! });
   };
   return { ...h, reserve };
 }
