@@ -361,6 +361,29 @@ test("a session limit the person lowers under Custom survives authorizing the al
   } finally { h.db.close(); }
 });
 
+test("an allowance stops governing only when its root's recorded control grants none (#2940)", () => {
+  const h = harness();
+  try {
+    const control = (value: unknown) => {
+      const stored = h.db.sessionOrchestratorPolicy("root")!;
+      if (value === undefined) delete stored.control; else stored.control = value as typeof stored.control;
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    };
+    h.db.campaignBudgets.authorize("root", allowance());
+    control(undefined);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), "root", "a root with no control record keeps its allowance");
+    assert.ok(h.enable().ok);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), "root", "Full Control with an allowance governs");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.control, { mode: "custom" }, "revoking records Custom explicitly");
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), null, "a revoked-to-Custom allowance never governs");
+    assert.equal(h.db.campaignBudgets.admissionError("root"), null);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2936", operations: ["implementation_question"],
+      delegatablePolicyIds: [] }, 3, h.principal).ok);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), null, "Full Control authorized without an allowance does not revive it");
+  } finally { h.db.close(); }
+});
+
 /** An allowance with no personal limits, revoked to Custom, then the root lowered to 5 tool calls (#2940). */
 function revokedAndLowered(before?: (h: ReturnType<typeof harness>) => void) {
   const h = harness();

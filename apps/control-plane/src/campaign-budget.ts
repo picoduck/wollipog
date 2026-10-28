@@ -135,20 +135,21 @@ export class CampaignBudgetLedger {
     return (this.sql.prepare("SELECT root_id FROM campaign_budget_members WHERE session_id=?").get(sessionId) as { root_id: string } | undefined)?.root_id ?? null;
   }
 
-  /** The allowance that governs a member's admission: its root's, only while that root's current
-   * control is Full Control with a Human-authorized allowance. A campaign the Human revoked to Custom
-   * (or authorized without an allowance) runs under ordinary session rules, so a revoked allowance
-   * never stops, refuses or deadlocks it; its members' spend is still recorded, and counts against
-   * any allowance the Human authorizes again (#2940). Accounting reads use `root`. */
+  /** The allowance that governs a member's admission: its root's, unless that root's recorded control
+   * no longer grants one. A campaign the Human revoked to Custom (or authorized again without an
+   * allowance) runs under ordinary session rules, so a revoked allowance never stops, refuses or
+   * deadlocks it; its members' spend is still recorded, and counts against any allowance the Human
+   * authorizes again (#2940). Accounting reads use `root`. */
   governingRoot(sessionId: string): string | null {
     const rootId = this.root(sessionId);
     if (!rootId) return null;
     const row = this.sql.prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(rootId) as { orchestrator_policy: string | null } | undefined;
-    // A missing root keeps governing: losing its row must never release the allowance.
-    if (!row) return rootId;
     let control: { mode?: string; boundary?: { budgetAuthority?: unknown } } | undefined;
-    try { control = (JSON.parse(row.orchestrator_policy ?? "null") as { control?: typeof control } | null)?.control; } catch { return rootId; }
-    return control?.mode === "full_control" && control.boundary?.budgetAuthority !== undefined ? rootId : null;
+    try { control = (JSON.parse(row?.orchestrator_policy ?? "null") as { control?: typeof control } | null)?.control; } catch { return rootId; }
+    // Only an explicit control without an allowance releases it: a missing root, policy or control
+    // record keeps the allowance governing, never silently lifting it.
+    if (!control) return rootId;
+    return control.mode === "full_control" && control.boundary?.budgetAuthority !== undefined ? rootId : null;
   }
 
   view(rootId: string): CampaignBudgetView | undefined {
