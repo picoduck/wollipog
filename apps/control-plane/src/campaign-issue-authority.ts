@@ -86,17 +86,27 @@ export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, 
 type DeliveryCandidate = ForgeFactEntry & { approvedHeads: string[] };
 
 /** The pull requests that may prove one item's delivery (#2940): every consumed `pr_merge` gate a
- * verified-delivered attempt's session passed (server-recorded at an exact head), and every pull
- * request the item's reported stage names. Each is only a candidate; its forge fact decides. */
+ * verified-delivered attempt's session passed inside that attempt (server-recorded at an exact
+ * head), and every pull request the item's reported stage names. Each is only a candidate; its
+ * forge fact decides. A gate from before the attempt began or after its verified report, or one
+ * meant to close other issues but not this item's, belongs to other work and is never counted. */
 function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail): DeliveryCandidate[] {
   const candidates = new Map<string, DeliveryCandidate>();
   for (const entry of item.observed.pullRequests ?? []) candidates.set(forgeRefKey(entry.ref), { ...entry, approvedHeads: [] });
   const repository = root.orchestratorPolicy?.issueScope?.repository.toLowerCase();
-  const sessions = (item.verifications ?? []).flatMap((v) => v.outcome === "delivered" && v.childSessionId ? [v.childSessionId] : []);
+  const issue = item.issue ? `${item.issue.repository}#${item.issue.number}`.toLowerCase() : null;
+  const windows = (item.verifications ?? []).flatMap((v) => {
+    const attempt = v.outcome === "delivered" ? (item.attempts ?? []).find((a) => a.id === v.attemptId) : undefined;
+    const until = v.report.ts ?? attempt?.endedAt;
+    return attempt?.sessionId && attempt.sessionId === v.childSessionId && until !== null && until !== undefined
+      ? [{ sessionId: attempt.sessionId, from: attempt.startedAt, until }] : [];
+  });
   const gated = new Map<string, { ref: CampaignPullRequestRef; heads: string[] }>();
-  for (const decision of db.consumedPullRequestMerges(sessions)) {
+  for (const decision of db.consumedPullRequestMerges(windows.map((w) => w.sessionId))) {
     const gate = decision.resourceSnapshot;
-    if (gate.category !== "pr_merge" || gate.repository.toLowerCase() !== repository) continue;
+    if (gate.category !== "pr_merge" || gate.repository.toLowerCase() !== repository ||
+        !windows.some((w) => w.sessionId === decision.sessionId && decision.createdAt >= w.from && decision.createdAt <= w.until) ||
+        gate.intendedClosures?.length && (!issue || !gate.intendedClosures.some((closure) => closure.toLowerCase() === issue))) continue;
     const ref = { repository: gate.repository, number: gate.pullRequest };
     const key = forgeRefKey(ref);
     gated.set(key, { ref, heads: [...(gated.get(key)?.heads ?? []), gate.headSha] });
@@ -112,6 +122,12 @@ export function closureCandidateRefs(db: ControlPlaneDb, root: SessionView, issu
   const refs = new Map<string, CampaignPullRequestRef>();
   for (const item of issueWork(db, root, issue)) for (const { ref } of deliveryCandidates(db, root, item)) refs.set(forgeRefKey(ref), ref);
   return [...refs.values()];
+}
+
+/** The candidates a closure proof excluded as closed without merging, which execution re-reads uncached. */
+export function closureExcludedRefs(proof: ReturnType<typeof closureEvidence>): CampaignPullRequestRef[] {
+  const excluded = proof && "excluded" in proof ? proof.excluded ?? [] : [];
+  return excluded.map((key) => ({ repository: key.slice(0, key.lastIndexOf("#")), number: Number(key.slice(key.lastIndexOf("#") + 1)) }));
 }
 
 /** The candidates freshly observed merged, for the runner to re-verify at their exact heads. */

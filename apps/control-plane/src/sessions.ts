@@ -22,8 +22,9 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, CAMPAIGN_FORGE_OBSERVATION, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { validForgeResults } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
@@ -9919,6 +9920,24 @@ export class SessionsService {
     if (refs.length) await this.campaignForgeRefresh(sessionId, refs).catch(() => undefined);
   }
 
+  /** The runner's authoritative read of every excluded pull request, bypassing the observer's cache
+   * and rate limit: a pull request reopened since its last read must not stay excluded. A runner
+   * that cannot answer for every ref proves nothing. */
+  private async excludedPullRequestsStillClosed(root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean> {
+    if (!refs.length) return true;
+    const runner = this.db.campaignForgeObservingRunner(root.id);
+    if (!runner?.online || !this.hub.isRunnerOnline(runner.runnerId) || !runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return false;
+    const requestId = `issue_closure_excluded_${randomUUID()}`;
+    try {
+      const response = await this.hub.requestFromRunner(runner.runnerId, requestId, { type: "campaign_forge_observe", requestId,
+        sessionId: root.id, pullRequests: refs.map(({ repository, number }) => ({ repository, number })), gitlab: true },
+      CAMPAIGN_FORGE_OBSERVATION.requestTimeoutMs);
+      return validForgeResults(response, root.id, refs)?.every((result) => result.observation?.state === "closed") ?? false;
+    } catch {
+      return false;
+    }
+  }
+
   async requestGithubIssueClosure(
     sessionId: string,
     request: GithubIssueClosureRequest,
@@ -10048,6 +10067,10 @@ export class SessionsService {
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
+    if (decision.authority === "orchestrator" &&
+        !await this.excludedPullRequestsStillClosed(freshSession, closureExcludedRefs(closureEvidence(this.db, freshSession, snapshot)))) {
+      return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
+    }
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);

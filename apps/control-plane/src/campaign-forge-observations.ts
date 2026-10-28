@@ -338,7 +338,7 @@ export class CampaignForgeObserver {
     }
     try {
       // Validation itself must not throw past here: a malformed answer only stores nothing.
-      const results = validResults(response, campaignId, refs);
+      const results = validForgeResults(response, campaignId, refs);
       if (!results) {
         this.deps.warn(`campaign forge read for ${campaignId} returned a malformed answer`);
         return;
@@ -351,7 +351,7 @@ export class CampaignForgeObserver {
 }
 
 /** Accept only an answer for exactly the refs asked, in order, with recognized failures. */
-function validResults(
+export function validForgeResults(
   response: unknown,
   campaignId: string,
   refs: readonly CampaignPullRequestRef[],
