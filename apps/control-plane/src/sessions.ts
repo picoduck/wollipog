@@ -658,6 +658,11 @@ class CampaignAttemptRefusal extends Error {
   constructor(message: string, readonly status: number) { super(message); }
 }
 
+/** A runner capability gate refused inside a transaction, so its catch can return the versions too. */
+class RunnerCapabilityRefusal extends Error {
+  constructor(readonly requirement: { error: string } & RunnerCapabilityRequirementDetails) { super(requirement.error); }
+}
+
 /** Re-type a failed result, keeping its status, error and any capability-gate versions. */
 function failAs<T>(result: ServiceResult<unknown>, fallback?: string): ServiceResult<T> {
   return {
@@ -15119,8 +15124,10 @@ export class SessionsService {
         const view = this.db.campaignBudgets.view(budgetRoot)!;
         const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
         if(parentError) throw new Error(parentError);
-        const peer = this.db.getRunner(req.runnerId)?.protocolVersion ?? 0;
-        if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) throw new Error("Campaign run workers require protocol v218");
+        const peer = this.db.getRunner(req.runnerId)?.protocolVersion;
+        if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) {
+          throw new RunnerCapabilityRefusal(runnerCapabilityRequirementError(peer, "campaignBudgetAdmission", "campaign run workers"));
+        }
         const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
         if (accountingError) throw new Error(accountingError);
         const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
@@ -15184,7 +15191,10 @@ export class SessionsService {
     };
     let materialized: ReturnType<typeof materialize>;
     try { materialized = this.db.campaignBudgetTransaction(materialize); }
-    catch (error) { return fail((error as Error).message, 409); }
+    catch (error) {
+      if (error instanceof RunnerCapabilityRefusal) return capabilityFail(error.requirement);
+      return fail((error as Error).message, 409);
+    }
     for (const spec of launches) {
       this.hub.sessionChangedById(spec.sessionId);
       this.hub.sendToRunner(req.runnerId, { type: "start_session", spec, initialPrompt: req.task });
