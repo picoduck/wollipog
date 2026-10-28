@@ -464,6 +464,34 @@ test("declared merge closures fail closed against a control plane that would dro
   assert.equal(calls.length, 1, "a merge that declares no closure is still requested");
 });
 
+test("merge review citations are refused before submission to an older or unknown control plane", async () => {
+  const snapshot = { category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42,
+    headSha: "a".repeat(40), reviewSessionId: "review-upvote", reviewResult: "merge",
+    requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1, checks: [{ name: "Required", state: "passed" }] } };
+  for (const tool of ["request_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision"]) {
+    const { deps, calls } = makeDeps();
+    deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.mergeReviewEvidence - 1;
+    const args = { requestId: "merge", resourceKey: "merge", occurrenceId: "workflow_merge", resourceSnapshot: snapshot,
+      action: { kind: "pr_merge_enqueue", command: "gh pr merge" } };
+    const old = await callTool(deps, tool, args);
+    assert.equal(old.isError, true, tool);
+    assert.equal(resultJson(old).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.mergeReviewEvidence);
+    assert.match(resultJson(old).error, /review session/u);
+    assert.equal(calls.length, 0, "an older control plane never receives a citation it could drop");
+    deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+    const current = await callTool(deps, tool, args);
+    assert.equal(current.isError, undefined, JSON.stringify(current));
+    assert.equal(calls.length, 1);
+    assert.equal((calls[0]!.body as { resourceSnapshot: { reviewSessionId: string } }).resourceSnapshot.reviewSessionId, "review-upvote");
+    calls.length = 0;
+    deps.controlPlaneProtocolVersion = undefined;
+    const unknown = await callTool(deps, tool, args);
+    assert.equal(unknown.isError, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.url, `${CP_URL}/api/compatibility`);
+  }
+});
+
 test("PR merge reconciliation fails closed against mixed-version control planes", async () => {
   const { deps, calls } = makeDeps();
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1;
