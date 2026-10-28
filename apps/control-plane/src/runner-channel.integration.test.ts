@@ -220,6 +220,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   let maxHealthMs = 0;
   let maxPongMs = 0;
   let maxHandshakeMs = 0;
+  let maxConvergenceMs = 0;
   const failureContext = (pass: number, started: number) => JSON.stringify({
     pass, elapsedMs: Math.round(performance.now() - started),
     maxHandshakeMs: Math.round(maxHandshakeMs), maxHealthMs: Math.round(maxHealthMs), maxPongMs: Math.round(maxPongMs),
@@ -327,6 +328,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     }
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${failureContext(pass, convergenceStarted)}\n${output}`);
+    maxConvergenceMs = Math.max(maxConvergenceMs, performance.now() - convergenceStarted);
     if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
   }
   // Shell output bypasses the runner outbox and legitimately exceeds the queue's byte ceiling
@@ -349,7 +351,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     `the bounded shell tail did not reach the end of the burst\n${output}`);
   assert.ok(maxHealthMs < 2000, `health latency ${maxHealthMs}ms`);
   assert.ok(maxPongMs < 2000, `heartbeat latency ${maxPongMs}ms`);
-  t.diagnostic(`Three registrations: max handshake ${Math.round(maxHandshakeMs)}ms, max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms`);
+  t.diagnostic(`Three registrations: max handshake ${Math.round(maxHandshakeMs)}ms, max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms, max convergence ${Math.round(maxConvergenceMs)}ms`);
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);

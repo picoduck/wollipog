@@ -248,6 +248,7 @@ import {
   type CampaignRequestResolutionRecord,
   type ControlPlaneDb,
   type RestartNoticeEntry,
+  type RunnerHistoryReconciliation,
   type RunnerHistoryState,
   type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
@@ -346,6 +347,18 @@ type Logger = { info: (m: string) => void; warn: (m: string) => void; error: (m:
 export interface RunnerAttentionBatch {
   capture(session: SessionView | null): SessionView | null;
   defer(before: SessionView | null): void;
+}
+
+/** At most this many live runtime snapshots share one durable commit (#2601). The same bound as a
+ * registration step (#2125): the event loop yields between runs, never inside one. */
+export const RUNTIME_UPDATE_RUN_LIMIT = 32;
+
+/** What a runtime snapshot's publication needs once its update has committed. */
+interface CommittedRuntimeUpdate {
+  existing: SessionView;
+  runtimeSnapshot: SessionSnapshot;
+  unacknowledgedRevision: number;
+  campaignBefore: SessionView | null;
 }
 
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
@@ -16895,14 +16908,7 @@ export class SessionsService {
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
-    const policyGateMayRunBeforeUpdate = runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
-      this.db.sessionCostUsd(snapshot.id) > existing.costUsd;
-    const repeated = this.db.isRepeatedRuntimeSnapshot(snapshot.id, runtimeSnapshot);
-    // A CP-owned budget can change between identical runner snapshots. Preserve the before-view
-    // when this snapshot may park a new policy card, so its campaign receives the transition.
-    const newPolicyAsk = repeated && existing.parentSessionId && policyGateMayRunBeforeUpdate &&
-      this.pendingPolicyAsk({ ...existing, status: runtimeSnapshot.status, costUsd: runtimeSnapshot.costUsd });
-    const campaignBefore = repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing, batch);
+    const campaignBefore = this.runtimeCampaignBefore(existing, runtimeSnapshot, batch);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
@@ -16937,27 +16943,151 @@ export class SessionsService {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
-    this.settleCampaignUsage(snapshot.id);
-    this.synchronizeCostReconciliation(snapshot.id, unacknowledgedRevision);
+    this.finishSessionRuntimeUpdate({ existing, runtimeSnapshot, unacknowledgedRevision, campaignBefore }, history, now, batch);
+  }
+
+  /** Apply consecutive live snapshots from one runner in arrival order (#2601). Each run of up to
+   * RUNTIME_UPDATE_RUN_LIMIT snapshots, for distinct sessions, whose reconciliation needs nothing
+   * beyond database writes shares one durable transaction, and nothing about the run is published
+   * or sent before it commits. Every other snapshot takes the exact single-snapshot path, in turn.
+   * `beforeApply` runs for each snapshot, outside any transaction, before it is applied. */
+  applySessionRuntimeUpdates(
+    runnerId: string,
+    snapshots: readonly SessionSnapshot[],
+    batch?: RunnerAttentionBatch,
+    beforeApply?: (snapshot: SessionSnapshot) => void,
+  ): void {
+    let next = 0;
+    let readied = 0;
+    const ready = (index: number) => {
+      if (index < readied) return;
+      readied = index + 1;
+      beforeApply?.(snapshots[index]!);
+    };
+    while (next < snapshots.length) {
+      const run: Array<CommittedRuntimeUpdate & { before: () => void }> = [];
+      const sessions = new Set<string>();
+      // Distinct sessions: each is classified against exactly the state it is applied to.
+      while (next < snapshots.length && run.length < RUNTIME_UPDATE_RUN_LIMIT && !sessions.has(snapshots[next]!.id)) {
+        ready(next);
+        const update = this.batchableRuntimeUpdate(runnerId, snapshots[next]!, batch);
+        if (!update) break;
+        run.push(update);
+        sessions.add(update.runtimeSnapshot.id);
+        next++;
+      }
+      if (run.length > 0) {
+        this.commitRuntimeUpdates(run, batch);
+        continue;
+      }
+      ready(next);
+      this.applySessionRuntimeUpdate(runnerId, snapshots[next]!, batch);
+      next++;
+    }
+  }
+
+  /** A live snapshot that can share a run: the single-snapshot path would reach its update with
+   * only database writes before it, and none of them can publish. Null sends it down that path.
+   * These are the registration batch's criteria (#2125) plus the live path's own settle steps. */
+  private batchableRuntimeUpdate(
+    runnerId: string,
+    snapshot: SessionSnapshot,
+    batch?: RunnerAttentionBatch,
+  ): (CommittedRuntimeUpdate & { before: () => void }) | null {
+    const sessionId = snapshot.id;
+    const existing = this.db.getSession(sessionId);
+    if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(sessionId) ||
+        this.pendingMediaLifecycle(existing) || this.db.hasSessionStopIntent(sessionId) ||
+        (existing.archived && !isTerminal(snapshot.status))) return null;
+    // Cost reconciliation that can neither send a repair nor refuse the snapshot.
+    if (reconciliationRevision(this.db, sessionId) !== 0 || latestReconciliationRepair(this.db, sessionId) ||
+        !reconciliationSnapshotAvailable(this.db, snapshot)) return null;
+    const runtimeSnapshot = snapshot.costUsd < existing.costUsd ? { ...snapshot, costUsd: existing.costUsd } : snapshot;
+    const terminal = isTerminal(runtimeSnapshot.status);
+    if (terminal) {
+      // Ending for good already happened; nothing the end would revoke, abort or abandon remains.
+      if (!isTerminal(existing.status) || this.db.unconsumedWorkflowDecisionsForSession(sessionId).length > 0 ||
+          this.db.hasActiveSessionPromptCommands(sessionId) || this.db.heldWorkflowDecisionResumes(sessionId).length > 0 ||
+          this.db.hasOpenRestartNotices(sessionId) || this.db.hasOpenReviewContinuations(sessionId) ||
+          this.db.listOpenPolicyHookApprovals(sessionId).length > 0) return null;
+    } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
+      return null;
+    }
+    return {
+      existing,
+      runtimeSnapshot,
+      unacknowledgedRevision: snapshot.costReconciliationRevision ?? 0,
+      campaignBefore: this.runtimeCampaignBefore(existing, runtimeSnapshot, batch),
+      // The single-snapshot path's writes before its update, in its order; none publishes.
+      before: () => {
+        if (terminal && snapshot.campaignBudgetCheckpoint) {
+          this.db.campaignBudgets.recordCheckpoint(sessionId, snapshot.campaignBudgetCheckpoint);
+        }
+        observeReconciliationSnapshot(this.db, snapshot);
+        if (runtimeSnapshot.status === "idle") this.db.noteSpawnApprovalsSettled(sessionId);
+        else this.db.clearPolicyResumeStatus(sessionId);
+      },
+    };
+  }
+
+  /** One durable commit for the run; its publications follow only once that commit succeeds. */
+  private commitRuntimeUpdates(run: ReadonlyArray<CommittedRuntimeUpdate & { before: () => void }>, batch?: RunnerAttentionBatch): void {
+    const now = Date.now();
+    const histories = this.db.updateSessionsFromRuntimeSnapshots(
+      run.map(({ runtimeSnapshot, before }) => ({ snapshot: runtimeSnapshot, before })), now);
+    // Every committed session is published even if an earlier one's publication throws.
+    let failure: { error: unknown } | undefined;
+    for (const [index, update] of run.entries()) {
+      try {
+        this.finishSessionRuntimeUpdate(update, histories[index] ?? null, now, batch);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+    if (failure) throw failure.error;
+  }
+
+  private runtimeCampaignBefore(existing: SessionView, runtimeSnapshot: SessionSnapshot, batch?: RunnerAttentionBatch): SessionView | null {
+    const policyGateMayRunBeforeUpdate = runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
+      this.db.sessionCostUsd(existing.id) > existing.costUsd;
+    const repeated = this.db.isRepeatedRuntimeSnapshot(existing.id, runtimeSnapshot);
+    // A CP-owned budget can change between identical runner snapshots. Preserve the before-view
+    // when this snapshot may park a new policy card, so its campaign receives the transition.
+    const newPolicyAsk = repeated && existing.parentSessionId && policyGateMayRunBeforeUpdate &&
+      this.pendingPolicyAsk({ ...existing, status: runtimeSnapshot.status, costUsd: runtimeSnapshot.costUsd });
+    return repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing, batch);
+  }
+
+  /** Everything a runtime update publishes or sends, after its update has committed. */
+  private finishSessionRuntimeUpdate(
+    update: CommittedRuntimeUpdate,
+    history: RunnerHistoryReconciliation | null,
+    now: number,
+    batch?: RunnerAttentionBatch,
+  ): void {
+    const { existing, runtimeSnapshot, unacknowledgedRevision, campaignBefore } = update;
+    const sessionId = runtimeSnapshot.id;
+    this.settleCampaignUsage(sessionId);
+    this.synchronizeCostReconciliation(sessionId, unacknowledgedRevision);
     if (history?.reset) {
-      const reset = this.db.getSession(snapshot.id)!;
-      this.hub.sessionEventsReset(snapshot.id, this.db.listEvents(snapshot.id), reset.eventEpoch ?? 0);
-      this.rehydrate.add(snapshot.id);
-      void this.hydrateHistory(snapshot.id);
+      const reset = this.db.getSession(sessionId)!;
+      this.hub.sessionEventsReset(sessionId, this.db.listEvents(sessionId), reset.eventEpoch ?? 0);
+      this.rehydrate.add(sessionId);
+      void this.hydrateHistory(sessionId);
     }
     // The ledger may price a token residual the runner reported at zero cost (Codex), so the
     // settled session total, not the runner's figure, decides whether a budget gate re-evaluates.
     if (runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
-        this.db.sessionCostUsd(snapshot.id) > existing.costUsd) {
-      this.gateOnPolicy(snapshot.id, now);
-      this.notifyTransition(existing, snapshot.id);
+        this.db.sessionCostUsd(sessionId) > existing.costUsd) {
+      this.gateOnPolicy(sessionId, now);
+      this.notifyTransition(existing, sessionId);
     }
-    this.restorePendingWorkflowDecisionCards(snapshot.id);
-    this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
-    this.deliverHeldRestartNotices(snapshot.id, now);
-    this.applyStandingCampaignResponses(snapshot.id);
-    this.deliverHeldReviewContinuations(snapshot.id, now);
-    this.hub.sessionChangedById(snapshot.id);
+    this.restorePendingWorkflowDecisionCards(sessionId);
+    this.deliverHeldWorkflowDecisionResumes(sessionId, now);
+    this.deliverHeldRestartNotices(sessionId, now);
+    this.applyStandingCampaignResponses(sessionId);
+    this.deliverHeldReviewContinuations(sessionId, now);
+    this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
   }
 
