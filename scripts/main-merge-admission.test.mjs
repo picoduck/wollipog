@@ -133,7 +133,7 @@ test("workflow shadow has no dependency into required checks and reads trusted b
   assert.match(shadow, /persist-credentials: false/); assert.doesNotMatch(shadow, /: write|pull_request_target|pnpm install/);
   const permissions = shadow.match(/    permissions:\n((?:      .+\n)+)/)?.[1];
   assert.equal(permissions, "      contents: read\n", "reusable CI must not exceed its rolling caller's contents-only grant");
-  assert.match(aggregator, /needs: \[checks, browser, win32, webkit, suite_plan\]/);
+  assert.match(aggregator, /needs: \[checks, browser, win32, webkit, suite_plan, merge_group_gate\]/);
   assert.doesNotMatch(aggregator, /regression-admission|MAIN_MERGE_ADMISSION/);
   assert.match(shadow, /"decision":"hold","reasons":\["trusted-policy-unavailable"\]/);
 });

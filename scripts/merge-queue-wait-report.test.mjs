@@ -136,12 +136,16 @@ test("skipped routing anchors delayed full work without counting its API start p
 });
 
 test("the assumed dependency structure matches the CI workflow files", () => {
-  // Checks/browser wait for optional PR routing. Windows/WebKit stay independent, and only the
-  // aggregator consumes all required work. Advisory shadows never supply a required result.
+  // Checks/browser wait for optional PR routing and the disabled merge-group gate. Both are
+  // skipped when the run is created, so neither delays work today. An active gate's execution
+  // would be counted as waiting; activation must model it first. Windows/WebKit stay
+  // independent, and only the aggregator consumes all required work. Advisory shadows never
+  // supply a required result.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
-  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: suite_plan", "needs: suite_plan",
-    "needs: [checks, browser, win32, webkit]", "needs: [checks, browser, win32, webkit, suite_plan]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, suite_plan\]\n/);
+  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
+    "needs: [suite_plan, merge_group_gate]", "needs: [checks, browser, win32, webkit]",
+    "needs: [checks, browser, win32, webkit, suite_plan, merge_group_gate]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);

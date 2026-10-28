@@ -76,13 +76,59 @@ jobs:
             echo 'PR routing unavailable; full coverage required.'
           fi
 
+  # Disabled by default (docs/ci-aggregation.md). Absent/ordinary off values consume no runner.
+  # Case variants admit this job, but its exact shell check selects full. Only exact enabled plus
+  # issuer-pinned admission enforcement and a trusted fast group selection may reduce work.
+  merge_group_gate:
+    if: github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled'
+    name: Merge Group Gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      mode: ${{ steps.plan.outputs.mode }}
+    steps:
+      # A queue base may contain earlier queued work: execute only current main code.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Compute Trusted Merge Group Gate
+        id: plan
+        env:
+          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
+          GITHUB_TOKEN: ${{ github.token }}
+          TESTED_SHA: ${{ github.sha }}
+        run: |
+          # A fetch/gate error explicitly chooses full. Setup/job failures remain failures.
+          if [ "$GATE_SWITCH" != enabled ]; then
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'Merge group gate is not exactly enabled; full coverage required.'
+          elif git fetch --no-tags origin "$TESTED_SHA" && test -f scripts/ci-merge-group-gate.mjs; then
+            node scripts/ci-merge-group-gate.mjs
+          else
+            echo 'mode=full' >> "$GITHUB_OUTPUT"
+            echo 'Merge group gate unavailable; full coverage required.'
+          fi
+      # Job-level evidence for scripts/ci-merge-group-restoration.mjs: exactly one records the mode.
+      - name: Record Full Merge Group Coverage
+        if: steps.plan.outputs.mode != 'fast'
+        run: echo 'Full merge-group validation selected.'
+      - name: Record Reduced Merge Group Coverage
+        if: steps.plan.outputs.mode == 'fast'
+        run: echo 'Reduced merge-group validation selected.'
+
   # The required status context "Typecheck, Test & Sidecar Bundle" is the `check` job below. It
   # only aggregates: the work runs in parallel jobs with their own time budgets, because the
   # browser end-to-end suite alone takes ~19 minutes and was crowding the single 30-minute job
   # (a merge-queue run that hits the budget is cancelled and the PR silently leaves the queue).
   checks:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
-    needs: suite_plan
+    needs: [suite_plan, merge_group_gate]
     name: Typecheck, Unit Tests & Bundles
     runs-on: ubuntu-24.04
     # Everything except the video decoder install took a median of 539 seconds and at most 771 over
@@ -290,8 +336,12 @@ jobs:
         env:
           ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
+          GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
           if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            node scripts/test-suites.mjs --node-only --groups node-fast --ci
+          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
             node scripts/test-suites.mjs --node-only --groups node-fast --ci
           else
             pnpm test:ci
@@ -341,7 +391,7 @@ jobs:
 
   browser:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
-    needs: suite_plan
+    needs: [suite_plan, merge_group_gate]
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
     # A recovered install timeout plus passing tests exhausted the old budget (#2700).
@@ -370,7 +420,7 @@ jobs:
         # Projects partition the live file inventory by measured duration, keeping files intact.
         # The inventory contract pins these five jobs to all five projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: ${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -493,8 +543,12 @@ jobs:
           SYNTHETIC_ARTIFACT_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' || 'false' }}
           ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
+          GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
           if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
+          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
             pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
           else
             pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}
@@ -893,7 +947,7 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [checks, browser, win32, webkit, suite_plan]
+    needs: [checks, browser, win32, webkit, suite_plan, merge_group_gate]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
@@ -901,6 +955,10 @@ jobs:
           ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && 'true' || 'false' }}
           PLAN_RESULT: ${{ needs.suite_plan.result }}
           PLAN_MODE: ${{ needs.suite_plan.outputs.mode }}
+          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
+          GATE_ENABLED: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && 'true' || 'false' }}
+          GATE_RESULT: ${{ needs.merge_group_gate.result }}
+          GATE_MODE: ${{ needs.merge_group_gate.outputs.mode }}
           CHECKS_RESULT: ${{ needs.checks.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
           WIN32_RESULT: ${{ needs.win32.result }}
@@ -925,6 +983,18 @@ jobs:
             esac
           elif [ "$ROUTING_ENABLED" != false ] || [ "$PLAN_RESULT" != skipped ] || [ -n "$PLAN_MODE" ]; then
             echo "::error::Unexpected PR Suite Routing admission or output"; status=1
+          fi
+          if [ "$GATE_ENABLED" = true ]; then
+            report "Merge Group Gate" "$GATE_RESULT"
+            case "$GATE_MODE" in
+              full) ;;
+              fast) if [ "$GATE_SWITCH" != enabled ]; then
+                echo '::error::A reduced merge group requires the exact lowercase enabled gate'; status=1
+              fi ;;
+              *) echo "::error::Merge Group Gate returned missing or unknown mode '$GATE_MODE'"; status=1 ;;
+            esac
+          elif [ "$GATE_ENABLED" != false ] || [ "$GATE_RESULT" != skipped ] || [ -n "$GATE_MODE" ]; then
+            echo "::error::Unexpected Merge Group Gate admission or output"; status=1
           fi
           report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
