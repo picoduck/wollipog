@@ -95,6 +95,24 @@ test("Back onto /settings/keyboard while Behavior is open still delivers its foc
   assert.equal(focusOf()?.activationId, 3, "a plain visit to the same address changes nothing");
 });
 
+test("each Machine accounts intent is a new activation, and the address leaves it out (#3240)", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "board" }, (view) => pushed.push(view));
+  const intentOf = () => {
+    const view = store.getState().view;
+    return view.name === "runners" ? view.accounts : undefined;
+  };
+  const machine = { name: "runners", section: "machines", machineId: "runner-1" } as const;
+  store.navigate({ ...machine, accounts: { kind: "add_account", provider: "codex" } });
+  assert.deepEqual(intentOf(), { kind: "add_account", provider: "codex", activationId: 1 });
+  assert.equal(pushed.length, 1);
+  assert.equal(viewPath(store.getState().view), viewPath(machine), "the intent is not part of the address");
+  store.navigate({ ...machine, accounts: { kind: "recover_profile", accountId: "work" } });
+  assert.deepEqual(intentOf(), { kind: "recover_profile", accountId: "work", activationId: 2 },
+    "arriving again on the same Machine is still an activation the section must answer");
+  assert.equal(pushed.length, 1, "an activation on the same address writes no history");
+});
+
 test("history traversal updates view state without writing a new entry", () => {
   const pushed: View[] = [];
   const store = new Store({ name: "board" }, (view) => pushed.push(view));

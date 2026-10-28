@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PROVIDER_HOME_LAUNCH_REFUSAL_CODES, PROVIDER_HOME_RECOVERY_CAUSES, PROVIDER_HOME_RECOVERY_CAUSE_CODES } from "@wollipog/protocol";
-import { providerHomeRefusalCopy } from "./provider-home-refusal.js";
+import { availableProviderHomeRefusalActions, providerHomeRefusalCopy } from "./provider-home-refusal.js";
 
 test("every launch refusal code has its own state, a short sentence-case body and a recovery", () => {
   const titles = new Set<string>();
@@ -29,11 +29,13 @@ test("each refusal offers the action that recovers it", () => {
   const actions = (code: Parameters<typeof providerHomeRefusalCopy>[0]["code"], account?: string) =>
     providerHomeRefusalCopy({ code, provider: "claude" }, account).actions;
   assert.deepEqual(actions("busy", "Work"), ["restart", "switch_account"]);
-  assert.deepEqual(actions("foreign_owner", "Work"), ["open_accounts", "switch_account"], "Recover Lease is in the Machine's accounts");
-  assert.deepEqual(actions("foreign_owner"), ["open_accounts"], "the Machine's own HOME needs an account of this control plane");
-  assert.deepEqual(actions("foreign_host", "Work"), ["switch_account", "open_accounts"]);
+  assert.deepEqual(actions("busy"), ["restart", "set_up_profile"], "the Machine's shared HOME: a profile of this control plane's own");
+  assert.deepEqual(actions("foreign_owner", "Work"), ["recover_profile", "switch_account"], "Recover Existing Profile unlocks it here");
+  assert.deepEqual(actions("foreign_owner"), ["set_up_profile"], "the Machine's own HOME needs an account of this control plane");
+  assert.deepEqual(actions("foreign_host", "Work"), ["switch_account", "set_up_profile"]);
+  assert.deepEqual(actions("foreign_host"), ["set_up_profile"]);
   assert.deepEqual(actions("unavailable", "Work"), ["restart"]);
-  assert.deepEqual(actions("profile_not_granted", "Work"), ["open_accounts", "switch_account"], "Adopt as Profile is in the Machine's accounts");
+  assert.deepEqual(actions("profile_not_granted", "Work"), ["recover_profile", "switch_account"], "Recover Existing Profile adopts it");
   assert.deepEqual(actions("profile_changed", "Work"), ["switch_account", "open_accounts"]);
   assert.equal(providerHomeRefusalCopy({ code: "busy", provider: "codex" }, undefined).body.includes("Codex sign-in"), true);
 });
@@ -54,4 +56,22 @@ test("specific recovery causes explain the problem and next step without impleme
     }
   }
   assert.equal(titles.size, PROVIDER_HOME_RECOVERY_CAUSES.length);
+});
+
+test("the Machine's own HOME refused by a recovery cause offers a managed profile of this control plane (#3240)", () => {
+  const holder = providerHomeRefusalCopy({ code: "foreign_owner", cause: "holder_alive", provider: "claude" }, undefined);
+  assert.deepEqual(holder.actions, ["restart", "set_up_profile"]);
+  const locked = providerHomeRefusalCopy({ code: "foreign_owner", cause: "process_uninspectable", provider: "claude" }, undefined);
+  assert.deepEqual(locked.actions, ["set_up_profile"]);
+});
+
+test("Set Up Managed Profile and Recover Existing Profile fall back to Open Machine Accounts for a viewer who can't complete them (#3240)", () => {
+  const all = { canSetUpProfile: true, canRecoverProfile: true };
+  assert.deepEqual(availableProviderHomeRefusalActions(["recover_profile", "switch_account"], all), ["recover_profile", "switch_account"]);
+  assert.deepEqual(availableProviderHomeRefusalActions(["recover_profile", "switch_account"], { ...all, canRecoverProfile: false }),
+    ["open_accounts", "switch_account"]);
+  assert.deepEqual(availableProviderHomeRefusalActions(["restart", "set_up_profile"], { ...all, canSetUpProfile: false }),
+    ["restart", "open_accounts"]);
+  assert.deepEqual(availableProviderHomeRefusalActions(["switch_account", "set_up_profile", "open_accounts"], { canSetUpProfile: false, canRecoverProfile: false }),
+    ["switch_account", "open_accounts"], "the fallback is listed once");
 });

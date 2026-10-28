@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { campaignWorkflowOwner, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
+import { campaignWorkflowOwner, PERSONAL_ORGANIZATION_ID, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
   type RunnerView, type SessionConfig, type SessionEvent, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -478,6 +478,11 @@ if (leaseRefusal) {
     ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
   };
 }
+// `lease-viewer=owner` or `member` (#3240): a viewer who manages the Machine, as an Owner of the
+// personal organization (Set Up Managed Profile and Recover Existing Profile) or a member (Set Up
+// Managed Profile only).
+const leaseViewer = params.get("lease-viewer");
+if (leaseViewer === "owner" || leaseViewer === "member") runner.canManage = true;
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];
@@ -643,6 +648,9 @@ function fixtureEffectiveOwners(control: CampaignControl) {
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  ...(leaseViewer === "owner" || leaseViewer === "member" ? {
+    getIdentity: async () => ({ context: { organizationId: PERSONAL_ORGANIZATION_ID, role: leaseViewer } }) as never,
+  } : {}),
   enableFullControl: async (id: string, input: Parameters<typeof api.enableFullControl>[1]) => {
     if (params.get("fullControlFixture") !== "enable") return api.enableFullControl(id, input);
     if (input.expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);

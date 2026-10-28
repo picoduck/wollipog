@@ -86,7 +86,9 @@ import {
   type HiddenColumnFailure,
 } from "./hidden-column-conditions.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
-import { providerHomeRefusalCopy } from "../provider-home-refusal.js";
+import { availableProviderHomeRefusalActions, providerHomeRefusalCopy } from "../provider-home-refusal.js";
+import { canManageProviderProfiles } from "../provider-profile-access.js";
+import type { MachineAccountsIntent } from "../navigation.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionArchiveControlLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
@@ -3670,6 +3672,20 @@ function SessionDetailLoaded({
   const providerHomeRefusalOrder = providerHomeRefusal && {
     key: `provider-home-refusal:${providerHomeRefusal.detectedAt}`, severity: "warning", rank: SESSION_NOTICE_RANK.providerHomeRefusal,
   } as const;
+  // Recover Existing Profile needs an Owner or Admin of the personal organization (#3240). The
+  // identity is read only while a refusal notice is shown; until it answers, the notice offers Open
+  // Machine Accounts instead.
+  const [recoverProfileAllowed, setRecoverProfileAllowed] = useState(false);
+  const refusalShown = providerHomeRefusal !== undefined;
+  useEffect(() => {
+    if (!refusalShown) return;
+    let live = true;
+    api.getIdentity().then(
+      (identity) => { if (live) setRecoverProfileAllowed(canManageProviderProfiles(identity.context)); },
+      () => { if (live) setRecoverProfileAllowed(false); },
+    );
+    return () => { live = false; };
+  }, [api, refusalShown]);
   // An archived session that has stopped says so in the slot, with Unarchive as the way back (#2202).
   const archivedOrder = sessionArchivedAtRest(session) ? {
     key: "archived", severity: "info", rank: SESSION_NOTICE_RANK.archived,
@@ -5117,8 +5133,16 @@ function SessionDetailLoaded({
     // way back (#2301).
     const restartReason = runnerOfflineReason ?? restartRefusal ??
       (session.archived ? "Unarchive the session to restart it." : null);
-    const actions = copy.actions.filter((action) => action !== "switch_account" || accountSwitchApplicable);
+    // Set Up Managed Profile adds an account, so it needs manage rights on a Machine whose runner
+    // creates managed profiles (v225); Recover Existing Profile also needs an Owner or Admin.
+    const canSetUpProfile = runner?.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerProfiles");
+    const actions = availableProviderHomeRefusalActions(copy.actions, {
+      canSetUpProfile,
+      canRecoverProfile: canSetUpProfile && recoverProfileAllowed && providerHomeRefusal.providerAccountId !== undefined,
+    }).filter((action) => action !== "switch_account" || accountSwitchApplicable);
     const buttonClass = (index: number) => index === 0 ? "btn primary sm" : "btn sm";
+    const openMachineAccounts = (accounts?: MachineAccountsIntent) =>
+      navigate({ name: "runners", section: "machines", machineId: session.runnerId, ...(accounts ? { accounts } : {}) });
     // Each disabled action's reason is visible under the body, once even when both share it.
     const disabledReasons = [...new Set([
       actions.includes("restart") ? restartReason : null,
@@ -5151,9 +5175,18 @@ function SessionDetailLoaded({
               }}>
               Switch Account…
             </button>
-          ) : (
+          ) : action === "set_up_profile" ? (
             <button key={action} type="button" className={buttonClass(index)}
-              onClick={() => navigate({ name: "runners", section: "machines", machineId: session.runnerId })}>
+              onClick={() => openMachineAccounts({ kind: "add_account", provider: providerHomeRefusal.provider })}>
+              Set Up Managed Profile…
+            </button>
+          ) : action === "recover_profile" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              onClick={() => openMachineAccounts({ kind: "recover_profile", accountId: providerHomeRefusal.providerAccountId! })}>
+              Recover Existing Profile…
+            </button>
+          ) : (
+            <button key={action} type="button" className={buttonClass(index)} onClick={() => openMachineAccounts()}>
               Open Machine Accounts
             </button>
           ))}>

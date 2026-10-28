@@ -3481,9 +3481,18 @@ app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, repl
       runner.protocolVersion, "providerAccounts", "default provider account changes",
     ));
   }
-  if (body.accountId !== null && !runner.providerAccounts?.some((account) =>
-    account.provider === provider && account.id === body.accountId)) {
+  const chosen = body.accountId === null ? undefined : runner.providerAccounts?.find((account) =>
+    account.provider === provider && account.id === body.accountId);
+  if (body.accountId !== null && !chosen) {
     return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+  }
+  // A profile only other control planes may use would refuse every session that takes the default
+  // (#3240); adopting it first grants this control plane access.
+  if (chosen?.profile?.access === "not_granted") {
+    return reply.code(409).send({
+      error: "This account's provider profile isn't granted to this control plane. Adopt it as a profile first.",
+      code: "PROVIDER_PROFILE_NOT_GRANTED",
+    });
   }
   const changed = db.setMachineProviderAccountDefault(
     id, provider, body.accountId as string | null, body.expectedRevision as number, Date.now(),

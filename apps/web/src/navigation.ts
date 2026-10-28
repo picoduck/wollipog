@@ -12,7 +12,7 @@ export type AttentionTarget = { eventEpoch: number; requestId?: string; activati
 export type View =
   | { name: "inbox"; split?: SessionsTab }
   | { name: "board"; split?: SessionsTab }
-  | { name: "runners"; section?: ConnectionSection; machineId?: string }
+  | { name: "runners"; section?: ConnectionSection; machineId?: string; accounts?: MachineAccountsIntent }
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
@@ -45,6 +45,15 @@ export type SettingsSection = "appearance" | "notifications" | "behavior" | "app
  * `AttentionTarget.activationId`: `viewPath` omits it, so the replaced address is the section's.
  * The store gives each arrival its own `activationId`, so arriving again focuses it again.
  */
+/**
+ * What a Machine's Provider Accounts section opens on arrival (#3240): Add Account for a provider,
+ * or Recover Existing Profile for one account. Ephemeral like `SettingsFocus`: `viewPath` omits it,
+ * and the store gives each arrival its own `activationId`, so arriving again opens it again.
+ */
+export type MachineAccountsIntent =
+  | { kind: "add_account"; provider: "claude" | "codex"; activationId?: number }
+  | { kind: "recover_profile"; accountId: string; activationId?: number };
+
 export type SettingsFocusTarget = "keyboard-shortcuts";
 export type SettingsFocus = { target: SettingsFocusTarget; activationId?: number };
 

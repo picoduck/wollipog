@@ -2,13 +2,12 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
-  PERSONAL_ORGANIZATION_ID,
   type AgentDefinition,
   type IdentityAdministrationView,
-  type IdentityContextView,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { canManageProviderProfiles } from "../provider-profile-access.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { activeSessionCounts } from "../rail-attention.js";
@@ -43,7 +42,7 @@ import { DetailBar, PageHeader, type PageHeaderActions } from "./PageHeader.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInstances } from "../instances-context.js";
 import type { MachineSettingsTarget } from "../machine-settings.js";
-import { backLabel, destination, type ConnectionSection } from "../navigation.js";
+import { backLabel, destination, type ConnectionSection, type MachineAccountsIntent } from "../navigation.js";
 import {
   hasBundledLocalRunner,
   isManagedLocalRunnerRepair,
@@ -62,6 +61,7 @@ export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "U
  */
 function MachineSections({
   runner, name, online, canFindSessions, onChooseInstallation, canManageProfiles = false, canManageMachines, onChangeLimit,
+  accountsIntent, profileAccessKnown = true,
 }: {
   runner: RunnerView;
   name: string;
@@ -73,28 +73,25 @@ function MachineSections({
   /** An organization owner or admin. */
   canManageMachines: boolean;
   onChangeLimit: () => void;
+  /** An Add Account or Recover Existing Profile the route asks the accounts section to open (#3240). */
+  accountsIntent?: MachineAccountsIntent;
+  /** The viewer's identity has answered (or failed), so `canManageProfiles` is final. */
+  profileAccessKnown?: boolean;
 }) {
   return (
     <div className="machine-detail-sections">
       <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
       <MachineAgentsSection runner={runner} online={online} machineName={name}
         canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
-      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles} />
+      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles}
+        profileAccessKnown={profileAccessKnown} intent={accountsIntent} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
     </div>
   );
 }
 
-/** Provider profile routes (#3239) are neither member-scoped nor organization-admin routes, so the
- * control plane confines them to Owners and Admins of its personal organization; an Owner or Admin
- * of any other organization would be refused, so the actions are not offered there. */
-export function canManageProviderProfiles(
-  context: Pick<IdentityContextView, "organizationId" | "role"> | null | undefined,
-): boolean {
-  return !!context && (context.role === "owner" || context.role === "admin") &&
-    context.organizationId === PERSONAL_ORGANIZATION_ID;
-}
+export { canManageProviderProfiles };
 
 /** One way to connect a machine: an item of the Add Machine menu and a row of the empty Machines tab. */
 export interface AddMachineMethod {
@@ -434,6 +431,8 @@ export function RunnersView() {
           canManageProfiles={canManageProfiles}
           canManageMachines={canManageMachines}
           onChangeLimit={() => openSettings(selectedMachine.runnerId, "capacity")}
+          accountsIntent={view.name === "runners" ? view.accounts : undefined}
+          profileAccessKnown={identity !== null || identityError !== null}
         />
       )}
     </MachineDetail>

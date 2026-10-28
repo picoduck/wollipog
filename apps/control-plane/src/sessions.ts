@@ -4253,13 +4253,26 @@ export class SessionsService {
       runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
       ? this.db.machineProviderAccountDefault(runner.runnerId, launchProvider)?.accountId
       : undefined;
+    // The implicit choice skips a profile this control plane may not use (#3240): another control
+    // plane connected to the same runner reports its accounts as not granted here.
     const implicitProviderAccountId = (launch.context?.kind ?? "native") === "native"
-      ? compatibleProviderAccounts[0]?.id
+      ? compatibleProviderAccounts.find((account) => account.profile?.access !== "not_granted")?.id
       : undefined;
     const providerAccountId = usesRunnerProviderAccount
       ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
         savedProviderAccountId ?? defaultProviderAccountId ?? implicitProviderAccountId
       : undefined;
+    // With no account chosen and every compatible one another control plane's profile, the runner
+    // would fall back to the first of them and refuse it at its lease (#3240): say so here instead.
+    if (usesRunnerProviderAccount && !providerAccountId && (launch.context?.kind ?? "native") === "native" &&
+        compatibleProviderAccounts.length > 0 &&
+        compatibleProviderAccounts.every((account) => account.profile?.access === "not_granted")) {
+      return fail(
+        "Every account for this provider on this Machine is a profile of another control plane. " +
+          "Set up a managed profile for this control plane, or adopt one, in the Machine's accounts.",
+        409,
+      );
+    }
     const providerAccount = providerAccountId
       ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
       : undefined;

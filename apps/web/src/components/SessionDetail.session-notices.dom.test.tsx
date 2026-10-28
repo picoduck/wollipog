@@ -12,6 +12,7 @@ import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi, OrchestratorCampaignProjection, RunnerView, SessionEvent, SessionView,
 } from "@wollipog/protocol";
+import { PERSONAL_ORGANIZATION_ID } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { View, ViewNavigation } from "../navigation.js";
@@ -151,8 +152,10 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { online = true, client: overrides = {}, events, unarchiveAndRestart = false, draftLoader }: {
+async function mount(current: SessionView, { online = true, runner: runnerOverrides = {}, client: overrides = {}, events, unarchiveAndRestart = false, draftLoader }: {
   online?: boolean;
+  /** Fields of the session's machine beyond `runnerView`. */
+  runner?: Partial<RunnerView>;
   client?: Partial<ApiClient>;
   /** Transcript events, delivered live once the session is in the store. */
   events?: SessionEvent["payload"][];
@@ -207,7 +210,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
     capabilities: {
       sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, unarchiveAndRestart,
     },
-    runners: [runnerView(online)], boxes: [], projects: [], sessions: [current], runs: [], pods: [],
+    runners: [{ ...runnerView(online), ...runnerOverrides }], boxes: [], projects: [], sessions: [current], runs: [], pods: [],
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;
@@ -426,7 +429,7 @@ test("a launch refused at its account's lease says why and opens the Machine's a
     assert.equal(notice.getAttribute("aria-label"), "Account Locked by Another Runner");
     assert.ok(notice.classList.contains("t-warning"));
     assert.equal(notice.querySelector(".notice-body")?.textContent,
-      "A runner or control plane that stopped left Work locked. An Owner or Admin can recover the lease from the Machine's accounts, or you can switch to another account.");
+      "A runner or control plane that stopped left Work locked. An Owner or Admin can unlock it with Recover Existing Profile, or you can switch to another account.");
     assert.deepEqual(actionNames(notice), ["Open Machine Accounts", "Switch Account…"]);
     await act(async () => { fixture.button("Open Machine Accounts")!.click(); });
     await flush();
@@ -464,8 +467,66 @@ test("a refusal of the Machine's own provider HOME names it and offers no accoun
     providerHomeRefusal: launchRefusal("foreign_owner", false) }));
   try {
     const notice = fixture.notices()[0]!;
-    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Add an account for this control plane/);
+    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Set up a managed profile for this control plane's new sessions\./);
     assert.deepEqual(actionNames(notice), ["Open Machine Accounts"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+/** A machine this viewer manages, on a runner that creates managed profiles, and the identity of a
+ * personal-organization Owner (`owner`) or a member. */
+const PROFILE_RUNNER: Partial<RunnerView> = { canManage: true, protocolVersion: 233 };
+const identityAs = (role: "owner" | "member") => (async () => ({
+  context: { organizationId: PERSONAL_ORGANIZATION_ID, role },
+})) as unknown as ApiClient["getIdentity"];
+
+test("an Owner recovers a refused account's existing profile from the notice, in the Machine's accounts (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: launchRefusal("profile_not_granted") }), {
+    runner: PROFILE_RUNNER,
+    client: { getIdentity: identityAs("owner"), sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient>,
+  });
+  try {
+    await flush();
+    const notice = fixture.notices()[0]!;
+    assert.deepEqual(actionNames(notice), ["Recover Existing Profile…", "Switch Account…"]);
+    await act(async () => { fixture.button("Recover Existing Profile…")!.click(); });
+    await flush();
+    const opened = fixture.pushed.at(-1);
+    assert.ok(opened?.name === "runners", JSON.stringify(opened));
+    assert.equal(opened.machineId, "runner-1");
+    assert.equal(opened.accounts?.kind, "recover_profile");
+    assert.ok(opened.accounts?.kind === "recover_profile" && opened.accounts.accountId === "acct-1");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a member who manages the Machine gets Open Machine Accounts instead of Recover Existing Profile (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: launchRefusal("foreign_owner") }), {
+    runner: PROFILE_RUNNER,
+    client: { getIdentity: identityAs("member"), sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient>,
+  });
+  try {
+    await flush();
+    assert.deepEqual(actionNames(fixture.notices()[0]!), ["Open Machine Accounts", "Switch Account…"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("the Machine's own HOME refused offers Set Up Managed Profile, which opens Add Account for the provider (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerAccountId: undefined, providerAccountLabel: undefined,
+    providerHomeRefusal: launchRefusal("busy", false) }), { runner: PROFILE_RUNNER, client: { getIdentity: identityAs("member") } as Partial<ApiClient> });
+  try {
+    await flush();
+    const notice = fixture.notices()[0]!;
+    assert.deepEqual(actionNames(notice), ["Restart Session", "Set Up Managed Profile…"]);
+    await act(async () => { fixture.button("Set Up Managed Profile…")!.click(); });
+    await flush();
+    const opened = fixture.pushed.at(-1);
+    assert.ok(opened?.name === "runners" && opened.accounts?.kind === "add_account" && opened.accounts.provider === "codex",
+      JSON.stringify(opened));
   } finally {
     await fixture.unmount();
   }
