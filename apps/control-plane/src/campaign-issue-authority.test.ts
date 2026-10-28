@@ -629,8 +629,13 @@ function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOptio
   const forgeReads: number[][] = [];
   /** While `hold` is set, each forge read is sent but waits for `release()` before GitHub answers. */
   const reads = { hold: false, waiting: [] as Array<() => void>, release() { for (const resume of this.waiting.splice(0)) resume(); } };
+  /** While `hold` is set, each campaign-scope synchronization waits for `release()`. */
+  const syncs = { hold: false, waiting: [] as Array<() => void>, release() { for (const resume of this.waiting.splice(0)) resume(); } };
   const runner = h.hub.requestFromRunner;
   h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+    if (message.type === "campaign_issue_scope" && message.operation === "synchronize" && syncs.hold) {
+      await new Promise<void>((resume) => syncs.waiting.push(resume));
+    }
     if (message.type === "campaign_forge_observe") {
       forgeReads.push(message.pullRequests.map((pr) => pr.number));
       if (reads.hold) await new Promise<void>((resume) => reads.waiting.push(resume));
@@ -709,7 +714,7 @@ function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOptio
     return observer;
   };
   const settle = async (until: () => boolean) => { while (!until()) await new Promise((resolve) => setImmediate(resolve)); };
-  return { h, head, observe, setForge, forgeReads, reads, verified, close, useObserver, settle };
+  return { h, head, observe, setForge, forgeReads, reads, syncs, verified, close, useObserver, settle };
 }
 
 test("#2940 a verified issue delivered through a consumed merge gate gets Orchestrator-owned closure after an on-demand refresh", async () => {
@@ -912,5 +917,32 @@ test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)"
     // A settled answer is never reused: a later execute of the consumed occurrence reads nothing new and is refused.
     assert.equal((await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest)).ok, false);
     assert.deepEqual(forgeReads.slice(before), [[9]]);
+  } finally { h.db.close(); }
+});
+
+test("#2940 an excluded pull request reopened during scope synchronization is never closed over (CR-3.1)", async () => {
+  const { h, setForge, forgeReads, syncs, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+  try {
+    setForge(9, "closed"); setForge(10, "merged");
+    useObserver();
+    const c = await close("reopened-during-sync");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.ok(h.approve(d).ok);
+    const before = forgeReads.length;
+    syncs.hold = true;
+    const pending = h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    await settle(() => syncs.waiting.length > 0);
+    assert.equal(forgeReads.length, before, "no excluded read before synchronization settles");
+    // GitHub reopens the excluded pull request; the store still says closed.
+    setForge(9, "open");
+    syncs.hold = false;
+    syncs.release();
+    const executed = await pending;
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.deepEqual(forgeReads.slice(before), [[9]], "the uncached read follows synchronization");
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "approved", "the approval stays unconsumed");
   } finally { h.db.close(); }
 });

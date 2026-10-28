@@ -10064,13 +10064,14 @@ export class SessionsService {
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
       return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
     }
-    // Every await precedes the recheck below, which repeats each current-state condition right before
-    // consumption: work assigned or authority changed while a read is pending is never closed.
+    if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
+    // The uncached read is the last await: a pull request reopened during synchronization is seen,
+    // and only synchronous rechecks of every current-state condition separate it from consumption.
+    const synchronized = this.db.getSession(sessionId) ?? session;
     if (decision.authority === "orchestrator" &&
-        !await this.excludedPullRequestsStillClosed(occurrenceId, session, closureExcludedRefs(closureEvidence(this.db, session, snapshot)))) {
+        !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
       return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }
-    if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || (freshSession.orchestratorPolicy?.issueScope?.revision ?? 0) !== (snapshot.scopeRevision ?? 0) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
