@@ -33,7 +33,7 @@ test("the actual registration handler refuses old control planes before promotin
   let closed = 0, promoted = 0;
   const receive = frameHandler({ reviewRetirementPeerRefusal, log: (message: string) => logs.push(message),
     ws: { close: () => { closed++; } }, stagedRunnerCredential: { promote: () => { promoted++; } } });
-  receive({ type: "registered", protocolVersion: 243 });
+  receive({ type: "registered", protocolVersion: PROTOCOL_VERSION - 1 });
   assert.equal(closed, 1);
   assert.equal(promoted, 0);
   assert.match(logs[0]!, /requires.*control plane.*review sessions?/iu);
@@ -62,7 +62,7 @@ function fixture(kind: "bridge" | "campaign", content: unknown) {
 }
 
 test("old or unknown control planes are refused before a new runner can replay retired dispatch", () => {
-  for (const peer of [undefined, null, 223, 243, "244", NaN, 244.5]) {
+  for (const peer of [undefined, null, 223, 243, PROTOCOL_VERSION - 1, String(PROTOCOL_VERSION), NaN, PROTOCOL_VERSION + 0.5]) {
     assert.match(reviewRetirementPeerRefusal(peer)!, /requires.*control plane.*review sessions?/iu);
   }
   assert.equal(reviewRetirementPeerRefusal(PROTOCOL_VERSION), null);

@@ -633,7 +633,7 @@ export const BUILT_IN_SKILL_SOURCES: readonly BuiltInSkillSource[] = [
           "and CLI spellings refuse with review-session guidance. Upgrade unsupported peers; do not launch",
           "a native reviewer to bypass trust, admission, budget or review-limit refusals.",
           "",
-          "Protocol 244 requires the retirement-aware control plane for new runners. Before upgrading,",
+          "Protocol 245 requires the retirement-aware control plane for new runners. Before upgrading,",
           "finish or cancel legacy jobs using their prior runner and preserve their final receipts and usage.",
           "Upgrade the control plane first, then the runner. New runners refuse unfinished or unverified",
           "legacy state without changing it or starting a controller. Reconnect never redispatches those",
