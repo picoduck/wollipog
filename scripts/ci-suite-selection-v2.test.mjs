@@ -232,6 +232,47 @@ test("the trusted base selector reads head files as text and never executes head
   assert.ok(refused.reasons.includes("shared-config-test-or-unknown-input"));
 });
 
+test("tests that read source by package-relative or computed paths are not deferred", () => {
+  const files = new Map(Object.entries({
+    "apps/web/src/components/Dialog.tsx": "export const Dialog = 1;\n",
+    "apps/web/src/components/Other.tsx": "export const Other = 1;\n",
+    "apps/web/src/focus.test.ts": 'import { readFileSync } from "node:fs";\nreadFileSync(join(WEB, "src/components/Dialog.tsx"), "utf8");\n',
+    "apps/web/src/each.test.ts": 'import { readFileSync } from "node:fs";\nfor (const n of names) readFileSync(join(WEB, `src/components/${n}.tsx`));\n',
+    "apps/web/src/temp.test.ts": 'import { readFileSync } from "node:fs";\nreadFileSync(join(tmp, "state.json"));\n',
+  }));
+  const g = buildGraph(files);
+  assert.ok(g.edges.get("apps/web/src/focus.test.ts").has("apps/web/src/components/Dialog.tsx"));
+  assert.ok(g.opaque.has("apps/web/src/each.test.ts"));
+  assert.ok(!g.opaque.has("apps/web/src/temp.test.ts"));
+  // The reviewer's case on the real tree: the focus test reads the dialog's source text.
+  const cwd = new URL("..", import.meta.url).pathname, reader = gitReader(cwd), real = reader.tree(reader.git(["rev-parse", "HEAD"]).trim());
+  const result = selectFilesV2({ diff: { entries: [entry("apps/web/src/components/AgentSessionDiscoveryDialog.tsx")] },
+    inventory: suiteInventory(real, loadFastFiles()), graph: treeGraph(real, reader.readBlobs) });
+  assert.equal(result.mode, "affected");
+  assert.ok(result.selectedFiles.includes("apps/web/src/forced-colors-focus.test.ts"));
+});
+
+test("offline evaluation applies the selectors' mandatory-inventory fallback and calibrated timing", async () => {
+  const { compareSelections, browserMinutes } = await import("./ci-suite-v2-evaluate.mjs");
+  const diff = { entries: [entry("apps/web/src/components/Timeline.tsx")] };
+  const read = (oids) => new Map(oids.map((oid) => [oid, texts.get(oid)]));
+  assert.equal(compareSelections({ diff, tree, fastFiles: FAST, readBlobs: read }).v2.mode, "affected");
+  const partial = tree.filter(({ path }) => path !== FAST_API_FILES[0]);
+  const result = compareSelections({ diff, tree: partial, fastFiles: FAST, readBlobs: read });
+  const context = { baseSha: "a".repeat(40), diffBaseSha: "a".repeat(40), changeHeadSha: "b".repeat(40), testedSha: "b".repeat(40),
+    trustedPolicySha: "a".repeat(40), event: "local", diffKind: "base-to-head", runId: null, attempt: null };
+  assert.equal(result.v1.mode, makeSelection({ tree: partial, fastFiles: FAST, diff, context, policyId: hash("p") }).mode);
+  assert.equal(result.v2.mode, makeSelectionV2({ tree: partial, fastFiles: FAST, diff, graph, context, policyId: hash("p") }).mode);
+  assert.equal(result.v2.mode, "full");
+  assert.equal(result.v2Files.size, result.inventory.length);
+  const full = { browserSerialMs: 100 }, half = { browserSerialMs: 50 };
+  assert.equal(browserMinutes(half, full, null), null);
+  const slow = browserMinutes(half, full, { jobMs: 40, stepMs: 30 }), fast = browserMinutes(half, full, { jobMs: 20, stepMs: 10 });
+  assert.deepEqual([slow.shards, slow.runnerMs, slow.wallMs], [3, 105, 35]);
+  assert.notDeepEqual(slow, fast);
+  assert.equal(browserMinutes(full, full, { jobMs: 40, stepMs: 30 }).runnerMs, 200);
+});
+
 test("offline evaluation classifies fallback triggers and models only selected browser weight", async () => {
   const { fallbackTriggers, model } = await import("./ci-suite-v2-evaluate.mjs");
   assert.deepEqual(fallbackTriggers({ entries: [entry("docs/a.md"), entry("apps/web/e2e/x.spec.ts"), entry("apps/web/src/a.css"),

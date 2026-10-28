@@ -5,12 +5,13 @@
 // Input JSON: { window, samples: [{ pr, mergedAt, mergeCommit, areas, prTestedSha, prRunId,
 //   groups: [{ runId, attempt, baseSha, testedSha, conclusion }] }],
 //   failures: [{ runId, attempt, event, pr, baseSha, testedSha, job, step, files, flaky, typecheck, infra }],
-//   timing: { jobs: { "<event>:<job>": { medianMs } }, nodeProfile: { slowestFiles: [{ fileId, durationMs }] } } }
+//   timing: { jobs: { "<event>:<job>": { medianMs } }, steps: { "<event>:<job> :: <step>": { medianMs } },
+//     nodeProfile: { slowestFiles: [{ fileId, durationMs }] } } }
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { GROUPS, selectGroups } from "./ci-suite-policy.mjs";
+import { GROUPS, FAST_API_FILES, CRITICAL_BROWSER_FILES, selectGroups } from "./ci-suite-policy.mjs";
 import { suiteInventory, hash } from "./ci-suite-selection.mjs";
 import { narrow, selectFilesV2 } from "./ci-suite-policy-v2.mjs";
 import { gitReader, loadFastFiles, treeGraph } from "./ci-suite-selection-v2.mjs";
@@ -26,13 +27,42 @@ export function compare({ reader, fastFiles, base, head, changeHead, event, prHe
     ? (() => { const diffBase = reader.git(["merge-base", base, prHead]).trim();
       return reader.changes({ base: diffBase, head: prHead, changeHead: prHead, event: "local" }); })()
     : reader.changes({ base, head, changeHead, event });
-  const tree = reader.tree(head), inventory = suiteInventory(tree, fastFiles), graph = treeGraph(tree, reader.readBlobs);
-  const v1 = selectGroups(diff), v2 = selectFilesV2({ diff, inventory, graph });
+  return { diff, ...compareSelections({ diff, tree: reader.tree(head), fastFiles, readBlobs: reader.readBlobs }) };
+}
+
+/**
+ * Both selectors' outcomes for one diff and tested tree, including the missing-mandatory-inventory
+ * fallback that `makeSelection`/`makeSelectionV2` apply, so evaluation never reports a narrowing
+ * the real selectors would refuse.
+ */
+export function compareSelections({ diff, tree, fastFiles, readBlobs }) {
+  const inventory = suiteInventory(tree, fastFiles), graph = treeGraph(tree, readBlobs);
+  let v1 = selectGroups(diff), v2 = selectFilesV2({ diff, inventory, graph });
+  const has = (file) => inventory.some((row) => row.file === file);
+  if ([...fastFiles, ...FAST_API_FILES].some((file) => !has(file)) || CRITICAL_BROWSER_FILES.some((file) => !has(`apps/web/e2e/${file}`))) {
+    const full = (choice) => ({ ...choice, mode: "full", reasons: [...choice.reasons, "missing-mandatory-inventory"].sort(), groups: Object.keys(GROUPS).sort() });
+    v1 = full(v1);
+    v2 = { ...full(v2), partialGroups: [], selectionReasons: {}, scopedOpaqueDeferred: 0, selectedFiles: inventory.map((row) => row.file) };
+  }
   const v1Files = new Set(inventory.filter((row) => v1.groups.includes(row.group)).map((row) => row.file)), v2Files = new Set(v2.selectedFiles);
-  if ([...v2Files].some((file) => !v1Files.has(file))) throw new Error(`v2 selected outside v1 for ${head}`);
+  if ([...v2Files].some((file) => !v1Files.has(file))) throw new Error("v2 selected outside v1");
   // Counterfactual only: the graph rule with every v1 fallback ignored, to measure its recall.
-  const graphOnly = new Set(narrow({ changed: diff.entries.map((entry) => entry.path), inventory, graph, groups: Object.keys(GROUPS) }).selectedFiles);
-  return { diff, inventory, v1, v2, v1Files, v2Files, graphOnly, triggers: fallbackTriggers(diff) };
+  const graphOnly = new Set(graph ? narrow({ changed: diff.entries.map((entry) => entry.path), inventory, graph, groups: Object.keys(GROUPS) }).selectedFiles
+    : inventory.map((row) => row.file));
+  return { inventory, v1, v2, v1Files, v2Files, graphOnly, triggers: fallbackTriggers(diff) };
+}
+
+/**
+ * Modeled browser minutes for one selection: the selected share of profile weight scales the
+ * observed five-shard test-step total; ceil(5 x share) shards each pay the observed per-job
+ * overhead (job minus test step). `calibration` holds observed medians; null means unmeasured.
+ */
+export function browserMinutes(selected, full, calibration) {
+  if (!calibration || !full.browserSerialMs) return null;
+  const share = selected.browserSerialMs / full.browserSerialMs;
+  const shards = Math.max(1, Math.min(5, Math.ceil(share * 5 - 1e-9)));
+  const overhead = calibration.jobMs - calibration.stepMs, testing = share * 5 * calibration.stepMs;
+  return { share, shards, runnerMs: shards * overhead + testing, wallMs: overhead + testing / shards };
 }
 
 /** Which changed-path classes force v1 (and therefore v2) to full. */
@@ -85,14 +115,20 @@ export function model({ inventory, selected, browserProfile, nodeProfile }) {
 export function evaluate(input, { cwd = process.cwd(), browserProfile, fastFiles = loadFastFiles() } = {}) {
   const reader = gitReader(cwd);
   const nodeProfile = { ...input.timing.nodeProfile, totalMs: input.timing.nodeProfile.totalMs ?? 0 };
+  // Observed medians for PR browser shards (job and its test step); absent timing stays unmeasured.
+  const job = input.timing.jobs?.["pull_request:Browser End-to-End Tests (#)"]?.medianMs;
+  const step = input.timing.steps?.["pull_request:Browser End-to-End Tests (#) :: Remote-Instance Browser End-to-End Tests"]?.medianMs;
+  const calibration = Number.isFinite(job) && Number.isFinite(step) && job >= step ? { jobMs: job, stepMs: step } : null;
   const row = (kind, meta, args) => {
     const result = compare({ reader, fastFiles, ...args });
     const m1 = model({ inventory: result.inventory, selected: result.v1Files, browserProfile, nodeProfile });
     const m2 = model({ inventory: result.inventory, selected: result.v2Files, browserProfile, nodeProfile });
+    const mg = model({ inventory: result.inventory, selected: result.graphOnly, browserProfile, nodeProfile });
     return { kind, ...meta, changed: result.diff.entries.length, v1Mode: result.v1.mode, v1Reasons: result.v1.reasons, v2Mode: result.v2.mode,
       v2Reasons: result.v2.reasons, inventory: result.inventory.length, v1Selected: result.v1Files.size, v2Selected: result.v2Files.size,
       scopedOpaqueDeferred: result.v2.scopedOpaqueDeferred, v2SelectionReasons: result.v2.selectionReasons, triggers: result.triggers, graphOnlySelected: result.graphOnly.size,
-      modelV1: m1, modelV2: m2, modelGraphOnly: model({ inventory: result.inventory, selected: result.graphOnly, browserProfile, nodeProfile }), result };
+      modelV1: m1, modelV2: m2, modelGraphOnly: mg,
+      modeledBrowser: { v1: browserMinutes(m1, m1, calibration), v2: browserMinutes(m2, m1, calibration), graphOnly: browserMinutes(mg, m1, calibration) }, result };
   };
   const prRows = [], groupRows = [], failureRows = [];
   for (const sample of input.samples) {

@@ -25,6 +25,10 @@ const DYNAMIC = /\bimport\s*\(\s*(?!["'][^"'`$]*["']\s*\))|\bimport\.meta\.glob|
 // Test-side child processes and directory enumeration can load or read source the graph cannot see.
 // Literal source paths (new URL("./x.ts", import.meta.url), join(dir, "x.ts")) are edges below.
 const TEST_OPAQUE = /\bnode:(?:child_process|worker_threads|vm)\b|["'](?:child_process|worker_threads|vm)["']|\b(?:spawn|spawnSync|execFile|execFileSync|execSync|exec|fork)\s*\(|\bnew\s+Worker\s*\(|\b(?:readdir|readdirSync|opendir|opendirSync|glob|globSync)\s*\(/;
+// Test-side file reads through a computed path under a source directory (template interpolation or a
+// directory prefix) cannot be resolved to files, so they are opaque too. Literal paths are edges.
+const TEST_SOURCE_READ = /\b(?:readFile|readFileSync|createReadStream)\s*\(/;
+const COMPUTED_SOURCE_PATH = /["'`][^"'`\n]*\bsrc\/[^"'`\n]*\$\{|["'`](?:[\w.-]+\/)*src(?:\/[\w.-]+)*\/?["'`]/;
 const testSide = (path) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path) || /(?:^|\/)(?:e2e|fixtures|test-support|test-utils|__tests__)\//.test(path) ||
   /(?:^|[/-])(?:fixtures?|test-helpers?|testing)\.[cm]?[jt]sx?$/.test(path) || path.startsWith("scripts/");
 
@@ -38,10 +42,13 @@ function specifiers(text) {
     // Any relative path literal: new URL("./x", import.meta.url), mock.module("./x"), spawn arguments.
     /["'`](\.{1,2}\/[^"'`\s$]+)["'`]/g, /["'`](\/src\/[^"'`\s$?#]+)["'`]/g,
     // Bare basenames such as join(dir, "runner-entry.ts") resolve to same-package files below.
-    /["'`]([\w.-]+\.(?:[cm]?[jt]sx?))["'`]/g, /["']@wollipog\/([\w-]+(?:\/[\w./-]*)?)["']/g, /["'`/]([\w-]+\.html)\b/g];
+    /["'`]([\w.-]+\.(?:[cm]?[jt]sx?))["'`]/g, /["']@wollipog\/([\w-]+(?:\/[\w./-]*)?)["']/g, /["'`/]([\w-]+\.html)\b/g,
+    // Package- or repository-relative paths such as join(WEB, "src/components/X.tsx").
+    /["'`]((?:[\w@.-]+\/)+[\w.-]+\.(?:[cm]?[jt]sx?|html))["'`]/g];
   patterns.forEach((pattern, index) => {
     for (const match of text.matchAll(pattern)) {
-      const spec = index === 7 ? `@wollipog/${match[1]}` : index === 8 ? `html:${match[1]}` : match[1];
+      if (index === 9 && /^(?:\.{1,2}\/|\/|@wollipog\/)/.test(match[1])) continue;
+      const spec = index === 7 ? `@wollipog/${match[1]}` : index === 8 ? `html:${match[1]}` : index === 9 ? `path:${match[1]}` : match[1];
       found.set(spec, found.get(spec) || index < 4);
     }
   });
@@ -94,7 +101,8 @@ export function buildGraph(files, packages = {}) {
     const out = new Set();
     edges.set(path, out);
     if (typeof text !== "string") { opaque.set(path, new Set(["*"])); continue; }
-    if (DYNAMIC.test(text) || (testSide(path) && TEST_OPAQUE.test(text))) opaque.set(path, opaqueScope(path, text, roots));
+    if (DYNAMIC.test(text) || (testSide(path) && (TEST_OPAQUE.test(text) || (TEST_SOURCE_READ.test(text) && COMPUTED_SOURCE_PATH.test(text)))))
+      opaque.set(path, opaqueScope(path, text, roots));
     const dir = path.split("/").slice(0, -1);
     // Literal mentions of a test file (comments, messages) are not dependencies; imports are.
     const link = (target, module) => { if (module || !TEST_FILE.test(target)) out.add(target); };
@@ -104,6 +112,15 @@ export function buildGraph(files, packages = {}) {
         // Page names are navigation only in browser-spec code; elsewhere they name built output.
         const page = `apps/web/${spec.slice(5)}`;
         if (path.startsWith("apps/web/e2e/") && paths.has(page)) out.add(page);
+        continue;
+      }
+      if (spec.startsWith("path:")) {
+        // Resolve against this directory and every ancestor up to the repository root.
+        const rel = spec.slice(5);
+        for (let depth = dir.length; depth >= 0; depth -= 1) {
+          const target = normalize([...dir.slice(0, depth), ...rel.split("/")]);
+          if (target !== null && paths.has(target)) link(target, false);
+        }
         continue;
       }
       if (spec.startsWith("@wollipog/")) {
