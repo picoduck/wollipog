@@ -118,6 +118,26 @@ test("terminal unpriced accounting cannot hide live or uninspectable recorded ex
   } finally { f.close(); }
 });
 
+test("the real Linux probe recognizes the prior writers' procfs identity format", { skip: process.platform !== "linux" }, () => {
+  // Both writers at 863246baffc11b2994c23e218420d614a4a8ad15 stored pid/startIdentity using
+  // field 22 from /proc/<pid>/stat, with providerPid/providerStartIdentity (campaign) and
+  // reviewerPid/reviewerIdentity (bridge). Use their literal extraction against a live PID.
+  const stat = readFileSync(`/proc/${process.pid}/stat`, "utf8");
+  const startIdentity = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19]!;
+  assert.match(startIdentity, /^[1-9][0-9]*$/u);
+  for (const kind of ["bridge", "campaign"] as const) {
+    const jobId = kind === "bridge" ? bridgeId : campaignId;
+    const update = kind === "bridge"
+      ? { type: "session_review_job_update", jobId, nonce, state: "failed" }
+      : { type: "campaign_review_job_update", jobId, nonce, state: "accounting_unavailable", toolCalls: 1, receiptSha256: "c".repeat(64) };
+    const f = fixture(kind, { phase: "finished", command: { jobId, nonce }, pid: process.pid, startIdentity, update });
+    try {
+      assert.throws(() => assertLegacyReviewsDrained(f.root), /live or unverified/u);
+      assert.throws(() => retiredReviewReceipt(f.root, kind, jobId, nonce), /live or unverified/u);
+    } finally { f.close(); }
+  }
+});
+
 test("settled historical usage is replayed verbatim on reconnect or cancellation, never refunded or relaunched", () => {
   const receipt = { type: "campaign_review_job_update", jobId: campaignId, nonce, state: "completed", costUsd: 2.25,
     toolCalls: 4, attemptConsumed: true, attemptValid: true, vote: "UPVOTE", receiptSha256: "a".repeat(64) };
