@@ -268,7 +268,7 @@ export function reviewHelp(): string {
     "review run returns a job id at once. Poll review get until terminal is true; it then prints the controller's summary, report and the runner-owned ledger. One review runs per session at a time.",
     "Sessions in a campaign with an allowance are refused; their Orchestrator runs the campaign's controlled review job. Tools: request_cross_model_review, get_cross_model_review, list_cross_model_reviews, cancel_cross_model_review.",
     "",
-    "  review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path>",
+    "  review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path>",
     "                     [--full-reason <text>] [--json]",
     "  review session get <review-session-id> [--json]",
     "  review session list [--limit <1-100>] [--cursor <review-session-id>] [--json]",

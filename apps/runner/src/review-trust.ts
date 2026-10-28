@@ -273,10 +273,13 @@ export function configuredCodexHomes(home: string, sources: SessionWritableSourc
   return [...homes];
 }
 
-/** The verified git, gh and optional ssh used outside every sandbox. */
+/** The verified git, forge CLIs and optional ssh used outside every sandbox. At least one of gh and
+ * glab is present; a review of a GitHub pull request needs gh, of a GitLab merge request glab. */
 export interface ReviewTools {
   git: string;
-  gh: string;
+  gh?: string;
+  /** v244 (#3539): reads GitLab merge requests for review sessions. */
+  glab?: string;
   /** Without a trusted ssh, mirror fetches use HTTPS only. */
   ssh?: string;
 }
@@ -294,15 +297,23 @@ export interface ReviewToolEnvironment {
   temporaryRoots?: readonly string[];
 }
 
-/** Find and verify git, gh and ssh. Never throws: a refusal is returned as its reason. */
+/** Find and verify git, gh, glab and ssh. Never throws: a refusal is returned as its reason. git
+ * and at least one forge CLI are required; without gh the runner cannot review GitHub pull
+ * requests, without glab GitLab merge requests. */
 export function discoverReviewTools(env: ReviewToolEnvironment): ReviewTools | { unavailable: string } {
   try {
     const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
     const git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid);
-    const gh = trustedExecutable("gh", env.pathEnv, roots, env.uid, env.rootUid);
-    let ssh: string | undefined;
-    try { ssh = trustedExecutable("ssh", env.pathEnv, roots, env.uid, env.rootUid); } catch { ssh = undefined; }
-    return { git, gh, ...(ssh ? { ssh } : {}) };
+    const optional = (name: string): { path?: string; error?: string } => {
+      try { return { path: trustedExecutable(name, env.pathEnv, roots, env.uid, env.rootUid) }; } catch (error) {
+        return { error: (error as Error).message };
+      }
+    };
+    const gh = optional("gh");
+    const glab = optional("glab");
+    if (!gh.path && !glab.path) return { unavailable: gh.error ?? "gh is unavailable" };
+    const ssh = optional("ssh").path;
+    return { git, ...(gh.path ? { gh: gh.path } : {}), ...(glab.path ? { glab: glab.path } : {}), ...(ssh ? { ssh } : {}) };
   } catch (error) {
     return { unavailable: (error as Error).message };
   }

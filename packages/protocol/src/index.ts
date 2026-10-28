@@ -739,7 +739,10 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      refuses an undeclared closure and records the check on the decision. A pre-v242 child runner
 //      is not asked; its decisions carry no `closingReferenceCheck`.
 // 243: optional server-verified review-session citations on merge decisions (#3371).
-export const PROTOCOL_VERSION = 243;
+// 244: GitLab review sessions (#3539): a review session's `pullRequest.repository` may name a
+//      host-qualified GitLab project and `number` a merge request IID. An older runner cannot read
+//      a merge request, so the control plane refuses a GitLab review for a pre-v244 runner.
+export const PROTOCOL_VERSION = 244;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1065,6 +1068,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
   githubMergeClosingReferences: 242,
+  /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
+  gitlabReviewSessions: 244,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */

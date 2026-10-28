@@ -7,9 +7,10 @@ import { test } from "node:test";
 import {
   REVIEW_CONTRACT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_REFUSALS, type AgentDefinition, type ReviewLaunchPolicy, type ReviewRunHistory,
 } from "@wollipog/protocol";
-import { ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
+import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
-  defaultReviewSessionDependencies, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand, type ReviewSessionDependencies,
+  defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
+  type ReviewSessionDependencies,
 } from "./review-sessions.js";
 import type { SessionMeta } from "./session-store.js";
 
@@ -21,6 +22,8 @@ const AGENTS = [
   { id: "claude", name: "Claude", command: "claude", driver: "claude-code", available: true },
 ] as unknown as AgentDefinition[];
 const GIT = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+/** A GitLab project in a nested namespace on a self-managed host. */
+const GITLAB = "gitlab.example.com/acme/team/widget";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(GIT, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args], {
@@ -40,6 +43,10 @@ interface Fixture {
   logs: string[];
   /** The forge's facts for the pull request; a test that pushes again updates its head. */
   facts: PullRequestFacts;
+  /** Every GitLab merge request read: glab, host, project and IID. */
+  mergeRequestReads: unknown[][];
+  /** Every host the GitLab host gate was asked about. */
+  hostChecks: string[];
   policy(overrides?: Partial<ReviewLaunchPolicy>): ReviewLaunchPolicy;
 }
 
@@ -51,13 +58,19 @@ function fixture(t: { after(fn: () => void): void }, options: {
   tools?: ReturnType<ReviewSessionDependencies["tools"]>;
   untrusted?: boolean;
   agents?: AgentDefinition[];
+  /** The project is the GitLab project `GITLAB`, read through a fake glab. */
+  gitlab?: boolean;
+  /** Leave out the GitLab merge request reader. */
+  noMergeRequestReader?: boolean;
+  /** Hosts the user's global glab configuration names; `null` leaves out the host gate. */
+  gitlabHosts?: string[] | null;
 } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-sessions-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, "repo");
   mkdirSync(repo);
   git(repo, "init", "--quiet", "--initial-branch=main");
-  git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
+  git(repo, "remote", "add", "origin", options.gitlab ? `https://${GITLAB}.git` : "https://github.com/acme/widget.git");
   writeFileSync(join(repo, "app.ts"), "export const answer = 41;\n");
   git(repo, "add", "app.ts");
   git(repo, "commit", "--quiet", "-m", "base");
@@ -77,16 +90,26 @@ function fixture(t: { after(fn: () => void): void }, options: {
   } as unknown as SessionMeta;
   const metas = new Map<string, SessionMeta>([[requester.sessionId, requester]]);
   const logs: string[] = [];
+  const repository = options.gitlab ? GITLAB : "acme/widget";
   const facts: PullRequestFacts = {
-    state: "open", baseRepository: "acme/widget", headRepository: "acme/widget", headRef: "fix/feature",
+    state: "open", baseRepository: repository, headRepository: repository, headRef: "fix/feature",
     headSha: head, baseSha: base, ...options.pr,
   };
+  const mergeRequestReads: unknown[][] = [];
+  const hostChecks: string[] = [];
+  const gitlabHosts = options.gitlabHosts === undefined ? ["gitlab.example.com"] : options.gitlabHosts;
   const exec: ReviewSessionDependencies["exec"] = async (command, args, execOptions) =>
     execFileSync(command, args, { encoding: "utf8", ...(execOptions?.cwd ? { cwd: execOptions.cwd } : {}), env: execOptions?.env });
   const deps: ReviewSessionDependencies = {
     exec,
     pullRequest: async () => ({ ...facts }),
-    tools: () => options.tools ?? { git: GIT, gh: "/trusted/gh" },
+    ...(options.noMergeRequestReader ? {} : {
+      mergeRequest: async (...args: unknown[]) => { mergeRequestReads.push(args.slice(0, 4)); return { ...facts }; },
+    }),
+    ...(gitlabHosts === null ? {} : {
+      gitlabHostConfigured: async (_glab: string, host: string) => { hostChecks.push(host); return gitlabHosts.includes(host); },
+    }),
+    tools: () => options.tools ?? (options.gitlab ? { git: GIT, glab: "/trusted/glab" } : { git: GIT, gh: "/trusted/gh" }),
     verifyCommand: () => { if (options.untrusted) throw new Error("planted"); },
     agents: () => options.agents ?? AGENTS,
     agentPath: () => "/usr/bin:/bin",
@@ -95,9 +118,9 @@ function fixture(t: { after(fn: () => void): void }, options: {
   const snapshots = new ReviewSnapshotter(join(root, "snapshots"), exec, (message) => logs.push(message));
   const launcher = new ReviewSessionLauncher(join(root, "snapshots"), snapshots, { readMeta: (id) => metas.get(id) ?? null }, deps);
   return {
-    root, repo, worktree, base, head, requester, metas, launcher, logs, facts,
+    root, repo, worktree, base, head, requester, metas, launcher, logs, facts, mergeRequestReads, hostChecks,
     policy: (overrides = {}) => ({
-      requesterSessionId: "s_requester", pullRequest: { repository: "acme/widget", number: 7 }, headSha: facts.headSha,
+      requesterSessionId: "s_requester", pullRequest: { repository, number: 7 }, headSha: facts.headSha,
       harness: "codex", ...overrides,
     }),
   };
@@ -400,6 +423,129 @@ test("prepare refuses every request outside the requester's own pull request at 
   assert.equal(await refusal(untrusted.launcher.prepare("s_review", untrusted.policy(), CODEX, "b")),
     "the runner is missing a trusted git or gh for reviews");
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+});
+
+test("prepare binds a GitLab merge request in a nested namespace through glab, from the session's own branch", async (t) => {
+  const f = fixture(t, { gitlab: true });
+  const prepared = await f.launcher.prepare("s_review", f.policy({ pullRequest: { repository: GITLAB, number: 12 } }), CODEX, "b");
+  // Read once, by host, project and IID, with the verified glab.
+  assert.deepEqual(f.mergeRequestReads, [["/trusted/glab", "gitlab.example.com", "acme/team/widget", 12]]);
+  // The host was proven configured before that read.
+  assert.deepEqual(f.hostChecks, ["gitlab.example.com"]);
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
+  assert.equal(prepared.baseSha, f.base);
+  assert.match(prepared.prompt, /- Merge request: gitlab\.example\.com\/acme\/team\/widget!12\n/u);
+  assert.match(prepared.prompt, /-export const answer = 41;\n\+export const answer = 42;/u);
+  // The head and the merge base came from the session's own branch: the forge URL is unreachable.
+  assert.equal(existsSync(join(f.root, "snapshots", "mirrors", `${repositoryKey(GITLAB)}.git`)), true);
+  f.launcher.release("s_review");
+});
+
+test("prepare refuses a GitLab merge request outside the session's own project, branch and head", async (t) => {
+  const f = fixture(t, { gitlab: true });
+  const policy = (overrides: Partial<ReviewLaunchPolicy> = {}) => f.policy({ pullRequest: { repository: GITLAB, number: 12 }, ...overrides });
+  // Another project on the same host, or the same path on another host, is not the origin's.
+  for (const repository of ["gitlab.example.com/acme/team/other", "gitlab.other.example/acme/team/widget"]) {
+    assert.equal(await refusal(f.launcher.prepare("s_review", policy({ pullRequest: { repository, number: 12 } }), CODEX, "b")),
+      "the pull request is not this session's open, same-repository pull request");
+  }
+  // A bare namespace names no host, and is never guessed to be gitlab.com.
+  assert.equal(await refusal(f.launcher.prepare("s_review", policy({ pullRequest: { repository: "acme/team/widget", number: 12 } }), CODEX, "b")),
+    "the pull request is not this session's open, same-repository pull request");
+  for (const [pr, reason] of [
+    [{ state: "locked" }, "the pull request is not this session's open, same-repository pull request"],
+    [{ headRepository: "" }, "the pull request is not this session's open, same-repository pull request"],
+    [{ headRef: "other-branch" }, "the pull request is not this session's open, same-repository pull request"],
+    [{ baseSha: "" }, "the review snapshot could not be prepared"],
+  ] as const) {
+    const g = fixture(t, { gitlab: true, pr });
+    assert.equal(await refusal(g.launcher.prepare("s_review", g.policy(), CODEX, "b")), reason);
+  }
+  // A self-managed host the user's global glab configuration does not name is never asked, so a
+  // session-written origin cannot send glab's credentials elsewhere; nor is it without the gate.
+  for (const gitlabHosts of [[], null]) {
+    const unconfigured = fixture(t, { gitlab: true, gitlabHosts });
+    assert.equal(await refusal(unconfigured.launcher.prepare("s_review", unconfigured.policy(), CODEX, "b")),
+      "the runner's glab is not configured for this GitLab host");
+    assert.deepEqual(unconfigured.mergeRequestReads, []);
+  }
+  const noGlab = fixture(t, { gitlab: true, tools: { git: GIT, gh: "/trusted/gh" } });
+  assert.equal(await refusal(noGlab.launcher.prepare("s_review", noGlab.policy(), CODEX, "b")),
+    "the runner is missing a trusted glab for GitLab reviews");
+  assert.deepEqual(noGlab.mergeRequestReads, []);
+  const noReader = fixture(t, { gitlab: true, noMergeRequestReader: true });
+  assert.equal(await refusal(noReader.launcher.prepare("s_review", noReader.policy(), CODEX, "b")),
+    "the pull request is not this session's open, same-repository pull request");
+  // A runner with only glab still refuses a GitHub pull request by what it lacks.
+  const noGh = fixture(t, { tools: { git: GIT, glab: "/trusted/glab" } });
+  assert.equal(await refusal(noGh.launcher.prepare("s_review", noGh.policy(), CODEX, "b")),
+    "the runner is missing a trusted gh for GitHub reviews");
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+});
+
+test("the GitLab host gate reads only the user's global glab configuration, and fails closed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-glab-gate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const glab = join(root, "glab");
+  const calls = join(root, "calls");
+  // A fake glab: records its arguments, and answers api_protocol for the hosts it is configured for.
+  writeFileSync(glab, [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> '${calls}'`,
+    'case "$5" in',
+    "  gitlab.example.com) echo https ;;",
+    "  ssh.example.com) echo ssh ;;",
+    "  *) echo 'not configured' >&2; exit 1 ;;",
+    "esac",
+    "",
+  ].join("\n"));
+  chmodSync(glab, 0o755);
+  assert.equal(await gitlabHostConfigured(glab, "gitlab.example.com"), true);
+  assert.equal(await gitlabHostConfigured(glab, "attacker.example"), false);
+  assert.equal(await gitlabHostConfigured(glab, "ssh.example.com"), false);
+  assert.equal(await gitlabHostConfigured("glab", "gitlab.example.com"), false, "only a verified absolute glab");
+  assert.equal(await gitlabHostConfigured(join(root, "missing"), "gitlab.example.com"), false);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+    "config get api_protocol --host gitlab.example.com --global",
+    "config get api_protocol --host attacker.example --global",
+    "config get api_protocol --host ssh.example.com --global",
+  ]);
+});
+
+test("a GitLab merge request is open only when opened, same-project, and diffed at its head", () => {
+  const head = "a".repeat(40);
+  const base = "b".repeat(40);
+  const mr = {
+    iid: 12, state: "opened", sha: head, source_branch: "fix/feature", source_project_id: 5, target_project_id: 5,
+    diff_refs: { base_sha: base, head_sha: head, start_sha: "c".repeat(40) },
+  };
+  assert.deepEqual(gitlabMergeRequestFacts(mr, GITLAB, 12), {
+    state: "open", baseRepository: GITLAB, headRepository: GITLAB, headRef: "fix/feature", headSha: head, baseSha: base,
+  });
+  // GitLab's merge base, never the target branch's tip (start_sha).
+  assert.equal(gitlabMergeRequestFacts(mr, GITLAB, 12).baseSha, base);
+  assert.equal(gitlabMergeRequestFacts({ ...mr, state: "locked" }, GITLAB, 12).state, "locked");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, state: "merged" }, GITLAB, 12).state, "merged");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, source_project_id: 9 }, GITLAB, 12).headRepository, "");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, source_project_id: undefined, target_project_id: undefined }, GITLAB, 12).headRepository, "");
+  // A diff computed for an earlier head gives no base.
+  assert.equal(gitlabMergeRequestFacts({ ...mr, diff_refs: { base_sha: base, head_sha: "d".repeat(40) } }, GITLAB, 12).baseSha, "");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, diff_refs: null }, GITLAB, 12).baseSha, "");
+  // Another merge request's answer names nothing.
+  const other = gitlabMergeRequestFacts({ ...mr, iid: 13 }, GITLAB, 12);
+  assert.equal(other.state, "opened");
+  assert.equal(other.baseRepository, "");
+  assert.deepEqual(gitlabMergeRequestFacts("not an object", GITLAB, 12), {
+    state: "", baseRepository: "", headRepository: "", headRef: "", headSha: "", baseSha: "",
+  });
+});
+
+test("mirror keys keep a GitHub repository readable and hash a nested GitLab project apart from it", () => {
+  assert.equal(repositoryKey("Acme/Widget"), "acme__widget");
+  const key = repositoryKey(GITLAB);
+  assert.match(key, /^gitlab-[0-9a-f]{32}$/u);
+  assert.equal(repositoryKey(GITLAB.toUpperCase()), key);
+  assert.notEqual(repositoryKey("gitlab.example.com/acme/team/other"), key);
 });
 
 const FINDING = {
