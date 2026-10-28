@@ -496,7 +496,12 @@ The lifetime policy is quiescence-aware and fail-safe:
   and records every remaining job as `killed` and runner-ended instead of orphaned, so no recovery
   turn relaunches it. An ended job's task file never gets a completion marker, so its id is
   tombstoned in the driver and in the session's recovered-task ids: no later receipt read revives
-  it as unfinished work. An agent-authored `hold.json` does not extend this bound: the prompts it
+  it as unfinished work. The driver's own tombstones end with its process, so every relaunch (the
+  handoff's move, a restart) passes the new driver the ids of every job the ledger already records
+  as ended. Claude can deliver the dead task's queued `stopped` notification to the new process;
+  without those ids, the driver would record it as pending and observed, which lifts the session's
+  tombstone and holds the next handoff on a job the session lists as killed (#3752). An
+  agent-authored `hold.json` does not extend this bound: the prompts it
   would hold are someone else's. See Queue Holds in [agent-control.md](agent-control.md).
 - Claude reports a stopped task as a `task_updated` patch to `killed`, then a `stopped`
   `task_notification`. It sends the same pair when the runner stops the task, when the model stops

@@ -935,6 +935,15 @@ function withoutRecoveredBackgroundTaskIds(current: string[] | undefined, observ
   return (current ?? []).filter((id) => !remove.has(id));
 }
 
+/** Every job the resumed conversation has ended, by provider id and `tool:` alias (#3752). Unlike
+ * the recovery tombstones, which a live observation may lift, such a job never runs again. A Restart
+ * stamps the replaced conversation's rows with `restartedAt`; they are left out, because the fresh
+ * conversation may start a new job under the same id (#1779). */
+function endedBackgroundTaskIds(meta: SessionMeta): string[] {
+  return (meta.backgroundJobs ?? []).filter((job) => job.terminalStatus && job.restartedAt === undefined)
+    .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]);
+}
+
 function automaticClaudeRecoveryAllowed(meta: SessionMeta): boolean {
   return !isAdoptedSession(meta) || meta.adoptedBackgroundRecoveryAuthorized === true;
 }
@@ -8978,6 +8987,7 @@ export class SessionManager {
           isolation,
           sessionStateDir: this.store.sessionPath(sessionId),
           initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds,
+          endedBackgroundTaskIds: endedBackgroundTaskIds(meta),
           descendantMarker: worktree ? this.worktreeProcessMarker(sessionId, cwd) : undefined,
           managedWorktreeProtections: () => this.managedWorktreeGuardProtections(
             this.store.readMeta(sessionId) ?? meta,

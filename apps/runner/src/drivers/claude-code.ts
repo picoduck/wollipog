@@ -728,8 +728,14 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentIdleMs = persistent.idleMs;
     this.pendingMaxMs = persistent.pendingMaxMs;
     this.handoffWaitMaxMs = persistent.handoffWaitMaxMs;
+    // A task the session already ended stays ended in this process too (#3752). Claude can still
+    // deliver the dead task's queued `stopped` notification after a relaunch, which would otherwise
+    // record it as pending again and hold the next handoff on a job the session lists as killed.
+    for (const id of opts.endedBackgroundTaskIds ?? []) {
+      if (id) this.endedBackgroundTaskIds.add(id);
+    }
     for (const id of opts.initialBackgroundTaskIds ?? []) {
-      if (id) {
+      if (id && !this.endedBackgroundTaskIds.has(id)) {
         this.pendingBackgroundTasks.set(id, { id, startedAt: this.deps.now(), launchType: "unknown" });
         this.unverifiedBackgroundTaskIds.add(id);
       }

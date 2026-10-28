@@ -73,6 +73,8 @@ function haveGit(): boolean {
 interface ProviderProcess {
   cwd: string;
   home?: string;
+  /** The ids this process was told the session had already ended (#3752). */
+  ended: string[];
   cb: DriverCallbacks;
 }
 
@@ -89,8 +91,14 @@ function fakeProvider(options: {
   const prompts: Array<{ cwd: string; home?: string; text: string }> = [];
   const live = new Map<string, DriverBackgroundJob>();
   const endCalls: number[] = [];
-  const factory = (_driver: unknown, launch: { cwd: string; env: Record<string, string> }, cb: DriverCallbacks) => {
-    const provider: ProviderProcess = { cwd: launch.cwd, home: launch.env.CLAUDE_CONFIG_DIR, cb };
+  const factory = (
+    _driver: unknown,
+    launch: { cwd: string; env: Record<string, string>; endedBackgroundTaskIds?: string[] },
+    cb: DriverCallbacks,
+  ) => {
+    const provider: ProviderProcess = {
+      cwd: launch.cwd, home: launch.env.CLAUDE_CONFIG_DIR, ended: [...(launch.endedBackgroundTaskIds ?? [])], cb,
+    };
     providers.push(provider);
     return {
       pid: providers.length,
@@ -248,6 +256,10 @@ test("a monitor that never ends is killed after the bound, the sibling result is
       { cwd: requested.worktree.path, home: undefined, text: "third queued" },
     ]);
     assert.deepEqual(fake.providers.map((provider) => provider.cwd), [repo, requested.worktree.path]);
+    // #3752: the relaunched provider is told which jobs already ended, so Claude's late `stopped`
+    // notification for the killed monitor cannot make it pending again and hold the next handoff.
+    assert.deepEqual(fake.providers[0]!.ended, []);
+    assert.deepEqual([...fake.providers[1]!.ended].sort(), ["agent-1", "monitor-1"]);
     await clock.waitFor(() => lifecycle.includes("decision-resume:completed"), "the decision resume did not complete");
     assert.deepEqual(lifecycle, ["decision-resume:queued", "decision-resume:started", "decision-resume:completed"]);
     assert.equal(fake.prompts.filter((prompt) => prompt.text.startsWith(ORPHAN_RECOVERY_PREFIX)).length, 0,
