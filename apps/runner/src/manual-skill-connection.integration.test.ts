@@ -49,10 +49,11 @@ function fixture(t: TestContext) {
   class InertSocket extends EventEmitter {
     static OPEN = 1;
     readyState = 1;
+    deferClose = false;
     failSend = false;
     readonly server: Socket = { send: data => this.emit("message", Buffer.from(data)), close() {} };
     constructor(_url: string) { super(); sockets.push(this); }
-    terminate() { this.readyState = 3; this.emit("close"); }
+    terminate() { this.readyState = 3; if (!this.deferClose) this.emit("close"); }
     send(data: string) {
       if (this.failSend) throw new Error("Fixture handoff refused");
       const message = JSON.parse(data);
@@ -374,8 +375,16 @@ test("valid unknown authority is ignored and older server authority is never ado
   f.reporter.report(empty()); assert.equal((await pending).error, undefined);
   assert.deepEqual(f.messages.map(message => message.requestId), ["R"]);
   const oldServerPending = f.request("old-server"), c = f.start(false);
+  c.socket.deferClose = true;
+  const before = f.counts(), commandsBefore = f.commands.length;
   f.scope.applyRegistered({ ...c.response, protocolVersion: 208 });
   assert.equal(f.scope.controlPlanePeerRefused, true);
+  assert.equal(c.socket.readyState, 3, "the refused socket is terminated before its close event");
+  c.socket.emit("message", Buffer.from(JSON.stringify({ type: "skills_sync", requestId: "refused-frame" })));
+  assert.equal(f.commands.length, commandsBefore, "buffered frames cannot reach the handler before close");
+  c.socket.emit("close");
+  assert.equal(f.counts().reconnects, before.reconnects + 1);
+  assert.equal(f.counts().heartbeatStops, before.heartbeatStops + 1);
   assert.throws(() => f.scope.sendSkillState({ type: "skills_state" }), /not registered/);
   f.reporter.report(empty());
   assert.deepEqual(f.messages.map(message => message.requestId), ["R"]);

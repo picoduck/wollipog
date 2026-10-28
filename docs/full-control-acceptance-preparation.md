@@ -184,10 +184,11 @@ Claude Code implementation children, all on the existing runner-default Claude a
 operator must verify it). Each must run on an agent whose media-only reviewer attestation the runner
 re-proves, or that peer cannot declare the paced contract and its video stays with the Human. Media path: the separately admitted Claude Code media-only reviewer
 (`claude-opus-5-5`, high, dedicated runner-local API key) only if its runner attestation and actual
-namespace probes pass and a current Human-recorded live proof certifies that exact attestation. Native code review remains
-Claude Opus 5.5 / high / Read-only using the exact #2936 admitted controller, executable hash, CLI
-version and existing runner-default Claude account. Neither account is provisioned, inspected for
-secrets, copied or changed by this preparation. Provider-account retention and permissions are
+namespace probes pass and a current Human-recorded live proof certifies that exact attestation.
+Code review uses an admitted review session with its captured harness/model/effort, read-only
+snapshot and managed Session usage. The retired #2936 controller cannot admit code-review work.
+Provider accounts are never provisioned, inspected for secrets, copied or changed by this preparation.
+Provider-account retention and permissions are
 human-only inputs. Persistent grants and unsupported profiles remain exceptions.
 
 Disposable data paths are listed under `/tmp/wollipog-2939-live/` in the proposal. An operator must
@@ -206,7 +207,7 @@ generator, oracle, operator directories, shared provider history and every unrel
 Record direct-path, symlink, parent-traversal, shell/search/plugin/resource/management refusal and
 the actual tool/capability digest. Separate folders, prompt omission or a cooperative reviewer
 assertion do not create a blind oracle. Generic coding worker tools must never inherit this media
-namespace, and native code-review admission must never stand in for media admission. If the
+namespace, and code-review session admission must never stand in for media admission. If the
 managed driver cannot enforce it, the live plan remains blocked.
 
 The #1321 handoff's offline generator prepares fresh candidate, paced and maximum challenges only
