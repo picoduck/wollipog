@@ -4204,6 +4204,26 @@ test("setSessionArchived hides from default listSessions but visible with includ
   assert.equal(db.listSessions({ includeArchived: true }).length, 1);
 });
 
+test("runnerSessionInventory matches listSessions for one runner without materializing other runners", () => {
+  const db = withRunner();
+  db.registerRunner(meta({ runnerId: "runner-2", hostname: "host-2" }), 500);
+  db.createSession(newSession({ id: "old", now: 1000 }));
+  db.createSession(newSession({ id: "archived", now: 2000 }));
+  db.createSession(newSession({ id: "other", runnerId: "runner-2", now: 3000 }));
+  db.createSession(newSession({ id: "new", now: 4000 }));
+  db.setSessionArchived("archived", true, 5000);
+  db.setWorktreePath("archived", "/worktrees/archived");
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?")
+    .run(JSON.stringify([{ id: "wt", path: "/worktrees/archived", branch: "agent/archived", source: "created" }]), "archived");
+  db.updateSessionStatus("old", "completed", 6000);
+  const fields = ["id", "runnerId", "projectId", "status", "archived", "worktreePath", "worktrees"] as const;
+  const expected = db.listSessions({ includeArchived: true }).filter((session) => session.runnerId === "runner-1")
+    .map((session) => Object.fromEntries(fields.map((field) => [field, session[field]])));
+  assert.deepEqual(db.runnerSessionInventory("runner-1"), expected);
+  assert.deepEqual(expected.map((session) => session.id), ["new", "archived", "old"]);
+  assert.deepEqual(db.runnerSessionInventory("runner-2").map((session) => session.id), ["other"]);
+});
+
 /* ----------------------------- Events ---------------------------------- */
 
 test("appendEvent + listEvents return events in seq order with stable ids", () => {

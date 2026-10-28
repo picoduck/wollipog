@@ -2201,8 +2201,7 @@ export class SessionsService {
 
   recoverWorkflowRunner(runnerId: string): number {
     let recovered = 0;
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (session.runnerId !== runnerId) continue;
+    for (const session of this.db.runnerSessionInventory(runnerId)) {
       for (const attempt of this.db.activeWorkflowAttemptsForSession(session.id)) {
         if (session.status === "idle" || session.status === "completed") {
           if (this.db.setWorkflowAttemptStatus(attempt.attemptId, ["dispatching", "running"], "awaiting_output")) recovered++;
@@ -13467,9 +13466,8 @@ export class SessionsService {
 
   /** A new control-plane process replays an archive request that was not delivered before exit. */
   reconcileArchivedCampaignWorktrees(runnerId: string): void {
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (session.runnerId === runnerId && session.archived &&
-          (session.worktreePath || session.worktrees?.length)) {
+    for (const session of this.db.runnerSessionInventory(runnerId)) {
+      if (session.archived && (session.worktreePath || session.worktrees?.length)) {
         this.queueCampaignWorktreeRetirement(session.id, true);
       }
     }
