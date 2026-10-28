@@ -36,6 +36,7 @@ export const CHECK_STEPS = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Bo
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const STEPS = new Map([[CHECKS, CHECK_STEPS], [WEBKIT, ["WebKit Browser End-to-End Tests"]],
   [DETECT, ["Compare the Diff Against the Settings-Rows Paths"]], [COMPARE, ["Compare Against the Committed win32 Baselines"]],
+  ["Delegated Pipeline Recovery", ["Verify Recorded-Boundary Pipeline Recovery"]],
   [REQUIRED_CONTEXT, ["Require Every Job to Have Succeeded"]],
   ...SHARDS.map((name, index) => [name, ["Remote-Instance Browser End-to-End Tests", ...(index ? [] : ["Rendered Production Browser Smoke"])]])]);
 

@@ -49,9 +49,9 @@ const callerOf = (job) => job.name.includes(" / ") ? job.name.slice(0, job.name.
 
 /**
  * The jobs `job` can depend on, from ci.yml's structure: the aggregator needs every other
- * required work job. Checks/browser work also waits for PR Suite Routing and the Merge Group
- * Gate (#3637); an executed gate is execution on the critical path, never queue wait. A skipped
- * gate is not executed work, so disabled-gate runs keep exactly the earlier model. A called
+ * required work job. Checks/browser work waits for PR Suite Routing and the Merge Group
+ * Gate (#3637); delegated recovery waits only for PR routing. An executed gate is execution
+ * on the critical path, never queue wait. A skipped gate consumes no execution. A called
  * workflow's jobs depend only on jobs of the same call. Advisory shadow work is never a dependency.
  * Older runs have neither planning job. The jobs API does not name dependencies; tests pin this model.
  */
@@ -60,8 +60,10 @@ function dependencyCandidates(job, work, aggregator) {
   const requiredWork = work.filter((other) => !ADVISORY_JOBS.has(other.name));
   if (job === aggregator) return requiredWork;
   if (PLANNING_JOBS.has(job.name)) return [];
-  const routed = job.name === "Typecheck, Unit Tests & Bundles" || /^Browser End-to-End Tests \([1-5]\)$/.test(job.name);
-  const routing = routed ? requiredWork.filter((other) => PLANNING_JOBS.has(other.name)) : [];
+  const gated = job.name === "Typecheck, Unit Tests & Bundles" || /^Browser End-to-End Tests \([1-5]\)$/.test(job.name);
+  const routed = gated || job.name === "Delegated Pipeline Recovery";
+  const routing = routed ? requiredWork.filter((other) => other.name === "PR Suite Routing" ||
+    gated && other.name === "Merge Group Gate") : [];
   const caller = callerOf(job);
   return caller === null ? routing : work.filter((other) => other !== job && callerOf(other) === caller);
 }

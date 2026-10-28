@@ -33,7 +33,8 @@ export function fullTestStepsPassed(jobs) {
     passed(required[6], "WebKit Browser End-to-End Tests") &&
     passed(required[7], "Compare the Diff Against the Settings-Rows Paths") &&
     passed(required[8], "Compare Against the Committed win32 Baselines") &&
-    passed(required[9], "Require Every Job to Have Succeeded");
+    passed(required.find((job) => job?.name === "Full Validation / Delegated Pipeline Recovery"), "Verify Recorded-Boundary Pipeline Recovery") &&
+    passed(required.at(-1), "Require Every Job to Have Succeeded");
 }
 
 /** Read-only exact-target proof. Pointers locate evidence; cached verdicts grant nothing. */

@@ -30,6 +30,7 @@ function fullRun(id, createdAt = "2026-10-27T13:00:00Z", headSha = "d".repeat(40
     job("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", [step("Compare the Diff Against the Settings-Rows Paths")]),
     job("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", [], "skipped"),
     job("Suite Selection Shadow (Advisory)", [step("Compute Trusted Suite Selection")]),
+    job("Delegated Pipeline Recovery", [step("Verify Recorded-Boundary Pipeline Recovery")]),
     job(REQUIRED_CONTEXT, [step("Require Every Job to Have Succeeded")]),
     job("Regression Admission Shadow (Advisory)", [], "skipped"),
   ];
@@ -44,11 +45,12 @@ const edit = (fixture, change) => {
 const named = (fixture, name) => fixture.listing.jobs.find((job) => job.name === name);
 
 test("the verifier's job inventory is the rolling full inventory and its steps exist in ci.yml", () => {
-  assert.equal(FULL_JOBS.length, 10);
+  assert.equal(FULL_JOBS.length, 11);
+  assert.ok(FULL_JOBS.includes("Delegated Pipeline Recovery"));
   assert.ok(FULL_JOBS.includes(REQUIRED_CONTEXT));
   const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
   for (const name of [...CHECK_STEPS, "Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke",
-    "WebKit Browser End-to-End Tests", "Require Every Job to Have Succeeded", "Record Reduced Merge Group Coverage"]) {
+    "WebKit Browser End-to-End Tests", "Verify Recorded-Boundary Pipeline Recovery", "Require Every Job to Have Succeeded", "Record Reduced Merge Group Coverage"]) {
     assert.ok(workflow.includes(`      - name: ${name}\n`), name);
   }
   assert.match(workflow, /^  merge_group_gate:\n(?:    .*\n)*?    name: Merge Group Gate$/m);
@@ -88,6 +90,14 @@ test("reduced, partial, unfinished, gate-active or mis-identified runs are never
   }
   refuse((copy) => { named(copy, "Browser End-to-End Tests (1)").steps[1].conclusion = "skipped"; },
     "step-not-successful:Browser End-to-End Tests (1)/Rendered Production Browser Smoke");
+  refuse((copy) => { copy.listing.jobs = copy.listing.jobs.filter((job) => job.name !== "Delegated Pipeline Recovery"); },
+    "job-missing:Delegated Pipeline Recovery");
+  refuse((copy) => { named(copy, "Delegated Pipeline Recovery").conclusion = "skipped"; }, "job-not-successful:Delegated Pipeline Recovery");
+  for (const steps of [[], [step("Verify Recorded-Boundary Pipeline Recovery", "skipped")],
+    [step("Verify Recorded-Boundary Pipeline Recovery", "failure")]]) {
+    refuse((copy) => { named(copy, "Delegated Pipeline Recovery").steps = steps; },
+      "step-not-successful:Delegated Pipeline Recovery/Verify Recorded-Boundary Pipeline Recovery");
+  }
   refuse((copy) => { named(copy, REQUIRED_CONTEXT).steps = []; }, `step-not-successful:${REQUIRED_CONTEXT}/Require Every Job to Have Succeeded`);
   // Restoration requires the gate switched off, even when an active gate happened to select full.
   for (const [conclusion, steps] of [["success", [step("Record Full Merge Group Coverage"), step("Record Reduced Merge Group Coverage", "skipped")]],

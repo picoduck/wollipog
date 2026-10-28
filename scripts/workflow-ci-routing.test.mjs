@@ -44,7 +44,7 @@ test("off switches preserve full work; case-variant plan admission cannot change
       assert.equal(evaluate(enabled, event, variable, mode), String(active));
       assert.equal(evaluate(fast, event, variable, mode), String(active && mode === "fast"));
       assert.deepEqual(Array.from(evaluate(matrix, event, variable, mode)), active && mode === "fast" ? [1] : [1, 2, 3, 4, 5]);
-      for (const id of ["checks", "browser", "win32", "webkit", "check"]) {
+      for (const id of ["checks", "browser", "win32", "webkit", "delegated_pipeline", "check"]) {
         const condition = expression(job(id), "if");
         assert.equal(evaluate(condition, event, variable, mode), true, `${event}/${variable}/${id}`);
         assert.equal(evaluate(condition, event, variable, mode, false, true), event !== "pull_request");
@@ -75,7 +75,7 @@ test("every gate and routing variable, mode and event keeps full coverage unless
         assert.equal(evaluate(admission, ...args), prActive);
         assert.deepEqual(Array.from(evaluate(matrix, ...args)),
           (prActive && mode === "fast") || groupReduced ? [1] : [1, 2, 3, 4, 5], `${event}/${gate}/${gateResult}/${gateMode}`);
-        for (const id of ["checks", "browser", "win32", "webkit", "check"]) {
+        for (const id of ["checks", "browser", "win32", "webkit", "delegated_pipeline", "check"]) {
           assert.equal(evaluate(expression(job(id), "if"), ...args), true, `${event}/${gate}/${id}`);
         }
       }
@@ -90,19 +90,19 @@ test("the actual aggregate requires an active plan's success and unambiguous out
     const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
       GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
       ROUTING_SWITCH: variable, ROUTING_ENABLED: String(variable.toLowerCase() === "enabled"), PLAN_RESULT: plan, PLAN_MODE: mode,
-      CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
+      CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success",
     } });
     assert.ifError(run.error);
     const pass = variable.toLowerCase() === "enabled" ? plan === "success" && (mode === "full" || variable === "enabled" && mode === "fast")
       : plan === "skipped" && mode === "";
     assert.equal(run.status, pass ? 0 : 1, `${variable}/${plan}/${mode}`);
   }
-  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT"]) {
+  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"]) {
     for (const result of states.filter((state) => state !== "success")) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
         GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
         ROUTING_SWITCH: "enabled", ROUTING_ENABLED: "true", PLAN_RESULT: "success", PLAN_MODE: mode,
-        CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", [key]: result,
+        CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success", [key]: result,
       } });
       assert.ifError(run.error);
       assert.equal(run.status, 1, `${mode}/${key}/${result}`);
@@ -112,7 +112,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
 
 test("the actual aggregate requires an admitted gate's success and unambiguous output, and rejects stray gate output", () => {
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
-  const work = { CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
+  const work = { CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success",
     ROUTING_SWITCH: "", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
   for (const gate of variables) for (const admitted of [true, false]) for (const result of states) {
     for (const mode of ["", "full", "fast", "affected", "unknown"]) {
@@ -125,7 +125,7 @@ test("the actual aggregate requires an admitted gate's success and unambiguous o
       assert.equal(run.status, pass ? 0 : 1, `${gate}/${admitted}/${result}/${mode}`);
     }
   }
-  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT"]) {
+  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"]) {
     for (const result of states.filter((state) => state !== "success")) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
         ...work, GATE_SWITCH: "enabled", GATE_ENABLED: "true", GATE_RESULT: "success", GATE_MODE: mode, [key]: result,
@@ -157,6 +157,34 @@ test("the actual gate shell checks exact casing before invoking Git or the gate"
   assert.doesNotMatch(gate, /continue-on-error|pnpm install|pull_request_target|permissions:|: write/);
   assert.match(gate, /- name: Record Full Merge Group Coverage\n        if: steps.plan.outputs.mode != 'fast'\n/);
   assert.match(gate, /- name: Record Reduced Merge Group Coverage\n        if: steps.plan.outputs.mode == 'fast'\n/);
+});
+
+test("delegated recovery admission rejects an empty filter, omitted story, skip or todo", (t) => {
+  const shell = shellOf(job("delegated_pipeline"), "Verify Recorded-Boundary Pipeline Recovery");
+  const guard = shell.match(/python3 - "\$pipeline_root\/results\.tap" <<'PY'\n([\s\S]*?)\nPY/)?.[1];
+  assert.ok(guard, "the five-pass guard lives in the actual workflow step");
+  const root = mkdtempSync(join(tmpdir(), "delegated-pipeline-counts-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixture = join(root, "stories.test.mjs");
+  const report = join(root, "results.tap");
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  for (const [pattern, variant, passes] of [
+    ["story", "pass", true], ["renamed", "pass", false], ["story [1-4]", "pass", false],
+    ["story", "skip", false], ["story", "todo", false], ["story", "fail", false],
+  ]) {
+    writeFileSync(fixture, 'import { test } from "node:test";\n' + Array.from({ length: 5 }, (_, i) =>
+      `test("story ${i + 1}", t => { ${i === 4 && variant !== "pass"
+        ? variant === "fail" ? 'throw new Error("fixture failure");' : `t.${variant}("fixture");`
+        : ""} });`).join("\n"));
+    const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", `--test-name-pattern=${pattern}`, fixture],
+      { env, encoding: "utf8", timeout: 10_000 });
+    assert.ifError(run.error);
+    writeFileSync(report, run.stdout);
+    const admitted = spawnSync("python3", ["-", report], { input: guard, encoding: "utf8", timeout: 5_000 });
+    assert.ifError(admitted.error);
+    assert.equal(admitted.status, passes ? 0 : 1, `${pattern}/${variant}: ${admitted.stdout}${admitted.stderr}`);
+  }
 });
 
 test("the actual plan shell checks exact casing before invoking Git or the selector", (t) => {

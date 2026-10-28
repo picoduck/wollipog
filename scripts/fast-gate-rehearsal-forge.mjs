@@ -33,6 +33,7 @@ const CORE = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Veri
 const STEPS = [CORE, ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
   ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
   ["Compare the Diff Against the Settings-Rows Paths"], ["Compare Against the Committed win32 Baselines"],
+  ["Verify Recorded-Boundary Pipeline Recovery"],
   ["Require Every Job to Have Succeeded"]];
 
 function jobs(run) {
