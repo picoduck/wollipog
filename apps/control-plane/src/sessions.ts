@@ -8878,7 +8878,7 @@ export class SessionsService {
     if (active && ((allocation.costUsd ?? 0) < (prior.costUsd ?? 0) ||
         (allocation.toolCalls ?? 0) < (prior.toolCalls ?? 0))) return fail("a live allocation cannot be released before cancellation settles; finish this worker before redistributing its unspent reservation", 409);
     if (!isTerminal(member.status) && !this.hub.isRunnerOnline(member.runnerId)) return fail("allocation cannot change while its runner is offline", 409);
-    try { this.db.campaignBudgets.admit(rootId, allocation, {}, active); }
+    try { this.db.campaignBudgets.admit(rootId, allocation, {}, active, false); }
     catch (error) { return fail((error as Error).message, 409); }
     if (!this.syncCampaignAllocation(member.id)) {
       // Keep the reservation until delivery/reconnect; never refund a possibly applied change.

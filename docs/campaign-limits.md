@@ -31,10 +31,20 @@ mid-turn, and settlement replaces the estimate with the provider total (#3196, s
 Outstanding allocations are the unspent portion of active workers' cumulative ceilings. Actual
 usage plus outstanding reservations must fit the envelope. Admission and session insertion share
 one SQLite transaction, so competing dispatches cannot reserve the same capacity. Deletion never
-removes accounting rows. Terminal status and absent inventory do not release capacity. A
+removes accounting rows. Terminal status and absent inventory do not release reservations. A
 generation-bound runner checkpoint must cover durable final history and priced usage first;
 usage, a completed receipt and reservation release commit together. Replay cannot release a
 replacement's allocation. A cancellation without complete final usage retains its reservation.
+The runner reports that checkpoint in its local history coordinates, and the control plane matches
+it against the wire-projected history it hydrated.
+
+A concurrency slot is separate from a reservation (#2940). A worker holds a slot while it is live,
+while a Stop is pending, and while its stop is provisional and unconfirmed. A confirmed stop,
+verification with Stop and Archive, archival or provider exit releases the slot at once, without
+reloading history, even when its final usage has not settled yet. Its unspent reservation stays
+outstanding until then. Every campaign read settles ended workers whose hydrated history covers
+their checkpoint, so a campaign that held slots or reservations for already-ended workers is
+repaired on its next read or startup without changing its allowance.
 
 `allocate_campaign_budget` (CLI `campaign allocate --input '<json>'`) changes an existing managed
 worker's absolute cumulative limits, for example `{"sessionId":"s_worker","costUsd":12,"toolCalls":300}`.
