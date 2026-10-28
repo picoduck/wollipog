@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import fc from "fast-check";
 import { ADMISSION_CONTEXT, authorizedRepair, failureFingerprint, main, planAdmissionCycle, planRollback,
-  readAdmissionEntries, rebuildAdmissionCycle, REQUIRED_RESULT, requiredResult, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
+  readAdmissionEntries, rebuildAdmissionCycle, REQUIRED_RESULT, requiredResult, admissionState, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
 import { repairDigest } from "./main-merge-repair.mjs";
 
 const repository = "example/project", base = "a".repeat(40), head = "b".repeat(40), group = "c".repeat(40);
@@ -10,7 +10,8 @@ const at = seconds => new Date(Date.UTC(2026, 9, 26, 1) + seconds * 1000).toISOS
 const entry = () => ({ repository, kind: "merge_group", pullRequest: 42, headSha: head, baseSha: base,
   integrationSha: group, members: [{ pullRequest: 42, headSha: head }] });
 // The group's own aggregator already succeeded: just-in-time admission may write its success.
-const census = () => ({ repository, complete: true, mainSha: base, entries: [entry()], requiredResults: { [group]: "success" }, fingerprint: "fixture" });
+const census = () => ({ repository, complete: true, mainSha: base, entries: [entry()], requiredResults: { [group]: "success" },
+  admissionStates: { [group]: "none" }, fingerprint: "fixture" });
 const control = () => ({ available: true, repair: null });
 function health() {
   return { schema: "main-ci-health-v1", repository, currentMainSha: base, observedAt: at(0), status: "passing", reasons: [],
@@ -149,6 +150,17 @@ test("a group's required result is success only from the pinned aggregator, comp
     rollup(Array(101).fill(aggregator("COMPLETED", "SUCCESS")))]) assert.equal(requiredResult(broken), "unavailable");
 });
 
+test("the group's current admission status is read from the same rollup; unreadable is unknown", () => {
+  const status = state => ({ __typename: "StatusContext", context: ADMISSION_CONTEXT, state });
+  assert.equal(admissionState(rollup([])), "none");
+  assert.equal(admissionState(rollup([aggregator("COMPLETED", "SUCCESS"), status("SUCCESS")])), "success");
+  assert.equal(admissionState(rollup([status("PENDING")])), "pending");
+  for (const state of ["FAILURE", "ERROR"]) assert.equal(admissionState(rollup([status(state)])), "failure");
+  assert.equal(admissionState(rollup([{ __typename: "StatusContext", context: "Other", state: "SUCCESS" }])), "none");
+  for (const broken of [undefined, {}, rollup([status("SUCCESS")], true), rollup([status("SUCCESS"), status("PENDING")]), rollup([status("EXPECTED")])])
+    assert.equal(admissionState(broken), "unknown");
+});
+
 test("the census reads each group's aggregator on its exact SHA outside entry identity", async () => {
   const body = (nodes) => ({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: base } }, pullRequests: {
     pageInfo: { hasNextPage: false }, nodes: [{ number: 42, isDraft: false, headRefOid: head, baseRefOid: base,
@@ -157,8 +169,11 @@ test("the census reads each group's aggregator on its exact SHA outside entry id
   const pending = await readAdmissionEntries(async (path, { body: request }) => { query = request.query; return body([]); }, repository);
   assert.match(query, /statusCheckRollup\{contexts\(first:100\)\{pageInfo\{hasNextPage\}/);
   assert.match(query, /checkSuite\{app\{databaseId\}\}/);
-  const done = await readAdmissionEntries(async () => body([aggregator("COMPLETED", "SUCCESS")]), repository);
+  const done = await readAdmissionEntries(async () => body([aggregator("COMPLETED", "SUCCESS"),
+    { __typename: "StatusContext", context: ADMISSION_CONTEXT, state: "SUCCESS" }]), repository);
   assert.deepEqual([pending.requiredResults, done.requiredResults], [{ [group]: "pending" }, { [group]: "success" }]);
+  assert.deepEqual([pending.admissionStates, done.admissionStates], [{ [group]: "none" }, { [group]: "success" }]);
+  assert.match(query, /\.\.\. on StatusContext\{context state\}/);
   // A finishing aggregator changes what may be written, never which integration is targeted.
   assert.deepEqual(done.entries, pending.entries); assert.equal(done.fingerprint, pending.fingerprint);
 });
@@ -178,6 +193,19 @@ test("merge groups get a success only just in time; waiting groups get no write 
   for (const extra of [{ health: red() }, { health: red(), census: { ...census(), requiredResults: {} } },
     { health: red(), census: { ...census(), entries: [{ ...entry(), baseSha: head }] } }])
     assert.equal(groupDecision(await cycle(extra)).state, "failure");
+  // A rerun (or any loss of readiness) after a published success withdraws it to pending (#3768 review).
+  for (const [published, expected] of [["success", "pending"], ["failure", "pending"], ["unknown", "pending"], [undefined, "pending"],
+    ["pending", "none"], ["none", "none"]]) {
+    const rerun = groupDecision(await cycle({ census: { ...census(), requiredResults: { [group]: "pending" },
+      admissionStates: published === undefined ? undefined : { [group]: published } } }));
+    assert.deepEqual([rerun.state, rerun.awaiting, rerun.admissionState], [expected, "required-result", published ?? "unknown"], String(published));
+  }
+  // An identical group success is not rewritten: it refreshes nothing on GitHub.
+  const again = groupDecision(await cycle({ census: { ...census(), admissionStates: { [group]: "success" } } }));
+  assert.deepEqual([again.state, again.decision], ["none", "ordinary-admission-eligible"]);
+  const movedAfterSuccess = groupDecision(await cycle({ census: { ...census(), entries: [{ ...entry(), baseSha: head }],
+    admissionStates: { [group]: "success" } } }));
+  assert.deepEqual([movedAfterSuccess.state, movedAfterSuccess.awaiting], ["pending", "queue-head"]);
   // Pull-request heads only gate enqueueing; their states are unchanged.
   const pr = { repository, kind: "pull_request", pullRequest: 7, headSha: head, baseSha: base, integrationSha: head };
   const prPlan = await cycle({ census: { ...census(), entries: [pr] } });
@@ -197,6 +225,16 @@ test("the writer skips waiting groups and refuses any group success without its 
   api.rateLimit = { limit: 5000, remaining: 4900 };
   const skipped = await writeAdmissionPlan(waiting, { configuration, api, now: () => at(12), revalidate: async () => waiting });
   assert.deepEqual([skipped.writes, skipped.attemptedWrites, skipped.capacity.plannedWrites, posts], [0, 0, 0, 0]);
+  const withdrawn = await cycle({ census: { ...census(), requiredResults: { [group]: "pending" }, admissionStates: { [group]: "success" } } });
+  const bodies = [];
+  const recording = async (path, { body } = {}) => { if (path === "/rate_limit") return {}; bodies.push(body); return { id: bodies.length, context: body.context, state: body.state }; };
+  recording.rateLimit = { limit: 5000, remaining: 4900 };
+  const delivered = await writeAdmissionPlan(withdrawn, { configuration, api: recording, now: () => at(12), revalidate: async () => withdrawn });
+  assert.deepEqual([delivered.writes, bodies.map(b => b.state)], [1, ["pending"]]);
+  // Pending is a group withdrawal only; a pull-request decision may never be written pending.
+  const pr = { repository, kind: "pull_request", pullRequest: 7, headSha: head, baseSha: base, integrationSha: head };
+  const prPlan = await cycle({ census: { ...census(), entries: [pr] } }); prPlan.decisions[0].state = "pending";
+  await assert.rejects(writeAdmissionPlan(prPlan, { configuration, api: recording, now: () => at(12), revalidate: async () => prPlan }));
   // A forged or stale decision claiming success for a group whose aggregator has not succeeded.
   for (const forged of [{ requiredResult: "pending" }, { requiredResult: undefined }, { requiredResult: "failure" }]) {
     const plan = structuredClone(waiting); Object.assign(plan.decisions[0], { state: "success", ...forged });
@@ -263,6 +301,7 @@ function batch(count) {
     integrationSha: (i + 1).toString(16).padStart(40, "0"),
     members: [{ pullRequest: i + 1, headSha: head }] }));
   c.requiredResults = Object.fromEntries(c.entries.map(e => [e.integrationSha, "success"]));
+  c.admissionStates = Object.fromEntries(c.entries.map(e => [e.integrationSha, "none"]));
   return c;
 }
 function inertApi(limit = 5000, remaining = limit) {

@@ -88,13 +88,13 @@ export async function readAdmissionEntries(api, repository) {
   if (!REPOSITORY.test(repository ?? "")) throw new Error("Invalid admission repository");
   const [owner, name] = repository.split("/");
   const body = await api("/graphql", { method: "POST", body: { query:
-    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{name target{oid}} pullRequests(first:100,states:OPEN,baseRefName:\"main\"){pageInfo{hasNextPage} nodes{number isDraft headRefOid baseRefOid mergeQueueEntry{state position headCommit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{name status conclusion checkSuite{app{databaseId}}}}}}} baseCommit{oid}}}}}}",
+    "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){defaultBranchRef{name target{oid}} pullRequests(first:100,states:OPEN,baseRefName:\"main\"){pageInfo{hasNextPage} nodes{number isDraft headRefOid baseRefOid mergeQueueEntry{state position headCommit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage} nodes{__typename ... on CheckRun{name status conclusion checkSuite{app{databaseId}}} ... on StatusContext{context state}}}}} baseCommit{oid}}}}}}",
     variables: { owner, name } } });
   const repo = body?.data?.repository, list = repo?.pullRequests;
   if (body?.errors?.length || repo?.defaultBranchRef?.name !== "main" || !SHA.test(repo.defaultBranchRef.target?.oid ?? "") ||
       !Array.isArray(list?.nodes) || list.nodes.length > CONTROLLER.maxEntries || list.pageInfo?.hasNextPage !== false)
     throw new Error("Admission census unavailable");
-  const entries = [], groups = new Map(), numbers = new Set(), requiredResults = {};
+  const entries = [], groups = new Map(), numbers = new Set(), requiredResults = {}, admissionStates = {};
   for (const p of list.nodes) {
     if (!positive(p?.number) || numbers.has(p.number) || typeof p.isDraft !== "boolean" ||
         !SHA.test(p.headRefOid ?? "") || !SHA.test(p.baseRefOid ?? "")) throw new Error("Invalid admission entry");
@@ -110,13 +110,15 @@ export async function readAdmissionEntries(api, repository) {
     if (group.baseSha !== q.baseCommit.oid) throw new Error("Queue group changed");
     group.members.push({ pullRequest: p.number, headSha: p.headRefOid }); groups.set(group.integrationSha, group);
     requiredResults[q.headCommit.oid] = requiredResult(q.headCommit.statusCheckRollup);
+    admissionStates[q.headCommit.oid] = admissionState(q.headCommit.statusCheckRollup);
   }
   entries.push(...groups.values());
   if (entries.length > CONTROLLER.maxEntries) throw new Error("Admission census capacity");
   entries.sort((a, b) => `${a.kind}:${target(a)}`.localeCompare(`${b.kind}:${target(b)}`, "en"));
   // Required results stay outside entry identity: an aggregator finishing between plan and write
   // changes what may be written, never which integration a decision targets.
-  return { repository, mainSha: repo.defaultBranchRef.target.oid, entries, requiredResults, complete: true, fingerprint: hash(entries) };
+  return { repository, mainSha: repo.defaultBranchRef.target.oid, entries, requiredResults, admissionStates, complete: true,
+    fingerprint: hash(entries) };
 }
 
 /** Pure: the group's own required aggregator, from the pinned issuer only. `success` needs every
@@ -130,6 +132,17 @@ export function requiredResult(rollup) {
   if (runs.some(n => n.checkSuite?.app?.databaseId !== REQUIRED_RESULT.appId)) return "unavailable";
   if (runs.some(n => n.status !== "COMPLETED")) return "pending";
   return runs.every(n => n.conclusion === "SUCCESS") ? "success" : "failure";
+}
+
+/** Pure: the group's current admission status, so a success published before a rerun (or before
+ * the group stopped being next) is withdrawn. Unreadable is "unknown", which is withdrawn too. */
+export function admissionState(rollup) {
+  const contexts = rollup?.contexts;
+  if (!Array.isArray(contexts?.nodes) || contexts.pageInfo?.hasNextPage !== false || contexts.nodes.length > REQUIRED_RESULT.maxContexts)
+    return "unknown";
+  const statuses = contexts.nodes.filter(n => n?.__typename === "StatusContext" && n.context === ADMISSION_CONTEXT);
+  if (statuses.length > 1) return "unknown";
+  return statuses.length ? ({ SUCCESS: "success", PENDING: "pending", FAILURE: "failure", ERROR: "failure" })[statuses[0].state] ?? "unknown" : "none";
 }
 
 /** Complete plan before any optional writer is considered. Previous successes
@@ -159,9 +172,15 @@ export async function planAdmissionCycle({ repository, census, health, control, 
     // a group held only because it is stacked behind another is waiting, not failed: no write.
     const group = entry.kind === "merge_group";
     const result = group ? census.requiredResults?.[entry.integrationSha] ?? "unavailable" : null;
-    const state = !group ? eligible ? "success" : "failure"
+    const waiting = !group ? eligible ? "success" : "failure"
       : eligible ? result === "success" ? "success" : "none"
         : reasons.length === 1 && reasons[0] === "base-moved" ? "none" : "failure";
+    // A waiting group must not keep a success published earlier (for example before its aggregator
+    // was rerun): withdraw it to pending. A group that never had one, or is already pending, gets no write.
+    const current = group ? census.admissionStates?.[entry.integrationSha] ?? "unknown" : null;
+    // Rewriting an identical group success refreshes nothing on GitHub; skip it to save writes.
+    const state = waiting === "none" && !["none", "pending"].includes(current) ? "pending"
+      : group && waiting === "success" && current === "success" ? "none" : waiting;
     const expiresAt = new Date(Math.min(Date.parse(now) + CONTROLLER.maxCycleAgeMs,
       date(health?.observedAt) ? Date.parse(health.observedAt) + POLICY.maxObservationAgeSeconds * 1000 : Date.parse(now),
       repair ? Date.parse(repair.expiresAt) : Infinity,
@@ -177,7 +196,8 @@ export async function planAdmissionCycle({ repository, census, health, control, 
     decisions.push({ entry, targetSha: target(entry), context: ADMISSION_CONTEXT, state,
       decision: repair ? "authorized-repair-eligible" : eligible ? "ordinary-admission-eligible" : "hold",
       reasons: repair ? ["operator-authorized-exact-repair"] : reasons, repair, expiresAt,
-      ...(group ? { requiredResult: result, awaiting: state !== "none" ? null : eligible ? "required-result" : "queue-head" } : {}),
+      ...(group ? { requiredResult: result, admissionState: current,
+        awaiting: waiting !== "none" ? null : eligible ? "required-result" : "queue-head" } : {}),
       plannedBlockLatencyMs: !eligible && trigger !== null && trigger <= Date.parse(now) ? Date.parse(now) - trigger : null });
   }
   return { schema: "main-merge-admission-cycle-v1", mode: "dry-run", enforcement: "none", repository,
@@ -261,7 +281,8 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
     for (const d of fresh.decisions) {
       if (!validEntry(d.entry) || d.entry.repository !== configuration.repository || d.targetSha !== target(d.entry) ||
           !identities.has(d.targetSha) || identities.get(d.targetSha) !== hash(d.entry) || seen.has(d.targetSha) ||
-          !["success", "failure", "none"].includes(d.state) || d.context !== ADMISSION_CONTEXT ||
+          !["success", "failure", "pending", "none"].includes(d.state) || d.context !== ADMISSION_CONTEXT ||
+          d.state === "pending" && d.entry.kind !== "merge_group" ||
           d.state === "success" && (!date(d.expiresAt) || Date.parse(d.expiresAt) <= checked) ||
           d.state === "success" && d.entry.kind === "merge_group" && d.requiredResult !== "success")
         throw new Error("Writer evidence expired or changed");
@@ -283,6 +304,7 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
       const result = await writerApi(`/repos/${configuration.repository}/statuses/${current.targetSha}`, { method: "POST", body: {
         state: current.state, context: ADMISSION_CONTEXT,
         description: current.state === "failure" ? "Regression health hold; inspect the admission audit" :
+          current.state === "pending" ? "Waiting for this group's own required checks; earlier admission withdrawn" :
           current.repair ? "Exact repair exception; normal merge authority still required" : "Fresh regression admission decision",
       } });
       if (!positive(result?.id) || result.context !== ADMISSION_CONTEXT || result.state !== current.state)

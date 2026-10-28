@@ -142,7 +142,7 @@ change the controller wrote `success` to every eligible merge group on every cyc
 while the group's own checks were still running. A controller or forge outage after
 that write, followed by a health failure, let the group land on a minutes-old
 evaluation when its checks finished. The rehearsal reproduces exactly this landing
-for the earlier behavior (`pre-change-early-success-lands-stale`: a 539.7-second-old
+for the earlier behavior (`pre-change-early-success-lands-stale`: a 596-second-old
 evaluation lands after health failed).
 
 | Mechanism | Fails Closed in an Outage? | Assessment |
@@ -167,8 +167,12 @@ evaluation lands after health failed).
 3. health admits it under the unchanged policy, with the writer's unchanged ≤ 60-second
    cycle and ≤ 120-second observation lease checked immediately before the write.
 
-A waiting group gets no status at all. A health hold still writes `failure`, which
-ejects the group. Pull-request heads keep their earlier statuses, because they only
+A waiting group that never had a success gets no status at all. A waiting group that
+does hold one is withdrawn to `pending`. This covers an aggregator rerun after the
+write, a group that stopped being next, and an unreadable current status. The census
+reads the group's current `Regression Admission` state from the same rollup. An
+identical success is not rewritten, because rewriting refreshes nothing on GitHub. A
+health hold still writes `failure`, which ejects the group. Pull-request heads keep their earlier statuses, because they only
 gate enqueueing: a sticky head success cannot land code without the group's own
 just-in-time success. An exact repair follows the same rule. The writer refuses any
 merge-group success whose fresh decision lacks the aggregator result.
@@ -182,14 +186,22 @@ runs controller outages of 5, 30 and 130 minutes, starting 2 or 9.5 minutes into
 group's life, with health failing during each outage. No group lands: each is either
 ejected when the controller returns or removed at the timeout. A healthy group lands
 7.1 seconds after its aggregator. A failure while the controller is up ejects the
-group at the next cycle.
+group at the next cycle. If the aggregator reruns after the write with the controller
+up, the success is withdrawn within one cycle. A fresh success follows only after the
+rerun, so the group lands on a 123-second-old evaluation with a 2-minute fixture forge
+latency. Ages are measured from the observation the writer itself rebuilt.
 
 **Disclosed race.** Between the just-in-time write and GitHub's landing, a newly
 failing health cannot be withdrawn if the controller stops. The landing evaluation's
 age is bounded by observation age + cycle age + GitHub's landing latency: at most
-120 s + 60 s + L. The rehearsal shows a stale landing on a 39.7-second-old
-evaluation, with a fixture L of 30 seconds. **L is not measured**: GitHub publishes
-no merge-latency bound, and a forge outage between write and landing extends it.
+120 s + 60 s + L. The rehearsal shows a stale landing on a 36-second-old evaluation,
+with a fixture L of 30 seconds. **L is not measured**: GitHub publishes no
+merge-latency bound, and a forge outage between write and landing extends it. A
+rerun of the group's required checks begun inside this window, while the controller
+is down, also extends it by the rerun's length. The rehearsal shows a 736-second-old
+evaluation landing after a 10-minute rerun (`rerun-during-outage-disclosed`).
+Rerunning a queue group's CI is an operator action; while admission is enforced,
+leave it to the queue.
 This window replaces the earlier unbounded window, which lasted from first admission
 to landing, including a whole outage.
 

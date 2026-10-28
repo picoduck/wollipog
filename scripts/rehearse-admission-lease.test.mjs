@@ -32,21 +32,34 @@ test("the earlier every-cycle success reproduces the sticky landing this change 
   const before = await byId("pre-change-early-success-lands-stale");
   assert.deepEqual([before.outcome, before.staleLanding], ["landed", true]);
   assert.ok(before.successWrittenAtMs < before.failedAtMs, "the success predates the failure");
-  assert.equal(before.evaluationAgeAtLandingMs, 539_700, "a 9-minute-old evaluation lands after health failed");
+  assert.equal(before.evaluationAgeAtLandingMs, 596_000, "a ten-minute-old evaluation lands after health failed");
 });
 
 test("healthy groups land just in time and failures with the controller up eject; the race window is bounded and disclosed", async () => {
   const healthy = await byId("healthy-lands-just-in-time");
-  assert.deepEqual([healthy.outcome, healthy.staleLanding, healthy.aggregatorToLandingMs, healthy.evaluationAgeAtLandingMs], ["landed", false, 7_100, 6_800]);
+  // Ages are measured from the observation the writer itself rebuilt and used (#3768 review).
+  assert.deepEqual([healthy.outcome, healthy.staleLanding, healthy.aggregatorToLandingMs, healthy.evaluationAgeAtLandingMs], ["landed", false, 7_100, 3_100]);
   assert.ok(healthy.successWrittenAtMs >= LEASE_TIMING.aggregatorMs, "success only after the aggregator");
   const up = await byId("failure-while-controller-up-ejects");
   assert.deepEqual([up.outcome, up.successWrittenAtMs], ["ejected", null]);
   const race = await byId("race-failure-between-write-and-landing");
-  assert.deepEqual([race.outcome, race.staleLanding, race.evaluationAgeAtLandingMs], ["landed", true, 39_700]);
+  assert.deepEqual([race.outcome, race.staleLanding, race.evaluationAgeAtLandingMs], ["landed", true, 36_000]);
   const { summary } = await run();
   assert.equal(summary.raceWindow.boundMs, POLICY.maxObservationAgeSeconds * 1000 + CONTROLLER.maxCycleAgeMs + race.forgeLandingMs);
   assert.ok(summary.raceWindow.withinBound);
   assert.equal(summary.staleLandingsOutsideRace, 0);
   assert.deepEqual(summary.availabilityCost, { healthyAggregatorToLandingMs: 7_100, maxAddedLatencyMs: LEASE_TIMING.cycleMs + LEASE_TIMING.tickMs,
     outageStallUntilRemovalMs: 120 * MINUTE });
+});
+
+test("an aggregator rerun after the just-in-time write withdraws that success until a fresh one (#3768 review)", async () => {
+  const rerun = await byId("rerun-after-success-withdrawn");
+  assert.deepEqual([rerun.outcome, rerun.staleLanding, rerun.withdrawals], ["landed", false, 1]);
+  assert.ok(rerun.successWrittenAtMs >= rerun.rerunAtMs + rerun.rerunMs, "the landing success is written after the rerun");
+  assert.equal(rerun.evaluationAgeAtLandingMs, 123_000);
+  assert.ok(rerun.evaluationAgeAtLandingMs <= POLICY.maxObservationAgeSeconds * 1000 + CONTROLLER.maxCycleAgeMs + rerun.forgeLandingMs);
+  // Disclosed limit: a rerun begun inside the race window while the controller is down extends it by the rerun.
+  const outage = await byId("rerun-during-outage-disclosed");
+  assert.deepEqual([outage.outcome, outage.staleLanding, outage.withdrawals, outage.evaluationAgeAtLandingMs], ["landed", true, 0, 736_000]);
+  assert.deepEqual((await run()).summary.rerunDuringOutage, { staleLanding: true, evaluationAgeAtLandingMs: 736_000, extendsRaceByRerunMs: 600_000 });
 });

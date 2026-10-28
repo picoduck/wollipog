@@ -72,11 +72,13 @@ async function cycle(w, options = {}) {
 /** Default-deny writer, explicitly enabled only against the inert forge. */
 async function deliver(w, plan, options = {}) {
   const started = w.state.calls;
+  let fresh = null;
   try {
     const result = await writeAdmissionPlan(plan, { configuration: { enabled: true, repository: REPOSITORY, context: CONTEXT },
-      api: w.api, now: () => w.iso(), revalidate: ({ repository }, { api }) => rebuildAdmissionCycle({ repository, api, env: ENV,
-        now: () => w.iso(), error: () => {}, control, observationId: "inert-rehearsal", entryPoint: "rehearsal", ...options }) });
-    return { ...result, forgeCalls: w.state.calls - started };
+      api: w.api, now: () => w.iso(), revalidate: async ({ repository }, { api }) => (fresh = await rebuildAdmissionCycle({ repository, api,
+        env: ENV, now: () => w.iso(), error: () => {}, control, observationId: "inert-rehearsal", entryPoint: "rehearsal", ...options })) });
+    // The writer authorizes from its own fresh rebuild, not the caller's plan.
+    return { ...result, forgeCalls: w.state.calls - started, revalidatedObservedAt: fresh?.healthSummary?.observedAt ?? null };
   } catch (failure) {
     if (failure.writes === undefined) throw failure;
     return { writes: failure.writes, complete: false, reason: failure.reason, capacity: failure.capacity,
