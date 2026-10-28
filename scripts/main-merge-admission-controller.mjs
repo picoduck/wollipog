@@ -5,9 +5,13 @@ import { evaluateAdmission, POLICY } from "./main-merge-admission.mjs";
 import { repairRecovery, repairDigest } from "./main-merge-repair.mjs";
 import { budgetApi, githubApi, main as healthReport } from "./main-ci-health.mjs";
 import { admissionEvidenceApi } from "./main-merge-admission-evidence.mjs";
+import { COVERAGE, REQUIRED_CONTEXT as FULL_CONTEXT, RESTORATION_SCHEMA, WORKFLOW_FILES } from "./ci-merge-group-restoration.mjs";
 
 export const ADMISSION_CONTEXT = "Regression Admission";
-export const CONTROLLER = Object.freeze({ maxEntries: 100, maxCycleAgeMs: 60_000, reevaluateMs: 60_000 });
+export const CONTROLLER = Object.freeze({ maxEntries: 100, maxCycleAgeMs: 60_000, reevaluateMs: 60_000,
+  // Every delivery leaves this share of the call cap unspent (10 of 96), so one more read never
+  // turns a batch into zero writes. Holds beyond the rest are delivered next cycle (#3633).
+  headroomFraction: 0.1, progressLeaseMs: 10 * 60_000 });
 // Just-in-time group admission (docs/main-merge-admission.md#fail-closed-group-admission). A merge
 // group's success is written only after its own required aggregator succeeded on that exact SHA,
 // from the pinned GitHub Actions issuer, while the group is next to land (its base is live main).
@@ -202,6 +206,7 @@ export async function planAdmissionCycle({ repository, census, health, control, 
   }
   return { schema: "main-merge-admission-cycle-v1", mode: "dry-run", enforcement: "none", repository,
     observationId, entryPoint, evaluatedAt: now, healthDigest: health ? hash(health) : null,
+    failureFingerprint: failureFingerprint(health),
     healthSummary: { status: health?.status ?? "unknown", mainSha: health?.currentMainSha ?? null,
       observedAt: health?.observedAt ?? null, passingRunId: health?.latestPassingSnapshot?.runId ?? null,
       backlogCommits: health?.backlog?.commits ?? null },
@@ -213,11 +218,26 @@ export async function planAdmissionCycle({ repository, census, health, control, 
  * cannot plan hold removal until complete full queue validation is independently
  * verified. A false/unknown proof always preserves the hold.
  */
+/**
+ * Pure: reasons a proof is not internally consistent restoration-verifier output: its schema and
+ * repository, no refusal reasons, full coverage of the unchanged context, the trusted workflow and
+ * both workflow blobs, and every selected run certified full. A consistently hand-edited proof can
+ * still pass; operators take proofs only from ci-merge-group-restoration.mjs.
+ */
+export function restorationProofRefusal(proof, repository) {
+  const reasons = [];
+  if (!REPOSITORY.test(repository ?? "") || proof?.schema !== RESTORATION_SCHEMA || proof.repository !== repository) reasons.push("proof-identity-unavailable");
+  if (proof?.verified !== true || !Array.isArray(proof.reasons) || proof.reasons.length) reasons.push("proof-not-verified");
+  if (proof?.coverage !== COVERAGE || proof.requiredContext !== FULL_CONTEXT || !SHA.test(proof.workflowSha ?? "")) reasons.push("proof-coverage-unavailable");
+  if (!proof?.workflowBlobs || WORKFLOW_FILES.some(path => !SHA.test(proof.workflowBlobs[path] ?? ""))) reasons.push("proof-workflow-blobs-unavailable");
+  if (!Array.isArray(proof?.runs) || !proof.runs.length || proof.runs.some(run => run?.certification !== "full" ||
+      !Array.isArray(run.reasons) || run.reasons.length || !SHA.test(run.headSha ?? ""))) reasons.push("proof-run-not-certified-full");
+  return reasons;
+}
+
 export function planRollback({ repository, fullQueueProof, operatorApproval } = {}) {
-  const full = fullQueueProof?.repository === repository && REPOSITORY.test(repository ?? "") &&
-    fullQueueProof?.verified === true && fullQueueProof?.coverage === "full-merge-group-v1" &&
-    fullQueueProof?.requiredContext === "Typecheck, Test & Sidecar Bundle" && SHA.test(fullQueueProof?.workflowSha ?? "");
-  if (!full) return { decision: "restore-full-queue-validation-first", holdRetained: true, enforcement: "none",
+  const refusal = restorationProofRefusal(fullQueueProof, repository);
+  if (refusal.length) return { decision: "restore-full-queue-validation-first", holdRetained: true, enforcement: "none", proofRefusal: refusal,
     steps: ["Restore full merge-group validation", "Independently verify the required full context", "Obtain separate operator hold-removal approval"] };
   const approved = operatorApproval?.repository === repository && operatorApproval?.fullQueueProofDigest === hash(fullQueueProof) &&
     operatorApproval?.action === "remove-admission-hold" && operatorApproval?.approved === true;
@@ -247,7 +267,35 @@ export async function rebuildAdmissionCycle({ repository, api, env = process.env
  * A trusted operator callback rebuilds the WHOLE cycle once using this budget.
  * Serialized input supplies target identities only, never success authority.
  */
-export async function writeAdmissionPlan(plan, { configuration, api, revalidate, now = () => new Date().toISOString(), log = () => {} } = {}) {
+/** Delivery order: withdraw any group that may hold a success first (the only landing-critical
+ * writes under just-in-time admission), then other group holds, then pull-request holds, then
+ * successes. A stable target order makes every cycle deterministic. */
+const deliveryClass = d => d.state === "success" ? d.entry.kind === "merge_group" ? 3 : 4
+  : d.entry.kind === "merge_group" ? ["success", "unknown", undefined].includes(d.admissionState) ? 0 : 1 : 2;
+
+/** Pure: whether `progress` (the operator's durable record of this writer's own receipts) shows
+ * this exact hold already delivered under the same failure fingerprint within the lease. Successes
+ * are never skipped; malformed progress skips nothing. */
+function alreadyHeld(progress, repository, decision, fingerprint, checked) {
+  const last = progress?.repository === repository && progress.deliveries && typeof progress.deliveries === "object"
+    ? progress.deliveries[decision.targetSha] : null;
+  return ["failure", "pending"].includes(decision.state) && last?.state === decision.state && last.fingerprint === fingerprint &&
+    typeof fingerprint === "string" && date(last.deliveredAt) && Date.parse(last.deliveredAt) <= checked &&
+    checked - Date.parse(last.deliveredAt) < CONTROLLER.progressLeaseMs;
+}
+
+/** Pure: what a decision's delivery outcome means. A merge group without a success cannot land
+ * under just-in-time admission; one that may hold a success is landable until withdrawn. An unheld
+ * pull request can still be enqueued (never landed). Only written or already-held targets are held. */
+function coverageOf(d, outcome) {
+  if (outcome === "written" || outcome === "already-held") return d.state === "success" ? "admitted" : "held";
+  if (d.state === "success") return "not-admitted";
+  if (d.entry.kind !== "merge_group") return "uncovered";
+  return ["success", "unknown", undefined].includes(d.admissionState) ? "uncovered-landable" : "unlandable";
+}
+
+export async function writeAdmissionPlan(plan, { configuration, api, revalidate, progress = null, now = () => new Date().toISOString(),
+  log = () => {} } = {}) {
   if (configuration?.enabled !== true) return { mode: "disabled", writes: 0 };
   if (!REPOSITORY.test(configuration.repository ?? "") || configuration.repository !== plan?.repository ||
       configuration.context !== ADMISSION_CONTEXT || typeof revalidate !== "function" || typeof api !== "function" ||
@@ -256,6 +304,10 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
   // One quota-sized budget covers the independent rebuild, census and ALL writes.
   const writerApi = budgetApi(api, { reserve: 0, requireHeaders: true });
   let writes = 0, attemptedWrites = 0, capacity, fresh, lastReceiptAt = null, lastPlannedBlockLatencyMs = null;
+  // The updated durable record: this writer's own receipts, keyed by target.
+  const deliveries = progress?.repository === configuration.repository && progress.deliveries && typeof progress.deliveries === "object"
+    ? structuredClone(progress.deliveries) : {};
+  const outcomes = new Map();
   try {
     await writerApi("/rate_limit");
     fresh = structuredClone(await revalidate({ repository: configuration.repository }, { api: writerApi }));
@@ -289,14 +341,18 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
       seen.add(d.targetSha);
     }
     const usage = writerApi.budget;
-    capacity = { plannedWrites: fresh.decisions.filter(d => d.state !== "none").length, callsUsed: usage.calls, callLimit: usage.limit,
-      callsAvailable: usage.limit - usage.calls, restRemaining: usage.rateRemaining, remainingFloor: usage.remainingFloor,
-      quotaAvailable: usage.rateRemaining - usage.remainingFloor };
-    capacity.writesAvailable = Math.max(0, Math.min(capacity.callsAvailable, capacity.quotaAvailable));
+    const ordered = fresh.decisions.filter(d => d.state !== "none")
+      .map(d => ({ d, skip: alreadyHeld(progress, configuration.repository, d, fresh.failureFingerprint, checked) }))
+      .sort((a, b) => deliveryClass(a.d) - deliveryClass(b.d) || a.d.targetSha.localeCompare(b.d.targetSha, "en"));
+    for (const { d } of ordered.filter(item => item.skip)) outcomes.set(d.targetSha, "already-held");
+    const due = ordered.filter(item => !item.skip).map(item => item.d);
+    capacity = { plannedWrites: due.length, alreadyHeld: ordered.length - due.length, callsUsed: usage.calls, callLimit: usage.limit,
+      callsAvailable: usage.limit - usage.calls, reserveCalls: Math.ceil(usage.limit * CONTROLLER.headroomFraction),
+      restRemaining: usage.rateRemaining, remainingFloor: usage.remainingFloor, quotaAvailable: usage.rateRemaining - usage.remainingFloor };
+    capacity.writesAvailable = Math.max(0, Math.min(capacity.callsAvailable - capacity.reserveCalls, capacity.quotaAvailable));
     capacity.shortfall = Math.max(0, capacity.plannedWrites - capacity.writesAvailable);
-    if (capacity.shortfall) throw new Error("Writer complete batch exceeds remaining budget");
-    for (const current of fresh.decisions) {
-      if (current.state === "none") continue;
+    // Highest-priority writes first, within the reserve; the rest wait for the next cycle.
+    for (const current of due.slice(0, capacity.writesAvailable)) {
       const checked = checkTime();
       if (current.state === "success" && Date.parse(current.expiresAt) <= checked)
         throw new Error("Writer evidence expired or changed");
@@ -313,6 +369,8 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
       const received = Date.parse(now());
       if (!Number.isFinite(received) || received < checked) throw new Error("Writer receipt clock unavailable");
       lastReceiptAt = new Date(received).toISOString();
+      outcomes.set(current.targetSha, "written");
+      deliveries[current.targetSha] = { state: current.state, fingerprint: fresh.failureFingerprint, deliveredAt: lastReceiptAt, statusId: result.id };
       const plannedBlockLatencyMs = current.state === "failure" && Number.isFinite(current.plannedBlockLatencyMs)
         ? current.plannedBlockLatencyMs + received - Date.parse(fresh.evaluatedAt) : null;
       if (plannedBlockLatencyMs !== null) lastPlannedBlockLatencyMs = Math.max(lastPlannedBlockLatencyMs ?? 0, plannedBlockLatencyMs);
@@ -321,12 +379,26 @@ export async function writeAdmissionPlan(plan, { configuration, api, revalidate,
         state: current.state, decision: current.decision, expiresAt: current.expiresAt, statusId: result.id,
         receivedAt: lastReceiptAt, plannedBlockLatencyMs, apiCalls: writerApi.budget.calls }));
     }
-    return { mode: "operator-enabled", writes, attemptedWrites, complete: true, capacity, apiBudget: { ...writerApi.budget },
-      lastReceiptAt, lastPlannedBlockLatencyMs };
+    const coverage = fresh.decisions.map(d => ({ targetSha: d.targetSha, kind: d.entry.kind, state: d.state,
+      outcome: outcomes.get(d.targetSha) ?? (d.state === "none" ? "no-write" : "deferred"), coverage: coverageOf(d, outcomes.get(d.targetSha)) }));
+    const counts = Object.fromEntries(["held", "admitted", "unlandable", "uncovered", "uncovered-landable", "not-admitted"]
+      .map(kind => [kind, coverage.filter(row => row.coverage === kind).length]));
+    // Complete only when every planned write is delivered or already held; an unheld target is never counted as held.
+    const deferred = coverage.filter(row => row.outcome === "deferred").length;
+    const complete = deferred === 0;
+    // Landing-safe: no group that may hold a success is left unwithdrawn (they are delivered first).
+    const landingSafe = counts["uncovered-landable"] === 0;
+    if (!complete) log(JSON.stringify({ event: "main_merge_admission_batch_partial", repository: configuration.repository,
+      writes, deferred, landingSafe, coverage: counts, capacity }));
+    return { mode: "operator-enabled", writes, attemptedWrites, complete, landingSafe, deferred, coverage: counts, targets: coverage, capacity,
+      apiBudget: { ...writerApi.budget }, lastReceiptAt, lastPlannedBlockLatencyMs,
+      progress: { repository: configuration.repository, deliveries } };
   } catch (cause) {
     const failure = { event: "main_merge_admission_batch_incomplete", repository: configuration.repository,
       writes, attemptedWrites, plannedWrites: requested.length, complete: false,
-      reason: writerApi.budget.reason ?? (capacity?.shortfall ? "complete-batch-capacity-shortfall" : "revalidation-or-delivery-unavailable"), capacity: capacity ?? null, apiBudget: { ...writerApi.budget } };
+      reason: writerApi.budget.reason ?? "revalidation-or-delivery-unavailable", capacity: capacity ?? null, apiBudget: { ...writerApi.budget },
+      // Receipts already acknowledged stay recorded, so the next cycle does not repeat them.
+      progress: { repository: configuration.repository, deliveries } };
     log(JSON.stringify(failure));
     // A prior PR-head success is sticky even on a zero-write refusal, but only gates enqueueing;
     // a merge group's success exists only once it is ready to land (just in time). Never call

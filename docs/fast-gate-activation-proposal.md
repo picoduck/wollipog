@@ -31,11 +31,11 @@ reviewed migration. Unfinished or unknown required checks still block merging.
 
 All must hold before step 1. The readiness report tracks each one.
 
-1. **Code gaps closed.** At the five-commit backlog limit the writer has 41 status
-   writes for a 45-target fan-out, and the batched 45-target set uses 96/96 calls
-   (#3711). Either outcome refuses with zero writes. Each needs a reviewed fix or an
-   explicit decision to keep full queue validation. Sticky merge-group success is
-   addressed by [just-in-time group admission](main-merge-admission.md#fail-closed-group-admission).
+1. **Code gaps closed.** Hold fan-out at the backlog limit and call headroom are addressed by
+   [bounded multi-cycle delivery](main-merge-recovery.md#slice-5-bounded-multi-cycle-delivery):
+   approve its completion bound, which is two 60-second cycles for 45 targets in
+   the fixture. Its durable progress store is part of the operator host. Sticky
+   merge-group success is addressed by [just-in-time group admission](main-merge-admission.md#fail-closed-group-admission).
    Approve its availability cost (a stalled queue during a controller outage) and its
    remaining write-to-landing race. Exhausted investigation escalation is
    delivered to the open incident once per attempt

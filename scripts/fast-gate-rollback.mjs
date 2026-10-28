@@ -3,8 +3,8 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { ADMISSION_CONTEXT, admissionEnforcement, computeMergeGroupGate, GATE_ENABLED, GATE_VARIABLE, gateDecision,
   REQUIRED_CONTEXT, ROLLBACK_VALUE } from "./ci-merge-group-gate.mjs";
-import { CHECK_STEPS, COVERAGE, FULL_JOBS, RESTORATION_SCHEMA, verifyRestoration, WORKFLOW_FILES } from "./ci-merge-group-restoration.mjs";
-import { planRollback } from "./main-merge-admission-controller.mjs";
+import { CHECK_STEPS, COVERAGE, FULL_JOBS, verifyRestoration } from "./ci-merge-group-restoration.mjs";
+import { planRollback, restorationProofRefusal } from "./main-merge-admission-controller.mjs";
 import { POLICY } from "./main-merge-admission.mjs";
 
 /** #3637 AC5: rollback triggers for a future fast merge-group gate and the ordered return to full
@@ -109,30 +109,9 @@ export function evaluateRollbackTriggers(observation, thresholds) {
     incomplete, requiredLatencyP90Minutes: p90 };
 }
 
-/**
- * Pure. #3633's planRollback checks only a proof's top-level fields. Before it, require the proof to be
- * internally consistent verifier output: the restoration schema, no refusal reasons, the trusted
- * workflow blobs and every selected run certified full. A hand-edited proof can still pass; the
- * operator must take the proof from ci-merge-group-restoration.mjs, never from another source.
- */
-export function restorationProofRefusal(proof, repository) {
-  const reasons = [];
-  if (proof?.schema !== RESTORATION_SCHEMA || proof.repository !== repository) reasons.push("proof-identity-unavailable");
-  if (proof?.verified !== true || !Array.isArray(proof.reasons) || proof.reasons.length) reasons.push("proof-not-verified");
-  if (proof?.coverage !== COVERAGE || proof.requiredContext !== REQUIRED_CONTEXT || !SHA.test(proof.workflowSha ?? "")) reasons.push("proof-coverage-unavailable");
-  if (!proof?.workflowBlobs || WORKFLOW_FILES.some((path) => !SHA.test(proof.workflowBlobs[path] ?? ""))) reasons.push("proof-workflow-blobs-unavailable");
-  if (!Array.isArray(proof?.runs) || !proof.runs.length || proof.runs.some((run) => run?.certification !== "full" ||
-      !Array.isArray(run.reasons) || run.reasons.length || !SHA.test(run.headSha ?? ""))) reasons.push("proof-run-not-certified-full");
-  return reasons;
-}
-
-/** The fast-gate rollback plan: the consistency refusal above, then #3633's planRollback unchanged. */
-export function planFastGateRollback({ repository, fullQueueProof, operatorApproval } = {}) {
-  const refusal = restorationProofRefusal(fullQueueProof, repository);
-  if (refusal.length) return { decision: "restore-full-queue-validation-first", holdRetained: true, enforcement: "none", proofRefusal: refusal,
-    steps: ["Restore full merge-group validation", "Run ci-merge-group-restoration.mjs for a complete proof", "Obtain separate operator hold-removal approval"] };
-  return planRollback({ repository, fullQueueProof, operatorApproval });
-}
+// #3633's planRollback now checks run-level proof consistency itself; the fast-gate path delegates to it.
+export { restorationProofRefusal };
+export const planFastGateRollback = (options = {}) => planRollback(options);
 
 /** The exact operator commands. They are printed for a human; this module never runs them. */
 export function rollbackCommands(repository) {
@@ -269,7 +248,7 @@ export async function rehearseFastGateRollback() {
   const scenarios = SCENARIOS.map(([trigger, make]) => scenario(trigger, make()));
   const checks = {
     liveAdapterAtRollbackValue: live,
-    // Disclosed limitation of the delivered pure planRollback: it advances a scalar-consistent forged proof.
+    // #3633's planRollback itself refuses a proof whose top-level fields were edited to look verified.
     deliveredPlanRollbackOnForgedProof: planRollback({ repository: REPOSITORY_FIXTURE, fullQueueProof: forgedProof(iso(5)) }).decision,
     healthyObservationKeepsGate: { rollback: control.rollback, requiredLatencyP90Minutes: control.requiredLatencyP90Minutes },
     sparseSampleIsIncomplete: { rollback: sparse.rollback, incomplete: sparse.incomplete.map((row) => row.id) },
@@ -299,8 +278,8 @@ export async function main(argv = process.argv.slice(2), { log = console.log, er
     return result.rollback ? 1 : 0;
   }
   if (command === "plan" && REPOSITORY.test(values.repository ?? "") && values.proof) {
-    // Offline only: the consistency refusal, then #3633's planRollback, over a saved restoration proof.
-    // It plans; it never removes a hold.
+    // Offline only: #3633's planRollback, with its run-level consistency refusal, over a saved restoration
+    // proof. It plans; it never removes a hold.
     const plan = planFastGateRollback({ repository: values.repository, fullQueueProof: read(values.proof),
       operatorApproval: values.approval ? read(values.approval) : undefined });
     log(JSON.stringify(plan, null, 2));

@@ -80,10 +80,12 @@ the whole batch. Duplicate SHAs are conservatively refused rather than letting a
 later eligibility decision overwrite a hold on the same status context. Serialized
 input supplies identities only; only the independent callback supplies verdicts.
 
-After the rebuild, preflight requires enough **remaining calls AND REST quota
-above the existing floor for every planned status**. A shortfall records exact
-planned/available counts, cap, reads used, quota and floor, then refuses with zero
-writes. It never raises the 48/96-call cap or borrows another token. A successful
+After the rebuild, preflight keeps a **reserve of 10% of the call cap** (10 of 96,
+5 of 48) and requires REST quota above the existing floor for every write. It then
+delivers the [highest-priority writes that fit](#slice-5-bounded-multi-cycle-delivery)
+and defers the rest to the next cycle, recording exact planned, available,
+reserved, deferred and already-held counts. It never raises the 48/96-call cap,
+the floor or the reserve, and never borrows another token. A successful
 preflight is conditional on subsequent API availability: changed quota, receipt
 failure or clock/lease expiry can still interrupt delivery. The adapter checks
 cycle age (strictly less than 60 seconds) and positive-decision expiry immediately
@@ -91,7 +93,7 @@ before each write, validates receipts, and reports partial delivery with actual
 acknowledged and attempted write counts (a failed request may have reached the
 forge). Receipt timestamps, cumulative API calls and planned block latency
 are auditable through the last completed hold. No automatic retry is configured.
-A batch refusal is not an enforcement success: existing forge successes remain
+A batch refusal or a deferred write is not an enforcement success: existing forge successes remain
 until explicitly replaced. Merge groups receive a success only just in time, once
 ready to land ([fail-closed group admission](main-merge-admission.md#fail-closed-group-admission)),
 so only pull-request head successes, which gate enqueueing alone, can outlive an outage. The callback is an operator trust boundary,
@@ -290,6 +292,50 @@ The conditional receipt envelope for that case is **D + 96L + C**, where D is
 trigger-to-start delay, L an assumed per-call maximum and C actual computation.
 The rehearsal emits CPU time separately. All statuses are inert; live latency
 through the final held target still requires separately approved activation.
+The all-or-nothing writer these tables describe is superseded by bounded
+multi-cycle delivery below; the fixtures are retained and now complete.
+
+### Slice 5: Bounded Multi-Cycle Delivery
+
+Refs #3633. A full-set refusal at the backlog limit left every target unheld. The
+writer now validates the whole batch as before, then delivers within the reserve in
+a fixed safety order:
+
+1. merge groups that may hold a success (current admission `success` or unreadable).
+   Under [just-in-time admission](main-merge-admission.md#fail-closed-group-admission)
+   these are the only targets that can still land;
+2. other merge-group holds, which eject a group that cannot land anyway;
+3. pull-request head holds, which only gate enqueueing;
+4. successes.
+
+The rest is deferred, never dropped. The writer returns a durable `progress` record
+of its own receipts (target, state, failure fingerprint, receipt time). On the next
+60-second cycle, an operator-owned store passes it back, and holds already delivered
+under the same failure fingerprint within a ten-minute lease are not repeated. A
+changed failure set, a stale or foreign record, or missing progress writes again.
+That is slower, never weaker. Successes are always rewritten.
+
+Each result reports per-target coverage: `held`, `admitted`, `unlandable` (a group
+with no success), `uncovered` (an unheld pull request) or `uncovered-landable` (a
+group that may hold a success). `complete` means nothing was deferred. `landingSafe`
+means no group that may hold a success was left unwithdrawn. An unheld target is
+never counted as held. The census cap (100 entries) still fails closed: an
+incomplete census writes nothing and no group can then receive a success.
+
+| Fixture (`rehearse-main-merge-admission.mjs` fan-out) | Per-Cycle Delivery | Completion (virtual, from failure) |
+| --- | --- | --- |
+| 45 targets, 37-read rebuild, 96-call cap | 45 writes, 13 calls spare | 1 cycle, **9,300 ms** |
+| Same 45 targets, 48-call cap (earlier zero writes) | 5 writes, 5 reserve calls | 9 cycles, **485,300 ms** |
+| #3711 batched cost, 45 targets (earlier 96/96) | 35, then 10; 10 calls spare each | 2 cycles, **67,100 ms** |
+| Same cost, 46 targets (earlier zero writes) | 35, then 11 | 2 cycles, **67,200 ms** |
+| #3637 backlog-limit cost (55 calls used), 45 targets incl. 2 groups holding a success | 31 (both groups first), then 14 | 2 cycles, **67,900 ms** |
+
+Every fixture cycle keeps at least 10.4% of its cap spare. The bound for T targets
+is **ceil(T / writable) cycles**, where writable = cap − rebuild reads − reserve; a
+cycle is 60 seconds plus its own call time. Landing-critical withdrawals complete in
+the first cycle when the groups holding a success fit within writable. With
+`max_entries_to_build` 2, that is at most two. These are fixture costs; live
+per-commit cost and controller delivery timing still need observation.
 
 Two new read-only observations on **2026-10-26**, at **21:51:57.465 UTC**
 (unbatched health start) and **21:52:21.618 UTC** (batched health start), used the

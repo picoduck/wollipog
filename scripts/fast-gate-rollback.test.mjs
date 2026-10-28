@@ -8,6 +8,7 @@ import { evaluateRollbackTriggers, main, OBSERVATION_SCHEMA, planFastGateRollbac
   rehearseFastGateRollback, restorationProofRefusal,
   rollbackCommands, ROLLBACK_TRIGGERS } from "./fast-gate-rollback.mjs";
 import { POLICY } from "./main-merge-admission.mjs";
+import { planRollback } from "./main-merge-admission-controller.mjs";
 
 const at = (minutes) => new Date(Date.UTC(2026, 10, 2, 15) + minutes * 60_000).toISOString();
 const healthy = (overrides = {}) => ({ schema: OBSERVATION_SCHEMA, repository: "owner/repo", observedAt: at(0), controllerAvailable: true,
@@ -93,10 +94,11 @@ test("thresholds are boundaries: equality keeps the gate, the next step beyond i
   assert.equal(PROPOSED_THRESHOLDS.maxDetectionMinutes, POLICY.maxUnvalidatedAgeSeconds / 60);
 });
 
-test("a forged or inconsistent restoration proof is refused before #3633's planRollback, which alone checks only top-level fields", async () => {
+test("a forged or inconsistent restoration proof is refused by #3633's planRollback itself, which the fast-gate path delegates to", async () => {
   const report = await rehearseFastGateRollback();
-  assert.equal(report.checks.deliveredPlanRollbackOnForgedProof, "operator-hold-removal-approval-required",
-    "disclosed: the delivered pure planRollback does not inspect runs");
+  assert.equal(report.checks.deliveredPlanRollbackOnForgedProof, "restore-full-queue-validation-first",
+    "the delivered planRollback inspects every run (#3633)");
+  assert.equal(planFastGateRollback({ repository: "fixture/fast-gate-rollback" }).decision, planRollback({ repository: "fixture/fast-gate-rollback" }).decision);
   const repository = "fixture/fast-gate-rollback";
   const sha = (c) => c.repeat(40);
   const proof = { schema: "merge-group-restoration-v1", repository, since: "2026-11-02T15:05:00Z", verified: true, coverage: "full-merge-group-v1",
