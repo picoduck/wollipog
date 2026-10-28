@@ -29,7 +29,11 @@ export function queueHoldTrayView(
 ): QueueHoldTrayView | null {
   const hold = session.queueHold;
   if (session.status !== "queued" || session.capacityWait || !hold) return null;
-  const reason = session.holds?.find((candidate) => candidate.holdId === hold.holdId)?.reason ?? queueHoldReason(hold);
+  // An account handoff's sentence names the provider account, whose label may be an email address
+  // (§11.8). The tray writes that one itself, naming the account generically, whoever sent a reason.
+  const reason = hold.kind === "provider_account_switch"
+    ? queueHoldReason(hold).replace(`switch to provider account ${hold.target}`, "switch to the selected provider account")
+    : session.holds?.find((candidate) => candidate.holdId === hold.holdId)?.reason ?? queueHoldReason(hold);
   let release: QueueHoldReleaseAvailability | null = null;
   if (hold.canRelease && sessionCommandRefusal(session, "stopBackgroundJob") === null) {
     release = runnerOnline ? { available: true } : { available: false, reason: "The runner is offline." };

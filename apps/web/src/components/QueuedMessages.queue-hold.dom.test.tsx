@@ -207,6 +207,29 @@ test("without a reason from the control plane the hold reads the protocol's sent
   }
 });
 
+test("an account handoff's reason never names the provider account, whoever wrote the sentence (#3752)", async () => {
+  // A provider account label may be an email address, a personal identifier the tray must not show.
+  const accountHold = hold({ kind: "provider_account_switch", holdId: "provider-account-switch:1", target: "dev@example.com" });
+  const generic = /^The 2 queued messages cannot start: the provider must first switch to the selected provider account, and that handoff waits for 1 background job with no terminal status/u;
+  for (const holds of [
+    [{ kind: "provider_account_switch" as const, holdId: accountHold.holdId, since: SINCE, reason: queueHoldReason(accountHold),
+      recoveryAction: "Wait." }],
+    [],
+  ]) {
+    const tray = await mountTray(heldSession({ queueHold: accountHold, holds }));
+    try {
+      assert.match(tray.line()?.querySelector(".queue-note")?.textContent ?? "", generic);
+      assert.doesNotMatch(tray.line()?.textContent ?? "", /dev@example\.com/u);
+      const button = tray.line()?.querySelector("button");
+      const describedBy = button?.getAttribute("aria-describedby");
+      const description = describedBy ? domWindow.document.getElementById(describedBy)?.textContent ?? "" : "";
+      assert.doesNotMatch(description, /dev@example\.com/u, "the button's description does not name it either");
+    } finally {
+      await tray.dispose();
+    }
+  }
+});
+
 test("a Viewer reads the reason but is not offered Proceed Now… (#3752, #1857)", async () => {
   const tray = await mountTray(heldSession({
     commandPermissions: {
