@@ -99,3 +99,20 @@ test("the summary states five facts and counts changes in words", () => {
   assert.equal(changesLabel(1), "1 change");
   assert.equal(changesLabel(3), "3 changes");
 });
+
+test("review policy fields track overrides, reset individually, and validate only on capable control planes", () => {
+  const settings = view();
+  settings.reviewPolicySupported = true;
+  settings.capabilities.reviewers = [{ harness: "codex", name: "Codex", runnerId: "r", agentId: "codex",
+    capabilities: { models: [{ id: "gpt-review", default: true }], effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true } }];
+  const original = policyDraftFromDefaults(settings.defaults);
+  const draft = { ...original, values: { ...original.values, behavior: { ...original.values.behavior,
+    reviewHarness: "codex" as const, reviewModel: "gpt-review", reviewEffort: "high", reviewRoundBudget: 2 } } };
+  assert.deepEqual([...policyOverrides(draft, settings.defaults)], ["behavior.reviewHarness", "behavior.reviewModel", "behavior.reviewEffort", "behavior.reviewRoundBudget"]);
+  assert.equal(evaluateOrchestratorPolicy(context(settings), draft).problems.some(p => p.path === "behavior.reviewHarness"), false);
+  const missing = { ...draft, values: { ...draft.values, behavior: { ...draft.values.behavior, reviewModel: "missing" } } };
+  assert.equal(evaluateOrchestratorPolicy(context(settings), missing).problems.some(p => p.path === "behavior.reviewHarness"), true);
+  delete settings.reviewPolicySupported;
+  assert.equal(evaluateOrchestratorPolicy(context(settings), missing).problems.some(p => p.path === "behavior.reviewHarness"), false);
+  assert.equal(resetField(draft, settings.defaults, "behavior.reviewRoundBudget").values.behavior.reviewRoundBudget, null);
+});

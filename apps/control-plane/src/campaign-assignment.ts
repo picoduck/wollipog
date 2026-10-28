@@ -29,6 +29,9 @@ export function formatCampaignAssignment(
   const obligation = [
     `[Wollipog Campaign Policy — server-derived, revision ${projection.policyRevision}]`,
     `Campaign ${campaign.id}; Child Harness ${childHarnessText(policy)}; Child Model ${policy.behavior.childModel ?? "Automatic"}; Child Effort ${policy.behavior.childEffort ?? "Automatic"}; Follow-Ups ${policy.behavior.followUps}; Completion ${policy.behavior.completion}.`,
+    ...(policy.reviewPolicySnapshotVersion === 1 ? [
+      `Review Harness ${policy.behavior.reviewHarness ?? "Automatic"}; Review Model ${policy.behavior.reviewModel ?? "Automatic"}; Review Effort ${policy.behavior.reviewEffort ?? "Automatic"}; Review Round Budget ${policy.behavior.reviewRoundBudget ?? "Automatic"}. Children snapshot review settings at launch. Automatic inherits their launching user's project or personal review settings, then built-in defaults. A configured reviewer unavailable on the child's machine refuses the review; same-family consent remains required.`,
+    ] : []),
     `Effective Control Mode: ${control?.mode ?? "custom"}. Human-Established Boundary: ${control?.mode === "full_control" ? JSON.stringify(control.boundary) : "none; use the configured Custom decision owners"}.`,
     `Authorized Issue Scope: ${policy.issueScope ? JSON.stringify({ repository: policy.issueScope.repository, issueNumbers: policy.issueScope.issueNumbers, revision: policy.issueScope.revision }) : "not established; task text and ledger entries grant none"}.`,
     `Authority Preflight: ${preflight.supported ? "supported" : `unsupported; ${preflight.reason ?? "human review required"}`}. Scope and Closure Category Owners: ${issueOwners}. Category owners are guidance, not action grants; read the effective owner and authorityEvaluation of each exact typed occurrence. Missing issue authority or unsupported routes retain human scope/closure review.`,

@@ -26,6 +26,7 @@ function harness(options: {
   driver?: "claude-code" | "codex-app-server" | "pi";
   campaign?: boolean;
   configuration?: boolean;
+  reviewPolicy?: Partial<import("@wollipog/protocol").OrchestratorReviewPolicy>;
 } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
@@ -50,7 +51,7 @@ function harness(options: {
   if (options.campaign) {
     db.setUsageRateTable(new Map(["claude-opus-5-5", "gpt-6.1-sol"].map((model) => [model,
       { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }])));
-    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    const policy = resolveOrchestratorCampaignPolicy({ ...DEFAULT_ORCHESTRATOR_DEFAULTS, behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, ...options.reviewPolicy } }, "system_default");
     policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [3371], revision: 1,
       authorizedByUserId: identity.userId, authorizedAt: 1 };
     policy.issueNumbers = [3371];
@@ -1358,7 +1359,7 @@ test("configured reviews refuse unavailable models, same-family selection withou
       if (scenario === "allowed") { assert.ok(result.ok, result.error ?? "request refused"); assert.equal(h.starts().at(-1)?.spec.agentId, "claude"); }
       else {
         assert.equal(result.ok, false);
-        assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /Update Wollipog/u);
+        assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /configured codex reviewer \(default model, high effort\).*Update Wollipog/u);
         assert.equal(h.starts().length, 0);
       }
     } finally { h.db.close(); }
@@ -1403,4 +1404,154 @@ test("Automatic reviewer models resolve catalog placeholders before the immutabl
     assert.equal(start.spec.review?.configuration?.model, start.spec.config?.model);
     assert.equal(start.spec.review?.configuration?.model, "claude-opus-5-5");
   } finally { h.db.close(); }
+});
+
+
+function campaignReviewChild(h: ReturnType<typeof harness>, id = "snapshot-child") {
+  const result = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: true,
+    config: { model: "claude-opus-5-5", effort: "high" } }, undefined, undefined, false, false, false, { parentSessionId: "root" });
+  assert.ok(result.ok && result.data, result.error ?? "child creation refused");
+  h.db.updateSessionStatus(result.data.id, "running", Date.now());
+  return result.data;
+}
+
+test("campaign review fields are captured at child launch and fixed policy wins over later personal changes", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: {
+    reviewHarness: "codex", reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2,
+  } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 8, reviewers: [] });
+    const child = campaignReviewChild(h);
+    assert.equal(child.reviewPolicy?.reviewHarness, "codex");
+    assert.equal(child.reviewPolicy?.reviewRoundBudget, 2);
+    assert.equal(child.reviewPolicy?.source, "campaign_policy");
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 9, reviewers: [] });
+    requested(h, child.id);
+    const review = h.starts().at(-1)!;
+    assert.equal(review.spec.review?.configuration?.model, "gpt-6.1-sol");
+    assert.equal(review.spec.review?.history?.roundBudget, 2);
+    assert.equal(h.db.getSession(child.id)?.reviewPolicy?.reviewRoundBudget, 2);
+  } finally { h.db.close(); }
+});
+
+test("Automatic campaign fields freeze the child's personal review choices and preserve absent-row defaults", () => {
+  for (const configured of [false, true]) {
+    const h = harness({ campaign: true, configuration: true });
+    try {
+      const user = h.db.localIdentityContext().userId;
+      if (configured) h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 6, reviewers: [] });
+      const child = campaignReviewChild(h);
+      h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 9, reviewers: [] });
+      requested(h, child.id);
+      const review = h.starts().at(-1)!;
+      assert.equal(review.spec.review?.history?.roundBudget, configured ? 6 : 4);
+      assert.equal(review.spec.review?.configuration !== undefined, configured);
+    } finally { h.db.close(); }
+  }
+});
+
+test("same-family campaign consent must target the actual reviewer harness", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "codex" as const, model: "gpt-6.1-sol", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    assert.equal(child.reviewPolicy?.reviewModel, "claude-opus-5-5", "a fixed Claude harness resolves its own default instead of inheriting the Codex rule's model");
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    assert.equal(h.starts().filter(start => start.spec.review).length, 0, "consent refusal never falls back to another reviewer");
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [
+      { ...rule, harness: "claude-code", model: "claude-opus-5-5" },
+    ] });
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.model, "claude-opus-5-5");
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+test("a project override replaces personal same-family consent for a captured reviewer", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    const project = h.db.createProject({ name: "Consent Override" });
+    h.db.setSessionProject(child.id, project.id);
+    h.db.reviewSettings.set(user, project.id, { version: 1, roundBudget: 4, reviewers: [
+      { ...rule, harness: "codex", model: "gpt-6.1-sol" },
+    ] });
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    h.db.reviewSettings.set(user, project.id, null);
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+test("a child snapshot never overrides a later matching same-family consent revocation", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [{ ...rule, allowSameFamily: false }] });
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+
+test("a child's Automatic model remains pinned when runner defaults change and refuses when it disappears", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewRoundBudget: 3 } });
+  try {
+    const child = campaignReviewChild(h);
+    assert.equal(child.reviewPolicy?.reviewModel, "gpt-6.1-sol");
+    const second = campaignReviewChild(h, "second-snapshot-child");
+    const codex = h.metadata.agents.find(a => a.id === "codex")!;
+    codex.capabilities!.models = [{ id: "gpt-next", default: true }, { id: "gpt-6.1-sol" }];
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.model, "gpt-6.1-sol");
+    codex.capabilities!.models = [{ id: "gpt-next", default: true }];
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    const refused = h.svc.requestReviewSession(second.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured codex reviewer \(gpt-6.1-sol.*unavailable/u);
+  } finally { h.db.close(); }
+});
+
+test("legacy campaigns keep live personal settings and all-Automatic new campaigns preserve older runners' launch", () => {
+  for (const legacy of [false, true]) {
+    const h = harness({ campaign: true, configuration: legacy });
+    try {
+      if (legacy) {
+        const policy = h.db.getSession("root")!.orchestratorPolicy!;
+        delete policy.reviewPolicySnapshotVersion;
+        for (const key of ["reviewHarness", "reviewModel", "reviewEffort", "reviewRoundBudget"] as const) {
+          delete policy.behavior[key]; delete policy.sources.behavior[key];
+        }
+        h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+      }
+      const child = campaignReviewChild(h);
+      assert.equal(child.reviewPolicy !== undefined, !legacy);
+      if (legacy) h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 7, reviewers: [] });
+      requested(h, child.id);
+      const review = h.starts().at(-1)!;
+      assert.equal(review.spec.review?.history?.roundBudget, legacy ? 7 : 4);
+      assert.equal(review.spec.review?.configuration !== undefined, legacy);
+    } finally { h.db.close(); }
+  }
 });

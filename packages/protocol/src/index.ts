@@ -1,4 +1,6 @@
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
+import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
+export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
 export * from "./review-settings.js";
 import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
@@ -2618,7 +2620,7 @@ export const HUMAN_ONLY_PARENT_CONTROL_POLICY: ParentControlDecisionPolicy = {
 
 /** User-owned defaults for how a newly created Orchestrator campaign manages children. `null`
  * means capability-driven automatic selection within the preceding fixed level, if any. */
-export interface OrchestratorBehaviorDefaults {
+export interface OrchestratorBehaviorDefaults extends Partial<OrchestratorReviewPolicy> {
   childHarness: AgentHarnessIdentity | null;
   childModel: string | null;
   childEffort: string | null;
@@ -2684,6 +2686,7 @@ export function validOrchestratorCampaignBudgetDefault(value: unknown): value is
 
 export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
   behavior: {
+    ...DEFAULT_ORCHESTRATOR_REVIEW_POLICY,
     childHarness: null,
     childModel: null,
     childEffort: null,
@@ -2707,7 +2710,7 @@ export type OrchestratorPolicySource =
   | "active_campaign";
 
 export interface OrchestratorPolicySources {
-  behavior: Record<keyof OrchestratorBehaviorDefaults, OrchestratorPolicySource>;
+  behavior: { [K in keyof OrchestratorBehaviorDefaults]: OrchestratorPolicySource };
   delegation: {
     parentControl: OrchestratorPolicySource;
     decisions: Record<DelegatableWorkflowDecisionCategory, OrchestratorPolicySource>;
@@ -2718,6 +2721,8 @@ export interface OrchestratorPolicySources {
 /** Immutable-at-creation campaign snapshot. Active human changes replace only the affected field
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
+  /** Capability-gated child review snapshots. Older policies omit it and retain legacy resolution. */
+  reviewPolicySnapshotVersion?: 1;
   version: 1;
   /** `harness`: a fixed Child Harness admits any row of the same harness on every Machine (#3247).
    * Absent on campaigns created earlier, which keep enforcing the exact Machine-local agent id. */
@@ -2989,6 +2994,8 @@ export interface OrchestratorCampaignOverrides {
 }
 
 export interface OrchestratorSettingsCapabilities {
+  /** Only trusted native reviewers advertised by connected machines with configuration support. */
+  reviewers?: import("./review-settings.js").ReviewSettingsView["reviewers"];
   /** Harness-scoped catalogs are authoritative. Identical model ids in separate harnesses remain
    * separate choices and never share effort metadata. */
   harnesses?: OrchestratorHarnessCapability[];
@@ -3073,6 +3080,8 @@ export interface OrchestratorHarnessCapability extends AgentHarnessIdentity {
 }
 
 export interface OrchestratorSettingsView {
+  /** Older control planes omit it; clients hide the new policy fields in that case. */
+  reviewPolicySupported?: true;
   defaults: OrchestratorDefaults;
   source: "system_default" | "user_default";
   capabilities: OrchestratorSettingsCapabilities;
@@ -7545,6 +7554,8 @@ export interface SessionAttentionSummary {
 
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
+  /** Immutable review selection captured when this campaign child launched. */
+  reviewPolicy?: import("./orchestrator-review-policy.js").SessionReviewPolicySnapshot;
   /** Lightweight list projection. Open the authorized detail endpoint before rendering controls
    * that depend on request bodies, provider capabilities, queues, or campaign inventories. */
   projection?: "summary";

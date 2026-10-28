@@ -16,7 +16,8 @@ import { CampaignBudgetLedger } from "./campaign-budget.js";
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
-import { ReviewSettingsStore } from "./review-settings.js";
+import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
+import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
@@ -2768,6 +2769,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_settings (
   user_id                     TEXT PRIMARY KEY,
   control_mode                TEXT CHECK (control_mode IN ('custom','full_control')),
   campaign_budget             TEXT,
+  review_policy               TEXT,
   child_harness               TEXT,
   child_model                 TEXT,
   child_effort                TEXT,
@@ -4546,6 +4548,8 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
+  reviewPolicyCapture?: ReviewPolicyCapture;
   /** Authenticated launching user for personal review settings, including shared Projects. */
   reviewSettingsUserId?: string;
   /** Trusted pre-allocation session ceilings, never from request JSON. */
@@ -5437,11 +5441,12 @@ export class ControlPlaneDb {
   readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
    * reviews, their summary (#3369); nothing else for ordinary sessions. */
-  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns"> {
+  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy"> {
     const review = this.reviewSessions.link(sessionId);
     if (review) return { kind: "review", review };
     const reviewRuns = this.reviewSessions.summaryFor(sessionId);
-    return reviewRuns ? { reviewRuns } : {};
+    const reviewPolicy = this.reviewSettings.sessionPolicy(sessionId);
+    return { ...(reviewRuns ? { reviewRuns } : {}), ...(reviewPolicy ? { reviewPolicy } : {}) };
   }
 
   private constructor(
@@ -7219,6 +7224,9 @@ export class ControlPlaneDb {
     }
     if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "campaign_budget")) {
       db.exec("ALTER TABLE orchestrator_settings ADD COLUMN campaign_budget TEXT");
+    }
+    if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "review_policy")) {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN review_policy TEXT");
     }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
@@ -11250,12 +11258,13 @@ export class ControlPlaneDb {
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
-      `SELECT control_mode, campaign_budget, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+      `SELECT control_mode, campaign_budget, review_policy, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
               strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
       control_mode: OrchestratorDefaults["controlMode"] | null;
       campaign_budget: string | null;
+      review_policy: string | null;
       child_harness: string | null;
       child_model: string | null;
       child_effort: string | null;
@@ -11277,6 +11286,7 @@ export class ControlPlaneDb {
         ...(row.control_mode == null ? {} : { controlMode: row.control_mode }),
         ...(validOrchestratorCampaignBudgetDefault(campaignBudget) ? { campaignBudget } : {}),
         behavior: {
+          ...(parseOrchestratorReviewPolicy(parseJson<unknown>(row.review_policy)) ?? DEFAULT_ORCHESTRATOR_REVIEW_POLICY),
           // Saved before #3247 under a Machine-local agent id; read as the harness it names.
           childHarness: canonicalChildHarness(parseJson<unknown>(row.child_harness)),
           childModel: row.child_model,
@@ -11329,6 +11339,11 @@ export class ControlPlaneDb {
     if (defaults.campaignBudget !== undefined) {
       this.stmt("UPDATE orchestrator_settings SET campaign_budget=? WHERE user_id=?")
         .run(defaults.campaignBudget === null ? null : JSON.stringify(defaults.campaignBudget), userId);
+    }
+    // Older clients omit every review field; that preserves this user's saved review policy.
+    if (ORCHESTRATOR_REVIEW_POLICY_KEYS.some(key => Object.hasOwn(defaults.behavior, key))) {
+      this.stmt("UPDATE orchestrator_settings SET review_policy=? WHERE user_id=?")
+        .run(JSON.stringify(parseOrchestratorReviewPolicy(defaults.behavior)), userId);
     }
   }
 
@@ -16064,6 +16079,7 @@ export class ControlPlaneDb {
       const reviewUserId = input.reviewSettingsUserId ?? (input.parentSessionId ? this.reviewSettings.sessionUser(input.parentSessionId) : null)
         ?? (scope.owner.kind === "user" ? scope.owner.userId : null);
       if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
+      if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",
@@ -31138,6 +31154,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     value.sources.execution.integrationIsolation = "legacy_session";
   }
   const behavior = value.behavior;
+  if (!parseOrchestratorReviewPolicy(behavior)) return null;
   const childHarness = behavior.childHarness === null ? null : normalizeAgentHarnessIdentity(behavior.childHarness);
   if ((behavior.childHarness !== null && !childHarness) ||
       (value.issueNumbers !== undefined && (!Array.isArray(value.issueNumbers) ||
@@ -31179,11 +31196,13 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   ]);
   const behaviorSourceKeys = [
     "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+    ...ORCHESTRATOR_REVIEW_POLICY_KEYS.filter(key => value.reviewPolicySnapshotVersion === 1 || Object.hasOwn(value.sources.behavior, key)),
   ] as const;
+  if (value.reviewPolicySnapshotVersion !== undefined && value.reviewPolicySnapshotVersion !== 1) return null;
   if (!value.sources.behavior || !value.sources.delegation || !value.sources.delegation.decisions ||
       !value.sources.execution ||
       Object.keys(value.sources.behavior).length !== behaviorSourceKeys.length ||
-      !behaviorSourceKeys.every((key) => validSources.has(value.sources.behavior[key])) ||
+      !behaviorSourceKeys.every((key) => typeof value.sources.behavior[key] === "string" && validSources.has(value.sources.behavior[key]!)) ||
       !validSources.has(value.sources.delegation.parentControl) ||
       !validSources.has(value.sources.execution.strictProjectIsolation) ||
       !validSources.has(value.sources.execution.integrationIsolation)) return null;

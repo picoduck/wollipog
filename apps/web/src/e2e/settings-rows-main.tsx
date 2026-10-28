@@ -423,8 +423,11 @@ const harnessDefaultsTransport: ApiTransport = {
       return new Response(JSON.stringify({
         defaults,
         source: orchestratorSaved || drifted ? "user_default" : "system_default",
+        ...(params.get("reviewPolicy") === "legacy" ? {} : { reviewPolicySupported: true }),
         ...(params.get("fullControlFixture") === "1" ? { controlModeSupported: true } : {}),
         capabilities: {
+          reviewers: ["codex", "claude-code"].map(harness => ({ harness, name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
+            capabilities: { models: [{ id: harness === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", displayName: harness === "codex" ? "GPT-6.1 Sol" : "Claude Opus 5.5", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
           harnesses: [{
             agentId: "codex-app-server",
             driver: "codex-app-server",

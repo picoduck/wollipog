@@ -603,3 +603,32 @@ test("Orchestrator settings reasons name machines and Connections, never install
     db.close();
   }
 });
+
+test("review policy defaults persist, older clients preserve them, and discovery rejects missing choices", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const principal = human(db);
+    const metadata = runner("review-host", "gpt-review", ["medium", "high"]);
+    metadata.runtime = { dataDir: "/runner", worktreeRoot: "/worktrees", maxConcurrentSessions: 4,
+      reviewSession: { configuration: true, reviewers: [{ harness: "codex", agentId: "codex" }] } };
+    db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const saved = defaults({ reviewHarness: "codex", reviewModel: "gpt-review", reviewEffort: "medium", reviewRoundBudget: 7 });
+    assert.equal(settings.update(principal, { defaults: saved }).defaults.behavior.reviewRoundBudget, 7);
+    assert.equal(new OrchestratorSettings(db).view(principal).defaults.behavior.reviewModel, "gpt-review");
+    const legacy = defaults({ maximumConcurrentChildren: 3 });
+    for (const key of ["reviewHarness", "reviewModel", "reviewEffort", "reviewRoundBudget"] as const) delete legacy.behavior[key];
+    const result = settings.update(principal, { defaults: legacy });
+    assert.equal(result.defaults.behavior.reviewRoundBudget, 7);
+    assert.equal(result.defaults.behavior.maximumConcurrentChildren, 3);
+    assert.throws(() => settings.update(principal, { defaults: defaults({ ...saved.behavior, reviewModel: "missing" }) }), /codex.*missing.*unavailable/u);
+    assert.throws(() => settings.update(principal, { defaults: defaults({ ...saved.behavior, reviewEffort: "ultra" }) }), /ultra.*unavailable/u);
+    assert.equal(parseOrchestratorDefaults({ ...saved, behavior: { ...saved.behavior, reviewRoundBudget: 33 } }), null);
+    assert.equal(parseOrchestratorOverrides({ behavior: { reviewHarness: "shell-command" } }), null);
+    const policy = resolveOrchestratorCampaignPolicy(saved, "user_default", { behavior: { reviewRoundBudget: 2 } });
+    assert.equal(policy.reviewPolicySnapshotVersion, 1);
+    assert.equal(policy.behavior.reviewRoundBudget, 2);
+    assert.equal(policy.sources.behavior.reviewRoundBudget, "session_override");
+    assert.equal(policy.sources.behavior.reviewModel, "user_default");
+  } finally { db.close(); }
+});

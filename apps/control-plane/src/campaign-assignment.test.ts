@@ -93,3 +93,13 @@ test("unsupported or stale authority names human fallback rather than a consumab
   assert.match(text, /Category owners are guidance, not action grants/);
   assert.match(text, /authorityEvaluation of each exact typed occurrence/);
 });
+
+test("modern assignments describe fixed review fields and legacy policies retain their prior prompt", () => {
+  const campaign = fixture();
+  Object.assign(campaign.orchestratorPolicy.behavior, { reviewHarness: "codex", reviewModel: "gpt-review", reviewEffort: "high", reviewRoundBudget: 2 });
+  const modern = formatCampaignAssignment(campaign, humanProjection, { supported: true }, "Task");
+  assert.match(modern, /Review Harness codex; Review Model gpt-review; Review Effort high; Review Round Budget 2/);
+  assert.match(modern, /Children snapshot review settings at launch/);
+  delete campaign.orchestratorPolicy.reviewPolicySnapshotVersion;
+  assert.doesNotMatch(formatCampaignAssignment(campaign, humanProjection, { supported: true }, "Task"), /Review Round Budget/);
+});

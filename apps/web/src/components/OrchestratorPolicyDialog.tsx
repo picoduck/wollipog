@@ -1,3 +1,5 @@
+import { OrchestratorReviewFields } from "./OrchestratorReviewFields.js";
+import { orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import { useId, useState, type ReactNode, type Ref } from "react";
 import {
   MAX_LIVE_CHILD_LIMIT,
@@ -225,6 +227,16 @@ export function OrchestratorPolicyDialog({
         error={problemFor("behavior.childEffort")}
         onChange={(value) => setBehavior("childEffort", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
       />
+      {view.reviewPolicySupported && <OrchestratorReviewFields value={draft.values.behavior} reviewers={view.capabilities.reviewers ?? []}
+        problem={orchestratorReviewPolicyProblem(draft.values.behavior, view.capabilities.reviewers ?? [])}
+        badge={key => {
+          const saved = defaults.behavior[key];
+          const label = saved == null ? "Automatic" : key === "reviewHarness" ? saved === "codex" ? "Codex" : "Claude Code"
+            : key === "reviewEffort" ? titleCaseLabel(String(saved)) : key === "reviewModel"
+              ? view.capabilities.reviewers?.flatMap(r => r.capabilities.models).find(m => m.id === saved)?.displayName ?? String(saved) : String(saved);
+          return mark(`behavior.${key}`, label);
+        }}
+        onChange={patch => setDraft(current => ({ ...current, values: { ...current.values, behavior: { ...current.values.behavior, ...patch } } }))} />}
       {/* The error replaces the description (§8.5), so the row says one thing at a time. */}
       <NumberRow
         title="Maximum Concurrent Children"

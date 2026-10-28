@@ -1,5 +1,6 @@
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
+import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
@@ -4012,6 +4013,8 @@ export class SessionsService {
     }
     this.hub.sessionChanged(session);
     this.log.info(`session created ${session.id} on ${session.runnerId} (${session.agentId} @ ${session.workspaceId})`);
+    if (session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
+      entryPoint: "prepared_media", sessionId: session.id, parentSessionId: session.parentSessionId, ...session.reviewPolicy }));
   }
 
   createSession(
@@ -4511,6 +4514,7 @@ export class SessionsService {
       ) ? DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.parentControl : "off";
       const inheritedCampaign = parentSessionId ? campaignController?.orchestratorPolicy : undefined;
       const campaignBase = inheritedCampaign ? {
+        ...(inheritedCampaign.reviewPolicySnapshotVersion === 1 ? { reviewPolicySnapshotVersion: 1 as const } : {}),
         behavior: { ...inheritedCampaign.behavior },
         delegation: {
           parentControl: inheritedCampaign.delegation.parentControl,
@@ -4978,9 +4982,20 @@ export class SessionsService {
       const gate = this.sessionSpawnGate(parentSessionId, spawnRequest);
       if (!gate.ok) return failAs(gate);
     }
+    const snapshotReviews = campaignController?.orchestratorPolicy?.reviewPolicySnapshotVersion === 1 && !creationContext?.review;
+    const reviewFields = snapshotReviews ? parseOrchestratorReviewPolicy(campaignController!.orchestratorPolicy!.behavior) : null;
+    if (snapshotReviews && !reviewFields) return fail("the campaign's review policy is invalid; update it before launching a child", 409);
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
+      ...(reviewFields ? { reviewPolicyCapture: { fields: reviewFields,
+        implementer: agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
+        resolveModel: (harness, model, effort) => {
+          const reviewerId = runner?.runtime?.reviewSession?.reviewers.find(entry => entry.harness === harness)?.agentId;
+          const reviewer = runner?.agents.find(entry => entry.id === reviewerId && entry.available === true);
+          return resolveEffectiveModelEffort({ ...(model ? { model } : {}), effort }, reviewer?.capabilities,
+            harness === "codex" ? "codex-app-server" : "claude-code").value?.model ?? null;
+        } } } : {}),
       reviewSettingsUserId: creationContext?.defaultOwnerUserId,
       campaignBudgetUserLimits,
       reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
@@ -5119,6 +5134,8 @@ export class SessionsService {
       }
     }
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
+    if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
+      entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
     return ok(this.db.getSession(id)!, 201);
   }
 
