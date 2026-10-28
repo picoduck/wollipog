@@ -607,6 +607,50 @@ test("Inbox Reply consumes its focus request in a captured frame", async () => {
   });
 });
 
+test("Escape before Inbox Reply is acknowledged leaves Answer Mode for the ordinary draft (#3517)", { timeout: 5_000 }, async () => {
+  setQuestionResponseStyle("composer", domWindow as never);
+  const draft = deferred<ComposerDraft | null>();
+  let consumed = 0;
+  const fixture = await mountFixture(draft, {
+    composerFocusIntent: "reply",
+    onComposerFocusConsumed: () => { consumed += 1; },
+  });
+  try {
+    await resolveDraft(draft, "preserved draft");
+    await fixture.pushSession({
+      pendingApproval: {
+        requestId: "ask-reply-escape",
+        title: "Choose a target",
+        options: [],
+        kind: "question",
+        questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+      },
+    });
+    const answer = fixture.container.querySelector<HTMLInputElement>(".composer-answer-input");
+    assert.ok(answer, "Reply opens Answer Mode for the pending question");
+    assert.ok(answer.ownerDocument.activeElement === answer, "the answer owns focus");
+    assert.equal(consumed, 0, "the acknowledgement frame has not run yet");
+
+    // The person leaves Answer Mode before the frame that acknowledges Reply has run.
+    await act(async () => {
+      answer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Escape", bubbles: true, cancelable: true,
+      }) as never);
+    });
+    await act(async () => { flushFrames(); });
+
+    assert.ok(consumed > 0, "Reply is still acknowledged");
+    assertNoDomNode(fixture.container.querySelector(".composer-answer"));
+    const ordinary = fixture.container.querySelector<HTMLTextAreaElement>(".composer-input");
+    assert.ok(ordinary, "the ordinary composer returns");
+    assert.equal(ordinary.value, "preserved draft");
+    assert.ok(ordinary.ownerDocument.activeElement === ordinary, "the ordinary composer is focused");
+  } finally {
+    await unmountFixture(fixture);
+    setQuestionResponseStyle("interactive", domWindow as never);
+  }
+});
+
 test("selecting a slash command restores the composer caret in its captured frame", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft);

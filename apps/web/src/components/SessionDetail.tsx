@@ -3807,18 +3807,31 @@ function SessionDetailLoaded({
   }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId,
     revealComposerFromTerminal]);
 
+  // The session whose Inbox Reply has already opened Answer Mode. The request stays set until the
+  // acknowledgement frame below, and every commit before then reruns this effect; leaving Answer
+  // Mode is one of them, so Escape pressed before that frame would otherwise reopen it (#3517).
+  const replyIntentAnsweredRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (composerFocusIntent !== "reply") return;
+    if (composerFocusIntent !== "reply") {
+      replyIntentAnsweredRef.current = null;
+      return;
+    }
     // An Inbox Reply request is contextual: a pending question owns it before the ordinary
     // composer does. Resolve that ownership during the expansion commit so the very next bare key
     // cannot escape to the global shortcut layer while focus is waiting on an animation frame.
-    enterAnswerMode();
+    // A question that arrives while the request waits still takes it. Once Answer Mode has opened,
+    // a rerun keeps focus in it while it stays open, and never reopens it after the person leaves.
+    if (replyIntentAnsweredRef.current !== sessionId || composerAnswerActive) {
+      enterAnswerMode();
+      if (canAnswerPendingQuestion) replyIntentAnsweredRef.current = sessionId;
+    }
     // Acknowledge only after InboxView's expansion frame records the new surface. Clearing the
     // request in this layout commit would cancel that frame; its replacement sees an ordinary
     // expansion and moves focus back to the reader.
     const frame = window.requestAnimationFrame(() => onComposerFocusConsumed?.());
     return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusIntent, enterAnswerMode, onComposerFocusConsumed, sessionId]);
+  }, [canAnswerPendingQuestion, composerAnswerActive, composerFocusIntent, enterAnswerMode, onComposerFocusConsumed,
+    sessionId]);
 
   useLayoutEffect(() => {
     const liveRequestId = pendingQuestion?.requestId ?? null;
