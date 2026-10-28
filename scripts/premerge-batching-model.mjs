@@ -98,7 +98,9 @@ export function simulate(inputs, design, params = {}, seed = 1) {
   let validated = 0;
   let failedTip = null;
   let validator = null;
-  let liveDefects = new Set();
+  // Landed escapes not yet reverted, and escapes still open until a passing verdict covers their revert.
+  const liveDefects = new Set();
+  const openDefects = new Map();
   let redSince = null;
   let healthFailing = false;
   let holdSince = null;
@@ -122,6 +124,16 @@ export function simulate(inputs, design, params = {}, seed = 1) {
     const holding = held();
     if (holding && holdSince === null) holdSince = now;
     if (!holding && holdSince !== null) { stats.holdMinutes += now - holdSince; holdSince = null; }
+    if (holding) {
+      // A hold withdraws admission from ordinary entries already building; reverts keep moving.
+      const withdrawn = units.filter((unit) => unit.entries.some((entry) => entry.revert === null));
+      if (withdrawn.length) {
+        for (const unit of withdrawn) cancel(unit);
+        units = units.filter((unit) => !withdrawn.includes(unit));
+        queue.unshift(...withdrawn.flatMap((unit) => unit.entries));
+        queue.sort((a, b) => (a.revert === null) - (b.revert === null));
+      }
+    }
     while (units.length < depth && queue.length) {
       // A health or backlog hold admits only reverts.
       const take = holding ? queue.filter((entry) => entry.revert !== null).slice(0, k) : queue.slice(0, k);
@@ -133,7 +145,8 @@ export function simulate(inputs, design, params = {}, seed = 1) {
     if (staged && !validator && validated < main.length && failedTip !== main.length && slotsUsed < p.slots) {
       const minutes = fullMinutes();
       const tip = main.length;
-      validator = { tip, end: now + minutes, fails: liveDefects.size > 0 ? "defect" : rng() < p.flakeRate ? "flake" : null };
+      const defects = [...liveDefects];
+      validator = { tip, defects, end: now + minutes, fails: defects.length ? "defect" : rng() < p.flakeRate ? "flake" : null };
       slotsUsed++;
       stats.validations++;
       stats.fullBuilds++;
@@ -172,15 +185,21 @@ export function simulate(inputs, design, params = {}, seed = 1) {
       if (!staged) continue;
       main.push({ at: now, entry });
       if (entry.revert === null && liveDefects.size) stats.exposedMerges++;
-      if (entry.escapes) { liveDefects.add(entry); stats.escapes++; redSince ??= now; }
-      if (entry.revert) liveDefects.delete(entry.revert);
+      if (entry.escapes) { liveDefects.add(entry); openDefects.set(entry, null); stats.escapes++; redSince ??= now; }
+      if (entry.revert) { liveDefects.delete(entry.revert); openDefects.set(entry.revert, main.length); }
     }
   }
 
   function resolve() {
     while (units[0]?.build?.done) {
       const [head] = units;
-      if (!head.build.fails) { land(head); units.shift(); continue; }
+      if (!head.build.fails) {
+        // An ordinary entry whose fast build passed cannot land while admission is held.
+        if (held() && head.entries.some((entry) => entry.revert === null)) break;
+        land(head);
+        units.shift();
+        continue;
+      }
       if (design.headGreen) {
         // HEADGREEN: a later passing group contains every entry ahead of it, so it vouches for them
         // within one merge (max_entries_to_merge 5). A still-running later group is awaited.
@@ -201,7 +220,8 @@ export function simulate(inputs, design, params = {}, seed = 1) {
         const [entry] = head.entries;
         const failsAgain = staged ? entry.defective && !entry.escapes : entry.defective;
         if (failsAgain) stats.rejected++;
-        else pending.push({ at: now + sample(inputs.sameHeadReenqueueMinutes), entry });
+        // Reverts are retried by the repair path; other unchanged heads wait a measured re-enqueue delay.
+        else pending.push({ at: now + (entry.revert !== null ? p.repairMinutes : sample(inputs.sameHeadReenqueueMinutes)), entry });
       } else if (design.retryBatch && !head.retried) {
         units.unshift({ entries: head.entries, build: null, retried: true });
       } else {
@@ -215,13 +235,15 @@ export function simulate(inputs, design, params = {}, seed = 1) {
 
   function validatorDone() {
     slotsUsed--;
-    const { tip, fails } = validator;
+    const { tip, defects, fails } = validator;
     validator = null;
+    // Admission cannot tell a spurious failure from a real one: any failed verdict holds until a pass.
+    if (fails) healthFailing = true;
     if (fails === "flake") return; // The rolling validator reruns the same tip at its next opportunity.
     if (fails === "defect") {
-      healthFailing = true;
       failedTip = tip;
-      for (const defect of liveDefects) {
+      // Only defects in the tested snapshot are attributed; later landings need their own verdict.
+      for (const defect of defects) {
         if (entries.some((entry) => entry.revert === defect)) continue;
         const revert = { id: entries.length, arrival: now + p.repairMinutes, defective: false, escapes: false, revert: defect };
         entries.push(revert);
@@ -231,12 +253,11 @@ export function simulate(inputs, design, params = {}, seed = 1) {
       return;
     }
     validated = tip;
-    if (healthFailing || redSince !== null) {
-      if (liveDefects.size === 0) {
-        stats.redMinutes += now - redSince;
-        redSince = null;
-        healthFailing = false;
-      }
+    healthFailing = false;
+    for (const [defect, revertTip] of openDefects) if (revertTip !== null && revertTip <= tip) openDefects.delete(defect);
+    if (openDefects.size === 0 && redSince !== null) {
+      stats.redMinutes += now - redSince;
+      redSince = null;
     }
   }
 

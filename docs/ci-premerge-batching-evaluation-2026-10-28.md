@@ -244,8 +244,13 @@ ceiling holds two eight-job suites before PR CI contends for it.
   flight. A failing batch splits by bisection or one at a time. Optionally it retries the batch
   once before splitting.
 - **Staged** runs native ordering over a fast gate with its own small-job pool. One rolling full
-  validation of `main`'s tip runs at a time. #3633-style holds admit only reverts while health is
-  failing, the backlog exceeds 5 commits, or the oldest unvalidated commit is older than 120 min.
+  validation of `main`'s tip runs at a time. #3633-style holds admit only reverts while any full
+  verdict is unresolved (a spurious failure holds too, until a passing rerun), the backlog exceeds
+  5 commits, or the oldest unvalidated commit is older than 120 min. A hold withdraws ordinary
+  entries already building. A failed verdict schedules a revert only for defects in the snapshot
+  it tested, `repairMinutes` (20) later; a revert whose fast build flakes is retried on the same
+  delay. Ordinary same-head retries draw from the measured re-enqueue delays, whose tail includes
+  one 7,408-minute (five-day) human gap.
 
 **Assumptions** (all overridable with `--set`): 12% spurious full-suite failures and 3% defective
 entries.
@@ -290,7 +295,7 @@ Minutes. "Builds" are full suites per merged entry, including cancelled builds.
 | Batch 4, depth 1, one-by-one | 54.2 | 133.5 | 0.91 | 163.7 | — | — |
 | Batch 4, depth 1, retry then bisect | 52.0 | 122.4 | 0.90 | 161.8 | — | — |
 | Batch 4, depth 2, bisect | 37.5 | 87.8 | 1.13 | 197.2 | 71.5 | 148.9 |
-| Staged fast gate + rolling | 10.0 | 19.9 | 0.82 | 191.5 | 10.0 | 19.9 |
+| Staged fast gate + rolling | 10.0 | 37.0 | 0.83 | 193.7 | 10.0 | 37.0 |
 
 **Mean landing size** for a size-4 batch is only 1.34, because the queue rarely holds four
 waiting entries.
@@ -306,7 +311,7 @@ runner-minutes per merge.
 | Native, HEADGREEN | 66 / 158, 200 | 124 / 292, 199 | Same as native | Same as native |
 | Batch 4, depth 1, bisect | 64 / 198, 130 | 82 / 278, 113 | 64 / 198, 130 | 82 / 278, 113 |
 | Batch 4, depth 2, bisect | 44 / 108, 172 | 52 / 145, 157 | 89 / 222, 139 | 108 / 324, 122 |
-| Staged | 10 / 35, 158 | 10 / 71, 142 | 10 / 35, 158 | 10 / 71, 142 |
+| Staged | 10 / 48, 161 | 16 / 90, 145 | 10 / 48, 161 | 16 / 90, 145 |
 
 **Failure-rate sensitivity** (today's rate, 2 slots), comparing a 5% spurious rate with 12%:
 
@@ -369,19 +374,20 @@ model estimates the following per nine-day trace:
 | Measure | Modeled Value |
 | --- | ---: |
 | Escapes to `main` | 1.9 |
-| Red minutes on `main` | 223, about two hours per escape |
-| Ordinary merges landed while a defect was live | 2.3 |
-| Admission hold minutes | 222 |
+| Red minutes on `main` | 224, about two hours per escape |
+| Ordinary merges landed while a defect was live | 2.1 |
+| Admission hold minutes | 685, about 5% of the trace |
 
-Holds rise to 372 and 593 minutes at ×2 and ×3. At these rates the backlog and age holds start to
-limit throughput.
+Most hold time comes from spurious full verdicts, which hold admission until a passing rerun; at a
+5% spurious rate holds fall to 375 minutes. Holds rise to 725 and 838 minutes at ×2 and ×3, where
+the staged p90 reaches 48 and 90 minutes as backlog and age holds start to limit throughput.
 
 **Sensitivity to the fast gate's catch rate:**
 
 | Fast-Gate Catch Rate | Escapes | Red Minutes | Hold Minutes |
 | ---: | ---: | ---: | ---: |
-| 90% | 0.7 | 73 | 133 |
-| 30% | 3.4 | 756 | 701 |
+| 90% | 0.7 | 76 | 623 |
+| 30% | 3.4 | 380 | 785 |
 
 The fast gate's real coverage is the dominant unknown, and #3637 must measure it before anyone
 accepts temporary regressions.
@@ -488,8 +494,8 @@ through #3637's approval. Do not adopt a batching queue.
 1. **Little to batch.** The queue is idle 49% of the time and its median depth is 1. A size-4
    batch averages 1.34 entries.
 2. **Latency does not improve enough.** Depth-1 batching worsens median latency at today's rate.
-   Speculative batching improves p90 by about 25 min but cannot reach p90 ≤ 60, and halves the
-   runner saving.
+   Speculative batching improves p90 by about 25 min but cannot reach p90 ≤ 60, and keeps less
+   than half of the runner saving.
 3. **Flakes cost batching more.** Spurious failures (12–15% per build, often clustered) are the
    largest cost driver in every full-gate design. They cost a batching queue more, through split
    cascades, than they cost native. Reducing them (#3636, #3628) helps every option: native p90
@@ -502,7 +508,8 @@ through #3637's approval. Do not adopt a batching queue.
    address that directly without changing merge authority.
 
 **Temporary regressions on `main`:** not accepted under the current gate. The staged design is
-the only modeled option that meets a sub-60-minute required-result p90. Accepting its bounded
+the only modeled option that meets a sub-60-minute p90 at today's and twice today's arrival rate
+(37 and 48 min). Accepting its bounded
 regressions is a separate human decision at #3637 activation, with the exposure modeled above.
 
 ### Revisit Triggers

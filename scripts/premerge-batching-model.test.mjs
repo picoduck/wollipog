@@ -95,6 +95,38 @@ test("staged validation lands an escaped defect, holds ordinary admission and re
   assert.equal(run.fullBuilds, 4);
 });
 
+test("a spurious full verdict holds ordinary admission until a passing verdict", () => {
+  const runs = Array.from({ length: 40 }, (_, i) => simulate(inputs([0]), { kind: "staged", depth: 2 }, { ...clean, flakeRate: 0.5 }, i + 1));
+  const retried = runs.filter((run) => run.fullBuilds > 1);
+  assert.ok(retried.length > 0);
+  for (const run of retried) {
+    assert.equal(run.holdMinutes, (run.fullBuilds - 1) * 30);
+    assert.equal(run.redMinutes, 0);
+  }
+});
+
+test("recovery is attributed only to defects in the failed snapshot", () => {
+  const run = simulate(inputs([0, 15]), { kind: "staged", depth: 2 },
+    { ...clean, defects: [0, 1], fastCatchRate: 0, repairMinutes: 100 });
+  // Validators: 10-40 sees only entry 0 (revert due 140); 40-70 sees both (revert for 1 due 170).
+  // Reverts land at 150 and 180; the validator at 180-210 passes and closes both.
+  assert.equal(run.reverts, 2);
+  assert.equal(run.redMinutes, 200);
+  // Entry 1 landed at 25 while entry 0's defect was live.
+  assert.equal(run.exposedMerges, 1);
+});
+
+test("a hold withdraws an ordinary entry already in flight until recovery", () => {
+  const run = simulate(inputs([0, 35, 200]), { kind: "staged", depth: 2 },
+    { ...clean, defects: [0], fastCatchRate: 0, fastMinutes: 10, repairMinutes: 20 });
+  // The failed verdict at 40 withdraws the entry building 35-45; the revert lands at 70 and the
+  // validator passes at 100, so the entry rebuilds 100-110.
+  assert.deepEqual(run.merged, [10, 75, 10]);
+  assert.equal(run.exposedMerges, 0);
+  assert.equal(run.redMinutes, 90);
+  assert.equal(run.holdMinutes, 60);
+});
+
 test("a fast-gate catch rejects the defect without reaching main", () => {
   const run = simulate(inputs([0]), { kind: "staged", depth: 2 }, { ...clean, defects: [0], fastCatchRate: 1 });
   assert.equal(run.escapes, 0);
