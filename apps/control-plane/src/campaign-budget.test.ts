@@ -982,6 +982,30 @@ test("retirement receipts retain unknown reservations without a cancellation fee
   } finally { h.db.close(); }
 });
 
+test("reconnect waits for a priced historical receipt without irreversibly stopping its allowance", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100, toolCalls: 1000 })).ok);
+    const profile = { profile: "native_opus_5_5_high_read_only", controllerSha256: "a".repeat(64), executableSha256: "b".repeat(64),
+      cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" } as const;
+    const command = h.db.campaignReviewJobs.reserve("root", "r", "root", 2, profile, { requestId: "lost-final", workItemId: "old-item",
+      pullRequest: { repository: "picoduck/wollipog", number: 3065 }, baseSha: "a".repeat(40), headSha: "b".repeat(40),
+      costUsd: 5, toolCalls: 20, brief: "Historical fixture" });
+    h.sent.length = 0;
+    h.svc.recoverCampaignReviewJobs("r");
+    assert.equal(h.db.campaignBudgets.view("root")?.state, "active");
+    assert.equal(h.db.campaignBudgets.active(command.jobId), true, "keep possible usage reserved while waiting");
+    assert.deepEqual(h.sent.map(message => (message as { type: string }).type), ["cancel_campaign_review_job"]);
+    const receipt = { type: "campaign_review_job_update" as const, jobId: command.jobId, nonce: command.nonce,
+      state: "completed" as const, costUsd: 2, toolCalls: 3, attemptValid: false, attemptConsumed: true, receiptSha256: "f".repeat(64) };
+    h.svc.onCampaignReviewJobUpdate("r", receipt);
+    h.svc.onCampaignReviewJobUpdate("r", receipt);
+    assert.equal(h.db.campaignBudgets.view("root")?.state, "active");
+    assert.equal(h.db.campaignBudgets.view("root")?.actual.costUsd, 2);
+    assert.equal(h.db.campaignBudgets.active(command.jobId), false);
+  } finally { h.db.close(); }
+});
+
 test("historical native review receipts retain scope, canonical PR and server-only usage",()=>{
   const h=harness();
   try {
@@ -1166,7 +1190,7 @@ test("supported native reconnect cancels after human revocation without new admi
   } finally {h.db.close();}
 });
 
-test("a review-required campaign refuses child ceilings at creation, so every admitted child can get its review (#2940)",()=>{
+test("retirement preserves a legacy boundary's child ceiling restriction until human replacement (#2940)",()=>{
   const h=harness();
   try {
     const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
@@ -1181,8 +1205,8 @@ test("a review-required campaign refuses child ceilings at creation, so every ad
       const refused=child(ceiling);
       assert.equal(refused.ok,false,JSON.stringify(ceiling));
       assert.equal(refused.status,409);
-      assert.match(refused.error!,/controlled cross-model review, which cannot run under a per-session cost or tool-call limit/);
-      assert.match(refused.error!,/without costBudgetUsd or maxToolCalls/);
+      assert.match(refused.error!,/retired controlled-review boundary.*person must replace/u);
+      assert.match(refused.error!,/review sessions do not inherit a native-review grant/u);
     }
     assert.equal(members(),before,"a refused child leaves no reservation");
     const runRefused=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5",costBudgetUsd:5}},{parentSessionId:"root"});
@@ -1195,7 +1219,7 @@ test("a review-required campaign refuses child ceilings at creation, so every ad
     h.db.updateProject(project.id,{childSessionDefaults:{costBudgetUsd:5,maxToolCalls:30}});
     const projectRefused=child({});
     assert.equal(projectRefused.ok,false);
-    assert.match(projectRefused.error!,/clear them for this campaign's Project/);
+    assert.match(projectRefused.error!,/person must replace that obsolete boundary/u);
     h.db.updateProject(project.id,{childSessionDefaults:null});
 
     const admitted=child({});
@@ -1215,7 +1239,7 @@ test("a review-required campaign refuses child ceilings at creation, so every ad
   } finally {h.db.close();}
 });
 
-test("campaigns without required controlled review keep accepting child ceilings",()=>{
+test("campaigns without a legacy controlled-review boundary keep accepting child ceilings",()=>{
   const h=harness();
   try {
     assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);

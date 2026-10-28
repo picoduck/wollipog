@@ -27,8 +27,12 @@ Protocol 245 gates retirement. Drain legacy jobs under the prior runner, preserv
 receipts and charges; upgrade the control plane before the runner. A new runner explicitly refuses
 an older or unverified control plane before registration resumes work: old servers can replay
 legacy dispatch and sanitize new refusal reasons into a generic failure. New runner startup also
-refuses unfinished, malformed or accounting-unavailable legacy records without editing them or
-starting recovery executors. An external operator must finish recovery under the prior version.
+refuses unfinished, malformed or still-live/uninspectable legacy execution without editing records
+or starting recovery executors. An external operator must drain recorded processes and controller
+groups under the prior version. Terminal unpriced receipts cannot become priced through retry;
+once execution has drained, they permit upgrade and replay unchanged while unknown cost and its
+reservation remain. Cancellation-only older runners may not re-send a lost terminal update; the
+upgraded runner delivers that historical receipt without re-dispatching a job.
 
 Settled receipts replay verbatim. Missing receipts cannot prove that a previous runner never
 launched, so unknown campaign usage retains reservations and stops protected admission. No costs,

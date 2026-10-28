@@ -366,7 +366,10 @@ a native reviewer to bypass trust, admission, budget or review-limit refusals.
 Protocol 245 requires the retirement-aware control plane for new runners. Before upgrading,
 finish or cancel legacy jobs using their prior runner and preserve their final receipts and usage.
 Upgrade the control plane first, then the runner. New runners refuse unfinished or unverified
-legacy state without changing it or starting a controller. Reconnect never redispatches those
+legacy execution without changing records or starting a controller. Drained terminal unpriced
+receipts permit upgrade and replay unchanged, retaining unknown cost and reservations. Older
+runners may not re-send a lost finished result on cancellation; upgrading delivers the historical
+receipt without redispatch. Reconnect never redispatches those
 jobs. Missing usage remains unknown, with campaign reservations retained. A human must replace
 an obsolete controlled-review boundary; this migration never grants new authority or budget.
 

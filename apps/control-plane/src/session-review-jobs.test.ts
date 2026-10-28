@@ -39,7 +39,7 @@ function harness(options: { protocol?: number; sessionReview?: SessionReviewCapa
   let deliver = true;
   hub.sendToRunner = (_, message) => { if (deliver) sent.push(message as { type: string }); return deliver; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
-  return { db, svc, sent, setOnline: (value: boolean) => { online = value; }, setDeliver: (value: boolean) => { deliver = value; } };
+  return { db, svc, sent, metadata, setOnline: (value: boolean) => { online = value; }, setDeliver: (value: boolean) => { deliver = value; } };
 }
 
 /** Seed an already-dispatched pre-retirement record; this never calls admission or sends a job. */
@@ -145,6 +145,26 @@ test("cancellation never dispatches a requested legacy bridge job", () => {
     assert.equal(h.svc.cancelSessionReviewJob("s1", job.jobId).status, 202);
     assert.deepEqual(h.sent.map(message => message.type), ["cancel_session_review_job"]);
     assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.terminal, false, "await the owning runner's terminal receipt");
+  } finally { h.db.close(); }
+});
+
+test("a prior runner's silent cancel retains the record until an upgraded runner supplies its receipt", () => {
+  const h = harness({ protocol: 243 });
+  try {
+    const job = seedHistoricalBridge(h).data;
+    const command = h.db.sessionReviewJobs.command(job.jobId)!;
+    h.svc.recoverSessionReviewJobs("r");
+    // The prior runner sends nothing for a finished or never-delivered job. Keep the row and
+    // cancellation intent, rather than redispatching a controller or discarding a lost report.
+    assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.state, "requested");
+    assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.cancelRequested, true);
+    h.db.registerRunner(h.metadata, 10, PROTOCOL_VERSION);
+    h.svc.recoverSessionReviewJobs("r");
+    assert.deepEqual(h.sent.map(message => message.type), ["cancel_session_review_job", "cancel_session_review_job"]);
+    h.svc.onSessionReviewJobUpdate("r", { type: "session_review_job_update", jobId: command.jobId, nonce: command.nonce,
+      state: "completed", report: "historical report" });
+    assert.equal(h.svc.sessionReviewJobArtifacts("s1", job.jobId).data?.report, "historical report");
+    assert.equal(h.db.sessionReviewJobs.unfinished("r").length, 0);
   } finally { h.db.close(); }
 });
 

@@ -8972,15 +8972,13 @@ export class SessionsService {
       campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
   }
 
-  /** Controlled review refuses any worker holding its own cost or tool-call ceiling, so a campaign
-   * that requires it admits only children the campaign allocation alone limits. Refusing here,
-   * before any write, keeps every admitted child review-admissible. */
+  /** Preserve the existing human boundary until its owner replaces the obsolete native profile;
+   * retirement must not silently weaken the grant's original ceiling restrictions. */
   private controlledReviewCeilingError(budgetRoot: string, limits: { costUsd?: number; toolCalls?: number }): string | null {
     if (!this.db.campaignBudgets.view(budgetRoot)?.authority.controlledReview) return null;
     if (!((limits.costUsd ?? 0) > 0 || (limits.toolCalls ?? 0) > 0)) return null;
-    return "This campaign requires controlled cross-model review, which cannot run under a per-session cost or tool-call limit. " +
-      "Create the child without costBudgetUsd or maxToolCalls; the campaign allocation limits it. " +
-      "If the Project sets child-session defaults, a person must clear them for this campaign's Project.";
+    return "This campaign retains a retired controlled-review boundary. A person must replace that obsolete boundary " +
+      "before adding per-session cost or tool-call ceilings; review sessions do not inherit a native-review grant.";
   }
 
   /** Production reviewer adapters must use this preflight rather than treating a shell worker
@@ -9128,7 +9126,7 @@ export class SessionsService {
       // Never redispatch a retired job. Unknown launched cost stays reserved until an owning
       // runner's authenticated final receipt settles it; cancellation itself refunds nothing.
       if (supported) this.hub.sendToRunner(runnerId, { type: "cancel_campaign_review_job", jobId: command.jobId, nonce: command.nonce });
-      if (!supported || runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "reviewSessionOnly")) {
+      if (!supported) {
         this.db.campaignBudgets.stop(command.rootSessionId, "accounting_unavailable", REVIEW_JOBS_RETIRED_REASON);
         this.enforceCampaignBudget(command.rootSessionId, Date.now());
       }

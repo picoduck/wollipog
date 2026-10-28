@@ -798,6 +798,7 @@ function sameAcpCapabilities(
 }
 
 let ws: WebSocket | null = null;
+let controlPlanePeerRefused = false;
 let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
 let policyHookRegistrationGeneration = 0;
@@ -2320,10 +2321,11 @@ function runCommandTask(kind: string, task: Promise<void>): void {
 }
 
 function handleCommand(msg: ControlPlaneToRunner): void {
+  if (controlPlanePeerRefused) return;
   switch (msg.type) {
     case "registered": {
       const refusal = reviewRetirementPeerRefusal(msg.protocolVersion);
-      if (refusal) { log(refusal); ws?.close(); break; }
+      if (refusal) { controlPlanePeerRefused = true; log(refusal); ws?.terminate(); break; }
       try {
         stagedRunnerCredential.promote();
       } catch (error) {
@@ -4208,6 +4210,7 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
 function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
+  controlPlanePeerRefused = false;
   controlPlaneProtocolVersion = null;
   automaticAccountSwitchConfigurationSynchronized = false;
   sessions.setAutomaticAccountSwitchAuthorityReady(false);
@@ -4242,7 +4245,7 @@ function connect(): void {
   });
 
   socket.on("message", (raw: Buffer) => {
-    if (ws !== socket) return;
+    if (ws !== socket || controlPlanePeerRefused) return;
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
     if (!msg) return;
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not

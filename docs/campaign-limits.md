@@ -101,7 +101,8 @@ or passing checks. Optional review-session citations at merge gates are verified
 Protocol 245 retires the older bridge and campaign review job tools, CLI commands and native
 executors. Follow the [upgrade order](./agent-control.md#retired-review-jobs): drain with the prior
 runner, upgrade the control plane, then upgrade the runner. New runners explicitly refuse older
-control planes and unfinished or unverified legacy records. Reconnect never redispatches a legacy
+control planes and unfinished or unverified legacy execution. Drained terminal unpriced receipts
+permit upgrade and replay unchanged; they retain unknown costs and reservations. Reconnect never redispatches a legacy
 job. Cancellation does not refund possible launched usage.
 
 Historical campaign job ledgers, immutable dispatch-owner daily costs, receipts and archive reads

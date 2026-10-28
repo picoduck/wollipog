@@ -23,17 +23,22 @@ function frameHandler(globals: Record<string, unknown>): (message: unknown) => v
   visit(source);
   assert.ok(handler);
   const js = ts.transpileModule(handler.getText(source), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
-  const context = vm.createContext(globals);
+  const context = vm.createContext({ controlPlanePeerRefused: false, ...globals });
   vm.runInContext(`${js}\nglobalThis.receive = handleCommand;`, context);
   return context.receive;
 }
 
-test("the actual registration handler refuses old control planes before promoting credentials or resuming work", () => {
+test("a refused registration drops buffered commands before the socket close event", () => {
   const logs: string[] = [];
   let closed = 0, promoted = 0;
   const receive = frameHandler({ reviewRetirementPeerRefusal, log: (message: string) => logs.push(message),
-    ws: { close: () => { closed++; } }, stagedRunnerCredential: { promote: () => { promoted++; } } });
+    ws: { terminate: () => { closed++; } }, stagedRunnerCredential: { promote: () => { promoted++; } },
+    sendUp: () => { throw Error("refused peer received a receipt"); },
+    runCommandTask: () => { throw Error("refused peer resumed a command"); } });
   receive({ type: "registered", protocolVersion: PROTOCOL_VERSION - 1 });
+  for (const type of ["session_review_job", "campaign_review_job", "prompt_session", "invoke_session_command"]) {
+    assert.doesNotThrow(() => receive({ type, jobId: bridgeId, nonce }));
+  }
   assert.equal(closed, 1);
   assert.equal(promoted, 0);
   assert.match(logs[0]!, /requires.*control plane.*review sessions?/iu);
@@ -68,7 +73,7 @@ test("old or unknown control planes are refused before a new runner can replay r
   assert.equal(reviewRetirementPeerRefusal(PROTOCOL_VERSION), null);
 });
 
-test("runner restart refuses prepared, launching, running, corrupt and unpriced legacy work without changing it", () => {
+test("runner restart refuses prepared, launching, running and corrupt legacy work without changing it", () => {
   for (const kind of ["bridge", "campaign"] as const) for (const content of [
     { phase: "prepared" }, { phase: "launching" }, { phase: "running" }, {}, null,
     { phase: "finished", command: { jobId: campaignId, nonce }, update: { state: "accounting_unavailable" } },
@@ -80,6 +85,37 @@ test("runner restart refuses prepared, launching, running, corrupt and unpriced 
       assert.equal(readFileSync(f.path, "utf8"), before);
     } finally { f.close(); }
   }
+});
+
+test("drained terminal unpriced receipts permit upgrade and replay without inventing cost", () => {
+  for (const costUsd of [undefined, 1.25]) {
+    const receipt = { type: "campaign_review_job_update", jobId: campaignId, nonce, state: "accounting_unavailable",
+      toolCalls: 3, ...(costUsd === undefined ? {} : { costUsd }), attemptConsumed: true, attemptValid: false,
+      receiptSha256: "b".repeat(64), reason: REVIEW_JOBS_RETIRED_REASON };
+    const f = fixture("campaign", { phase: "finished", command: { jobId: campaignId, nonce }, update: receipt });
+    try {
+      const before = readFileSync(f.path, "utf8");
+      assert.doesNotThrow(() => assertLegacyReviewsDrained(f.root));
+      assert.deepEqual(retiredReviewReceipt(f.root, "campaign", campaignId, nonce), receipt);
+      assert.equal(readFileSync(f.path, "utf8"), before);
+    } finally { f.close(); }
+  }
+});
+
+test("terminal unpriced accounting cannot hide live or uninspectable recorded execution", () => {
+  const receipt = { type: "campaign_review_job_update", jobId: campaignId, nonce, state: "accounting_unavailable",
+    toolCalls: 1, receiptSha256: "a".repeat(64) };
+  const f = fixture("campaign", { phase: "finished", command: { jobId: campaignId, nonce }, update: receipt,
+    pid: 101, startIdentity: "old-controller", providerPid: 102, providerStartIdentity: "old-provider" });
+  try {
+    const dead = { startTime: () => null, groupAlive: () => false };
+    assert.doesNotThrow(() => assertLegacyReviewsDrained(f.root, dead));
+    assert.throws(() => assertLegacyReviewsDrained(f.root, { ...dead, startTime: pid => pid === 101 ? "old-controller" : null }), /live or unverified/u);
+    assert.throws(() => assertLegacyReviewsDrained(f.root, { ...dead, groupAlive: () => true }), /live or unverified/u);
+    assert.throws(() => assertLegacyReviewsDrained(f.root, { ...dead, startTime: pid => pid === 102 ? "old-provider" : null }), /live or unverified/u);
+    assert.throws(() => assertLegacyReviewsDrained(f.root, { ...dead, startTime: () => { throw Error("unreadable"); } }), /live or unverified/u);
+    assert.doesNotThrow(() => assertLegacyReviewsDrained(f.root, { startTime: () => "reused-pid", groupAlive: () => true }));
+  } finally { f.close(); }
 });
 
 test("settled historical usage is replayed verbatim on reconnect or cancellation, never refunded or relaunched", () => {

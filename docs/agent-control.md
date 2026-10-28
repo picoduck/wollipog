@@ -246,18 +246,24 @@ The legacy HTTP admission routes return 410 after their existing identity/audien
 
 Upgrade in this order:
 
-1. Finish or cancel every legacy job with its prior runner and retain its final receipt and usage.
+1. Drain every legacy job's execution with its prior runner and retain its final receipt and usage,
+   including terminal `accounting_unavailable` receipts. These cannot be turned into priced
+   receipts by repeating cancellation; unknown cost remains unknown after execution has stopped.
    Do not delete job records or infer zero cost from missing state. Unknown campaign usage keeps
    its reservation and blocks protected admission until authenticated settlement.
 2. Upgrade the control plane. It admits no new legacy jobs; reconnect recovery sends only
    cancellation, never a legacy dispatch. Older runners can still provide authenticated final
-   receipts to settle previously admitted work. Existing archive read routes retain their audience
-   checks, bounded output, historical charges and deduplicated receipts.
+   receipts to settle previously admitted work. Their cancel handlers do not re-send already-finished
+   or unknown jobs: a lost final update or never-delivered request stays pending until the runner is
+   upgraded to replay its historical receipt or explicitly refuse missing state. Existing archive
+   read routes retain their audience checks, bounded output, historical charges and deduplicated receipts.
 3. Upgrade the runner. A new runner refuses an older or unverified control plane at registration
    with an actionable version error. Older servers sanitize unknown job refusal messages and can
    replay dispatch, so silently accepting that pairing would hide the migration. Startup also
-   refuses unfinished, malformed or accounting-unavailable local legacy records without changing
-   them or launching a controller. Finish their recovery with the prior runner before upgrading.
+   refuses unfinished, malformed or still-live/uninspectable local legacy execution without changing
+   records or launching a controller. A drained terminal unpriced receipt permits upgrade and replays
+   unchanged, retaining its unknown cost and reservation. Recorded process identities and surviving
+   controller groups must be gone; use the prior runner to drain them before upgrading.
 4. Request review sessions. Campaign members request their own sessions against the campaign
    allowance. A human must replace any obsolete controlled-review profile boundary; no authority
    or budget is silently converted. Missing reviewer/admission/budget support remains a blocker.
