@@ -738,7 +738,8 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `github_merge_preflight`, which reports every issue the merge would close. The control plane
 //      refuses an undeclared closure and records the check on the decision. A pre-v242 child runner
 //      is not asked; its decisions carry no `closingReferenceCheck`.
-export const PROTOCOL_VERSION = 242;
+// 243: optional server-verified review-session citations on merge decisions (#3371).
+export const PROTOCOL_VERSION = 243;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1047,6 +1048,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundRetryExhaustion: 221,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  mergeReviewEvidence: 243,
   agentAutomationCreation: 236,
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
@@ -4845,6 +4847,9 @@ export type WorkflowDecisionResourceSnapshot =
       pullRequest: number;
       headSha: string;
       reviewResult: "merge" | "merge_with_acknowledged_risk";
+      /** Optional immutable upvoting attempt in this requester's review run (#3371).
+       * Evidence is verified by the server; it grants no merge or human approval. */
+      reviewSessionId?: string;
       requiredChecks: {
         headSha: string;
         status: "passed";
@@ -4969,10 +4974,20 @@ export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction 
 /** Longest child-facing message a resolver may attach to a typed workflow decision. */
 export const WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS = 2000;
 
+/** Current server-verified review citation. Review approval grants no merge authority or CI result. */
+export type MergeReviewEvidence =
+  | { status: "refused"; reviewSessionId: string; reason: string }
+  | { status: "verified"; reviewSessionId: string; requesterSessionId: string;
+      repository: string; pullRequest: number; headSha: string; vote: "UPVOTE";
+      reviewer: import("./session-review-job.js").SessionReviewHarness;
+      epoch: number; round: number; attempt: number; completedAt: number };
+
 /** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. The
  * child-facing message is the exception by design: its audience is the child, so it is retained
  * on the decision and delivered, while audit still records only its digest. */
 export interface WorkflowDecisionView {
+  /** Server-derived current verification of the optional merge citation. Never caller supplied. */
+  reviewEvidence?: MergeReviewEvidence;
   requestId: string;
   occurrenceId: string;
   sessionId: string;

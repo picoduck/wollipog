@@ -334,6 +334,32 @@ job failed.
 
 ### Review Sessions
 
+#### Optional Merge Decision Evidence
+
+Protocol 243 adds `mergeReviewEvidence`. A `pr_merge` snapshot may cite `reviewSessionId`, the
+immutable attempt that upvoted its exact `headSha`. It is optional: uncited decisions preserve
+their existing behavior. The control plane checks that the attempt exists, belongs to the
+requester's own review run on that repository and PR, completed with a server-validated UPVOTE,
+and has not been superseded by a newer valid UPVOTE or DOWNVOTE on that PR. Repository matching is
+case insensitive. A newer invalid, cancelled, failed or unfinished attempt does not supersede it.
+A refusal identifies the mismatch or the superseding review session and head and directs the
+requester to obtain and cite a valid review session for the exact head.
+
+`get_workflow_decision` and `list_workflow_decisions` return current server-derived
+`reviewEvidence`: `verified` with the reviewer, requester, PR, head, vote, epoch, round, attempt and
+completion time, or `refused` with its reason. Orchestrators read these facts from the server;
+`reviewResult` remains the requester's recommendation. Evidence is checked at request, approval,
+arming, and the correlated merge authorization boundary. A new vote can revoke a stale grant.
+The review records survive reconnect and restart; ordinary stop/restart decision revocation still
+applies. Review approval never grants human approval, merge authorization or passing CI checks.
+
+Upgrade the control plane and runner before using citations. A current runner refuses to send a
+cited snapshot to an older or unverified control plane, rather than letting it drop the citation;
+a current control plane refuses citations from an older runner. The CLI shares the MCP transport
+gate. Neither side silently retries without the citation. An uncited decision remains available
+under its existing review and authority rules; removing a citation changes the exact snapshot and
+requires a new decision.
+
 Settings → Reviews stores personal reviewer choices in the control plane, so they follow the user
 across devices. Each configured implementing harness can select a trusted, discovered native Codex
 or Claude Code reviewer, a discovered model and an effort. Automatic uses that reviewer's discovered

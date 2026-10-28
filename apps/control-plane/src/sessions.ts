@@ -867,6 +867,8 @@ export function normalizeWorkflowDecisionSnapshot(
       ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
   }
   if (category === "pr_merge") {
+    if (value.reviewSessionId !== undefined && (!boundedDecisionString(value.reviewSessionId, 128) ||
+        !/^[A-Za-z0-9_-]+$/u.test(value.reviewSessionId))) return fail("reviewSessionId must identify a review session", 400);
     // A GitLab project is named by host and full namespace (#3602) and pins how it merges; those
     // fields exist only for GitLab, so a GitHub snapshot and its digest are unchanged.
     const gitlab = campaignRepositoryLocation(value.repository)?.forge === "gitlab";
@@ -910,6 +912,7 @@ export function normalizeWorkflowDecisionSnapshot(
       return fail(`intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
     }
     return ok({ category, repository: repo, pullRequest, headSha,
+      ...(typeof value.reviewSessionId === "string" ? { reviewSessionId: value.reviewSessionId } : {}),
       reviewResult: value.reviewResult, requiredChecks: {
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
       },
@@ -10216,8 +10219,10 @@ export class SessionsService {
     }
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
+      const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
+      if (refused) return fail(refused, 409);
       const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
-      if (run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) return fail("the current pull request head needs a valid review before merge", 409);
+      if (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) return fail("the current pull request head needs a valid review before merge", 409);
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
@@ -10296,7 +10301,7 @@ export class SessionsService {
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
     if (created.replay) {
       if (created.decision.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
-      return ok(created.decision);
+      return ok(this.withMergeReviewEvidence(created.decision));
     }
     const decision = created.decision;
     const approval = this.workflowDecisionApproval(decision);
@@ -10323,13 +10328,13 @@ export class SessionsService {
     }
     this.publishCampaignAttentionTransition(controller.session);
     this.hub.sessionChangedById(sessionId);
-    return ok(decision, 201);
+    return ok(this.withMergeReviewEvidence(decision), 201);
   }
 
   workflowDecision(sessionId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
     this.expireAutomationCreationDecisions(Date.now(), sessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
-    return decision?.sessionId === sessionId ? ok(decision) : fail("workflow decision not found", 404);
+    return decision?.sessionId === sessionId ? ok(this.withMergeReviewEvidence(decision)) : fail("workflow decision not found", 404);
   }
 
   workflowDecisions(sessionId: string, cursorId: string | undefined, limit: number): ServiceResult<{
@@ -10339,7 +10344,7 @@ export class SessionsService {
     const cursor = cursorId === undefined ? undefined : this.db.workflowDecisionByOccurrence(cursorId);
     if (cursorId !== undefined && cursor?.sessionId !== sessionId) return fail("invalid workflow decision cursor", 400);
     const rows = this.db.workflowDecisionPage(sessionId, cursor ?? undefined, limit + 1);
-    const decisions = rows.slice(0, limit);
+    const decisions = rows.slice(0, limit).map((decision) => this.withMergeReviewEvidence(decision));
     return ok({ decisions, ...(rows.length > limit ? { nextCursor: decisions.at(-1)!.occurrenceId } : {}) });
   }
 
@@ -10390,6 +10395,14 @@ export class SessionsService {
       return fail("workflow decision not found", 404);
     }
     if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    if (resolution?.outcome === "approve" && decision.resourceSnapshot.category === "pr_merge") {
+      const requester = this.db.getSession(childSessionId);
+      const refused = requester && this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, actor);
+        return fail(refused, 409);
+      }
+    }
     for (const sessionId of [childSessionId, parentSessionId]) {
       const owner = this.db.getSession(sessionId);
       const unsupported = owner && this.capabilityFailure(
@@ -10608,6 +10621,13 @@ export class SessionsService {
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
+    if (child && decision.resourceSnapshot.category === "pr_merge") {
+      const refused = this.mergeReviewEvidenceRefusal(child, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(refused, 409);
+      }
+    }
     for (const owner of [child, parent]) {
       const unsupported = owner && this.capabilityFailure(
         owner.runnerId,
@@ -10635,7 +10655,7 @@ export class SessionsService {
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
       const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
-      if (run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) {
+      if (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) {
         this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
         return fail("the current pull request head needs a valid review before merge", 409);
       }
@@ -10789,6 +10809,15 @@ export class SessionsService {
             return fail("runner could not establish the App Server action admission boundary", 409);
           }
         }
+      }
+      const evidenceRefusal = normalized.data.category === "pr_merge" ? this.mergeReviewEvidenceRefusal(child, normalized.data) : null;
+      if (evidenceRefusal) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(evidenceRefusal, 409);
+      }
+      if (!this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
       }
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
         ...action.data,
@@ -11361,6 +11390,28 @@ export class SessionsService {
       : fail("review receipt is unknown, replaced, expired, or no longer usable", 409);
   }
 
+  private mergeReviewEvidenceRefusal(child: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): string | null {
+    if (snapshot.reviewSessionId === undefined) return null;
+    if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "mergeReviewEvidence")) {
+      return "Review-run merge evidence requires a compatible runner; upgrade and reconnect the runner, then cite a review session.";
+    }
+    const evidence = this.db.reviewSessions.mergeEvidence(child.id, snapshot);
+    return evidence?.status === "refused" ? evidence.reason : null;
+  }
+
+  /** The decision API exposes current server facts, never a child's asserted review result. */
+  private withMergeReviewEvidence(decision: WorkflowDecisionView): WorkflowDecisionView {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "pr_merge" || snapshot.reviewSessionId === undefined) return decision;
+    const child = this.db.getSession(decision.sessionId);
+    const reason = child ? this.mergeReviewEvidenceRefusal(child, snapshot) : "The review requester no longer exists.";
+    const reviewEvidence = reason
+      ? { status: "refused" as const, reviewSessionId: snapshot.reviewSessionId, reason }
+      : this.db.reviewSessions.mergeEvidence(decision.sessionId, snapshot);
+    return { ...decision, reviewEvidence };
+  }
+
   /** Whether a stored decision's owner still holds under the current policy and capabilities.
    * A human-owned UI evidence decision stays valid when capabilities later improve: human review
    * never broadens access, and a saved-owner change is caught by the policy revision instead. */
@@ -11377,6 +11428,8 @@ export class SessionsService {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
     const requester = this.db.getSession(decision.sessionId);
+    if (decision.status === "approved" && requester && decision.resourceSnapshot.category === "pr_merge" &&
+        this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot)) return false;
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
         evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,

@@ -505,6 +505,20 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
 
 /** A pre-v242 control plane drops an unknown intendedClosures and creates the merge decision
  * without reading GitHub, so the requester would believe its closures were checked (#3713). */
+async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps): Promise<ToolResult | null> {
+  if (args?.resourceSnapshot?.category !== "pr_merge" || args.resourceSnapshot.reviewSessionId === undefined) return null;
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.mergeReviewEvidence;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) return controlPlaneUpdateRequired(wollipogSupportUnverified("review-run merge evidence", result.message), required);
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Review-run merge evidence needs",
+      "Update Wollipog before citing a review session; this citation was not submitted."), required, actual);
+}
+
 async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
   let actual = deps.controlPlaneProtocolVersion;
@@ -967,6 +981,8 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       properties: {
         category: { const: "pr_merge" }, repository: { type: "string" }, pullRequest: { type: "integer", minimum: 1 },
         headSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        reviewSessionId: { type: "string", minLength: 1, maxLength: 128,
+          description: "Optional immutable upvoting review session for this requester's exact PR head. The server verifies it and returns reviewEvidence; review approval grants no merge authority or passing checks." },
         reviewResult: { type: "string", enum: ["merge", "merge_with_acknowledged_risk"] },
         requiredChecks: { type: "object", properties: {
           headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, status: { const: "passed" },
@@ -2020,6 +2036,8 @@ export const TOOLS: McpTool[] = [
         const compatibilityError = await intendedClosuresCompatibilityError(deps);
         if (compatibilityError) return compatibilityError;
       }
+      const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
+      if (evidenceCompatibilityError) return evidenceCompatibilityError;
       const r = await cpFetch(
         deps,
         "POST",
@@ -2113,6 +2131,8 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (args?.sessionId !== undefined) return errorResult("consume is self-scoped and does not accept sessionId");
+      const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
+      if (evidenceCompatibilityError) return evidenceCompatibilityError;
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
         return errorResult("occurrenceId and a session identity are required");
       }
@@ -2151,6 +2171,8 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (args?.sessionId !== undefined) return errorResult("reconcile is self-scoped and does not accept sessionId");
+      const evidenceCompatibilityError = await mergeReviewEvidenceCompatibilityError(args, deps);
+      if (evidenceCompatibilityError) return evidenceCompatibilityError;
       if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
         return errorResult("occurrenceId and a session identity are required");
       }
