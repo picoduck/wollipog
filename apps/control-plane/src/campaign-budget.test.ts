@@ -16,7 +16,7 @@ import type { HumanPrincipal } from "./identity.js";
 const allowance = (extra: Partial<CampaignBudgetAuthority> = {}): CampaignBudgetAuthority => ({ version: 1,
   accounting: "managed_workers_only", unpriced: "stop", toolCalls: 120, concurrency: 2, ...extra });
 
-function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
+function harness(path = ":memory:", protocol = PROTOCOL_VERSION, completion?: "retain" | "stop_and_archive") {
   const db = ControlPlaneDb.open(path);
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -26,6 +26,7 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
   db.registerRunner(metadata, 1, protocol);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]])); // Fixture rates, never live pricing.
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  if (completion) policy.behavior.completion = completion;
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [2936], revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
   policy.issueNumbers = [2936];
   const make = (id: string, parentSessionId?: string, config: { costBudgetUsd?: number; maxToolCalls?: number } = {}) => {
@@ -376,14 +377,16 @@ test("a definitively unsent restart restores its generation and pending final ch
     assert.ok(h.enable(allowance({costUsd:120})).ok);
     h.make("worker","root",{costBudgetUsd:20,maxToolCalls:20});
     h.db.updateSessionStatus("worker","stopped",7,RUNNER_REPORTED_STOP);
-    h.db.reconcileRunnerHistory("worker",0,0);
-    const checkpoint={generation:h.db.campaignBudgets.dispatch("worker")!.generation,historyEpoch:0,throughSeq:0,costUsd:2};
+    // The final event is not hydrated yet, so the checkpoint is still pending evidence.
+    h.db.reconcileRunnerHistory("worker",0,1);
+    const checkpoint={generation:h.db.campaignBudgets.dispatch("worker")!.generation,historyEpoch:0,throughSeq:1,costUsd:2};
     h.db.campaignBudgets.recordCheckpoint("worker",checkpoint);
     const before=h.db.campaignBudgets.dispatchState("worker");
     h.hub.sendToRunner=()=>false;
     assert.equal(h.svc.restart("worker").ok,false);
     assert.deepEqual(h.db.campaignBudgets.dispatchState("worker"),before,"a known-unsent dispatch cannot destroy old retirement evidence");
     h.hub.sendToRunner=()=>true;
+    h.db.setHydratedSeq("worker",1);
     h.svc.onSessionStatus("worker","stopped",undefined,undefined,"r",undefined,undefined,checkpoint);
     await new Promise((r)=>setImmediate(r));
     assert.equal(h.db.campaignBudgets.active("worker"),false,"normal service hydration settles the restored old receipt");
@@ -683,15 +686,23 @@ test("cancellation retains reservations until runner settlement; late spend stil
     h.make("worker", "root", { maxToolCalls: 20 });
     assert.ok(h.svc.stop("worker").ok);
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
+    const reserved = h.db.campaignBudgets.view("root")!.outstanding.toolCalls;
     h.svc.onSessionStatus("worker", "stopped");
-    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1, "status alone does not prove final usage");
+    // A runner reports `stopped` while its provider still closes: status alone proves neither
+    // retirement nor final usage (#2940).
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1, "status alone does not prove provider retirement");
+    assert.equal(h.db.campaignBudgets.view("root")!.outstanding.toolCalls, reserved, "status alone does not prove final usage");
     h.tool("worker", "late");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
     const generation = h.db.campaignBudgets.dispatch("worker")!.generation;
     h.db.campaignBudgets.recordCheckpoint("worker", { generation, historyEpoch: 0, throughSeq: 2, costUsd: 0 });
+    // The retired runner's final checkpoint frees the slot; the reservation waits for its history.
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0, "the final checkpoint proves retirement");
     assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 1 }), false);
+    assert.equal(h.db.campaignBudgets.active("worker"), true, "the reservation stays until settlement");
     assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }));
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+    assert.equal(h.db.campaignBudgets.view("root")!.outstanding.toolCalls, reserved - 20, "settlement releases the unspent reservation");
     assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }), false, "settlement is one-shot");
     h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 20 }, {});
     h.db.campaignBudgets.replaceDispatch("worker");

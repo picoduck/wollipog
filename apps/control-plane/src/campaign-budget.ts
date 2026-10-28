@@ -1,6 +1,7 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
-import { validCampaignBudgetAuthority, type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView } from "@wollipog/protocol";
+import { SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS, validCampaignBudgetAuthority,
+  type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView } from "@wollipog/protocol";
 
 type Member = { session_id: string; root_id: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null;
   user_cost_limit: number | null; user_tool_limit: number | null; active: number };
@@ -8,6 +9,39 @@ type Member = { session_id: string; root_id: string; cost: number; tools: number
 /** A member session's open live estimate for a running Claude turn, on the terms cost guardrails
  * use (#3112): none while a checkpoint is accounting the window its recorded cost already holds. */
 const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live_cost_usd ELSE 0 END";
+
+/** Whether member `m` (sessions joined as `s`) holds one of its campaign's concurrent slots. A slot
+ * is not a reservation (#2940): `active` keeps a member's unspent allocation outstanding until its
+ * final usage settles, which can wait on history, but its slot ends once its provider has retired.
+ * A terminal status is not that proof: a runner reports `stopped` as soon as a Stop begins closing
+ * the provider, which can still run until the close completes or stay unconfirmed if it fails. The
+ * runner withholds its final checkpoint until retirement, so a checkpoint for the member's current
+ * generation proves it, as does a reconnect that no longer holds the session alive, recorded for
+ * that generation by `noteProviderAbsent` (a stop the runner already confirmed keeps that earlier
+ * confirmation). Until then, and while a stop is pending or provisional, the session keeps its
+ * slot. A member without a session row, a native review job or a deleted session whose runner may
+ * not have removed it yet, holds one until its usage settles. Reviewer sessions never hold one.
+ * Every comparison is NULL-safe, and an indeterminate result still holds the slot. */
+const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id) AND CASE
+    WHEN s.id IS NULL THEN 1
+    ELSE COALESCE(NOT (s.status IN ('completed','failed','stopped')
+      AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
+      AND (s.status IS NOT 'stopped' OR s.stop_confirmation IS NOT NULL)
+      AND (s.stop_confirmation IS 'runner_absent' OR m.absent_generation IS m.generation
+        OR EXISTS (SELECT 1 FROM campaign_budget_checkpoints c
+          WHERE c.session_id=m.session_id AND json_extract(c.checkpoint,'$.generation') IS m.generation))), 1) END)`;
+
+/** Whether a runner's final checkpoint, in its local history coordinates, names the history the
+ * control plane hydrated, which it stores in the wire coordinates that runner projected for it.
+ * Comparing the two directly never matched, so no checkpoint settled (#2940). A runner no newer
+ * than this control plane omits no events for it, so its sequence numbers are unchanged and its
+ * epoch is the format offset plus the local epoch times the projection radix. Any other format
+ * stays pending rather than being guessed. An epoch below the offset predates projection. */
+function checkpointEpochMatches(localEpoch: number, hydratedEpoch: number | null): boolean {
+  if (hydratedEpoch === null) return false;
+  if (hydratedEpoch < SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET) return hydratedEpoch === localEpoch;
+  return hydratedEpoch === SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET + localEpoch * SESSION_EVENT_WIRE_PROJECTION_VARIANTS;
+}
 
 /** A sum of float USD amounts at the ledger's micro-USD precision. */
 function roundUsdMicros(usd: number): number {
@@ -66,6 +100,11 @@ export class CampaignBudgetLedger {
     for (const row of sql.prepare("SELECT session_id FROM campaign_budget_members WHERE generation=''").all() as Array<{session_id:string}>) {
       sql.prepare("UPDATE campaign_budget_members SET generation=? WHERE session_id=?").run(randomUUID(),row.session_id);
     }
+    // The generation a reconnect proved no provider runs for (#2940). It frees only that
+    // generation's slot; a relaunch's new generation needs its own proof.
+    if (!(sql.prepare("PRAGMA table_info(campaign_budget_members)").all() as Array<{name:string}>).some((c) => c.name === "absent_generation")) {
+      sql.exec("ALTER TABLE campaign_budget_members ADD COLUMN absent_generation TEXT");
+    }
     // Cost availability outlives the usage rows that showed it: deleting an unpriced member drops
     // its usage state, but its cost stays unknown. The marker is set once and never cleared (#2940).
     // It is written from code, on every read and before any session deletion, rather than by
@@ -97,6 +136,8 @@ export class CampaignBudgetLedger {
   }
 
   view(rootId: string): CampaignBudgetView | undefined {
+    // First, so the header read below includes any accounting stop a settlement makes.
+    this.settleEnded(rootId);
     const header = this.sql.prepare("SELECT * FROM campaign_budgets WHERE root_id=?").get(rootId) as
       { authority: string; state: CampaignBudgetView["state"]; reason: string | null; accepted_follow_ups: number; cost_unpriced: number } | undefined;
     if (!header) return undefined;
@@ -115,9 +156,8 @@ export class CampaignBudgetLedger {
       this.stop(rootId, "accounting_unavailable", "Unpriced campaign usage detected; protected admission stopped without a continue prompt.");
       header.state = "accounting_unavailable"; header.reason = "Unpriced campaign usage detected; protected admission stopped without a continue prompt.";
     }
-    const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost,
-      EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id) AS review FROM campaign_budget_members m
-      LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=?`).all(rootId) as unknown as Array<Member & { live_cost: number; review: number }>;
+    const rows = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost, ${OCCUPYING} AS occupying FROM campaign_budget_members m
+      LEFT JOIN sessions s ON s.id=m.session_id WHERE m.root_id=?`).all(rootId) as unknown as Array<Member & { live_cost: number; occupying: number }>;
     const actual: CampaignBudgetView["actual"] = { costUsd: 0, toolCalls: 0 }, outstanding = { costUsd: 0, toolCalls: 0 };
     let live = 0;
     for (const row of rows) {
@@ -148,7 +188,7 @@ export class CampaignBudgetLedger {
     return { authority, state: header.state, ...(header.reason ? { reason: header.reason } : {}), actual, outstanding,
       remaining: { costUsd: authority.costUsd === undefined ? null : Math.max(0, authority.costUsd - actual.costUsd - outstanding.costUsd),
         toolCalls: authority.toolCalls === undefined ? null : Math.max(0, authority.toolCalls - actual.toolCalls - outstanding.toolCalls) },
-      occupied: rows.filter((r) => r.active && r.session_id !== rootId && !r.review).length,
+      occupied: rows.filter((r) => r.occupying && r.session_id !== rootId).length,
       acceptedFollowUps: header.accepted_follow_ups,
       reachedCheckpointsUsd: authority.checkpointsUsd?.filter((v) => actual.costUsd >= v) ?? [],
       enforcement: "admission_and_best_effort_cancellation", externalWorkers: "unsupported",
@@ -356,6 +396,18 @@ export class CampaignBudgetLedger {
     });
   }
 
+  /** Record that the owning runner reconnected without this session alive, so no provider of its
+   * current generation runs. That proves retirement for the slot even when the stop was already
+   * confirmed by an earlier terminal status, or the final checkpoint never arrives. It settles no
+   * usage: the reservation stays until a checkpoint does. Only the reconnect reconciliation may
+   * call it. */
+  noteProviderAbsent(sessionId: string): void {
+    const dispatch = this.dispatch(sessionId);
+    if (!dispatch) return;
+    this.sql.prepare("UPDATE campaign_budget_members SET absent_generation=? WHERE session_id=? AND generation=? AND active=1")
+      .run(dispatch.generation, sessionId, dispatch.generation);
+  }
+
   /** Only the authenticated owning runner may supply a checkpoint. Do not accept agent JSON. */
   recordCheckpoint(sessionId: string, checkpoint: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint): void {
     if (!this.root(sessionId) || !checkpoint || !Number.isSafeInteger(checkpoint.historyEpoch) || checkpoint.historyEpoch < 0 ||
@@ -373,7 +425,7 @@ export class CampaignBudgetLedger {
       const checkpoint = JSON.parse(record.checkpoint) as import("@wollipog/protocol").CampaignBudgetUsageCheckpoint;
       if (checkpoint.generation !== this.dispatch(sessionId)?.generation) return false;
       const session = this.sql.prepare("SELECT status FROM sessions WHERE id=?").get(sessionId) as { status: string } | undefined;
-      if (!session || !["completed","failed","stopped"].includes(session.status) || history.historyEpoch !== checkpoint.historyEpoch ||
+      if (!session || !["completed","failed","stopped"].includes(session.status) || !checkpointEpochMatches(checkpoint.historyEpoch, history.historyEpoch) ||
           history.hydratedSeq < checkpoint.throughSeq) return false;
       // Unpriced final usage can settle only where no cost ceiling depends on it: the charge then keeps
       // the recorded cost, and the view reports cost accounting as unavailable.
@@ -390,6 +442,22 @@ export class CampaignBudgetLedger {
       this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
       return true;
     });
+  }
+
+  /** Settle every ended member of a campaign whose final checkpoint its hydrated history already
+   * covers. Hydration, reconnect and startup each try once, but a member's stop intent can outlive
+   * all of them, and an archived member's history is never reloaded, so its reservation stayed
+   * outstanding for good (#2940). Reads retry, so a campaign that leaked repairs on its next read.
+   * Settlement is one-shot: a settled member leaves the set, and its charge never lowers. */
+  private settleEnded(rootId: string): void {
+    const ended = this.sql.prepare(`SELECT m.session_id, s.runner_history_epoch, s.hydrated_seq FROM campaign_budget_members m
+      JOIN campaign_budget_checkpoints c ON c.session_id=m.session_id JOIN sessions s ON s.id=m.session_id
+      WHERE m.root_id=? AND m.active=1 AND s.status IN ('completed','failed','stopped')
+        AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)`).all(rootId) as
+      Array<{ session_id: string; runner_history_epoch: number | null; hydrated_seq: number }>;
+    for (const row of ended) {
+      this.settleCheckpoint(row.session_id, { historyEpoch: row.runner_history_epoch, hydratedSeq: row.hydrated_seq });
+    }
   }
 
   dispatch(sessionId: string): import("@wollipog/protocol").CampaignBudgetDispatch | undefined {
@@ -435,18 +503,21 @@ export class CampaignBudgetLedger {
     return null;
   }
 
-  /** Must run inside the session insertion transaction. A failed insert releases the reservation. */
-  admit(rootId: string, allocation: CampaignBudgetAllocation, userLimits: { costUsd?: number; toolCalls?: number }, activate = true): void {
+  /** Must run inside the session insertion transaction. A failed insert releases the reservation.
+   * A launch needs a free slot unless the member still holds its own; changing a member's
+   * allocation without launching it (`launch` false) needs none. */
+  admit(rootId: string, allocation: CampaignBudgetAllocation, userLimits: { costUsd?: number; toolCalls?: number }, activate = true,
+    launch = activate): void {
     this.atomic(() => {
       const v = this.view(rootId); if (!v || v.state !== "active") throw new Error(v?.reason ?? "campaign allowance unavailable");
-      const old = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m
-        LEFT JOIN sessions s ON s.id=m.session_id WHERE m.session_id=?`).get(allocation.sessionId) as Member & { live_cost: number } | undefined;
+      const old = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost, ${OCCUPYING} AS occupying FROM campaign_budget_members m
+        LEFT JOIN sessions s ON s.id=m.session_id WHERE m.session_id=?`).get(allocation.sessionId) as Member & { live_cost: number; occupying: number } | undefined;
       // Spend includes a running turn's open estimate, as the view counts it (#3196).
       const spentCost = old ? old.live_cost > 0 ? roundUsdMicros(old.cost + old.live_cost) : old.cost : 0;
       if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
       if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
       const review = this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(allocation.sessionId);
-      if (!review && activate && !old?.active && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
+      if (!review && launch && !old?.occupying && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
       for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
         [allocation.costUsd, spentCost, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-spentCost) : 0],
         [allocation.toolCalls, old?.tools ?? 0, v.authority.toolCalls, old ? old.user_tool_limit : userLimits.toolCalls, v.remaining.toolCalls, old?.active ? Math.max(0,(old.tool_limit ?? 0)-old.tools) : 0],

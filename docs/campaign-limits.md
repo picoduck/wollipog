@@ -31,10 +31,22 @@ mid-turn, and settlement replaces the estimate with the provider total (#3196, s
 Outstanding allocations are the unspent portion of active workers' cumulative ceilings. Actual
 usage plus outstanding reservations must fit the envelope. Admission and session insertion share
 one SQLite transaction, so competing dispatches cannot reserve the same capacity. Deletion never
-removes accounting rows. Terminal status and absent inventory do not release capacity. A
+removes accounting rows. Terminal status and absent inventory do not release reservations. A
 generation-bound runner checkpoint must cover durable final history and priced usage first;
 usage, a completed receipt and reservation release commit together. Replay cannot release a
 replacement's allocation. A cancellation without complete final usage retains its reservation.
+The runner reports that checkpoint in its local history coordinates, and the control plane matches
+it against the wire-projected history it hydrated.
+
+A concurrency slot is separate from a reservation (#2940). A worker holds a slot until its provider
+has retired. A terminal status alone is not proof: a runner reports a Stop as soon as it begins
+closing the provider. The runner sends its final checkpoint only after retirement, so that
+checkpoint, or a reconnect inventory without the session, releases the slot after a Stop,
+verification with Stop and Archive, archival or provider exit, without reloading history and even
+when its final usage has not settled yet. A pending, provisional or unretired stop keeps the slot.
+Its unspent reservation stays outstanding until its usage settles. Every campaign read settles ended workers whose hydrated history covers
+their checkpoint, so a campaign that held slots or reservations for already-ended workers is
+repaired on its next read or startup without changing its allowance.
 
 `allocate_campaign_budget` (CLI `campaign allocate --input '<json>'`) changes an existing managed
 worker's absolute cumulative limits, for example `{"sessionId":"s_worker","costUsd":12,"toolCalls":300}`.
