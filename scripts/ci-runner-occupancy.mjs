@@ -20,13 +20,37 @@ const UNSETTLED = /"status":"(queued|in_progress|waiting|pending|requested)"/;
  * Wraps a GitHub API function with a response cache in `dir` and a rate-limit floor. Only
  * settled responses are cached: a listing that still shows queued or running work is refetched.
  * Before network calls it reads the exempt rate-limit endpoint and admits at most `checkEvery`
- * calls, and never more than the remaining quota above `floor` on either quota, before reading it
- * again. Its own calls therefore never take a quota below the floor, so a partial collection
- * resumes from the cache instead of exhausting quota shared with other consumers.
+ * calls, and never more than the remaining quota above `floor` on either quota less the calls
+ * still in flight, before reading it again. Concurrent callers share one refresh and take their
+ * admission synchronously, so the wrapper's own calls never take a quota below the floor and a
+ * partial collection resumes from the cache instead of exhausting quota shared with other consumers.
  */
 export function cachedApi(api, dir, { floor = 1500, checkEvery = 100 } = {}) {
   const stats = { hits: 0, calls: 0 };
-  let admitted = 0;
+  let admitted = 0, inFlight = 0, refreshing = null;
+  const refresh = async () => {
+    // Calls in flight when the read starts may be missing from it, even if they finish before it returns.
+    const unseen = inFlight;
+    const limits = await api("/rate_limit");
+    const remaining = [limits?.resources?.core?.remaining, limits?.resources?.graphql?.remaining];
+    if (!remaining.every(Number.isSafeInteger)) throw new ReportError("Unreadable rate limit");
+    admitted = Math.min(checkEvery, Math.min(...remaining) - floor - unseen);
+    if (admitted <= 0)
+      throw new ReportError(`API budget floor ${floor} reached after ${stats.calls} calls; rerun later to resume from the cache`);
+  };
+  const admit = async () => {
+    for (;;) {
+      // No await between this check and the decrement: admission is atomic across callers.
+      if (admitted > 0) {
+        admitted--;
+        inFlight++;
+        stats.calls++;
+        return;
+      }
+      refreshing ??= refresh().finally(() => { refreshing = null; });
+      await refreshing;
+    }
+  };
   const wrapped = async (path, body) => {
     const key = createHash("sha256").update(JSON.stringify([path, body ?? null])).digest("hex");
     const file = join(dir, `${key}.json`);
@@ -37,17 +61,13 @@ export function cachedApi(api, dir, { floor = 1500, checkEvery = 100 } = {}) {
     } catch (error) {
       if (error?.code !== "ENOENT") throw new ReportError("Unreadable API cache entry");
     }
-    if (admitted <= 0) {
-      const limits = await api("/rate_limit");
-      const remaining = [limits?.resources?.core?.remaining, limits?.resources?.graphql?.remaining];
-      if (!remaining.every(Number.isSafeInteger)) throw new ReportError("Unreadable rate limit");
-      admitted = Math.min(checkEvery, Math.min(...remaining) - floor);
-      if (admitted <= 0)
-        throw new ReportError(`API budget floor ${floor} reached after ${stats.calls} calls; rerun later to resume from the cache`);
+    await admit();
+    let response;
+    try {
+      response = await api(path, body);
+    } finally {
+      inFlight--;
     }
-    admitted--;
-    stats.calls++;
-    const response = await api(path, body);
     if (!UNSETTLED.test(JSON.stringify(response))) {
       await mkdir(dir, { recursive: true });
       await writeFile(`${file}.tmp`, JSON.stringify({ path, response }));
@@ -449,7 +469,9 @@ export function replay(jobs, { capacity, priority = null, drop = null, limit = n
  * run keeps that creation time. A job GitHub created later, when its dependencies finished, is
  * created when the last of those dependencies (the merge-queue report's dependency model, limited
  * to jobs that had finished by its observed creation) finishes in the model. The aggregator thus
- * waits for every required branch, never only the observed critical one.
+ * waits for every required branch, never only the observed critical one. A dependency must also
+ * have completed strictly before the job (ties broken by id), which keeps the inferred graph
+ * acyclic when the creation slack would let two short jobs each look like the other's dependency.
  */
 export function modeledRequiredMinutes(runCreatedAt, list, waits) {
   const runStart = Date.parse(runCreatedAt);
@@ -459,12 +481,15 @@ export function modeledRequiredMinutes(runCreatedAt, list, waits) {
   if (!aggregator || !Number.isFinite(runStart) || raw.some((job) => !waits.has(job.id) ||
       ![job.created_at, job.started_at, job.completed_at].every((time) => Number.isFinite(Date.parse(time))))) return null;
   const work = raw.filter((job) => job !== aggregator);
+  const before = (a, b) => Date.parse(a.completed_at) < Date.parse(b.completed_at) ||
+    (Date.parse(a.completed_at) === Date.parse(b.completed_at) && a.id < b.id);
   const finished = new Map();
   const finish = (job) => {
     if (finished.has(job.id)) return finished.get(job.id);
     const created = Date.parse(job.created_at);
     const dependencies = created - runStart > DEPENDENCY_SLACK_MS
-      ? dependencyCandidates(job, work, aggregator).filter((other) => other !== job && Date.parse(other.completed_at) <= created + DEPENDENCY_SLACK_MS)
+      ? dependencyCandidates(job, work, aggregator).filter((other) => other !== job && before(other, job) &&
+        Date.parse(other.completed_at) <= created + DEPENDENCY_SLACK_MS)
       : [];
     const ready = dependencies.length ? Math.max(...dependencies.map(finish)) : created;
     const value = ready + waits.get(job.id) * MINUTE + (Date.parse(job.completed_at) - Date.parse(job.started_at));

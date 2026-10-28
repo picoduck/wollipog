@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   allocated, analyze, cachedApi, category, collectOccupancy, combineOccupancy, dropCopiedJobs, main, mergeGroupCriticalWaits,
-  options, parseScenario, projectJob, replay, runnerClass, runningAt, scenarios, timeline, withinWindow,
+  modeledRequiredMinutes, options, parseScenario, projectJob, replay, runnerClass, runningAt, scenarios, timeline, withinWindow,
 } from "./ci-runner-occupancy.mjs";
 import { AGGREGATOR } from "./merge-queue-wait-report.mjs";
 
@@ -212,6 +212,47 @@ test("the wrapper's own calls never take a quota below the floor", async (t) => 
   assert.equal(remaining, 1000);
 });
 
+test("concurrent callers share one quota refresh and cannot jointly cross the floor", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "occupancy-concurrent-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  let remaining = 1002, reads = 0;
+  const api = async (path) => {
+    if (path === "/rate_limit") {
+      reads++;
+      const snapshot = remaining;
+      await new Promise((resolve) => setImmediate(resolve));
+      return { resources: { core: { remaining: snapshot }, graphql: { remaining: 5000 } } };
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    remaining--;
+    return { status: "completed" };
+  };
+  const cached = cachedApi(api, dir, { floor: 1000 });
+  const results = await Promise.allSettled(Array.from({ length: 6 }, (_, i) => cached(`/item/${i}`)));
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 2);
+  assert.equal(remaining, 1000);
+  assert.ok(reads <= 3);
+});
+
+test("a quota read that started before a call finished does not count that call as spent", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "occupancy-stale-read-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  // The quota snapshot is taken when the read starts and returned later; data calls spend at once.
+  let remaining = 1001;
+  const api = async (path) => {
+    if (path === "/rate_limit") {
+      const snapshot = remaining;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      return { resources: { core: { remaining: snapshot }, graphql: { remaining: 5000 } } };
+    }
+    remaining--;
+    return { status: "completed" };
+  };
+  const cached = cachedApi(api, dir, { floor: 1000 });
+  await Promise.allSettled(Array.from({ length: 4 }, (_, i) => cached(`/item/${i}`)));
+  assert.equal(remaining, 1000);
+});
+
 test("combining refreshed snapshots of the same hours counts their time once", () => {
   const report = { kind: "runner-occupancy", repository, since: at(0), until: at(60), collectedAt: at(70),
     runListingTruncated: false, jobListingsTruncated: 0, attemptsTruncated: 0, runs: [], jobs: [job(1, "a", 0, 10, 20, { id: 1 })] };
@@ -298,6 +339,14 @@ test("modeled latency waits for every required branch, not only the observed cri
     job(9, AGGREGATOR, 70, 70, 71, { id: 3 })];
   const [modeled] = scenarios(called, called, runs, [parseScenario("capacity=10")]);
   assert.equal(modeled.mergeGroupRequired.modeled.median, 12);
+});
+
+test("short jobs within the creation slack cannot form a dependency cycle", () => {
+  const second = (s) => new Date(Date.UTC(2026, 9, 27) + s * 1000).toISOString();
+  const short = (jobId, name, c, st, e) => ({ jobId, name, conclusion: "success", createdAt: second(c), apiStartedAt: second(st), completedAt: second(e) });
+  const jobs = [short(1, "Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 10, 10, 11),
+    short(2, "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 11, 11, 12), short(3, AGGREGATOR, 12, 12, 13)];
+  assert.equal(modeledRequiredMinutes(second(0), jobs, new Map([[1, 0], [2, 0], [3, 0]])), 13 / 60);
 });
 
 test("scenario specs are validated", () => {
