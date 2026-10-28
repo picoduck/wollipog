@@ -20225,6 +20225,18 @@ export class ControlPlaneDb {
     this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
   }
 
+  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates (#2940). */
+  consumedPullRequestMerges(sessionIds: readonly string[]): WorkflowDecisionView[] {
+    if (!sessionIds.length) return [];
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE category='pr_merge' AND status='consumed'
+         AND session_id IN (SELECT value FROM json_each(?))
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(JSON.stringify([...new Set(sessionIds)])) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
       `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND status IN ('pending','approved')

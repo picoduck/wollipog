@@ -22,8 +22,8 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
@@ -1794,6 +1794,9 @@ export class SessionsService {
   private readonly firstMessagesInFlight = new Set<string>();
   /** The one session whose established first message is being admitted right now. */
   private firstMessageDelivery: string | null = null;
+  /** Bounded on-demand forge read, wired by the server once its observer exists. A delivered item's
+   * pull requests leave the background pass, so completed closure refreshes them itself (#2940). */
+  campaignForgeRefresh: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<void>) | null = null;
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -9908,6 +9911,14 @@ export class SessionsService {
     return synchronized;
   }
 
+  /** Read the closure's candidate pull requests now; a fact that stays stale still fails the proof. */
+  private async refreshClosureForge(sessionId: string, issue: number): Promise<void> {
+    const root = this.db.getSession(sessionId);
+    if (!root || !issueBoundary(root) || !this.campaignForgeRefresh) return;
+    const refs = closureCandidateRefs(this.db, root, issue);
+    if (refs.length) await this.campaignForgeRefresh(sessionId, refs).catch(() => undefined);
+  }
+
   async requestGithubIssueClosure(
     sessionId: string,
     request: GithubIssueClosureRequest,
@@ -9961,11 +9972,9 @@ export class SessionsService {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
         if (request.reason === "completed") {
-          const work = issueWork(this.db, this.db.getSession(sessionId)!, request.issue);
-          const delivery = work.flatMap((item) => (item.observed.pullRequests ?? []).flatMap((pr) =>
-            pr.fact.availability === "fresh" && pr.fact.value.state === "merged" && pr.fact.value.mergeCommitSha ?
-              [{ number: pr.ref.number, headSha: pr.fact.value.headSha, mergeCommitSha: pr.fact.value.mergeCommitSha }] : []));
-          if (closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
+          await this.refreshClosureForge(sessionId, request.issue);
+          const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue);
+          if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
             const verificationId = `issue_closure_delivery_${randomUUID()}`;
             const verified = await this.hub.requestFromRunner(session.runnerId, verificationId, {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
@@ -10026,6 +10035,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
+    if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||

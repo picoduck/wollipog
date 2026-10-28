@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
+import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -601,5 +601,135 @@ test("campaign issue scope refuses each runner floor with the shared sentence an
       assert.equal(proposed.statusCode, 409);
       assert.deepEqual(proposed.json(), { error: refusal, ...versions }, "the HTTP refusal keeps the versions beside the sentence");
     } finally { await app.close(); h.db.close(); }
+  }
+});
+
+/** #2940: the live Full Control root delivered an issue through a gated, merged pull request it never
+ * named in a reported stage, then waited past the forge fact's freshness. These run the real ledger,
+ * verification, `pr_merge` gate and closure route rather than a stubbed work-item detail. */
+function delivery(options: { stage?: Array<{ number: number }>; gate?: "consumed" | "revoked" | "other_session" | null; verify?: boolean } = {}) {
+  const h = harness();
+  const head = "b".repeat(40), merge = "c".repeat(40);
+  const ref = (number: number) => ({ repository: "team/repo", number });
+  const observation = (state: "open" | "closed" | "merged", headSha = head) => ({ state, draft: false, headSha, baseRef: "main",
+    reviewDecision: "approved" as const, checks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 },
+    requiredChecks: { state: "passing" as const, passing: 1, failing: 0, pending: 0 }, mergeQueue: null,
+    mergeCommitSha: state === "merged" ? merge : null });
+  const observe = (number: number, state: "open" | "closed" | "merged", at = Date.now(), headSha = head) =>
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: ref(number), observation: observation(state, headSha) }], at);
+  const verified: Array<Array<{ number: number; headSha: string }> | undefined> = [];
+  const runner = h.hub.requestFromRunner;
+  h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+    if (message.type === "github_issue_closure" && message.operation === "inspect" && message.deliveryPullRequests) {
+      verified.push(message.deliveryPullRequests);
+      h.state.delivery = message.deliveryPullRequests.map((pr) => ({ ...pr, mergeCommitSha: merge }));
+    }
+    return runner(runnerId, requestId, message, timeout);
+  };
+  if (options.gate === "other_session") {
+    h.db.createSession({ id: "other", runnerId: "r", workspaceId: "w", agentId: "codex", title: "other", useWorktree: false,
+      driver: "codex-app-server", now: 1, config: {}, parentSessionId: "root" });
+    h.db.updateSessionStatus("other", "running", 2);
+  }
+  assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.item.id, childSessionId: "child" }).ok);
+  if (options.gate) {
+    const requester = options.gate === "other_session" ? "other" : "child";
+    const gate = h.svc.createWorkflowDecision(requester, { requestId: "merge-10", resourceKey: "team/repo#10/merge", resourceSnapshot: {
+      category: "pr_merge", repository: "team/repo", pullRequest: 10, headSha: head, reviewResult: "merge",
+      requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] } } });
+    assert.ok(gate.ok, gate.error ?? "merge gate");
+    assert.ok(h.svc.resolveWorkflowDecision("root", requester, gate.data!.occurrenceId, { outcome: "approve" }, gate.data!.authority,
+      { kind: "human", id: h.principal.userId }, () => true).ok);
+    if (options.gate === "revoked") assert.ok(h.db.markWorkflowDecisionRevoked(gate.data!.occurrenceId, Date.now()));
+    else assert.ok(h.db.consumeWorkflowDecision(gate.data!.occurrenceId, Date.now()));
+  }
+  if (options.stage) assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+    stage: { stage: "merged", pullRequests: options.stage.map(({ number }) => ref(number)) } }).ok);
+  if (options.verify !== false) {
+    h.svc.onSessionStatus("child", "idle");
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Delivered.", final: true }, Date.now()).seq;
+    const result = h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: report, followUpsAccounted: true,
+      workItem: { id: h.item.id, outcome: "delivered" } });
+    assert.ok(result.ok, result.error ?? "verify");
+  }
+  const close = (requestId: string) => h.svc.requestGithubIssueClosure("root", { requestId, issue: 100, reason: "completed",
+    explanation: "Delivered by the merged pull request", evidence: ["Verified report"] });
+  return { h, head, observe, verified, close };
+}
+
+test("#2940 a verified issue delivered through a consumed merge gate gets Orchestrator-owned closure after an on-demand refresh", async () => {
+  const { h, head, observe, verified, close } = delivery({ gate: "consumed" });
+  try {
+    // The background pass dropped the pull request once the item was delivered; its fact went stale.
+    observe(10, "merged", Date.now() - CAMPAIGN_FORGE_OBSERVATION.staleAfterMs - 60_000);
+    const refreshed: number[][] = [];
+    h.svc.campaignForgeRefresh = async (campaignId, refs) => {
+      assert.equal(campaignId, "root");
+      refreshed.push(refs.map((ref) => ref.number));
+      observe(10, "merged");
+    };
+    const c = await close("live-shape");
+    assert.ok(c.ok, c.error ?? "closure");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.deepEqual(refreshed, [[10]], "the gated pull request is read even though no stage names it");
+    assert.deepEqual(verified, [[{ number: 10, headSha: head }]], "the runner re-verifies the exact approved head");
+    assert.ok(h.approve(d).ok);
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.equal(h.state.executes, 1);
+    assert.deepEqual(refreshed, [[10], [10]], "execution refreshes before it re-proves delivery");
+  } finally { h.db.close(); }
+});
+
+test("#2940 a stale fact that no refresh renews still retains human closure review", async () => {
+  for (const hook of [false, true]) {
+    const { h, observe, close } = delivery({ gate: "consumed" });
+    try {
+      observe(10, "merged", Date.now() - CAMPAIGN_FORGE_OBSERVATION.staleAfterMs - 60_000);
+      if (hook) h.svc.campaignForgeRefresh = async () => {};
+      const c = await close(`stale-${hook}`);
+      assert.ok(c.ok, c.error ?? "closure");
+      assert.equal(c.data!.decision!.authority, "human");
+    } finally { h.db.close(); }
+  }
+});
+
+test("#2940 a closed-unmerged pull request does not poison an issue another gated pull request delivered", async () => {
+  const { h, head, observe, verified, close } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+  try {
+    observe(9, "closed"); observe(10, "merged");
+    const c = await close("superseded-pr");
+    assert.ok(c.ok, c.error ?? "closure");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.deepEqual(verified, [[{ number: 10, headSha: head }]], "only the merged pull request is sent for verification");
+    assert.ok(h.approve(d).ok);
+    // The excluded pull request reopens before execution: the bound proof no longer holds.
+    observe(9, "open");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.equal(h.state.executes, 0);
+  } finally { h.db.close(); }
+});
+
+test("#2940 delivery candidates never stand in for a missing merge, gate, head or verification", async () => {
+  const cases: Array<[string, Parameters<typeof delivery>[0], (observe: ReturnType<typeof delivery>["observe"]) => void]> = [
+    ["only a closed-unmerged pull request", { stage: [{ number: 9 }] }, (observe) => observe(9, "closed")],
+    ["an open stage pull request beside the merge", { gate: "consumed", stage: [{ number: 11 }] }, (observe) => { observe(10, "merged"); observe(11, "open"); }],
+    ["a revoked, never consumed gate", { gate: "revoked" }, (observe) => observe(10, "merged")],
+    ["a gate another session passed", { gate: "other_session" }, (observe) => observe(10, "merged")],
+    ["a merge at a head other than the approved one", { gate: "consumed" }, (observe) => observe(10, "merged", Date.now(), "e".repeat(40))],
+    ["an unverified attempt", { gate: "consumed", verify: false }, (observe) => observe(10, "merged")],
+  ];
+  for (const [label, options, setup] of cases) {
+    const { h, observe, close } = delivery(options);
+    try {
+      setup(observe);
+      const c = await close(label.replaceAll(" ", "-"));
+      assert.ok(c.ok, c.error ?? label);
+      assert.equal(c.data!.decision!.authority, "human", label);
+    } finally { h.db.close(); }
   }
 });
