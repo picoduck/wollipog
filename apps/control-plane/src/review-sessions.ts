@@ -4,6 +4,7 @@ import {
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewContinuationState, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
   type ReviewRunHistory, type ReviewSessionAdmission, type ReviewSessionLink, type ReviewSessionState, type ReviewSessionUpdate, type ReviewSessionView,
   type ReviewRunsSummary, type ReviewSessionsPage, type SessionReviewHarness,
+  type MergeReviewEvidence, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 
 type Row = {
@@ -256,6 +257,40 @@ export class ReviewSessions {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  /** Immutable attempt citation, verified from server-owned records. Only a newer valid vote
+   * supersedes it: a failed or cancelled retry cannot erase an upvote. Row order survives
+   * reconnects/restarts and does not trust runner clocks or caller-supplied verdicts. */
+  mergeEvidence(requesterSessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): MergeReviewEvidence | undefined {
+    const reviewSessionId = snapshot.reviewSessionId;
+    if (reviewSessionId === undefined) return undefined;
+    const refused = (reason: string): MergeReviewEvidence => ({ status: "refused", reviewSessionId,
+      reason: `${reason} Request a review session for the exact PR head and cite its valid upvote.` });
+    const row = this.row(reviewSessionId);
+    if (!row) return refused("The cited review session does not exist.");
+    if (row.requester_session_id !== requesterSessionId) return refused("The cited review belongs to another requester, outside this requester's review run.");
+    if (row.repository.toLowerCase() !== snapshot.repository.toLowerCase() || row.pr_number !== snapshot.pullRequest) {
+      return refused("The cited review belongs to another pull request.");
+    }
+    if (row.head_sha !== snapshot.headSha) return refused(`The cited review is for head ${row.head_sha}, not decision head ${snapshot.headSha}.`);
+    const view = this.view(reviewSessionId)!;
+    if (view.state !== "completed" || !view.round || !view.verdict?.valid || view.verdict.effectiveVote !== "UPVOTE") {
+      return refused(`The cited review is ${view.state} and has no valid UPVOTE.`);
+    }
+    const newer = this.sql.prepare(`SELECT * FROM review_sessions WHERE requester_session_id=? AND repository=? COLLATE NOCASE
+      AND pr_number=? AND rowid>(SELECT rowid FROM review_sessions WHERE review_session_id=?) ORDER BY rowid DESC`)
+      .all(requesterSessionId, snapshot.repository, snapshot.pullRequest, reviewSessionId) as Row[];
+    const superseding = newer.find((candidate) => {
+      const verdict = json<ReviewAttemptVerdictView>(candidate.verdict_json);
+      return candidate.state === "completed" && verdict?.valid &&
+        (verdict.effectiveVote === "UPVOTE" || verdict.effectiveVote === "DOWNVOTE");
+    });
+    if (superseding) return refused(`The cited review was superseded by valid review ${superseding.review_session_id} at head ${superseding.head_sha}.`);
+    return { status: "verified", reviewSessionId, requesterSessionId, repository: row.repository,
+      pullRequest: row.pr_number, headSha: row.head_sha, vote: "UPVOTE", reviewer: row.reviewer,
+      epoch: view.round.epoch, round: view.round.round, attempt: view.round.attempt, completedAt: row.updated_at };
   }
 
   /**

@@ -103,6 +103,176 @@ const BLOCKER: ReviewReportFinding = {
 };
 const VALID: ReviewAttemptVerdictView = { valid: true, consumed: true, effectiveVote: "DOWNVOTE", failureClass: null, validationErrors: [] };
 
+function mergeSnapshot(reviewSessionId?: string) {
+  return { category: "pr_merge" as const, repository: request().pullRequest.repository,
+    pullRequest: request().pullRequest.number, headSha: HEAD, reviewResult: "merge" as const,
+    ...(reviewSessionId === undefined ? {} : { reviewSessionId }),
+    requiredChecks: { headSha: HEAD, status: "passed" as const, checkedAt: 10,
+      checks: [{ name: "required", state: "passed" as const }] } };
+}
+
+/** Insert and deliver a runner-owned attempt, including cases the admission planner would
+ * normally refuse, to exercise verification independently of admission. */
+function evidenceAttempt(h: ReturnType<typeof harness>, id: string, options: {
+  requester?: string; head?: string; pr?: number; state?: "requested" | "running" | "completed" | "failed" | "cancelled";
+  vote?: "UPVOTE" | "DOWNVOTE"; invalid?: boolean;
+} = {}) {
+  const head = options.head ?? HEAD;
+  const state = options.state ?? "completed";
+  h.db.reviewSessions.record({ reviewSessionId: id, requesterSessionId: options.requester ?? "s1", runnerId: "r",
+    pullRequest: { ...request().pullRequest, number: options.pr ?? request().pullRequest.number }, headSha: head, reviewer: "codex" }, 10);
+  if (state !== "requested") h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state,
+    round: ROUND, ...(state === "completed" ? { output: options.invalid ? "{}" : report(head, {
+      vote: options.vote ?? "UPVOTE", findings: options.vote === "DOWNVOTE" ? [BLOCKER] : [],
+    }), verdict: VALID } : {}) }, 11);
+}
+
+test("merge citations expose server-verified evidence without approving or consuming the decision", () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const result = h.svc.createWorkflowDecision("s1", { requestId: "cited", resourceKey: "merge", resourceSnapshot: mergeSnapshot("upvote") });
+    assert.ok(result.data, result.error ?? "refused");
+    assert.equal(result.data.status, "pending");
+    assert.equal(result.data.actionAdmission, undefined);
+    assert.deepEqual(result.data.reviewEvidence, { status: "verified", reviewSessionId: "upvote", requesterSessionId: "s1",
+      repository: request().pullRequest.repository, pullRequest: request().pullRequest.number, headSha: HEAD, vote: "UPVOTE",
+      reviewer: "codex", epoch: 1, round: 1, attempt: 1, completedAt: 11 });
+    assert.deepEqual(h.svc.workflowDecision("s1", result.data.occurrenceId).data?.reviewEvidence, result.data.reviewEvidence);
+    assert.deepEqual(h.svc.workflowDecisions("s1", undefined, 10).data?.decisions[0]?.reviewEvidence, result.data.reviewEvidence);
+    assert.equal(h.svc.workflowDecision("s2", result.data.occurrenceId).status, 404);
+    const mixedCase = { ...mergeSnapshot("upvote"), repository: request().pullRequest.repository.toUpperCase() };
+    assert.ok(h.svc.createWorkflowDecision("s1", { requestId: "case", resourceKey: "case", resourceSnapshot: mixedCase }).ok);
+  } finally { h.db.close(); }
+});
+
+test("merge citations reject missing, foreign, wrong-PR, wrong-head and non-upvoting attempts with reasons", () => {
+  for (const [id, options, reason] of [
+    ["missing", null, /does not exist/u],
+    ["foreign", { requester: "s2" }, /another requester/u],
+    ["other-pr", { pr: 99 }, /another pull request/u],
+    ["other-head", { head: "c".repeat(40) }, /not decision head/u],
+    ["downvote", { vote: "DOWNVOTE" }, /no valid UPVOTE/u],
+    ["invalid", { invalid: true }, /no valid UPVOTE/u],
+    ["cancelled", { state: "cancelled" }, /cancelled.*no valid UPVOTE/u],
+    ["failed", { state: "failed" }, /failed.*no valid UPVOTE/u],
+    ["running", { state: "running" }, /running.*no valid UPVOTE/u],
+    ["requested", { state: "requested" }, /requested.*no valid UPVOTE/u],
+  ] as const) {
+    const h = harness({ campaign: true });
+    try {
+      if (options) evidenceAttempt(h, id, options);
+      const result = h.svc.createWorkflowDecision("s1", { requestId: id, resourceKey: "merge", resourceSnapshot: mergeSnapshot(id) });
+      assert.equal(result.status, 409, id);
+      assert.match(result.error!, reason);
+      assert.match(result.error!, /review session/u);
+      assert.equal(h.svc.workflowDecisions("s1", undefined, 10).data?.decisions.length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("only a newer valid vote supersedes a citation, on either the same or another head", () => {
+  for (const head of [HEAD, "c".repeat(40)]) for (const vote of ["UPVOTE", "DOWNVOTE"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      evidenceAttempt(h, "upvote");
+      evidenceAttempt(h, "new-vote", { head, vote });
+      const result = h.svc.createWorkflowDecision("s1", { requestId: "stale", resourceKey: "merge", resourceSnapshot: mergeSnapshot("upvote") });
+      assert.equal(result.status, 409);
+      assert.match(result.error!, new RegExp(`superseded by valid review new-vote at head ${head}`, "u"));
+    } finally { h.db.close(); }
+  }
+  for (const state of ["cancelled", "failed", "running", "requested", "invalid"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      evidenceAttempt(h, "upvote");
+      evidenceAttempt(h, "retry", { head: "c".repeat(40), ...(state === "invalid" ? { invalid: true } : { state }) });
+      const result = h.svc.createWorkflowDecision("s1", { requestId: "preserved", resourceKey: "merge", resourceSnapshot: mergeSnapshot("upvote") });
+      assert.ok(result.ok, `${state}: ${result.error}`);
+      assert.equal(result.data?.reviewEvidence?.status, "verified");
+    } finally { h.db.close(); }
+  }
+});
+
+test("a newer vote revokes a cited decision at approval and consumption and updates its view", async () => {
+  for (const stage of ["approval", "consume"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      evidenceAttempt(h, "upvote");
+      const snapshot = mergeSnapshot("upvote");
+      const created = h.svc.createWorkflowDecision("s1", { requestId: stage, resourceKey: "merge", resourceSnapshot: snapshot });
+      assert.ok(created.data, created.error ?? "refused");
+      if (stage === "consume") assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+      evidenceAttempt(h, "new-downvote", { vote: "DOWNVOTE" });
+      const result = stage === "approval" ? h.svc.approve("s1", created.data.occurrenceId, "approve")
+        : await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot });
+      assert.equal(result.status, 409);
+      assert.match(result.error!, /superseded by valid review new-downvote/u);
+      const view = h.svc.workflowDecision("s1", created.data.occurrenceId).data!;
+      assert.equal(view.status, "revoked");
+      assert.equal(view.reviewEvidence?.status, "refused");
+    } finally { h.db.close(); }
+  }
+});
+
+test("citation verification survives control-plane reconstruction, reconnect, and a failed restart attempt", () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const snapshot = mergeSnapshot("upvote");
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "durable", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(created.data, created.error ?? "refused");
+    h.setOnline(false);
+    evidenceAttempt(h, "interrupted", { state: "running", head: "c".repeat(40) });
+    h.db.reviewSessions.abandon("interrupted", "the runner restarted", 20);
+    h.setOnline(true);
+    h.db.registerRunner(h.metadata, 30, PROTOCOL_VERSION);
+    const reconstructed = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(reconstructed.workflowDecision("s1", created.data.occurrenceId).data?.reviewEvidence?.status, "verified");
+    assert.ok(reconstructed.approve("s1", created.data.occurrenceId, "approve").ok);
+  } finally { h.db.close(); }
+});
+
+test("a citation is rechecked after an asynchronous merge preflight, before action arming", async () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const snapshot = mergeSnapshot("upvote");
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "arm", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(created.data, created.error ?? "refused");
+    assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+    h.hub.requestFromRunner = async (_runner, requestId) => {
+      evidenceAttempt(h, "during-preflight", { vote: "DOWNVOTE" });
+      return { type: "github_merge_preflight_result", requestId, sessionId: "s1", ok: true,
+        check: { checkedAt: 10, closures: [] } };
+    };
+    const consumed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot,
+      action: { kind: "pr_merge_enqueue", command: `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${HEAD}` } });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /superseded by valid review during-preflight/u);
+    assert.equal(h.svc.workflowDecision("s1", created.data.occurrenceId).data?.actionAdmission, undefined);
+  } finally { h.db.close(); }
+});
+
+test("mixed-version runners refuse citations and downgrade invalidates an approved cited grant; uncited stays compatible", async () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const snapshot = mergeSnapshot("upvote");
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "current", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(created.data, created.error ?? "refused");
+    assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+    h.db.registerRunner(h.metadata, 30, 242);
+    const old = h.svc.createWorkflowDecision("s1", { requestId: "old", resourceKey: "old", resourceSnapshot: snapshot });
+    assert.equal(old.status, 409);
+    assert.match(old.error!, /upgrade and reconnect.*review session/u);
+    const consumed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /compatible runner/u);
+    assert.ok(h.svc.createWorkflowDecision("s1", { requestId: "uncited", resourceKey: "uncited", resourceSnapshot: mergeSnapshot() }).ok);
+  } finally { h.db.close(); }
+});
+
 /** A contract-conforming report of `ROUND` at `head`. */
 function report(head = HEAD, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
