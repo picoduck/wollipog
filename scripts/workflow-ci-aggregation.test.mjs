@@ -9,7 +9,7 @@ const check = workflow.slice(workflow.indexOf("\n  check:\n"));
 const condition = check.match(/^    if: \$\{\{ (.+) \}\}$/m)?.[1];
 assert.ok(condition, "required aggregator condition must be inspectable");
 const dependencies = check.match(/^    needs: \[([^\]]+)\]$/m)?.[1].split(", ");
-assert.deepEqual(dependencies, ["checks", "browser", "win32", "webkit", "suite_plan"]);
+assert.deepEqual(dependencies, ["checks", "browser", "win32", "webkit", "suite_plan", "merge_group_gate"]);
 const resultEnv = [...check.matchAll(/^          ([A-Z_0-9]+): \$\{\{ needs\.([a-z0-9_]+)\.result \}\}$/gm)];
 assert.deepEqual(resultEnv.map((match) => match[2]).sort(), [...dependencies].sort());
 const shell = check.match(/^        run: \|\n((?:          .*\n?)+)/m)?.[1]
@@ -74,7 +74,8 @@ test("the actual aggregator shell succeeds only for all-success and names every 
   const labels = { checks: "Typecheck, Unit Tests & Bundles", browser: "Browser End-to-End Tests",
     win32: "Settings-Rows win32 Baselines", webkit: "WebKit End-to-End Tests" };
   for (const outcomes of [...combinations, { checks: "", browser: "success", win32: "success", webkit: "success" }]) {
-    const env = { ROUTING_ENABLED: "false", PLAN_MODE: "", ...Object.fromEntries(resultEnv.map((match) => [match[1], match[2] === "suite_plan" ? "skipped" : outcomes[match[2]]])) };
+    const env = { ROUTING_ENABLED: "false", PLAN_MODE: "", GATE_ENABLED: "false", GATE_MODE: "",
+      ...Object.fromEntries(resultEnv.map((match) => [match[1], ["suite_plan", "merge_group_gate"].includes(match[2]) ? "skipped" : outcomes[match[2]]])) };
     const run = spawnSync("bash", ["-c", shell], { env, encoding: "utf8", timeout: 1_000 });
     assert.ifError(run.error);
     assert.equal(run.signal, null);
@@ -149,4 +150,29 @@ test("concurrency remains independent for unrelated PRs, refs and workflows", ()
   for (const name of ["main-push", "merge-group", "manual"]) {
     assert.equal(cancels(events.find((event) => event.name === name)), true, `${name} keeps cancelling superseded runs`);
   }
+});
+
+test("merge groups keep the full required aggregation whatever the disabled gate's result", () => {
+  const success = { CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
+    ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
+  const merge = events.find((event) => event.name === "merge-group");
+  for (const outcomes of combinations) {
+    // The aggregator is admitted for every merge-group outcome, with or without cancellation.
+    assert.equal(eligible(condition, merge, { ...outcomes, suite_plan: "skipped", merge_group_gate: "skipped" }, true), true);
+  }
+  for (const result of results) for (const mode of ["", "full", "fast"]) {
+    const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1_000,
+      env: { ...success, GATE_SWITCH: "", GATE_ENABLED: "false", GATE_RESULT: result, GATE_MODE: mode } });
+    assert.ifError(run.error);
+    assert.equal(run.status, result === "skipped" && mode === "" ? 0 : 1, `${result}/${mode}`);
+    if (run.status) assert.ok(run.stdout.includes("::error::Unexpected Merge Group Gate admission or output"));
+  }
+  const missing = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1_000,
+    env: { ...success, GATE_SWITCH: "enabled", GATE_ENABLED: "true", GATE_RESULT: "success", GATE_MODE: "" } });
+  assert.equal(missing.status, 1);
+  assert.ok(missing.stdout.includes("::error::Merge Group Gate returned missing or unknown mode ''"));
+  const caseVariant = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1_000,
+    env: { ...success, GATE_SWITCH: "Enabled", GATE_ENABLED: "true", GATE_RESULT: "success", GATE_MODE: "fast" } });
+  assert.equal(caseVariant.status, 1);
+  assert.ok(caseVariant.stdout.includes("::error::A reduced merge group requires the exact lowercase enabled gate"));
 });

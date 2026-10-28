@@ -229,5 +229,5 @@ test("shadow workflow is advisory, draft guarded and runs base-revision code wit
   assert.match(shadow, /ref: \$\{\{ github\.event\.merge_group\.base_sha \|\| github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(shadow, /--change-head "\$CHANGE_HEAD_SHA"/);
   assert.doesNotMatch(shadow, /pnpm install|pnpm test|pull_request_target/);
-  assert.match(workflow, /needs: \[checks, browser, win32, webkit, suite_plan\]/);
+  assert.match(workflow, /needs: \[checks, browser, win32, webkit, suite_plan, merge_group_gate\]/);
 });

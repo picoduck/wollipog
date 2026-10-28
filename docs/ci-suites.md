@@ -122,7 +122,10 @@ workflow routing; a PR may edit that workflow. Such an edit selects full and
 remains subject to existing review/full required CI. The advisory log cannot
 grant lighter coverage or become a security authority. Any future gating caller
 must establish a trusted workflow definition as well as trusted selector code;
-this issue does not activate that route.
+this issue does not activate that route. The [disabled merge-group gate](ci-aggregation.md#disabled-merge-group-gate)
+(#3637) is such a caller: it runs this selector from current main over the
+combined main-to-group diff, requires an unchanged workflow and enforced
+regression admission, and is inert unless `CI_MERGE_GROUP_GATE` is exactly `enabled`.
 
 Every `ci-selection-v1` record includes `suiteVersion`, `policyVersion`, `policyId`
 (trusted policy/selector/profile content), `suiteId` (group contract, allowlists,

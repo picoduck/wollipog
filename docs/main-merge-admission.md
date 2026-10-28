@@ -198,9 +198,13 @@ Separate human-authorized operator work, after remaining code and dry-run recove
    adding the exact approved admission context. Drain/rebuild old queue groups so
    pre-activation green checks cannot inherit admission. Verify the protected
    context's issuer and new/queued/in-flight behavior before considering fast cutover.
+   The [disabled merge-group gate](ci-aggregation.md#disabled-merge-group-gate) refuses
+   to reduce work until it reads exactly that issuer-pinned required context.
 
 Rollback order is mandatory: **restore full queue regression validation first**,
-verify exact-group full results, then remove the hold only under separate operator
+verify exact-group full results (`scripts/ci-merge-group-restoration.mjs`, see
+[Rollback and Restoration Proof](ci-aggregation.md#rollback-and-restoration-proof)),
+then remove the hold only under separate operator
 approval. Do not remove a required context or clear holds on a failing baseline to
 make the queue green. Revoke outstanding repair authorizations, retain evidence and
 reconcile current main. If the full baseline still fails, keep ordinary admissions
