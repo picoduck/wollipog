@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -194,12 +194,19 @@ async function until(predicate: () => boolean | Promise<boolean>, description: s
   }
 }
 
+// A process that exits after its procfs file opens fails the read with ESRCH rather than ENOENT
+// (#3801), as provider-home-lease-evidence.ts already treats it. Either proves the process gone.
+function fixtureProcessGone(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code;
+  return code === "ENOENT" || code === "ESRCH";
+}
+
 function liveFixtureProcess(pid: number, startedAt: string): boolean {
   try {
     const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
     return stat[19] === startedAt && stat[0] !== "Z";
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    if (fixtureProcessGone(error)) return false;
     throw error;
   }
 }
@@ -226,7 +233,7 @@ function ownedFixtureTree(root: FixtureIdentity): FixtureIdentity[] {
       const stat = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
       if (hasFixtureAncestor(pid, root)) owned.push({ pid, startedAt: stat[19]! });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (!fixtureProcessGone(error)) throw error;
     }
   }
   return owned;
@@ -259,6 +266,29 @@ function abandonmentInspection(record: LeaseRecord, scannerPid: number, fixtureP
     settled: !scan?.uninspectable.includes(-1),
   };
 }
+
+test("fixture process inspection treats a process that exits mid-read as gone", { skip: process.platform !== "linux" ? "uses Linux procfs" : false }, async () => {
+  // Reproduce the exact window from #3801: the stat file opens, then the process is reaped before
+  // the read. The kernel reports ESRCH, which must count as gone rather than fail the teardown.
+  const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1_000)"], { stdio: "ignore" });
+  const exited = new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise()));
+  let fd: number | undefined;
+  try {
+    await until(() => existsSync(`/proc/${child.pid}/stat`), "the fixture child has a procfs entry", 5_000);
+    fd = openSync(`/proc/${child.pid}/stat`, "r");
+    child.kill("SIGKILL");
+    await exited;
+    let midRead: unknown;
+    try { readSync(fd, Buffer.alloc(512), 0, 512, 0); } catch (error) { midRead = error; }
+    assert.equal((midRead as NodeJS.ErrnoException | undefined)?.code, "ESRCH", "a read after exit reports ESRCH");
+    assert.ok(fixtureProcessGone(midRead), "ESRCH proves the fixture process gone");
+    assert.ok(fixtureProcessGone(Object.assign(new Error("absent"), { code: "ENOENT" })), "ENOENT still proves it gone");
+    assert.ok(!fixtureProcessGone(Object.assign(new Error("denied"), { code: "EACCES" })), "an unreadable live process is not gone");
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    child.kill("SIGKILL");
+  }
+});
 
 for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "second-signal", "supervisor-stop", "supervisor-teardown", "SIGKILL-empty", "second-signal-empty", "unreadable"] as const) {
   test(

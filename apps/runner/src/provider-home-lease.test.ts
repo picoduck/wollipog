@@ -745,7 +745,7 @@ type SuccessorRaceOptions = {
   signal?: AbortSignal;
   onReady?: () => void;
   beforeRemoveRoot?: (root: string) => void;
-  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse";
+  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse" | "transient-catch-up";
 };
 
 async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
@@ -761,7 +761,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     child: AgentProcess; name: string; phase: string; phaseAt: number; spawnedAt: number;
     ready: boolean; reported: boolean; closed: boolean; code: number | null;
     signal: NodeJS.Signals | null; stderr: string; error?: string;
-    timings: Record<string, number>; outcome?: string;
+    timings: Record<string, number>; outcome?: string; checkpointFailures: string[];
   }> = [];
   let failure: string | undefined;
   let cleanupProved = true;
@@ -778,6 +778,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     timings: state.timings, outcome: sanitize(state.outcome ?? outcomes[states.indexOf(state)] ?? "unreported"),
     exitCode: state.code, signal: state.signal, closed: state.closed,
     stderr: sanitize(state.stderr), error: state.error,
+    checkpointFailures: state.checkpointFailures.map(sanitize),
   }));
   async function waitUntil(predicate: () => boolean, ms: number, monitor = false): Promise<boolean> {
     const deadline = performance.now() + ms;
@@ -816,8 +817,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       import { ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
       const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
       const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      const checkpointFailures = [];
       const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
-        process.send({ phase: name, timings, outcome }, (error) => error ? reject(error) : resolve());
+        process.send({ phase: name, timings, outcome, checkpointFailures }, (error) => error ? reject(error) : resolve());
       });
       const waitFor = (path) => {
         const deadline = performance.now() + 20_000;
@@ -839,28 +841,47 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         const initializedAt = performance.now();
         withLeaseIoOptions({ providerHome: home }, ensureLeaseIoAvailable);
         const initializationMs = performance.now() - initializedAt;
-        registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
+        registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, {
+          hostname: "host-a",
+          disableCompactionForTest: fault === "transient-catch-up",
+          onCheckpointFailureForTest: (error) => checkpointFailures.push(error instanceof Error ? error.message : String(error)),
+        });
         pause(${options.startupDelayMs ?? 0});
         await phase("ready", { initializationMs });
         waitFor(start);
         await phase("acquiring");
         const acquisitionAt = performance.now();
         let outcome;
-        try {
-          registry.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
-          outcome = "won";
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const refusal = (error instanceof Error && typeof error.reason === "string") ||
-            (error instanceof LeaseIoError && error.kind === "busy");
-          if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
-          outcome = "lost:" + message;
+        let catchUpRetries = 0;
+        for (;;) {
+          try {
+            registry.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
+            outcome = "won";
+            break;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            // Only the registry holding the published successor gets this refusal (#3801). The
+            // product keeps its reservation and asks the runner to retry with the same registry,
+            // as a runner does; the retry count and checkpoint failures stay in the diagnostics.
+            if (catchUpRetries < 3 && /bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry/.test(message)) {
+              catchUpRetries++;
+              // The fault fails only the first catch-up: re-enable the checkpoint this registry disabled.
+              if (fault === "transient-catch-up") registry.disableCompactionForTest = false;
+              pause(25);
+              continue;
+            }
+            const refusal = (error instanceof Error && typeof error.reason === "string") ||
+              (error instanceof LeaseIoError && error.kind === "busy");
+            if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
+            outcome = "lost:" + message;
+            break;
+          }
         }
         if (fault === "both-refuse") outcome = "lost:synthetic refusal after acquisition";
         const acquisitionMs = performance.now() - acquisitionAt;
         writeFileSync(result + ".claim.tmp", JSON.stringify({ outcome, pid: process.pid }));
         renameSync(result + ".claim.tmp", result + ".claim");
-        await phase("publishing", { acquisitionMs }, outcome);
+        await phase("publishing", { acquisitionMs, catchUpRetries }, outcome);
         if (fault === "hang-in-publication") await hang();
         const publicationAt = performance.now();
         pause(${options.publicationDelayMs ?? 0});
@@ -905,7 +926,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     const results = [join(root, "result-a"), join(root, "result-b")];
     for (const [index, result] of results.entries()) {
       const spawnedAt = performance.now();
-      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || options.fault === "both-refuse") ? options.fault ?? "" : "", results[1 - index]!], {
+      // Either contender may win, so faults that model the election itself reach both of them.
+      const bothFault = options.fault === "both-refuse" || options.fault === "transient-catch-up";
+      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || bothFault) ? options.fault ?? "" : "", results[1 - index]!], {
         env: { ...process.env, TMPDIR: staging, TMP: staging, TEMP: staging },
         detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe", "ipc"],
       }) as AgentProcess;
@@ -914,15 +937,17 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         spawnedAt, ready: false, reported: false, closed: false,
         code: null as number | null, signal: null as NodeJS.Signals | null, stderr: "",
         error: undefined as string | undefined, outcome: undefined as string | undefined, timings: {} as Record<string, number>,
+        checkpointFailures: [] as string[],
       };
       states.push(state);
       child.stderr?.on("data", (chunk) => { state.stderr = (state.stderr + String(chunk)).slice(-8_192); });
       child.on("message", (message) => {
-        const report = message as { phase: string; timings: Record<string, number>; outcome?: string };
+        const report = message as { phase: string; timings: Record<string, number>; outcome?: string; checkpointFailures?: string[] };
         state.phase = report.phase;
         state.phaseAt = performance.now();
         Object.assign(state.timings, report.timings);
         if (report.outcome !== undefined) state.outcome = report.outcome;
+        if (Array.isArray(report.checkpointFailures)) state.checkpointFailures = report.checkpointFailures.slice(0, 8).map(String);
         if (report.phase === "ready") {
           state.ready = true;
           state.timings.startupMs = state.phaseAt - spawnedAt;
@@ -972,7 +997,12 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
   if (cleanupFailures.length) failure = [failure, ...cleanupFailures].filter(Boolean).join("; ");
   if (states.some((state) => state.code !== 0)) failure ??= "contenders must exit successfully";
   if (failure) throw new Error(`${failure}; ${JSON.stringify(details())}`);
-  t.diagnostic(`successor election phases: ${JSON.stringify(states.map((state) => ({ contender: state.name, ...state.timings })))}`);
+  const phases = states.map((state) => ({
+    contender: state.name, ...state.timings, catchUpRetries: state.timings.catchUpRetries ?? 0,
+    checkpointFailures: state.checkpointFailures.map(sanitize),
+  }));
+  t.diagnostic(`successor election phases: ${JSON.stringify(phases)}`);
+  return phases;
 }
 
 function assertSuccessorFailureClosed(error: unknown, expected: RegExp): boolean {
@@ -1055,6 +1085,16 @@ test("successor election diagnoses two refusals without a publication timeout", 
     assert.equal((error.message.match(/"outcome":"lost:/g) ?? []).length, 2);
     return assertSuccessorFailureClosed(error, /contender failed before publishing/);
   });
+});
+
+test("successor election lets the winning reservation finish a transient catch-up refusal", async (t) => {
+  // #3801: the contender that published the successor can still fail its first bounded catch-up.
+  // The product preserves that reservation and asks for a retry with the same registry; without
+  // the retry neither contender wins, and the forced-cleanup case above reports the wrong failure.
+  const phases = await runSuccessorElectionRace(t, { fault: "transient-catch-up" });
+  assert.equal(phases.reduce((sum, phase) => sum + phase.catchUpRetries, 0), 1, "exactly the winner retried once");
+  assert.deepEqual(phases.flatMap((phase) => phase.checkpointFailures), ["checkpoint disabled for unavailable-storage validation"],
+    "the failed first catch-up stays visible in the diagnostics");
 });
 
 test("successor election preserves removal errors after an earlier failure", async (t) => {
