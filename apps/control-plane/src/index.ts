@@ -133,6 +133,7 @@ import {
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
+  type CampaignPullRequestRef,
 } from "@wollipog/protocol";
 import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
@@ -1078,17 +1079,20 @@ const campaignForgeObserver = new CampaignForgeObserver({
 campaignForgeObserver.start();
 /** An on-demand read waits at most this long before the route answers with what is stored. */
 const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
+const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullRequestRef[]) => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
+  timer.unref?.();
+  void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
+    clearTimeout(timer);
+    resolve();
+  });
+});
+svc.campaignForgeRefresh = refreshCampaignForge;
+svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
 registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
-  refreshForge: (campaignId, refs) => new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
-    timer.unref?.();
-    void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  }),
+  refreshForge: refreshCampaignForge,
 });
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),

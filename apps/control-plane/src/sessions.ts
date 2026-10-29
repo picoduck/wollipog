@@ -23,8 +23,9 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
+import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
@@ -1819,6 +1820,14 @@ export class SessionsService {
   private readonly firstMessagesInFlight = new Set<string>();
   /** The one session whose established first message is being admitted right now. */
   private firstMessageDelivery: string | null = null;
+  /** Bounded on-demand forge read, wired by the server once its observer exists. A delivered item's
+   * pull requests leave the background pass, so completed closure refreshes them itself (#2940). */
+  campaignForgeRefresh: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<void>) | null = null;
+  /** The observer's uncached, still concurrency-bounded read, for proof execution must not take from
+   * an earlier answer. Without it an excluded pull request cannot be re-proven (#2940). */
+  campaignForgeReadNow: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<ForgeReadResult[] | null>) | null = null;
+  /** One in-flight excluded-pull-request read per closure occurrence; concurrent executes share it. */
+  private readonly excludedClosureReads = new Map<string, Promise<boolean>>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -9969,6 +9978,30 @@ export class SessionsService {
     return synchronized;
   }
 
+  /** Read the closure's candidate pull requests now; a fact that stays stale still fails the proof. */
+  private async refreshClosureForge(sessionId: string, issue: number): Promise<void> {
+    const root = this.db.getSession(sessionId);
+    if (!root || !issueBoundary(root) || !this.campaignForgeRefresh) return;
+    const refs = closureCandidateRefs(this.db, root, issue);
+    if (refs.length) await this.campaignForgeRefresh(sessionId, refs).catch(() => undefined);
+  }
+
+  /** The runner's authoritative read of every excluded pull request, past the observer's cache and
+   * rate limit: a pull request reopened since its last read must not stay excluded. Concurrent
+   * executes of one occurrence share a read in flight, and a settled answer is never reused. A
+   * read that cannot answer for every ref proves nothing. */
+  private excludedPullRequestsStillClosed(occurrenceId: string, root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean> {
+    if (!refs.length) return Promise.resolve(true);
+    const shared = this.excludedClosureReads.get(occurrenceId);
+    if (shared) return shared;
+    const read = (async () => {
+      const results = this.campaignForgeReadNow ? await this.campaignForgeReadNow(root.id, refs).catch(() => null) : null;
+      return Boolean(results && results.length === refs.length && results.every((result) => result.observation?.state === "closed"));
+    })().finally(() => this.excludedClosureReads.delete(occurrenceId));
+    this.excludedClosureReads.set(occurrenceId, read);
+    return read;
+  }
+
   async requestGithubIssueClosure(
     sessionId: string,
     request: GithubIssueClosureRequest,
@@ -10022,11 +10055,9 @@ export class SessionsService {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
         if (request.reason === "completed") {
-          const work = issueWork(this.db, this.db.getSession(sessionId)!, request.issue);
-          const delivery = work.flatMap((item) => (item.observed.pullRequests ?? []).flatMap((pr) =>
-            pr.fact.availability === "fresh" && pr.fact.value.state === "merged" && pr.fact.value.mergeCommitSha ?
-              [{ number: pr.ref.number, headSha: pr.fact.value.headSha, mergeCommitSha: pr.fact.value.mergeCommitSha }] : []));
-          if (closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
+          await this.refreshClosureForge(sessionId, request.issue);
+          const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue);
+          if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
             const verificationId = `issue_closure_delivery_${randomUUID()}`;
             const verified = await this.hub.requestFromRunner(session.runnerId, verificationId, {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
@@ -10087,6 +10118,7 @@ export class SessionsService {
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
+    if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
@@ -10094,11 +10126,25 @@ export class SessionsService {
       return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
     }
     if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
+    // The uncached read is the last await: a pull request reopened during synchronization is seen,
+    // and only synchronous rechecks of every current-state condition separate it from consumption.
+    const synchronized = this.db.getSession(sessionId) ?? session;
+    if (decision.authority === "orchestrator" &&
+        !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
+      return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
+    }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || (freshSession.orchestratorPolicy?.issueScope?.revision ?? 0) !== (snapshot.scopeRevision ?? 0) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
+    const settled = Date.now();
+    if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" || settled - decision.resolvedAt > 30 * 60_000 ||
+        decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) ||
+        this.pendingPolicyAsk(freshSession) || pendingRequests(freshSession.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
+        this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
+      return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
+    }
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
