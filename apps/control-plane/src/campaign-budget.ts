@@ -135,6 +135,23 @@ export class CampaignBudgetLedger {
     return (this.sql.prepare("SELECT root_id FROM campaign_budget_members WHERE session_id=?").get(sessionId) as { root_id: string } | undefined)?.root_id ?? null;
   }
 
+  /** The allowance that governs a member's admission: its root's, unless that root's recorded control
+   * no longer grants one. A campaign the Human revoked to Custom (or authorized again without an
+   * allowance) runs under ordinary session rules, so a revoked allowance never stops, refuses or
+   * deadlocks it; its members' spend is still recorded, and counts against any allowance the Human
+   * authorizes again (#2940). Accounting reads use `root`. */
+  governingRoot(sessionId: string): string | null {
+    const rootId = this.root(sessionId);
+    if (!rootId) return null;
+    const row = this.sql.prepare("SELECT orchestrator_policy FROM sessions WHERE id=?").get(rootId) as { orchestrator_policy: string | null } | undefined;
+    let control: { mode?: string; boundary?: { budgetAuthority?: unknown } } | undefined;
+    try { control = (JSON.parse(row?.orchestrator_policy ?? "null") as { control?: typeof control } | null)?.control; } catch { return rootId; }
+    // Only an explicit control without an allowance releases it: a missing root, policy or control
+    // record keeps the allowance governing, never silently lifting it.
+    if (!control) return rootId;
+    return control.mode === "full_control" && control.boundary?.budgetAuthority !== undefined ? rootId : null;
+  }
+
   view(rootId: string): CampaignBudgetView | undefined {
     // First, so the header read below includes any accounting stop a settlement makes.
     this.settleEnded(rootId);
@@ -200,10 +217,12 @@ export class CampaignBudgetLedger {
     if (!validCampaignBudgetAuthority(authority)) throw new Error("invalid campaign allowance");
     this.atomic(() => {
       const old = this.view(rootId);
-      // A new human grant can enlarge ceilings, but cannot silently resume revoked accounting.
-      if (old && old.state !== "active") throw new Error("a stopped campaign allowance cannot be reset; start an explicitly authorized new campaign");
+      // A new human grant can enlarge ceilings, but cannot silently resume stopped accounting. Only the
+      // Human's own revocation is resumed, by that Human's next explicit authorization (#2940); the
+      // spend recorded before and since still counts against it.
+      if (old && old.state !== "active" && old.state !== "revoked") throw new Error("a stopped campaign allowance cannot be reset; start an explicitly authorized new campaign");
       this.sql.prepare(`INSERT INTO campaign_budgets(root_id,authority) VALUES (?,?)
-        ON CONFLICT(root_id) DO UPDATE SET authority=excluded.authority`).run(rootId, JSON.stringify(authority));
+        ON CONFLICT(root_id) DO UPDATE SET authority=excluded.authority,state='active',reason=NULL`).run(rootId, JSON.stringify(authority));
       const existingFollowUps = this.sql.prepare("SELECT id FROM campaign_work_items WHERE campaign_session_id=? AND origin='follow_up'").all(rootId) as unknown as Array<{ id: string }>;
       for (const item of existingFollowUps) {
         const inserted = this.sql.prepare("INSERT OR IGNORE INTO campaign_budget_follow_ups VALUES (?,?)").run(rootId,item.id);
@@ -222,6 +241,7 @@ export class CampaignBudgetLedger {
         if (!old && authority.toolCalls !== undefined && m.tools > count) throw new Error("Campaign tool accounting is unavailable because preauthorization history is incomplete; protected admission is refused.");
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_members(session_id,root_id,cost,tools,cost_limit,tool_limit,user_cost_limit,user_tool_limit,active)
           VALUES (?,?,?,?,?,?,?,?,?)`).run(m.id,rootId,m.cost,m.tools,m.cost_limit,m.tool_limit,m.cost_limit,m.tool_limit,["completed","failed","stopped"].includes(m.status)?0:1);
+        if (old?.state === "revoked") this.reconcileResumedMember(m.id, m.status, { costBudgetUsd: m.cost_limit, maxToolCalls: m.tool_limit });
         this.sql.prepare(`INSERT OR IGNORE INTO campaign_budget_tool_calls(session_id,tool_call_id)
           SELECT session_id,json_extract(payload,'$.toolCallId') FROM session_events WHERE session_id=? AND kind='tool_call' AND json_extract(payload,'$.toolCallId') IS NOT NULL`).run(m.id);
         // Calls retention pruned are recorded by id, so they count once however their history returns.
@@ -249,6 +269,34 @@ export class CampaignBudgetLedger {
           (authority.concurrency !== undefined && view.occupied > authority.concurrency) ||
           (authority.acceptedFollowUps !== undefined && view.acceptedFollowUps > authority.acceptedFollowUps)) throw new Error("allowance is below existing spend or reservations");
     });
+  }
+
+  /** Resuming an allowance the Human revoked (#2940). A member that runs again since counts against
+   * it, with a fresh dispatch generation, and a session limit the person lowered meanwhile becomes
+   * its personal ceiling and caps its allocation. No spend is refunded and no member is released. */
+  private reconcileResumedMember(sessionId: string, status: string, current: { costBudgetUsd: number | null; maxToolCalls: number | null }): void {
+    const row = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined;
+    const personal = this.personalLimits(sessionId, current);
+    if (!row || !personal) return;
+    const cap = (allocated: number | null, ceiling: number | null) => ceiling === null ? allocated : Math.min(allocated ?? Infinity, ceiling);
+    this.sql.prepare("UPDATE campaign_budget_members SET user_cost_limit=?,user_tool_limit=?,cost_limit=?,tool_limit=? WHERE session_id=?")
+      .run(personal.costBudgetUsd, personal.maxToolCalls, cap(row.cost_limit, personal.costBudgetUsd), cap(row.tool_limit, personal.maxToolCalls), sessionId);
+    if (!row.active && !["completed", "failed", "stopped"].includes(status)) {
+      this.sql.prepare("UPDATE campaign_budget_members SET active=1,generation=? WHERE session_id=?").run(randomUUID(), sessionId);
+      this.sql.prepare("DELETE FROM campaign_budget_checkpoints WHERE session_id=?").run(sessionId);
+    }
+  }
+
+  /** A member's personal ceilings, tightened by a session limit the person set below its allocation
+   * while the allowance did not govern it (#2940). A raised or cleared limit never widens them. */
+  personalLimits(sessionId: string, current: { costBudgetUsd: number | null; maxToolCalls: number | null }):
+    { costBudgetUsd: number | null; maxToolCalls: number | null } | undefined {
+    const row = this.sql.prepare("SELECT * FROM campaign_budget_members WHERE session_id=?").get(sessionId) as Member | undefined;
+    if (!row) return undefined;
+    const lowered = (limit: number | null, allocated: number | null, ceiling: number | null) =>
+      limit !== null && limit > 0 && (allocated === null || limit < allocated) ? Math.min(ceiling ?? Infinity, limit) : ceiling;
+    return { costBudgetUsd: lowered(current.costBudgetUsd, row.cost_limit, row.user_cost_limit),
+      maxToolCalls: lowered(current.maxToolCalls, row.tool_limit, row.user_tool_limit) };
   }
 
   /** Whether the Human authorized a cost ceiling, the only limit that needs priced usage. */
@@ -491,7 +539,7 @@ export class CampaignBudgetLedger {
   }
 
   admissionError(sessionId: string): string | null {
-    const rootId = this.root(sessionId); if (!rootId) return null;
+    const rootId = this.governingRoot(sessionId); if (!rootId) return null;
     const v = this.view(rootId)!;
     if (v.state !== "active") return v.reason ?? "campaign allowance unavailable";
     const row = this.sql.prepare(`SELECT m.*, ${LIVE_COST} AS live_cost FROM campaign_budget_members m

@@ -5250,9 +5250,12 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
   respond(reply, await svc.cancelTurn((req.params as { id: string }).id)),
 );
 
-app.post("/api/sessions/:id/restart", async (req, reply) =>
-  respond(reply, svc.restart((req.params as { id: string }).id)),
-);
+app.post("/api/sessions/:id/restart", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  // A person restarting a Full Control campaign restores or explains its stale boundary (#2940).
+  const human = requestHuman(req);
+  return respond(reply, (human && svc.restoreHumanCampaignAuthority(human, id)) ?? svc.restart(id));
+});
 
 // #1780: end one managed background job without ending the session. The auth gate has already
 // confined an agent credential to its descendants; only the direct parent Orchestrator remains.

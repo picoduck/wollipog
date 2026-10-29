@@ -1252,6 +1252,26 @@ test("a server refusal keeps its words behind Show Details, not in the sentence"
   }
 });
 
+test("a stale Full Control authority refusal says what happened and how to recover in the sentence (#2940)", async () => {
+  const reason = "This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+    "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.";
+  const fixture = await mount(sessionView({}), {
+    client: { prompt: () => Promise.reject(new ApiError(reason, 409, "campaign_authority_stale")) } as Partial<ApiClient>,
+  });
+  try {
+    await typeDraft(fixture.container, "Hello");
+    await sendDraft(fixture.container);
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Message Not Sent");
+    assert.equal(notice.querySelector(".notice-body p")?.textContent, `${reason} Your draft is kept.`);
+    assert.equal(fixture.button("Show Details"), undefined, "nothing is held back behind details");
+    assert.equal(fixture.button("Retry"), undefined, "resending before the recovery would meet the same refusal");
+    assert.equal((fixture.container.querySelector("textarea") as HTMLTextAreaElement).value, "Hello", "the draft waits in the composer");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a composer error waits through a pending request and is still there after it resolves", async () => {
   const session = sessionView({});
   const fixture = await mount(session, { client: { prompt: unreachable } as Partial<ApiClient> });

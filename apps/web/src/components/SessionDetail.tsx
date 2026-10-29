@@ -733,7 +733,8 @@ function composerHoldsDraft(
 
 /** "Couldn't send your message." with what happened, for a send the server did not accept. A request
  * that never got an answer is the machine not responding; any other refusal keeps the server's
- * reason behind Show Details. Without `retry` the draft was changed while the send was in flight, so
+ * reason behind Show Details, except one the server words for the person with its recovery. Without
+ * `retry` the draft was changed while the send was in flight, so
  * there is no kept draft to retry. */
 function messageNotSent(cause: unknown, machineName: string | undefined, retry?: ComposerRetry): ComposerError {
   const kept = retry ? " Your draft is kept." : "";
@@ -745,6 +746,11 @@ function messageNotSent(cause: unknown, machineName: string | undefined, retry?:
     };
   }
   const detail = cause.message.trim();
+  // A Full Control campaign's stale authority is explained for the person, with its recovery (#2940).
+  // No Retry: until that recovery, resending meets the same refusal; the kept draft sends after it.
+  if (cause.code === "campaign_authority_stale" && detail) {
+    return { title: "Message Not Sent", message: `${detail}${kept}` };
+  }
   return {
     title: "Message Not Sent",
     message: `Couldn't send your message.${kept}`,

@@ -304,10 +304,129 @@ test("human-only grant, CAS, runner compatibility, and revocation preserve usage
     assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
     assert.equal(h.db.campaignBudgets.view("root")!.state, "revoked");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
-    assert.equal(h.enable(allowance({ toolCalls: 1000 }), 3).ok, false, "a new grant cannot reset an exhausted/revoked ledger");
+    // The Human's next explicit grant resumes the allowance that Human revoked (#2940), never refunding usage.
+    assert.ok(h.enable(allowance({ toolCalls: 1000 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
+    h.db.campaignBudgets.stop("root", "exhausted", "Campaign allowance reached; unfinished work remains incomplete.");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 4, h.principal).ok);
+    assert.equal(h.enable(allowance({ toolCalls: 2000 }), 5).ok, false, "a new grant cannot reset an exhausted ledger");
   } finally { h.db.close(); }
   const old = harness(":memory:", 217);
   try { assert.equal(old.enable().ok, false); } finally { old.db.close(); }
+});
+
+test("a worker that runs again under Custom counts against the allowance its Human authorizes again (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    h.make("worker", "root", { maxToolCalls: 40 });
+    h.db.updateSessionStatus("worker", "completed", 4);
+    const settled = h.db.campaignBudgets.dispatch("worker")!.generation;
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation: settled, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 0 }));
+    assert.equal(h.db.campaignBudgets.active("worker"), false);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const restarted = h.svc.restart("worker");
+    assert.ok(restarted.ok, restarted.error ?? "restart under Custom");
+    assert.equal(h.db.campaignBudgets.active("worker"), false, "Custom admits no allowance");
+
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.active("worker"), true, "the running worker counts again");
+    assert.notEqual(h.db.campaignBudgets.dispatch("worker")!.generation, settled, "with a fresh dispatch generation");
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
+    assert.throws(() => h.make("second", "root", { maxToolCalls: 10 }), /concurrency/);
+  } finally { h.db.close(); }
+});
+
+test("a session limit the person lowers under Custom survives authorizing the allowance again (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+    h.make("worker", "root", { maxToolCalls: 40 });
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.toolCalls, 40);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const lowered = h.svc.setConfig("worker", { maxToolCalls: 5 });
+    assert.ok(lowered.ok, lowered.error ?? "lower the limit under Custom");
+    h.sent.length = 0;
+
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.toolCalls, 5);
+    assert.equal(h.db.campaignBudgets.userLimits("worker")!.maxToolCalls, 5);
+    assert.equal(h.db.getSession("worker")!.maxToolCalls, 5);
+    const rearmed = h.sent.filter((message) => (message as { type: string; sessionId?: string }).type === "rearm_governance" &&
+      (message as { sessionId?: string }).sessionId === "worker") as Array<{ config: { maxToolCalls?: number } }>;
+    assert.ok(rearmed.length > 0 && rearmed.every((message) => (message.config.maxToolCalls ?? 0) <= 5), JSON.stringify(rearmed));
+    assert.throws(() => h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 6 }, {}), /tighter/);
+  } finally { h.db.close(); }
+});
+
+test("an allowance stops governing only when its root's recorded control grants none (#2940)", () => {
+  const h = harness();
+  try {
+    const control = (value: unknown) => {
+      const stored = h.db.sessionOrchestratorPolicy("root")!;
+      if (value === undefined) delete stored.control; else stored.control = value as typeof stored.control;
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    };
+    h.db.campaignBudgets.authorize("root", allowance());
+    control(undefined);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), "root", "a root with no control record keeps its allowance");
+    assert.ok(h.enable().ok);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), "root", "Full Control with an allowance governs");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.control, { mode: "custom" }, "revoking records Custom explicitly");
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), null, "a revoked-to-Custom allowance never governs");
+    assert.equal(h.db.campaignBudgets.admissionError("root"), null);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2936", operations: ["implementation_question"],
+      delegatablePolicyIds: [] }, 3, h.principal).ok);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), null, "Full Control authorized without an allowance does not revive it");
+  } finally { h.db.close(); }
+});
+
+/** An allowance with no personal limits, revoked to Custom, then the root lowered to 5 tool calls (#2940). */
+function revokedAndLowered(before?: (h: ReturnType<typeof harness>) => void) {
+  const h = harness();
+  assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+  before?.(h);
+  assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+  const lowered = h.svc.setConfig("root", { maxToolCalls: 5 });
+  assert.ok(lowered.ok, lowered.error ?? "lower the root's limit under Custom");
+  assert.equal(h.db.campaignBudgets.userLimits("root")!.maxToolCalls, null, "the retained record has no personal limit");
+  return h;
+}
+
+test("under Custom, a child's creation is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered();
+  try {
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5", maxToolCalls: 10 },
+      prompt: "Implement #2936" }, undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.ok(child.ok, child.error ?? "child creation");
+    assert.ok(child.data!.maxToolCalls != null && child.data!.maxToolCalls <= 5, `creation: ${child.data!.maxToolCalls}`);
+  } finally { h.db.close(); }
+});
+
+test("under Custom, a batch of children is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered();
+  try {
+    const run = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Implement #2936",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 } }, { parentSessionId: "root" });
+    assert.ok(run.ok, run.error ?? "batch admission");
+    assert.ok(run.data!.sessions.every((member) => member.maxToolCalls != null && member.maxToolCalls <= 5),
+      `batch: ${run.data!.sessions.map((member) => member.maxToolCalls).join(",")}`);
+  } finally { h.db.close(); }
+});
+
+test("under Custom, a child's restart is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered((h) => {
+    h.make("worker", "root", { maxToolCalls: 10 });
+    h.db.updateSessionStatus("worker", "completed", 4);
+  });
+  try {
+    const restarted = h.svc.restart("worker");
+    assert.equal(restarted.ok, false, "restart re-reserves 10 tool calls against a current limit of 5");
+    assert.match(restarted.error!, /re-reserves 10 tool calls/);
+  } finally { h.db.close(); }
 });
 
 test("root, nested reviewers and replacements share reservations without double counting", () => {

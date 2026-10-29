@@ -23,7 +23,7 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
@@ -3878,7 +3878,7 @@ export class SessionsService {
       }
       const guarded = childSessionGuardrails({
         ...parent,
-        ...this.db.campaignBudgets.userLimits(parent.id),
+        ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
       }, candidate, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
@@ -4154,7 +4154,7 @@ export class SessionsService {
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const guarded = childSessionGuardrails({
         ...parent,
-        ...this.db.campaignBudgets.userLimits(parent.id),
+        ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
       }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
@@ -4839,7 +4839,7 @@ export class SessionsService {
     const config = { ...requestedConfig };
     const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
     const budgetSource = creationContext?.review?.policy.requesterSessionId ?? parentSessionId;
-    const budgetRoot = budgetSource ? this.db.campaignBudgets.root(budgetSource) : null;
+    const budgetRoot = budgetSource ? this.db.campaignBudgets.governingRoot(budgetSource) : null;
     if (budgetRoot) {
       if (delivery) return fail("Campaign budget admission for pre-staged automation dispatch is unsupported.", 409);
       const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
@@ -5290,6 +5290,8 @@ export class SessionsService {
     reviewedResultRevision?: string,
   ): Promise<ServiceResult<PromptAdmissionView>> {
     if (!this.awaitingFirstMessage(this.db.getSession(sessionId))) {
+      const authorityRefusal = this.restoreHumanCampaignAuthority(principal, sessionId);
+      if (authorityRefusal) return authorityRefusal;
       return this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
     }
     if (this.firstMessagesInFlight.has(sessionId)) return fail("This campaign's first message is still being delivered; wait for it to appear.", 409);
@@ -5299,6 +5301,48 @@ export class SessionsService {
     } finally {
       this.firstMessagesInFlight.delete(sessionId);
     }
+  }
+
+  /** The ceilings a parent's children are bounded by, over its own session fields. Under a governing
+   * allowance the parent's session limits are its campaign allocation, so its original personal
+   * limits apply; otherwise (a campaign revoked to Custom) its current session limits do (#2940). */
+  private childCeilingsOf(parent: SessionView): Partial<Record<"costBudgetUsd" | "maxToolCalls", number | null>> {
+    return this.db.campaignBudgets.governingRoot(parent.id) ? this.db.campaignBudgets.userLimits(parent.id) ?? {} : {};
+  }
+
+  /** Before a Human's message or restart reaches a Full Control campaign whose boundary is stale
+   * (#2940): when the boundary trails only issue scope this Human approved, it is restored from
+   * those approval records (`repairHumanScopeBoundary`) and the action proceeds; otherwise the
+   * refusal names what happened and how to recover, instead of the allowance check's generic one. */
+  restoreHumanCampaignAuthority(principal: HumanPrincipal, sessionId: string): ServiceResult<never> | null {
+    const session = this.db.getSession(sessionId);
+    const root = session ? this.orchestratorCampaignController(session) : null;
+    if (!root || root === "refused" || root.orchestratorPolicy?.control?.mode !== "full_control" || campaignBoundaryCurrent(root)) return null;
+    const repairer = this.db.humanScopeBoundaryRepairUser(root.id);
+    const owner = this.db.isSessionOwner(principal, root.id);
+    if (owner && repairer === principal.userId) {
+      const now = Date.now();
+      const revoked = this.db.repairHumanScopeBoundary(root.id, principal.userId, now);
+      if (revoked) {
+        for (const decision of revoked) {
+          this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+          this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+        }
+        const repaired = this.db.getSession(root.id)!;
+        const boundary = (repaired.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+        this.log.info(JSON.stringify({ event: "campaign_boundary_restored_from_scope_approval", sessionId: root.id,
+          boundaryRevision: boundary.revision, issueScopeRevision: boundary.issueScopeRevision, revokedDecisions: revoked.length }));
+        for (const member of scopeParticipants(this.db, repaired)) this.hub.sessionChangedById(member.id);
+        this.publishCampaignAttentionTransition(repaired);
+        return null;
+      }
+    }
+    const recovery = "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.";
+    const error = repairer && repairer !== principal.userId
+      ? "This Full Control campaign's authority doesn't yet cover the issue scope another person approved, so it can't continue. " +
+        `That person can restore it by sending a message here; otherwise, ${recovery}`
+      : `This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. ${recovery}`;
+    return { ok: false, status: 409, error, errorDetails: { code: "campaign_authority_stale" } };
   }
 
   /** The owner's first message establishes the Full Control boundary the launch left task-only:
@@ -7645,7 +7689,7 @@ export class SessionsService {
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
     if (budgetError) return fail(budgetError, 409);
-    const budgetRoot = this.db.campaignBudgets.root(sessionId);
+    const budgetRoot = this.db.campaignBudgets.governingRoot(sessionId);
     const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
       return fail("retry the failed Stop before restarting the session", 409);
@@ -7665,7 +7709,7 @@ export class SessionsService {
           return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
         }
         const allowanceError = childRestartAllowanceError(
-          { ...parent, ...this.db.campaignBudgets.userLimits(parent.id) },
+          { ...parent, ...this.childCeilingsOf(parent) },
           allocated,
           this.db.childSessionRestartReservation(session.id),
         );
@@ -9139,7 +9183,7 @@ export class SessionsService {
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
     // The legacy bridge has no campaign accounting. Review sessions use the managed allowance.
-    if (this.db.campaignBudgets.root(session.id) !== null) {
+    if (this.db.campaignBudgets.governingRoot(session.id) !== null) {
       return fail("This session is part of a campaign with an allowance, which the legacy review bridge cannot account for. Request a review session with request_review_session or `wollipog review session run` to reserve allowance and account for its cost.", 409);
     }
     const runner = this.db.getRunner(session.runnerId);
@@ -9299,7 +9343,7 @@ export class SessionsService {
       throw error;
     }
     const harness = configured?.harness ?? reviewerHarnessFor(session.driver);
-    const budgetRoot = this.db.campaignBudgets.root(session.id);
+    const budgetRoot = this.db.campaignBudgets.governingRoot(session.id);
     if (budgetRoot && !runnerSupportsProtocol(runner?.protocolVersion, "campaignReviewSessions")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "campaignReviewSessions", "review sessions charged to the campaign allowance"));
     }
@@ -9538,7 +9582,8 @@ export class SessionsService {
   recoverCampaignBudgetAllocations(runnerId:string):void {
     for(const id of this.db.campaignBudgets.membersForRunner(runnerId)) {
       const member=this.db.getSession(id);
-      if(!member) continue;
+      // A campaign the Human revoked to Custom runs under ordinary session rules (#2940).
+      if(!member || !this.db.campaignBudgets.governingRoot(id)) continue;
       const error=this.campaignBudgetConfigError(member);
       if(error) {
         if(!isTerminal(member.status)) this.stopAtGuardrail(member,Date.now());
@@ -9567,7 +9612,7 @@ export class SessionsService {
   }
 
   private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): string | null {
-    const rootId = this.db.campaignBudgets.root(session.id);
+    const rootId = this.db.campaignBudgets.governingRoot(session.id);
     if (!rootId) return null;
     const view = this.db.campaignBudgets.view(rootId)!;
     const controller = this.db.getSession(rootId), control = controller?.orchestratorPolicy?.control;
@@ -9589,7 +9634,7 @@ export class SessionsService {
   }
 
   private enforceCampaignBudget(sessionId: string, now: number): boolean {
-    const rootId = this.db.campaignBudgets.root(sessionId);
+    const rootId = this.db.campaignBudgets.governingRoot(sessionId);
     if (!rootId) return false;
     let view = this.db.campaignBudgets.view(rootId)!;
     // Unpriced usage stops only a campaign whose cost ceiling depends on pricing (#2940).
@@ -10638,6 +10683,18 @@ export class SessionsService {
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
       if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved > boundary.issueAuthority!.maxIssues)) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
+      // within the scope limit that boundary names, counting the slots consumed publications still
+      // hold other than those this change admits: only a fresh authorization can raise that limit.
+      const control = currentChild.orchestratorPolicy?.control;
+      const limit = authority === "human" && control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+      const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
+      const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + held;
+      if (limit !== undefined && total > limit) {
+        return fail(`This change would give the campaign ${total} issues${held ? `, counting ${held} published follow-up${held === 1 ? "" : "s"} not yet in scope` : ""}, ` +
+          `more than the ${limit} its Full Control boundary allows. Deny it and propose fewer issues, or Revoke Full Control in ` +
+          "Orchestrator Controls, then Enable Full Control to authorize a larger scope.", 409);
+      }
       if (!latest || auditDigest(latest) !== decision.resourceDigest ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {
         this.revokeWorkflowDecision(decision, actor);
@@ -15287,7 +15344,7 @@ export class SessionsService {
       // Clone per member so guardrail normalization never changes the shared request.
       const config = { ...admitted.data![memberIndex]! };
       const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
-      const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
+      const budgetRoot = parentSessionId ? this.db.campaignBudgets.governingRoot(parentSessionId) : null;
       if (budgetRoot) {
         const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
         if (ceilingError) throw new Error(ceilingError);

@@ -70,6 +70,15 @@ export function publicationEvidence(db: ControlPlaneDb, root: SessionView,
   return { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision };
 }
 
+/** The publications a scope change admits: its follow-up lineage and the exact payloads it verified. */
+export function scopeSettlements(snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "campaign_issue_scope" }>): string[] {
+  // Exactly the proofs `admittedCampaignPublicationIssue` accepts once this change is consumed: a
+  // lineage alone is a caller's claim and settles nothing without the server's issue admission.
+  const lineage = snapshot.lineage?.kind === "follow_up" && typeof snapshot.issueAdmission === "object" && snapshot.issueAdmission !== null &&
+    snapshot.additions.length === 1 ? snapshot.lineage.publicationOccurrenceId : undefined;
+  return [...(lineage ? [lineage] : []), ...(snapshot.verifiedPublications ?? []).map((proof) => proof.publicationOccurrenceId)];
+}
+
 export function reservedPublicationSlots(db: ControlPlaneDb, root: SessionView, exceptOccurrence?: string, exceptRecommendation?: string, consumedOnly = false): number {
   const recommendations = new Set<string>();
   for (const d of db.campaignPublicationReservations(root.id)) {
