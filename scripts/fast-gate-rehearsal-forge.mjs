@@ -51,7 +51,8 @@ export function inertForge({ start = START } = {}) {
   const genesis = { sha: sha("genesis"), parent: sha("pre-genesis"), tree: sha("tree:genesis"), landedAt: start - 7 * 24 * 60 * MINUTE, edition: 0, pull: null };
   // History may be seeded up to one day before the scenario epoch.
   const f = { clock: start - 24 * 60 * MINUTE, chain: [genesis], pulls: new Map(), groups: new Map(), runs: [], statuses: [], refs: new Map(),
-    objects: new Map(), dispatches: [], calls: 0, graphqlQueries: 0, stateWrites: 0, outage: false, nextRun: 7001, nextStatus: 1, sequence: 0 };
+    objects: new Map(), dispatches: [], calls: 0, graphqlQueries: 0, stateWrites: 0, outage: false, nextRun: 7001, nextStatus: 1, sequence: 0,
+    issues: [], nextComment: 9001 };
   const tip = () => f.chain.at(-1);
   const position = value => f.chain.findIndex(c => c.sha === value);
   const commitOf = value => f.chain.find(c => c.sha === value);
@@ -137,7 +138,14 @@ export function inertForge({ start = START } = {}) {
         base: { ref: "main", sha: p.base, repo: { full_name: REPOSITORY } }, merge_commit_sha: p.mergeCommit ?? null,
         merged_at: p.mergedAt ? iso(p.mergedAt) : null };
     }
-    if (rest === "issues") return [];
+    // Only an explicitly opened fixture incident exists; it is listed exactly as Main CI Health reads it.
+    if (rest === "issues") return f.issues.filter(issue => issue.state === "open" && (!query.get("labels") ||
+      issue.labels.some(label => label.name === query.get("labels")))).map(({ comments: _c, ...issue }) => issue);
+    if ((m = /^issues\/(\d+)\/comments$/.exec(rest))) {
+      const issue = f.issues.find(item => item.number === Number(m[1])); if (!issue) throw notFound();
+      const size = Number(query.get("per_page") ?? 30), page = Number(query.get("page") ?? 1);
+      return issue.comments.slice((page - 1) * size, page * size);
+    }
     if (rest === "actions/workflows/main-rolling-validation.yml") return { path: WORKER, created_at: iso(start - 30 * 24 * 60 * MINUTE) };
     if ((m = /^actions\/workflows\/([a-z0-9.-]+)\/runs$/.exec(rest))) {
       if (m[1] !== "main-rolling-validation.yml") return { workflow_runs: [], total_count: 0 };
@@ -199,6 +207,13 @@ export function inertForge({ start = START } = {}) {
       return null;
     }
     if (!path.startsWith(ROOT + "/")) throw new Error("Inert forge serves only its fixture repository");
+    const comment = /^\/issues\/(\d+)\/comments$/.exec(path.slice(ROOT.length));
+    if (comment) {
+      const issue = f.issues.find(item => item.number === Number(comment[1])); if (!issue) throw notFound();
+      const record = { id: f.nextComment++, user: { login: "github-actions[bot]" }, body: body.body, created_at: iso(f.clock) };
+      issue.comments.push(record);
+      return { id: record.id, body: record.body };
+    }
     const status = /^\/statuses\/([a-f0-9]{40})$/.exec(path.slice(ROOT.length));
     if (status) {
       const record = { id: f.nextStatus++, targetSha: status[1], state: body.state, context: body.context, at: iso(f.clock) };
@@ -253,6 +268,15 @@ export function inertForge({ start = START } = {}) {
     rebase(number, base = tip().sha) { f.pulls.get(number).base = base; },
     /** The group's required aggregator result on its own SHA: "pending", "success" or "failure". */
     reportRequired(label, result) { f.groups.get(label).required = result; },
+    /** A Main CI Health incident, shaped as the trusted job opens it; comments are inert. */
+    openIncident(number = 4001, { runId = 1 } = {}) {
+      const issue = { number, title: "Main CI Is Failing", state: "open", user: { login: "github-actions[bot]" },
+        labels: [{ name: "main-ci-red" }], body: `<!-- main-ci-health latest:${runId} -->`, comments: [] };
+      f.issues.push(issue);
+      return issue;
+    },
+    /** A comment by someone else, for example a pasted marker. */
+    commentAs(number, login, body) { f.issues.find(item => item.number === number).comments.push({ id: f.nextComment++, user: { login }, body }); },
     seedRun(targetSha, { createdAt, startedAt, finishedAt, conclusion, claim = "00000000-0000-4000-8000-000000000000" }) {
       const run = createRun(targetSha, claim, createdAt);
       this.startRun(run, startedAt);

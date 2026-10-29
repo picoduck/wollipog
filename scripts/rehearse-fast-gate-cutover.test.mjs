@@ -19,7 +19,7 @@ test("all seven #3637 AC2 flows are decided by delivered modules and match their
     assert.ok(flow.steps.every(s => /^main-|^release-certification/.test(s.decidedBy)), `${flow.id} names a deciding module for every step`);
     assert.ok(flow.gaps.length > 0, `${flow.id} discloses its limits`);
   }
-  assert.deepEqual(report.summary, { flows: 7, passed: 7, steps: 51 });
+  assert.deepEqual(report.summary, { flows: 7, passed: 7, steps: 52 });
 });
 
 test("measured virtual detection, hold and recovery times are reproducible", async () => {

@@ -63,7 +63,7 @@ function isAlert(issue) {
     Array.isArray(issue.labels) && issue.labels.some((label) => label?.name === ALERT_LABEL);
 }
 
-async function readAlert(api, repository) {
+export async function readAlert(api, repository) {
   const issues = await api(`/repos/${repository}/issues?state=open&labels=${ALERT_LABEL}&per_page=20`);
   if (!Array.isArray(issues) || issues.length >= 20) fail("issue-pagination-incomplete");
   return issues.filter(isAlert).sort((a, b) => a.number - b.number)[0] ?? null;

@@ -11,6 +11,7 @@ import { candidateReceipt } from "./main-validation-candidates.mjs";
 import { plan as planInvestigation, readState as readInvestigationState, reconcile as reconcileInvestigation,
   selectCandidate, writeState as writeInvestigationState } from "./main-regression-automation.mjs";
 import { classify, InvestigationBudget } from "./main-regression-investigation.mjs";
+import { deliverEscalation, escalationMarker } from "./main-regression-escalation.mjs";
 import { INVESTIGATION_PROMPT, LIMITS, PARAMETERS } from "./main-regression-policy.mjs";
 import { collectCertification } from "./release-certification.mjs";
 import { rehearseAdmission } from "./rehearse-main-merge-admission.mjs";
@@ -34,7 +35,8 @@ const ENV = Object.freeze({ GITHUB_REPOSITORY: REPOSITORY, GITHUB_TOKEN: "inert-
 const CONTEXT = "Regression Admission";
 const MODULES = { health: "main-ci-health", admission: "main-merge-admission", controller: "main-merge-admission-controller",
   repair: "main-merge-repair", rolling: "main-rolling-validation", candidates: "main-validation-candidates",
-  automation: "main-regression-automation", investigation: "main-regression-investigation", certification: "release-certification" };
+  automation: "main-regression-automation", investigation: "main-regression-investigation", certification: "release-certification",
+  escalation: "main-regression-escalation" };
 const control = Object.freeze({ available: true, repair: null });
 // The operator trust boundary is a fixture: it only echoes an exact grant digest.
 const verifyAuthority = async ({ grant }) => ({ approved: true, authorizationDigest: repairDigest(grant) });
@@ -303,7 +305,7 @@ async function exhaustedInvestigation() {
     cron: "0 0 1 1 *", timezone: "UTC", action }, executions });
   const triggers = { triggers: [{ triggerId: config.triggerId, automationId: config.automationId, kind: "webhook", generation: 1,
     deliveryPolicy: { allowPrompt: false, parameterNames: PARAMETERS, missingReferences: "reject" } }] };
-  const outcomes = {};
+  const outcomes = {}, escalations = {};
   for (const variant of ["delivery", "elapsed"]) {
     const r = await regressionWorld(), { w } = r, controls = [];
     const collect = virtualCollect(w);
@@ -329,6 +331,13 @@ async function exhaustedInvestigation() {
     const state = (await readInvestigationState(w.api, REPOSITORY)).value;
     const replan = planInvestigation(state, candidate, w.now);
     const { plan } = await cycle(w);
+    // Main CI Health's job delivers the escalation to its open incident; a repeat finds the marker.
+    const incident = w.openIncident(4001, { runId: candidate.runId });
+    const mentions = ["@fixture/maintainers"];
+    const notified = await deliverEscalation(REPOSITORY, { api: w.api, mentions });
+    const repeated = await deliverEscalation(REPOSITORY, { api: w.api, mentions });
+    escalations[variant] = { first: notified.status, repeat: repeated.status, comments: incident.comments.length,
+      marked: incident.comments.filter(c => c.body.includes(escalationMarker(notified.escalation))).length };
     outcomes[variant] = { first: first.status, second: second.status, blocked: state.blocked, replan: replan.reason,
       deliveries: controls.filter(p => p.startsWith("/hooks/")).length, admission: [...new Set(plan.decisions.map(d => d.decision))] };
   }
@@ -341,6 +350,9 @@ async function exhaustedInvestigation() {
     (({ admission: _a, ...o }) => o)(outcomes.elapsed));
   f.check("exhaustion never releases holds while health still fails", MODULES.controller,
     { delivery: ["hold"], elapsed: ["hold"] }, { delivery: outcomes.delivery.admission, elapsed: outcomes.elapsed.admission });
+  f.check("each exhaustion reaches the open incident exactly once", MODULES.escalation,
+    { delivery: { first: "notified", repeat: "already-notified", comments: 1, marked: 1 },
+      elapsed: { first: "notified", repeat: "already-notified", comments: 1, marked: 1 } }, escalations);
   let clock = 0;
   const investigation = new InvestigationBudget({ clock: () => clock, startedAt: 0 }), refusals = {};
   const attempt = (label, kind, options) => { try { investigation.charge(kind, options); return "charged"; }
@@ -353,7 +365,7 @@ async function exhaustedInvestigation() {
       "after-45-minutes": "elapsed-budget-exhausted" }, refusals);
   f.callBudgets = { investigationCounts: investigation.counts, limits: { deliveryAttempts: LIMITS.deliveryAttempts, elapsedMs: LIMITS.elapsedMs,
     reproductions: LIMITS.reproductionAttempts, ciDispatches: LIMITS.ciDispatches } };
-  f.gaps.push("Escalation is an operator-required status plus the open Main CI Health incident; delivery of that escalation to a human is outside these modules and is not rehearsed.");
+  f.gaps.push("Escalation is delivered as one marked comment on the open Main CI Health incident, mentioning the configured target; it is disabled until MAIN_REGRESSION_ESCALATION_MENTION is set, runs on Main CI Health's next invocation, and cannot prove a human read it.");
   return f.done();
 }
 
