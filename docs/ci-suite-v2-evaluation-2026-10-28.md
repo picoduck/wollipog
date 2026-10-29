@@ -292,7 +292,9 @@ per-job overhead. The evaluator's `browserMinutes` implements this model.
    **158 distinct values**, and the longest run under one value was 4 groups. A 30-change cohort
    under one `suiteId` is therefore practically unreachable for v1 as built. A v2 cohort should
    key on `(suiteVersion, policyId)` and keep `suiteId`, `inventoryId` and `graphId` as per-sample
-   compatibility evidence.
+   compatibility evidence. *Done after this report:* #3795 (for #3786) keys cohorts on
+   `(suiteVersion, policyVersion, policyId)` from a documented cutover; see
+   [Cohort Keys and Cutover](ci-suites.md#cohort-keys-and-cutover). The numbers above are unchanged.
 5. **Readiness denominator.** Only comparisons where v2 actually narrows (`v1Mode: affected`)
    test v2's rules. Everything else equals v1 by construction.
    - Since the mandatory inventory existed, the observed rate is about one such PR every

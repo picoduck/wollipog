@@ -45,6 +45,7 @@
     "ci:selection": "node scripts/ci-suite-selection.mjs",
     "ci:selection-v2": "node scripts/ci-suite-selection-v2.mjs",
     "ci:selection-v2-evaluate": "node --import tsx scripts/ci-suite-v2-evaluate.mjs",
+    "ci:selection-v3": "node scripts/ci-suite-selection-v3.mjs",
     "ci:suite-inventory": "node --import tsx scripts/ci-suite-inventory.mjs",
     "ci:shadow-report": "node scripts/ci-suite-shadow-report.mjs",
     "test:e2e": "playwright test",
