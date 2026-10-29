@@ -8,10 +8,10 @@ import { join, resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION, pacedVideoReviewWindowPlan, type MediaReviewDispatch, type SessionSnapshot } from "@wollipog/protocol";
-import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../../control-plane/src/local-device-credential.js";
 import { viewPath } from "../src/navigation.js";
 import { delegatedVideoRunner, seedDelegatedVideoEvidence } from "./fixtures/delegated-video-evidence-seed.js";
+import { withLiveDb } from "./fixtures/live-database.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const sha = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
@@ -126,15 +126,15 @@ test("an Orchestrator's video evidence is reviewed by a separate media reviewer 
     // The runner hosts the controller and child, so registration keeps them, and their decision, live.
     runner = await connectRunner(base, seeded.runnerToken, workspacePath, [seeded.parentId, seeded.childId]);
     // Startup stopped every seeded Session while no runner was connected. Restore the fixture's
-    // live controller and child so their exact credentials reach the real routes.
-    const db = ControlPlaneDb.open(databasePath);
-    try {
+    // live controller and child so their exact credentials reach the real routes. The server is
+    // already writing (runner registration), so this second connection can meet its lock (#3801).
+    await withLiveDb(databasePath, (db) => {
       db.updateSessionStatus(seeded.parentId, "running", Date.now());
       db.updateSessionStatus(seeded.childId, "running", Date.now());
       // The seed dispatched the reviewer before this process started, so startup stopped its
       // never-hosted Session; restore the unsent state the dispatch receipt below moves to running.
       db.updateSessionStatus(seeded.dispatch.grant.reviewerSessionId, "queued", Date.now());
-    } finally { db.close(); }
+    });
 
     await page.goto(`${base}/#pair=${ownerToken}`);
     await page.goto(`${base}${viewPath({ name: "session", id: seeded.parentId })}`);
