@@ -420,8 +420,14 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
   const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
   const integration = readFileSync(resolve(process.cwd(), "apps/runner/src/wsl-bwrap-fail-closed.integration.test.ts"), "utf8");
 
-  assert.match(platform, /os: \[ubuntu-24\.04, windows-latest, windows-2025, macos-latest\]/u);
-  assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
+  assert.equal(platform.match(/^        os: \[ubuntu-24\.04, windows-latest, macos-latest\]$/gmu)?.length, 2,
+    "both Platform Isolation matrices must run one Windows lane (#3785)");
+  assert.doesNotMatch(platform, /^        os: .*windows-2025/mu,
+    "windows-2025 is the same image as windows-latest, so a second lane would only repeat the shared steps");
+  assert.match(platform, /^      - name: Verify WSL Boundaries Stay Fail-Closed\r?\n        if: matrix\.os == 'windows-latest'\r?\n/mu,
+    "the WSL boundary step must run on the remaining Windows lane");
+  assert.match(platform, /^  platform-isolation:\r?\n(?: {4}.*\r?\n)*? {4}timeout-minutes: 35\r?$/mu,
+    "the merged Windows job needs the budget sized from its measured step durations");
   assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,
     "the real WSL job must exercise the product's Direct bwrap alias and PE rejection");
