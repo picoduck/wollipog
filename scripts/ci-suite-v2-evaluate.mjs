@@ -1,4 +1,4 @@
-// Offline v1-versus-v2 selection evaluation over recorded CI history (Refs #3629). Reads only local
+// Offline v1/v2/v3 selection evaluation over recorded CI history (Refs #3629, #3787). Reads only local
 // Git objects and a prepared input file; makes no network calls, executes no tested code, and
 // certifies nothing. Modeled durations are labeled as models, not measurements.
 //
@@ -15,6 +15,8 @@ import { GROUPS, FAST_API_FILES, CRITICAL_BROWSER_FILES, selectGroups } from "./
 import { suiteInventory, hash } from "./ci-suite-selection.mjs";
 import { narrow, selectFilesV2 } from "./ci-suite-policy-v2.mjs";
 import { gitReader, loadFastFiles, treeGraph } from "./ci-suite-selection-v2.mjs";
+import { relaxedClass, selectFilesV3 } from "./ci-suite-policy-v3.mjs";
+import { treeGraphV3 } from "./ci-suite-selection-v3.mjs";
 import { browserShards } from "../playwright.shards.ts";
 
 const NODE_GROUPS = ["node-fast", "node-web", "node-control-plane", "node-runner", "node-other"];
@@ -36,20 +38,27 @@ export function compare({ reader, fastFiles, base, head, changeHead, event, prHe
  * the real selectors would refuse.
  */
 export function compareSelections({ diff, tree, fastFiles, readBlobs }) {
-  const inventory = suiteInventory(tree, fastFiles), graph = treeGraph(tree, readBlobs);
-  let v1 = selectGroups(diff), v2 = selectFilesV2({ diff, inventory, graph });
+  const inventory = suiteInventory(tree, fastFiles), graph = treeGraph(tree, readBlobs), graph3 = treeGraphV3(tree, readBlobs);
+  let v1 = selectGroups(diff), v2 = selectFilesV2({ diff, inventory, graph }), v3 = selectFilesV3({ diff, inventory, graph: graph3 });
   const has = (file) => inventory.some((row) => row.file === file);
   if ([...fastFiles, ...FAST_API_FILES].some((file) => !has(file)) || CRITICAL_BROWSER_FILES.some((file) => !has(`apps/web/e2e/${file}`))) {
     const full = (choice) => ({ ...choice, mode: "full", reasons: [...choice.reasons, "missing-mandatory-inventory"].sort(), groups: Object.keys(GROUPS).sort() });
     v1 = full(v1);
     v2 = { ...full(v2), partialGroups: [], selectionReasons: {}, scopedOpaqueDeferred: 0, selectedFiles: inventory.map((row) => row.file) };
+    v3 = { ...full(v3), partialGroups: [], selectionReasons: {}, scopedOpaqueDeferred: 0, relaxed: [], relaxedClasses: {},
+      v3Reason: "missing-mandatory-inventory", selectedFiles: inventory.map((row) => row.file) };
   }
   const v1Files = new Set(inventory.filter((row) => v1.groups.includes(row.group)).map((row) => row.file)), v2Files = new Set(v2.selectedFiles);
+  const v3Files = new Set(v3.selectedFiles);
   if ([...v2Files].some((file) => !v1Files.has(file))) throw new Error("v2 selected outside v1");
+  const outside = [...v3Files].filter((file) => !v2Files.has(file));
+  // Without a relaxed path v3 must be v2 exactly (property 2), not merely within it.
+  if (!diff.entries.some(({ path }) => relaxedClass(path)) && (v3Files.size !== v2Files.size || v3.mode !== v2.mode)) throw new Error(`v3 differs from v2 without a relaxed path (v2 ${v2.mode}, v3 ${v3.mode})`);
+  if (outside.length) throw new Error(`v3 selected outside v2: ${outside.slice(0, 3).join(", ")} (v2 ${v2.mode}, v3 ${v3.mode}/${v3.v3Reason}; diff ${diff.entries.map((e) => `${e.status}:${e.path}`).slice(0, 8).join(" ")})`);
   // Counterfactual only: the graph rule with every v1 fallback ignored, to measure its recall.
   const graphOnly = new Set(graph ? narrow({ changed: diff.entries.map((entry) => entry.path), inventory, graph, groups: Object.keys(GROUPS) }).selectedFiles
     : inventory.map((row) => row.file));
-  return { inventory, v1, v2, v1Files, v2Files, graphOnly, triggers: fallbackTriggers(diff) };
+  return { inventory, v1, v2, v3, v1Files, v2Files, v3Files, graphOnly, triggers: fallbackTriggers(diff) };
 }
 
 /**
@@ -116,8 +125,10 @@ export function model({ inventory, selected, browserProfile, nodeProfile }) {
 export function modelRow({ result, browserProfile, nodeProfile, calibration }) {
   const of = (selected) => model({ inventory: result.inventory, selected, browserProfile, nodeProfile });
   const m1 = of(result.v1Files), m2 = of(result.v2Files), mg = of(result.graphOnly), all = of(new Set(result.inventory.map((row) => row.file)));
-  return { modelV1: m1, modelV2: m2, modelGraphOnly: mg,
-    modeledBrowser: { v1: browserMinutes(m1, all, calibration), v2: browserMinutes(m2, all, calibration), graphOnly: browserMinutes(mg, all, calibration) } };
+  const m3 = result.v3Files ? of(result.v3Files) : null;
+  return { modelV1: m1, modelV2: m2, modelGraphOnly: mg, ...(m3 ? { modelV3: m3 } : {}),
+    modeledBrowser: { v1: browserMinutes(m1, all, calibration), v2: browserMinutes(m2, all, calibration), graphOnly: browserMinutes(mg, all, calibration),
+      ...(m3 ? { v3: browserMinutes(m3, all, calibration) } : {}) } };
 }
 
 export function evaluate(input, { cwd = process.cwd(), browserProfile, fastFiles = loadFastFiles() } = {}) {
@@ -132,15 +143,21 @@ export function evaluate(input, { cwd = process.cwd(), browserProfile, fastFiles
     return { kind, ...meta, changed: result.diff.entries.length, v1Mode: result.v1.mode, v1Reasons: result.v1.reasons, v2Mode: result.v2.mode,
       v2Reasons: result.v2.reasons, inventory: result.inventory.length, v1Selected: result.v1Files.size, v2Selected: result.v2Files.size,
       scopedOpaqueDeferred: result.v2.scopedOpaqueDeferred, v2SelectionReasons: result.v2.selectionReasons, triggers: result.triggers, graphOnlySelected: result.graphOnly.size,
+      v3Mode: result.v3.mode, v3Reason: result.v3.v3Reason, v3Reasons: result.v3.reasons, v3Selected: result.v3Files.size,
+      v3RelaxedClasses: result.v3.relaxedClasses, v3ScopedOpaqueDeferred: result.v3.scopedOpaqueDeferred,
       ...modelRow({ result, browserProfile, nodeProfile, calibration }), result };
   };
   const prRows = [], groupRows = [], failureRows = [];
   for (const sample of input.samples) {
     // A pull_request run records the PR head, not GitHub's test merge commit. The PR diff is
     // merge-base(main before merge, PR head)..PR head; the tested tree is the squash result.
-    const prHead = sample.prTestedSha ?? sample.prHead;
+    // A tested head found by branch name can belong to another PR that reused the branch; only the
+    // PR's own final head or one of its ancestors is accepted.
+    const ownLineage = (sha) => { try { reader.git(["merge-base", "--is-ancestor", sha, sample.prHead]); return true; } catch { return false; } };
+    const tested = sample.prTestedSha && (!sample.prHead || ownLineage(sample.prTestedSha)) ? sample.prTestedSha : null;
+    const prHead = tested ?? sample.prHead;
     prRows.push(row("pr", { pr: sample.pr, mergedAt: sample.mergedAt, areas: sample.areas, testedSha: sample.mergeCommit, prHead,
-      diffSource: sample.prTestedSha ? "last-ci-tested-pr-head" : "final-pr-head-no-ci-run" },
+      diffSource: tested ? "last-ci-tested-pr-head" : sample.prTestedSha ? "final-pr-head-foreign-tested-head" : "final-pr-head-no-ci-run" },
     { base: `${sample.mergeCommit}^1`, head: sample.mergeCommit, prHead }));
     for (const group of sample.groups) groupRows.push(row("merge_group", { pr: sample.pr, runId: group.runId, attempt: group.attempt, conclusion: group.conclusion,
       testedSha: group.testedSha }, { base: group.baseSha, head: group.testedSha, changeHead: group.testedSha, event: "merge_group" }));
@@ -153,14 +170,16 @@ export function evaluate(input, { cwd = process.cwd(), browserProfile, fastFiles
     const r = row("failure", { runId: failure.runId, attempt: failure.attempt, event: failure.event, pr: failure.pr, job: failure.job, step: failure.step,
       testedSha: failure.testedSha }, args);
     const containment = /Containment/.test(failure.step);
-    const verdict = (files) => failure.infra.length ? "infrastructure-exclusion"
+    const pick = (version) => ({ v1: [r.result.v1.groups, r.result.v1Files], v2: [r.result.v2.groups, r.result.v2Files], v3: [r.result.v3.groups, r.result.v3Files] })[version];
+    const verdict = (version) => failure.infra.length ? "infrastructure-exclusion"
       : failure.typecheck.length && !failure.files.length ? "always-selected-typecheck"
       : /WebKit/.test(failure.job) ? "always-selected-webkit"
       : !failure.files.length ? "no-test-identity"
-      : containment ? (files === "v1" ? r.result.v1.groups : r.result.v2.groups).includes("linux-containment") ? "selected" : "missed"
-      : failure.files.every((file) => (files === "v1" ? r.result.v1Files : r.result.v2Files).has(file)) ? "selected" : "missed";
-    failureRows.push({ ...r, files: failure.files, flaky: failure.flaky, infra: failure.infra, v1Verdict: verdict("v1"), v2Verdict: verdict("v2"),
+      : containment ? pick(version)[0].includes("linux-containment") ? "selected" : "missed"
+      : failure.files.every((file) => pick(version)[1].has(file)) ? "selected" : "missed";
+    failureRows.push({ ...r, files: failure.files, flaky: failure.flaky, infra: failure.infra, v1Verdict: verdict("v1"), v2Verdict: verdict("v2"), v3Verdict: verdict("v3"),
       v2MissedFiles: containment || failure.infra.length ? [] : failure.files.filter((file) => !r.result.v2Files.has(file)),
+      v3MissedFiles: containment || failure.infra.length ? [] : failure.files.filter((file) => !r.result.v3Files.has(file)),
       graphOnlyMissedFiles: containment || failure.infra.length ? [] : failure.files.filter((file) => !r.result.graphOnly.has(file)) });
   }
   const strip = (rows) => rows.map(({ result, ...rest }) => rest);

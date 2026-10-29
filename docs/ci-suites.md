@@ -247,8 +247,10 @@ record, with environment and commands, without claiming CI speedup.
 A separately versioned, advisory successor prototype, `fast-required-v2`, narrows only
 v1's `affected` outcome with a conservative import graph. It has its own marker and identities,
 and no CI caller. See the [v2 prototype and offline evaluation](ci-suite-v2-evaluation-2026-10-28.md).
-That evaluation also measures how often v1's `suiteId` changes across merges, which bears on
-the cohort denominator below. Nothing in this section changes for v1.
+That evaluation also measured how often v1's `suiteId` changes across merges, which led to the
+policy-identity cohort keys in [Cohort Keys and Cutover](#cohort-keys-and-cutover). A further
+shadow-only candidate, `fast-required-v3`, relaxes only low-risk fallbacks; see the
+[v3 candidate replay](ci-suite-v3-candidate-2026-10-29.md). Nothing in this section changes for v1.
 
 **Remaining:** at least 30 eligible natural changes across five working days,
 individual miss/flake/infrastructure review, actual shadow overhead/selected
