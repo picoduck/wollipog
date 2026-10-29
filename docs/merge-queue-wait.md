@@ -69,7 +69,9 @@ report understates the window used. Removals are read only for pull requests wit
 a merge-group run created in the window, up to 1,000 per pull request; the report
 says when that bound cut a history short. `--since` and `--until` accept any ISO
 8601 offset and are compared as instants. The report does not attribute a wait to a
-cause; runner contention is the observed pattern, measured separately in #2674.
+cause; runner contention is the observed pattern, measured separately in #2674. Pool-wide occupancy
+across every workflow, with a trace-driven capacity replay, is measured by
+`scripts/ci-runner-occupancy.mjs`; see [CI Runner Contention](ci-runner-contention-2026-10-28.md).
 
 ## Event, Attempt, and Test Measurements
 

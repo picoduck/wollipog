@@ -17,7 +17,7 @@ export const MAX_PAGES = 10;
 const POOL = 6;
 const MINUTE = 60_000;
 // GitHub creates a job within seconds of its last dependency finishing.
-const DEPENDENCY_SLACK_MS = 5_000;
+export const DEPENDENCY_SLACK_MS = 5_000;
 
 /** A failure this script describes itself; anything else is reported without its message. */
 export class ReportError extends Error {}
@@ -56,7 +56,7 @@ const callerOf = (job) => job.name.includes(" / ") ? job.name.slice(0, job.name.
  * Older runs have neither planning job. The jobs API does not name dependencies; tests pin this model.
  */
 const PLANNING_JOBS = new Set(["PR Suite Routing", "Merge Group Gate"]);
-function dependencyCandidates(job, work, aggregator) {
+export function dependencyCandidates(job, work, aggregator) {
   const requiredWork = work.filter((other) => !ADVISORY_JOBS.has(other.name));
   if (job === aggregator) return requiredWork;
   if (PLANNING_JOBS.has(job.name)) return [];
