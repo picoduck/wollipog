@@ -2,7 +2,7 @@ import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { parseSelection, SELECTION_MARKER } from "./ci-suite-selection.mjs";
+import { hash, parseSelection, SELECTION_MARKER } from "./ci-suite-selection.mjs";
 import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
 import { combineReports } from "./merge-queue-wait-report.mjs";
 import { reliabilityReport } from "./ci-reliability-report.mjs";
@@ -15,6 +15,64 @@ const utcWorkingDate = (time) => {
   const date = new Date(time);
   return [0, 6].includes(date.getUTCDay()) ? null : date.toISOString().slice(0, 10);
 };
+
+/**
+ * Documented cohort-key cutover (#3786). Samples created before it keep their original
+ * `suiteId/policyId` cohorts; samples from it onward join policy-identity cohorts. The
+ * time is prospective: it must follow the merge of the first commit that uses it.
+ */
+export const COHORT_KEY_CUTOVER = "2026-11-02T00:00:00.000Z";
+const LEGACY_KEYING = "suiteId/policyId", POLICY_KEYING = "suiteVersion/policyVersion/policyId";
+export function cohortKey(row) {
+  return Date.parse(row.createdAt) < Date.parse(COHORT_KEY_CUTOVER)
+    ? { cohortKeying: LEGACY_KEYING, cohortKey: `${row.suiteId}/${row.policyId}` }
+    : { cohortKeying: POLICY_KEYING, cohortKey: `${row.suiteVersion}/${row.policyVersion}/${row.policyId}` };
+}
+
+/** Contract drift inside one policy cohort, for compatibility review; never a cohort split. */
+function compatibility(rows) {
+  const ordered = [...rows].sort((a, b) => a.createdAt.localeCompare(b.createdAt) || Number(a.runId) - Number(b.runId));
+  const transitions = (field) => ordered.slice(1).filter((row, index) => row[field] !== ordered[index][field]).length;
+  const fileIdentityChangedSamples = ordered.slice(1).flatMap((row, index) => {
+    const previous = ordered[index];
+    return row.fileIdentitySetId === previous.fileIdentitySetId ? [] : [{
+      runId: row.runId, attempt: row.attempt, createdAt: row.createdAt, suiteId: row.suiteId, inventoryId: row.inventoryId,
+      inventoryCount: row.inventoryCount, previousRunId: previous.runId, previousAttempt: previous.attempt,
+      previousSuiteId: previous.suiteId, previousInventoryId: previous.inventoryId, previousInventoryCount: previous.inventoryCount }];
+  });
+  return { distinctSuiteIds: new Set(rows.map((row) => row.suiteId)).size, distinctInventoryIds: new Set(rows.map((row) => row.inventoryId)).size,
+    suiteIdTransitions: transitions("suiteId"), inventoryIdTransitions: transitions("inventoryId"),
+    fileIdentityChanges: fileIdentityChangedSamples.length, fileIdentityChangedSamples,
+    review: "contract-drift-visible-requires-compatibility-review" };
+}
+
+/** Groups comparisons by cohort key; samples from either side of the cutover never share a cohort. */
+export function shadowCohorts(comparisons) {
+  const groups = new Map();
+  for (const row of comparisons) {
+    const { cohortKeying, cohortKey: key } = cohortKey(row), id = `${cohortKeying}\n${key}`;
+    groups.set(id, [...(groups.get(id) ?? []), row]);
+  }
+  return [...groups.values()].map((rows) => {
+    const { cohortKeying, cohortKey: key } = cohortKey(rows[0]), legacy = cohortKeying === LEGACY_KEYING;
+    const identified = [], changes = new Set(), heads = new Set();
+    for (const row of rows.filter((row) => row.eligible).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      if (!row.changeKey || changes.has(row.changeKey) || heads.has(row.changeHeadSha)) continue;
+      identified.push(row); changes.add(row.changeKey); heads.add(row.changeHeadSha);
+    }
+    const days = new Set(identified.map((row) => row.workingDate).filter(Boolean));
+    return { ...(legacy ? { suiteId: rows[0].suiteId, policyId: rows[0].policyId }
+      : { suiteVersion: rows[0].suiteVersion, policyVersion: rows[0].policyVersion, policyId: rows[0].policyId }),
+      cohortKeying, cohortKey: key, projectedSamples: rows.filter((row) => row.eligible).length,
+      partialFailureObservations: rows.filter((row) => !row.eligible).length,
+      distinctIdentifiedChanges: changes.size, distinctWorkingDatesUTC: days.size,
+      missedFailureCandidates: rows.filter((row) => row.missedFailureCandidate).length,
+      fastMissedFailureCandidates: rows.filter((row) => row.fastMissedFailureCandidate).length,
+      sampleThresholdMet: changes.size >= 30 && days.size >= 5,
+      readiness: "not-certified-requires-miss-investigation-and-reviewed-comparison",
+      ...(legacy ? {} : { compatibility: compatibility(rows) }) };
+  });
+}
 
 /** Offline inference from the existing full run. Never represents a second suite execution. */
 export function shadowReport(input) {
@@ -102,8 +160,9 @@ export function shadowReport(input) {
       // candidate, without manufacturing a subset pass or counting an eligible sample.
       if (record.state !== "failing" || (!failures.length && !mandatoryFailures.length)) continue;
     }
-    comparisons.push({ ...source, suiteId: plan.suiteId, policyId: plan.policyId, suiteVersion: plan.suiteVersion,
-      policyVersion: plan.policyVersion, inventoryId: plan.inventoryId, mode: plan.mode, fallbackReasons: plan.reasons,
+    const identity = { suiteId: plan.suiteId, policyId: plan.policyId, suiteVersion: plan.suiteVersion, policyVersion: plan.policyVersion };
+    comparisons.push({ ...source, ...identity, ...cohortKey({ ...source, ...identity }), inventoryId: plan.inventoryId,
+      fileIdentitySetId: hash(JSON.stringify([...plan.selectedFileIds, ...plan.deferredFileIds].sort())), mode: plan.mode, fallbackReasons: plan.reasons,
       selectedCount: plan.selectedCount, fastCount: plan.fastCount, inventoryCount: plan.inventoryCount,
       fullOutcome: record.state, eligible: !incomplete,
       projectedFastOutcome: fastFailed ? "failing" : incomplete ? "unmeasured" : "passing",
@@ -116,24 +175,10 @@ export function shadowReport(input) {
       changeHeadSha: plan.context.changeHeadSha,
       changeKey: Number.isSafeInteger(record.pullRequest) && record.pullRequest > 0 ? `pr-${record.pullRequest}` : null });
   }
-  const cohorts = [...new Set(comparisons.map((row) => `${row.suiteId}/${row.policyId}`))].map((key) => {
-    const rows = comparisons.filter((row) => `${row.suiteId}/${row.policyId}` === key);
-    const identified = [], changes = new Set(), heads = new Set();
-    for (const row of rows.filter((row) => row.eligible).sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
-      if (!row.changeKey || changes.has(row.changeKey) || heads.has(row.changeHeadSha)) continue;
-      identified.push(row); changes.add(row.changeKey); heads.add(row.changeHeadSha);
-    }
-    const days = new Set(identified.map((row) => row.workingDate).filter(Boolean));
-    return { suiteId: rows[0].suiteId, policyId: rows[0].policyId, projectedSamples: rows.filter((row) => row.eligible).length,
-      partialFailureObservations: rows.filter((row) => !row.eligible).length,
-      distinctIdentifiedChanges: changes.size, distinctWorkingDatesUTC: days.size,
-      missedFailureCandidates: rows.filter((row) => row.missedFailureCandidate).length,
-      fastMissedFailureCandidates: rows.filter((row) => row.fastMissedFailureCandidate).length,
-      sampleThresholdMet: changes.size >= 30 && days.size >= 5,
-      readiness: "not-certified-requires-miss-investigation-and-reviewed-comparison" };
-  });
-  return { version: 1, repository: input.repository,
-    windows: input.windows.map(({ since, until }) => ({ since: new Date(since).toISOString(), until: new Date(until).toISOString() })), comparisons, cohorts, gaps, exclusions,
+  return { version: 2, repository: input.repository,
+    windows: input.windows.map(({ since, until }) => ({ since: new Date(since).toISOString(), until: new Date(until).toISOString() })),
+    cohortKeyCutover: { at: COHORT_KEY_CUTOVER, before: LEGACY_KEYING, from: POLICY_KEYING },
+    comparisons, cohorts: shadowCohorts(comparisons), gaps, exclusions,
     naturalProjectedSamples: comparisons.filter((row) => row.eligible).length,
     partialFailureObservations: comparisons.filter((row) => !row.eligible).length, selectedRuntimeMs: null, certification: "none",
     remainingCriterion: "At least 30 eligible identified changes across five working days, individual triage of exclusions and every miss, and reviewed comparison before readiness." };
