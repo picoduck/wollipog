@@ -483,6 +483,22 @@ if (leaseRefusal) {
     ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
   };
 }
+// A v248 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
+if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
+// A starting session waiting for its busy account (#3240): `lease-wait=<cause>` (or `busy`).
+const leaseWait = params.get("lease-wait");
+if (leaseWait) {
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
+  session.status = "starting";
+  session.providerAccountId = "work-account";
+  session.providerAccountLabel = "Work Account";
+  session.providerHomeWait = {
+    provider: session.driver === "claude-code" ? "claude" : "codex",
+    ...(leaseWait === "busy" ? {} : { cause: leaseWait as NonNullable<NonNullable<SessionView["providerHomeWait"]>["cause"]> }),
+    providerAccountId: "work-account", providerAccountLabel: "Work Account",
+    waitingSince: Date.now() - 60_000, waitUntil: Date.now() - 60_000 + 8 * 3_600_000,
+  };
+}
 // `lease-viewer=owner` or `member` (#3240): a viewer who manages the Machine, as an Owner of the
 // personal organization (Set Up Managed Profile and Recover Existing Profile) or a member (Set Up
 // Managed Profile only).

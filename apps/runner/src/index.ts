@@ -2977,6 +2977,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             events: result.events,
             handoffDraft: result.handoffDraft,
             retainedPrompt: result.retainedPrompt,
+            ...(result.providerHomeRefusal &&
+              runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeForkRefusals")
+              ? { providerHomeRefusal: result.providerHomeRefusal } : {}),
           }),
         )
         .catch((err) =>

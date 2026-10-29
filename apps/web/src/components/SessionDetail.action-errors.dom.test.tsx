@@ -399,6 +399,27 @@ test("a failed fork is Fork Not Created, and an uncertain one says not to retry"
   }
 });
 
+test("a fork refused at the account's lease shows the launch refusal's state, worded for a fork (#3240)", async () => {
+  const server = "Provider HOME is already in use; retry after the current owner or publication finishes.";
+  const fixture = await mount(sessionView({}), {
+    client: { fork: () => Promise.reject(new ApiError(server, 409, undefined, {
+      error: server,
+      providerHomeRefusal: { code: "busy", provider: "codex", providerAccountId: "acct-1", providerAccountLabel: "Work", detectedAt: 5 },
+    })) } as Partial<ApiClient>,
+    events: CHECKPOINTED_TURNS,
+  });
+  try {
+    await chooseTranscriptAction(fixture.container, "More Turn Actions", "Fork After This Turn…", 0);
+    await flush();
+    await assertPlainFailure(fixture, "Account in Use",
+      "Another runner, provider, helper, or lease publication is using Work, so the fork didn't start. " +
+        "Try again once it's free, or switch the session to another account.",
+      server);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("Edit in a Fork's failure is a plain sentence, with the server's words kept for Show Details", async () => {
   // Its confirmation shows the failure (#2185); FeedbackProvider.dom.test.tsx renders the details.
   const server = "conversation fork failed: provider refused";

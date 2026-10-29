@@ -557,7 +557,8 @@ export type SessionConditionKind =
   | "disconnected"
   /** Live workers. */
   | "workers"
-  /** Why a queued session is waiting: capacity, or a worktree or account handoff. */
+  /** Why a queued session is waiting: capacity, or a worktree or account handoff; or that a starting
+   * session is waiting for its busy provider account. */
   | "queue_reason"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
   | "lifecycle";
@@ -607,7 +608,8 @@ export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval"
   Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "orchestratorPolicy" | "parentSessionId" |
     "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
-    "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries">>;
+    "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries" |
+    "providerHomeWait">>;
 
 const FOLLOW_UP_BLOCKERS: Record<NonNullable<NonNullable<SessionView["backgroundFollowUp"]>["blocker"]>, string> = {
   governance: "The session is paused by a governance limit. Review the session's pending action to continue.",
@@ -839,6 +841,15 @@ export function sessionStatusSummary(
         pulse: false,
       },
       description: reason ?? "A handoff is waiting on background work.",
+      needsYou: false,
+      fact: true,
+    });
+  } else if (session.status === "starting" && session.providerHomeWait) {
+    // #3240: the launch retries the busy account's lease; Stop ends the wait.
+    conditions.push({
+      kind: "queue_reason",
+      meta: { label: "Waiting for Account", tone: "neutral", pulse: false },
+      description: "The session starts as soon as its provider account is free.",
       needsYou: false,
       fact: true,
     });

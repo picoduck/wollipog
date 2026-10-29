@@ -19,7 +19,7 @@ import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal } from "@wollipog/protocol";
+import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -743,6 +743,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_switch_failure TEXT,
   provider_profile_id TEXT,
   provider_home_refusal TEXT,
+  provider_home_wait TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
@@ -3150,6 +3151,7 @@ interface SessionRow {
   provider_account_switch_failure: string | null;
   provider_profile_id: string | null;
   provider_home_refusal: string | null;
+  provider_home_wait: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
@@ -7051,6 +7053,8 @@ export class ControlPlaneDb {
       "provider_profile_id TEXT",
       // The provider-HOME lease refusal that stopped the session's last launch (#3240).
       "provider_home_refusal TEXT",
+      // The busy provider HOME a starting session's launch is waiting for (#3240).
+      "provider_home_wait TEXT",
     ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
@@ -11870,7 +11874,7 @@ export class ControlPlaneDb {
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
       provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
-      title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
+      provider_home_wait title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
       parent_control_policy parent_control_policy_revision orchestrator_policy session_role
@@ -13178,6 +13182,15 @@ export class ControlPlaneDb {
     const refusal = value === null ? null : validProviderHomeLaunchRefusal(value);
     this.stmt("UPDATE sessions SET provider_home_refusal=? WHERE id=?")
       .run(refusal ? JSON.stringify(refusal) : null, sessionId);
+  }
+
+  /** Undefined (an older runner) keeps the stored wait; null clears it; a malformed one is
+   * dropped, so the session shows only that it is starting. */
+  private writeSessionProviderHomeWait(sessionId: string, value: unknown): void {
+    if (value === undefined) return;
+    const wait = value === null ? null : validProviderHomeWait(value);
+    this.stmt("UPDATE sessions SET provider_home_wait=? WHERE id=?")
+      .run(wait ? JSON.stringify(wait) : null, sessionId);
   }
 
   private writeSessionProviderProfileId(sessionId: string, value: string | null | undefined): void {
@@ -16327,6 +16340,7 @@ export class ControlPlaneDb {
       }
       this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
       this.writeSessionProviderHomeRefusal(snap.id, snap.providerHomeRefusal);
+      this.writeSessionProviderHomeWait(snap.id, snap.providerHomeWait);
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -16659,6 +16673,7 @@ export class ControlPlaneDb {
     }
     this.writeSessionProviderProfileId(id, snap.providerProfileId);
     this.writeSessionProviderHomeRefusal(id, snap.providerHomeRefusal);
+    this.writeSessionProviderHomeWait(id, snap.providerHomeWait);
     if (snap.providerAccountSwitchFailure !== undefined) {
       this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
         .run(snap.providerAccountSwitchFailure
@@ -18159,8 +18174,9 @@ export class ControlPlaneDb {
       INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)
       ON CONFLICT(session_id) DO UPDATE SET meaningful_at=MAX(meaningful_at,excluded.meaningful_at)`).run(id, now);
     if (current && current.status !== effectiveStatus) this.advanceSessionAttentionRevision(id);
-    this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
-      .run(effectiveStatus, now, id);
+    this.stmt(`UPDATE sessions SET status=?, capacity_wait=NULL,
+      provider_home_wait=CASE WHEN ?='starting' THEN provider_home_wait ELSE NULL END, updated_at=? WHERE id=?`)
+      .run(effectiveStatus, effectiveStatus, now, id);
     // The overloads require provenance for `stopped`; an untyped caller still records a stop that
     // nothing has confirmed rather than one that claims runner evidence it never had.
     const stopWrite = stop ?? { cause: "unrecorded" };
@@ -24983,6 +24999,7 @@ export class ControlPlaneDb {
       providerAccountId: row.provider_account_id ?? undefined, providerAccountLabel: row.provider_account_label ?? undefined,
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
+      ...providerHomeWaitField(status, row.provider_home_wait),
       title: row.title, titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: row.background_work_state ? parseBackgroundWorkState(row.background_work_state) : undefined,
@@ -25140,6 +25157,7 @@ export class ControlPlaneDb {
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
       ...providerHomeRefusalField(row.provider_home_refusal),
+      ...providerHomeWaitField(status, row.provider_home_wait),
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
@@ -31688,6 +31706,15 @@ function validBackgroundTerminalStatus(
 }
 
 /** The stored launch refusal (#3240), re-validated as it is projected. */
+/** Only a starting session waits for its account: a stale wait never outlives the launch. */
+function providerHomeWaitField(status: SessionStatus, value: string | null): Pick<SessionView, "providerHomeWait"> {
+  if (status !== "starting" || !value) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return {}; }
+  const wait = validProviderHomeWait(parsed);
+  return wait ? { providerHomeWait: wait } : {};
+}
+
 function providerHomeRefusalField(value: string | null): { providerHomeRefusal?: ProviderHomeLaunchRefusalView } {
   if (!value) return {};
   let parsed: unknown;

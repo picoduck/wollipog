@@ -4525,6 +4525,35 @@ test("provider-HOME launch refusals round-trip, survive an older runner's snapsh
   assert.equal(db.getSession("launch-refusal")?.providerHomeRefusal, undefined, "null clears it");
 });
 
+test("a starting session's provider-HOME wait is stored, projected only while starting, and cleared (#3240)", () => {
+  const db = withRunner();
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  const wait = { provider: "codex" as const, cause: "holder_alive" as const, providerAccountId: "work",
+    providerAccountLabel: "Work", waitingSince: 2_000, waitUntil: 3_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "waiting", status: "starting", providerHomeWait: wait }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("waiting")?.providerHomeWait, wait);
+  assert.deepEqual(summary("waiting")?.providerHomeWait, wait, "lists show it too");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 1 }), 3_000);
+  assert.deepEqual(db.getSession("waiting")?.providerHomeWait, wait, "an older runner's absent field keeps it");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 2,
+    providerHomeWait: { ...wait, home: "/home/user/.codex" } as never }), 4_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a malformed wait is not stored");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 3, providerHomeWait: wait }), 5_000);
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 4, providerHomeWait: null }), 6_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "null clears it");
+
+  // A wait never outlives its launch: any other status hides it, and a status change ends it.
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "running", seq: 5, providerHomeWait: wait }), 7_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined);
+  assert.equal(summary("waiting")?.providerHomeWait, undefined);
+  db.updateSessionStatus("waiting", "failed", 8_000);
+  db.updateSessionStatus("waiting", "starting", 9_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a later launch starts without the old wait");
+});
+
 test("a session's recorded provider profile id is stored, projected, kept when absent and cleared by null (#3239)", () => {
   const db = withRunner();
   const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";

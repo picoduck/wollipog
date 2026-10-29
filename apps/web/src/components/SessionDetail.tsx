@@ -35,6 +35,7 @@ import {
   runnerSupportsProtocol,
   providerSupportsConversationFork,
   inPlaceHandoffTurns,
+  validProviderHomeLaunchRefusal,
   type PromptImageInput,
   type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
@@ -86,7 +87,7 @@ import {
   type HiddenColumnFailure,
 } from "./hidden-column-conditions.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
-import { availableProviderHomeRefusalActions, providerHomeRefusalCopy } from "../provider-home-refusal.js";
+import { availableProviderHomeRefusalActions, providerHomeRefusalCopy, providerHomeWaitCopy } from "../provider-home-refusal.js";
 import { canManageProviderProfiles } from "../provider-profile-access.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { BusyButton } from "./ui/BusyButton.js";
@@ -680,7 +681,16 @@ function forkFailure(
   cause: unknown,
   ambiguous: AmbiguousForkError | null,
   machineName: string | undefined,
+  /** Names a refused account as the session notices do, masked when identifiers are hidden. */
+  accountName: (label: string | undefined) => string | undefined = (label) => label,
 ): ComposerActionError {
+  // The fork's provider launch was refused at the account's lease (#3240): the same state and copy
+  // as a refused session launch, with the server's words behind Show Details.
+  const refusal = cause instanceof ApiError ? validProviderHomeLaunchRefusal(cause.details?.providerHomeRefusal) : null;
+  if (refusal) {
+    const copy = providerHomeRefusalCopy(refusal, accountName(refusal.providerAccountLabel), { launch: "fork" });
+    return { title: copy.title, message: copy.body, ...(cause instanceof Error && cause.message ? { detail: cause.message } : {}) };
+  }
   if (!ambiguous) return composerActionError(action, cause, machineName);
   const { detail } = composerActionError(action, cause);
   return { title: "Fork Outcome Unknown", message: ambiguous.message, ...(detail ? { detail } : {}) };
@@ -1365,6 +1375,9 @@ function SessionDetailLoaded({
   const [busy, setBusy] = useState(false);
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  // Which refusal action is restarting the session: Restart Session or Wait for Account (#3240).
+  const [refusalWaitPending, setRefusalWaitPending] = useState(false);
+  const [stopWaitingPending, setStopWaitingPending] = useState(false);
   const [setupRetryPending, setSetupRetryPending] = useState(false);
   const setupSuggestion = useWorktreeSetupSuggestion(
     showWorktreeSetupNotice && session.projectId ? session as SessionView & { projectId: string } : undefined,
@@ -1498,6 +1511,9 @@ function SessionDetailLoaded({
   }, [showComposerError]);
   // The session's machine, named when it is why an action failed; assigned once it is known below.
   const actionMachineNameRef = useRef<string | undefined>(undefined);
+  // Names a refused account in a fork failure as the session notices do (#3240): an email-shaped
+  // label is named by role while identifiers are hidden.
+  const refusalAccountNameRef = useRef<(label: string | undefined) => string | undefined>((label) => label);
   /** A composer action the server refused (#2511): its own title and sentence, and the server's words
    * behind Show Details. */
   const showActionError = useCallback((action: ComposerAction, cause: unknown) => {
@@ -3679,6 +3695,11 @@ function SessionDetailLoaded({
   const providerHomeRefusalOrder = providerHomeRefusal && {
     key: `provider-home-refusal:${providerHomeRefusal.detectedAt}`, severity: "warning", rank: SESSION_NOTICE_RANK.providerHomeRefusal,
   } as const;
+  // The busy account a starting session's launch is waiting for (#3240): a state, not a failure.
+  const providerHomeWait = session.status === "starting" ? session.providerHomeWait : undefined;
+  const providerHomeWaitOrder = providerHomeWait && {
+    key: `provider-home-wait:${providerHomeWait.waitingSince}`, severity: "info", rank: SESSION_NOTICE_RANK.providerHomeWait,
+  } as const;
   // Recover Existing Profile needs an Owner or Admin of the personal organization (#3240). The
   // identity is read only while a refusal notice is shown; until it answers, the notice offers Open
   // Machine Accounts instead.
@@ -3711,6 +3732,8 @@ function SessionDetailLoaded({
   // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
   const runnerDisp = runnerDisplay(runner, box, session.runnerId);
   actionMachineNameRef.current = runnerDisp.name || undefined;
+  refusalAccountNameRef.current = (label) => label === undefined ? undefined
+    : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
   // Why the composer cannot send a new message now (#2154). Edit & Resend states the same reason.
   // An archived session is also stopped; its notice is in the slot, so the slot's order decides.
   const promptUnavailableReason = composerUnavailableReason({
@@ -4462,7 +4485,7 @@ function SessionDetailLoaded({
           const ambiguous = ambiguousForkError(cause);
           if (ambiguous) releaseOnFinish = false;
           if (viewGenerationRef.current === generation) {
-            const failure = forkFailure("fork", cause, ambiguous, actionMachineNameRef.current);
+            const failure = forkFailure("fork", cause, ambiguous, actionMachineNameRef.current, refusalAccountNameRef.current);
             showComposerError("action", failure);
             if (mode === "preview") showToast(failure.message, { tone: "error" });
           }
@@ -4561,7 +4584,7 @@ function SessionDetailLoaded({
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
       if (viewGenerationRef.current === generation) {
-        const failure = forkFailure("recoverConversation", cause, ambiguous, actionMachineNameRef.current);
+        const failure = forkFailure("recoverConversation", cause, ambiguous, actionMachineNameRef.current, refusalAccountNameRef.current);
         showComposerError("action", failure);
         if (mode === "preview") showToast(failure.message, { tone: "error" });
       }
@@ -4621,24 +4644,40 @@ function SessionDetailLoaded({
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
   // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
   // failed or stopped session the refusal left.
-  const restartFromRefusal = useCallback(async () => {
+  const restartFromRefusal = useCallback(async (waitForProviderHome = false) => {
     if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
         turnRetryInFlightRef.current) return;
     const generation = viewGenerationRef.current;
     setError(null);
     setBusy(true);
     setRestartPending(true);
+    setRefusalWaitPending(waitForProviderHome);
     try {
-      loadSession(await api.restart(session.id));
+      loadSession(await api.restart(session.id, waitForProviderHome ? { waitForProviderHome } : undefined));
     } catch (cause) {
       if (viewGenerationRef.current === generation) showActionError("restart", cause);
     } finally {
       if (viewGenerationRef.current === generation) {
         setRestartPending(false);
+        setRefusalWaitPending(false);
         setBusy(false);
       }
     }
   }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.archived, session.id]);
+  // Stop Waiting (#3240): the launch hasn't started a provider, so stopping the session only ends
+  // the wait.
+  const stopWaiting = useCallback(async () => {
+    if (stopWaitingPending) return;
+    const generation = viewGenerationRef.current;
+    setStopWaitingPending(true);
+    try {
+      loadSession(await api.stop(session.id));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) showActionError("stopWaiting", cause);
+    } finally {
+      if (viewGenerationRef.current === generation) setStopWaitingPending(false);
+    }
+  }, [api, loadSession, session.id, stopWaitingPending]);
   // Retry Turn on a failed turn's notice (#2169): the turn's prompt again, as a new turn. A failed
   // or stopped session restarts first, since the control plane admits no prompt to it until then,
   // but only where the restart resumes the provider conversation.
@@ -4946,7 +4985,7 @@ function SessionDetailLoaded({
       // progress rather than creating a second one.
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
-      const failure = forkFailure("editInFork", cause, ambiguous, actionMachineNameRef.current);
+      const failure = forkFailure("editInFork", cause, ambiguous, actionMachineNameRef.current, refusalAccountNameRef.current);
       throw new ConfirmationFailure(failure.message, failure.detail);
     } finally {
       if (releaseOnFinish) releaseFork();
@@ -5132,7 +5171,9 @@ function SessionDetailLoaded({
     // With hiding enabled, an email-shaped account is named by role, as the switch failure does.
     const account = label === undefined ? undefined
       : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
-    const copy = providerHomeRefusalCopy(providerHomeRefusal, account);
+    const copy = providerHomeRefusalCopy(providerHomeRefusal, account, {
+      canWait: runnerSupportsProtocol(runner?.protocolVersion, "providerHomeWait"),
+    });
     const switchReason = !accountSwitchSupported
       ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "session account switching")
       : runnerOfflineReason;
@@ -5152,7 +5193,7 @@ function SessionDetailLoaded({
       navigate({ name: "runners", section: "machines", machineId: session.runnerId, ...(accounts ? { accounts } : {}) });
     // Each disabled action's reason is visible under the body, once even when both share it.
     const disabledReasons = [...new Set([
-      actions.includes("restart") ? restartReason : null,
+      actions.includes("restart") || actions.includes("wait") ? restartReason : null,
       actions.includes("switch_account") ? switchReason : null,
     ].filter((reason): reason is string => reason !== null))];
     const reasonId = (reason: string | null) => reason === null ? undefined
@@ -5163,13 +5204,21 @@ function SessionDetailLoaded({
       render: ({ trailing }) => (
         <Notice tone="warning" role="status" ariaLabel={copy.title} title={copy.title}
           trailing={trailing}
-          actions={actions.length > 0 && actions.map((action, index) => action === "restart" ? (
+          actions={actions.length > 0 && actions.map((action, index) => action === "wait" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              disabled={restartReason !== null || restartPending || busy}
+              title={restartReason ?? undefined}
+              aria-describedby={reasonId(restartReason)}
+              onClick={() => void restartFromRefusal(true)}>
+              {restartPending && refusalWaitPending ? "Starting to Wait" : "Wait for Account"}
+            </button>
+          ) : action === "restart" ? (
             <button key={action} type="button" className={buttonClass(index)}
               disabled={restartReason !== null || restartPending || busy}
               title={restartReason ?? undefined}
               aria-describedby={reasonId(restartReason)}
               onClick={() => void restartFromRefusal()}>
-              {restartPending ? "Restarting Session" : "Restart Session"}
+              {restartPending && !refusalWaitPending ? "Restarting Session" : "Restart Session"}
             </button>
           ) : action === "switch_account" ? (
             <button key={action} type="button" className={buttonClass(index)}
@@ -5201,6 +5250,29 @@ function SessionDetailLoaded({
           {disabledReasons.map((reason, index) => (
             <p key={reason} className="notice-meta" id={`provider-home-refusal-reason-${index}`}>{reason}</p>
           ))}
+        </Notice>
+      ),
+    });
+  }
+  if (providerHomeWait && providerHomeWaitOrder) {
+    const label = providerHomeWait.providerAccountLabel;
+    const account = label === undefined ? undefined
+      : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
+    const copy = providerHomeWaitCopy(providerHomeWait, account);
+    sessionNotices.push({
+      ...providerHomeWaitOrder,
+      title: copy.title,
+      render: ({ trailing }) => (
+        <Notice tone="info" role="status" ariaLabel={copy.title} title={copy.title}
+          trailing={trailing}
+          actions={
+            <button type="button" className="btn sm" disabled={stopWaitingPending || runnerOfflineReason !== null}
+              title={runnerOfflineReason ?? undefined}
+              onClick={() => void stopWaiting()}>
+              {stopWaitingPending ? "Stopping" : "Stop Waiting"}
+            </button>
+          }>
+          <p>{copy.body}</p>
         </Notice>
       ),
     });
