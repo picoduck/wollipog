@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { FAST_API_FILES, FAST_PROSE_FILES, CRITICAL_BROWSER_FILES } from "./ci-suite-policy.mjs";
 import { makeSelection, hash, SELECTION_MARKER } from "./ci-suite-selection.mjs";
-import { shadowReport } from "./ci-suite-shadow-report.mjs";
+import { COHORT_KEY_CUTOVER, shadowCohorts, shadowReport } from "./ci-suite-shadow-report.mjs";
 import { readTimingLog } from "./merge-queue-wait-report.mjs";
 
 const testedSha = "b".repeat(40), baseSha = "a".repeat(40);
@@ -137,6 +137,91 @@ test("reruns cannot inflate changes and suite/policy identities never share a co
   const rerun = input(); rerun.records[0].attempt = 2;
   rerun.records[0].jobs.at(-1).testTiming.selections[0].context.attempt = 2;
   assert.equal(shadowReport(rerun).exclusions[0].reason, "rerun-not-an-independent-change");
+});
+
+// Independent natural samples: one PR per record, each with its own plan over `sampleTree`.
+function samples(specs) {
+  const data = input(), original = data.records[0];
+  data.windows = [{ since: "2026-10-19T00:00:00Z", until: "2026-11-14T00:00:00Z" }];
+  data.records = specs.map(({ createdAt, sampleTree = tree, policyId = hash("policy-fixture") }, index) => {
+    const record = structuredClone(original), sha = (index + 2000).toString(16).padStart(40, "0");
+    record.runId = 301 + index; record.pullRequest = 400 + index; record.sha = sha; record.testedSha = sha; record.createdAt = createdAt;
+    for (const job of record.jobs) {
+      job.id += index * 100;
+      for (const summary of job.testTiming?.summaries ?? []) { summary.context.runId = String(record.runId); summary.context.testedSha = sha; }
+    }
+    record.jobs.at(-1).testTiming.selections = [makeSelection({ tree: sampleTree, fastFiles: [], policyId,
+      diff: { entries: [{ path: FAST_PROSE_FILES[0], status: "M" }] },
+      context: { baseSha, diffBaseSha: baseSha, testedSha: sha, changeHeadSha: sha, trustedPolicySha: baseSha,
+        runId: String(record.runId), attempt: 1, event: "merge_group", diffKind: "combined-merge-group" } })];
+    return record;
+  });
+  return data;
+}
+const edited = tree.map((row) => row.path === "apps/web/e2e/deferred.spec.ts" ? { ...row, oid: "c".repeat(40) } : row);
+const added = [...tree, { path: "apps/web/e2e/added.spec.ts", oid: baseSha }];
+const after = (day) => `2026-11-${String(day).padStart(2, "0")}T01:00:00.000Z`;
+
+test("from the cutover, samples with different suite identities but one policy identity share a cohort", () => {
+  assert.equal(COHORT_KEY_CUTOVER, "2026-11-02T00:00:00.000Z");
+  const report = shadowReport(samples([{ createdAt: after(2) }, { createdAt: after(3), sampleTree: edited }, { createdAt: after(4), sampleTree: added }]));
+  assert.equal(new Set(report.comparisons.map((row) => row.suiteId)).size, 3);
+  assert.equal(report.cohorts.length, 1);
+  const [cohort] = report.cohorts;
+  assert.equal(cohort.cohortKeying, "suiteVersion/policyVersion/policyId");
+  assert.equal(cohort.cohortKey, `fast-required-v1/1/${hash("policy-fixture")}`);
+  assert.equal(cohort.suiteId, undefined);
+  assert.equal(cohort.projectedSamples, 3);
+  assert.equal(cohort.distinctIdentifiedChanges, 3);
+  for (const row of report.comparisons) assert.ok(row.suiteId && row.inventoryId && row.fileIdentitySetId);
+  // Drift stays visible: an edited test changes identities only; an added test changes file identities.
+  assert.deepEqual({ ...cohort.compatibility, fileIdentityChangedSamples: cohort.compatibility.fileIdentityChangedSamples.map((row) => row.runId) },
+    { distinctSuiteIds: 3, distinctInventoryIds: 3, suiteIdTransitions: 2, inventoryIdTransitions: 2, fileIdentityChanges: 1,
+      fileIdentityChangedSamples: [303], review: "contract-drift-visible-requires-compatibility-review" });
+  const changed = cohort.compatibility.fileIdentityChangedSamples[0];
+  assert.equal(changed.previousRunId, 302);
+  assert.equal(changed.inventoryCount, changed.previousInventoryCount + 1);
+});
+
+test("a policy identity change starts a new cohort after the cutover", () => {
+  const report = shadowReport(samples([{ createdAt: after(2) }, { createdAt: after(3), policyId: hash("policy-fixture-2") }, { createdAt: after(4) }]));
+  assert.deepEqual(report.cohorts.map((cohort) => cohort.projectedSamples), [2, 1]);
+  assert.deepEqual(report.cohorts.map((cohort) => cohort.policyId), [hash("policy-fixture"), hash("policy-fixture-2")]);
+});
+
+test("records from different suite versions never share a cohort", () => {
+  const [row] = shadowReport(samples([{ createdAt: after(2) }])).comparisons;
+  const cohorts = shadowCohorts([row, { ...row, runId: 999, suiteVersion: "fast-required-v2" }]);
+  assert.deepEqual(cohorts.map((cohort) => cohort.suiteVersion), ["fast-required-v1", "fast-required-v2"]);
+  // The v1 report also refuses another suite version's record outright.
+  const data = samples([{ createdAt: after(2) }]);
+  data.records[0].jobs.at(-1).testTiming.selections[0].suiteVersion = "fast-required-v2";
+  assert.equal(shadowReport(data).comparisons.length, 0);
+  assert.equal(shadowReport(data).gaps.length, 1);
+});
+
+test("samples before the cutover keep their original suite/policy cohorts and never join a later cohort", () => {
+  const report = shadowReport(samples([{ createdAt: "2026-10-30T01:00:00.000Z" }, { createdAt: "2026-10-30T02:00:00.000Z", sampleTree: edited },
+    { createdAt: "2026-11-01T23:59:59.999Z" }, { createdAt: COHORT_KEY_CUTOVER }, { createdAt: after(3), sampleTree: edited }]));
+  assert.equal(report.version, 2);
+  assert.deepEqual(report.cohortKeyCutover, { at: COHORT_KEY_CUTOVER, before: "suiteId/policyId", from: "suiteVersion/policyVersion/policyId" });
+  const [first, second, policy] = report.cohorts, [one, two, three, four, five] = report.comparisons;
+  // Legacy cohorts keep their exact suiteId/policyId key and pre-#3786 fields, and are never merged.
+  const { cohortKeying, cohortKey, ...legacyFields } = first;
+  assert.deepEqual(legacyFields, { suiteId: one.suiteId, policyId: one.policyId, projectedSamples: 2, partialFailureObservations: 0,
+    distinctIdentifiedChanges: 2, distinctWorkingDatesUTC: 1, missedFailureCandidates: 0, fastMissedFailureCandidates: 0, sampleThresholdMet: false,
+    readiness: "not-certified-requires-miss-investigation-and-reviewed-comparison" });
+  assert.equal(cohortKeying, "suiteId/policyId");
+  assert.equal(cohortKey, `${one.suiteId}/${one.policyId}`);
+  assert.equal(three.cohortKey, cohortKey);
+  assert.equal(second.cohortKey, `${two.suiteId}/${two.policyId}`);
+  assert.equal(second.projectedSamples, 1);
+  // The same suite identities from the cutover onward start the policy cohort instead of joining a legacy one.
+  assert.equal(four.suiteId, one.suiteId);
+  assert.equal(five.suiteId, two.suiteId);
+  assert.equal(policy.cohortKeying, "suiteVersion/policyVersion/policyId");
+  assert.equal(policy.projectedSamples, 2);
+  assert.equal(report.cohorts.length, 3);
 });
 
 test("the long-window threshold requires 30 independent identified changes across five working dates", () => {
