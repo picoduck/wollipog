@@ -698,6 +698,7 @@ export function SideChatPanel({
     : !transcriptLoaded ? <TranscriptSkeleton label="Loading Side Chat Transcript" />
       : items.length ? (
         <EventTimeline
+          agents={runner?.agents}
           items={items}
           driver={child.driver}
           sessionActive={isTimelineSessionActive(child.status)}

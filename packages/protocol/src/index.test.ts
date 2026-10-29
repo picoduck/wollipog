@@ -113,7 +113,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 244);
+  assert.equal(PROTOCOL_VERSION, 245);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -294,11 +294,11 @@ test("a provider-HOME launch refusal is accepted only when well formed and conte
   ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
 });
 
-test("waiting for a busy provider account requires v244 runners", () => {
-  assert.equal(runnerSupportsProtocol(243, "providerHomeWait"), false);
-  assert.equal(runnerSupportsProtocol(244, "providerHomeWait"), true);
-  assert.equal(runnerSupportsProtocol(243, "providerHomeForkRefusals"), false);
-  assert.equal(runnerSupportsProtocol(244, "providerHomeForkRefusals"), true);
+test("waiting for a busy provider account requires v245 runners", () => {
+  assert.equal(runnerSupportsProtocol(244, "providerHomeWait"), false);
+  assert.equal(runnerSupportsProtocol(245, "providerHomeWait"), true);
+  assert.equal(runnerSupportsProtocol(244, "providerHomeForkRefusals"), false);
+  assert.equal(runnerSupportsProtocol(245, "providerHomeForkRefusals"), true);
 });
 
 test("a provider-HOME wait is accepted only when well formed and content-free", () => {
@@ -319,11 +319,14 @@ test("a provider-HOME wait is accepted only when well formed and content-free", 
   ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 244", () => {
-  assert.equal(PROTOCOL_VERSION, 244);
+test("PROTOCOL_VERSION is 245", () => {
+  assert.equal(PROTOCOL_VERSION, 245);
   // A v241 runner cannot report the closing references of a GitHub merge (#3713).
   assert.equal(runnerSupportsProtocol(241, "githubMergeClosingReferences"), false);
   assert.equal(runnerSupportsProtocol(242, "githubMergeClosingReferences"), true);
+  // A v243 runner cannot bind a review session to a GitLab merge request (#3539).
+  assert.equal(runnerSupportsProtocol(243, "gitlabReviewSessions"), false);
+  assert.equal(runnerSupportsProtocol(244, "gitlabReviewSessions"), true);
   assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
   assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
   // A v238 runner cannot answer the GitLab merge preflight (#3602).

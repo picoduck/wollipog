@@ -213,9 +213,9 @@ test("a launch that did not ask to wait keeps failing on a busy account", async 
   assert.ok(!waits(h.messages).some((wait) => wait));
 });
 
-test("only a v244 control plane receives the wait", async (t) => {
+test("only a v245 control plane receives the wait", async (t) => {
   const h = harness(t);
-  (h.manager as unknown as { controlPlaneProtocolVersion: () => number }).controlPlaneProtocolVersion = () => 243;
+  (h.manager as unknown as { controlPlaneProtocolVersion: () => number }).controlPlaneProtocolVersion = () => 244;
   h.driverLease.push("busy");
   await h.launch({ wait: true });
   assert.equal(h.driversCreated(), 1, "an older control plane can't ask to wait, but the runner honours the start it got");

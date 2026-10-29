@@ -3,9 +3,11 @@
 Refs #3637 under #3625 (acceptance criterion 2). **Inert, offline and disabled.**
 No repository variable, secret, ruleset, required context, permission, status
 grant or budget changes. No workflow is dispatched and no status is written.
-This document covers the recovery rehearsal only. It does not cover the fast
-merge-group mode in `ci.yml` (a sibling slice) or the readiness report, the
-end-to-end rollback rehearsal or the operator proposal (a later slice).
+This document covers the recovery rehearsal only. The fast merge-group mode is
+in [CI aggregation](ci-aggregation.md#disabled-merge-group-gate). The
+[readiness report](fast-gate-readiness-2026-10-28.md) embeds this rehearsal's
+results, and the end-to-end rollback rehearsal and operator steps are in the
+[activation proposal](fast-gate-activation-proposal.md).
 
 ## What It Runs
 

@@ -3,6 +3,11 @@
 The [regression merge-admission runbook](main-merge-admission.md) documents #3633's
 disabled policy and optional read-only shadow. It does not change required checks
 or admit repairs; candidate integration and enforcement remain later slices.
+Merge groups still run full regression. The disabled fast merge-group gate, its
+readiness evidence, rollback triggers and the exact operator steps are in the
+[activation proposal](fast-gate-activation-proposal.md). If it is ever activated, a
+regression can reach `main` through a reduced group, and this health signal becomes the
+primary way it is caught.
 
 The merge queue tests every entry on top of `main`, so a red `main` fails every queued pull
 request, whatever it changes. Normally nothing reaches `main` without passing the queue. The one

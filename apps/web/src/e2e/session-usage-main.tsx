@@ -483,12 +483,12 @@ if (leaseRefusal) {
     ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
   };
 }
-// A v244 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
-if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 244);
+// A v245 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
+if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 245);
 // A starting session waiting for its busy account (#3240): `lease-wait=<cause>` (or `busy`).
 const leaseWait = params.get("lease-wait");
 if (leaseWait) {
-  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 244);
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 245);
   session.status = "starting";
   session.providerAccountId = "work-account";
   session.providerAccountLabel = "Work Account";

@@ -44,7 +44,13 @@ and maximum for:
   `PR Suite Routing` job; its execution is counted as execution, not queue wait.
   A skipped routing job with known creation/completion timestamps is a zero-execution
   dependency anchor, so its scheduling delay is retained without inventing runner time.
-  Missing or ambiguous anchor timestamps leave the split unmeasured.
+  Missing or ambiguous anchor timestamps leave the split unmeasured. Checks/browser also
+  depend on the [disabled merge-group gate](ci-aggregation.md#disabled-merge-group-gate)
+  (`Merge Group Gate`). When it executes, its runtime counts as critical-path execution
+  and only its runner wait as waiting. A skipped gate is not executed work, so every
+  disabled-gate run, and every historical cohort and baseline output, is measured
+  exactly as before. Fast-gate activation measurement uses this model
+  ([measurement plan](fast-gate-activation-proposal.md#measurement-plan-ac3-and-ac4)).
   The advisory suite shadow is never a required dependency. A run with a job created
   late for any other reason is counted as unmeasured rather than guessed.
 - **Critical path waiting:** the rest of the time to the required result.

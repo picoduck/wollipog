@@ -240,7 +240,7 @@ metadata stay in the authorized account details rather than the badge tooltip.
 
 ### Waiting for a Busy Account
 
-A busy account frees itself once the other holder finishes, so with a v244 runner a **busy** refusal
+A busy account frees itself once the other holder finishes, so with a v245 runner a **busy** refusal
 (including its live-runner and surviving-session causes) offers **Wait for Account** in place of
 **Restart Session**: its launch starts at once when the account is already free, so a plain restart
 would only risk a second refusal. It restarts the session with `waitForProviderHome` (`POST /api/sessions/:id/restart` with
@@ -270,8 +270,8 @@ when the wait started and ends, never a path. The control plane stores it in
 ### Refused Forks
 
 A conversation fork (including Recover Conversation and Edit in Fork) launches its own provider
-under the source session's account, so its lease can refuse it too. A v244 runner returns the same
-typed `providerHomeRefusal` in `fork_result` for a v244 control plane, which passes it on in the
+under the source session's account, so its lease can refuse it too. A v245 runner returns the same
+typed `providerHomeRefusal` in `fork_result` for a v245 control plane, which passes it on in the
 fork's 409 response. The fork's failure notice then has the same title as a refused session launch
 and the same guidance, worded for a fork ("so the fork didn't start. Try again once it's free."),
 with the runner's message under its details. A fork is never waited for. The source session is

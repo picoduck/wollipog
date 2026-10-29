@@ -7,7 +7,7 @@ import type { ProviderHomeBlockingProcess, ProviderHomeLaunchRefusalCode, Provid
 export type ProviderHomeRefusalAction = "wait" | "restart" | "switch_account" | "open_accounts" | "set_up_profile" | "recover_profile";
 
 export interface ProviderHomeRefusalOptions {
-  /** The runner can wait for a busy account (protocol v244): a busy refusal offers Wait for Account. */
+  /** The runner can wait for a busy account (protocol v245): a busy refusal offers Wait for Account. */
   canWait?: boolean;
   /** What the lease refused: a session's launch (the default) or a conversation fork's. A fork's
    * copy offers no restart, since the session itself is unaffected. */

@@ -2504,11 +2504,13 @@ export class CodexAppServerDriver implements Driver {
           if (this.seenAsyncQuestionItems.size > 256) {
             this.seenAsyncQuestionItems.delete(this.seenAsyncQuestionItems.values().next().value!);
           }
-          const questions = item.delivery === "async" && !parentToolUseId
-            ? normalizeCodexAsyncQuestions(item.questions) : null;
-          if (questions) {
-            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions, async: true });
+          const normalized: CodexAsyncQuestions = parentToolUseId ? { rejected: "subagent" }
+            : item.delivery !== "async" ? { rejected: `delivery=${diagnosticValue(item.delivery)}` }
+            : normalizeCodexAsyncQuestions(item.questions);
+          if ("questions" in normalized) {
+            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions: normalized.questions, async: true });
           } else {
+            this.cb.onStderr(`unsupported Codex async question item=${diagnosticValue(id)} reason=${normalized.rejected} — reporting a compatibility error`);
             this.cb.onEvent({ kind: "error", message: "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message." });
           }
         }
@@ -3072,25 +3074,36 @@ function normalizedOptions(raw: unknown): AgentQuestion["options"] | null {
   return new Set(valid.map((option) => option.label)).size === valid.length ? valid : null;
 }
 
+/** A rejection names the failing rule with bounded values so the runner log explains the
+ * compatibility error without recording provider-controlled text. */
+export type CodexAsyncQuestions = { questions: AgentQuestion[] } | { rejected: string };
+
 /** App Server agentMessage.questions uses titles and plain string choices, not the blocking
- * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response. */
-export function normalizeCodexAsyncQuestions(raw: unknown): AgentQuestion[] | null {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 3) return null;
+ * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response.
+ * Codex documents no upper bound on the count ("one or more questions"), unlike requestUserInput's
+ * three (#3724); MAX_STRUCTURED_QUESTIONS is only a defensive cap on one event's size. */
+export function normalizeCodexAsyncQuestions(raw: unknown): CodexAsyncQuestions {
+  if (!Array.isArray(raw)) return { rejected: "questions_shape" };
+  if (raw.length === 0 || raw.length > MAX_STRUCTURED_QUESTIONS) return { rejected: `question_count count=${raw.length}` };
   const questions: AgentQuestion[] = [];
   for (let index = 0; index < raw.length; index++) {
     const entry = raw[index];
     const title = boundedString(entry?.title, MAX_ASYNC_QUESTION_TEXT);
-    if (!title || (entry.options != null && !Array.isArray(entry.options))) return null;
+    if (!title) {
+      return { rejected: `${typeof entry?.title === "string" ? "title_length" : "title_shape"} index=${index}` };
+    }
+    if (entry.options != null && !Array.isArray(entry.options)) return { rejected: `option_shape index=${index}` };
     const options = entry.options == null ? [] : entry.options.map((value: unknown) => boundedString(value, MAX_QUESTION_ID));
-    if (options.length > MAX_QUESTION_OPTIONS || options.some((value: string | null) => !value) ||
-        new Set(options).size !== options.length) return null;
+    if (options.length > MAX_QUESTION_OPTIONS) return { rejected: `option_count index=${index} count=${options.length}` };
+    if (options.some((value: string | null) => !value)) return { rejected: `option_shape index=${index}` };
+    if (new Set(options).size !== options.length) return { rejected: `duplicate_options index=${index}` };
     questions.push({
       id: String(index), question: title,
       options: options.map((label: string) => ({ label })),
       allowOther: true, inputFormat: "text", maxLength: MAX_FREE_TEXT,
     });
   }
-  return questions;
+  return { questions };
 }
 
 /** Normalize Codex's item/tool/requestUserInput request without synthesizing a user message. */

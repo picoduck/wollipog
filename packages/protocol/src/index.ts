@@ -739,12 +739,15 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      refuses an undeclared closure and records the check on the decision. A pre-v242 child runner
 //      is not asked; its decisions carry no `closingReferenceCheck`.
 // 243: optional server-verified review-session citations on merge decisions (#3371).
-// 244: waiting for a busy provider account (#3240): a `start_session` may set
+// 244: GitLab review sessions (#3539): a review session's `pullRequest.repository` may name a
+//      host-qualified GitLab project and `number` a merge request IID. An older runner cannot read
+//      a merge request, so the control plane refuses a GitLab review for a pre-v244 runner.
+// 245: waiting for a busy provider account (#3240): a `start_session` may set
 //      `waitForProviderHome`, and the runner then retries a busy provider-HOME lease, reporting
 //      `providerHomeWait` on the starting session, instead of failing the launch. A refused
 //      conversation fork's `fork_result` carries the typed `providerHomeRefusal`. The control plane
-//      sends the wait request only to a v244+ runner; older peers keep failing busy launches.
-export const PROTOCOL_VERSION = 244;
+//      sends the wait request only to a v245+ runner; older peers keep failing busy launches.
+export const PROTOCOL_VERSION = 245;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1010,11 +1013,11 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerHomeLaunchRefusals: 233,
   /** Specific recovery causes and authorized process diagnostics (#3585). */
   providerHomeRecoveryDetails: 235,
-  /** v244 runner waits for a busy provider HOME when a launch asks it to, reporting the wait on
+  /** v245 runner waits for a busy provider HOME when a launch asks it to, reporting the wait on
    * the session (#3240). */
-  providerHomeWait: 244,
-  /** v244 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
-  providerHomeForkRefusals: 244,
+  providerHomeWait: 245,
+  /** v245 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
+  providerHomeForkRefusals: 245,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -1075,6 +1078,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
   githubMergeClosingReferences: 242,
+  /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
+  gitlabReviewSessions: 244,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
@@ -3367,7 +3372,7 @@ export function validProviderHomeLaunchRefusal(value: unknown): ProviderHomeLaun
 export type ProviderHomeWaitCause = "holder_alive" | "boundary_survivor" | "process_survivor";
 const PROVIDER_HOME_WAIT_CAUSES: readonly ProviderHomeWaitCause[] = ["holder_alive", "boundary_survivor", "process_survivor"];
 
-/** Protocol v244 (#3240): a starting session whose launch is waiting for a busy provider HOME's
+/** Protocol v245 (#3240): a starting session whose launch is waiting for a busy provider HOME's
  * lease. Content-free like `ProviderHomeLaunchRefusalView`: it names the account, never a path. */
 export interface ProviderHomeWaitView {
   provider: "claude" | "codex";
@@ -7694,7 +7699,7 @@ export interface SessionView {
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   /** Protocol v233 (#3240): the lease refusal that stopped the session's last launch. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
-  /** Protocol v244 (#3240): the busy provider account a starting session is waiting for. */
+  /** Protocol v245 (#3240): the busy provider account a starting session is waiting for. */
   providerHomeWait?: ProviderHomeWaitView;
   /** Protocol v225 (#3239): the provider profile the account binding recorded. Absent for a binding
    * made before the account was adopted, a legacy HOME, and older control planes. */
@@ -7915,7 +7920,7 @@ export interface SessionSnapshot {
   /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier
    * refusal. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView | null;
-  /** Protocol v244 (#3240). Three-valued: undefined is an older peer; null is no wait. */
+  /** Protocol v245 (#3240). Three-valued: undefined is an older peer; null is no wait. */
   providerHomeWait?: ProviderHomeWaitView | null;
   /** Protocol v225 (#3239): the provider profile the session's account binding recorded when it was
    * made. Three-valued: undefined carries no information (an older peer, or a registration snapshot
@@ -9839,8 +9844,8 @@ export interface SessionLaunchSpec {
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
   controlPlaneLaunchId?: string;
-  /** Protocol v244 (#3240): when this launch finds the provider HOME busy, wait for its lease
-   * instead of failing. Sent only to a v244+ runner. */
+  /** Protocol v245 (#3240): when this launch finds the provider HOME busy, wait for its lease
+   * instead of failing. Sent only to a v245+ runner. */
   waitForProviderHome?: boolean;
   workspaceId: string | null;
   workspacePath: string;
@@ -10300,7 +10305,7 @@ export interface ForkResultMessage {
   /** v128: a prompt the source retained unsent while quarantined, handed to the recovered session
    * as a composer draft. It is never submitted by the runner or the control plane. */
   retainedPrompt?: { text: string; images: PromptImageInput[] };
-  /** v244 (#3240): the provider-HOME lease refusal that stopped the fork, for a v244+ control
+  /** v245 (#3240): the provider-HOME lease refusal that stopped the fork, for a v245+ control
    * plane. `error` still carries the text. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
 }

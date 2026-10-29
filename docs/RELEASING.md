@@ -312,7 +312,9 @@ including the unique tag used by a manual test release.
 ## Cut a release
 
 Stable releases require [exact full-regression certification](release-automation.md#exact-full-regression-certification)
-of the actual merged release commit. A green PR, merge group or ancestor is insufficient. Use
+of the actual merged release commit. A green PR, merge group or ancestor is insufficient. This
+stays true if the disabled fast merge-group gate is ever activated
+([proposal](fast-gate-activation-proposal.md)): a reduced group never certifies a release. Use
 resumable supervision for checkpoint recovery and fresh certification immediately before
 publication. An intermediate candidate skipped by rolling main can request the bounded candidate
 lane; wait for that exact SHA's complete compatible suite before tagging.

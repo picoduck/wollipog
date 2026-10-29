@@ -439,7 +439,144 @@ test("a job Claude kills because its stdin closed is left for orphan recovery, n
   h.driver.dispose();
 });
 
-test("only a report inside the model's own stop call ends the job it named", async () => {
+for (const explicitLaunch of [false, true]) {
+  test(`an unrequested kill ends ${explicitLaunch ? "a shell" : "an unknown"} job once while the provider remains open (#3204)`, async () => {
+    const h = harness();
+    try {
+      const turn = h.driver.prompt("wait for CI");
+      await nextTask();
+      const child = h.spawned[0];
+      if (explicitLaunch) frame(child, { type: "assistant", message: { content: [{
+        type: "tool_use", id: "toolu_wait", name: "Bash", input: { command: "sleep 100", run_in_background: true },
+      }] } });
+      taskStarted(child, "wait", "toolu_wait");
+      frame(child, { type: "result", subtype: "success" });
+      assert.equal(await turn, "end_turn");
+      assert.equal(child.stdin.writableEnded, false);
+      killedReport(child, "wait", "toolu_wait");
+      killedReport(child, "wait", "toolu_wait");
+      taskStarted(child, "wait", "toolu_wait");
+      (h.driver as any).applyBackgroundInspection({
+        incompleteArtifacts: [{ id: "wait", outputFile: "/tmp/wait.output" }], terminalTaskIds: new Set(),
+      });
+      assert.deepEqual(h.background.at(-1)?.pendingTaskIds, []);
+      assert.equal(h.background.at(-1)?.state, null, "idle session must no longer claim external work is running");
+      const terminal = h.background.flatMap(update => update.terminalJobs ?? []);
+      assert.deepEqual(terminal.map(job => [job.id, job.status, job.launchType, job.continuationRequired, job.endedByRunner]),
+        [["wait", "killed", explicitLaunch ? "shell" : "unknown", true, undefined]]);
+      assert.deepEqual(await h.driver.stopBackgroundJob("wait"), { status: "not_running" });
+      assert.equal(child.stdin.writableEnded, false, "ending one job retains the conversation");
+    } finally { h.driver.dispose({ forceImmediate: true }); }
+  });
+}
+
+test("an unconfirmed stop reconciles a forgotten job's terminal receipt after its confirmation window (#3204)", async () => {
+  const h = harness();
+  try {
+    const child = await launchTwoTasks(h);
+    (h.driver as any).deps.inspectBackgroundWork = async () => ({
+      incompleteArtifacts: [], terminalTaskIds: new Set(["shell-2"]),
+      terminalTaskStatuses: new Map([["shell-2", "killed"]]),
+    });
+    const stopping = h.driver.stopBackgroundJob("shell-2");
+    await nextTask();
+    controlResponse(child, stopRequest(h, "shell-2").request_id);
+    await nextTask();
+    h.timers.find(timer => timer.delay === CLAUDE_STOP_TASK_CONFIRM_MS && !timer.cleared)!.callback();
+    const result = await stopping;
+    assert.equal(result.status, "finished");
+    assert.equal(result.status === "finished" && result.job.status, "killed");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1"]);
+    frame(child, { type: "system", subtype: "task_notification", task_id: "shell-2", status: "stopped" });
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1"]);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("an unrequested agent kill still belongs to orphan recovery (#3204)", async () => {
+  const h = harness();
+  try {
+    const turn = h.driver.prompt("launch an agent");
+    await nextTask();
+    const child = h.spawned[0];
+    frame(child, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_agent", name: "Task", input: { run_in_background: true } }] } });
+    taskStarted(child, "agent", "toolu_agent");
+    frame(child, { type: "result", subtype: "success" });
+    assert.equal(await turn, "end_turn");
+    killedReport(child, "agent", "toolu_agent");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["agent"]);
+    assert.equal(h.background.flatMap(update => update.terminalJobs ?? []).length, 0);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("a receipt-settled agent can be resumed under the same provider id (#3204)", async () => {
+  const h = harness();
+  try {
+    const turn = h.driver.prompt("launch an agent");
+    await nextTask();
+    const child = h.spawned[0];
+    frame(child, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_agent", name: "Task", input: { run_in_background: true } }] } });
+    taskStarted(child, "agent", "toolu_agent");
+    frame(child, { type: "result", subtype: "success" });
+    assert.equal(await turn, "end_turn");
+    (h.driver as any).applyBackgroundInspection({
+      incompleteArtifacts: [], terminalTaskIds: new Set(["agent"]), terminalTaskStatuses: new Map([["agent", "completed"]]),
+    });
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, []);
+    frame(child, { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_resume", name: "Task", input: { resume: "agent", run_in_background: true } }] } });
+    taskStarted(child, "agent", "toolu_resume");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["agent"]);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("a persistent exit after a shell kill orphans only siblings without terminal evidence (#3204)", async () => {
+  const h = harness();
+  try {
+    const child = await launchTwoTasks(h);
+    killedReport(child, "shell-2", "toolu_shell");
+    child.emit("close", 1);
+    assert.deepEqual(h.background.flatMap(update => update.terminalJobs ?? [])
+      .map(job => [job.id, job.status, job.continuationRequired]), [["shell-2", "killed", true]]);
+    assert.equal(h.background.at(-1)?.state, "orphaned");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1"]);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("a live task report supersedes an in-flight forgotten-task receipt read (#3204)", async () => {
+  const h = harness();
+  try {
+    const child = await launchTwoTasks(h);
+    let resolveInspection!: (inspection: any) => void;
+    (h.driver as any).deps.inspectBackgroundWork = () => new Promise(resolve => { resolveInspection = resolve; });
+    const stopping = h.driver.stopBackgroundJob("shell-2");
+    await nextTask();
+    controlResponse(child, stopRequest(h, "shell-2").request_id);
+    await nextTask();
+    h.timers.find(timer => timer.delay === CLAUDE_STOP_TASK_CONFIRM_MS && !timer.cleared)!.callback();
+    await nextTask();
+    frame(child, { type: "system", subtype: "task_progress", task_id: "shell-2", tool_use_id: "toolu_shell" });
+    resolveInspection({ incompleteArtifacts: [], terminalTaskIds: new Set(["shell-2"]), terminalTaskStatuses: new Map([["shell-2", "killed"]]) });
+    assert.deepEqual(await stopping, { status: "refused", reason: "unconfirmed" });
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
+    assert.equal(h.background.flatMap(update => update.terminalJobs ?? []).length, 0);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("recovery settles unseen seeds durably while preserving re-observed work (#3204)", async () => {
+  const h = harness({ initialBackgroundTaskIds: ["forgotten", "live"] });
+  try {
+    const turn = h.driver.prompt("reconcile background work");
+    await nextTask();
+    const child = h.spawned[0];
+    taskStarted(child, "live", "toolu_live");
+    frame(child, { type: "result", subtype: "success" });
+    assert.equal(await turn, "end_turn");
+    assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["live"]);
+    assert.deepEqual(h.background.flatMap(update => update.terminalJobs ?? [])
+      .map(job => [job.id, job.status, job.continuationRequired]), [["forgotten", "killed", false]]);
+  } finally { h.driver.dispose({ forceImmediate: true }); }
+});
+
+test("unrequested provider kills are not attributed to an unrelated or already-returned model stop", async () => {
   const h = harness();
   const child = await launchTwoTasks(h);
   const turn = h.driver.prompt("stop the monitor");
@@ -447,17 +584,19 @@ test("only a report inside the model's own stop call ends the job it named", asy
   frame(child, { type: "assistant", message: { content: [
     { type: "tool_use", id: "toolu_stop", name: "TaskStop", input: { task_id: "monitor-1" } },
   ] } });
-  // A report for a task the call did not name is not proof that the model stopped it.
+  // The provider ends this job independently, not through the model's unrelated stop call.
   killedReport(child, "shell-2", "toolu_shell");
   await nextTask();
-  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
-  // Nor is a report that arrives after the call returned.
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1"]);
+  // A kill after the model's call returned also has no model-stop provenance.
   frame(child, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_stop", content: "No task found", is_error: true }] } });
   killedReport(child, "monitor-1", "toolu_monitor");
   frame(child, { type: "result", subtype: "success" });
   assert.equal(await turn, "end_turn");
-  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
-  assert.equal(h.background.some((update) => update.terminalJobs?.length), false);
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, []);
+  assert.deepEqual(h.background.flatMap(update => update.terminalJobs ?? [])
+    .map(job => [job.id, job.status, job.stoppedByModel, job.endedByRunner]),
+  [["shell-2", "killed", undefined, undefined], ["monitor-1", "killed", undefined, undefined]]);
   h.driver.dispose();
 });
 

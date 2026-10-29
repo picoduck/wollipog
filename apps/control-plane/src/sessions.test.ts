@@ -28083,7 +28083,7 @@ for (const protocol of [199, 209, PROTOCOL_VERSION]) test(`fenced Claude usage i
   } finally { db.close(); }
 });
 
-test("Wait for Account restarts the session with the runner told to wait, only on a v244 runner (#3240)", () => {
+test("Wait for Account restarts the session with the runner told to wait, only on a v245 runner (#3240)", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
   db.updateSessionStatus(id, "failed", Date.now());

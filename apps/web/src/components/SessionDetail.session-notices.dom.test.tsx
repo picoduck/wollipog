@@ -560,11 +560,11 @@ test("an archived session's refusal offers no ordinary restart, and says to unar
   }
 });
 
-test("a busy account on a v244 runner offers Wait for Account, which restarts the session waiting (#3240)", async () => {
+test("a busy account on a v245 runner offers Wait for Account, which restarts the session waiting (#3240)", async () => {
   const restarts: Array<[string, unknown]> = [];
   const current = sessionView({ status: "failed", providerHomeRefusal: launchRefusal("busy") });
   const fixture = await mount(current, {
-    runner: { protocolVersion: 244 },
+    runner: { protocolVersion: 245 },
     client: { restart: async (id: string, options?: unknown) => {
       restarts.push([id, options]);
       return { ...current, status: "starting" };
@@ -590,7 +590,7 @@ test("a starting session waiting for its account says so, and Stop Waiting stops
     waitingSince: 0, waitUntil: 8 * 3_600_000,
   } });
   const fixture = await mount(current, {
-    runner: { protocolVersion: 244 },
+    runner: { protocolVersion: 245 },
     client: { stop: async (id: string) => { stops.push(id); return { ...current, status: "stopped", providerHomeWait: undefined }; } } as Partial<ApiClient>,
   });
   try {
