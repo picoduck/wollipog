@@ -25,6 +25,7 @@ import type {
   HostActionResultMessage,
   InterruptTurnResultMessage,
   StopBackgroundJobResultMessage,
+  ReleaseQueueHoldResultMessage,
   ListDirectoryResultMessage,
   ListExternalSessionsResultMessage,
   ListSessionFilesResultMessage,
@@ -371,6 +372,7 @@ export type RunnerRequestResult =
   | HostActionResultMessage
   | InterruptTurnResultMessage
   | StopBackgroundJobResultMessage
+  | ReleaseQueueHoldResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
   | EditQueuedPromptResultMessage

@@ -2720,6 +2720,30 @@ const client = {
     pushSession(value);
     return { sessionId: id, jobId, outcome: "stopped" as const, terminalStatus: "killed" as const };
   },
+  // #3752: Proceed Now ends every unfinished job as killed, then the handoff and the queued prompts run.
+  releaseQueueHold: async (id: string, holdId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new ApiError("Session not found", 404);
+    if (value.queueHold?.holdId !== holdId) {
+      throw new ApiError("This session is no longer held by that handoff, so nothing was ended.", 409);
+    }
+    const now = Date.now();
+    const jobIds: string[] = [];
+    for (const job of value.backgroundJobs ?? []) {
+      if (job.terminalStatus) continue;
+      Object.assign(job, {
+        terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now,
+        endedBy: { actor: { kind: "user" }, reason: "stop_request", endedAt: now },
+      });
+      jobIds.push(job.id);
+    }
+    delete value.queueHold;
+    value.holds = value.holds?.filter((hold) => hold.holdId !== holdId);
+    value.status = "running";
+    value.updatedAt += 1;
+    pushSession(value);
+    return { sessionId: id, holdId, outcome: "released" as const, jobIds };
+  },
   acknowledgeBackgroundBlockedResults: async (id, targets) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

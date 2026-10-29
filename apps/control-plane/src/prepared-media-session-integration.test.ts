@@ -613,7 +613,10 @@ test("purpose-bound HTTP routes allow only exact media operations while parent s
   }
   for (const route of ["/api/sessions/:id/prompt", "/api/sessions/:id/config", "/api/sessions/:id/restart",
     "/api/sessions/:id/fork", "/api/sessions/:id/shells"]) assert.equal(mediaSessionMutationAllowed("POST", route), false);
-  for (const route of ["/api/sessions/:id/stop", "/api/sessions/:id/archive"]) assert.equal(mediaSessionMutationAllowed("POST", route), true);
+  for (const route of ["/api/sessions/:id/stop", "/api/sessions/:id/archive",
+    "/api/sessions/:id/background-jobs/:jobId/stop", "/api/sessions/:id/queue-hold/release"]) {
+    assert.equal(mediaSessionMutationAllowed("POST", route), true, route);
+  }
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions", "normal"), true);
 });
 

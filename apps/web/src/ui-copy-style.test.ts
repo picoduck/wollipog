@@ -11,6 +11,7 @@ import { archiveAndStopMessage } from "./archive-actions.js";
 import { projectArchiveMessage, projectDeleteMessage, projectRemoveLocationMessage } from "./project-actions.js";
 import { deleteSessionMessage, signOutOfAgentMessage, stopArchivedSessionMessage, stopSessionMessage } from "./session-confirmation-copy.js";
 import { STOP_JOB_OUTCOME } from "./background-job-stop.js";
+import { queueHoldReleaseOutcome } from "./queue-hold-release.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
@@ -999,7 +1000,7 @@ const MAX_BODY_BRANCHES = 256;
  */
 const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^projectArchiveMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
   /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/,
-  /^STOP_JOB_OUTCOME$/, /^projectDeleteMessage\(/, /^projectRemoveLocationMessage\(/];
+  /^STOP_JOB_OUTCOME$/, /^projectDeleteMessage\(/, /^projectRemoveLocationMessage\(/, /^queueHoldReleaseOutcome\(/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
@@ -1216,8 +1217,10 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
       projectArchiveMessage({ projectName: "Payments Service", count, stops, onProjectPage })))),
     ...[0, 1, 3].map((count) => projectDeleteMessage("Payments Service", count)),
     projectRemoveLocationMessage("Payments Service", "Studio Mac"),
+    ...(["worktree_rebind", "provider_account_switch"] as const).flatMap((kind) => [1, 3].map((queuedPrompts) =>
+      queueHoldReleaseOutcome({ kind, queuedPrompts }))),
   ];
-  assert.equal(bodies.length, 51);
+  assert.equal(bodies.length, 55);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });
 

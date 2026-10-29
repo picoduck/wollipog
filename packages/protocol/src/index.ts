@@ -742,7 +742,11 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 // 244: GitLab review sessions (#3539): a review session's `pullRequest.repository` may name a
 //      host-qualified GitLab project and `number` a merge request IID. An older runner cannot read
 //      a merge request, so the control plane refuses a GitLab review for a pre-v244 runner.
-export const PROTOCOL_VERSION = 244;
+// 247: release a queue hold now (#3752). A worktree or provider-account handoff hold reports
+//      `canRelease` when its live provider can end the work it waits on, and `release_queue_hold`
+//      runs the hold's deadline path at once for the session owner or its controlling Orchestrator.
+//      An older runner reports no `canRelease`, and the control plane refuses the request for it.
+export const PROTOCOL_VERSION = 247;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1194,6 +1198,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   restartKeepsQueuedWork: 191,
   /** v192 projects who ended a managed background job, and why, as `endedBy` (#1849). */
   backgroundJobEndedBy: 192,
+  /** v247 releases a worktree or account handoff hold at once (`release_queue_hold`, #3752). */
+  queueHoldRelease: 247,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -7315,6 +7321,11 @@ export interface SessionQueueHoldView {
   /** The live provider can stop one of the unfinished jobs by id without ending the others or the
    * session (#1780), through `stop_background_job`. Absent from runners older than v190. */
   canStopJobs?: true;
+  /** The live provider can end the work this hold waits on right now (#3752), through
+   * `release_queue_hold` or Proceed Now: what `endsAt` does at its deadline, on request. Every
+   * unfinished job is recorded as killed at the requester's request, then the handoff and the
+   * queued prompts run in order. Absent from runners older than v247. */
+  canRelease?: true;
   /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports a
    * finished background result still owed to the new conversation (#1779). Absent from runners
    * older than v191, whose restart discards the queue. */
@@ -7379,6 +7390,21 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
       "background job and starts a new conversation."
     : ` Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
   const deadline = hold.endsAt === undefined ? undefined : new Date(hold.endsAt).toISOString().slice(0, 16);
+  // Releasing needs the same authority as stopping a job (#3752): the owner or the controlling
+  // Orchestrator. It is named first because it works even when no listed job can be stopped.
+  if (hold.canRelease && canStopJobs) {
+    return wait +
+      `To proceed now, release the hold with release_queue_hold (hold ${hold.holdId}) or with Proceed Now in the ` +
+      `queued messages: Wollipog ends every unfinished background job, records each as killed at your request, ` +
+      `and then runs the handoff and the queued ${messages} in order. The conversation keeps running, and a finished ` +
+      "job's result from the same turn is still delivered." +
+      (hold.canStopJobs
+        ? " To end only one job instead, stop it by its job id with stop_background_job or with Stop Job in the " +
+          "Background Work panel."
+        : "") +
+      (deadline !== undefined ? ` Wollipog also ends any job still running at ${deadline}Z.` : "") +
+      avoidRestart("proceeding now");
+  }
   if (hold.canStopJobs && canStopJobs) {
     return wait +
       `To end ${one ? "it" : "one"} now, stop it by its job id with stop_background_job (get_session lists the unfinished jobs) ` +
@@ -7387,7 +7413,7 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
       (deadline !== undefined ? `; Wollipog also ends any job still running at ${deadline}Z.` : ".") +
       avoidRestart("stopping the job");
   }
-  if (hold.canStopJobs) {
+  if (hold.canStopJobs || hold.canRelease) {
     return wait +
       `Only the session owner or its controlling Orchestrator can end ${one ? "it" : "one"} sooner; ask them if it must end now.` +
       (deadline !== undefined ? ` Wollipog also ends any job still running at ${deadline}Z.` : "") +
@@ -7419,6 +7445,7 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
 /** What the person reading queue-hold advice may do to the held session (#1857), from its
  * `stopBackgroundJob` and `restart` command permissions. */
 export interface QueueHoldReader {
+  /** May stop the session's background jobs, and so also release its hold (#3752). */
   canStopJobs: boolean;
   canRestart: boolean;
 }
@@ -9481,6 +9508,36 @@ export interface StopBackgroundJobResultMessage {
   terminalStatus?: "completed" | "failed" | "killed";
 }
 
+/** Why a runner could not release a queue hold (#3752). `session_not_found`: the runner has no
+ * such session. `no_hold`: nothing is held any more. `hold_changed`: the session is held, but not by
+ * the hold the requester saw (it cleared and a new one formed), so nothing was ended. `unsupported`:
+ * the session's harness cannot end its background work. `turn_active`: a turn started meanwhile and
+ * may be consuming the work. `in_progress`: the session's background work is being ended right now.
+ * `no_live_process`: no live provider process owns the work, so only its orphan recovery or a
+ * restart clears the hold. `nothing_to_end`: the live provider reported no unfinished work. */
+export type ReleaseQueueHoldRefusal =
+  | "session_not_found"
+  | "no_hold"
+  | "hold_changed"
+  | "unsupported"
+  | "turn_active"
+  | "in_progress"
+  | "no_live_process"
+  | "nothing_to_end";
+
+/** Correlated v247 answer to `release_queue_hold`. */
+export interface ReleaseQueueHoldResultMessage {
+  type: "release_queue_hold_result";
+  requestId: string;
+  sessionId: string;
+  holdId: string;
+  outcome: "released" | "refused";
+  /** Present exactly when `outcome` is `refused`. */
+  reason?: ReleaseQueueHoldRefusal;
+  /** For `released`, the jobs recorded as killed at the actor's request. */
+  jobIds?: string[];
+}
+
 /** Correlated runner disposition for a v73 steering request. */
 export interface SteerSessionResultMessage {
   type: "steer_session_result";
@@ -9693,6 +9750,7 @@ export type RunnerToControlPlane =
   | SessionQueueMessage
   | InterruptTurnResultMessage
   | StopBackgroundJobResultMessage
+  | ReleaseQueueHoldResultMessage
   | SteerSessionResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
@@ -10070,6 +10128,28 @@ export interface BackgroundJobStopResponse {
   jobId: string;
   outcome: "stopped" | "already_terminal";
   terminalStatus: "completed" | "failed" | "killed";
+}
+
+/** v247: release a worktree or provider-account handoff hold now (#3752). The runner ends the work
+ * the hold waits on, exactly as the hold's deadline would, records every ended job as killed at the
+ * actor's request, and then runs the handoff and the queued prompts in order. `holdId` is the hold
+ * the requester saw; a different or cleared hold is refused without ending anything. */
+export interface ReleaseQueueHoldMessage {
+  type: "release_queue_hold";
+  requestId: string;
+  sessionId: string;
+  holdId: string;
+  actor: BackgroundJobStopActor;
+}
+
+/** HTTP answer of `POST /api/sessions/:id/queue-hold/release`. A refusal is an HTTP error instead:
+ * 409 when the runner cannot release the hold. */
+export interface QueueHoldReleaseResponse {
+  sessionId: string;
+  holdId: string;
+  outcome: "released";
+  /** The jobs recorded as killed. */
+  jobIds: string[];
 }
 
 /** Control plane asks the runner to drop ONE not-yet-started prompt from a session's queue (the
@@ -11611,6 +11691,7 @@ export type ControlPlaneToRunner =
   | CancelSessionMessage
   | InterruptTurnMessage
   | StopBackgroundJobMessage
+  | ReleaseQueueHoldMessage
   | CancelQueuedPromptMessage
   | ReadQueuedPromptMessage
   | EditQueuedPromptMessage

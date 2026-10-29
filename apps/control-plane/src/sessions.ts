@@ -115,6 +115,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type BackgroundJobStopActor,
   type BackgroundJobStopResponse,
   type StopBackgroundJobRefusal,
+  type ReleaseQueueHoldRefusal,
+  type QueueHoldReleaseResponse,
   type ExternalSessionDescriptor,
   type GovernanceActor,
   type GovernanceAuditEntry,
@@ -1771,6 +1773,24 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
     case "provider_rejected": return "the provider refused to stop the job";
     default: return "the provider did not confirm in time that the job ended, so it is left running; " +
       "if the provider reports it ended later, it is recorded then as stopped at your request";
+  }
+}
+
+/** Why the runner could not release a queue hold, in words the requester can act on (#3752). */
+function queueHoldReleaseRefusal(reason: ReleaseQueueHoldRefusal | undefined): string {
+  switch (reason) {
+    case "session_not_found": return "The runner has no record of this session.";
+    case "no_hold": return "The session is no longer held, so there is nothing to release.";
+    case "hold_changed": return "The hold changed before it could be released; reload the session and try again.";
+    case "unsupported": return "This session's harness cannot end its background work, so its hold cannot be released.";
+    case "turn_active": return "A turn started while the hold was being released, so nothing was ended; " +
+      "reload the session and try again if it is still held.";
+    case "in_progress": return "The session's background work is being ended right now; try again shortly.";
+    case "no_live_process": return "No running provider process owns the work this hold waits on, so it cannot be " +
+      "released; the hold clears when Wollipog recovers the orphaned work or the session is restarted.";
+    case "nothing_to_end": return "The provider reported no unfinished background work to end; " +
+      "reload the session to see whether the hold has cleared.";
+    default: return "The runner could not release the hold.";
   }
 }
 
@@ -7552,6 +7572,47 @@ export class SessionsService {
       if (/offline|not sent/i.test(message)) return fail("runner is offline", 409);
       if (/respond in time/i.test(message)) return fail("the runner did not answer the stop request in time", 504);
       return fail(`stopping the background job failed: ${message}`, 502);
+    }
+  }
+
+  /** Release a session's worktree or provider-account handoff hold now (#3752): the runner ends the
+   * work the hold waits on exactly as the hold's deadline would, records every ended job as killed
+   * at the actor's request, and then runs the handoff and the queued prompts in order. `holdId` is
+   * the hold the requester saw; a cleared or replaced hold is refused without ending anything. The
+   * caller has already established that the actor is the session owner or its controlling
+   * Orchestrator, the same authority that stops one background job. */
+  async releaseQueueHold(
+    sessionId: string,
+    holdId: string,
+    actor: BackgroundJobStopActor,
+  ): Promise<ServiceResult<QueueHoldReleaseResponse>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const unsupported = this.capabilityFailure(session.runnerId, "queueHoldRelease", "releasing a queue hold");
+    if (unsupported) return unsupported;
+    const requestId = `releasehold_${randomUUID()}`;
+    try {
+      const result = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "release_queue_hold",
+        requestId,
+        sessionId,
+        holdId,
+        actor,
+      }, BACKGROUND_JOB_STOP_TIMEOUT_MS);
+      if (result.type !== "release_queue_hold_result" || result.sessionId !== sessionId || result.holdId !== holdId) {
+        return fail("runner returned an invalid queue hold release response", 502);
+      }
+      if (result.outcome === "refused") return fail(queueHoldReleaseRefusal(result.reason), 409);
+      if (result.outcome !== "released" || !Array.isArray(result.jobIds) ||
+        !result.jobIds.every((jobId) => typeof jobId === "string")) {
+        return fail("runner returned an invalid queue hold release response", 502);
+      }
+      return ok({ sessionId, holdId, outcome: "released", jobIds: [...result.jobIds] });
+    } catch (error) {
+      const message = (error as Error).message;
+      if (/offline|not sent/i.test(message)) return fail("runner is offline", 409);
+      if (/respond in time/i.test(message)) return fail("the runner did not answer the release request in time", 504);
+      return fail(`releasing the queue hold failed: ${message}`, 502);
     }
   }
 
