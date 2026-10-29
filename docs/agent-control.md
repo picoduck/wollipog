@@ -344,7 +344,7 @@ snapshot with the child and parent session IDs, without exposing the user's othe
 session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
 **review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
 session, with a live and recorded transcript, instead of as an external controller. It reviews the
-calling session's own pull request at its pushed head, with the same scope as the bridge above: a
+calling session's own pull request at its pushed head. The scope is a
 native managed worktree the session created, an open pull request from the same repository on that
 worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
 100 KiB) is required and is the reviewer's only context besides the pinned patch.

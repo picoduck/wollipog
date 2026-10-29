@@ -562,7 +562,7 @@ test("reviews under a campaign remain outside its membership, counts, requests a
 
 const GITLAB = "gitlab.example.com/acme/team/widget";
 
-test("a GitLab merge request is reviewed by host-qualified project and IID, only on a v240 runner", () => {
+test("a GitLab merge request is reviewed by host-qualified project and IID, only on a v244+ runner", () => {
   const h = harness();
   try {
     const result = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: GITLAB, number: 12 } }));
@@ -574,7 +574,7 @@ test("a GitLab merge request is reviewed by host-qualified project and IID, only
     });
     assert.equal(h.db.getSession(result.data.reviewSessionId)!.title, `Codex Review of ${GITLAB}!12`);
   } finally { h.db.close(); }
-  // A pre-v240 runner cannot read a merge request, so it is refused with an update message, while
+  // A pre-v244 runner cannot read a merge request, so it is refused with an update message, while
   // its GitHub reviews still work.
   const old = harness({ protocol: 239 });
   try {
