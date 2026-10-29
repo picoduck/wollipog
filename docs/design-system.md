@@ -573,7 +573,7 @@ Rules
   One exception: in a request notice inside a narrow card (under 360px wide, such as a
   board card), Approve and Deny may stretch as an **equal pair** that fills the row, matching the
   phone sheet footer rule (§7.5). Only that pair, never a single button. The session notice slot's
-  resolving action below 760px is the other exception (§13.2).
+  resolving action below 760px, while the slot is at most 480px wide, is the other exception (§13.2).
 - Labels are verb plus object in Title Case: "New Skill", "Import from Git…", "Delete Skill". The
   ellipsis means "opens a dialog or menu that asks for more input before anything happens" (§17).
 - A leading `+` icon marks create actions; no other decorative icons in text buttons unless the
@@ -606,7 +606,7 @@ Rules
 | List row | Open (row click) plus one inline action and ⋯. | Inline actions show on hover or focus on fine pointers, always on coarse. |
 | Dialog footer (§7.3) | Cancel and the dialog's one primary, optional destructive tertiary on the left. | 3 on desktop; 2 on phone. |
 | Section (in page) | At most one action, in the section title row, right-aligned (`.section-head .actions`). | 1 + ⋯. |
-| Notice | Its resolving action(s), bottom-left of the copy on desktop, full width on phone. | 2. |
+| Notice | Its resolving action(s), bottom-left of the copy on desktop; in a notice slot, filling the row on a phone held upright (slot at most 480px, #2157). | 2. |
 | Toast | One action plus close. | 1. |
 
 ---
@@ -3030,8 +3030,12 @@ exactly one: the most severe, then the lowest rank.
   a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the
   server). A suggestion about a Project rather than one session also shows once above that
   Project's Sessions tab, never inside a list row.
-- Below 760px the action row is one row: the resolving action fills it (the one exception to "buttons
-  never stretch", §3.1) and a disclosure toggle such as Show Details keeps its own width.
+- Below 760px, while the slot is at most 480px wide (a phone held upright), the action row is one
+  row: the resolving action fills it (the one exception to "buttons never stretch", §3.1) and a
+  disclosure toggle such as Show Details keeps its own width. The slot's own width decides, not the
+  viewport's (#2157): `.session-notice-slot` and `.campaign-notices` are the `notice-slot` inline-size
+  container below 760px, so on a phone on its side or a small tablet the actions keep their own
+  width, left-aligned, as on desktop. Their height is the touch height either way (§2.8).
 
 Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`,
 `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
@@ -3071,7 +3075,7 @@ under it, so Machine Offline leads Couldn't Load Recorded Workers, Background Wo
 Chat's Couldn't Refresh, and a worker's request leads an inventory error. Each tool adds its own
 entries in its own unit; Review, Files and Browser keep the notices at the top of their scrollers.
 Below 760px its notices' buttons, "+N More" included, are 44px, and the resolving action fills the
-action row.
+action row while the slot is at most 480px wide, as in the session notice slot.
 
 - **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
   the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then

@@ -100,7 +100,7 @@ export function BackgroundRecoveryNotice(props: BackgroundRecoveryNoticeProps) {
   }
   return (
     <Notice tone="info" compact role="status" title={title} trailing={trailing} onDismiss={onDismiss}
-      className="background-recovery-notice" dataState={state}>
+      dataState={state}>
       {backgroundRecoverySentence(state, subject)}
     </Notice>
   );
@@ -112,7 +112,6 @@ function ResultMissingNotice({ state, title, trailing, subject, finishedAt, now,
       tone="warning"
       title={title}
       trailing={trailing}
-      className="background-recovery-notice"
       dataState={state}
       actions={acknowledgement && (
         <>
@@ -200,7 +199,6 @@ function ResultBlockedNotice({
       tone="warning"
       title={title}
       trailing={trailing}
-      className="background-recovery-notice"
       dataState={state}
       actions={(blockedAcknowledgement || button || outcome) && <>
         {blockedAcknowledgement && <BusyButton className="btn sm" busy={blockedAcknowledgement.busy}
