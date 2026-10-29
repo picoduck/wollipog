@@ -58,6 +58,10 @@ and refuses with zero writes. A new real read-only comparison reduced 38 calls t
 holds in **79/96 calls**, leaving **17**. See [the recovery runbook](main-merge-recovery.md#slice-4-batched-read-cost-and-full-set-delivery)
 for exact assumptions, negative cases and observations. Neither sample gives a
 universal history-cost bound. Limits and REST quota floors are unchanged.
+Those single-batch figures describe the earlier all-or-nothing writer. With
+[bounded multi-cycle delivery](main-merge-recovery.md#slice-5-bounded-multi-cycle-delivery),
+every cycle keeps 10% of the cap spare. Holds that do not fit follow on the next
+cycle, so 46 targets or the 48-call cap no longer mean zero writes.
 
 Every observation retains the complete health report, its SHA-256 digest, policy
 version/thresholds, decision time, repository, integration/base identity, passing

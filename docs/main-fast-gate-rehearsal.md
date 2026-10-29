@@ -65,10 +65,11 @@ JSON as is.
 Call budgets stay inside the unchanged 48/96-call caps and the 60% REST floor.
 A health report costs 35 calls at one unvalidated commit and **57 calls** at
 five, because each commit adds landing-evidence reads. At the five-commit hold,
-the writer's shared budget has used 55 calls, leaving **41** status writes. That
-is fewer than the 45-target fan-out the #3633 rehearsal fits, so a full queue
-at the backlog limit would refuse with zero writes. This is fixture call cost;
-GitHub's per-commit cost still needs observation.
+the writer's shared budget has used 55 calls. After its 10-call reserve, **31**
+holds fit per cycle, and the rest follow on the next cycle
+([bounded multi-cycle delivery](main-merge-recovery.md#slice-5-bounded-multi-cycle-delivery)):
+a 45-target set is held in two cycles, with groups holding a success first. This is
+fixture call cost; GitHub's per-commit cost still needs observation.
 
 ## What It Proves and What It Does Not
 

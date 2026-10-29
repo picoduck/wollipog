@@ -42,13 +42,17 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     assert.equal(by[id].classification, "approval-gap", id);
   // Escalation delivery is met through the rehearsal's exactly-once step; configuring its target is an approval.
   assert.deepEqual([by["escalation-delivery"].status, by["escalation-target"].classification], ["met", "approval-gap"]);
+  // #3633 bounded multi-cycle delivery, headroom and run-level proofs close these gaps through computed evidence.
   for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "planrollback-run-level-proof"])
-    assert.equal(by[id].classification, "code-gap", id);
+    assert.equal(by[id].status, "met", id);
   // #3633 just-in-time admission closes the sticky-success code gap; its race and availability remain.
   assert.deepEqual([by["sticky-success"].classification, by["admission-landing-race"].classification,
     by["admission-outage-availability"].classification], ["met", "observation-gap", "approval-gap"]);
   for (const flow of report.rehearsals.cutover.flows) assert.equal(by[`ac2-${flow.id}`].status, "met", flow.id);
   assert.deepEqual(Object.values(report.counts).reduce((a, b) => a + b, 0), report.criteria.length);
+  // Every code gap is closed by computed evidence, and the verdict names only what remains (#3783 review).
+  assert.equal(report.counts["code-gap"], 0);
+  assert.match(report.verdict, /^Not ready to activate: observation and approval gaps remain\./);
 });
 
 test("a failing rehearsal flow or rollback scenario is reported as a failing code gap, never met", async () => {
@@ -71,8 +75,12 @@ test("a failing rehearsal flow or rollback scenario is reported as a failing cod
 test("capacity findings are computed from the delivered rehearsals", async () => {
   const { capacity } = await buildReadiness(await inputs());
   assert.deepEqual(capacity.healthReportCallsByBacklog.map((row) => [row.backlog, row.calls]), [[1, 35], [2, 42], [3, 47], [4, 52], [5, 57]]);
-  assert.deepEqual([capacity.backlogLimitWriterCallsUsed, capacity.backlogLimitWritesAvailable, capacity.fanoutTargetsFitted], [55, 41, 45]);
-  assert.deepEqual([capacity.batched45Calls, capacity.callCap, capacity.batched46Writes], [96, 96, 0], "#3711: zero headroom");
+  // #3633: a 10-call reserve per cycle, the rest delivered next cycle from durable progress.
+  assert.deepEqual([capacity.backlogLimitWriterCallsUsed, capacity.backlogLimitReserveCalls, capacity.backlogLimitWritesAvailable,
+    capacity.fanoutTargetsFitted], [55, 10, 31, 45]);
+  assert.deepEqual([capacity.backlogLimitFanout.cyclesToComplete, capacity.backlogLimitFanout.groupHoldsInFirstCycle], [2, 2]);
+  assert.deepEqual([capacity.batched45.calls, capacity.callCap, capacity.batched46.cyclesToComplete], [86, 96, 2]);
+  assert.ok(capacity.minHeadroomFraction >= 0.1, "every cycle keeps at least 10% of its cap spare");
   assert.ok(capacity.rehearsalHolds.baseMovedOnly > 0 && capacity.rehearsalHolds.healthOrPolicy > 0);
 });
 

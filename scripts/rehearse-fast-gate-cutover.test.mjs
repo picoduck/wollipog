@@ -49,16 +49,20 @@ test("call budgets stay inside the unchanged caps and every write stays in the i
   assert.equal(outage.calls, 1); assert.equal(outage.mutationCalls, 0, "an outage refuses before any status request");
   const backlog = flows["stale-backlogged-health"].callBudgets;
   assert.equal(backlog.maxHealthReportCalls, 57, "each unvalidated commit adds landing-evidence reads");
-  assert.deepEqual([backlog.backlogLimitCapacity.callsUsed, backlog.backlogLimitCapacity.writesAvailable], [55, 41],
-    "at the five-commit limit fewer than the #3633 45-target fan-out fits");
+  // The writer keeps a 10% reserve (10 of 96); the #3633 fan-out rehearsal delivers the rest next cycle.
+  assert.deepEqual([backlog.backlogLimitCapacity.callsUsed, backlog.backlogLimitCapacity.reserveCalls, backlog.backlogLimitCapacity.writesAvailable],
+    [55, 10, 31], "at the five-commit limit 31 holds fit per cycle");
 });
 
 test("delivered #3633 rehearsal is reused for hold fan-out and ordered rollback evidence", async () => {
   const reused = (await rehearseFastGateCutover()).delivered3633Rehearsal;
   assert.equal(reused.schema, "main-merge-admission-rehearsal-v1"); assert.equal(reused.liveMutations, 0);
   assert.equal(reused.phases.find(p => p.phase === "rollback-before-full-restoration").decision, "restore-full-queue-validation-first");
-  assert.equal(reused.fanout.batchedMeasuredCost46Targets.writes, 0);
-  assert.equal(reused.fanout.batchedMeasuredCost45Targets.calls, 96);
+  // Bounded multi-cycle delivery: the 46th target is held next cycle, and 10 calls always stay spare (#3633).
+  assert.deepEqual([reused.fanout.batchedMeasuredCost46Targets.cyclesToComplete, reused.fanout.batchedMeasuredCost46Targets.totalWrites], [2, 46]);
+  assert.deepEqual([reused.fanout.batchedMeasuredCost45Targets.calls, reused.fanout.batchedMeasuredCost45Targets.minHeadroomCalls], [86, 10]);
+  const backlogFanout = reused.fanout.backlogLimitCost45TargetsTwoHeldGroups;
+  assert.deepEqual([backlogFanout.cyclesToComplete, backlogFanout.groupHoldsInFirstCycle, backlogFanout.minHeadroomCalls], [2, 2, 10]);
 });
 
 test("inert forge serves only its fixture repository and refuses unknown mutations", async () => {

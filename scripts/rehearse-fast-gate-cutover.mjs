@@ -589,7 +589,8 @@ async function delivered3633(projection) {
   const report = await rehearseAdmission(projection);
   return { schema: report.schema, source: report.source, phases: report.phases.map(({ phase, decision }) => ({ phase, decision })),
     fanout: Object.fromEntries(Object.entries(report.fanout).map(([k, v]) => [k, { targetCount: v.targetCount, writes: v.writes,
-      complete: v.complete, calls: v.apiBudget?.calls ?? v.capacity?.callsUsed, failureOrExpiryToLastPlannedHoldMs: v.failureOrExpiryToLastPlannedHoldMs }])),
+      complete: v.complete, calls: v.calls, cyclesToComplete: v.cyclesToComplete, totalWrites: v.totalWrites, minHeadroomCalls: v.minHeadroomCalls, minHeadroomFraction: v.minHeadroomFraction,
+      heldGroups: v.heldGroups, groupHoldsInFirstCycle: v.groupHoldsInFirstCycle, failureOrExpiryToLastPlannedHoldMs: v.failureOrExpiryToLastPlannedHoldMs }])),
     liveMutations: report.liveMutations };
 }
 

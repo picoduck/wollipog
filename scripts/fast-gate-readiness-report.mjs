@@ -118,10 +118,13 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
   const capacity = {
     healthReportCallsByBacklog: lagging.map((row) => ({ backlog: row.backlog, calls: row.healthCalls })),
     backlogLimitWriterCallsUsed: backlog.callBudgets.backlogLimitCapacity.callsUsed,
+    backlogLimitReserveCalls: backlog.callBudgets.backlogLimitCapacity.reserveCalls,
     backlogLimitWritesAvailable: backlog.callBudgets.backlogLimitCapacity.writesAvailable,
-    fanoutTargetsFitted: fanout.batchedMeasuredCost45Targets.targetCount,
-    batched45Calls: fanout.batchedMeasuredCost45Targets.calls, callCap: backlog.callBudgets.healthReportLimit,
-    batched46Writes: fanout.batchedMeasuredCost46Targets.writes,
+    fanoutTargetsFitted: fanout.batchedMeasuredCost45Targets.targetCount, callCap: backlog.callBudgets.healthReportLimit,
+    // #3633 bounded multi-cycle delivery at the backlog-limit cost, with two groups holding a success.
+    backlogLimitFanout: fanout.backlogLimitCost45TargetsTwoHeldGroups,
+    batched45: fanout.batchedMeasuredCost45Targets, batched46: fanout.batchedMeasuredCost46Targets,
+    minHeadroomFraction: Math.min(...Object.values(fanout).map((row) => row.minHeadroomFraction)),
     rehearsalHolds: { baseMovedOnly: holds.filter((kind) => kind === "base-moved").length, healthOrPolicy: holds.filter((kind) => kind === "health-or-policy").length },
   };
   const liveRequired = live.ruleset.rules.find((rule) => rule.type === "required_status_checks").parameters.required_status_checks;
@@ -175,7 +178,9 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
   const delivered = rollback.checks.deliveredPlanRollbackOnForgedProof;
   criteria.push({ id: "planrollback-run-level-proof", acceptance: "AC5", criterion: "#3633's planRollback checks run-level certification itself",
     classification: delivered === "restore-full-queue-validation-first" ? "met" : "code-gap", status: delivered === "restore-full-queue-validation-first" ? "met" : "open",
-    evidence: `On a forged proof with top-level fields edited to verified and runs certified none, the delivered planRollback returns ${delivered}; only the fast-gate plan path's consistency check refuses it. A fully hand-edited proof still passes: take proofs only from the verifier` });
+    evidence: delivered === "restore-full-queue-validation-first"
+      ? `On a forged proof with top-level fields edited to verified and runs certified none, the delivered planRollback returns ${delivered}; the fast-gate path delegates to it. A consistently hand-edited proof still passes: take proofs only from the verifier`
+      : `On a forged proof with top-level fields edited to verified and runs certified none, the delivered planRollback returns ${delivered}; only the fast-gate plan path's consistency check refuses it. A fully hand-edited proof still passes: take proofs only from the verifier` });
   add("no-auto-expansion", "AC5", "No budget, timeout, paid capacity or bypass right is expanded", "met",
     `Rehearsals made ${cutover.liveMutations + rollback.liveMutations} live mutations; proposal keeps check_response_timeout_minutes ${queue.check_response_timeout_minutes}, max_entries_to_build ${queue.max_entries_to_build} and bypass actors unchanged`,
     JSON.stringify(ruleset.bypass_actors) === JSON.stringify(live.ruleset.bypass_actors) &&
@@ -196,11 +201,14 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
   add("first-real-gate-group", "Prerequisite", "The gate's first real merge group decision and job-level evidence", "observation-gap", "Never enabled");
   add("base-moved-separation", "Measurement", "base-moved holds measured apart from health holds", "observation-gap",
     `Rehearsal: ${capacity.rehearsalHolds.baseMovedOnly} base-moved-only and ${capacity.rehearsalHolds.healthOrPolicy} health/policy ready-PR holds; no live sample`);
-  add("capacity-backlog-limit", "Capacity", "A full ready set can still be held at the backlog limit", "code-gap",
-    `Health report ${capacity.healthReportCallsByBacklog[0]?.calls}→${capacity.healthReportCallsByBacklog.at(-1)?.calls} calls at backlog ${capacity.healthReportCallsByBacklog[0]?.backlog}→${capacity.healthReportCallsByBacklog.at(-1)?.backlog}; writer used ${capacity.backlogLimitWriterCallsUsed} leaving ${capacity.backlogLimitWritesAvailable} writes, under the ${capacity.fanoutTargetsFitted}-target fan-out: refuses with zero writes`,
-    capacity.backlogLimitWritesAvailable >= capacity.fanoutTargetsFitted);
-  add("capacity-zero-headroom", "Capacity", "Call headroom for the 45-target hold set", "code-gap",
-    `${capacity.batched45Calls}/${capacity.callCap} calls (#3711), zero headroom; 46 targets write ${capacity.batched46Writes}`);
+  // Met only by the delivered #3633 multi-cycle fan-out evidence, recomputed here.
+  const bl = capacity.backlogLimitFanout;
+  add("capacity-backlog-limit", "Capacity", "A full ready set is held at the backlog limit within a stated bound", "met",
+    `Health report ${capacity.healthReportCallsByBacklog[0]?.calls}→${capacity.healthReportCallsByBacklog.at(-1)?.calls} calls at backlog ${capacity.healthReportCallsByBacklog[0]?.backlog}→${capacity.healthReportCallsByBacklog.at(-1)?.backlog}; at the limit ${capacity.backlogLimitWritesAvailable} holds fit per cycle after a ${capacity.backlogLimitReserveCalls}-call reserve. ${bl?.targetCount} targets are held in ${bl?.cyclesToComplete} cycles (${minutes(bl?.failureOrExpiryToLastPlannedHoldMs)} min, virtual), both groups holding a success in the first`,
+    bl?.complete === true && bl.cyclesToComplete <= 2 && bl.groupHoldsInFirstCycle === bl.heldGroups && bl.heldGroups > 0);
+  add("capacity-zero-headroom", "Capacity", "Stated nonzero call headroom at the live-observed maximum target count", "met",
+    `Every fan-out cycle keeps at least ${Math.floor(capacity.minHeadroomFraction * 1000) / 10}% of its call cap spare; #3711's batched 45-target set now uses ${capacity.batched45.calls}/${capacity.callCap} in its first cycle, and 46 targets complete in ${capacity.batched46.cyclesToComplete} cycles`,
+    capacity.minHeadroomFraction >= 0.1 && capacity.batched46.complete === true);
   // #3633 just-in-time group admission (scripts/rehearse-admission-lease.mjs): met only by its computed proof.
   const ls = lease.summary;
   add("sticky-success", "Enforcement", "A controller or forge outage cannot leave an earlier merge-group success sticky", "met",
@@ -225,8 +233,12 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
 
   const counts = Object.fromEntries(["met", "observation-gap", "approval-gap", "code-gap"]
     .map((kind) => [kind, criteria.filter((row) => row.classification === kind).length]));
+  // The verdict names only the gap kinds that actually remain (#3783 review).
+  const open = [["observation-gap", "observation"], ["approval-gap", "approval"], ["code-gap", "code"]]
+    .filter(([kind]) => counts[kind] > 0).map(([, label]) => label);
+  const openGaps = open.length > 1 ? `${open.slice(0, -1).join(", ")} and ${open.at(-1)} gaps remain` : open.length ? `${open[0]} gaps remain` : "no gap is open in this report, but every approval must still be recorded";
   return { schema: SCHEMA, issue: "#3637 AC1", date: REPORT_DATE, activationReady: false, liveMutations: 0,
-    verdict: "Not ready to activate: observation, approval and code gaps remain. Insufficient data is reported as incomplete, never as passing.",
+    verdict: `Not ready to activate: ${openGaps}. Insufficient data is reported as incomplete, never as passing.`,
     counts, criteria, gate, ruleset: { id: RULESET_ID, put: ruleset }, capacity, baseline,
     live: { observedAt: live.observedAt, rulesetRereadAt: live.rulesetRereadAt ?? null, method: live.method, repositoryVariableNames: live.repositoryVariableNames, gateVariables: live.gateVariables,
       requiredStatusChecks: liveRequired, mergeQueue: queue, bypassActors: live.ruleset.bypass_actors },
@@ -295,9 +307,10 @@ export function markdown(report) {
     "Stale landings appear only in the earlier-behavior comparison and the two disclosed race cases.", "",
     "## Capacity Findings", "",
     `- Health report calls by unvalidated backlog: ${report.capacity.healthReportCallsByBacklog.map((row) => `${row.backlog}→${row.calls}`).join(", ")} (fixture cost).`,
-    `- At the five-commit limit the writer's shared budget used **${report.capacity.backlogLimitWriterCallsUsed}** calls, leaving **${report.capacity.backlogLimitWritesAvailable}** status writes,`,
-    `  fewer than the **${report.capacity.fanoutTargetsFitted}**-target fan-out. A full queue at the backlog limit would refuse with zero writes.`,
-    `- #3711's batched measured cost fits 45 holds in **${report.capacity.batched45Calls}/${report.capacity.callCap}** calls: zero headroom; 46 targets write ${report.capacity.batched46Writes}.`,
+    `- At the five-commit limit the writer's shared budget used **${report.capacity.backlogLimitWriterCallsUsed}** calls. After its **${report.capacity.backlogLimitReserveCalls}**-call reserve,`,
+    `  **${report.capacity.backlogLimitWritesAvailable}** holds fit per cycle; the rest follow on the next 60-second cycle from durable progress (#3633).`,
+    `  The **${report.capacity.backlogLimitFanout.targetCount}**-target set with two groups holding a success completes in **${report.capacity.backlogLimitFanout.cyclesToComplete}** cycles, both groups in the first.`,
+    `- #3711's batched 45-target set uses **${report.capacity.batched45.calls}/${report.capacity.callCap}** calls in its first cycle; every cycle keeps at least **${Math.floor(report.capacity.minHeadroomFraction * 1000) / 10}%** of its cap spare. 46 targets complete in ${report.capacity.batched46.cyclesToComplete} cycles.`,
     `- Rehearsal ready-PR holds: ${report.capacity.rehearsalHolds.baseMovedOnly} \`base-moved\` only, ${report.capacity.rehearsalHolds.healthOrPolicy} with a health or policy reason.`,
     "  Live measurement must count these classes separately (`holdKind` in the generator).", "",
     "## Full-Gate Baseline Context", "",
