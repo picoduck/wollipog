@@ -16,7 +16,7 @@
     "@wollipog/protocol": "workspace:*",
     "node-pty": "1.1.0",
     "shell-quote": "1.12.0",
-    "smol-toml": "^1.9.0",
+    "smol-toml": "^1.9.1",
     "ws": "^8.22.0"
   },
   "devDependencies": {
@@ -27,6 +27,7 @@
     "esbuild": "^0.28.2",
     "postject": "^1.0.0-alpha.6",
     "tsx": "^4.23.13",
-    "typescript": "^5.7.3"
+    "typescript": "^5.7.3",
+    "zod": "^4.6.7"
   }
 }

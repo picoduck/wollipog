@@ -3,27 +3,38 @@ import { createHash } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { evaluateAdmission } from "./main-merge-admission.mjs";
-import { authorizedRepair, failureFingerprint, planAdmissionCycle, planRollback, rebuildAdmissionCycle, writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
+import { authorizedRepair, CONTROLLER, failureFingerprint, planAdmissionCycle, planRollback, rebuildAdmissionCycle,
+  writeAdmissionPlan } from "./main-merge-admission-controller.mjs";
 import { mergedRepairBinding, repairDigest, repairRecovery, requestMergedRepairCandidate } from "./main-merge-repair.mjs";
 
 /** Entire target set, inert transport, explicit virtual API latency. The 36
  * report reads + one census conservatively replay the prior 37-read rebuild.
+ * Delivery is bounded per cycle (the writer's reserve) and continues on the next
+ * 60-second cycle with the writer's own durable progress, up to `maxCycles`.
  * These endpoints cannot reach GitHub; the enabled flag applies only to fixtures.
  */
 export async function rehearseHoldFanout(health, { expired = false, restLimit = 5000, targetCount = 45, healthReadCount = 36,
-  workflowBatches = 0 } = {}) {
+  workflowBatches = 0, maxCycles = 12, heldGroups = 0 } = {}) {
   const repository = health.repository, origin = Date.parse(health.observedAt);
   const trigger = expired ? origin + 120_000 : Date.parse(health.unresolvedFailures[0].completedAt);
   const start = expired ? trigger : trigger + 1000;
   const virtualRequestMs = 100;
   let clock = start, reports = 0, censuses = 0, writes = 0, workflowQueries = 0;
+  const written = [];
   const workflowFiles = ["main-rolling-validation.yml", "ci.yml", "settings-rows-win32.yml"];
   const workflowText = "# Inert complete workflow blob; not live health evidence\n";
   const byteSize = Buffer.byteLength(workflowText);
   const workflowBlob = { __typename: "Blob", text: workflowText, byteSize, isBinary: false,
     oid: createHash("sha1").update(`blob ${byteSize}\0${workflowText}`).digest("hex") };
-  const nodes = Array.from({ length: targetCount }, (_, i) => ({ number: i + 1, isDraft: false,
-    headRefOid: (i + 100).toString(16).padStart(40, "0"), baseRefOid: health.currentMainSha, mergeQueueEntry: null }));
+  // `heldGroups` of the pull requests sit in queue groups on main that already hold a just-in-time
+  // success: the only landing-critical targets. Each adds a group target beside its PR head.
+  const groupSha = i => (i + 900).toString(16).padStart(40, "0");
+  const nodes = Array.from({ length: targetCount - heldGroups }, (_, i) => ({ number: i + 1, isDraft: false,
+    headRefOid: (i + 100).toString(16).padStart(40, "0"), baseRefOid: health.currentMainSha,
+    mergeQueueEntry: i < heldGroups ? { state: "MERGEABLE", position: i + 1, baseCommit: { oid: health.currentMainSha },
+      headCommit: { oid: groupSha(i), statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
+        { __typename: "CheckRun", name: "Typecheck, Test & Sidecar Bundle", status: "COMPLETED", conclusion: "SUCCESS", checkSuite: { app: { databaseId: 15368 } } },
+        { __typename: "StatusContext", context: "Regression Admission", state: "SUCCESS" }] } } } } : null }));
   const api = async (path, { body } = {}) => {
     clock += virtualRequestMs;
     api.rateLimit.remaining--;
@@ -40,6 +51,12 @@ export async function rehearseHoldFanout(health, { expired = false, restLimit = 
     }
     if (path.startsWith(`/repos/${repository}/statuses/`)) {
       if (body.state !== "failure") throw new Error("Fanout fixture must hold every target");
+      const target = path.slice(`/repos/${repository}/statuses/`.length);
+      written.push(target);
+      // The forge now shows the hold: later censuses observe the group's admission as failure.
+      for (const p of nodes) if (p.mergeQueueEntry?.headCommit.oid === target)
+        for (const c of p.mergeQueueEntry.headCommit.statusCheckRollup.contexts.nodes) if (c.context === body.context) c.state = "FAILURE";
+      if (target in census.admissionStates) census.admissionStates[target] = "failure";
       return { id: ++writes, state: body.state, context: body.context };
     }
     throw new Error("Unexpected inert fanout request");
@@ -54,25 +71,50 @@ export async function rehearseHoldFanout(health, { expired = false, restLimit = 
     log(JSON.stringify(health)); return 0;
   };
   const census = { repository, mainSha: health.currentMainSha, complete: true,
-    entries: nodes.map(p => ({ repository, kind: "pull_request", pullRequest: p.number,
-      headSha: p.headRefOid, baseSha: p.baseRefOid, integrationSha: p.headRefOid })) };
+    entries: [...nodes.map(p => ({ repository, kind: "pull_request", pullRequest: p.number,
+      headSha: p.headRefOid, baseSha: p.baseRefOid, integrationSha: p.headRefOid })),
+    ...nodes.filter(p => p.mergeQueueEntry).map(p => ({ repository, kind: "merge_group", pullRequest: p.number, headSha: p.headRefOid,
+      baseSha: health.currentMainSha, integrationSha: p.mergeQueueEntry.headCommit.oid, members: [{ pullRequest: p.number, headSha: p.headRefOid }] }))]
+      .sort((a, b) => `${a.kind}:${a.kind === "pull_request" ? a.headSha : a.integrationSha}`.localeCompare(`${b.kind}:${b.kind === "pull_request" ? b.headSha : b.integrationSha}`, "en")),
+    requiredResults: Object.fromEntries(nodes.filter(p => p.mergeQueueEntry).map(p => [p.mergeQueueEntry.headCommit.oid, "success"])),
+    admissionStates: Object.fromEntries(nodes.filter(p => p.mergeQueueEntry).map(p => [p.mergeQueueEntry.headCommit.oid, "success"])) };
   const control = { available: true, repair: null };
-  const initial = await planAdmissionCycle({ repository, census, health, control, now: now() });
+  // Holds are planned against the health being replayed; a cycle's clock never moves past its lease.
   const cpuStart = performance.now();
-  let delivery;
-  try {
-    delivery = await writeAdmissionPlan(initial, { configuration: { enabled: true, repository, context: "Regression Admission" },
-      api, now, revalidate: ({ repository }, { api }) => rebuildAdmissionCycle({ repository, api, report, now, control,
-        observationId: "inert-full-fanout", entryPoint: "rehearsal" }) });
-  } catch (failure) {
-    if (!failure.capacity?.shortfall || failure.writes !== 0) throw failure;
-    delivery = { writes: failure.writes, complete: false, capacity: failure.capacity, apiBudget: failure.apiBudget };
+  const cycles = [];
+  let progress = null, lastReceiptAt = null, lastPlannedBlockLatencyMs = null, firstCapacity = null;
+  for (let cycle = 0; cycle < maxCycles; cycle++) {
+    if (cycle) clock = start + cycle * CONTROLLER.reevaluateMs;
+    const cycleStart = clock;
+    api.rateLimit.remaining = restLimit; // An inert per-cycle quota snapshot; live quota is shared and observed.
+    const initial = await planAdmissionCycle({ repository, census, health: { ...health, observedAt: new Date(clock).toISOString() },
+      control, now: now() });
+    const delivery = await writeAdmissionPlan(initial, { configuration: { enabled: true, repository, context: "Regression Admission" },
+      api, now, progress, revalidate: ({ repository }, { api }) => rebuildAdmissionCycle({ repository, api,
+        report: (args, options) => report(args, options), now, control, observationId: "inert-full-fanout", entryPoint: "rehearsal" }) });
+    progress = delivery.progress;
+    firstCapacity ??= delivery.capacity;
+    if (delivery.lastReceiptAt) lastReceiptAt = delivery.lastReceiptAt;
+    if (delivery.lastPlannedBlockLatencyMs !== null) lastPlannedBlockLatencyMs = delivery.lastPlannedBlockLatencyMs;
+    const before = written.length;
+    cycles.push({ cycle: cycle + 1, startedAtMs: cycleStart - trigger, writes: delivery.writes, alreadyHeld: delivery.capacity.alreadyHeld,
+      groupHoldsWritten: written.slice(before - delivery.writes).filter(target => target >= groupSha(0)).length,
+      deferred: delivery.deferred, calls: delivery.apiBudget.calls, limit: delivery.apiBudget.limit,
+      headroomCalls: delivery.apiBudget.limit - delivery.apiBudget.calls, reserveCalls: delivery.capacity.reserveCalls,
+      complete: delivery.complete, coverage: delivery.coverage });
+    if (delivery.complete) break;
   }
+  const last = cycles.at(-1), first = cycles[0];
   return { evidenceClass: "inert-api-and-virtual-clock; no live delivery or authority", targetCount,
     reports, censuses, healthReadCount, workflowQueries, unbatchedReadCalls: healthReadCount + 2,
     savedCalls: workflowBatches * 2, virtualRequestMs, virtualStartAt: new Date(start).toISOString(),
-    ...delivery, failureOrExpiryToLastPlannedHoldMs: delivery.complete ? clock - trigger : null,
-    callHeadroom: delivery.complete ? delivery.apiBudget.limit - delivery.apiBudget.calls : null,
+    // First-cycle delivery, as the earlier single-batch fixtures reported it.
+    writes: first.writes, calls: first.calls, callLimit: first.limit, firstCycleHeadroomCalls: first.headroomCalls, heldGroups,
+    groupHoldsInFirstCycle: first.groupHoldsWritten, capacity: firstCapacity, lastPlannedBlockLatencyMs,
+    complete: last.complete, cyclesToComplete: last.complete ? cycles.length : null, totalWrites: cycles.reduce((n, c) => n + c.writes, 0),
+    minHeadroomCalls: Math.min(...cycles.map(c => c.headroomCalls)),
+    minHeadroomFraction: Math.min(...cycles.map(c => c.headroomCalls / c.limit)), cycles,
+    failureOrExpiryToLastPlannedHoldMs: last.complete && lastReceiptAt ? Date.parse(lastReceiptAt) - trigger : null,
     computeMs: performance.now() - cpuStart, liveMutations: 0 };
 }
 
@@ -163,7 +205,11 @@ export async function rehearseAdmission(projection, { candidateInterfaces } = {}
   phases.push({ phase: "release", evidenceClass: "inert-fixture", decision: released.decisions[0].decision });
   const beforeRestore = planRollback({ repository });
   phases.push({ phase: "rollback-before-full-restoration", evidenceClass: "inert-fixture", decision: beforeRestore.decision, holdRetained: beforeRestore.holdRetained });
-  const proof = { repository, verified: true, coverage: "full-merge-group-v1", requiredContext: "Typecheck, Test & Sidecar Bundle", workflowSha: merged };
+  // Shaped exactly like ci-merge-group-restoration.mjs output; planRollback checks every run (#3633).
+  const proof = { schema: "merge-group-restoration-v1", repository, since: at(80), verified: true, coverage: "full-merge-group-v1",
+    requiredContext: "Typecheck, Test & Sidecar Bundle", workflowSha: merged,
+    workflowBlobs: { ".github/workflows/ci.yml": "1".repeat(40), ".github/workflows/settings-rows-win32.yml": "2".repeat(40) },
+    runs: [{ runId: 9003, attempt: 1, headSha: "3".repeat(40), createdAt: at(85), certification: "full", reasons: [] }], reasons: [] };
   const restored = planRollback({ repository, fullQueueProof: proof });
   const rollback = planRollback({ repository, fullQueueProof: proof, operatorApproval: { repository, approved: true,
     action: "remove-admission-hold", fullQueueProofDigest: restored.fullQueueProofDigest } });
@@ -179,7 +225,9 @@ export async function rehearseAdmission(projection, { candidateInterfaces } = {}
       batchedMeasuredCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 51, workflowBatches: 1 }),
       batchedMeasuredCostExpiry45Targets: await rehearseHoldFanout(historical, { expired: true, healthReadCount: 51, workflowBatches: 1 }),
       batchedMeasuredCost46Targets: await rehearseHoldFanout(red, { targetCount: 46, healthReadCount: 51, workflowBatches: 1 }),
-      latestObservedCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 36, workflowBatches: 2 }) },
+      latestObservedCost45Targets: await rehearseHoldFanout(red, { healthReadCount: 36, workflowBatches: 2 }),
+      // The #3637 backlog-limit cost (55 calls before writes) with two queue groups holding a success.
+      backlogLimitCost45TargetsTwoHeldGroups: await rehearseHoldFanout(red, { healthReadCount: 53, heldGroups: 2 }) },
     forgeRace: "A success is sticky after the controller stops; fixture lease expiry does not expire a GitHub status. No finite unconditional block bound or atomic enforcement is established." };
 }
 

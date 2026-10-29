@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -12,6 +13,7 @@ import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../..
 import { linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseProcessEvidence } from "./provider-home-lease-evidence.js";
 import { agentControlFifoRelayBase, sweepAgentControlFifoRelays } from "./agent-control-fifo-relay.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
+import { inspectLeaseCgroup } from "./provider-home-lease-containment.js";
 
 // Real control plane + real runner daemon + real mock-agent, end to end. This is the first test to
 // exercise the runner's transport/reconnect module (apps/runner/src/index.ts) against a live control
@@ -106,8 +108,8 @@ class JsonInbox {
   }
 }
 
-function eventPayload(message: JsonObject): { sessionId?: string; payload?: { kind?: string; text?: string; message?: string } } {
-  return (message.event as { sessionId?: string; payload?: { kind?: string; text?: string; message?: string } } | undefined) ?? {};
+function eventPayload(message: JsonObject): { sessionId?: string; seq?: number; payload?: { kind?: string; text?: string; message?: string } } {
+  return (message.event as { sessionId?: string; seq?: number; payload?: { kind?: string; text?: string; message?: string } } | undefined) ?? {};
 }
 
 function isTerminalTurnMessage(message: JsonObject, sessionId: string): boolean {
@@ -149,6 +151,7 @@ type LeaseRecord = {
   version: number; state: "active" | "released"; pid: number; leaseId: string;
   previousLeaseId: string | null; previousRecordHash: string | null;
   process?: LeaseProcessEvidence;
+  recovery?: { proof: string };
 };
 
 // Read canonical records without changing the private registry. Check links against exact bytes,
@@ -257,14 +260,17 @@ function abandonmentInspection(record: LeaseRecord, scannerPid: number, fixtureP
   };
 }
 
-for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "second-signal", "supervisor-stop", "supervisor-teardown"] as const) {
+for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "second-signal", "supervisor-stop", "supervisor-teardown", "SIGKILL-empty", "second-signal-empty", "unreadable"] as const) {
   test(
     stopMode === "smoke" ? "a session created over the control plane drives a mock-agent turn to /ui and survives a runner restart"
       : stopMode === "SIGKILL" || stopMode === "second-signal"
-        ? `provider-HOME pipeline refuses handoff after ${stopMode} while a descendant survives`
+        ? `provider-HOME pipeline refuses handoff after ${stopMode}, then recovers once its descendant is gone`
+      : stopMode === "SIGKILL-empty" ? "provider-HOME pipeline recovery after SIGKILL with an empty recorded boundary"
+      : stopMode === "second-signal-empty" ? "provider-HOME pipeline recovery after second-signal exit with an empty recorded boundary"
+      : stopMode === "unreadable" ? "provider-HOME pipeline recovery with an unrelated unreadable process left alive"
       : stopMode === "supervisor-teardown" ? "provider-HOME pipeline teardown reaps the inner daemon after forced supervisor exit"
       : `provider-HOME pipeline handoff after ${stopMode}: journal ownership and completed turns`,
-    { timeout: 120_000, skip: stopMode !== "smoke" && process.platform !== "linux" ? "lease process evidence uses Linux procfs" : false },
+    { timeout: 150_000, skip: stopMode !== "smoke" && process.platform !== "linux" ? "lease process evidence uses Linux procfs" : false },
     async (t) => {
       const port = await reservePort();
       const httpBase = `http://127.0.0.1:${port}`;
@@ -321,6 +327,16 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
       controlPlane.stderr?.on("data", captureCp);
 
       let runner: ChildProcess | null = null;
+      let unrelated: FixtureIdentity | undefined;
+      let unrelatedChild: ChildProcess | undefined;
+      const unrelatedReady = join(temp, "unrelated.pid");
+      const unrelatedSignals = join(temp, "unrelated.signals");
+      const assertUnrelatedUntouched = () => {
+        assert.ok(unrelated && liveFixtureProcess(unrelated.pid, unrelated.startedAt), "the same unrelated process remains alive");
+        const identity = unrelated;
+        assert.throws(() => readFileSync(`/proc/${identity.pid}/environ`), { code: "EACCES" }, "the unrelated same-user process remains unreadable");
+        assert.equal(readFileSync(unrelatedSignals).length, 0, "neither runner signalled the unrelated process");
+      };
       let runnerOutput = "";
       const captureRunner = (chunk: unknown) => {
         runnerOutput = (runnerOutput + String(chunk)).slice(-65_536);
@@ -377,6 +393,10 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
           "the supervisor, launcher, and real daemon must be gone before deleting temporary state", 3_000);
         await killFixtureProcesses();
         await stopChild(controlPlane);
+        if (unrelated) {
+          killFixtureIdentity(unrelated);
+          await until(() => !liveFixtureProcess(unrelated!.pid, unrelated!.startedAt), "the test-owned unrelated fixture was reaped");
+        } else if (unrelatedChild) await stopChild(unrelatedChild);
         // SIGKILL can leave the runner's intentionally unlistable 0300 FIFO relay directories.
         // After every owned process is gone, use the same targeted sweep as runner startup;
         // ordinary rmSync cannot list these directories, even though this user owns them.
@@ -512,13 +532,51 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         [kind, descendants().filter((entry) => entry.kind === kind).length]));
       const beforeCounts = counts();
       const survivorExpected = stopMode === "SIGKILL" || stopMode === "second-signal";
-      const secondSignal = stopMode === "second-signal";
+      const positiveRecovery = stopMode === "SIGKILL-empty" || stopMode === "second-signal-empty" || stopMode === "unreadable";
+      const forcedExit = survivorExpected || positiveRecovery;
+      const secondSignal = stopMode === "second-signal" || stopMode === "second-signal-empty";
+      let predecessorProcesses: ReturnType<typeof descendants> = [];
+      let recoveryProof: "linux_cgroup" | "linux_cgroup_unit_removed" | undefined;
+      const proveEmptyRecordedBoundary = async () => {
+        const old = before.at(-1)!.record;
+        assert.equal(old.version, 5, "recovery starts from a v5 lease");
+        assert.equal(old.process?.version, 2);
+        const boundary = old.process?.containment;
+        assert.ok(boundary?.kind === "linux-cgroup-v2", "recovery must use the predecessor's recorded kernel boundary");
+        let state = inspectLeaseCgroup(boundary);
+        await until(() => {
+          state = inspectLeaseCgroup(boundary);
+          return state === "empty" || state === "unit_removed";
+        }, "the exact recorded boundary must be empty or its recorded unit proven removed");
+        const inspection = abandonmentInspection(old, runner?.pid ?? process.pid, predecessorProcesses.map((entry) => entry.pid));
+        recoveryProof = state === "unit_removed" ? "linux_cgroup_unit_removed" : "linux_cgroup";
+        assert.deepEqual(inspection.result, { proven: true, proof: recoveryProof }, "legacy process_scan or reboot proof cannot satisfy recovery");
+        t.diagnostic(`empty recorded boundary: ${JSON.stringify({ state, ...inspection })}`);
+      };
+      const reapPredecessor = async () => {
+        for (const entry of predecessorProcesses) killFixtureIdentity(entry);
+        await until(() => predecessorProcesses.every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)), "only the predecessor's recorded fixture identities were reaped");
+        assert.deepEqual(journal(runnerHome).slice(0, before.length), before, "fixture reaping preserves the exact predecessor history");
+        await proveEmptyRecordedBoundary();
+      };
       if (stopMode === "smoke") {
         await stopChild(runner);
       } else {
         await until(() => descendants().some((entry) => entry.kind === "descendant" && liveFixtureProcess(entry.pid, entry.startedAt)), "provider descendant is alive before shutdown");
         before = journal(runnerHome);
         const held = before.at(-1)!;
+        predecessorProcesses = descendants();
+        const recordedBoundary = held.record.process?.containment?.kind === "linux-cgroup-v2";
+        if ((positiveRecovery || survivorExpected) && process.env.WOLLIPOG_TEST_REQUIRE_CGROUP === "1") {
+          assert.ok(recordedBoundary, "mandatory delegated validation requires recorded cgroup-v2 containment; missing delegation is a failure");
+          assert.equal(held.record.version, 5);
+        }
+        if (positiveRecovery && !recordedBoundary) {
+          const reason = "recorded-boundary recovery requires a delegated Linux cgroup-v2 unit; predecessor has no kernel boundary";
+          t.diagnostic(reason);
+          t.skip(reason);
+          return;
+        }
         assert.equal(held.record.state, "active");
         if (stopMode === "supervisor-stop") {
           const launcher = JSON.parse(readFileSync(supervisedRunner, "utf8")) as { pid: number; startedAt: string };
@@ -527,17 +585,48 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
           assert.equal(held.record.pid, runner.pid, "the real daemon acquired this provider HOME");
         }
         assert.ok(held.record.process, "the active record contains actual runner lifecycle evidence");
+        if (stopMode === "unreadable") {
+          assert.notEqual(process.getuid?.(), 0, "non-dumpable environment reads must be denied to the ordinary test user");
+          const helper = join(temp, "unreadable-process");
+          const source = fileURLToPath(new URL("./fixtures/pipeline-unreadable-process.c", import.meta.url));
+          const compiled = spawnSync("/usr/bin/cc", ["-std=c11", "-Wall", "-Wextra", "-Werror", source, "-o", helper], { encoding: "utf8", timeout: 30_000 });
+          assert.equal(compiled.status, 0, compiled.stderr);
+          unrelatedChild = spawn(helper, [unrelatedReady, unrelatedSignals], { env: {}, stdio: "ignore" });
+          await until(() => {
+            assert.equal(unrelatedChild!.exitCode, null, "unreadable fixture must stay alive during setup");
+            return existsSync(unrelatedReady);
+          }, "the non-dumpable unrelated fixture became ready");
+          const pid = Number(readFileSync(unrelatedReady, "utf8"));
+          assert.equal(pid, unrelatedChild.pid, "the unrelated process was started by this test");
+          const fields = readFileSync(`/proc/${pid}/stat`, "utf8").split(") ").at(-1)!.split(" ");
+          unrelated = { pid, startedAt: fields[19]! };
+          assert.equal(readFileSync(`/proc/${pid}/status`, "utf8").match(/^Uid:\s+([0-9]+)/mu)?.[1], String(process.getuid!()), "unreadable fixture has the same uid");
+          const boundary = held.record.process.containment!;
+          assert.ok(boundary.kind === "linux-cgroup-v2");
+          const membership = readFileSync(`/proc/${pid}/cgroup`, "utf8").trim();
+          const oldPath = join(boundary.mountRoot, boundary.cgroupPath);
+          assert.ok(!membership.endsWith(oldPath) && !membership.includes(`${oldPath}/`), "the unrelated fixture is outside the predecessor provider boundary");
+          assertUnrelatedUntouched();
+          // This process started after the predecessor and blocks legacy proof, making this a
+          // regression even on a clean CI host rather than relying on ambient SSH sessions.
+          const legacy = { ...held.record.process, containment: undefined };
+          const probe = linuxLeaseProcessProbe("/proc", process.getuid?.(), runner.pid!)!;
+          const scan = probe.scan(legacy.marker, legacy.startTime, true);
+          assert.ok(scan.uninspectable.includes(pid), "the unrelated process would block legacy whole-user scanning");
+        }
         const exited = new Promise<void>((resolvePromise) => runner!.once("exit", () => resolvePromise()));
         const shutdownOutputStart = runnerOutput.length;
-        assert.ok(runner.kill(secondSignal || stopMode === "supervisor-stop" ? "SIGTERM" : stopMode));
+        assert.ok(runner.kill(secondSignal || stopMode === "supervisor-stop" ? "SIGTERM" : forcedExit ? "SIGKILL" : stopMode as NodeJS.Signals));
         if (secondSignal) {
           await until(() => runnerOutput.slice(shutdownOutputStart).includes("shutting down"), "the first signal entered the pending-kill drain");
           assert.ok(runner.kill("SIGINT"));
         }
         assert.ok(await exitedWithin(exited, 20_000), "runner shutdown finishes without test SIGKILL fallback");
-        if (survivorExpected) {
+        if (forcedExit) {
           assert.deepEqual(journal(runnerHome), before, "forced exit preserves exact active journal evidence");
           assert.ok(descendants().some((entry) => liveFixtureProcess(entry.pid, entry.startedAt)), "a provider descendant survives the forced exit");
+          if (unrelated) assertUnrelatedUntouched();
+          if (positiveRecovery) await reapPredecessor();
         } else {
           assert.equal(runner.exitCode, 0);
           assert.ok(descendants().every((entry) => !liveFixtureProcess(entry.pid, entry.startedAt)), "graceful shutdown drained detached TERM-ignoring descendants");
@@ -632,15 +721,67 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         t.diagnostic(`ACP executable/session/turn counts: before restart=${JSON.stringify(beforeCounts)}, at refusal=${JSON.stringify(refusedCounts)}`);
         assert.equal(refusedCounts.session, beforeCounts.session, "refusal did not initialize another provider session");
         assert.equal(refusedCounts.provider, beforeCounts.provider, "refusal did not start another provider turn");
-        // This is case 3's terminal outcome. Do not pretend prompting the now-failed session is
-        // a recovery attempt; phase 2 verifies the recorded-boundary replacement turn.
-        return;
+        if (!recordedBoundary) {
+          // Preserve marker-refusal coverage in ordinary CI without pretending its legacy
+          // whole-user scan can prove the positive half of this story.
+          await t.test("recovery requires recorded cgroup-v2 containment", (recovery) => {
+            const reason = "positive recovery requires a delegated cgroup-v2 unit and a v5 recorded boundary";
+            recovery.diagnostic(reason);
+            recovery.skip(reason);
+          });
+          return;
+        }
+        await until(async () => await sessionStatus() === "failed", "the refused session reached its failed status");
+        const advertisedMock = async () => {
+          const response = await fetch(`${httpBase}/api/runners`, {
+            headers: { authorization: `Bearer ${ownerToken}` },
+          });
+          assert.equal(response.status, 200);
+          const body = await response.json() as { runners: Array<{
+            runnerId: string; agents: Array<{ id: string; available?: boolean; unavailableReason?: string }>;
+          }> };
+          return body.runners.find((entry) => entry.runnerId === RUNNER_ID)?.agents.find((agent) => agent.id === "mock");
+        };
+        await until(async () => {
+          const agent = await advertisedMock();
+          return agent?.available === false && /HOME ownership/u.test(agent.unavailableReason ?? "");
+        },
+          "the configured mock catalog row is retained as unavailable while discovery is ownership-blocked");
+        assert.match((await advertisedMock())?.unavailableReason ?? "", /HOME ownership/u);
+        await reapPredecessor();
+        // Clearing the old boundary does not mutate the already advertised catalog. Discovery
+        // normally refreshes every five minutes; request the supported refresh rather than racing
+        // Restart against the still-unavailable row or restarting this replacement runner again.
+        const replacementPid = runner.pid;
+        const rediscovery = await fetch(`${httpBase}/api/runners/${RUNNER_ID}/rediscover`, {
+          method: "POST", headers: { authorization: `Bearer ${ownerToken}` },
+        });
+        assert.equal(rediscovery.status, 200);
+        await until(async () => (await advertisedMock())?.available === true,
+          `the same configured mock agent becomes available after rediscovery\n${runnerOutput}`);
+        assert.equal(runner.pid, replacementPid, "catalog recovery did not require another runner restart");
+        t.diagnostic("configured mock catalog: ownership-blocked -> explicit rediscovery -> available on the same replacement runner");
+        // A failed launch requires the real Restart operation; another prompt alone cannot
+        // revive it. Keep this same replacement runner and session for the recovery story.
+        const restarted = await fetch(`${httpBase}/api/sessions/${sessionId}/restart`, {
+          method: "POST", headers: { authorization: `Bearer ${ownerToken}` },
+        });
+        assert.equal(restarted.status, 200, `session restart failed: ${await restarted.text()}\n${runnerOutput}`);
+        await waitForIdle();
       }
 
-      await sendPrompt("Note again after the runner restart");
+      const freshPrompt = "Note again after the runner restart";
+      await sendPrompt(freshPrompt);
+      const freshUser = await uiInbox.take((message) => {
+        const event = eventPayload(message);
+        return message.type === "session_event" && event.sessionId === sessionId &&
+          event.payload?.kind === "user_message" && event.payload.text === freshPrompt;
+      });
+      const freshSeq = eventPayload(freshUser).seq;
+      assert.ok(typeof freshSeq === "number", "the fresh prompt has a durable event sequence");
 
       const secondTurn = await uiInbox
-        .take((m) => isTerminalTurnMessage(m, sessionId))
+        .take((m) => isTerminalTurnMessage(m, sessionId) && (eventPayload(m).seq ?? -1) > freshSeq)
         .catch((error) => {
           throw new Error(`${(error as Error).message}\n=== RUNNER OUTPUT ===\n${runnerOutput}`);
         });
@@ -657,15 +798,17 @@ for (const stopMode of ["smoke", "SIGTERM", "SIGINT", "SIGHUP", "SIGKILL", "seco
         assert.equal(succeeded.at(-1)!.record.state, "active");
         assert.equal(succeeded.at(-1)!.record.pid, runner.pid, "replacement owns the HOME and completed a provider turn");
         assert.deepEqual(succeeded.slice(0, before.length), before, "handoff keeps every predecessor byte");
+        if (forcedExit) {
+          assert.ok(recoveryProof, "the empty recorded boundary was positively proven before recovery");
+          const transition = succeeded[before.length];
+          assert.ok(transition, "recovery appended a journal transition");
+          assert.equal(transition.record.previousLeaseId, before.at(-1)!.record.leaseId);
+          assert.deepEqual(transition.record.recovery, { proof: recoveryProof }, "the committed transition records kernel-boundary proof, never process_scan");
+          assert.ok(counts().provider! > beforeCounts.provider!, "the replacement executed a new provider turn");
+          t.diagnostic(`recovered journal transition: proof=${recoveryProof}, predecessorRecords=${before.length}, successorRecords=${succeeded.length}, freshTurnCompleted=true`);
+        }
       }
+      if (unrelated) assertUnrelatedUntouched();
     },
   );
 }
-
-// Phase 2 must use #3584's recorded-boundary proof in a delegated scope, rather than the
-// legacy whole-user scan: CI reproduced a fail-closed uninspectable-process refusal even
-// after fixture cleanup. These positive recovery modes require real recorded evidence.
-test.todo("provider-HOME recovery after SIGKILL with an empty recorded boundary (phase 2, #3584 delegated scope)");
-test.todo("provider-HOME recovery after second-signal exit with an empty recorded boundary (phase 2, #3584 delegated scope)");
-// Keep an unrelated non-dumpable same-user process alive throughout the recorded-boundary restart.
-test.todo("provider-HOME recovery with an unrelated unreadable process left alive (phase 2, #3584 recorded boundary)");

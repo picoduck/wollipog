@@ -219,13 +219,20 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
     const session = db.getSession(id);
     if (!session || !db.isSessionOwner(principal, id)) return reply.code(404).send({ error: "campaign not found" });
     const policy = session.orchestratorPolicy;
-    if (!policy || session.parentSessionId || !session.workspaceId || !session.agentId ||
-        ["completed", "failed", "stopped"].includes(session.status)) return reply.code(409).send({ error: "only a live root campaign can enable Full Control" });
+    if (!policy || session.parentSessionId || !session.workspaceId || !session.agentId) return reply.code(409).send({ error: "only a live root campaign can enable Full Control" });
+    // A stopped campaign, including one revoked to Custom, restarts under Custom first (#2940).
+    if (["completed", "failed", "stopped"].includes(session.status)) {
+      return reply.code(409).send({ error: session.archived ? "only a live root campaign can enable Full Control"
+        : "This campaign isn't running. Restart it, then enable Full Control." });
+    }
     const runner = db.listRunnersForPrincipal(principal).find((candidate) => candidate.runnerId === session.runnerId);
     const scope = db.sessionScope(id);
     if (!runner || !scope) return reply.code(409).send({ error: "the campaign's runner or ownership is unavailable" });
     const limits = (sessionId: string) => {
-      const member = db.campaignBudgets.userLimits(sessionId), view = db.getSession(sessionId);
+      const view = db.getSession(sessionId);
+      // A revoked allowance's personal ceilings include limits the person lowered since (#2940).
+      const member = db.campaignBudgets.governingRoot(sessionId) ? db.campaignBudgets.userLimits(sessionId)
+        : db.campaignBudgets.personalLimits(sessionId, { costBudgetUsd: view?.costBudgetUsd ?? null, maxToolCalls: view?.maxToolCalls ?? null });
       return member ?? { costBudgetUsd: view?.costBudgetUsd ?? null, maxToolCalls: view?.maxToolCalls ?? null };
     };
     const ceiling = (value: { costBudgetUsd: number | null; maxToolCalls: number | null }) => (value.costBudgetUsd ?? 0) > 0 || (value.maxToolCalls ?? 0) > 0;

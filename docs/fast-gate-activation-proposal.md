@@ -7,9 +7,9 @@ below is a separate human operator action; agents do not perform them.
 
 Current state and evidence are in the generated
 [readiness report](fast-gate-readiness-2026-10-28.md). Its verdict today is **not
-ready**: code, observation and approval gaps remain. Do not start step 1 until a
-report regenerated at the activation revision shows no open code gap and every
-approval below has been recorded.
+ready**: observation and approval gaps remain, and every code gap is closed by
+computed evidence. Do not start step 1 until a report regenerated at the activation
+revision shows no open code gap and every approval below has been recorded.
 
 ## What Approval Would Change
 
@@ -31,12 +31,16 @@ reviewed migration. Unfinished or unknown required checks still block merging.
 
 All must hold before step 1. The readiness report tracks each one.
 
-1. **Code gaps closed.** At the five-commit backlog limit the writer has 41 status
-   writes for a 45-target fan-out, and the batched 45-target set uses 96/96 calls
-   (#3711). Either outcome refuses with zero writes. A controller or forge outage
-   leaves an earlier success sticky, and exhausted investigation escalation has no
-   delivery path to a human. Each needs a reviewed fix or an explicit decision to
-   keep full queue validation.
+1. **Code gaps closed.** Hold fan-out at the backlog limit and call headroom are addressed by
+   [bounded multi-cycle delivery](main-merge-recovery.md#slice-5-bounded-multi-cycle-delivery):
+   approve its completion bound, which is two 60-second cycles for 45 targets in
+   the fixture. Its durable progress store is part of the operator host. Sticky
+   merge-group success is addressed by [just-in-time group admission](main-merge-admission.md#fail-closed-group-admission).
+   Approve its availability cost (a stalled queue during a controller outage) and its
+   remaining write-to-landing race. Exhausted investigation escalation is
+   delivered to the open incident once per attempt
+   ([escalation delivery](main-regression-automation.md#escalation-delivery)), but only
+   after `MAIN_REGRESSION_ESCALATION_MENTION` is set to an approved target and read back.
 2. **#3633 enforcement bound.** A measured, approved failure-to-block bound from
    natural shadow traffic (shipped bound today: none), plus an accepted forge race.
 3. **Prerequisite windows.** #3628/#3629 long-window comparisons complete;
@@ -292,9 +296,11 @@ returns `operator-hold-removal-approval-required` and a `fullQueueProofDigest`. 
 approval bound to that digest (`--approval`) yields `operator-hold-removal-planned`.
 
 Use only the verifier's own output as the proof, written by the command above.
-#3633's `planRollback` checks only the proof's top-level fields, and no offline check
-can detect a proof that was edited by hand consistently. This is a known code gap in the
-[readiness report](fast-gate-readiness-2026-10-28.md).
+#3633's `planRollback` checks run-level certification itself, so a proof whose
+top-level fields were edited while its runs stayed uncertified is refused. No offline
+check can detect a proof that was edited by hand consistently, so take the proof only
+from the verifier (see `planrollback-run-level-proof` in the
+[readiness report](fast-gate-readiness-2026-10-28.md)).
 
 Removing the admission context afterwards is a separate manual operation: PUT the
 ruleset without the `Regression Admission` entry and read it back, delete

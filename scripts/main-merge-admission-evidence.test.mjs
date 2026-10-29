@@ -107,7 +107,7 @@ test("real full-health collection preserves evidence and final rechecks while sa
   const steps = [core, ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
     ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
     ["Compare the Diff Against the Settings-Rows Paths"], ["Compare Against the Committed win32 Baselines"],
-    ["Require Every Job to Have Succeeded"]];
+    ["Verify Recorded-Boundary Pipeline Recovery"], ["Require Every Job to Have Succeeded"]];
   const jobs = REQUIRED.map((name, i) => ({ id: i + 1, name, status: "completed", conclusion: "success",
     steps: ["Verify Rolling Checkout", ...steps[i]].map(name => ({ name, conclusion: "success" })) }));
   const response = fixture();

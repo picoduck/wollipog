@@ -203,7 +203,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/steering", "GET /api/sessions/:id/steering/:submissionId",
   "POST /api/sessions/:id/steering/:submissionId/resolve",
   "POST /api/sessions/:id/restart", "POST /api/sessions/:id/config", "POST /api/sessions/:id/archive",
-  "POST /api/sessions/:id/background-jobs/:jobId/stop",
+  "POST /api/sessions/:id/background-jobs/:jobId/stop", "POST /api/sessions/:id/queue-hold/release",
   "GET /api/sessions/:id/descendant-requests", "POST /api/sessions/:id/descendant-requests/resolve",
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence",
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",

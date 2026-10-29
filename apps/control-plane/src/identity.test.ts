@@ -103,10 +103,11 @@ test("orchestrators can mutate verified descendants while execution policy gover
       assert.match(agentCredentialSessionTargetError(route, credential, "s_parent", true)!, /descendants/);
     }
   }
-  const stopJob = "/api/sessions/:id/background-jobs/:jobId/stop";
-  assert.equal(agentCredentialSessionTargetError(stopJob, credential, "s_child", true), null);
-  assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_sibling")!, /descendants/);
-  assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_parent", true)!, /descendants/);
+  for (const stopJob of ["/api/sessions/:id/background-jobs/:jobId/stop", "/api/sessions/:id/queue-hold/release"]) {
+    assert.equal(agentCredentialSessionTargetError(stopJob, credential, "s_child", true), null, stopJob);
+    assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_sibling")!, /descendants/, stopJob);
+    assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_parent", true)!, /descendants/, stopJob);
+  }
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_parent"), null);
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_child", true), null);
   assert.match(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_sibling")!, /descendants/);

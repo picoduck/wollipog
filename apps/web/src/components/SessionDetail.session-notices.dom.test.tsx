@@ -560,11 +560,11 @@ test("an archived session's refusal offers no ordinary restart, and says to unar
   }
 });
 
-test("a busy account on a v245 runner offers Wait for Account, which restarts the session waiting (#3240)", async () => {
+test("a busy account on a v248 runner offers Wait for Account, which restarts the session waiting (#3240)", async () => {
   const restarts: Array<[string, unknown]> = [];
   const current = sessionView({ status: "failed", providerHomeRefusal: launchRefusal("busy") });
   const fixture = await mount(current, {
-    runner: { protocolVersion: 245 },
+    runner: { protocolVersion: 248 },
     client: { restart: async (id: string, options?: unknown) => {
       restarts.push([id, options]);
       return { ...current, status: "starting" };
@@ -590,7 +590,7 @@ test("a starting session waiting for its account says so, and Stop Waiting stops
     waitingSince: 0, waitUntil: 8 * 3_600_000,
   } });
   const fixture = await mount(current, {
-    runner: { protocolVersion: 245 },
+    runner: { protocolVersion: 248 },
     client: { stop: async (id: string) => { stops.push(id); return { ...current, status: "stopped", providerHomeWait: undefined }; } } as Partial<ApiClient>,
   });
   try {
@@ -1296,6 +1296,26 @@ test("a server refusal keeps its words behind Show Details, not in the sentence"
     assertNoDomNode(notice.querySelector("code"));
     await act(async () => { fixture.button("Show Details")!.click(); });
     assert.equal(notice.querySelector(".code-well code")?.textContent, "session is not accepting prompts");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a stale Full Control authority refusal says what happened and how to recover in the sentence (#2940)", async () => {
+  const reason = "This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+    "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.";
+  const fixture = await mount(sessionView({}), {
+    client: { prompt: () => Promise.reject(new ApiError(reason, 409, "campaign_authority_stale")) } as Partial<ApiClient>,
+  });
+  try {
+    await typeDraft(fixture.container, "Hello");
+    await sendDraft(fixture.container);
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Message Not Sent");
+    assert.equal(notice.querySelector(".notice-body p")?.textContent, `${reason} Your draft is kept.`);
+    assert.equal(fixture.button("Show Details"), undefined, "nothing is held back behind details");
+    assert.equal(fixture.button("Retry"), undefined, "resending before the recovery would meet the same refusal");
+    assert.equal((fixture.container.querySelector("textarea") as HTMLTextAreaElement).value, "Hello", "the draft waits in the composer");
   } finally {
     await fixture.unmount();
   }

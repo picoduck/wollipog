@@ -253,13 +253,14 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
-  for (const id of ["checks", "browser", "webkit"]) {
+  for (const id of ["checks", "browser", "webkit", "delegated_pipeline"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
     if (id === "webkit") assert.doesNotMatch(byId[id], /^    needs:/m);
+    else if (id === "delegated_pipeline") assert.match(byId[id], /^    needs: suite_plan$/m, `${id}: delegated recovery only waits for routing`);
     else assert.match(byId[id], /^    needs: \[suite_plan, merge_group_gate\]$/m, `${id}: only routing and the gate may precede parallel work`);
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
@@ -362,11 +363,13 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "the browser suites must not share the unit-test job's budget");
   assert.match(byId.checks, /^      - name: Unit Tests$/m);
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
+  assert.match(byId.check, /needs\.delegated_pipeline\.result/, "the aggregator must inspect recorded-boundary recovery");
+  assert.match(byId.check, /^          report "Delegated Pipeline Recovery" "\$DELEGATED_PIPELINE_RESULT"$/m);
   // The win32 job is the draft guard, its name, the call and optional snapshot inputs. Its path scoping lives
   // in the called workflow, where a skip is a job the call still reports as a success; a condition
   // here would instead skip the call, which the aggregator rightly reads as a failure.
@@ -850,7 +853,7 @@ test("every CI Node setup retries once with the same pinned action and version",
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
   const steps = ci.split(/^      - name: /m).slice(1);
   const setupSteps = steps.filter((step) => /^        uses: actions\/setup-node@/m.test(step));
-  assert.equal(setupSteps.length, 14, "seven Node setups each need one retry");
+  assert.equal(setupSteps.length, 16, "eight Node setups each need one retry");
 
   const versions = [];
   for (const [index, step] of steps.entries()) {
@@ -883,6 +886,7 @@ test("every CI Node setup retries once with the same pinned action and version",
     "node-version: 23.2.0",
     "node-version: 23.4.0",
     "node-version-file: .nvmrc",
+    "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
   ]);

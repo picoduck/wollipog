@@ -11,6 +11,7 @@ import { candidateReceipt } from "./main-validation-candidates.mjs";
 import { plan as planInvestigation, readState as readInvestigationState, reconcile as reconcileInvestigation,
   selectCandidate, writeState as writeInvestigationState } from "./main-regression-automation.mjs";
 import { classify, InvestigationBudget } from "./main-regression-investigation.mjs";
+import { deliverEscalation, escalationMarker } from "./main-regression-escalation.mjs";
 import { INVESTIGATION_PROMPT, LIMITS, PARAMETERS } from "./main-regression-policy.mjs";
 import { collectCertification } from "./release-certification.mjs";
 import { rehearseAdmission } from "./rehearse-main-merge-admission.mjs";
@@ -34,7 +35,8 @@ const ENV = Object.freeze({ GITHUB_REPOSITORY: REPOSITORY, GITHUB_TOKEN: "inert-
 const CONTEXT = "Regression Admission";
 const MODULES = { health: "main-ci-health", admission: "main-merge-admission", controller: "main-merge-admission-controller",
   repair: "main-merge-repair", rolling: "main-rolling-validation", candidates: "main-validation-candidates",
-  automation: "main-regression-automation", investigation: "main-regression-investigation", certification: "release-certification" };
+  automation: "main-regression-automation", investigation: "main-regression-investigation", certification: "release-certification",
+  escalation: "main-regression-escalation" };
 const control = Object.freeze({ available: true, repair: null });
 // The operator trust boundary is a fixture: it only echoes an exact grant digest.
 const verifyAuthority = async ({ grant }) => ({ approved: true, authorizationDigest: repairDigest(grant) });
@@ -72,11 +74,13 @@ async function cycle(w, options = {}) {
 /** Default-deny writer, explicitly enabled only against the inert forge. */
 async function deliver(w, plan, options = {}) {
   const started = w.state.calls;
+  let fresh = null;
   try {
     const result = await writeAdmissionPlan(plan, { configuration: { enabled: true, repository: REPOSITORY, context: CONTEXT },
-      api: w.api, now: () => w.iso(), revalidate: ({ repository }, { api }) => rebuildAdmissionCycle({ repository, api, env: ENV,
-        now: () => w.iso(), error: () => {}, control, observationId: "inert-rehearsal", entryPoint: "rehearsal", ...options }) });
-    return { ...result, forgeCalls: w.state.calls - started };
+      api: w.api, now: () => w.iso(), revalidate: async ({ repository }, { api }) => (fresh = await rebuildAdmissionCycle({ repository, api,
+        env: ENV, now: () => w.iso(), error: () => {}, control, observationId: "inert-rehearsal", entryPoint: "rehearsal", ...options })) });
+    // The writer authorizes from its own fresh rebuild, not the caller's plan.
+    return { ...result, forgeCalls: w.state.calls - started, revalidatedObservedAt: fresh?.healthSummary?.observedAt ?? null };
   } catch (failure) {
     if (failure.writes === undefined) throw failure;
     return { writes: failure.writes, complete: false, reason: failure.reason, capacity: failure.capacity,
@@ -118,9 +122,11 @@ async function regressionWorld() {
   const { w, base } = await baselineWorld();
   w.open(101, { head: sha("head:101") });
   const group = w.enqueue("regression", [101], { base, tree: sha("tree:regression") });
+  // Just-in-time admission: only after the group's own fast checks pass may its success be written.
+  w.at(START + TIMING.fastGateMs);
+  w.reportRequired("regression", "success");
   const admitted = await cycle(w);
   const fastPass = await deliver(w, admitted.plan);
-  w.at(START + TIMING.fastGateMs);
   const landing = w.now;
   const regression = w.land("regression", { pull: 101, tree: group.tree });
   w.at(landing + TIMING.controllerWakeMs);
@@ -173,6 +179,7 @@ async function missedFailure() {
   w.open(105, { head: sha("head:105") });
   const repairGroup = w.enqueue("repair", [105], { base: r.regression, tree: sha("tree:baseline") });
   w.at(w.now + TIMING.fastGateMs);
+  w.reportRequired("repair", "success");
   const before = await observeHealth(w);
   const entry = { repository: REPOSITORY, kind: "merge_group", pullRequest: 105, headSha: sha("head:105"), baseSha: r.regression,
     integrationSha: repairGroup.sha, members: [{ pullRequest: 105, headSha: sha("head:105") }] };
@@ -217,9 +224,12 @@ async function missedFailure() {
   w.state.groups.delete("innocent"); w.enqueue("innocent-rebuilt", [103], { base: merged }); w.rebase(103); w.rebase(104);
   const release = await cycle(w, { control: { available: true, repair: { binding, receipt } } });
   const released = await deliver(w, release.plan, { control: { available: true, repair: { binding, receipt } } });
+  // Ordinary eligibility returns at once; the rebuilt group's own success waits for its checks (just in time).
   f.check("rebuilt entries regain ordinary admission after reconciliation", MODULES.controller,
-    { decisions: { "group:103": "ordinary-admission-eligible", "pr:103": "ordinary-admission-eligible", "pr:104": "ordinary-admission-eligible" }, writes: 3 },
-    { decisions: decisionsBy(release.plan), writes: released.writes });
+    { decisions: { "group:103": "ordinary-admission-eligible", "pr:103": "ordinary-admission-eligible", "pr:104": "ordinary-admission-eligible" },
+      writes: 2, rebuiltGroup: "none" },
+    { decisions: decisionsBy(release.plan), writes: released.writes,
+      rebuiltGroup: release.plan.decisions.find(d => d.entry.kind === "merge_group")?.state });
   f.times = { landingToFailedVerdictMs: r.failedAt - r.landing, landingToHealthFailingObservedMs: Date.parse(failing.observedAt) - r.landing,
     failureToLastHoldReceiptMs: Date.parse(held.lastReceiptAt) - r.failedAt,
     exposureAdmissionsBeforeHold: r.exposed.writes, failureToReleaseReceiptMs: Date.parse(released.lastReceiptAt) - r.failedAt,
@@ -281,7 +291,7 @@ async function validatorOutage() {
     workerStartToUnknownMs: Date.parse(stalled.observedAt) - Date.parse(stuck.run.run_started_at) };
   f.callBudgets = { stalledHealthReport: budget(stalled.apiBudget), outageWriter: budget(writer.apiBudget), totalInertForgeCalls: w.state.calls };
   f.observations = { probes };
-  f.gaps.push("Known activation gap (documented in docs/main-merge-recovery.md): a forge/controller outage leaves any earlier success status sticky. The writer refuses with zero writes; it cannot withdraw. A fail-closed lease or full queue validation must cover this before any fast gate.");
+  f.gaps.push("A forge/controller outage leaves earlier PR-head successes in place (the writer refuses with zero writes); they only gate enqueueing. Merge groups receive a success just in time, so none exists to go stale (docs/main-merge-admission.md#fail-closed-group-admission, scripts/rehearse-admission-lease.mjs).");
   return f.done();
 }
 
@@ -295,7 +305,7 @@ async function exhaustedInvestigation() {
     cron: "0 0 1 1 *", timezone: "UTC", action }, executions });
   const triggers = { triggers: [{ triggerId: config.triggerId, automationId: config.automationId, kind: "webhook", generation: 1,
     deliveryPolicy: { allowPrompt: false, parameterNames: PARAMETERS, missingReferences: "reject" } }] };
-  const outcomes = {};
+  const outcomes = {}, escalations = {};
   for (const variant of ["delivery", "elapsed"]) {
     const r = await regressionWorld(), { w } = r, controls = [];
     const collect = virtualCollect(w);
@@ -321,6 +331,13 @@ async function exhaustedInvestigation() {
     const state = (await readInvestigationState(w.api, REPOSITORY)).value;
     const replan = planInvestigation(state, candidate, w.now);
     const { plan } = await cycle(w);
+    // Main CI Health's job delivers the escalation to its open incident; a repeat finds the marker.
+    const incident = w.openIncident(4001, { runId: candidate.runId });
+    const mentions = ["@fixture/maintainers"];
+    const notified = await deliverEscalation(REPOSITORY, { api: w.api, mentions });
+    const repeated = await deliverEscalation(REPOSITORY, { api: w.api, mentions });
+    escalations[variant] = { first: notified.status, repeat: repeated.status, comments: incident.comments.length,
+      marked: incident.comments.filter(c => c.body.includes(escalationMarker(notified.escalation))).length };
     outcomes[variant] = { first: first.status, second: second.status, blocked: state.blocked, replan: replan.reason,
       deliveries: controls.filter(p => p.startsWith("/hooks/")).length, admission: [...new Set(plan.decisions.map(d => d.decision))] };
   }
@@ -333,6 +350,9 @@ async function exhaustedInvestigation() {
     (({ admission: _a, ...o }) => o)(outcomes.elapsed));
   f.check("exhaustion never releases holds while health still fails", MODULES.controller,
     { delivery: ["hold"], elapsed: ["hold"] }, { delivery: outcomes.delivery.admission, elapsed: outcomes.elapsed.admission });
+  f.check("each exhaustion reaches the open incident exactly once", MODULES.escalation,
+    { delivery: { first: "notified", repeat: "already-notified", comments: 1, marked: 1 },
+      elapsed: { first: "notified", repeat: "already-notified", comments: 1, marked: 1 } }, escalations);
   let clock = 0;
   const investigation = new InvestigationBudget({ clock: () => clock, startedAt: 0 }), refusals = {};
   const attempt = (label, kind, options) => { try { investigation.charge(kind, options); return "charged"; }
@@ -345,7 +365,7 @@ async function exhaustedInvestigation() {
       "after-45-minutes": "elapsed-budget-exhausted" }, refusals);
   f.callBudgets = { investigationCounts: investigation.counts, limits: { deliveryAttempts: LIMITS.deliveryAttempts, elapsedMs: LIMITS.elapsedMs,
     reproductions: LIMITS.reproductionAttempts, ciDispatches: LIMITS.ciDispatches } };
-  f.gaps.push("Escalation is an operator-required status plus the open Main CI Health incident; delivery of that escalation to a human is outside these modules and is not rehearsed.");
+  f.gaps.push("Escalation is delivered as one marked comment on the open Main CI Health incident, mentioning the configured target; it is disabled until MAIN_REGRESSION_ESCALATION_MENTION is set, runs on Main CI Health's next invocation, and cannot prove a human read it.");
   return f.done();
 }
 
@@ -413,8 +433,9 @@ async function queuedEntryHold() {
   const f = flow("queued-entry-hold", "Ready, queued and stacked entries are held and earlier successes withdrawn");
   const { w } = await baselineWorld();
   w.open(200, { head: sha("head:200") }); w.enqueue("regression", [200]);
-  await deliver(w, (await cycle(w)).plan);
   w.at(START + TIMING.fastGateMs);
+  w.reportRequired("regression", "success");
+  await deliver(w, (await cycle(w)).plan);
   const landing = w.now, regression = w.land("regression", { pull: 200 });
   w.at(landing + TIMING.controllerWakeMs);
   const worker = await validateLatest(w, "failure", { finish: false });
@@ -422,6 +443,9 @@ async function queuedEntryHold() {
   w.open(202, { head: sha("head:202") }); const first = w.enqueue("queued", [202], { base: regression });
   w.open(203, { head: sha("head:203") }); w.open(204, { head: sha("head:204") });
   w.enqueue("stacked", [203, 204], { base: first.sha, position: 2 });
+  // The queue-head group's own checks have passed: it holds a just-in-time success that a later
+  // failure must withdraw (the forge race). The stacked group gets nothing until it is next.
+  w.reportRequired("queued", "success");
   w.at(landing + 5 * MINUTE);
   const before = await cycle(w);
   const green = await deliver(w, before.plan);
@@ -565,9 +589,14 @@ async function delivered3633(projection) {
   const report = await rehearseAdmission(projection);
   return { schema: report.schema, source: report.source, phases: report.phases.map(({ phase, decision }) => ({ phase, decision })),
     fanout: Object.fromEntries(Object.entries(report.fanout).map(([k, v]) => [k, { targetCount: v.targetCount, writes: v.writes,
-      complete: v.complete, calls: v.apiBudget?.calls ?? v.capacity?.callsUsed, failureOrExpiryToLastPlannedHoldMs: v.failureOrExpiryToLastPlannedHoldMs }])),
+      complete: v.complete, calls: v.calls, cyclesToComplete: v.cyclesToComplete, totalWrites: v.totalWrites, minHeadroomCalls: v.minHeadroomCalls, minHeadroomFraction: v.minHeadroomFraction,
+      heldGroups: v.heldGroups, groupHoldsInFirstCycle: v.groupHoldsInFirstCycle, failureOrExpiryToLastPlannedHoldMs: v.failureOrExpiryToLastPlannedHoldMs }])),
     liveMutations: report.liveMutations };
 }
+
+/** Shared inert harness: the same worlds, real health report, census and default-deny writer
+ * (scripts/rehearse-admission-lease.mjs reuses them rather than building a second policy). */
+export const harness = Object.freeze({ baselineWorld, validateLatest, cycle, deliver, observeHealth });
 
 export async function rehearseFastGateCutover({ projection } = {}) {
   projection ??= JSON.parse(readFileSync(new URL("./fixtures/main-merge-health-projection.json", import.meta.url), "utf8"));

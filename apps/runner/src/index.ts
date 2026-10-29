@@ -2816,6 +2816,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       );
       break;
     }
+    case "release_queue_hold": {
+      const { requestId, sessionId, holdId } = msg;
+      void sessions.releaseQueueHold(sessionId, holdId, msg.actor).then(
+        (result) => sendUp({ type: "release_queue_hold_result", requestId, sessionId, holdId, ...result }),
+        (error) => {
+          log(`releasing queue hold ${holdId} of ${sessionId} failed: ${errText(error)}`);
+          sendUp({
+            type: "release_queue_hold_result", requestId, sessionId, holdId, outcome: "refused", reason: "in_progress",
+          });
+        },
+      );
+      break;
+    }
     case "cancel_queued_prompt":
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;

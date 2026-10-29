@@ -17,12 +17,13 @@ const worker = (overrides = {}) => ({ id: 10, run_attempt: 1, run_number: 50, di
   run_started_at: at(1), updated_at: at(30), ...overrides });
 const jobs = () => REQUIRED.map((name, i) => ({ id: i + 1, name, run_id: 10, run_attempt: 1, head_sha: C,
   status: "completed", conclusion: "success", created_at: at(), started_at: at(1), completed_at: at(29),
-  steps: [...(i < 9 ? ["Verify Rolling Checkout"] : []), ...(i === 0 ? core : []),
+  steps: [...(i < 10 ? ["Verify Rolling Checkout"] : []), ...(i === 0 ? core : []),
     ...(i >= 1 && i <= 5 ? ["Remote-Instance Browser End-to-End Tests"] : []),
     ...(i === 1 ? ["Rendered Production Browser Smoke"] : []), ...(i === 6 ? ["WebKit Browser End-to-End Tests"] : []),
     ...(i === 7 ? ["Compare the Diff Against the Settings-Rows Paths"] : []),
     ...(i === 8 ? ["Compare Against the Committed win32 Baselines"] : []),
-    ...(i === 9 ? ["Require Every Job to Have Succeeded"] : [])].map((name, n) => ({ name, number: n + 1,
+    ...(i === 9 ? ["Verify Recorded-Boundary Pipeline Recovery"] : []),
+    ...(i === 10 ? ["Require Every Job to Have Succeeded"] : [])].map((name, n) => ({ name, number: n + 1,
       conclusion: "success", started_at: at(1), completed_at: at(2) })) }));
 
 function forge() {
@@ -105,6 +106,17 @@ test("missing, skipped, duplicate, cancelled and incomplete jobs cannot certify"
     assert.notEqual((await f.collect()).status, "certified", change);
   }
   assert.equal(fullTestStepsPassed(jobs()), true);
+});
+
+test("release certification requires delegated recovery execution even when its job reports success", () => {
+  for (const conclusion of [null, "skipped", "failure"]) {
+    const inventory = jobs();
+    const delegated = inventory.find((job) => job.name === "Full Validation / Delegated Pipeline Recovery");
+    assert.equal(delegated.conclusion, "success");
+    if (conclusion === null) delegated.steps = delegated.steps.filter((step) => step.name !== "Verify Recorded-Boundary Pipeline Recovery");
+    else delegated.steps.find((step) => step.name === "Verify Recorded-Boundary Pipeline Recovery").conclusion = conclusion;
+    assert.equal(fullTestStepsPassed(inventory), false, `test step ${conclusion} cannot satisfy the release proof`);
+  }
 });
 
 test("the release proof requires every core test step in authoritative health's coverage contract", () => {

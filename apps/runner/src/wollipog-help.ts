@@ -87,6 +87,7 @@ export function sessionHelp(): string {
     "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
     "  session stop <session-id> [--json]",
     "  session stop-job <session-id> <job-id> [--json]",
+    "  session release-hold <session-id> <hold-id> [--json]",
     "  session restart <session-id> [--json]",
     "  session archive <session-id> [--json]",
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",

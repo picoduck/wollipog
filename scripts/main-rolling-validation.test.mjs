@@ -114,6 +114,27 @@ test("only exact worker checkout proofs and every required job can certify the t
   assert.equal(rerun.metrics.consumedRunnerMinutes, null, "do not invent cost for copied rerun jobs");
 });
 
+test("delegated pipeline recovery must independently prove its exact rolling checkout", () => {
+  const name = "Full Validation / Delegated Pipeline Recovery";
+  assert.ok(REQUIRED.includes(name), "the new job must be directly required, not only transitively covered by the aggregator");
+  for (const conclusion of [null, "skipped", "failure"]) {
+    const sample = jobs();
+    const delegated = sample.find((job) => job.name === name);
+    delegated.steps = conclusion === null ? [] : [{ ...delegated.steps[0], conclusion }];
+    const result = record(run(), sample);
+    assert.equal(result.requiredOutcomes["Full Validation / Typecheck, Test & Sidecar Bundle"], "success");
+    assert.equal(result.checkoutVerified, false, `checkout ${conclusion} cannot certify the delegated job`);
+    assert.equal(result.verdict, "incomplete");
+  }
+  for (const conclusion of ["failure", "cancelled", "skipped"]) {
+    const sample = jobs();
+    sample.find((job) => job.name === name).conclusion = conclusion;
+    const result = record(run(), sample);
+    assert.equal(result.requiredOutcomes[name], conclusion);
+    assert.equal(result.verdict, "incomplete", "an otherwise green worker cannot hide delegated recovery's non-success");
+  }
+});
+
 test("burst/reordered wakes retain active execution and replace only pending intent", () => {
   let state = claimed();
   const active = run({ status: "in_progress", conclusion: null });
@@ -596,12 +617,12 @@ test("workflow security, exact checkout wiring and original gate contracts remai
   assert.match(controller, /group: main-rolling-state\n      cancel-in-progress: false/);
   assert.doesNotMatch(worker, /group: main-rolling-state/, "a queued controller must not evict pending worker admission");
   assert.match(worker, /name: Full Validation\n    permissions:\n      contents: read\n    uses: .\/.github\/workflows\/ci.yml/);
-  assert.equal((ci.match(/ref: \$\{\{ inputs.target_sha \}\}/g) ?? []).length, 4);
-  assert.equal((ci.match(/name: Verify Rolling Checkout/g) ?? []).length, 3);
+  assert.equal((ci.match(/ref: \$\{\{ inputs.target_sha \}\}/g) ?? []).length, 5);
+  assert.equal((ci.match(/name: Verify Rolling Checkout/g) ?? []).length, 4);
   assert.equal((windows.match(/name: Verify Rolling Checkout/g) ?? []).length, 2);
   assert.match(controller, /on:\n  push:\n    branches: \[main\]/, "main pushes retain the authoritative rolling controller");
   assert.match(ci, /  merge_group:/);
-  assert.match(ci, /    needs: \[checks, browser, win32, webkit, suite_plan, merge_group_gate\]/);
+  assert.match(ci, /    needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]/);
   assert.match(ci, /CI_EVIDENCE_HEAD: \$\{\{ inputs.target_sha \|\| github.event.pull_request.head.sha \|\| github.sha \}\}/);
   assert.match(ci, /--head "\$CI_EVIDENCE_HEAD"/);
 });

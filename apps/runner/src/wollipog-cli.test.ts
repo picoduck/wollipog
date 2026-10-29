@@ -931,6 +931,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     { argv: ["session", "wait", "s_child", "--for", "completed", "--timeout", "50"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "stop", "s_child"], method: "POST", path: "/api/sessions/s_child/stop" },
     { argv: ["session", "stop-job", "s_child", "monitor-1"], method: "POST", path: "/api/sessions/s_child/background-jobs/monitor-1/stop" },
+    { argv: ["session", "release-hold", "s_child", "worktree-rebind:5000"], method: "POST", path: "/api/sessions/s_child/queue-hold/release" },
     { argv: ["session", "steering", "s_child"], method: "GET", path: "/api/sessions/s_child/steering" },
     { argv: ["session", "steering-get", "s_child", "sub /1"], method: "GET", path: "/api/sessions/s_child/steering/sub%20%2F1" },
     { argv: ["session", "resolve-steering", "s_child", "sub /1", "queue_again"], method: "POST", path: "/api/sessions/s_child/steering/sub%20%2F1/resolve" },

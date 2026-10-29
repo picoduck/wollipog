@@ -21,7 +21,8 @@ import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, pa
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
 import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -5719,7 +5720,7 @@ export class ControlPlaneDb {
         full && !campaignAuthorityPreflight(policy.control, row.driver, runner?.protocolVersion).supported) {
       return { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." };
     }
-    const budget = this.campaignBudgets.view(campaignId);
+    const budget = this.campaignBudgets.governingRoot(campaignId) ? this.campaignBudgets.view(campaignId) : undefined;
     const profile = budget?.authority.controlledReview;
     if (profile && (!runner?.runtime?.campaignReview ||
         controlledReviewCapabilityKey(profile) !== controlledReviewCapabilityKey(runner.runtime.campaignReview)) ||
@@ -15791,6 +15792,20 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Issue slots consumed publications still hold, by recommendation, until a consumed scope decision
+   * admits their issue; `settling` names publications the scope change being decided admits. A
+   * pending grant is not counted: a boundary change revokes it in the same transaction. */
+  unsettledPublicationSlots(rootId: string, settling: readonly string[] = []): number {
+    const slots = new Set<string>();
+    for (const decision of this.campaignPublicationReservations(rootId)) {
+      const snapshot = decision.resourceSnapshot;
+      if (decision.status !== "consumed" || settling.includes(decision.occurrenceId) || snapshot.category !== "follow_up_issue_publication" ||
+          this.admittedCampaignPublicationIssue(rootId, decision.occurrenceId) !== null) continue;
+      slots.add(snapshot.recommendationId ?? decision.occurrenceId);
+    }
+    return slots.size;
+  }
+
   admittedCampaignPublicationIssue(rootId: string, publicationOccurrenceId: string): number | null {
     const row = this.stmt(`SELECT json_extract(proof.value, '$.issue') AS issue FROM workflow_decisions decision,
         json_each(decision.resource_snapshot, '$.verifiedPublications') proof
@@ -15837,6 +15852,17 @@ export class ControlPlaneDb {
         revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
         authorizedAt: agentSessionId ? policy.issueScope!.authorizedAt : now,
         ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) };
+      // A Human's approval is the authority for the scope it establishes (#2940): under Full Control
+      // the boundary is re-minted from that Human in this transaction, so the campaign never holds a
+      // scope its boundary does not name. A boundary stale for any other reason is not extended.
+      const reminted = !agentSessionId && boundary && this.boundaryTrailsHumanScope(root.id, policy)
+        ? remintCampaignBoundary(boundary, scope, userId, now) : null;
+      // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
+      // still reserves, as an explicit authorization's does.
+      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
+          this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > reminted.boundary.issueAuthority.maxIssues) {
+        this.db.exec("ROLLBACK"); return null;
+      }
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
         if (!memberPolicy) continue;
@@ -15846,8 +15872,17 @@ export class ControlPlaneDb {
         const memberScope = this.campaignSharesRepositoryWorkspace(root, member) ? scope : { ...scope, issueNumbers: [] };
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;
-        if (agentSessionId && memberPolicy.control?.mode === "full_control") memberPolicy.control.boundary.issueScopeRevision = scope.revision;
+        if (reminted && memberPolicy.control?.mode === "full_control") memberPolicy.control = structuredClone(reminted);
+        else if (agentSessionId && memberPolicy.control?.mode === "full_control") {
+          memberPolicy.control.boundary.issueScopeRevision = scope.revision;
+          // Evidence authority names the scope revision too; a stale copy invalidates the boundary.
+          if (memberPolicy.control.boundary.evidenceAuthority) memberPolicy.control.boundary.evidenceAuthority.issueScopeRevision = scope.revision;
+        }
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (reminted?.mode === "full_control" && Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(root.id, boundary!.revision).changes) !== 1) {
+        throw new Error("Campaign authority changed concurrently");
       }
       if (!this.resolveWorkflowDecision(occurrenceId, decision.authority, "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {
         throw new Error("Scope approval was resolved concurrently");
@@ -15859,6 +15894,81 @@ export class ControlPlaneDb {
       }
       this.db.exec("COMMIT");
       return this.workflowDecisionByOccurrence(occurrenceId);
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** Whether a Full Control campaign's boundary names its issue scope, or trails it only by scope
+   * revisions authenticated Humans approved (#2940): one consumed Human scope decision for each
+   * revision in order, the newest being the approval that wrote the current scope. A boundary stale
+   * for any other reason (a revoked or superseded policy, another repository, an Orchestrator
+   * disposition it never named) is not on this trail. */
+  private boundaryTrailsHumanScope(rootId: string, policy: OrchestratorCampaignPolicy): boolean {
+    const control = policy.control, scope = policy.issueScope;
+    if (control?.mode !== "full_control" || !scope || !validCampaignControl(control)) return false;
+    const boundary = control.boundary;
+    const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+    if (scope.revision === boundary.issueScopeRevision) return campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy });
+    if (scope.revision < boundary.issueScopeRevision || scope.disposition || parentControlPolicy?.revision !== boundary.revision ||
+        scope.repository.toLowerCase() !== boundary.repository.toLowerCase() || scope.authorizedAt < boundary.authorizedAt) return false;
+    for (let revision = boundary.issueScopeRevision; revision < scope.revision; revision++) {
+      const approval = this.stmt(`SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+          AND category='campaign_issue_scope' AND authority='human' AND status='consumed'
+          AND json_extract(resource_snapshot, '$.expectedRevision')=?`).all(rootId, rootId, revision) as Array<{ occurrence_id: string }>;
+      if (approval.length !== 1) return false;
+      if (revision !== scope.revision - 1) continue;
+      const newest = this.workflowDecisionByOccurrence(approval[0]!.occurrence_id);
+      const snapshot = newest?.resourceSnapshot;
+      if (snapshot?.category !== "campaign_issue_scope" || newest!.resolvedAt !== scope.authorizedAt ||
+          snapshot.repository.toLowerCase() !== scope.repository.toLowerCase() ||
+          JSON.stringify([...snapshot.before.filter((n) => !snapshot.removals.includes(n)), ...snapshot.additions].sort((a, b) => a - b)) !==
+            JSON.stringify(scope.issueNumbers)) return false;
+    }
+    return true;
+  }
+
+  /** The Human who can repair a boundary trailing their approved issue scope, if it is on that trail. */
+  humanScopeBoundaryRepairUser(rootId: string): string | null {
+    const policy = this.sessionOrchestratorPolicy(rootId);
+    const control = policy?.control, scope = policy?.issueScope;
+    return policy && control?.mode === "full_control" && scope && scope.revision !== control.boundary.issueScopeRevision &&
+      this.boundaryTrailsHumanScope(rootId, policy) ? scope.authorizedByUserId : null;
+  }
+
+  /** Repairs a campaign whose Human-approved issue scope its Full Control boundary does not name,
+   * as approvals made before #2940 left it. Only the Human whose approval wrote the current scope
+   * can repair it, and only from those approval records: the boundary is re-minted at that approval's
+   * own time, granting exactly the scope that Human approved. Like any boundary change, it revokes
+   * every unconsumed decision, which it returns. Idempotent: a current boundary is left alone. */
+  repairHumanScopeBoundary(rootId: string, userId: string, now: number): WorkflowDecisionView[] | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control, scope = policy?.issueScope;
+      const reminted = policy && control?.mode === "full_control" && scope && scope.revision !== control.boundary.issueScopeRevision &&
+        scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
+        ? remintCampaignBoundary(control.boundary, scope, userId, scope.authorizedAt) : null;
+      if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
+          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > reminted.boundary.issueAuthority.maxIssues) {
+        this.db.exec("ROLLBACK"); return null;
+      }
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, (control as Extract<CampaignControl, { mode: "full_control" }>).boundary.revision).changes) !== 1) {
+        throw new Error("Campaign authority changed concurrently");
+      }
+      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return revoked;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
@@ -15935,7 +16045,7 @@ export class ControlPlaneDb {
 
   createSession(input: NewSessionInput): SessionView {
     const budgetSource = input.reviewRequesterSessionId ?? input.parentSessionId;
-    const budgetRoot = budgetSource ? this.campaignBudgets.root(budgetSource) : null;
+    const budgetRoot = budgetSource ? this.campaignBudgets.governingRoot(budgetSource) : null;
     const budgetView = budgetRoot ? this.campaignBudgets.view(budgetRoot) : undefined;
     const userLimits = input.campaignBudgetUserLimits ?? { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls };
     const allocation = budgetRoot ? this.campaignBudgets.prepare(budgetRoot, input.id, { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls }) : null;
@@ -20275,6 +20385,18 @@ export class ControlPlaneDb {
 
   completeAutomationExpirationEffect(occurrenceId: string): void {
     this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
+  }
+
+  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates (#2940). */
+  consumedPullRequestMerges(sessionIds: readonly string[]): WorkflowDecisionView[] {
+    if (!sessionIds.length) return [];
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE category='pr_merge' AND status='consumed'
+         AND session_id IN (SELECT value FROM json_each(?))
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(JSON.stringify([...new Set(sessionIds)])) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
   }
 
   unconsumedWorkflowDecisionsForController(controllingSessionId: string): WorkflowDecisionView[] {
@@ -31504,6 +31626,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.startedAt } } : {}),
     ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
     ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
+    ...(value.canRelease === true ? { canRelease: true as const } : {}),
     ...(value.restartKeepsQueue === true ? { restartKeepsQueue: true as const } : {}),
   };
 }

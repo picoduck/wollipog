@@ -483,12 +483,12 @@ if (leaseRefusal) {
     ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
   };
 }
-// A v245 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
-if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 245);
+// A v248 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
+if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
 // A starting session waiting for its busy account (#3240): `lease-wait=<cause>` (or `busy`).
 const leaseWait = params.get("lease-wait");
 if (leaseWait) {
-  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 245);
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
   session.status = "starting";
   session.providerAccountId = "work-account";
   session.providerAccountLabel = "Work Account";
@@ -723,6 +723,11 @@ const client = {
   },
   prompt: async () => {
     document.body.dataset.composerAction = "send";
+    // A Full Control campaign whose authority is stale refuses the person's message (#2940).
+    if (params.get("prompt-refusal") === "campaign-authority") {
+      throw new ApiError("This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+        "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.", 409, "campaign_authority_stale");
+    }
     return { ...session, status: "running" as const };
   },
   cancelTurn: async () => {

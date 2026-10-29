@@ -1174,11 +1174,12 @@ test("revoking a campaign that waits for its first message restores Custom: no m
     const { id } = await firstMessageLaunch(f, server);
     const revoked = f.sessions.setCampaignControl(id, { mode: "custom" }, f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
     assert.equal(revoked.ok, true, revoked.error ?? "Revoke succeeded");
-    // Revoke stops the launch's allowance as it always has; the first-message wait no longer applies.
+    // Revoke stops the launch's allowance, and the campaign runs under Custom rules (#2940): its
+    // messages are admitted, but the first-message wait no longer applies, so none sets its scope.
+    assert.equal(f.db.campaignBudgets.view(id)!.state, "revoked");
     for (const sent of [await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 7"),
       await f.sessions.promptFromHuman(f.human, id, "Orchestrate issues 12 and 7")]) {
-      assert.equal(sent.ok, false);
-      assert.match(sent.error!, /allowance was revoked/u);
+      assert.equal(sent.ok, true, sent.error ?? "admitted under Custom");
     }
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(f.db.getSession(id)!.orchestratorPolicy!.control!.mode, "custom");

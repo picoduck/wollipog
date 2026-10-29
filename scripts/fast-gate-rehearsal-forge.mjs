@@ -33,6 +33,7 @@ const CORE = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Veri
 const STEPS = [CORE, ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
   ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
   ["Compare the Diff Against the Settings-Rows Paths"], ["Compare Against the Committed win32 Baselines"],
+  ["Verify Recorded-Boundary Pipeline Recovery"],
   ["Require Every Job to Have Succeeded"]];
 
 function jobs(run) {
@@ -50,7 +51,8 @@ export function inertForge({ start = START } = {}) {
   const genesis = { sha: sha("genesis"), parent: sha("pre-genesis"), tree: sha("tree:genesis"), landedAt: start - 7 * 24 * 60 * MINUTE, edition: 0, pull: null };
   // History may be seeded up to one day before the scenario epoch.
   const f = { clock: start - 24 * 60 * MINUTE, chain: [genesis], pulls: new Map(), groups: new Map(), runs: [], statuses: [], refs: new Map(),
-    objects: new Map(), dispatches: [], calls: 0, graphqlQueries: 0, stateWrites: 0, outage: false, nextRun: 7001, nextStatus: 1, sequence: 0 };
+    objects: new Map(), dispatches: [], calls: 0, graphqlQueries: 0, stateWrites: 0, outage: false, nextRun: 7001, nextStatus: 1, sequence: 0,
+    issues: [], nextComment: 9001 };
   const tip = () => f.chain.at(-1);
   const position = value => f.chain.findIndex(c => c.sha === value);
   const commitOf = value => f.chain.find(c => c.sha === value);
@@ -67,12 +69,22 @@ export function inertForge({ start = START } = {}) {
       total_commits: commits.length, commits: commits.map(c => ({ sha: c.sha, parents: [{ sha: c.parent }],
         commit: { committer: { date: iso(c.landedAt) } } })) };
   };
+  const admission = target => {
+    const latest = f.statuses.filter(s => s.targetSha === target && s.context === "Regression Admission").at(-1);
+    return latest ? [{ __typename: "StatusContext", context: latest.context, state: latest.state.toUpperCase() }] : [];
+  };
   const census = () => ({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: tip().sha } },
     pullRequests: { pageInfo: { hasNextPage: false }, nodes: [...f.pulls.values()].filter(p => p.state === "open").map(p => {
       const group = p.group && f.groups.get(p.group);
       // Like GitHub's baseRefOid, an open PR's base stays at its last sync, not the moving main tip.
       return { number: p.number, isDraft: p.draft, headRefOid: p.head, baseRefOid: p.base,
-        mergeQueueEntry: group ? { state: group.state, position: group.position, headCommit: { oid: group.sha },
+        mergeQueueEntry: group ? { state: group.state, position: group.position, headCommit: { oid: group.sha,
+          // The group's own required aggregator, as GitHub Actions (app 15368) reports it on that SHA.
+          statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [...group.required ? [{ __typename: "CheckRun",
+            name: "Typecheck, Test & Sidecar Bundle", status: group.required === "pending" ? "IN_PROGRESS" : "COMPLETED",
+            conclusion: group.required === "pending" ? null : group.required.toUpperCase(), checkSuite: { app: { databaseId: 15368 } } }] : [],
+            // The latest admission status on the group SHA, as the rollup reports it.
+            ...admission(group.sha)] } } },
           baseCommit: { oid: group.base } } : null };
     }) } } } });
   const read = (path, query) => {
@@ -126,7 +138,14 @@ export function inertForge({ start = START } = {}) {
         base: { ref: "main", sha: p.base, repo: { full_name: REPOSITORY } }, merge_commit_sha: p.mergeCommit ?? null,
         merged_at: p.mergedAt ? iso(p.mergedAt) : null };
     }
-    if (rest === "issues") return [];
+    // Only an explicitly opened fixture incident exists; it is listed exactly as Main CI Health reads it.
+    if (rest === "issues") return f.issues.filter(issue => issue.state === "open" && (!query.get("labels") ||
+      issue.labels.some(label => label.name === query.get("labels")))).map(({ comments: _c, ...issue }) => issue);
+    if ((m = /^issues\/(\d+)\/comments$/.exec(rest))) {
+      const issue = f.issues.find(item => item.number === Number(m[1])); if (!issue) throw notFound();
+      const size = Number(query.get("per_page") ?? 30), page = Number(query.get("page") ?? 1);
+      return issue.comments.slice((page - 1) * size, page * size);
+    }
     if (rest === "actions/workflows/main-rolling-validation.yml") return { path: WORKER, created_at: iso(start - 30 * 24 * 60 * MINUTE) };
     if ((m = /^actions\/workflows\/([a-z0-9.-]+)\/runs$/.exec(rest))) {
       if (m[1] !== "main-rolling-validation.yml") return { workflow_runs: [], total_count: 0 };
@@ -188,6 +207,13 @@ export function inertForge({ start = START } = {}) {
       return null;
     }
     if (!path.startsWith(ROOT + "/")) throw new Error("Inert forge serves only its fixture repository");
+    const comment = /^\/issues\/(\d+)\/comments$/.exec(path.slice(ROOT.length));
+    if (comment) {
+      const issue = f.issues.find(item => item.number === Number(comment[1])); if (!issue) throw notFound();
+      const record = { id: f.nextComment++, user: { login: "github-actions[bot]" }, body: body.body, created_at: iso(f.clock) };
+      issue.comments.push(record);
+      return { id: record.id, body: record.body };
+    }
     const status = /^\/statuses\/([a-f0-9]{40})$/.exec(path.slice(ROOT.length));
     if (status) {
       const record = { id: f.nextStatus++, targetSha: status[1], state: body.state, context: body.context, at: iso(f.clock) };
@@ -240,6 +266,17 @@ export function inertForge({ start = START } = {}) {
       return group;
     },
     rebase(number, base = tip().sha) { f.pulls.get(number).base = base; },
+    /** The group's required aggregator result on its own SHA: "pending", "success" or "failure". */
+    reportRequired(label, result) { f.groups.get(label).required = result; },
+    /** A Main CI Health incident, shaped as the trusted job opens it; comments are inert. */
+    openIncident(number = 4001, { runId = 1 } = {}) {
+      const issue = { number, title: "Main CI Is Failing", state: "open", user: { login: "github-actions[bot]" },
+        labels: [{ name: "main-ci-red" }], body: `<!-- main-ci-health latest:${runId} -->`, comments: [] };
+      f.issues.push(issue);
+      return issue;
+    },
+    /** A comment by someone else, for example a pasted marker. */
+    commentAs(number, login, body) { f.issues.find(item => item.number === number).comments.push({ id: f.nextComment++, user: { login }, body }); },
     seedRun(targetSha, { createdAt, startedAt, finishedAt, conclusion, claim = "00000000-0000-4000-8000-000000000000" }) {
       const run = createRun(targetSha, claim, createdAt);
       this.startRun(run, startedAt);

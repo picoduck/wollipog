@@ -134,6 +134,7 @@ import {
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
+  type CampaignPullRequestRef,
 } from "@wollipog/protocol";
 import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
@@ -1079,17 +1080,20 @@ const campaignForgeObserver = new CampaignForgeObserver({
 campaignForgeObserver.start();
 /** An on-demand read waits at most this long before the route answers with what is stored. */
 const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
+const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullRequestRef[]) => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
+  timer.unref?.();
+  void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
+    clearTimeout(timer);
+    resolve();
+  });
+});
+svc.campaignForgeRefresh = refreshCampaignForge;
+svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
 registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
-  refreshForge: (campaignId, refs) => new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
-    timer.unref?.();
-    void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  }),
+  refreshForge: refreshCampaignForge,
 });
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
@@ -1825,6 +1829,7 @@ app.register(async (instance) => {
       case "host_action_result":
       case "interrupt_turn_result":
       case "stop_background_job_result":
+      case "release_queue_hold_result":
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
@@ -5247,13 +5252,16 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
 );
 
 app.post("/api/sessions/:id/restart", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
   // #3240: `waitForProviderHome` asks the runner to wait for a busy provider account.
   const body = (req.body ?? {}) as { waitForProviderHome?: unknown };
   if (body.waitForProviderHome !== undefined && typeof body.waitForProviderHome !== "boolean") {
     return reply.code(400).send({ error: "waitForProviderHome must be a boolean" });
   }
-  return respond(reply, svc.restart((req.params as { id: string }).id,
-    body.waitForProviderHome ? { waitForProviderHome: true } : {}));
+  // A person restarting a Full Control campaign restores or explains its stale boundary (#2940).
+  const human = requestHuman(req);
+  return respond(reply, (human && svc.restoreHumanCampaignAuthority(human, id)) ??
+    svc.restart(id, body.waitForProviderHome ? { waitForProviderHome: true } : {}));
 });
 
 // #1780: end one managed background job without ending the session. The auth gate has already
@@ -5268,6 +5276,24 @@ app.post("/api/sessions/:id/background-jobs/:jobId/stop", async (req, reply) => 
   if (refusal) return reply.code(403).send({ error: refusal });
   if (!validParentControlCoordinate(jobId)) return reply.code(400).send({ error: "invalid background job id" });
   return respond(reply, await svc.stopBackgroundJob(id, jobId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
+});
+
+// #3752: release a worktree or provider-account handoff hold now (Proceed Now). It ends every
+// unfinished background job, so it takes exactly the authority of stopping one (#1780).
+app.post("/api/sessions/:id/queue-hold/release", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const session = db.getSession(id);
+  if (!principal || !session) return reply.code(404).send({ error: "session not found" });
+  const refusal = backgroundJobStopAuthorizationError(principal, session,
+    principal.kind === "human" && db.isSessionOwner(principal, id));
+  if (refusal) return reply.code(403).send({ error: refusal });
+  const body = req.body;
+  const holdId = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as { holdId?: unknown }).holdId
+    : undefined;
+  if (!validParentControlCoordinate(holdId)) return reply.code(400).send({ error: "holdId must be a non-empty hold id" });
+  return respond(reply, await svc.releaseQueueHold(id, holdId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
 });
 
 app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {

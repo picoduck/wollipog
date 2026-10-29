@@ -19,7 +19,7 @@ test("all seven #3637 AC2 flows are decided by delivered modules and match their
     assert.ok(flow.steps.every(s => /^main-|^release-certification/.test(s.decidedBy)), `${flow.id} names a deciding module for every step`);
     assert.ok(flow.gaps.length > 0, `${flow.id} discloses its limits`);
   }
-  assert.deepEqual(report.summary, { flows: 7, passed: 7, steps: 51 });
+  assert.deepEqual(report.summary, { flows: 7, passed: 7, steps: 52 });
 });
 
 test("measured virtual detection, hold and recovery times are reproducible", async () => {
@@ -27,7 +27,7 @@ test("measured virtual detection, hold and recovery times are reproducible", asy
   assert.equal(JSON.stringify(first), JSON.stringify(second), "the rehearsal is deterministic");
   const flows = byId(first);
   assert.deepEqual(flows["missed-failure"].times, { landingToFailedVerdictMs: 2_117_800, landingToHealthFailingObservedMs: 2_178_100,
-    failureToLastHoldReceiptMs: 70_700, exposureAdmissionsBeforeHold: 3, failureToReleaseReceiptMs: 4_059_600, landingToReleaseReceiptMs: 6_177_400 });
+    failureToLastHoldReceiptMs: 70_700, exposureAdmissionsBeforeHold: 2, failureToReleaseReceiptMs: 4_059_500, landingToReleaseReceiptMs: 6_177_300 });
   assert.deepEqual(flows["queued-entry-hold"].times, { failureToLastHoldReceiptMs: 67_500, lastPlannedBlockLatencyMs: 67_500, landingToFailedVerdictMs: 2_117_800 });
   assert.deepEqual(flows["validator-outage"].times, { firstHoldProbeAfterLandingMs: 7_200_000, workerStartToUnknownMs: 7_262_000 });
   assert.equal(flows["stale-backlogged-health"].times.firstAgeHoldProbeSeconds, 7_200);
@@ -49,16 +49,20 @@ test("call budgets stay inside the unchanged caps and every write stays in the i
   assert.equal(outage.calls, 1); assert.equal(outage.mutationCalls, 0, "an outage refuses before any status request");
   const backlog = flows["stale-backlogged-health"].callBudgets;
   assert.equal(backlog.maxHealthReportCalls, 57, "each unvalidated commit adds landing-evidence reads");
-  assert.deepEqual([backlog.backlogLimitCapacity.callsUsed, backlog.backlogLimitCapacity.writesAvailable], [55, 41],
-    "at the five-commit limit fewer than the #3633 45-target fan-out fits");
+  // The writer keeps a 10% reserve (10 of 96); the #3633 fan-out rehearsal delivers the rest next cycle.
+  assert.deepEqual([backlog.backlogLimitCapacity.callsUsed, backlog.backlogLimitCapacity.reserveCalls, backlog.backlogLimitCapacity.writesAvailable],
+    [55, 10, 31], "at the five-commit limit 31 holds fit per cycle");
 });
 
 test("delivered #3633 rehearsal is reused for hold fan-out and ordered rollback evidence", async () => {
   const reused = (await rehearseFastGateCutover()).delivered3633Rehearsal;
   assert.equal(reused.schema, "main-merge-admission-rehearsal-v1"); assert.equal(reused.liveMutations, 0);
   assert.equal(reused.phases.find(p => p.phase === "rollback-before-full-restoration").decision, "restore-full-queue-validation-first");
-  assert.equal(reused.fanout.batchedMeasuredCost46Targets.writes, 0);
-  assert.equal(reused.fanout.batchedMeasuredCost45Targets.calls, 96);
+  // Bounded multi-cycle delivery: the 46th target is held next cycle, and 10 calls always stay spare (#3633).
+  assert.deepEqual([reused.fanout.batchedMeasuredCost46Targets.cyclesToComplete, reused.fanout.batchedMeasuredCost46Targets.totalWrites], [2, 46]);
+  assert.deepEqual([reused.fanout.batchedMeasuredCost45Targets.calls, reused.fanout.batchedMeasuredCost45Targets.minHeadroomCalls], [86, 10]);
+  const backlogFanout = reused.fanout.backlogLimitCost45TargetsTwoHeldGroups;
+  assert.deepEqual([backlogFanout.cyclesToComplete, backlogFanout.groupHoldsInFirstCycle, backlogFanout.minHeadroomCalls], [2, 2, 10]);
 });
 
 test("inert forge serves only its fixture repository and refuses unknown mutations", async () => {

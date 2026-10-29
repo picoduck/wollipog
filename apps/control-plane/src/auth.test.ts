@@ -35,6 +35,7 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/orchestrator-campaign/follow-ups"],
     ["POST", "/api/sessions/:id/orchestrator-campaign/verify-child"],
     ["POST", "/api/sessions/:id/background-jobs/:jobId/stop"],
+    ["POST", "/api/sessions/:id/queue-hold/release"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), true, route);
   for (const [method, route] of [
     ["POST", "/api/runs"], ["POST", "/api/sessions/:id/approve"],
@@ -141,6 +142,7 @@ test("session-management REST access is method- and route-scoped to its publishe
     ["GET", "/api/sessions/:id/export"],
     ["GET", "/api/artifacts/:artifactId/export"],
     ["POST", "/api/sessions/:id/background-jobs/:jobId/stop"],
+    ["POST", "/api/sessions/:id/queue-hold/release"],
     ["GET", "/api/new-future-surface"],
   ] as const) {
     assert.equal(isAgentControlApiRouteAllowed(method, route), false, `${method} ${route}`);

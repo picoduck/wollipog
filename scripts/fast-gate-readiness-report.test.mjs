@@ -5,11 +5,13 @@ import { ADMISSION_CONTEXT, admissionEnforcement, REQUIRED_CONTEXT } from "./ci-
 import { ADMISSION_ISSUER_PLACEHOLDER, buildReadiness, holdKind, LIVE_SETTINGS, main, markdown, MEASUREMENTS, PROPOSAL,
   proposedRuleset, REPORT_PATH, RULESET_FIELDS, rulesetDrift } from "./fast-gate-readiness-report.mjs";
 import { rehearseFastGateRollback } from "./fast-gate-rollback.mjs";
+import { rehearseAdmissionLease } from "./rehearse-admission-lease.mjs";
 import { rehearseFastGateCutover } from "./rehearse-fast-gate-cutover.mjs";
 
 const live = JSON.parse(readFileSync(LIVE_SETTINGS, "utf8"));
 let shared;
-const inputs = async () => shared ??= { cutover: await rehearseFastGateCutover(), rollback: await rehearseFastGateRollback() };
+const inputs = async () => shared ??= { cutover: await rehearseFastGateCutover(), rollback: await rehearseFastGateRollback(),
+  lease: await rehearseAdmissionLease() };
 
 test("the committed dated report is exactly the generator's deterministic output, built without the network", async (t) => {
   const realFetch = globalThis.fetch;
@@ -38,22 +40,34 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     assert.equal(by[id].classification, "observation-gap", id);
   for (const id of ["detection-backlog-recovery", "status-writing-identity", "agents-md-active", "reconcile-2674"])
     assert.equal(by[id].classification, "approval-gap", id);
-  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "sticky-success", "escalation-delivery", "planrollback-run-level-proof"])
-    assert.equal(by[id].classification, "code-gap", id);
+  // Escalation delivery is met through the rehearsal's exactly-once step; configuring its target is an approval.
+  assert.deepEqual([by["escalation-delivery"].status, by["escalation-target"].classification], ["met", "approval-gap"]);
+  // #3633 bounded multi-cycle delivery, headroom and run-level proofs close these gaps through computed evidence.
+  for (const id of ["capacity-backlog-limit", "capacity-zero-headroom", "planrollback-run-level-proof"])
+    assert.equal(by[id].status, "met", id);
+  // #3633 just-in-time admission closes the sticky-success code gap; its race and availability remain.
+  assert.deepEqual([by["sticky-success"].classification, by["admission-landing-race"].classification,
+    by["admission-outage-availability"].classification], ["met", "observation-gap", "approval-gap"]);
   for (const flow of report.rehearsals.cutover.flows) assert.equal(by[`ac2-${flow.id}`].status, "met", flow.id);
   assert.deepEqual(Object.values(report.counts).reduce((a, b) => a + b, 0), report.criteria.length);
+  // Every code gap is closed by computed evidence, and the verdict names only what remains (#3783 review).
+  assert.equal(report.counts["code-gap"], 0);
+  assert.match(report.verdict, /^Not ready to activate: observation and approval gaps remain\./);
 });
 
 test("a failing rehearsal flow or rollback scenario is reported as a failing code gap, never met", async () => {
-  const { cutover, rollback } = await inputs();
+  const { cutover, rollback, lease } = await inputs();
   const broken = structuredClone(cutover);
   broken.flows[0].pass = false; broken.flows[0].steps[0].match = false;
+  broken.flows.find((flow) => flow.id === "exhausted-investigation-budget").steps
+    .find((step) => step.step === "each exhaustion reaches the open incident exactly once").match = false;
   const brokenRollback = structuredClone(rollback);
   brokenRollback.summary.pass = false;
   brokenRollback.scenarios[0].steps.find((step) => step.step === "every unverified, reduced, forged or foreign proof is refused").match = false;
-  const report = await buildReadiness({ cutover: broken, rollback: brokenRollback });
+  const brokenLease = structuredClone(lease); brokenLease.summary.pass = false;
+  const report = await buildReadiness({ cutover: broken, rollback: brokenRollback, lease: brokenLease });
   const by = Object.fromEntries(report.criteria.map((row) => [row.id, row]));
-  for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal"]) {
+  for (const id of [`ac2-${broken.flows[0].id}`, "rollback-triggers", "restore-before-hold-removal", "sticky-success", "escalation-delivery"]) {
     assert.equal(by[id].classification, "code-gap", id); assert.equal(by[id].status, "failing", id);
   }
 });
@@ -61,8 +75,12 @@ test("a failing rehearsal flow or rollback scenario is reported as a failing cod
 test("capacity findings are computed from the delivered rehearsals", async () => {
   const { capacity } = await buildReadiness(await inputs());
   assert.deepEqual(capacity.healthReportCallsByBacklog.map((row) => [row.backlog, row.calls]), [[1, 35], [2, 42], [3, 47], [4, 52], [5, 57]]);
-  assert.deepEqual([capacity.backlogLimitWriterCallsUsed, capacity.backlogLimitWritesAvailable, capacity.fanoutTargetsFitted], [55, 41, 45]);
-  assert.deepEqual([capacity.batched45Calls, capacity.callCap, capacity.batched46Writes], [96, 96, 0], "#3711: zero headroom");
+  // #3633: a 10-call reserve per cycle, the rest delivered next cycle from durable progress.
+  assert.deepEqual([capacity.backlogLimitWriterCallsUsed, capacity.backlogLimitReserveCalls, capacity.backlogLimitWritesAvailable,
+    capacity.fanoutTargetsFitted], [55, 10, 31, 45]);
+  assert.deepEqual([capacity.backlogLimitFanout.cyclesToComplete, capacity.backlogLimitFanout.groupHoldsInFirstCycle], [2, 2]);
+  assert.deepEqual([capacity.batched45.calls, capacity.callCap, capacity.batched46.cyclesToComplete], [86, 96, 2]);
+  assert.ok(capacity.minHeadroomFraction >= 0.1, "every cycle keeps at least 10% of its cap spare");
   assert.ok(capacity.rehearsalHolds.baseMovedOnly > 0 && capacity.rehearsalHolds.healthOrPolicy > 0);
 });
 

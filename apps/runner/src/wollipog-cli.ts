@@ -767,6 +767,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2] && words[3]
         ? { tool: "stop_background_job", input: { sessionId: words[2], jobId: words[3] } }
         : { error: "session stop-job requires a session id and a job id" };
+    case "release-hold":
+      return words[2] && words[3]
+        ? { tool: "release_queue_hold", input: { sessionId: words[2], holdId: words[3] } }
+        : { error: "session release-hold requires a session id and a hold id" };
     case "restart":
       return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
     case "archive":

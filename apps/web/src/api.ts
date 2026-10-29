@@ -5,6 +5,7 @@ import type {
   CampaignWorkItemsPage,
   AddBoxRequest,
   BackgroundJobStopResponse,
+  QueueHoldReleaseResponse,
   SessionWorktreeCreateOperationSummary,
   SessionWorktreeCreateOperationView,
   AccessScopeChangePreview,
@@ -1230,6 +1231,14 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/background-jobs/${encodeURIComponent(jobId)}/stop`,
       { method: "POST" },
     ),
+
+  /** Proceed Now (#3752): end the work a worktree or account handoff hold waits on, then run the
+   * queued prompts. `holdId` is the hold the person confirmed; the server refuses any other. */
+  releaseQueueHold: (id: string, holdId: string) =>
+    req<QueueHoldReleaseResponse>(`/api/sessions/${encodeURIComponent(id)}/queue-hold/release`, {
+      method: "POST",
+      body: JSON.stringify({ holdId }),
+    }),
 
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {

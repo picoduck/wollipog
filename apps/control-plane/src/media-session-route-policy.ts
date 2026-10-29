@@ -11,5 +11,5 @@ export function mediaReviewerApiRouteAllowed(method: string, routePath: string):
 export function mediaSessionMutationAllowed(method: string, routePath: string): boolean {
   return ["GET", "HEAD", "OPTIONS"].includes(method) || mediaReviewerApiRouteAllowed(method, routePath) ||
     method === "POST" && ["/api/sessions/:id/stop", "/api/sessions/:id/archive",
-      "/api/sessions/:id/background-jobs/:jobId/stop"].includes(routePath);
+      "/api/sessions/:id/background-jobs/:jobId/stop", "/api/sessions/:id/queue-hold/release"].includes(routePath);
 }

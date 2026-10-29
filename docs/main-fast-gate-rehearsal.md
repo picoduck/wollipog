@@ -54,21 +54,22 @@ JSON as is.
 
 | Flow | Deciding Modules | Outcome (Virtual Time) |
 | --- | --- | --- |
-| Missed failure | health, rolling, controller, automation, investigation, repair, candidates | The fast gate admits the regression. Its worker fails **35.30 min** after landing. Holds are delivered **70.7 s** after the verdict. **3** exposure-window admissions are withdrawn. The exact revert is the only exception. Release comes **67.66 min** after the failure. |
-| Validator outage | admission, health, rolling, controller | A stalled worker admits until **120 min** of lag, then holds. Health turns unknown (`validation-stalled`) and the scheduler reports `stalled-active-run`. A health-observer outage or crash is an explicit hold. The writer refuses with **0** writes, so **2** earlier successes stay sticky. |
-| Exhausted investigation budget | automation, investigation, controller | Exhausted delivery attempts and elapsed time give `*-exhausted-operator-required` with zero deliveries. Re-planning stays blocked, holds remain, and the helper budget refuses extra work before running it. |
+| Missed failure | health, rolling, controller, automation, investigation, repair, candidates | The fast gate admits the regression. Its worker fails **35.30 min** after landing. Holds are delivered **70.7 s** after the verdict. **2** exposure-window admissions (ready PR heads) are withdrawn; the queued innocent group never received a success while its checks ran. The exact revert is the only exception. Release comes **67.66 min** after the failure. |
+| Validator outage | admission, health, rolling, controller | A stalled worker admits until **120 min** of lag, then holds. Health turns unknown (`validation-stalled`) and the scheduler reports `stalled-active-run`. A health-observer outage or crash is an explicit hold. The writer refuses with **0** writes, so **2** earlier PR-head successes stay; they only gate enqueueing. |
+| Exhausted investigation budget | automation, investigation, controller | Exhausted delivery attempts and elapsed time give `*-exhausted-operator-required` with zero deliveries. Re-planning stays blocked, holds remain, and the helper budget refuses extra work before running it. Each exhaustion reaches the open incident as exactly one marked comment; a repeat finds the marker. |
 | Stale or backlogged health | admission, health, rolling, controller | Commits 1–4 admit and the 5th unvalidated commit holds. Every ready PR opened before a landing holds as `base-moved`. At 7,195 s the decision is eligible; at 7,200 s it holds, with a planned block 3.6 s later. Health reports stale only after strictly two hours. |
-| Queued-entry hold | controller, admission | One ready PR, a queued group and a stacked two-PR group (6 targets). All are held **67.5 s** after the failure. All **5** earlier successes are withdrawn by exact-SHA failures. The stacked group holds `base-moved` even while healthy. |
+| Queued-entry hold | controller, admission | One ready PR, a queued group and a stacked two-PR group (6 targets). All are held **67.5 s** after the failure. All **5** earlier successes, including the ready queue-head group's just-in-time success, are withdrawn by exact-SHA failures. The stacked group holds `base-moved` with no write while healthy, so it is not ejected. |
 | Exact-head repair | controller, repair | Only the exact single-PR group is eligible. Refusals: changed head, base or group, a batched group, a stale failure set, an expired grant, unverified fast checks, an expired observation, a mismatched squash tree, and a competing repair during reconciliation. |
 | Exact-candidate release | rolling, candidates, certification | A skipped intermediate SHA reads `missing`, and its receipt certifies `none`. The candidate is dispatched only after main is validated and the 60-minute cooldown has passed: `pending`, then `certified`, **95.32 min** after the request. Off-main, failed and changed-suite candidates are refused. |
 
 Call budgets stay inside the unchanged 48/96-call caps and the 60% REST floor.
 A health report costs 35 calls at one unvalidated commit and **57 calls** at
 five, because each commit adds landing-evidence reads. At the five-commit hold,
-the writer's shared budget has used 55 calls, leaving **41** status writes. That
-is fewer than the 45-target fan-out the #3633 rehearsal fits, so a full queue
-at the backlog limit would refuse with zero writes. This is fixture call cost;
-GitHub's per-commit cost still needs observation.
+the writer's shared budget has used 55 calls. After its 10-call reserve, **31**
+holds fit per cycle, and the rest follow on the next cycle
+([bounded multi-cycle delivery](main-merge-recovery.md#slice-5-bounded-multi-cycle-delivery)):
+a 45-target set is held in two cycles, with groups holding a success first. This is
+fixture call cost; GitHub's per-commit cost still needs observation.
 
 ## What It Proves and What It Does Not
 
@@ -97,13 +98,17 @@ through. Wall-clock callers are unchanged.
 **Open activation gaps (not fixed here).** These cannot be resolved in fixture
 code:
 
-- **Sticky success.** During a forge or controller outage the writer refuses
-  with zero writes, so an earlier success status stays sticky. GitHub can still
-  land an already-green group (the documented forge race). A fail-closed lease,
-  or keeping full queue validation, must cover this before cutover.
-- **Escalation delivery.** Exhausted escalation is an operator-required status
-  plus the open Main CI Health incident. Getting that escalation to a human is
-  outside these modules.
+- **Sticky success (addressed for merge groups).** A group's success is now
+  written just in time, after its own aggregator and only at the queue head, and
+  an outage before that leaves no success
+  ([fail-closed group admission](main-merge-admission.md#fail-closed-group-admission)).
+  The race between that write and GitHub's landing remains, bounded by
+  observation and cycle age plus GitHub's unmeasured landing latency.
+- **Escalation delivery (addressed, disabled by default).** Exhausted escalation
+  is delivered as one marked comment on the open Main CI Health incident, mentioning
+  `MAIN_REGRESSION_ESCALATION_MENTION`
+  ([escalation delivery](main-regression-automation.md#escalation-delivery)). It runs
+  on Main CI Health's next invocation and cannot prove a human read it.
 - **Exposure window.** Work admitted between landing and the failed verdict
   (35 min here) lands on a broken main and depends on repair.
 - **Ready-PR `base-moved` holds.** On GitHub, `baseRefOid` stays at an open
