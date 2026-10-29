@@ -765,8 +765,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      sentence is unchanged. The control plane passes only a known code through and puts
 //      `unrecognized` in place of any other, and dashboards fall back to matching the sentence only
 //      when the code is absent (an older runner or control plane).
-// 245: retire native review jobs; new runners require the retirement-aware control plane (#3371).
-export const PROTOCOL_VERSION = 245;
+// 246: retire native review jobs; new runners require the retirement-aware control plane (#3371).
+export const PROTOCOL_VERSION = 246;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1085,7 +1085,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   mergeReviewEvidence: 243,
-  reviewSessionOnly: 245,
+  reviewSessionOnly: 246,
   agentAutomationCreation: 236,
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
