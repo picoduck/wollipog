@@ -45,8 +45,14 @@ All must hold before step 1. The readiness report tracks each one.
    natural shadow traffic (shipped bound today: none), plus an accepted forge race.
 3. **Prerequisite windows.** #3628/#3629 long-window comparisons complete;
    #3634 investigation activation approved; #3630 either measured or left off.
+   #3629's denominator is one policy cohort `(suiteVersion, policyVersion, policyId)`
+   from the `2026-11-02T00:00:00Z` [cohort-key cutover](ci-suites.md#cohort-keys-and-cutover)
+   (#3786). It is not one `suiteId`, which changed on nearly every merge. Earlier
+   `suiteId/policyId` cohorts stay separate and never count toward it. Inventory and
+   contract drift inside the cohort is reviewed from its compatibility section.
 4. **Coordination.** No other CI measurement window (#2674, #3629, #3630) is open,
-   or its boundary is recorded so cohorts stay separable.
+   or its boundary is recorded so cohorts stay separable. #3629's cutover is such a
+   recorded boundary.
 
 ## Thresholds to Approve
 

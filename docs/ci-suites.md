@@ -131,8 +131,9 @@ Every `ci-selection-v1` record includes `suiteVersion`, `policyVersion`, `policy
 (trusted policy/selector/profile content), `suiteId` (group contract, allowlists,
 tested workflow/config/command inputs and test inventory), `inventoryId` (test paths/blobs/groups),
 tested revision, counts, fast/selected/deferred hashed file identities, reasons and
-`certification: none`. Changed contracts cannot reuse the same cohort; inventory
-and tested revisions remain available for compatibility review. Human-readable
+`certification: none`. Changed selection policy cannot reuse the same cohort; inventory,
+contract-input and tested revisions remain per-sample compatibility evidence (see
+[cohort keys](#cohort-keys-and-cutover)). Human-readable
 file paths stay in the local inventory, not the shadow marker.
 The record's `inventoryDomain: node-and-development-chromium` makes its file
 counts explicit: production/WebKit selections are always mandatory, are
@@ -190,11 +191,39 @@ failure prevents Node tests. Observed failures and miss candidates remain visibl
 while unknown subset outcomes are `unmeasured`, `eligible` is false and those
 observations never inflate the 30-change/five-working-day denominator.
 
-Cohorts separate exact suite/policy identities. They count distinct identified PRs
-conservatively (unidentified merge-group snapshots do not inflate the change
-denominator), distinct sampled UTC working dates, and misses. Even a cohort with
-30 changes across five working dates is not auto-certified. Investigate every
-miss and exclusion and review compatibility before any readiness decision.
+### Cohort Keys and Cutover
+
+Cohorts count distinct identified PRs conservatively (unidentified merge-group
+snapshots do not inflate the change denominator), distinct sampled UTC working
+dates, and misses. Even a cohort with 30 changes across five working dates is not
+auto-certified. Investigate every miss and exclusion, and review compatibility
+(including the cohort's contract drift), before any readiness decision.
+
+Cohort keys changed prospectively (#3786) at the documented cutover
+`2026-11-02T00:00:00Z` (`COHORT_KEY_CUTOVER` in the report). The first commit that uses
+it is the squash merge of #3795. The cutover follows that merge, so no sample recorded
+before the change existed is relabelled. Each sample's side is decided by its run's
+`createdAt`. A report never puts samples from both sides into one cohort: each cohort
+names its `cohortKeying`.
+
+| Samples | Cohort key | Why |
+| --- | --- | --- |
+| Before the cutover | `suiteId/policyId`, unchanged | Recorded cohorts stay readable and reportable under their original key. They are never relabelled or merged into later cohorts. |
+| From the cutover | `(suiteVersion, policyVersion, policyId)` | `suiteId` hashes the whole test inventory and every CI contract input. Across 170 successful merge-group trees (2026-10-20 to 2026-10-28) it took 158 distinct values, with a longest shared run of 4 groups, so a 30-change cohort could not form. `policyId` changes only with the trusted policy, selector or Node profile. |
+
+Every sample still carries `suiteId` and `inventoryId`, plus `fileIdentitySetId`: a
+digest of its selected and deferred hashed file identities. Each policy cohort's
+`compatibility` section reports contract drift without splitting the denominator:
+
+- distinct `suiteId` and `inventoryId` counts;
+- the number of transitions in each between chronologically consecutive samples;
+- every sample whose selected or deferred file identities changed from the previous sample,
+  with both identities and inventory counts.
+
+A test edit changes `suiteId` and `inventoryId`. An added, removed or renamed test also
+changes the file identities. The compatibility reviewer decides whether a drifted sample
+still belongs in the comparison. Drift neither certifies a sample nor silently drops it.
+Report output is `version: 2` with a `cohortKeyCutover` record.
 
 ## Evidence and Remaining Comparison
 
