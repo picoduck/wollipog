@@ -68,12 +68,22 @@ export function inertForge({ start = START } = {}) {
       total_commits: commits.length, commits: commits.map(c => ({ sha: c.sha, parents: [{ sha: c.parent }],
         commit: { committer: { date: iso(c.landedAt) } } })) };
   };
+  const admission = target => {
+    const latest = f.statuses.filter(s => s.targetSha === target && s.context === "Regression Admission").at(-1);
+    return latest ? [{ __typename: "StatusContext", context: latest.context, state: latest.state.toUpperCase() }] : [];
+  };
   const census = () => ({ data: { repository: { defaultBranchRef: { name: "main", target: { oid: tip().sha } },
     pullRequests: { pageInfo: { hasNextPage: false }, nodes: [...f.pulls.values()].filter(p => p.state === "open").map(p => {
       const group = p.group && f.groups.get(p.group);
       // Like GitHub's baseRefOid, an open PR's base stays at its last sync, not the moving main tip.
       return { number: p.number, isDraft: p.draft, headRefOid: p.head, baseRefOid: p.base,
-        mergeQueueEntry: group ? { state: group.state, position: group.position, headCommit: { oid: group.sha },
+        mergeQueueEntry: group ? { state: group.state, position: group.position, headCommit: { oid: group.sha,
+          // The group's own required aggregator, as GitHub Actions (app 15368) reports it on that SHA.
+          statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [...group.required ? [{ __typename: "CheckRun",
+            name: "Typecheck, Test & Sidecar Bundle", status: group.required === "pending" ? "IN_PROGRESS" : "COMPLETED",
+            conclusion: group.required === "pending" ? null : group.required.toUpperCase(), checkSuite: { app: { databaseId: 15368 } } }] : [],
+            // The latest admission status on the group SHA, as the rollup reports it.
+            ...admission(group.sha)] } } },
           baseCommit: { oid: group.base } } : null };
     }) } } } });
   const read = (path, query) => {
@@ -241,6 +251,8 @@ export function inertForge({ start = START } = {}) {
       return group;
     },
     rebase(number, base = tip().sha) { f.pulls.get(number).base = base; },
+    /** The group's required aggregator result on its own SHA: "pending", "success" or "failure". */
+    reportRequired(label, result) { f.groups.get(label).required = result; },
     seedRun(targetSha, { createdAt, startedAt, finishedAt, conclusion, claim = "00000000-0000-4000-8000-000000000000" }) {
       const run = createRun(targetSha, claim, createdAt);
       this.startRun(run, startedAt);
