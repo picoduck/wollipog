@@ -233,8 +233,12 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
 
   const counts = Object.fromEntries(["met", "observation-gap", "approval-gap", "code-gap"]
     .map((kind) => [kind, criteria.filter((row) => row.classification === kind).length]));
+  // The verdict names only the gap kinds that actually remain (#3783 review).
+  const open = [["observation-gap", "observation"], ["approval-gap", "approval"], ["code-gap", "code"]]
+    .filter(([kind]) => counts[kind] > 0).map(([, label]) => label);
+  const openGaps = open.length > 1 ? `${open.slice(0, -1).join(", ")} and ${open.at(-1)} gaps remain` : open.length ? `${open[0]} gaps remain` : "no gap is open in this report, but every approval must still be recorded";
   return { schema: SCHEMA, issue: "#3637 AC1", date: REPORT_DATE, activationReady: false, liveMutations: 0,
-    verdict: "Not ready to activate: observation, approval and code gaps remain. Insufficient data is reported as incomplete, never as passing.",
+    verdict: `Not ready to activate: ${openGaps}. Insufficient data is reported as incomplete, never as passing.`,
     counts, criteria, gate, ruleset: { id: RULESET_ID, put: ruleset }, capacity, baseline,
     live: { observedAt: live.observedAt, rulesetRereadAt: live.rulesetRereadAt ?? null, method: live.method, repositoryVariableNames: live.repositoryVariableNames, gateVariables: live.gateVariables,
       requiredStatusChecks: liveRequired, mergeQueue: queue, bypassActors: live.ruleset.bypass_actors },

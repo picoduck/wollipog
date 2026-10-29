@@ -7,9 +7,9 @@ below is a separate human operator action; agents do not perform them.
 
 Current state and evidence are in the generated
 [readiness report](fast-gate-readiness-2026-10-28.md). Its verdict today is **not
-ready**: code, observation and approval gaps remain. Do not start step 1 until a
-report regenerated at the activation revision shows no open code gap and every
-approval below has been recorded.
+ready**: observation and approval gaps remain, and every code gap is closed by
+computed evidence. Do not start step 1 until a report regenerated at the activation
+revision shows no open code gap and every approval below has been recorded.
 
 ## What Approval Would Change
 
@@ -296,9 +296,11 @@ returns `operator-hold-removal-approval-required` and a `fullQueueProofDigest`. 
 approval bound to that digest (`--approval`) yields `operator-hold-removal-planned`.
 
 Use only the verifier's own output as the proof, written by the command above.
-#3633's `planRollback` checks only the proof's top-level fields, and no offline check
-can detect a proof that was edited by hand consistently. This is a known code gap in the
-[readiness report](fast-gate-readiness-2026-10-28.md).
+#3633's `planRollback` checks run-level certification itself, so a proof whose
+top-level fields were edited while its runs stayed uncertified is refused. No offline
+check can detect a proof that was edited by hand consistently, so take the proof only
+from the verifier (see `planrollback-run-level-proof` in the
+[readiness report](fast-gate-readiness-2026-10-28.md)).
 
 Removing the admission context afterwards is a separate manual operation: PUT the
 ruleset without the `Regression Admission` entry and read it back, delete

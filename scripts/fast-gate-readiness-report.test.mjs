@@ -50,6 +50,9 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     by["admission-outage-availability"].classification], ["met", "observation-gap", "approval-gap"]);
   for (const flow of report.rehearsals.cutover.flows) assert.equal(by[`ac2-${flow.id}`].status, "met", flow.id);
   assert.deepEqual(Object.values(report.counts).reduce((a, b) => a + b, 0), report.criteria.length);
+  // Every code gap is closed by computed evidence, and the verdict names only what remains (#3783 review).
+  assert.equal(report.counts["code-gap"], 0);
+  assert.match(report.verdict, /^Not ready to activate: observation and approval gaps remain\./);
 });
 
 test("a failing rehearsal flow or rollback scenario is reported as a failing code gap, never met", async () => {
