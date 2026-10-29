@@ -24,7 +24,8 @@ const jobSteps = [core,
   ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
   ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]),
   ["WebKit Browser End-to-End Tests"], ["Compare the Diff Against the Settings-Rows Paths"],
-  ["Compare Against the Committed win32 Baselines"], ["Require Every Job to Have Succeeded"]];
+  ["Compare Against the Committed win32 Baselines"], ["Verify Recorded-Boundary Pipeline Recovery"],
+  ["Require Every Job to Have Succeeded"]];
 const jobs = (isLegacy = false) => REQUIRED.map((name, index) => ({ id: index + 1,
   name: isLegacy ? name.replace(/^Full Validation \/ /, "") : name, status: "completed", conclusion: "success",
   steps: ["Verify Rolling Checkout", ...jobSteps[index]].map((name) => ({ name, conclusion: "success" })) }));
@@ -135,6 +136,21 @@ test("complete full evidence certifies tested target, separately from dispatch h
   assert.equal(delayed.latestPassingSnapshot.testedSha, A);
   assert.equal(delayed.latestPassingSnapshot.dispatcherSha, B);
   assert.equal(delayed.fullCertification, null, "dispatch head never becomes the tested snapshot");
+});
+
+test("a green delegated recovery job needs both checkout and executed-test evidence to certify health", async () => {
+  for (const [name, conclusion] of [["Verify Rolling Checkout", "skipped"],
+    ["Verify Recorded-Boundary Pipeline Recovery", "skipped"], ["Verify Recorded-Boundary Pipeline Recovery", null]]) {
+    const f = forge();
+    const inventory = jobs();
+    const delegated = inventory.find((job) => job.name === "Full Validation / Delegated Pipeline Recovery");
+    assert.ok(delegated.steps.some((step) => step.name === name));
+    if (conclusion === null) delegated.steps = delegated.steps.filter((step) => step.name !== name);
+    else delegated.steps.find((step) => step.name === name).conclusion = conclusion;
+    f.data.jobSets.set("10:1", inventory);
+    const result = await f.collect();
+    assert.equal(result.status, "unknown", `${name}/${conclusion} cannot be replaced by the job's green conclusion`);
+  }
 });
 
 test("idle caught-up main stays fresh; freshness starts at oldest unvalidated commit", async () => {

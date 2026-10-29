@@ -26,6 +26,7 @@ export const REQUIRED = [
   "Full Validation / WebKit End-to-End Tests",
   "Full Validation / Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
   "Full Validation / Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines",
+  "Full Validation / Delegated Pipeline Recovery",
   "Full Validation / Typecheck, Test & Sidecar Bundle",
 ];
 const CHECKOUT_JOBS = REQUIRED.filter((name) => !name.endsWith("Typecheck, Test & Sidecar Bundle"));

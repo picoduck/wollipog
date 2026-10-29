@@ -389,6 +389,70 @@ jobs:
       - name: Validate Control-Plane Bundle
         run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
 
+  delegated_pipeline:
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    needs: suite_plan
+    name: Delegated Pipeline Recovery
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup Node 24
+        id: setup_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Retry Setup Node 24
+        if: ${{ !cancelled() && steps.setup_node_24.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify Recorded-Boundary Pipeline Recovery
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          set -euo pipefail
+          pipeline_root="$(mktemp -d "$RUNNER_TEMP/wollipog-pipeline.XXXXXX")"
+          trap 'rm -rf "$pipeline_root"' EXIT
+          mkdir -p "$pipeline_root/home" "$pipeline_root/tmp" "$pipeline_root/cache" "$pipeline_root/data" "$pipeline_root/config"
+          # The ordinary test user owns this transient delegation; no persistent unit changes.
+          # Keep only the five recovery stories here. Ordinary unit CI retains marker refusals.
+          sudo systemd-run --wait --collect --pipe \
+            --property=Delegate=yes --property=RuntimeMaxSec=420 --property=TimeoutStopSec=5 \
+            --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
+            /usr/bin/env -i PATH="$PATH" HOME="$pipeline_root/home" TMPDIR="$pipeline_root/tmp" \
+            XDG_CACHE_HOME="$pipeline_root/cache" XDG_DATA_HOME="$pipeline_root/data" \
+            XDG_CONFIG_HOME="$pipeline_root/config" RUNNER_DATA_DIR="$pipeline_root/data" \
+            NO_COLOR=1 WOLLIPOG_TEST_REQUIRE_CGROUP=1 \
+            "$(command -v node)" --import tsx --test --test-concurrency=1 --test-timeout=150000 \
+            --test-reporter=tap --test-name-pattern='provider-HOME pipeline (refuses handoff|recovery)' \
+            apps/runner/src/control-plane-runner-pipeline.integration.test.ts | tee "$pipeline_root/results.tap"
+          # A renamed test or empty filter must fail admission, not report a green zero-test run.
+          python3 - "$pipeline_root/results.tap" <<'PY'
+          import pathlib, re, sys
+          output = pathlib.Path(sys.argv[1]).read_text()
+          expected = {"tests": 5, "pass": 5, "fail": 0, "cancelled": 0, "skipped": 0, "todo": 0}
+          for label, count in expected.items():
+              actual = re.findall(rf"^# {label} (\d+)$", output, re.MULTILINE)
+              if actual != [str(count)]:
+                  raise SystemExit(f"Delegated recovery requires {label}={count}, received {actual}")
+          print("delegatedRecoveryPass=5; skipped=0; todo=0; fail=0")
+          PY
+
   browser:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
     needs: [suite_plan, merge_group_gate]
@@ -947,7 +1011,7 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [checks, browser, win32, webkit, suite_plan, merge_group_gate]
+    needs: [checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
@@ -963,6 +1027,7 @@ jobs:
           BROWSER_RESULT: ${{ needs.browser.result }}
           WIN32_RESULT: ${{ needs.win32.result }}
           WEBKIT_RESULT: ${{ needs.webkit.result }}
+          DELEGATED_PIPELINE_RESULT: ${{ needs.delegated_pipeline.result }}
         run: |
           status=0
           report() {
@@ -1000,4 +1065,5 @@ jobs:
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
           report "Settings-Rows win32 Baselines" "$WIN32_RESULT"
           report "WebKit End-to-End Tests" "$WEBKIT_RESULT"
+          report "Delegated Pipeline Recovery" "$DELEGATED_PIPELINE_RESULT"
           exit "$status"

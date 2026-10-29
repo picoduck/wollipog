@@ -163,6 +163,7 @@ export const REHEARSAL_THRESHOLDS = Object.freeze({ ...PROPOSED_THRESHOLDS, appr
   approval: "Inert rehearsal fixture; not a human approval of these values" });
 
 const STEP_NAMES = (name) => name === "Typecheck, Unit Tests & Bundles" ? CHECK_STEPS
+  : name === "Delegated Pipeline Recovery" ? ["Verify Recorded-Boundary Pipeline Recovery"]
   : /^Browser End-to-End Tests \(1\)$/.test(name) ? ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"]
     : /^Browser End-to-End Tests/.test(name) ? ["Remote-Instance Browser End-to-End Tests"]
       : name === "WebKit End-to-End Tests" ? ["WebKit Browser End-to-End Tests"]

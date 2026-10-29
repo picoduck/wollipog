@@ -112,6 +112,20 @@ test("routing is sequential execution and advisory shadow work cannot become a r
   assert.equal(nested.criticalExecutionMinutes, 14, "Windows remains independent of routing");
 });
 
+test("delegated pipeline recovery includes its successful or skipped routing dependency on the critical path", () => {
+  for (const skipped of [false, true]) {
+    const metrics = runMetrics(run(11, 1, 14), [
+      job("PR Suite Routing", 0, 1, 4, skipped ? "skipped" : "success"),
+      job("Browser End-to-End Tests (1)", 4, 4, 9),
+      job("Delegated Pipeline Recovery", 4, 6, 12),
+      job(AGGREGATOR, 12, 13, 14),
+    ]);
+    assert.equal(metrics.criticalExecutionMinutes, skipped ? 7 : 10);
+    assert.equal(metrics.criticalWaitMinutes, skipped ? 7 : 4);
+    assert.equal(summarize([metrics], [], 120).criticalPathUnmeasured, 0);
+  }
+});
+
 test("skipped routing anchors delayed full work without counting its API start placeholder as execution", () => {
   const work = [job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
     job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)];
@@ -156,6 +170,16 @@ test("an executed merge-group gate is critical-path execution, not waiting (#363
   assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 3, 3, 4), ...work.slice(2)]).criticalExecutionMinutes, null);
 });
 
+test("delegated recovery waits for routing without counting an independent gate as its dependency", () => {
+  const routing = job("PR Suite Routing", 0, 0, 0.01, "skipped");
+  // Delayed job creation must not turn a completed independent gate into a prerequisite.
+  const gate = job("Merge Group Gate", 0, 0.01, 2);
+  const recovery = job("Delegated Pipeline Recovery", 2, 3, 10);
+  const metrics = runMetrics(run(11, 1, 11), [routing, gate, recovery, job(AGGREGATOR, 10, 10, 11)]);
+  assert.equal(metrics.criticalExecutionMinutes, 8, "seven recovery minutes plus one aggregate minute");
+  assert.equal(metrics.criticalWaitMinutes, 3, "the independent gate is not charged to this path");
+});
+
 test("a skipped merge-group gate leaves every disabled-gate measurement byte-for-byte unchanged", () => {
   const shapes = [
     [job("Typecheck, Unit Tests & Bundles", 0, 2, 20), job("Browser End-to-End Tests (3)", 0, 40, 58), job(AGGREGATOR, 58, 62, 63)],
@@ -187,15 +211,16 @@ test("a skipped merge-group gate leaves every disabled-gate measurement byte-for
 });
 
 test("the assumed dependency structure matches the CI workflow files", () => {
-  // Checks/browser wait for optional PR routing and the disabled merge-group gate. Both are
-  // skipped when the run is created, so neither delays work today. An executed gate is modelled
-  // as critical-path execution (see the gate tests above). Windows/WebKit stay independent, and
-  // only the aggregator consumes all required work. Advisory shadows never supply a required result.
+  // Checks/browser wait for PR routing and the disabled merge-group gate; delegated recovery
+  // waits only for routing. Skipped plans consume no runner time. Executed gates contribute
+  // critical-path execution (see the gate tests above), including after a gate failure.
+  // Windows/WebKit stay independent, and only the aggregator consumes every required work
+  // result. Advisory shadows never supply one.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
   assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
-    "needs: [suite_plan, merge_group_gate]", "needs: [checks, browser, win32, webkit]",
-    "needs: [checks, browser, win32, webkit, suite_plan, merge_group_gate]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, suite_plan, merge_group_gate\]\n/);
+    "needs: suite_plan", "needs: [suite_plan, merge_group_gate]", "needs: [checks, browser, win32, webkit]",
+    "needs: [checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);
