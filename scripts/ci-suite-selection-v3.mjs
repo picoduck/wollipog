@@ -20,20 +20,26 @@ const POLICY_FILES = ["./ci-suite-policy.mjs", "./ci-suite-selection.mjs", "./ci
   "./ci-suite-policy-v3.mjs", "./ci-suite-selection-v3.mjs", "../docs/ci-node-profile-2026-10-23.json"];
 const sha = (value) => typeof value === "string" && /^[a-f0-9]{40}$/.test(value);
 const digest = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
-// Data and Markdown nodes are listed by path only; their bytes are never read.
-const dataPath = (path) => !path.split("/").includes("node_modules") && /\.(?:mdx?|json|txt|tsv|csv|png|jpe?g|gif|webp|svg|ico|webm|mp4|woff2?|ttf|webmanifest|html)$/.test(path);
+// Data and Markdown nodes are listed by path only; their bytes are never read. HTML pages are already
+// v2 graph nodes and are not counted again.
+const dataPath = (path) => !path.split("/").includes("node_modules") && /\.(?:mdx?|json|txt|tsv|csv|png|jpe?g|gif|webp|svg|ico|webm|mp4|woff2?|ttf|webmanifest)$/.test(path);
 
 export const loadPolicyIdV3 = () => hash(POLICY_FILES.map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n"));
 
-/** v2's source graph plus data/asset/Markdown nodes and edges. Over-bound trees return null (full). */
+/**
+ * v2's source graph plus data/asset/Markdown nodes and edges. The source graph uses v2's own bound,
+ * so v2's outcome is preserved; when only the data layer is over bound the graph keeps v2's edges
+ * and is marked `dataUnavailable`, which makes any relaxed diff select full.
+ */
 export function treeGraphV3(tree, readBlobs) {
   const rows = tree.filter(({ path }) => graphPath(path)), data = tree.filter(({ path }) => dataPath(path)).map(({ path }) => path);
-  if (rows.length + data.length > GRAPH_LIMITS.files) return null;
+  if (rows.length > GRAPH_LIMITS.files) return null;
   const manifests = tree.filter(({ path }) => /^(?:apps|packages)\/[^/]+\/package\.json$/.test(path));
   const texts = readBlobs([...rows, ...manifests].map(({ oid }) => oid));
   if (!texts) return null;
   const files = new Map(rows.map(({ path, oid }) => [path, texts.get(oid) ?? null]));
   const graph = buildGraph(files, workspacePackages(manifests.map(({ path, oid }) => [path, texts.get(oid) ?? ""])));
+  if (rows.length + data.length > GRAPH_LIMITS.files) return { ...graph, base: graph, dataUnavailable: true };
   return withDataEdges(graph, files, data);
 }
 

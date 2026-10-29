@@ -16,12 +16,23 @@ v3 starts from v2 and relaxes exactly three v1 fallbacks:
 | Browser Spec or E2E Fixture | A changed file under `apps/web/e2e/` selects itself and every spec that reaches it. |
 | Data or Asset | JSON, text, TSV/CSV, images, fonts, video and web manifests become graph nodes linked by literal paths; `/`-rooted references resolve under `apps/web/public` and `apps/web`. A spec depends on its Playwright `<spec>-snapshots/` directory. A changed data file **nothing references selects full** (`unreferenced-data-or-asset`). |
 
-Every other v1 rule is kept: security/approval, persistence/migration and runner-execution path
-rules (even for a relaxed file type); CI, selector, root tooling and `scripts/`; `.agents/` and
-shipped `skills/`; manifests and configuration (`package.json`, lockfiles, `tsconfig*`, `*.config.*`,
-Playwright configs, `src-tauri`); stylesheets; shared packages; cross-package source;
-renames/deletions; empty, incomplete or missing-base diffs; and missing mandatory inventory.
-v1's reviewed prose allowlist keeps its v1 `fast` handling.
+Every other v1 rule is kept:
+
+- the security/approval, persistence/migration and runner-execution path rules, even for a relaxed
+  file type;
+- CI, selector, root tooling and `scripts/`;
+- `.agents/` and shipped `skills/`;
+- every path under `packages/`, and under apps other than web, control-plane and runner (for
+  example `apps/desktop`), which v1 treats as shared inputs;
+- manifests and configuration: `package.json`, lockfiles, `tsconfig*`, `*.config.*`, Playwright
+  configs;
+- stylesheets and cross-package source;
+- renames/deletions, and empty, incomplete or missing-base diffs;
+- missing mandatory inventory.
+
+v1's reviewed prose allowlist keeps its v1 `fast` handling. The source graph keeps v2's own size
+bound. If only the data layer is over bound, v2's outcomes are preserved and any relaxed diff
+selects full.
 
 The data layer only adds leaf nodes and edges into them. HTML pages stay v2 nodes, linked only
 from browser-spec code, so no new path through the graph appears. A relaxed path outside any

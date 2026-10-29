@@ -95,6 +95,8 @@ test("every non-relaxed v1 fallback still forces the complete contract", () => {
     [entry("apps/runner/src/index.ts"), entry("apps/web/e2e/timeline.spec.ts")], [entry("packages/protocol/src/index.ts"), entry("docs/guide.md")],
     [entry("apps/web/src/components/Timeline.tsx"), entry("apps/control-plane/src/format-label.ts"), entry("docs/guide.md")],
     [entry("apps/web/src/copy/unused.json")], [entry("apps/web/public/icons/unused.svg")], [entry(".agents/skills/x.md")], [entry("skills/x/SKILL.md")],
+    // Shared packages and apps outside v1's three app packages keep v1's shared-input fallback.
+    [entry("packages/protocol/README.md")], [entry("packages/protocol/src/fixture.json")], [entry("apps/desktop/README.md")],
   ]) {
     const result = v3(...entries);
     assert.equal(result.mode, "full", JSON.stringify(entries));
@@ -105,6 +107,27 @@ test("every non-relaxed v1 fallback still forces the complete contract", () => {
   for (const diff of [{ entries: [] }, { entries: [entry("docs/guide.md")], complete: false }, { entries: [entry("docs/guide.md")], baseKnown: false }]) {
     assert.equal(selectFilesV3({ diff, inventory, graph }).mode, "full");
   }
+});
+
+test("a data layer over its bound keeps v2's outcome and refuses only relaxation", () => {
+  for (const path of ["packages/protocol/README.md", "packages/protocol/src/fixture.json", "apps/desktop/README.md", "apps/mock-agent/data.json"]) {
+    assert.equal(relaxedClass(path), null, path);
+  }
+  // At exactly v2's source-file bound, one extra Markdown file must not change v2's narrowing.
+  const big = Array.from({ length: 20_000 }, (_, i) => ({ path: `apps/web/src/f${i}.ts`, oid: String(i) }));
+  big.push({ path: "docs/notes.md", oid: "notes" });
+  const empty = (oids) => new Map(oids.map((oid) => [oid, ""]));
+  const rows = [{ file: "apps/web/src/unrelated.test.ts", group: "node-web" }];
+  const ordinary = { entries: [entry("apps/web/src/f0.ts")] };
+  const two = selectFilesV2({ diff: ordinary, inventory: rows, graph: treeGraph(big, empty) });
+  const threeGraph = treeGraphV3(big, empty);
+  assert.equal(threeGraph.dataUnavailable, true);
+  const three = selectFilesV3({ diff: ordinary, inventory: rows, graph: threeGraph });
+  assert.deepEqual({ mode: three.mode, files: three.selectedFiles }, { mode: two.mode, files: two.selectedFiles });
+  assert.equal(two.mode, "affected");
+  const relaxed = selectFilesV3({ diff: { entries: [entry("docs/notes.md")] }, inventory: rows, graph: threeGraph });
+  assert.equal(relaxed.mode, "full");
+  assert.ok(relaxed.reasons.includes("graph-unavailable"));
 });
 
 test("relaxed Markdown, browser specs, fixtures and referenced data select only their consumers", () => {

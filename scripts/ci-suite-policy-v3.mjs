@@ -16,7 +16,8 @@ export const SUITE_VERSION_V3 = "fast-required-v3";
 export const POLICY_VERSION_V3 = 3;
 const DATA = /\.(?:json|txt|tsv|csv|png|jpe?g|gif|webp|svg|ico|webm|mp4|woff2?|ttf|webmanifest|html)$/;
 // Inputs that configure tooling, CI, packaging or the selector itself are never relaxed.
-const RETAINED = /^(?:\.github|\.agents|scripts|skills)\/|^apps\/desktop\/src-tauri\/|(?:^|\/)(?:package\.json|pnpm-[\w-]+\.ya?ml|tsconfig[^/]*\.json|[^/]*\.config\.[\w.]+|[^/]*rc(?:\.\w+)?|playwright[^/]*)$|^docs\/ci-node-profile/;
+// Shared packages and apps outside v1's three app packages keep v1's shared-input fallback.
+const RETAINED = /^(?:\.github|\.agents|scripts|skills|packages)\/|^apps\/(?!(?:web|control-plane|runner)\/)|(?:^|\/)(?:package\.json|pnpm-[\w-]+\.ya?ml|tsconfig[^/]*\.json|[^/]*\.config\.[\w.]+|[^/]*rc(?:\.\w+)?|playwright[^/]*)$|^docs\/ci-node-profile/;
 const DIFF_LEVEL = ["missing-base", "incomplete-diff", "empty-diff", "renamed-deleted-or-unsupported-status", "unknown-path"];
 
 /** The low-risk class a changed path belongs to, or null when it keeps its v1 fallback. */
@@ -92,7 +93,8 @@ export function selectFilesV3({ diff, inventory, graph }) {
   const full = (reason) => ({ ...v2, mode: "full", reasons: [...new Set([...v2.reasons, reason])].sort(), v2Mode: v2.mode,
     groups: Object.keys(GROUPS).sort(), partialGroups: [], selectionReasons: {}, scopedOpaqueDeferred: 0, relaxed: [], relaxedClasses: {},
     v3Reason: reason, selectedFiles: inventory.map((row) => row.file) });
-  if (!graph) return full("graph-unavailable");
+  // A data layer over its bounds leaves v2's graph intact but cannot support any relaxation.
+  if (!graph || graph.dataUnavailable) return full("graph-unavailable");
   const classes = {};
   for (const { path } of relaxed) {
     const kind = relaxedClass(path);
