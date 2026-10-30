@@ -16672,6 +16672,8 @@ export class ControlPlaneDb {
     replayKind: "registration" | "runtime",
   ): RunnerHistoryReconciliation | null {
     snap = normalizeReconciledSnapshot(this, snap);
+    // Before any unchanged-snapshot return: a typed launch failure hydrated on reconnect (#3843).
+    this.reconcileSnapshotLaunchFailure(id, snap);
     const snapshotFingerprint = ControlPlaneDb.sessionSnapshotFingerprint(snap);
     if (isTerminal(snap.status)) {
       // A terminal snapshot is runner evidence that no provider process remains, even when it
@@ -23277,6 +23279,13 @@ export class ControlPlaneDb {
     }
     this.stmt(`INSERT INTO session_launch_failures (session_id, code, created_at) VALUES (?, ?, ?)
       ON CONFLICT(session_id) DO UPDATE SET code=excluded.code, created_at=excluded.created_at`).run(sessionId, code, now);
+  }
+
+  /** A runner snapshot carries the typed reason while the runner holds the session failed. One
+   * without it, such as an older runner's, leaves a reason a status message already delivered. */
+  private reconcileSnapshotLaunchFailure(sessionId: string, snap: SessionSnapshot): void {
+    if (snap.status !== "failed") this.setSessionLaunchFailure(sessionId, null);
+    else if (isSessionLaunchFailureCode(snap.launchFailure)) this.setSessionLaunchFailure(sessionId, snap.launchFailure);
   }
 
   sessionLaunchFailure(sessionId: string): SessionLaunchFailureCode | null {

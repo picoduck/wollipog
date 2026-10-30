@@ -77,6 +77,7 @@ import {
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
+import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
 import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -255,31 +256,27 @@ function externalSandboxPolicy(outer: CodexOuterSandbox): Json {
   return { type: "externalSandbox", networkAccess: outer.network === "deny" ? "restricted" : "enabled" };
 }
 
-/** Launch-probe result: whether Codex could run `true` under the sandbox a turn would use. */
+/** Launch-probe result: whether Codex could run the trusted probe command under the sandbox a turn
+ * would use. */
 export type CodexCommandSandboxProbe =
   | { outcome: "started" }
-  /** `namespaceDenied`: bubblewrap positively reported that it may not create a user namespace,
-   * the one failure a runner bwrap boundary is known to stand in for. */
+  /** `namespaceDenied`: bubblewrap itself refused to create a user namespace before the command
+   * started, the one failure a runner bwrap boundary is known to stand in for. */
   | { outcome: "failed"; reason: string; namespaceDenied: boolean }
   | { outcome: "inconclusive" };
 
-const USER_NAMESPACE_DENIED = /No permissions to create new namespace|unprivileged user namespaces/i;
-
-/** Classify a `command/exec ["true"]` response (#3843). `true` cannot fail by itself, so any other
- * exit means the sandbox did not start. The reason is a fixed sentence: provider stderr can carry
+/** Classify a `command/exec` response to the trusted probe (#3843; see
+ * `codex-sandbox-probe-command.ts`). The reason is a fixed sentence: provider stderr can carry
  * paths and is never repeated. Exported for tests. */
 export function codexCommandSandboxProbe(response: Json): CodexCommandSandboxProbe {
-  const exitCode = response?.exitCode;
-  if (typeof exitCode !== "number") return { outcome: "inconclusive" };
-  if (exitCode === 0) return { outcome: "started" };
-  const stderr = typeof response?.stderr === "string" ? response.stderr : "";
-  const namespaceDenied = USER_NAMESPACE_DENIED.test(stderr);
+  const classified = classifyCodexSandboxProbe(response?.exitCode, response?.stdout, response?.stderr);
+  if (classified.outcome !== "failed") return classified;
   return {
     outcome: "failed",
-    namespaceDenied,
-    reason: namespaceDenied
+    namespaceDenied: classified.namespaceDenied,
+    reason: classified.namespaceDenied
       ? "Codex's command sandbox cannot start here because this host does not let unprivileged processes create user namespaces"
-      : `Codex's command sandbox could not run a command here (exit ${exitCode})`,
+      : `Codex's command sandbox could not run a command here (exit ${classified.exitCode})`,
   };
 }
 
@@ -682,6 +679,8 @@ export class CodexAppServerDriver implements Driver {
    * inside it (#3843); null while Codex sandboxes its own commands. Re-probed at every launch.
    */
   private outerSandbox: CodexOuterSandbox | null = null;
+  /** The trusted probe argv, or null when this host has none (#3843). */
+  private readonly sandboxProbeCommand: () => string[] | null;
   /**
    * Whether a legacy `sandboxPolicy` has already been sent on the CURRENT thread.
    *
@@ -708,8 +707,10 @@ export class CodexAppServerDriver implements Driver {
       initializationRequestTimeoutMs: number;
       forkRequestTimeoutMs: number;
       archiveRequestTimeoutMs: number;
+      sandboxProbeCommand: () => string[] | null;
     }> = {},
   ) {
+    this.sandboxProbeCommand = deps.sandboxProbeCommand ?? (() => codexSandboxProbeCommand());
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.cwd = opts.cwd;
     this.config = opts.config;
@@ -1171,10 +1172,25 @@ export class CodexAppServerDriver implements Driver {
     const policy = turn.sandboxPolicy;
     // No sandbox of Codex's own to start; omitting the policy probes the profile the launch carries.
     if (policy?.type === "dangerFullAccess") return;
+    // Nothing the session can write may decide the outcome: the probe is a root-owned system
+    // program by absolute path, outside every root this boundary makes writable, run with a fixed
+    // PATH and no loader overrides. Without one the probe does not run, and nothing changes.
+    const command = this.sandboxProbeCommand();
+    const writableRoots = bwrap ? [this.cwd, ...(bwrap.writableBinds ?? []).map((bind) => bind.target),
+      ...(bwrap.protectedWorktree ? [bwrap.protectedWorktree.path, ...bwrap.protectedWorktree.gitWritableRoots,
+        ...(bwrap.protectedWorktree.ownedWorktrees ?? []).flatMap((owned) => [owned.path, owned.gitAdmin])] : []),
+      ...(bwrap.projectSharedWritableRoots ?? [])] : [this.cwd];
+    // A host with no trusted `printf` (such as a runner inside a user namespace, where root's files
+    // read as unmapped) is a host property and stays quiet; a boundary that makes it writable is not.
+    if (!command) return;
+    if (probeExecutableWritable(command[0]!, writableRoots)) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "probe_command_writable" }));
+      return;
+    }
     let probe: CodexCommandSandboxProbe;
     try {
       probe = codexCommandSandboxProbe(await peer.request<Json>("command/exec", {
-        command: ["true"], cwd: this.cwd, timeoutMs: CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS,
+        command, cwd: this.cwd, env: { ...CODEX_SANDBOX_PROBE_ENV }, timeoutMs: CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS,
         ...(policy ? { sandboxPolicy: policy } : {}),
       }, { deadlineAt: Date.now() + CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS + 5_000 }));
     } catch (error) {

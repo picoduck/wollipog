@@ -15644,6 +15644,11 @@ export class SessionsService {
     // that confirmation ends the child like any other runner-reported end: the decisions and resume
     // the provisional stop kept for the runner's return are revoked and abandoned.
     if (isTerminal(session.status) && !admittedReplacement) {
+      // Reconnect hydration can mark the session failed before its buffered status arrives; the
+      // typed reason for that same failure still belongs to it (#3843).
+      if (status === "failed" && session.status === "failed" && isSessionLaunchFailureCode(launchFailure)) {
+        this.db.setSessionLaunchFailure(sessionId, launchFailure);
+      }
       if (isTerminal(status) && this.db.confirmSessionStop(sessionId, "runner_terminal", Date.now())) {
         this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-ended");
         this.publishCampaignAttentionTransition(campaignBefore);

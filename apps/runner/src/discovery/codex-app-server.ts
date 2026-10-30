@@ -1,6 +1,7 @@
 import type { CodexAppServerCapabilities } from "@wollipog/protocol";
 import { run, type ResolvedLaunch } from "./resolve.js";
 import type { CodexProbeObserver } from "../codex-probe.js";
+import { classifyCodexSandboxProbe, codexSandboxProbeCommand } from "../codex-sandbox-probe-command.js";
 
 /** Oldest Codex build whose generated v2 schema is pinned in this repository. Official docs do
  * not publish a CLI minimum, so older builds remain an explicit exec fallback until verified. */
@@ -144,23 +145,26 @@ export function wslCodexAppServerProbeArgs(distro: string, launch: ResolvedLaunc
   return { command: "wsl.exe", args: ["-d", distro, "--exec", launch.command, ...launch.args, "app-server", "--help"] };
 }
 
-export function nativeCodexCommandSandboxProbeArgs(launch: ResolvedLaunch): { command: string; args: string[] } {
-  return { command: launch.command, args: [...launch.args, "sandbox", "--", "true"] };
+/** `codex sandbox` running the trusted probe command, or null when the host has none. */
+export function nativeCodexCommandSandboxProbeArgs(
+  launch: ResolvedLaunch,
+  probeCommand: string[] | null = codexSandboxProbeCommand(),
+): { command: string; args: string[] } | null {
+  return probeCommand ? { command: launch.command, args: [...launch.args, "sandbox", "--", ...probeCommand] } : null;
 }
 
-const USER_NAMESPACE_DENIED = /No permissions to create new namespace|unprivileged user namespaces/i;
-
-/** Fold the host's `codex sandbox -- true` result into a supported App Server row (#3843). Only a
- * positive user-namespace denial makes Codex unsupported: the runner can stand in for its sandbox
- * only inside its own bubblewrap, which needs the same namespaces. Any other failure, including a
- * Codex whose `sandbox` subcommand has another shape, leaves the row as it was, and the launch
- * probe still decides each session. */
+/** Fold the host's `codex sandbox` probe into a supported App Server row (#3843). Only bubblewrap's
+ * own namespace refusal, with the probe command never started, makes Codex unsupported: the runner
+ * can stand in for its sandbox only inside its own bubblewrap, which needs the same namespaces. Any
+ * other result, including a Codex whose `sandbox` subcommand has another shape, leaves the row as
+ * it was, and the launch probe still decides each session. */
 export function applyCodexCommandSandboxProbe(
   compatibility: CodexAppServerCapabilities,
   result: ProbeResult,
 ): CodexAppServerCapabilities {
-  if (compatibility.status !== "supported" || result.timedOut || result.errorCode || result.code === 0) return compatibility;
-  if (!USER_NAMESPACE_DENIED.test(result.stderr)) return compatibility;
+  if (compatibility.status !== "supported" || result.timedOut || result.errorCode) return compatibility;
+  const probe = classifyCodexSandboxProbe(result.code, result.stdout, result.stderr);
+  if (probe.outcome !== "failed" || !probe.namespaceDenied) return compatibility;
   return {
     ...compatibility,
     status: "unsupported",
@@ -183,6 +187,7 @@ export async function probeNativeCodexAppServer(
   const compatibility = interpretCodexAppServerProbe(version, result);
   if (platform !== "linux" || compatibility.status !== "supported") return compatibility;
   const sandbox = nativeCodexCommandSandboxProbeArgs(launch);
+  if (!sandbox) return compatibility;
   return applyCodexCommandSandboxProbe(compatibility, await run(sandbox.command, sandbox.args, {
     timeoutMs: 8000, maxBuffer: 64 * 1024, trackDescendants: true, ...observer,
   }));

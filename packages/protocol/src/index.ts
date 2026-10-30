@@ -8135,6 +8135,8 @@ export interface SessionSnapshot {
   status: SessionStatus;
   /** Durable runner-owned wait explanation for reconnect hydration. */
   capacityWait?: RunnerCapacityBlocker;
+  /** v257; the typed reason a `failed` session's launch failed, for reconnect hydration (#3843). */
+  launchFailure?: SessionLaunchFailureCode;
   driver: AgentDriverKind;
   useWorktree: boolean;
   worktreePath: string | null;

@@ -116,10 +116,15 @@ test("native and WSL probes preserve the resolved node-wrapped launch without sh
 
 test("only a host user-namespace denial marks a supported Codex unsupported (#3843)", () => {
   const supported = interpretCodexAppServerProbe("0.165.0", { code: 0, stdout: compatibleHelp, stderr: "" });
-  assert.deepEqual(nativeCodexCommandSandboxProbeArgs({ command: "/bin/codex", args: ["--flag"] }),
-    { command: "/bin/codex", args: ["--flag", "sandbox", "--", "true"] });
+  const probe = ["/usr/bin/printf", "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED"];
+  assert.deepEqual(nativeCodexCommandSandboxProbeArgs({ command: "/bin/codex", args: ["--flag"] }, probe),
+    { command: "/bin/codex", args: ["--flag", "sandbox", "--", ...probe] });
+  // Without a trusted probe command discovery runs no sandbox probe at all.
+  assert.equal(nativeCodexCommandSandboxProbeArgs({ command: "/bin/codex", args: [] }, null), null);
   for (const result of [
-    { code: 0, stdout: "", stderr: "" },
+    { code: 0, stdout: "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED", stderr: "" },
+    // The probe ran and then printed the refusal itself: not bubblewrap's.
+    { code: 1, stdout: "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED", stderr: "bwrap: No permissions to create new namespace" },
     { code: 2, stdout: "", stderr: "error: unrecognized subcommand 'sandbox'" },
     { code: null, stdout: "", stderr: "", timedOut: true },
     { code: null, stdout: "", stderr: "", errorCode: "ENOENT" },

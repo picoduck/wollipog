@@ -856,8 +856,21 @@ and the stock `bwrap-userns-restrict` AppArmor profile, a bubblewrap started ins
 cannot create its namespace. Every command then fails before it runs and asks to run outside the
 sandbox (#3843).
 
-Before a native Linux Codex session starts its thread, the driver runs `true` through the App
-Server's `command/exec` under the same policy its turns will send:
+Before a native Linux Codex session starts its thread, the driver runs a probe through the App
+Server's `command/exec` under the same policy its turns will send. Nothing a session can write
+decides the result:
+
+- The probe is a system `printf` that prints a sentinel. The runner resolves it once by absolute
+  path (`/usr/bin/printf` or `/bin/printf`) and accepts it only when it, and every directory above
+  it, is owned by root and writable by no one else.
+- It must lie outside every root this boundary makes writable.
+- It runs with `PATH=/usr/bin:/bin` and with `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`
+  unset.
+- A failure counts only when the sentinel never printed (the command never started) and a stderr
+  line begins with bubblewrap's own namespace refusal.
+
+Without a trusted `printf`, as for a runner that itself runs inside a user namespace, the probe
+does not run and nothing changes. Otherwise:
 
 - If the command runs, nothing changes.
 - If it fails because bubblewrap may not create a user namespace, and this boundary encloses the
@@ -882,9 +895,12 @@ Server's `command/exec` under the same policy its turns will send:
 - Any other failure inside this boundary keeps Codex's policy and is only logged.
 - Without this boundary, the launch fails. Its `failed` status carries `launchFailure:
   "codex_sandbox_unavailable"` (protocol v257), and a campaign shows that child as blocked work
-  for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry.
+  for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry. The
+  runner keeps the reason with the failed state and reports it in the session snapshot, so it
+  survives a runner restart and reconnect hydration. A failed status that arrives after
+  hydration has already marked the session failed still records it.
 
-Discovery runs `codex sandbox -- true` on the host as well. When it reports the same namespace
+Discovery runs the same probe through `codex sandbox` on the host as well. When it reports the same namespace
 denial, the Codex installation is unsupported with failure code `codex_sandbox_unavailable`. Its
 `unavailableReason` names the fix and appears in Machine settings and `get_agent_capabilities`,
 and `create_session` refuses it with that reason. Contexts other than native Linux are unchanged.

@@ -18208,11 +18208,13 @@ export class SessionManager {
     // actionable while the raw foreground status still reaches workflow/pod settlement consumers.
     const settled = projectedStatus !== "running" && projectedStatus !== "starting" && projectedStatus !== "input_required";
     const [firstAsync, ...otherAsync] = terminal ? [] : pendingRequests(pending).filter((request) => request.async);
+    // A typed launch failure survives a runner restart and a reconnect in the snapshot (#3843).
+    const typedFailure = projectedStatus === "failed" ? launchFailure : undefined;
     this.store.patchMeta(sessionId, settled
       ? { status: projectedStatus, pendingApproval: firstAsync
           ? { ...firstAsync, ...(otherAsync.length ? { additionalRequests: otherAsync } : {}) } : null,
-          capacityWait: status === "queued" ? capacityWait : undefined }
-      : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined });
+          capacityWait: status === "queued" ? capacityWait : undefined, launchFailure: typedFailure }
+      : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined, launchFailure: undefined });
     const finalMeta=this.store.readMeta(sessionId)!;
     const checkpoint=terminal && finalMeta.campaignBudgetDispatch && !this.closing.has(sessionId) &&
       !this.worktreeRebindings.has(sessionId) && !this.providerAccountSwitches.has(sessionId) &&

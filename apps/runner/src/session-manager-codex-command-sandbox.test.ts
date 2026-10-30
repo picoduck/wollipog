@@ -14,7 +14,7 @@ import type { AgentDriverKind, RunnerToControlPlane } from "@wollipog/protocol";
 import { CodexAppServerDriver } from "./drivers/codex-app-server.js";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { SessionManager } from "./session-manager.js";
-import { SessionStore, type SessionMeta } from "./session-store.js";
+import { metaToSnapshot, SessionStore, type SessionMeta } from "./session-store.js";
 import type { AgentProcess } from "./spawn.js";
 
 const shortDelay = () => new Promise<void>((resolve) => setTimeout(resolve, 10));
@@ -64,6 +64,7 @@ test("a Codex launch whose command sandbox cannot start fails with a typed launc
     assert.equal(kind, "codex-app-server");
     return new CodexAppServerDriver(options, callbacks, undefined, {
       spawn: () => namespaceRestrictedAppServer(methods), kill: () => {},
+      sandboxProbeCommand: () => ["/usr/bin/printf", "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED"],
     });
   };
   const manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner", undefined, factory);
@@ -78,6 +79,11 @@ test("a Codex launch whose command sandbox cannot start fails with a typed launc
       /does not let unprivileged processes create user namespaces/);
     assert.deepEqual(methods.filter((method) => method.startsWith("thread/") || method === "turn/start"), [],
       "no thread or turn exists before the probe decides");
+    // The reason is kept with the failed state, so a restart or reconnect still reports it (CR-1.2).
+    const meta = new SessionStore(root).readMeta("codex-session")!;
+    assert.equal(meta.launchFailure, "codex_sandbox_unavailable");
+    assert.equal(metaToSnapshot(meta).launchFailure, "codex_sandbox_unavailable");
+    assert.equal(metaToSnapshot({ ...meta, status: "idle" }).launchFailure, undefined);
     // Every other failure keeps its untyped status.
     assert.equal(sent.some((message) => message.type === "session_status" && message.status !== "failed" &&
       "launchFailure" in message), false);
