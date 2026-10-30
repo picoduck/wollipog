@@ -435,7 +435,7 @@ is used. Build-only TEMP/TMP and fixed native payload fields retain their existi
 Two read-only metadata resolutions add no process/temp producer; their OS-call duration is
 outside the existing child termination control, with no hard total metadata-call deadline.
 The source/SEA engine and DLL remain build-hash-bound. One passing windows-latest Platform
-Isolation job, which runs the existing 13 source cases and the actual SEA verification, is the
+Isolation job, which runs the 14 selected source cases and the actual SEA verification, is the
 required Windows receipt (a human decision replacing the earlier two-job requirement); pure validation/env assertions do
 not replace native success, architecture, death, sharing or durability evidence.
 
@@ -458,7 +458,7 @@ the command. No producer, global map/cache/history, HOME canonicalization or ACL
 The source regression queries a genuine directory alias once through the fixed fixture-only
 helper, then checks parent/file identity, canonical coalescing and default publication. Alias
 absence fails proof without a fake, skip, fallback or OS setting change. The query is absent from
-production/SEA admission. Raw dot refusal reuses that owned fixture. The 13 names, assertions,
+production/SEA admission. Raw dot refusal reuses that owned fixture. The selected names, assertions,
 HOME strings and all root/entry/byte/process/time limits remain; runtime/SEA/durability proof
 still requires actual receipts.
 

@@ -43,7 +43,8 @@ export function captureWindowsAccountConfig(path: string, expected: readonly Run
   const fixed = engine(), captured = call(1, () => fixed.capture(path)), source = captured.raw.toString("utf8");
   if (!Buffer.from(source).equals(captured.raw) || hash(captured.raw) !== captured.configDigest) throw new WindowsAccountConfigError("not_published", "STORE_UNVERIFIABLE");
   const parsed: unknown = JSON.parse(source); if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new WindowsAccountConfigError("not_published", "STORE_UNVERIFIABLE");
-  const accounts = normalize((parsed as Record<string, unknown>).providerAccounts);
+  // Same default as resolveConfig and the POSIX capture: an omitted or null list has no accounts yet.
+  const accounts = normalize((parsed as Record<string, unknown>).providerAccounts ?? []);
   if (hash(JSON.stringify(accounts)) !== hash(JSON.stringify(expected))) throw new WindowsAccountConfigError("not_published", "SOURCE_CHANGED");
   const frozen = Object.freeze(accounts.map(a => Object.freeze({ ...a })));
   return Object.freeze({ backend: "windows-wacw1" as const, path: captured.path, configIdentity: captured.configIdentity, configDigest: captured.configDigest,

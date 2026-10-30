@@ -60,6 +60,18 @@ test("native Windows account-config default dispatch enrolls add and remove with
   assert.equal(JSON.parse(readFileSync(f.path, "utf8")).untouched, true);
 });
 
+test("native Windows account-config adds the first account to a config without a providerAccounts list", onlyWindows, () => {
+  const first = { id: "work", label: "Work", provider: "claude" as const, directory: "C:\\canonical\\HOME" };
+  for (const config of [{ runnerId: "synthetic", untouched: true }, { runnerId: "synthetic", untouched: true, providerAccounts: null }]) {
+    // Overwriting keeps the private fixture's owner and DACL; only the JSON changes.
+    const f = fixture(); writeFileSync(f.path, JSON.stringify(config));
+    const pre = captureProviderAccountsConfigPreimage(f.path, []); assert.deepEqual(pre.accounts, []);
+    writeProviderAccountsConfig(f.path, [first], pre);
+    const saved = JSON.parse(readFileSync(f.path, "utf8")); assert.equal(saved.untouched, true); assert.equal(saved.providerAccounts[0].id, "work");
+    assert.equal(captureProviderAccountsConfigPreimage(f.path, [first]).revision, 1);
+  }
+});
+
 test("native Windows account-config rejects foreign writable and null DACL plus actual foreign owner", onlyWindows, () => {
   for (const mode of ["foreign-write", "null-dacl"] as const) {
     const root = mkdtempSync(join(tmpdir(), "wollipog-account-config-")), path = join(root, "runner.json");

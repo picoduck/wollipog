@@ -45,8 +45,8 @@ if(source){
  const pattern="^(WACW1 |Windows publication trust scope |an unbuilt source adapter |native Windows account-config |"+positiveNames.join("$|")+"$)";
  const result=run(process.execPath,["--test","--test-reporter=tap","--test-timeout=90000","--test-name-pattern="+pattern,entry]);
  const text=result.stdout.toString();for(const name of positiveNames)assert.ok(text.includes("- "+name),"actual selected supervisor case missing");
- // Four codec/static cases, seven actual native cases, two existing supervisor cases.
- assert.match(text,/# pass 13(?:\r?\n|$)/u);assert.match(text,/# fail 0(?:\r?\n|$)/u);assert.match(text,/# cancelled 0(?:\r?\n|$)/u);
+ // Four codec/static cases, eight actual native cases, two existing supervisor cases.
+ assert.match(text,/# pass 14(?:\r?\n|$)/u);assert.match(text,/# fail 0(?:\r?\n|$)/u);assert.match(text,/# cancelled 0(?:\r?\n|$)/u);
  for(const name of positiveNames)assert.doesNotMatch(text,new RegExp(name+".*# SKIP","u"));
 }else{
  const dist=join(ROOT,"apps/runner/dist-bin"),names=readdirSync(dist).filter(x=>/^wollipog-runner-.*\.exe$/u.test(x));assert.equal(names.length,1);
