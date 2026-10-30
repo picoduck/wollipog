@@ -115,7 +115,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 251);
+  assert.equal(PROTOCOL_VERSION, 254);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -330,8 +330,8 @@ test("a provider sign-in failure code is accepted only from the closed set (#351
   }
 });
 
-test("PROTOCOL_VERSION is 253", () => {
-  assert.equal(PROTOCOL_VERSION, 251);
+test("PROTOCOL_VERSION is 254", () => {
+  assert.equal(PROTOCOL_VERSION, 254);
   // A v252 runner reports a duplicate-account sign-in by its sentence alone (#3519).
   assert.equal(runnerSupportsProtocol(252, "providerLoginFailureCode"), false);
   assert.equal(runnerSupportsProtocol(253, "providerLoginFailureCode"), true);

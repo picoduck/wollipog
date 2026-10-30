@@ -98,7 +98,7 @@ it, including unsuccessful attempts. The reviewer's exact harness/model/effort, 
 and round/attempt limits remain enforced. Review approval grants no human approval, merge authority
 or passing checks. Optional review-session citations at merge gates are verified by the server.
 
-Protocol 251 retires the older bridge and campaign review job tools, CLI commands and native
+Protocol 254 retires the older bridge and campaign review job tools, CLI commands and native
 executors. Follow the [upgrade order](./agent-control.md#retired-review-jobs): drain with the prior
 runner, upgrade the control plane, then upgrade the runner. New runners explicitly refuse older
 control planes and unfinished or unverified legacy execution. Drained terminal unpriced receipts
