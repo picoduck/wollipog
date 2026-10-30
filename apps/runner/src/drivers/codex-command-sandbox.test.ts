@@ -40,6 +40,19 @@ const NESTED_BWRAP_FAILURE = {
 /** The same probe when the sandbox starts: the command ran and printed the sentinel. */
 const STARTED = { exitCode: 0, stdout: CODEX_SANDBOX_PROBE_SENTINEL, stderr: "" };
 
+type Overrides = Record<string, Partial<{ uid: number; mode: number; file: boolean }>>;
+/** A file system in the probe's trust model: every entry root-owned and 0755 unless overridden,
+ * `links` overriding what `lstat` reports for a symlink itself. */
+function fs(overrides: Overrides, real = (p: string) => p, links: Overrides = {}): ProbeFileSystem {
+  const view = (p: string, extra: Overrides) => {
+    const entry = { uid: 0, mode: 0o755, file: p.endsWith("printf") || p.endsWith("busybox"), ...overrides[p], ...extra[p] };
+    return { isFile: () => entry.file, isDirectory: () => !entry.file, uid: entry.uid, mode: entry.mode };
+  };
+  return { realpath: real, stat: (p) => view(p, {}), lstat: (p) => view(p, links) };
+}
+/** `/usr/bin/printf -> /bin/busybox`, as on BusyBox-based systems. */
+const busyboxLink = (p: string) => p === "/usr/bin/printf" ? "/bin/busybox" : p;
+
 function bwrap(network: "inherit" | "deny", extra: Partial<Extract<SpawnIsolation, { backend: "bwrap" }>> = {}): SpawnIsolation {
   return { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network, ...extra };
 }
@@ -173,6 +186,29 @@ test("a session with no sandbox of Codex's own is not probed", { skip: linuxOnly
 });
 /* eslint-enable @typescript-eslint/no-explicit-any */
 
+test("a printf symlinked to a BusyBox-style multicall binary probes a healthy sandbox as healthy (CR-2.1)", { skip: linuxOnly }, async () => {
+  const command = codexSandboxProbeCommand(fs({}, busyboxLink));
+  // The validated link runs by its own name, so the multicall binary still selects `printf`.
+  assert.deepEqual(command, ["/usr/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL]);
+  /** Answers as a multicall binary does: the applet is the name it was invoked by. */
+  const multicall = (params: any) => params.command[0].endsWith("/printf")
+    ? { exitCode: 0, stdout: params.command[1], stderr: "" }
+    : { exitCode: 1, stdout: "", stderr: `${params.command[1]}: applet not found\n` };
+  for (const isolation of [undefined, bwrap("inherit")]) {
+    const h = driverWith({ ...(isolation ? { isolation } : {}), probeCommand: command, probe: multicall });
+    assert.deepEqual((await h.firstTurn()).sandboxPolicy, { type: "workspaceWrite" }, "no refusal, no fallback");
+    assert.deepEqual(h.sandboxEvents(), []);
+  }
+  // Had the canonical target run instead, the probe would fail without a namespace denial; that
+  // keeps today's policy, inside a boundary or not, and never refuses the launch.
+  for (const isolation of [undefined, bwrap("inherit")]) {
+    const h = driverWith({ ...(isolation ? { isolation } : {}), probeCommand: ["/bin/busybox", CODEX_SANDBOX_PROBE_SENTINEL],
+      probe: multicall });
+    assert.deepEqual((await h.firstTurn()).sandboxPolicy, { type: "workspaceWrite" });
+    assert.deepEqual(h.sandboxEvents(), ["codex_command_sandbox_unavailable"]);
+  }
+});
+
 test("the probe command is a root-owned system printf, never one found on PATH (CR-1.1)", { skip: linuxOnly }, () => {
   // A session-writable directory first on PATH holding fake `true` and `printf` that imitate
   // bubblewrap's refusal changes nothing: the command is resolved by absolute path.
@@ -193,14 +229,6 @@ test("the probe command is a root-owned system printf, never one found on PATH (
     process.env.PATH = path;
     rmSync(fake, { recursive: true, force: true });
   }
-  type Overrides = Record<string, Partial<{ uid: number; mode: number; file: boolean }>>;
-  const fs = (overrides: Overrides, real = (p: string) => p): ProbeFileSystem => ({
-    realpath: real,
-    stat: (p) => {
-      const entry = { uid: 0, mode: p === "/usr/bin/printf" || p === "/bin/printf" ? 0o755 : 0o755, file: p.endsWith("printf"), ...overrides[p] };
-      return { isFile: () => entry.file, isDirectory: () => !entry.file, uid: entry.uid, mode: entry.mode };
-    },
-  });
   assert.deepEqual(codexSandboxProbeCommand(fs({})), ["/usr/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL]);
   // Not root-owned, group-writable, under a writable directory, or resolving outside /usr and /bin.
   const bads: Overrides[] = [{ "/usr/bin/printf": { uid: 1000 } }, { "/usr/bin/printf": { mode: 0o775 } }, { "/usr/bin": { mode: 0o777 } }];
@@ -208,6 +236,8 @@ test("the probe command is a root-owned system printf, never one found on PATH (
     assert.deepEqual(codexSandboxProbeCommand(fs({ ...bad, "/bin/printf": { uid: 1000 } })), null, JSON.stringify(bad));
   }
   assert.equal(codexSandboxProbeCommand(fs({}, () => "/home/u/printf")), null);
+  // A symlink a non-root user owns is refused even when its target is trusted.
+  assert.equal(codexSandboxProbeCommand(fs({ "/bin/printf": { uid: 1000 } }, busyboxLink, { "/usr/bin/printf": { uid: 1000 } })), null);
   assert.equal(probeExecutableWritable("/usr/bin/printf", ["/repo", "/usr"]), true);
   assert.equal(probeExecutableWritable("/usr/bin/printf", ["/repo", "/usr/bin/printf"]), true);
   assert.equal(probeExecutableWritable("/usr/bin/printf", ["/repo", "/usr/binx"]), false);

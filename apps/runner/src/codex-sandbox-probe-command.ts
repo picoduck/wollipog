@@ -6,7 +6,7 @@
  * sentinel; only a run that never printed it and failed with bubblewrap's own namespace error
  * reads as a sandbox that could not start.
  */
-import { realpathSync, statSync } from "node:fs";
+import { lstatSync, realpathSync, statSync } from "node:fs";
 import { dirname, posix } from "node:path";
 
 export const CODEX_SANDBOX_PROBE_SENTINEL = "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED";
@@ -23,25 +23,52 @@ const CANDIDATES = ["/usr/bin/printf", "/bin/printf"];
 const TRUSTED_PREFIXES = ["/usr/", "/bin/"];
 
 export interface ProbeFileStat { isFile(): boolean; isDirectory(): boolean; uid: number; mode: number }
-export interface ProbeFileSystem { realpath(path: string): string; stat(path: string): ProbeFileStat }
+export interface ProbeFileSystem {
+  realpath(path: string): string;
+  stat(path: string): ProbeFileStat;
+  /** The entry itself, not what a symlink names. */
+  lstat(path: string): ProbeFileStat;
+}
 
-const nativeFileSystem: ProbeFileSystem = { realpath: (path) => realpathSync(path), stat: (path) => statSync(path) };
+const nativeFileSystem: ProbeFileSystem = {
+  realpath: (path) => realpathSync(path), stat: (path) => statSync(path), lstat: (path) => lstatSync(path),
+};
 
-/** Root owns it and every directory above it, and no one else can write any of them. */
+/** Root owns the directory and every one above it, and no one else can write any of them, so no
+ * entry in it can be replaced or retargeted except by root. */
+function trustedDirectoryChain(directory: string, fs: ProbeFileSystem): boolean {
+  for (; ; directory = dirname(directory)) {
+    const entry = fs.stat(directory);
+    if (!entry.isDirectory() || entry.uid !== 0 || (entry.mode & 0o022) !== 0) return false;
+    if (directory === "/") return true;
+  }
+}
+
+/** The candidate path when both it and what it resolves to are root's and unwritable by anyone
+ * else (CR-2.1). The candidate path itself is what runs, never its canonical target: a multicall
+ * binary such as BusyBox picks its applet from the name it was invoked by, so `/usr/bin/printf ->
+ * /bin/busybox` must stay `/usr/bin/printf`. */
 function trustedSystemExecutable(path: string, fs: ProbeFileSystem): string | null {
   try {
+    if (fs.lstat(path).uid !== 0 || !trustedDirectoryChain(dirname(path), fs)) return null;
     const real = fs.realpath(path);
     if (!TRUSTED_PREFIXES.some((prefix) => real.startsWith(prefix))) return null;
     const file = fs.stat(real);
     if (!file.isFile() || file.uid !== 0 || (file.mode & 0o022) !== 0 || (file.mode & 0o111) === 0) return null;
-    for (let directory = dirname(real); ; directory = dirname(directory)) {
-      const entry = fs.stat(directory);
-      if (!entry.isDirectory() || entry.uid !== 0 || (entry.mode & 0o022) !== 0) return null;
-      if (directory === "/") break;
-    }
-    return real;
+    return trustedDirectoryChain(dirname(real), fs) ? path : null;
   } catch {
     return null;
+  }
+}
+
+/** The probe executable and what it resolves to, for the writable-root check: neither may lie
+ * under a root the session can write. */
+export function probeExecutablePaths(executable: string, fs: Pick<ProbeFileSystem, "realpath"> = nativeFileSystem): string[] {
+  try {
+    const real = fs.realpath(executable);
+    return real === executable ? [executable] : [executable, real];
+  } catch {
+    return [executable];
   }
 }
 

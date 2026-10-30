@@ -77,7 +77,7 @@ import {
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
-import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
+import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutablePaths, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
 import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -1183,7 +1183,7 @@ export class CodexAppServerDriver implements Driver {
     // A host with no trusted `printf` (such as a runner inside a user namespace, where root's files
     // read as unmapped) is a host property and stays quiet; a boundary that makes it writable is not.
     if (!command) return;
-    if (probeExecutableWritable(command[0]!, writableRoots)) {
+    if (probeExecutablePaths(command[0]!).some((path) => probeExecutableWritable(path, writableRoots))) {
       this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "probe_command_writable" }));
       return;
     }
@@ -1203,13 +1203,14 @@ export class CodexAppServerDriver implements Driver {
       return;
     }
     if (probe.outcome !== "failed") return;
-    if (!bwrap) throw new CodexCommandSandboxUnavailableError(probe.reason);
-    // Any other failure inside the boundary is not one it is known to stand in for, so the turns
-    // keep Codex's own policy, as before this probe existed, and the failure is only reported.
+    // Any other failure is neither one the boundary is known to stand in for nor proof that the
+    // sandbox cannot start (the probe command itself could misbehave on an unusual host, CR-2.1), so
+    // the turns keep Codex's own policy, as before this probe existed, and it is only reported.
     if (!probe.namespaceDenied) {
       this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_unavailable", reason: probe.reason }));
       return;
     }
+    if (!bwrap) throw new CodexCommandSandboxUnavailableError(probe.reason);
     this.outerSandbox = { network: bwrap.network };
     // A security-relevant downgrade of Codex's own sandbox, so it is always reported.
     this.cb.onStderr(JSON.stringify({

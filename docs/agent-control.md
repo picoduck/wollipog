@@ -861,9 +861,11 @@ Server's `command/exec` under the same policy its turns will send. Nothing a ses
 decides the result:
 
 - The probe is a system `printf` that prints a sentinel. The runner resolves it once by absolute
-  path (`/usr/bin/printf` or `/bin/printf`) and accepts it only when it, and every directory above
-  it, is owned by root and writable by no one else.
-- It must lie outside every root this boundary makes writable.
+  path (`/usr/bin/printf` or `/bin/printf`). It accepts the path only when the entry itself, what it
+  resolves to, and every directory above both are owned by root and writable by no one else. It
+  runs that path, not its resolved target, so a `printf` that links to a multicall binary such as
+  BusyBox still selects its `printf` applet.
+- Neither the path nor its target may lie under a root this boundary makes writable.
 - It runs with `PATH=/usr/bin:/bin` and with `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`
   unset.
 - A failure counts only when the sentinel never printed (the command never started) and stderr,
@@ -893,8 +895,9 @@ does not run and nothing changes. Otherwise:
   sandbox kept read-only. A writable `config.toml` can change later sessions. Binding it read-only
   is not done: the App Server writes it at runtime (`config/value/write`, `config/batchWrite`,
   `skills/config/write`), and its temp-file-and-rename writes would fail on a bound file.
-- Any other failure inside this boundary keeps Codex's policy and is only logged.
-- Without this boundary, the launch fails. Its `failed` status carries `launchFailure:
+- Any other probe failure keeps Codex's policy and is only logged, inside this boundary or not. It
+  is not proof that the sandbox cannot start.
+- On a namespace denial without this boundary, the launch fails. Its `failed` status carries `launchFailure:
   "codex_sandbox_unavailable"` (protocol v257), and a campaign shows that child as blocked work
   for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry. The
   runner keeps the reason with the failed state and reports it in the session snapshot, so it
