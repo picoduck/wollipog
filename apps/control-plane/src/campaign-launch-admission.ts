@@ -5,7 +5,7 @@ import {
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
   CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
-  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
+  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignBudgetAuthority, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
@@ -171,11 +171,15 @@ export function firstMessageBoundary(boundary: CampaignAuthorityBoundary, follow
   derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }): CampaignAuthorityBoundary {
   const derivedFollowUps = followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0;
   const budget = boundary.budgetAuthority;
-  const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps ?? 0;
+  // An explicit limit, including No Limit (omitted), is kept as the Human set it (#2940).
+  const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps;
   const issues = boundary.issueAuthority;
-  const maxIssues = issues && (derived.maxIssues ? Math.min(100, Math.max(issues.maxIssues, issueNumbers.length + acceptedFollowUps)) : issues.maxIssues);
+  // With no follow-up limit, a derived issue limit leaves room up to its ceiling.
+  const maxIssues = issues && (derived.maxIssues
+    ? Math.min(100, Math.max(issues.maxIssues, acceptedFollowUps === undefined ? 100 : issueNumbers.length + acceptedFollowUps)) : issues.maxIssues);
+  const { acceptedFollowUps: _previous, ...rest } = budget ?? {};
   return structuredClone({ ...boundary, objective, revision, issueScopeRevision, authorizedAt: now,
-    ...(budget ? { budgetAuthority: { ...budget, acceptedFollowUps } } : {}),
+    ...(budget ? { budgetAuthority: { ...rest, ...(acceptedFollowUps === undefined ? {} : { acceptedFollowUps }) } as CampaignBudgetAuthority } : {}),
     ...(issues ? { issueAuthority: { ...issues, epics: [...issueNumbers], maxIssues: maxIssues! } } : {}) });
 }
 

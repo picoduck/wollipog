@@ -1,7 +1,8 @@
 import type { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import { SESSION_EVENT_WIRE_EPOCH_FORMAT_OFFSET, SESSION_EVENT_WIRE_PROJECTION_VARIANTS, validCampaignBudgetAuthority,
-  type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView } from "@wollipog/protocol";
+  type CampaignBudgetAllocation, type CampaignBudgetAuthority, type CampaignBudgetView,
+  type CampaignFollowUpSubject, type CampaignIssueRef } from "@wollipog/protocol";
 
 type Member = { session_id: string; root_id: string; cost: number; tools: number; cost_limit: number | null; tool_limit: number | null;
   user_cost_limit: number | null; user_tool_limit: number | null; active: number };
@@ -48,6 +49,42 @@ function roundUsdMicros(usd: number): number {
   return Math.round(usd * 1_000_000) / 1_000_000;
 }
 
+/** The resource key of the Human decision admitting one follow-up past the approval limit (#2940). */
+export function campaignFollowUpAdmissionKey(rootId: string, subject: CampaignFollowUpSubject): string {
+  return `campaign_follow_up_admission:${rootId}:${subject.kind === "recommendation" ? `recommendation:${subject.recommendationId}` : `work_item:${subject.key}`}`;
+}
+
+/** The title a follow-up admission shows the Human and binds (#2940): the recorded title on one
+ * bounded line, or the subject's id when it has none. */
+export function campaignFollowUpAdmissionTitle(title: string | null | undefined, subject: CampaignFollowUpSubject): string {
+  return (title ?? "").replace(/[\u0000-\u001f\u007f]+/gu, " ").trim().slice(0, 200) ||
+    (subject.kind === "recommendation" ? subject.recommendationId : subject.key).slice(0, 200);
+}
+
+/** What a follow-up admission binds (#2940): the work item's title and issue and, for a
+ * recommendation, the title the campaign recorded for it. */
+export interface CampaignFollowUpIdentityContent {
+  title: string | null;
+  issue: CampaignIssueRef | null;
+  recommendationTitle: string | null;
+}
+
+/** The digest of a follow-up's complete identity (#2940): its recommendation or work item key, the
+ * recommendation's full recorded title, the item's full title and the issue it tracks. An admission
+ * binds this; its display titles are bounded apart. */
+export function campaignFollowUpIdentity(subject: CampaignFollowUpSubject, content: CampaignFollowUpIdentityContent): string {
+  return createHash("sha256").update(JSON.stringify([subject.kind, subject.kind === "recommendation" ? subject.recommendationId : subject.key,
+    content.recommendationTitle, content.title, content.issue ? [content.issue.repository.toLowerCase(), content.issue.number] : null]))
+    .digest("hex");
+}
+
+/** A follow-up past the campaign's approval threshold without the Human's approval (#2940). */
+export class FollowUpApprovalRequired extends Error {
+  constructor(readonly acceptedFollowUps: number, readonly limit: number) {
+    super(`This campaign has accepted ${acceptedFollowUps} follow-up${acceptedFollowUps === 1 ? "" : "s"}; its limit without approval is ${limit}.`);
+  }
+}
+
 /** No foreign keys: deletion, transcript replacement and retired attempts must not refund spend.
  * Usage is each session's own monotonic peak, never the recursively reserved child charge. */
 export class CampaignBudgetLedger {
@@ -67,6 +104,9 @@ export class CampaignBudgetLedger {
     );
     CREATE TABLE IF NOT EXISTS campaign_budget_follow_ups (
       root_id TEXT NOT NULL, recommendation_id TEXT NOT NULL, PRIMARY KEY(root_id,recommendation_id)
+    );
+    CREATE TABLE IF NOT EXISTS campaign_budget_follow_up_admissions (
+      work_item_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, occurrence_id TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS campaign_budget_checkpoints (
       session_id TEXT PRIMARY KEY, checkpoint TEXT NOT NULL
@@ -266,8 +306,7 @@ export class CampaignBudgetLedger {
       const view = this.view(rootId)!;
       if (view.state !== "active" || (authority.costUsd !== undefined && view.actual.costUsd + view.outstanding.costUsd > authority.costUsd + 1e-9) ||
           (authority.toolCalls !== undefined && view.actual.toolCalls + view.outstanding.toolCalls > authority.toolCalls) ||
-          (authority.concurrency !== undefined && view.occupied > authority.concurrency) ||
-          (authority.acceptedFollowUps !== undefined && view.acceptedFollowUps > authority.acceptedFollowUps)) throw new Error("allowance is below existing spend or reservations");
+          (authority.concurrency !== undefined && view.occupied > authority.concurrency)) throw new Error("allowance is below existing spend or reservations");
     });
   }
 
@@ -303,6 +342,32 @@ export class CampaignBudgetLedger {
   costCeiling(rootId: string): boolean {
     const row = this.sql.prepare("SELECT authority FROM campaign_budgets WHERE root_id=?").get(rootId) as { authority: string } | undefined;
     return row !== undefined && (JSON.parse(row.authority) as CampaignBudgetAuthority).costUsd !== undefined;
+  }
+
+  /** The Human's new follow-up approval threshold (#2940), `undefined` for none. It changes nothing
+   * already accepted: a limit below the count only makes the next follow-up need approval. Callers
+   * re-mint the boundary that names it in the same transaction. */
+  setFollowUpLimit(rootId: string, limit: number | undefined): void {
+    const row = this.sql.prepare("SELECT authority FROM campaign_budgets WHERE root_id=?").get(rootId) as { authority: string } | undefined;
+    if (!row) throw new Error("campaign allowance not found");
+    const { acceptedFollowUps: _previous, ...rest } = JSON.parse(row.authority) as CampaignBudgetAuthority;
+    const authority: CampaignBudgetAuthority = { ...rest, ...(limit === undefined ? {} : { acceptedFollowUps: limit }) };
+    if (!validCampaignBudgetAuthority(authority)) throw new Error("invalid follow-up limit");
+    this.sql.prepare("UPDATE campaign_budgets SET authority=? WHERE root_id=?").run(JSON.stringify(authority), rootId);
+  }
+
+  /** Records the Human approval that admitted a follow-up work item past the limit (#2940), or that
+   * approved a later change to it. Its title and issue stay bound to that approval. */
+  noteFollowUpAdmission(rootId: string, workItemId: string, occurrenceId: string): void {
+    this.sql.prepare(`INSERT INTO campaign_budget_follow_up_admissions(work_item_id,root_id,occurrence_id) VALUES (?,?,?)
+      ON CONFLICT(work_item_id) DO UPDATE SET occurrence_id=excluded.occurrence_id`).run(workItemId, rootId, occurrenceId);
+  }
+
+  /** The approval a follow-up work item admitted past the limit is bound to, if it was. */
+  followUpAdmission(workItemId: string): { rootId: string; occurrenceId: string } | null {
+    const row = this.sql.prepare("SELECT root_id, occurrence_id FROM campaign_budget_follow_up_admissions WHERE work_item_id=?")
+      .get(workItemId) as { root_id: string; occurrence_id: string } | undefined;
+    return row ? { rootId: row.root_id, occurrenceId: row.occurrence_id } : null;
   }
 
   stop(rootId: string, state: Exclude<CampaignBudgetView["state"], "active">, reason: string): void {
@@ -583,15 +648,23 @@ export class CampaignBudgetLedger {
     });
   }
 
-  acceptFollowUp<T>(rootId: string, recommendationId: string, write: () => T): T {
+  /** Counts a follow-up work item once. The allowance's `acceptedFollowUps` is an approval
+   * threshold, not a cap (#2940): past it, a follow-up is accepted only when `admit` consumes the
+   * Human's approval of exactly that follow-up; otherwise it throws `FollowUpApprovalRequired`. A
+   * campaign whose allowance does not govern (revoked to Custom) records the follow-up unchecked. */
+  acceptFollowUp<T>(rootId: string, workItemId: string, write: () => T, admit: () => boolean = () => false): T {
     return this.atomic(() => {
       const view = this.view(rootId);
       if (!view) return write();
-      const duplicate = this.sql.prepare("SELECT 1 FROM campaign_budget_follow_ups WHERE root_id=? AND recommendation_id=?").get(rootId,recommendationId);
-      if (!duplicate && (view.state !== "active" || view.authority.acceptedFollowUps !== undefined && view.acceptedFollowUps >= view.authority.acceptedFollowUps)) throw new Error("campaign accepted follow-up allowance reached");
+      const duplicate = this.sql.prepare("SELECT 1 FROM campaign_budget_follow_ups WHERE root_id=? AND recommendation_id=?").get(rootId,workItemId);
+      if (!duplicate && this.governingRoot(rootId) === rootId) {
+        if (view.state !== "active") throw new Error(view.reason ?? "campaign allowance unavailable");
+        const limit = view.authority.acceptedFollowUps;
+        if (limit !== undefined && view.acceptedFollowUps >= limit && !admit()) throw new FollowUpApprovalRequired(view.acceptedFollowUps, limit);
+      }
       const result = write();
       if (!duplicate) {
-        this.sql.prepare("INSERT INTO campaign_budget_follow_ups VALUES (?,?)").run(rootId,recommendationId);
+        this.sql.prepare("INSERT INTO campaign_budget_follow_ups VALUES (?,?)").run(rootId,workItemId);
         this.sql.prepare("UPDATE campaign_budgets SET accepted_follow_ups=accepted_follow_ups+1 WHERE root_id=?").run(rootId);
       }
       return result;

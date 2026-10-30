@@ -274,6 +274,25 @@ function issueScopeSession(): SessionView {
     workflowDecision:{...base.pendingApproval!.workflowDecision!,category:"campaign_issue_scope",resourceSnapshot:snapshot,controllingSessionId:base.id,authority:"human"}}};
 }
 
+/** A follow-up past the campaign's approval limit, the root's own Human decision (#2940); with
+ * `scenario=follow-up-rebinding`, another recommendation accepted into a follow-up already admitted. */
+function followUpAdmissionSession(rebinding = false): SessionView {
+  const base = evidenceSession();
+  const snapshot = rebinding
+    ? { category: "campaign_follow_up_admission" as const, subject: { kind: "recommendation" as const, recommendationId: "rec_follow_up_2" },
+      title: "Retry the Merge Group When Main Is Red", issue: { repository: "picoduck/wollipog", number: 3770 },
+      recommendationTitle: "Delete Every Stale Branch", identityDigest: "e".repeat(64), acceptedFollowUps: 4, limit: 3,
+      revises: "workflow_follow_up_1", rebinds: true as const }
+    : { category: "campaign_follow_up_admission" as const, subject: { kind: "recommendation" as const, recommendationId: "rec_follow_up_1" },
+      title: "Retry the Merge Group When Main Is Red", issue: { repository: "picoduck/wollipog", number: 3770 },
+      recommendationTitle: "Retry the Merge Group When Main Is Red", identityDigest: "d".repeat(64), acceptedFollowUps: 3, limit: 3 };
+  return { ...base, title: "Campaign Orchestrator", pendingApproval: {
+    ...base.pendingApproval!, title: "Follow-Up Approval Required", context: { input: JSON.stringify(snapshot) },
+    workflowDecision: { ...base.pendingApproval!.workflowDecision!, category: "campaign_follow_up_admission", resourceSnapshot: snapshot,
+      controllingSessionId: base.id, authority: "human" },
+  } };
+}
+
 function issueClosureSession(): SessionView {
   const base = evidenceSession();
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
@@ -839,7 +858,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -988,7 +1007,7 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
-  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "follow-up-admission" ? followUpAdmissionSession().pendingApproval! : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true).pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
     : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;

@@ -472,6 +472,52 @@ test("a child's publication outside the proof routes to the person with a visibl
   } finally { failedInspection.db.close(); }
 });
 
+test("a follow-up past the approval limit cannot be published until the person admits it, and its slot then holds the issue (#2940)", async () => {
+  const h = harness(true, 1);
+  try {
+    // A Human allowance that admits no follow-up without approval, on a scope already at its Maximum Issues.
+    const budgetAuthority = { version: 1 as const, concurrency: 3, acceptedFollowUps: 0, accounting: "managed_workers_only" as const, unpriced: "stop" as const };
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    assert.equal(policy.control?.mode, "full_control");
+    if (policy.control?.mode === "full_control") policy.control.boundary.budgetAuthority = budgetAuthority;
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    h.db.campaignBudgets.authorize("root", budgetAuthority);
+    assert.equal(campaignBoundaryCurrent(h.db.getSession("root")!), true);
+
+    const record = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Related repair", originWorkItemIds: [h.item.id] });
+    assert.ok(record.ok, record.error ?? "record");
+    const recommendationId = record.data!.id;
+    const accept = () => h.svc.adjudicateCampaignRecommendation("root", { recommendationId, disposition: "accepted", reason: "Observed related work", publicationRequired: true });
+    const publish = (requestId: string) => h.svc.createWorkflowDecisionWithVideo("child", { requestId, resourceKey: requestId,
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "[Feature]: Related repair", sanitizedBody: body,
+        labels: ["enhancement"], recommendationId } });
+
+    const over = accept();
+    assert.equal(over.ok, false);
+    assert.equal(over.status, 409);
+    const occurrenceId = /decision (workflow_[a-f0-9]+)/u.exec(over.error ?? "")?.[1];
+    assert.ok(occurrenceId, over.error ?? "refusal");
+
+    // Publication is no way around the follow-up approval: the recommendation is not accepted yet.
+    const early = await publish("early");
+    assert.ok(early.ok, early.error ?? "publication");
+    assert.equal(early.data!.authority, "human");
+    assert.equal(early.data!.authorityEvaluation?.admissionFailure, "recommendation_not_accepted");
+
+    const admission = h.db.workflowDecisionByOccurrence(occurrenceId)!;
+    assert.equal(admission.category, "campaign_follow_up_admission");
+    assert.ok(h.approve(admission).ok, "the person admits the follow-up");
+    assert.ok(accept().ok, "accepting it again admits it once");
+    assert.equal(h.db.campaignIssueLimit("root", 1), 2, "the admitted follow-up holds one issue slot past Maximum Issues");
+
+    // In the boundary and within the admitted slot, the child's publication is the Orchestrator's.
+    const admitted = await publish("admitted");
+    assert.ok(admitted.ok, admitted.error ?? "publication");
+    assert.equal(admitted.data!.authorityEvaluation?.admissionFailure, undefined);
+    assert.equal(admitted.data!.authority, "orchestrator");
+  } finally { h.db.close(); }
+});
+
 test("bounded not-planned closure needs a recorded supported disposition and keeps uncertain dispatch unreplayable", async () => {
   const h = harness();
   const request = {requestId:"closure",issue:100,reason:"not_planned" as const,explanation:"Supported retirement",evidence:["Recorded cancellation"]};

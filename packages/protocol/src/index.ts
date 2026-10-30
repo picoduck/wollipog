@@ -2618,7 +2618,10 @@ export const WORKFLOW_DECISION_CATEGORIES = [
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
-export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation";
+/** `campaign_follow_up_admission` (#2940): one follow-up past the campaign's approval limit. The server
+ * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
+export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
+  "campaign_follow_up_admission";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -4829,6 +4832,47 @@ export interface CampaignIssueScopeSnapshot {
   verifiedPublications?: Array<{ publicationOccurrenceId: string; issue: number }>;
 }
 
+/** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
+ * Orchestrator accepts, or a follow-up work item it plans by key. */
+export type CampaignFollowUpSubject =
+  | { kind: "recommendation"; recommendationId: string }
+  | { kind: "work_item"; key: string };
+
+/** A follow-up past the campaign's approval limit (#2940). Server-created from the campaign's own
+ * records; approving it admits exactly this follow-up, with this title and issue, once. A follow-up
+ * admitted this way keeps that binding: changing its title or issue is a new decision (`revises`). */
+export interface CampaignFollowUpAdmissionSnapshot {
+  category: "campaign_follow_up_admission";
+  subject: CampaignFollowUpSubject;
+  /** The follow-up work item's title, bounded for display. */
+  title: string;
+  /** The issue the follow-up work item tracks, if any. */
+  issue: CampaignIssueRef | null;
+  /** For a recommendation, its server-recorded title, bounded for display. It can differ from the
+   * work item's title, as when a recommendation is accepted into an existing follow-up. */
+  recommendationTitle?: string;
+  /** SHA-256 of the follow-up's complete identity: its subject, the recommendation's full recorded
+   * title, the item's full title and its issue. The approval binds this, not the display titles. */
+  identityDigest: string;
+  /** Follow-ups the campaign had accepted when this was requested. */
+  acceptedFollowUps: number;
+  /** How many follow-ups need no approval; `null` when there is no limit, which only a change to an
+   * admitted follow-up can meet. */
+  limit: number | null;
+  /** A change to a follow-up already admitted past the limit: the approval it replaces. */
+  revises?: string;
+  /** With `revises`: the change accepts this recommendation into the admitted follow-up in place of
+   * what it was approved as, rather than changing its title or issue. */
+  rebinds?: true;
+}
+
+/** A Human change to how many follow-ups a Full Control campaign accepts without approval (#2940).
+ * `null` clears the limit. Compare-and-set on the campaign's policy revision. */
+export interface SetCampaignFollowUpLimitRequest {
+  acceptedFollowUps: number | null;
+  expectedRevision: number;
+}
+
 export interface CampaignIssueScopeView {
   campaignSessionId: string;
   repository: string;
@@ -4953,6 +4997,7 @@ export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
+  | CampaignFollowUpAdmissionSnapshot
   | {
       category: "implementation_question";
       question: string;

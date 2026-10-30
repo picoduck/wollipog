@@ -14,6 +14,8 @@
  * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
  * `refresh=failing` fails every work-list read after the first, so a ledger write (`bumpRevision`)
  * leaves the loaded list under a Couldn't Refresh Work Items notice.
+ * With `budget=1`, `followUps=pending` puts the campaign at its follow-up limit with two follow-ups
+ * waiting for the person's approval (#2940); Change Limit saves to the fixture.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -265,7 +267,11 @@ const projectionFor = (rev: number) => campaignProjection(
       // `estimate=1`: recorded spend includes running Claude turns' live estimates (#3196).
       state: "active" as const, actual: { costUsd: 12, toolCalls: 100, ...(params.get("estimate") === "1" ? { includesEstimate: true } : {}) },
       outstanding: { costUsd: 50, toolCalls: 900 },
-      remaining: { costUsd: 38, toolCalls: 1000 }, occupied: 3, acceptedFollowUps: 1, reachedCheckpointsUsd: [],
+      remaining: { costUsd: 38, toolCalls: 1000 }, occupied: 3, acceptedFollowUps: params.get("followUps") === "pending" ? 4 : 1, reachedCheckpointsUsd: [],
+      followUpApprovals: params.get("followUps") === "pending" ? { approved: 1, pending: [
+        { occurrenceId: "workflow_follow_up_1", title: "Retry the Merge Group When Main Is Red" },
+        { occurrenceId: "workflow_follow_up_2", title: "Show Runner Contention in Campaign Status" },
+      ] } : { pending: [], approved: 0 },
       enforcement: "admission_and_best_effort_cancellation" as const, externalWorkers: "unsupported" as const,
       sessionLimits: {costBudgetUsd:40,maxToolCalls:null},rootAllocation:{sessionId:"s_parent",costUsd:25,toolCalls:500},costAccounting:"priced" as const,
     } } : {}),
@@ -290,8 +296,22 @@ const projectionFor = (rev: number) => campaignProjection(
   },
 );
 
+/** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
+const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get("followUps") === "pending" ? ([
+  ["workflow_follow_up_1", "Retry the Merge Group When Main Is Red"],
+  ["workflow_follow_up_2", "Show Runner Contention in Campaign Status"],
+] as Array<[string, string]>).map(([occurrenceId, title]) => ({
+  requestId: occurrenceId, occurrenceId, kind: "workflow_decision" as const, title: "Follow-Up Approval Required",
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" as const }, { optionId: "deny", name: "Deny", kind: "reject_once" as const }],
+  workflowDecision: { requestId: `request-${occurrenceId}`, occurrenceId: occurrenceId!, sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_follow_up_admission" as const, resourceKey: `campaign_follow_up_admission:s_root:work_item:${occurrenceId}`,
+    resourceSnapshot: { category: "campaign_follow_up_admission" as const, subject: { kind: "work_item" as const, key: occurrenceId! }, title: title!, issue: null, identityDigest: "d".repeat(64), acceptedFollowUps: 3, limit: 3 },
+    resourceDigest: "f".repeat(64), policyRevision: 1, authority: "human" as const, status: "pending" as const, createdAt: NOW - 5 * MINUTE },
+})) : [];
+
 function sessionsFor(rev: number): SessionView[] {
-  const root = baseSession({ orchestratorCampaign: projectionFor(rev) });
+  const root = baseSession({ orchestratorCampaign: projectionFor(rev),
+    ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -353,6 +373,10 @@ const client = {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
     } : {}) }),
+  setCampaignFollowUpLimit: async (_id: string, limit: number | null, expectedRevision: number) => {
+    (window as unknown as { __FOLLOW_UP_LIMIT__: unknown }).__FOLLOW_UP_LIMIT__ = { limit, expectedRevision };
+    return sessionsFor(revision)[0]!;
+  },
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
     (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;
     return { status: "pending" } as import("@wollipog/protocol").WorkflowDecisionView;

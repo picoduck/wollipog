@@ -13,7 +13,10 @@ import {
   installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable, validProviderPublicationInput,
   type PublicationDispatchKind, type PublicationObservation,
 } from "./provider-profile-publication-store.js";
-import { CampaignBudgetLedger } from "./campaign-budget.js";
+import { CampaignBudgetLedger, FollowUpApprovalRequired, campaignFollowUpAdmissionKey, campaignFollowUpAdmissionTitle,
+  campaignFollowUpIdentity, type CampaignFollowUpIdentityContent } from "./campaign-budget.js";
+import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef } from "@wollipog/protocol";
+
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
@@ -345,6 +348,18 @@ import {
   validateRunnerCloudTargets,
   validateRunnerContainerTargets,
 } from "./execution-targets.js";
+
+/** The machine-readable refusal for a follow-up that needs the Human's approval (#2940), from which
+ * the service requests the exact decision: its subject, bounded display titles, issue and identity
+ * digest. No limit is omitted. */
+function followUpApprovalDetails(subject: CampaignFollowUpSubject, content: CampaignFollowUpIdentityContent,
+  acceptedFollowUps: number, limit: number | null): Record<string, string | number> {
+  return { code: "follow_up_approval_required", acceptedFollowUps, ...(limit === null ? {} : { limit }),
+    subjectKind: subject.kind, subjectId: subject.kind === "recommendation" ? subject.recommendationId : subject.key,
+    title: campaignFollowUpAdmissionTitle(content.title, subject), identityDigest: campaignFollowUpIdentity(subject, content),
+    ...(content.recommendationTitle === null ? {} : { recommendationTitle: campaignFollowUpAdmissionTitle(content.recommendationTitle, subject) }),
+    ...(content.issue ? { issueRepository: content.issue.repository, issueNumber: content.issue.number } : {}) };
+}
 
 export const GOVERNANCE_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
@@ -5900,9 +5915,33 @@ export class ControlPlaneDb {
       observeCleanup: (sessionId) => this.campaignAttemptCleanupObservation(sessionId),
       boundary: (sessionId) => this.campaignAttemptBoundary(sessionId),
       atomic: (work) => this.atomic(work),
-      acceptFollowUp: (campaignId, workItemId) => {
-        try { this.campaignBudgets.acceptFollowUp(campaignId, workItemId, () => null); return null; }
-        catch (error) { return (error as Error).message; }
+      acceptFollowUp: (campaignId, workItemId, subject, content) => {
+        // A follow-up admitted past the limit stays bound to the approval that admitted it: another
+        // recommendation accepted into it is a change to what it is, not a duplicate (#2940).
+        if (this.campaignBudgets.followUpAdmission(workItemId)) return this.bindCampaignFollowUp(campaignId, workItemId, subject, content);
+        const identified = this.campaignFollowUpIdentityContent(campaignId, subject, content);
+        const identity = campaignFollowUpIdentity(subject, identified);
+        try {
+          // Past the approval limit, the Human's approval of exactly this follow-up admits it, and is
+          // consumed in the same write. A work item's key is the Orchestrator's own, so the approval
+          // binds the follow-up's complete identity, full title and issue included: the same key with
+          // other content is not it. The item stays bound to that approval (`reviseFollowUp`).
+          this.campaignBudgets.acceptFollowUp(campaignId, workItemId, () => null, () => {
+            const approved = this.approvedFollowUpAdmission(campaignId, subject, identity);
+            if (!approved || this.consumeWorkflowDecision(approved, Date.now()) === null) return false;
+            this.campaignBudgets.noteFollowUpAdmission(campaignId, workItemId, approved);
+            return true;
+          });
+          return null;
+        } catch (error) {
+          if (!(error instanceof FollowUpApprovalRequired)) return { error: (error as Error).message };
+          return { error: error.message, details: followUpApprovalDetails(subject, identified, error.acceptedFollowUps, error.limit) };
+        }
+      },
+      reviseFollowUp: (campaignId, workItemId, content) => {
+        const admission = this.campaignBudgets.followUpAdmission(workItemId);
+        const bound = admission && this.workflowDecisionByOccurrence(admission.occurrenceId)?.resourceSnapshot;
+        return bound?.category === "campaign_follow_up_admission" ? this.bindCampaignFollowUp(campaignId, workItemId, bound.subject, content) : null;
       },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
     });
@@ -15852,6 +15891,146 @@ export class ControlPlaneDb {
     return root.runnerId === member.runnerId && root.workspaceId === member.workspaceId && path(root) === path(member);
   }
 
+  /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */
+  campaignFollowUpAdmission(rootId: string, subject: CampaignFollowUpSubject): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+        AND category='campaign_follow_up_admission' AND resource_key=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(rootId, rootId, campaignFollowUpAdmissionKey(rootId, subject)));
+  }
+
+  /** The current, approved and unconsumed admission of exactly this follow-up identity (#2940), if
+   * any: at the current policy revision, and replacing `revises` when given. */
+  private approvedFollowUpAdmission(rootId: string, subject: CampaignFollowUpSubject, identity: string, revises?: string): string | null {
+    const approved = this.campaignFollowUpAdmission(rootId, subject);
+    const snapshot = approved?.resourceSnapshot;
+    return approved?.status === "approved" && approved.policyRevision === this.parentControlPolicy(rootId)?.revision &&
+      snapshot?.category === "campaign_follow_up_admission" && snapshot.revises === revises &&
+      snapshot.identityDigest === identity ? approved.occurrenceId : null;
+  }
+
+  /** Keeps a follow-up admitted past the limit bound to what the Human approved (#2940): its
+   * recommendation or key, full title and issue. Any other identity, whether a new title or issue or
+   * another recommendation accepted into it, needs the Human's approval of exactly that change,
+   * consumed here, after which the item is bound to it. Unbound items, and campaigns whose allowance
+   * no longer governs, change freely. */
+  private bindCampaignFollowUp(rootId: string, workItemId: string, subject: CampaignFollowUpSubject,
+    content: { title: string | null; issue: CampaignIssueRef | null }): { error: string; details?: Record<string, string | number> } | null {
+    const admission = this.campaignBudgets.followUpAdmission(workItemId);
+    const bound = admission && this.workflowDecisionByOccurrence(admission.occurrenceId)?.resourceSnapshot;
+    if (!admission || bound?.category !== "campaign_follow_up_admission" || this.campaignBudgets.governingRoot(rootId) !== rootId) return null;
+    const identified = this.campaignFollowUpIdentityContent(rootId, subject, content);
+    const identity = campaignFollowUpIdentity(subject, identified);
+    if (bound.identityDigest === identity) return null;
+    const approved = this.approvedFollowUpAdmission(rootId, subject, identity, admission.occurrenceId);
+    if (approved && this.consumeWorkflowDecision(approved, Date.now()) !== null) {
+      this.campaignBudgets.noteFollowUpAdmission(rootId, workItemId, approved);
+      return null;
+    }
+    const view = this.campaignBudgets.view(rootId);
+    // Another recommendation accepted into the admitted item replaces what the Human approved it as.
+    const rebinds = JSON.stringify(subject) !== JSON.stringify(bound.subject);
+    return { error: rebinds
+      ? `This follow-up was admitted past the campaign's follow-up limit as "${bound.title}"; accepting recommendation "${campaignFollowUpAdmissionTitle(identified.recommendationTitle, subject)}" into it needs the person's approval.`
+      : `This follow-up was admitted past the campaign's follow-up limit as "${bound.title}"; changing its title or issue needs the person's approval.`,
+    details: { ...followUpApprovalDetails(subject, identified, view?.acceptedFollowUps ?? 0, view?.authority.acceptedFollowUps ?? null),
+      revises: admission.occurrenceId, ...(rebinds ? { rebinds: 1 } : {}) } };
+  }
+
+  /** A follow-up's identity content (#2940): the item's title and issue and, for a recommendation,
+   * the title the campaign recorded for it, read here rather than taken from the caller. */
+  private campaignFollowUpIdentityContent(rootId: string, subject: CampaignFollowUpSubject,
+    content: { title: string | null; issue: CampaignIssueRef | null }): CampaignFollowUpIdentityContent {
+    return { ...content, recommendationTitle: subject.kind === "recommendation"
+      ? this.campaignWorkLedger.recommendation(rootId, subject.recommendationId)?.title ?? null : null };
+  }
+
+  /** Approved, not yet consumed follow-up admissions (#2940), so a ledger write can tell which it consumed. */
+  campaignFollowUpApprovedOccurrences(rootId: string): string[] {
+    return (this.stmt(`SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+        AND category='campaign_follow_up_admission' AND status='approved'`).all(rootId, rootId) as Array<{ occurrence_id: string }>)
+      .map((row) => row.occurrence_id);
+  }
+
+  /** Follow-ups past the approval limit (#2940): those awaiting the Human, and how many they admitted. */
+  campaignFollowUpApprovals(rootId: string): NonNullable<CampaignBudgetView["followUpApprovals"]> {
+    const rows = this.stmt(`SELECT occurrence_id, status, json_extract(resource_snapshot, '$.title') AS title FROM workflow_decisions
+        WHERE controlling_session_id=? AND session_id=? AND category='campaign_follow_up_admission'
+        AND (status='pending' OR status='consumed' AND json_extract(resource_snapshot, '$.revises') IS NULL)
+        ORDER BY created_at, rowid`).all(rootId, rootId) as Array<{ occurrence_id: string; status: string; title: string }>;
+    // An approved change to an admitted follow-up is not another follow-up, so it adds no issue slot.
+    return { pending: rows.filter((row) => row.status === "pending").map((row) => ({ occurrenceId: row.occurrence_id, title: row.title })),
+      approved: rows.filter((row) => row.status === "consumed").length };
+  }
+
+  /** The issue limit a campaign's boundary enforces (#2940): its Maximum Issues, plus one slot for
+   * each follow-up the Human admitted past the approval limit, so that follow-up's issue is not then
+   * refused by a limit derived from the follow-ups it exceeded. */
+  campaignIssueLimit(rootId: string, maxIssues: number): number {
+    return Math.min(100, maxIssues + this.campaignFollowUpApprovals(rootId).approved);
+  }
+
+  /** A Human's new follow-up approval limit for a live Full Control campaign (#2940), `null` for none.
+   * Only the Human who authorized the current boundary changes it, compare-and-set on the policy
+   * revision: the boundary is re-minted around the new limit in the same transaction as the
+   * allowance, as a Human scope approval re-mints it, so the campaign never runs under a boundary
+   * that does not name its limit. Raising the limit raises Maximum Issues by as much, and clearing
+   * it lifts Maximum Issues to its ceiling, so the follow-ups it admits can hold issues; lowering
+   * changes neither and revokes nothing already accepted. Like any boundary change, it revokes every
+   * unconsumed decision, which it returns. */
+  setCampaignFollowUpLimit(rootId: string, limit: number | null, userId: string, expectedRevision: number, now: number):
+    { ok: true; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.budgetAuthority || !this.campaignBudgets.view(rootId)) {
+        return refuse(409, "Only a Full Control campaign with a campaign allowance has a follow-up limit.");
+      }
+      const boundary = control.boundary;
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (parentControlPolicy?.revision !== expectedRevision) return refuse(409, "Campaign authority changed; refresh and try again.");
+      if (!campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date. Revoke Full Control in Orchestrator Controls, then Enable Full Control.");
+      }
+      if (boundary.authorizedByUserId !== userId) return refuse(403, "Only the person who authorized this campaign's Full Control can change its follow-up limit.");
+      const previous = boundary.budgetAuthority!.acceptedFollowUps;
+      const { acceptedFollowUps: _previous, ...budget } = boundary.budgetAuthority!;
+      const issues = boundary.issueAuthority;
+      const maxIssues = !issues ? undefined : limit === null ? 100
+        : Math.min(100, issues.maxIssues + Math.max(0, limit - (previous ?? limit)));
+      const reminted = remintCampaignBoundary({ ...boundary,
+        budgetAuthority: { ...budget, ...(limit === null ? {} : { acceptedFollowUps: limit }) },
+        ...(issues ? { issueAuthority: { ...issues, maxIssues: maxIssues! } } : {}) }, { revision: boundary.issueScopeRevision }, userId, now);
+      if (reminted?.mode !== "full_control") return refuse(400, "Enter a whole number of follow-ups, or choose no limit.");
+      this.campaignBudgets.setFollowUpLimit(rootId, limit ?? undefined);
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        // The person set this limit, so a first message still to come keeps it, No Limit included,
+        // rather than deriving one from the issues it names.
+        const waiting = memberPolicy.firstMessageScope;
+        if (id === rootId && waiting && "derivedLimits" in waiting && waiting.derivedLimits) {
+          waiting.derivedLimits = { ...waiting.derivedLimits, acceptedFollowUps: false };
+        }
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
+        return refuse(409, "Campaign authority changed; refresh and try again.");
+      }
+      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return { ok: true, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
   /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope. */
   approveCampaignIssueScope(occurrenceId: string, userId: string, now: number, agentSessionId?: string): WorkflowDecisionView | null {
     this.db.exec("BEGIN IMMEDIATE");
@@ -15869,7 +16048,7 @@ export class ControlPlaneDb {
       if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
           snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
           boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
-          snapshot.before.length + snapshot.additions.length - snapshot.removals.length > boundary.issueAuthority.maxIssues)) {
+          snapshot.before.length + snapshot.additions.length - snapshot.removals.length > this.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues))) {
         this.db.exec("ROLLBACK"); return null;
       }
       const scope: import("@wollipog/protocol").CampaignIssueScope = { repository: snapshot.repository,
@@ -15885,7 +16064,7 @@ export class ControlPlaneDb {
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
       if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
-          this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > reminted.boundary.issueAuthority.maxIssues) {
+          this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > this.campaignIssueLimit(root.id, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
       }
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
@@ -15973,7 +16152,7 @@ export class ControlPlaneDb {
         scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
         ? remintCampaignBoundary(control.boundary, scope, userId, scope.authorizedAt) : null;
       if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
-          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > reminted.boundary.issueAuthority.maxIssues) {
+          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
       }
       for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
@@ -20091,6 +20270,7 @@ export class ControlPlaneDb {
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     const budget=this.campaignBudgets.view(resolvedCampaignId);
+    if (budget && this.campaignBudgets.governingRoot(resolvedCampaignId)) budget.followUpApprovals = this.campaignFollowUpApprovals(resolvedCampaignId);
     if (budget) budget.requiredNativeReview = {
       supported: false,
       reason: budget.authority.controlledReview ? REVIEW_JOBS_RETIRED_REASON
