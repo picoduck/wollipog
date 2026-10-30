@@ -102,7 +102,12 @@ establishes new human provenance and invalidates an older Full Control boundary.
 
 For related publication, record and adjudicate a unique recommendation with authorized origin work
 items. Submit its `recommendationId` with the exact sanitized repository/title/body/labels through
-the usual workflow request. The server verifies accepted lineage and scope capacity; the runner
+the usual workflow request. The root or a member whose gates the root controls, usually the child
+that drafted it, may request it; inspection and consumption run as the root. Titles compare without
+one leading issue-form type tag such as `[Bug]: `. The server verifies accepted lineage and scope
+capacity. When it cannot admit the request, the decision goes to the person, and its
+`authorityEvaluation.admissionFailure` names the failed condition (for example `title_mismatch`,
+`capacity_exhausted` or `inspection_failed`), which the server also logs. The runner
 screens public content against the issue-reporting format and inspects both open and closed search
 results plus the newest issues. Incomplete or duplicate evidence refuses admission. This supplements
 the exact payload review; it never rewrites content or proves arbitrary prose is free of private data.

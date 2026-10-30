@@ -23,8 +23,8 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
@@ -9735,14 +9735,18 @@ export class SessionsService {
       const initialCaller = this.db.getSession(sessionId);
       const initialController = initialCaller && this.workflowDecisionController(initialCaller, "follow_up_issue_publication");
       const admitted = await this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
-      if (admitted.ok) return admitted;
+      if (!("failure" in admitted) && admitted.ok) return admitted;
       const currentCaller = this.db.getSession(sessionId);
       const currentController = currentCaller && this.workflowDecisionController(currentCaller, "follow_up_issue_publication");
-      if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) return admitted;
+      if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) {
+        return "failure" in admitted ? fail("Publication authority changed during inspection; request it again", 409) : admitted;
+      }
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
-      // preserve the original configured/human request path without a standing issue grant.
+      // preserve the original configured/human request path without a standing issue grant,
+      // and record why on the decision so the person is never asked without a reason (#2940).
       const { recommendationId: _recommendationId, ...snapshot } = normalized.data;
-      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess);
+      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess,
+        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
     }
     if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
       return this.createGithubMergeDecision(sessionId, request, normalized.data, canAccess);
@@ -9929,27 +9933,48 @@ export class SessionsService {
     }
   }
 
+  /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
+   * any member whose gates the root controls may request it: the drafting child usually does. A
+   * refusal names its condition, logged here and recorded on the human-owned fallback (#2940). */
   private async admitCampaignPublication(sessionId: string, request: CreateWorkflowDecisionRequest,
-    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, canAccess: (id: string) => boolean): Promise<ServiceResult<WorkflowDecisionView>> {
-    const root = this.db.getSession(sessionId);
-    if (!root || !canAccess(sessionId) || this.db.campaignRootForMember(sessionId) !== sessionId || !issueBoundary(root) || scopeCompatibility(this.db, root)) return fail("Bounded publication requires a supported root Full Control issue boundary", 403);
-    if (snapshot.issueAdmission) return fail("Publication admission is server-derived", 403);
-    const evidence = publicationEvidence(this.db, root, snapshot);
-    if (!evidence || new Set(snapshot.labels).size !== snapshot.labels.length) return fail("Publication requires a unique accepted related recommendation, sanitized exact payload, unique labels, authorized origins and remaining scope capacity", 409);
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, canAccess: (id: string) => boolean,
+  ): Promise<ServiceResult<WorkflowDecisionView> | { failure: CampaignPublicationAdmissionFailure }> {
+    const caller = this.db.getSession(sessionId);
+    const rootId = this.db.campaignRootForMember(sessionId);
+    const root = rootId ? this.db.getSession(rootId) : null;
+    const refused = (failure: CampaignPublicationAdmissionFailure, boundaryRevision?: number) => {
+      this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
+        ...(root ? { controllingSessionId: root.id } : {}), ...(boundaryRevision === undefined ? {} : { boundaryRevision }),
+        recommendationId: snapshot.recommendationId, outcome: "human_fallback", reason: failure }));
+      return { failure };
+    };
+    if (!caller || !root || !canAccess(sessionId) || !canAccess(root.id)) return refused("requester_outside_campaign");
+    if (!issueBoundary(root) || scopeCompatibility(this.db, root)) return refused("no_issue_boundary");
+    // The boundary is the root's; a nested Orchestrator's own gates are outside it.
+    if (this.workflowDecisionController(caller, snapshot.category)?.session.id !== root.id) return refused("requester_outside_campaign");
+    const boundaryRevision = issueBoundary(root)!.revision;
+    if (new Set(snapshot.labels).size !== snapshot.labels.length) return refused("unsafe_payload", boundaryRevision);
+    const checked = publicationEvidenceCheck(this.db, root, snapshot);
+    if (!("evidence" in checked)) return refused(checked.failure, boundaryRevision);
+    const evidence = checked.evidence;
+    let publicationDigest: string;
     try {
+      // Inspection and consumption both run as the root, whose runner and repository own the boundary.
       const requestId = `publication_inspect_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect",
-        requestId, sessionId, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
-      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== sessionId || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest) return fail("Fresh publication duplicate and sanitation inspection failed", 409);
-      const current = this.db.getSession(sessionId)!;
-      if (issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return fail("Publication lineage or boundary changed during inspection", 409);
-      this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
-        boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted" }));
-      return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
-        resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
-          evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }),
-          publicationAuthority: { authorizedByUserId: issueBoundary(current)!.authorizedByUserId, objectiveDigest: issueEvidenceDigest(issueBoundary(current)!.objective) } } } }, canAccess, { trustedPublication: true });
-    } catch { return fail("Publication inspection failed; no issue was published", 409); }
+        requestId, sessionId: root.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
+      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== root.id || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest) return refused("inspection_failed", boundaryRevision);
+      publicationDigest = result.publicationDigest;
+    } catch { return refused("inspection_failed", boundaryRevision); }
+    const current = this.db.getSession(root.id)!;
+    const boundary = issueBoundary(current);
+    if (!boundary || issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return refused("evidence_changed", boundaryRevision);
+    this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
+      controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted" }));
+    return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
+      resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
+        evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
+        publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess, { trustedPublication: true });
   }
 
   private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number): Promise<boolean> {
@@ -10364,6 +10389,7 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
+      publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
       /** #3713: the child runner's GitHub read, taken just before this request. */
       closingReferenceCheck?: PullRequestClosingReferenceCheck },
   ): ServiceResult<WorkflowDecisionView> {
@@ -10458,6 +10484,9 @@ export class SessionsService {
       authorityEvaluation.owner = authority;
       authorityEvaluation.basis = "human_required";
       authorityEvaluation.reason = "evidence_review_unavailable";
+    }
+    if (internal?.publicationAdmissionFailure && category === "follow_up_issue_publication" && authority === "human") {
+      authorityEvaluation.admissionFailure = internal.publicationAdmissionFailure;
     }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(

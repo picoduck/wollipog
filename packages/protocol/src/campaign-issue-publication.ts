@@ -11,6 +11,16 @@ export function campaignPublicationSafe(title: string, body: string, labels: str
     (i === 0 || headings.indexOf(heading) > headings.indexOf(required[i - 1]!)))) && /^\s*-\s+(?:\[[ xX]\]\s+)?\S/mu.test(body);
 }
 
+/** The subject a title names. One leading issue-form type tag, such as GitHub's prefilled
+ * "[Bug]: ", classifies the issue rather than naming it, so drafts and recommendations that differ
+ * only by that tag compare equal (#2940). Duplicate inspection uses the same comparison. */
 export function campaignPublicationTitle(title: string): string {
-  return title.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
+  return title.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase().replace(/^\[[^[\]]{1,32}\]:? (?=\S)/u, "");
 }
+
+/** Why the server did not admit a follow-up publication that named a recommendation. Recorded on
+ * the human-owned decision's authority evaluation and the admission log; it grants nothing. */
+export type CampaignPublicationAdmissionFailure =
+  | "no_issue_boundary" | "requester_outside_campaign" | "unsafe_payload" | "recommendation_not_found"
+  | "recommendation_not_accepted" | "recommendation_spent" | "title_mismatch" | "origin_outside_scope"
+  | "capacity_exhausted" | "inspection_failed" | "evidence_changed";
