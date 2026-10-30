@@ -83,7 +83,8 @@ control then exits 101. The escalation fixture therefore places its Codex home i
 throwaway `HOME` whenever that lies outside the temporary directory, as the workflow's private
 `TMPDIR` arranges; its workspace and hook state stay under `/tmp`. A local run whose `TMPDIR` is
 `/tmp` keeps the old placement, and a sandbox control failure reports its exit status and first
-error line. Two targets take about twice the 47-minute suite. The report is
+error line. The control runs `codex sandbox -- /bin/sh -c ...`: these releases have no `linux`
+subcommand, and the earlier `codex sandbox linux -- ...` form executed a program named `linux`. Two targets take about twice the 47-minute suite. The report is
 the job summary and the `harness-assumptions-codex` artifact; it embeds each target's `latest.md`,
 including the guard trust classification, so **measured OK, range can be widened** appears there
 for review without failing the run. Changed or could-not-run results fail it.

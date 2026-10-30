@@ -298,6 +298,9 @@ export function hardeningRestorable(outputs: Map<string, string>, marker: string
  * Driver.
  * ----------------------------------------------------------------------------------------- */
 
+/** The benign sandbox control: Codex's default platform sandbox around a fixed shell command. */
+export const SANDBOX_CONTROL_ARGS = ["sandbox", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"] as const;
+
 /**
  * Codex refuses to create its sandbox helper aliases when CODEX_HOME is under the temporary
  * directory, so the fixture's Codex home lives in this probe's throwaway HOME when that is
@@ -335,8 +338,10 @@ async function main(): Promise<number> {
 
     // Prove the host can execute Codex's sandbox before spending thirteen turn timeouts.
     // A denied namespace is an environment failure, never a network/deny measurement.
+    // `codex sandbox [OPTIONS] [COMMAND]...` (0.155.1 and 0.166.0) has no `linux` subcommand:
+    // hosted run 41036582625 showed `sandbox linux` executing a program named `linux`.
     const sandbox = process.platform === "linux" ? spawnSync(CODEX,
-      ["sandbox", "linux", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"],
+      SANDBOX_CONTROL_ARGS,
       { cwd: fixture.repo, env: isolatedProbeEnv(fixture.codexHome), encoding: "utf8", timeout: 15_000 }) : null;
     if (!sandbox || sandbox.error || sandbox.status !== 0 || !sandbox.stdout.includes("PROBE_SANDBOX_READY")) {
       const namespaceUnavailable = sandboxNamespaceUnavailable(sandbox);

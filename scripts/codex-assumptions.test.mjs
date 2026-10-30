@@ -6,7 +6,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { acknowledgeUnavailable, collectResult, guardRangeResult, markdown, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
-import { CASES, fixtureHomeBase, hardeningRestorable, sandboxFailureDetail, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
+import { CASES, fixtureHomeBase, hardeningRestorable, SANDBOX_CONTROL_ARGS, sandboxFailureDetail, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
 import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.ts";
 import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
@@ -41,6 +41,13 @@ test("only the measured namespace denial is eligible for acknowledgement, never 
   for (const result of [null, { ...denied, error: new Error("ETIMEDOUT") }, { ...denied, signal: "SIGTERM" },
     { ...denied, status: null }, { ...denied, status: 0 }, { ...denied, stderr: "bwrap: Operation not permitted" },
     { ...denied, stderr: "error: unrecognized subcommand sandbox" }]) assert.equal(sandboxNamespaceUnavailable(result), false);
+});
+
+test("the sandbox control uses the current `codex sandbox [OPTIONS] [COMMAND]...` form", () => {
+  // `codex sandbox linux -- ...` runs a program named `linux` on 0.155.1 and 0.166.0.
+  assert.deepEqual(SANDBOX_CONTROL_ARGS.slice(0, 2), ["sandbox", "--"]);
+  assert.ok(!SANDBOX_CONTROL_ARGS.includes("linux"));
+  assert.equal(SANDBOX_CONTROL_ARGS.at(-1), "printf PROBE_SANDBOX_READY");
 });
 
 test("the escalation fixture's Codex home leaves the temporary directory only for a throwaway HOME outside it", () => {
