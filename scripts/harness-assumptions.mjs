@@ -434,20 +434,22 @@ export async function measure(harness, { env = process.env, root = ROOT, exec = 
   try {
     // An incomplete report is on disk before the long-running work starts.
     writeAtomic(location.reportDir, "latest.json", JSON.stringify(report, null, 2) + "\n");
+    // Host preparation and staging both run as the runner user, before any release code.
+    if (harness.prepare) {
+      const run = await exec(harness.prepare.command, { cwd: root, env, timeoutMs: 15 * 60_000, stdio: "capture" });
+      report.preparation = ok(run) ? { status: "ok", purpose: harness.prepare.purpose, detail: "Completed." }
+        : { status: "failed", purpose: harness.prepare.purpose,
+          detail: `\`${harness.prepare.command.join(" ")}\` ${describeRun(run)}; the dependent probes report could not run. Last output: ${lastLines(run)}` };
+    }
     const staged = await box.stage();
+    const smoke = (staged.tail ?? "").split("\n").find(line => line.startsWith("bubblewrap smoke as "));
     report.isolation = box.isolated
-      ? ok(staged) ? { status: "ok", detail: `Suites ran as the unprivileged ${env.HARNESS_PROBE_USER} user without sudo, against a read-only copy.` }
+      ? ok(staged) ? { status: "ok", detail: `Suites ran as the unprivileged ${env.HARNESS_PROBE_USER} user without sudo, against a read-only copy.${smoke ? ` ${smoke.trim()}.` : ""}` }
         : { status: "failed", detail: `\`scripts/harness-assumptions-isolate.sh\` ${describeRun(staged)}; no suite ran. Last output: ${lastLines(staged)}` }
       : { status: "not isolated", detail: "Local run as the current user." };
     if (report.isolation.status === "failed") {
       report.targets = report.targets.map(t => fail(t, "the unprivileged probe user could not be prepared"));
     } else {
-      if (harness.prepare) {
-        const run = await exec(harness.prepare.command, { cwd: root, env, timeoutMs: 15 * 60_000, stdio: "capture" });
-        report.preparation = ok(run) ? { status: "ok", purpose: harness.prepare.purpose, detail: "Completed." }
-          : { status: "failed", purpose: harness.prepare.purpose,
-            detail: `\`${harness.prepare.command.join(" ")}\` ${describeRun(run)}; the dependent probes report could not run. Last output: ${lastLines(run)}` };
-      }
       for (const [index, target] of report.targets.entries()) {
         report.targets[index] = await measureTarget(harness, target, { box, env, exec, suiteMarkdown });
         writeAtomic(location.reportDir, "latest.json", JSON.stringify(report, null, 2) + "\n");

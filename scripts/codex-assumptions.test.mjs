@@ -6,7 +6,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { acknowledgeUnavailable, collectResult, guardRangeResult, markdown, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
-import { CASES, hardeningRestorable, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
+import { CASES, hardeningRestorable, sandboxFailureDetail, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
 import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.ts";
 import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
@@ -41,6 +41,16 @@ test("only the measured namespace denial is eligible for acknowledgement, never 
   for (const result of [null, { ...denied, error: new Error("ETIMEDOUT") }, { ...denied, signal: "SIGTERM" },
     { ...denied, status: null }, { ...denied, status: 0 }, { ...denied, stderr: "bwrap: Operation not permitted" },
     { ...denied, stderr: "error: unrecognized subcommand sandbox" }]) assert.equal(sandboxNamespaceUnavailable(result), false);
+});
+
+test("a failed sandbox control reports its exact cause, bounded and printable", () => {
+  assert.equal(sandboxFailureDetail({ status: 1, signal: null, stderr: "\nbwrap: setting up uid map: Permission denied\nmore\n" }), "exited 1: bwrap: setting up uid map: Permission denied");
+  assert.equal(sandboxFailureDetail({ status: null, signal: "SIGKILL", stderr: "" }), "killed by SIGKILL with no stderr");
+  assert.equal(sandboxFailureDetail({ status: null, error: Object.assign(new Error("x"), { code: "ETIMEDOUT" }), stderr: null }), "could not start (ETIMEDOUT) with no stderr");
+  assert.equal(sandboxFailureDetail({ status: 0, stderr: "" }), "exited 0 without the ready marker with no stderr");
+  assert.equal(sandboxFailureDetail(null), "no Linux sandbox on this platform");
+  const long = sandboxFailureDetail({ status: 2, stderr: `\u001b[31m${"x".repeat(500)}` });
+  assert.ok(long.length < 230 && !long.includes("\u001b"));
 });
 
 test("acknowledged namespace unavailability succeeds operationally with visible unmeasured evidence; every other failure remains failing", () => {

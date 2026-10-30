@@ -66,4 +66,12 @@ done
 if as_user test -x "$HOME"; then echo "$user can traverse $HOME" >&2; exit 1; fi
 if [ -d /opt/hostedtoolcache ] && as_user test -x /opt/hostedtoolcache; then echo "$user can traverse /opt/hostedtoolcache" >&2; exit 1; fi
 if as_user sudo -n true > /dev/null 2>&1; then echo "$user can use sudo" >&2; exit 1; fi
+# Diagnostic only: harness preparation may grant bubblewrap namespaces later; probes report the result.
+if [ -x /usr/bin/bwrap ]; then
+  if smoke="$(as_user /usr/bin/bwrap --ro-bind / / --dev /dev --proc /proc --tmpfs /tmp --unshare-pid -- /bin/true 2>&1)"; then
+    echo "bubblewrap smoke as $user: ok"
+  else
+    echo "bubblewrap smoke as $user: failed: ${smoke:0:200}"
+  fi
+fi
 echo "Isolated $user: read-only $root/repo, private Node, no sudo, cron or at, no access to $HOME or the tool cache"

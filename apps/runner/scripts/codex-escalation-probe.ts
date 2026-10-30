@@ -95,6 +95,20 @@ export function sandboxNamespaceUnavailable(result: { error?: unknown; status: n
     /^bwrap: No permissions to create new namespace(?:,|$)/m.test(result.stderr ?? "");
 }
 
+/**
+ * Why the benign sandbox control failed, so a could-not-run report names the cause: the exit
+ * status and the first stderr line, printable ASCII only and bounded. The control runs a fixed
+ * command in a throwaway home, so its stderr carries no credential.
+ */
+export function sandboxFailureDetail(result: { error?: unknown; status: number | null; signal?: string | null; stdout?: string | null; stderr: string | null } | null): string {
+  if (!result) return "no Linux sandbox on this platform";
+  const error = result.error as { code?: string } | undefined;
+  const outcome = error ? `could not start (${error.code ?? "error"})` : result.signal ? `killed by ${result.signal}` :
+    result.status === 0 ? "exited 0 without the ready marker" : `exited ${result.status}`;
+  const line = (result.stderr ?? "").split("\n").map(l => l.replace(/[^\x20-\x7e]/gu, "").trim()).find(Boolean);
+  return line ? `${outcome}: ${line.length > 200 ? `${line.slice(0, 200)}...` : line}` : `${outcome} with no stderr`;
+}
+
 /** Stands in for the network: reachable outside the sandbox, refused inside it. */
 function networkServer(): Server {
   return createServer((_request, response) => {
@@ -308,7 +322,7 @@ async function main(): Promise<number> {
       const namespaceUnavailable = sandboxNamespaceUnavailable(sandbox);
       probeResult("permission profile escalation matrix", "could not run",
         namespaceUnavailable ? "Host denies unprivileged user namespaces; Codex's benign sandbox control could not run; no escalation assumption measured" :
-          "Codex Linux sandbox cannot execute a benign control command on this host; no escalation assumption measured", GUARD_DOCUMENTATION,
+          `Codex Linux sandbox cannot execute a benign control command on this host (${sandboxFailureDetail(sandbox)}); no escalation assumption measured`, GUARD_DOCUMENTATION,
         namespaceUnavailable ? "sandbox_namespace_unavailable" : undefined);
       return 2;
     }
