@@ -73,7 +73,7 @@ function fixtureOperation(path: string, mode: "private" | "foreign-write" | "nul
   const dll = assembly(), prefix = Buffer.alloc(4); prefix.writeInt32LE(dll.length);
   const platform = resolveWindowsPlatform();
   const result = spawnSync(platform.executable, ["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", program(__WACW_DLL_SHA__, true)],
-    { input: Buffer.concat([prefix, dll]), env: { ...fixedWindowsEnvironment(platform.systemRoot), WACW_FIXTURE_PATH: path, WACW_FIXTURE_MODE: mode }, shell: false, windowsHide: true, timeout: 10_000, maxBuffer: 32768 });
+    { input: Buffer.concat([prefix, dll]), env: { ...fixedWindowsEnvironment(platform.systemRoot), WACW_FIXTURE_PATH: path, WACW_FIXTURE_MODE: mode }, shell: false, windowsHide: true, timeout: 60_000, maxBuffer: 32768 });
   if (result.error || result.status !== 0 || result.signal || result.stderr.length) throw new Error("native synthetic fixture creation failed");
   const value = result.stdout.toString("utf8");
   if (!Buffer.from(value).equals(result.stdout)) throw new Error("invalid synthetic fixture output");

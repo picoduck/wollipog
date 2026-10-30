@@ -276,9 +276,12 @@ public static class WollipogAccountConfigWindowsV1 {
    using(var context=ContextFor(r)){var old=Observe(context,false);r.Next=old.Raw;
     using(var guard=New(context,context.Slot("guard"),Bytes("synthetic-full-store"))){Bootstrap(context,old);var tip=TipFor(context,true);string prev=new string('0',64);
      using(var journal=Open(context.Slot("journal"),context.Sid,false,true,R|W)){
-      for(int revision=1;revision<=4096;revision++){context.Alive();string ticket=Guid.NewGuid().ToString("D");for(byte kind=1;kind<=2;kind++){
-       var record=Record(context,r,old,tip,kind,ticket,revision,prev);Write(journal,BitConverter.GetBytes(record.Length));Write(journal,record);prev=Digest(record);
-      }}Need(FlushFileBuffers(journal));
+      // The journal handle is write-through; one buffered write keeps 8,192 synthetic records inside the fixture deadline.
+      using(var all=new MemoryStream()){
+       for(int revision=1;revision<=4096;revision++){context.Alive();string ticket=Guid.NewGuid().ToString("D");for(byte kind=1;kind<=2;kind++){
+        var record=Record(context,r,old,tip,kind,ticket,revision,prev);all.Write(BitConverter.GetBytes(record.Length),0,4);all.Write(record,0,record.Length);prev=Digest(record);
+       }}Write(journal,all.ToArray());
+      }Need(FlushFileBuffers(journal));
      }ReleaseGuard(guard);
     }
    }
