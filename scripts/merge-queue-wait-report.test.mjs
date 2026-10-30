@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  AGGREGATOR, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
+  applyTimingContext, attemptRecord, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
+  AGGREGATOR, compareReports, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
 } from "./merge-queue-wait-report.mjs";
 
 const repository = "example/project";
@@ -89,12 +91,136 @@ test("a late job with no known dependency leaves the split unmeasured rather tha
   assert.equal(summarize([metrics], [], 120).criticalPathUnmeasured, 1);
 });
 
+test("routing is sequential execution and advisory shadow work cannot become a required dependency", () => {
+  const metrics = runMetrics(run(8, 1, 21), [
+    job("PR Suite Routing", 0, 2, 4),
+    job("Browser End-to-End Tests (1)", 4, 7, 20),
+    job("Suite Selection Shadow (Advisory)", 0, 19, 20.5),
+    // The admission observer can finish within the dependency timestamp slack,
+    // beside the aggregator. It must never become a required dependency.
+    job("Regression Admission Shadow (Advisory)", 20, 20, 20.05),
+    job(AGGREGATOR, 20, 20, 21),
+  ]);
+  assert.equal(metrics.criticalExecutionMinutes, 16);
+  assert.equal(metrics.criticalWaitMinutes, 5);
+  const nested = runMetrics(run(9, 1, 14), [
+    job("PR Suite Routing", 0, 0, 2),
+    job("Settings-Rows win32 Baselines / Detect Settings-Rows Changes", 0, 0, 5),
+    job("Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", 5, 5, 13),
+    job(AGGREGATOR, 13, 13, 14),
+  ]);
+  assert.equal(nested.criticalExecutionMinutes, 14, "Windows remains independent of routing");
+});
+
+test("delegated pipeline recovery includes its successful or skipped routing dependency on the critical path", () => {
+  for (const skipped of [false, true]) {
+    const metrics = runMetrics(run(11, 1, 14), [
+      job("PR Suite Routing", 0, 1, 4, skipped ? "skipped" : "success"),
+      job("Browser End-to-End Tests (1)", 4, 4, 9),
+      job("Delegated Pipeline Recovery", 4, 6, 12),
+      job(AGGREGATOR, 12, 13, 14),
+    ]);
+    assert.equal(metrics.criticalExecutionMinutes, skipped ? 7 : 10);
+    assert.equal(metrics.criticalWaitMinutes, skipped ? 7 : 4);
+    assert.equal(summarize([metrics], [], 120).criticalPathUnmeasured, 0);
+  }
+});
+
+test("skipped routing anchors delayed full work without counting its API start placeholder as execution", () => {
+  const work = [job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
+    job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)];
+  for (const placeholder of [null, 0, 1]) {
+    const metrics = runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, placeholder, 1, "skipped"), ...work]);
+    assert.equal(metrics.criticalExecutionMinutes, 13, "12 browser + 1 aggregate; skipped plan executes nothing");
+    assert.equal(metrics.criticalWaitMinutes, 3);
+    assert.equal(metrics.longestExecutionMinutes, 12);
+  }
+  assert.equal(runMetrics(run(10, 1, 16), work).criticalExecutionMinutes, null, "do not guess a missing anchor");
+  assert.equal(runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, null, null, "skipped"), ...work])
+    .criticalExecutionMinutes, null, "missing skip completion stays unmeasured");
+  assert.equal(runMetrics(run(10, 1, 16), [job("PR Suite Routing", 0, 0, 1, "skipped"),
+    job("PR Suite Routing", 0, 0, 1, "skipped"), ...work]).criticalExecutionMinutes, null, "duplicate anchors are ambiguous");
+  const collected = attemptRecord(repository, run(10, 1, 16), [
+    { ...job("PR Suite Routing", 0, 0, 1, "skipped"), status: "completed", steps: [] },
+    ...work.map((item) => ({ ...item, status: "completed", steps: [{ name: "Executed Work", conclusion: "success",
+      started_at: item.started_at, completed_at: item.completed_at }] })),
+  ], {});
+  assert.equal(collected.metrics.criticalExecutionMinutes, 13, "attempt collection must preserve the skipped dependency");
+  assert.equal(collected.metrics.criticalWaitMinutes, 3);
+  assert.equal(collected.jobs[0].executionMinutes, null, "anchor is never charged runner minutes");
+});
+
+test("an executed merge-group gate is critical-path execution, not waiting (#3637)", () => {
+  const work = [job("Typecheck, Unit Tests & Bundles", 2, 2, 10), job("Browser End-to-End Tests (1)", 2, 3, 9),
+    job(AGGREGATOR, 10, 10, 11)];
+  const routing = job("PR Suite Routing", 0, 0, 0.01, "skipped");
+  // The gate waited one minute for a runner, then executed for one; checks/browser follow it.
+  const metrics = runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 0, 1, 2), ...work]);
+  assert.equal(metrics.criticalExecutionMinutes, 10, "1 gate + 8 checks + 1 aggregate");
+  assert.equal(metrics.criticalWaitMinutes, 1, "only the gate's runner wait is waiting");
+  assert.equal(metrics.longestJobWaitMinutes, 1);
+  const collected = attemptRecord(repository, run(11, 1, 11), [{ ...routing, status: "completed", steps: [] },
+    ...[job("Merge Group Gate", 0, 1, 2), ...work].map((item) => ({ ...item, status: "completed", steps: [{ name: "Executed Work",
+      conclusion: "success", started_at: item.started_at, completed_at: item.completed_at }] }))], {});
+  assert.equal(collected.metrics.criticalExecutionMinutes, 10, "attempt collection keeps the executed gate");
+  assert.equal(collected.metrics.criticalWaitMinutes, 1);
+  // A failed gate still precedes the full fallback; its execution is still not waiting.
+  assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 0, 1, 2, "failure"), ...work]).criticalWaitMinutes, 1);
+  // The gate itself is created with the run; it never depends on other work.
+  assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 3, 3, 4), ...work.slice(2)]).criticalExecutionMinutes, null);
+});
+
+test("delegated recovery waits for routing without counting an independent gate as its dependency", () => {
+  const routing = job("PR Suite Routing", 0, 0, 0.01, "skipped");
+  // Delayed job creation must not turn a completed independent gate into a prerequisite.
+  const gate = job("Merge Group Gate", 0, 0.01, 2);
+  const recovery = job("Delegated Pipeline Recovery", 2, 3, 10);
+  const metrics = runMetrics(run(11, 1, 11), [routing, gate, recovery, job(AGGREGATOR, 10, 10, 11)]);
+  assert.equal(metrics.criticalExecutionMinutes, 8, "seven recovery minutes plus one aggregate minute");
+  assert.equal(metrics.criticalWaitMinutes, 3, "the independent gate is not charged to this path");
+});
+
+test("a skipped merge-group gate leaves every disabled-gate measurement byte-for-byte unchanged", () => {
+  const shapes = [
+    [job("Typecheck, Unit Tests & Bundles", 0, 2, 20), job("Browser End-to-End Tests (3)", 0, 40, 58), job(AGGREGATOR, 58, 62, 63)],
+    [job("PR Suite Routing", 0, 0, 0.01, "skipped"), job("Typecheck, Unit Tests & Bundles", 0.02, 2, 9),
+      job("Browser End-to-End Tests (1)", 0.02, 3, 15), job(AGGREGATOR, 15, 15, 16)],
+    [job("PR Suite Routing", 0, null, 1, "skipped"), job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
+      job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)],
+    [job("Typecheck, Unit Tests & Bundles", 10, 12, 28), job(AGGREGATOR, 28, 29, 30)],
+  ];
+  for (const [index, jobs] of shapes.entries()) {
+    for (const placeholder of [null, 0, 0.01]) {
+      const gate = job("Merge Group Gate", 0, placeholder, 0.01, "skipped");
+      assert.deepEqual(runMetrics(run(12, 1, 63), [gate, ...jobs]), runMetrics(run(12, 1, 63), jobs), `shape ${index}`);
+      const record = (items) => attemptRecord(repository, run(12, 1, 63), items.map((item) => ({ ...item, status: "completed",
+        steps: item.conclusion === "skipped" ? [] : [{ name: "Executed Work", conclusion: "success", started_at: item.started_at,
+          completed_at: item.completed_at }] })), {});
+      const [withGate, without] = [record([gate, ...jobs]), record(jobs)];
+      assert.deepEqual(withGate.metrics, without.metrics, `shape ${index} attempt metrics`);
+    }
+  }
+  // Offline recomputation of the committed baseline is unchanged (pinned at the pre-#3637 report).
+  const outputs = [];
+  return Promise.all([["--json"], []].map(async (flags) => {
+    const lines = [];
+    assert.equal(await main(["--input", "docs/ci-baseline-2026-10-22.json", ...flags], { out: (line) => lines.push(line) }), 0);
+    outputs.push(createHash("sha256").update(lines.join("\n") + "\n").digest("hex"));
+  })).then(() => assert.deepEqual(outputs.sort(), ["370a9e29dcf50f05510a7214a4aee0e961d3d677f0b753eff930b209aaaa2f46",
+    "e5858c017efe0d2fe7f41f8698351ba4bf7713c26207be6ea51478c9d8bb65c0"].sort()));
+});
+
 test("the assumed dependency structure matches the CI workflow files", () => {
-  // Only the aggregator has needs in ci.yml, and the settings-rows call is the only called workflow,
-  // whose comparison needs only its change detection.
+  // Checks/browser wait for PR routing and the disabled merge-group gate; delegated recovery
+  // waits only for routing. Skipped plans consume no runner time. Executed gates contribute
+  // critical-path execution (see the gate tests above), including after a gate failure.
+  // Windows/WebKit stay independent, and only the aggregator consumes every required work
+  // result. Advisory shadows never supply one.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
-  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [checks, browser, win32, webkit]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit\]\n/);
+  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
+    "needs: suite_plan", "needs: [suite_plan, merge_group_gate]", "needs: [checks, browser, win32, webkit]",
+    "needs: [checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);
@@ -247,4 +373,203 @@ test("options default to the last 48 hours and validate their inputs", () => {
   for (const argv of [[], ["--repo", "bad repo"], ["--repo", repository, "--since", "yesterday"],
     ["--repo", repository, "--since", "2026-10-17T00:00:00Z"], ["--repo", repository, "--timeout-minutes", "0"]])
     assert.throws(() => options(argv, now));
+});
+
+
+test("all outcome states and absent evidence remain distinct", () => {
+  assert.deepEqual(["success", "failure", "cancelled", "skipped", "neutral"].map((conclusion) => outcome({ status: "completed", conclusion })),
+    ["passing", "failing", "cancelled", "skipped", "unmeasured"]);
+  assert.equal(outcome({ status: "queued", conclusion: null }), "unfinished");
+  assert.equal(outcome(null), "unmeasured");
+  const empty = attemptRecord(repository, run(1, 1), [], { since: at(0), until: at(10) });
+  assert.equal(empty.metrics.consumedRunnerMinutes, null);
+  assert.equal(empty.metrics.nonTestOverheadMinutes, null);
+  assert.equal(empty.metrics.requiredMinutes, null);
+  const unfinished = attemptRecord(repository, run(1, 1), [{ ...job("Browser End-to-End Tests (1)", 0, 1, null), status: "in_progress" }], {});
+  assert.equal(unfinished.jobs[0].state, "unfinished");
+  assert.equal(unfinished.metrics.consumedRunnerMinutes, null);
+  const skipped = attemptRecord(repository, run(1, 1), [job("worker", 0, 0, 0, "skipped")], {});
+  assert.equal(skipped.metrics.nonTestOverheadMinutes, null);
+  assert.equal(skipped.metrics.consumedRunnerMinutes, null);
+  const backwards = attemptRecord(repository, run(1, 1), [job(AGGREGATOR, 0, 5, 1)], {});
+  assert.equal(backwards.metrics.requiredMinutes, null);
+  assert.equal(backwards.metrics.consumedRunnerMinutes, null);
+});
+
+test("GitHub queued-job start placeholders never become zero runner wait", () => {
+  const queued = { ...job("worker", 0, 0, null), status: "queued", conclusion: null };
+  const record = attemptRecord(repository, { ...run(1, 1), status: "queued", conclusion: null, run_started_at: at(0) }, [queued], {});
+  assert.equal(record.state, "unfinished");
+  assert.equal(record.startedAt, null);
+  assert.equal(record.apiStartedAt, at(0));
+  assert.equal(record.jobs[0].startedAt, null);
+  assert.equal(record.jobs[0].apiStartedAt, at(0));
+  assert.equal(record.jobs[0].runnerWaitMinutes, null);
+  assert.equal(record.jobs[0].executionMinutes, null);
+  const running = attemptRecord(repository, run(1, 1), [{ ...queued, status: "in_progress", started_at: at(3) }], {});
+  assert.equal(running.jobs[0].runnerWaitMinutes, 3);
+  assert.equal(running.jobs[0].executionMinutes, null);
+});
+
+test("terminal cancellation with no executed step never becomes runner execution", () => {
+  const cancelled = { ...job("worker", 0, 0, 8, "cancelled"), status: "completed", runner_id: 0, steps: [] };
+  const record = attemptRecord(repository, { ...run(1, 1), conclusion: "cancelled" }, [cancelled], {});
+  assert.equal(record.jobs[0].state, "cancelled");
+  assert.equal(record.jobs[0].apiStartedAt, at(0));
+  assert.equal(record.jobs[0].startedAt, null);
+  assert.equal(record.jobs[0].runnerWaitMinutes, null);
+  assert.equal(record.jobs[0].executionMinutes, null);
+  assert.equal(record.metrics.measuredRunnerMinutes, null);
+  assert.equal(record.metrics.consumedRunnerMinutes, null);
+  assert.equal(record.metrics.wallMinutes, null);
+  const allocated = attemptRecord(repository, run(1, 1), [{ ...cancelled, started_at: at(3), steps: [
+    { number: 1, name: "Setup", status: "completed", conclusion: "success", started_at: at(3), completed_at: at(4) },
+  ] }], {});
+  assert.equal(allocated.jobs[0].runnerWaitMinutes, 3);
+  assert.equal(allocated.jobs[0].executionMinutes, 5);
+});
+
+test("job pagination does not turn a partial page into complete execution evidence", async () => {
+  const paths = [];
+  const result = await listJobs(async (path) => {
+    paths.push(path);
+    return { total_count: 2, jobs: [ { id: paths.length, ...job("worker", 0, 1, 2) } ] };
+  }, repository, 5, 1);
+  assert.equal(result.jobs.length, 2);
+  assert.match(paths[1], /page=2$/);
+  const partial = attemptRecord(repository, run(5, 1), result.jobs, {}, true);
+  assert.equal(partial.metrics.consumedRunnerMinutes, null);
+  assert.equal(partial.metrics.requiredMinutes, null);
+  assert.equal(partial.metrics.measuredRunnerMinutes, 2);
+});
+
+test("event collection uses half-open windows, actual attempt outcomes and main pushes only", async () => {
+  const first = { ...run(10, 5), head_sha: "a".repeat(40), workflow_id: 4, run_attempt: 2 };
+  const calls = [];
+  const api = async (path, body) => {
+    calls.push(path);
+    if (path === "/graphql") return timeline([]);
+    if (path.includes("/workflows/")) {
+      const event = new URL(path, "https://x").searchParams.get("event");
+      const rows = event === "merge_group" ? [first, { ...first, id: 11, created_at: at(120) }]
+        : event === "push" ? [{ ...first, id: 12, event, head_branch: "other" }] : [];
+      return { total_count: rows.length, workflow_runs: rows };
+    }
+    if (path.includes("/jobs?")) return { total_count: 1, jobs: [{ id: calls.length, ...job(AGGREGATOR, 0, 1, 3) }] };
+    const attempt = Number(path.split("/").at(-1));
+    return { ...first, run_attempt: attempt, conclusion: attempt === 1 ? "failure" : "success" };
+  };
+  const report = await collectEvents(api, { repository, since: at(0), until: at(120), timeoutMinutes: 120 });
+  assert.equal(report.records.length, 2);
+  assert.deepEqual(report.records.map((r) => r.state), ["failing", "passing"]);
+  assert.equal(report.records[1].metrics.requiredMinutes, null);
+  assert.equal(report.records[1].jobs[0].runnerWaitMinutes, null);
+  assert.equal(report.records[1].metrics.nonTestOverheadMinutes, null);
+  assert.equal(report.records[1].metrics.consumedRunnerMinutes, null);
+  assert.equal(report.summary.retryOnlyRuns.length, 1);
+  assert.equal(report.summary.validationLag.oldestUnvalidatedChangeAgeMinutes, null);
+  assert.equal(report.summary.validationLag.state, "not-yet-measurable");
+});
+
+test("combined reports deduplicate boundaries and compute percentiles from raw records", () => {
+  const rows = [1, 2, 3, 100].map((value, i) => {
+    const row = attemptRecord(repository, { ...run(i + 1, 1), head_sha: "a".repeat(40) }, [], {});
+    row.metrics.requiredMinutes = value;
+    return row;
+  });
+  const report = (records, collectedAt) => ({ schemaVersion: 2, repository, collectedAt, windows: [{}],
+    records, removals: [{ repository, pullRequest: 1, at: at(0), reason: "merged" }], pagination: [],
+    summary: { cohorts: "DO NOT AVERAGE THIS" } });
+  const combined = combineReports([report(rows.slice(0, 3), at(10)), report(rows.slice(2), at(11))]);
+  assert.equal(combined.records.length, 4);
+  assert.equal(combined.removals.length, 1);
+  const cohort = combined.summary.cohorts.find((row) => row.event === "merge_group" && row.attemptClass === "first");
+  assert.deepEqual(cohort.measures.requiredMinutes, { measured: 4, median: 2, p90: 100, max: 100 });
+  assert.throws(() => combineReports([report([], at(0)), { ...report([], at(1)), repository: "other/repo" }]));
+});
+
+test("before/after comparisons keep natural windows, outcomes and incomplete evidence separate", () => {
+  const row = (id, conclusion) => attemptRecord(repository, { ...run(id, 1), conclusion, head_sha: "a".repeat(40) }, [], {});
+  const report = (records, since, until) => ({ schemaVersion: 2, repository, collectedAt: until,
+    windows: [{ since, until }], records, removals: [], pagination: [], queueEpisodes: [],
+    attemptsTruncated: false, removalsTruncated: false });
+  const before = report([row(1, "success"), row(2, "cancelled")], at(0), at(10));
+  const after = report([row(3, "failure")], at(10), at(20));
+  const result = compareReports(before, after);
+  assert.equal(result.before.cohorts.find((c) => c.event === "merge_group" && c.attemptClass === "first").cancellationFraction, 0.5);
+  assert.equal(result.after.records, 1);
+  assert.equal(result.after.mergedQueueLatencyMinutes.measured, 0);
+  assert.equal(result.after.cohorts[2].passing.requiredMinutes.measured, 0);
+  assert.equal(compareReports(before, { ...after, attemptsTruncated: true }).after.incomplete, true);
+  assert.throws(() => compareReports(before, { ...after, repository: "other/project" }), /same repository/);
+  assert.throws(() => compareReports(before, { ...after, windows: [{ since: at(9), until: at(20) }] }), /nonoverlapping/);
+  assert.throws(() => compareReports(before, { ...after, records: before.records }), /repeats a run/);
+  assert.throws(() => compareReports(before, { ...after, windows: [{}] }), /valid windows/);
+  assert.throws(() => options(["--repo", repository, "--baseline", "before.json"]), /offline/);
+  assert.equal(options(["--input", "after.json", "--baseline", "before.json"]).baseline, "before.json");
+});
+
+test("queue-to-merge measures only a surviving enqueue, without attributing an old entry", async () => {
+  const report = await queueHistory(async () => timeline([
+    { __typename: "AddedToMergeQueueEvent", createdAt: at(0) },
+    { __typename: "RemovedFromMergeQueueEvent", createdAt: at(20) },
+    { __typename: "AddedToMergeQueueEvent", createdAt: at(30) },
+    { __typename: "MergedEvent", createdAt: at(50), commit: { oid: "c".repeat(40) } },
+    { __typename: "MergedEvent", createdAt: at(60) },
+  ]), repository, 1);
+  assert.equal(report.episodes[0].minutes, 20);
+  assert.equal(report.episodes[1].minutes, null);
+  assert.equal(report.episodes[1].state, "unmeasured");
+});
+
+test("a merged queue removal before MergedEvent preserves the successful episode", async () => {
+  const report = await queueHistory(async () => timeline([
+    { __typename: "AddedToMergeQueueEvent", createdAt: at(0) },
+    { __typename: "RemovedFromMergeQueueEvent", createdAt: at(5), reason: "checks_timed_out" },
+    { __typename: "AddedToMergeQueueEvent", createdAt: at(10) },
+    { __typename: "RemovedFromMergeQueueEvent", createdAt: at(49), reason: "merged" },
+    { __typename: "MergedEvent", createdAt: at(50), commit: { oid: "c".repeat(40) } },
+  ]), repository, 1);
+  assert.equal(report.episodes[0].minutes, 40);
+  assert.equal(report.episodes[0].enteredAt, at(10));
+  assert.equal(report.episodes[0].state, "measured");
+});
+
+test("optional timing transport failure cannot discard collected metadata", async () => {
+  const unavailable = await readTimingLog("token", repository, 1, async () => new Response(null, { status: 302 }));
+  assert.equal(unavailable.state, "unmeasured");
+  let calls = 0;
+  const timedOut = await readTimingLog("token", repository, 1, async () => {
+    if (++calls === 1) return new Response(null, { status: 302, headers: { location: "https://x.blob.core.windows.net/log" } });
+    throw new DOMException("PRIVATE_SENTINEL", "AbortError");
+  });
+  assert.equal(timedOut.state, "unmeasured");
+  assert.ok(!JSON.stringify(timedOut).includes("PRIVATE_SENTINEL"));
+});
+
+test("missing timing SHA never erases known source evidence", () => {
+  const record = attemptRecord(repository, { ...run(1, 1), head_sha: "a".repeat(40) }, [], {});
+  applyTimingContext(record, { context: { runId: "1", attempt: 1, testedSha: null, workflowSha: "b".repeat(40) } });
+  assert.equal(record.testedSha, "a".repeat(40));
+  assert.equal(record.suiteRevision, "a".repeat(40));
+  assert.equal(record.workflowRevision.executedSourceSha, "b".repeat(40));
+  assert.equal(record.workflowRevision.state, "source-measured");
+  applyTimingContext(record, { context: { runId: "1", attempt: 2, testedSha: "c".repeat(40), workflowSha: null } });
+  assert.equal(record.testedSha, "a".repeat(40));
+});
+
+test("log collection projects marker lines and never forwards bearer authorization", async () => {
+  const { TimingSummary, TIMING_MARKER } = await import("./ci-timing.mjs");
+  const safe = new TimingSummary("browser");
+  safe.add({ file: process.cwd() + "/test.spec.ts", name: "PRIVATE_SENTINEL", durationMs: 5, state: "passing", retry: 1 });
+  const calls = [];
+  const result = await readTimingLog("secret-token", repository, 1, async (url, options) => {
+    calls.push({ url: String(url), options });
+    return calls.length === 1 ? new Response(null, { status: 302, headers: { location: "https://example.blob.core.windows.net/private" } })
+      : new Response("PRIVATE_LOG_SENTINEL\n2026-10-22 " + TIMING_MARKER + JSON.stringify({ ...safe.result(), secret: "PRIVATE_SENTINEL" }) + "\n");
+  });
+  assert.equal(result.state, "measured");
+  assert.equal(result.summaries[0].retryOnly, 1);
+  assert.equal(calls[1].options.headers, undefined);
+  assert.ok(!JSON.stringify(result).includes("PRIVATE"));
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GithubIssueClosureSnapshot } from "@wollipog/protocol";
-import { executeGithubIssueClosure, inspectGithubIssueClosure } from "./github-issue-closure.js";
+import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun } from "./github-issue-closure.js";
 
 const connection = (nodes: unknown[] = []) => ({ nodes, pageInfo: { hasNextPage: false } });
 function fixture() {
@@ -33,6 +33,15 @@ async function snapshot(f: ReturnType<typeof fixture>): Promise<GithubIssueClosu
   return { ...inspection, category: "issue_closure", reason: "not_planned", explanation: "Retire obsolete work.",
     evidence: ["Superseded by the new design."], comment: "Retired. `literal` $(literal)\nSecond line.", activeChildren: [] };
 }
+
+test("issue and scope commands run with the Orchestrator agent's forge environment", async () => {
+  const run = issueClosureRun({ kind: "native" }, process.cwd(), { GITLAB_TOKEN: "agent-token", GLAB_CONFIG_DIR: "/agent/glab" });
+  const seen = (await run("sh", ["-c", 'printf "%s|%s|%s" "$GITLAB_TOKEN" "$GLAB_CONFIG_DIR" "$NO_PROMPT"'])).trim();
+  assert.equal(seen, "agent-token|/agent/glab|1");
+  // The prompt guards always win over an agent value.
+  const guarded = issueClosureRun({ kind: "native" }, process.cwd(), { NO_PROMPT: "0", GH_PROMPT_DISABLED: "0" });
+  assert.equal((await guarded("sh", ["-c", 'printf "%s|%s" "$NO_PROMPT" "$GH_PROMPT_DISABLED"'])).trim(), "1|1");
+});
 
 test("issue closure executes the exact argv once and verifies GitHub state", async () => {
   const f = fixture();

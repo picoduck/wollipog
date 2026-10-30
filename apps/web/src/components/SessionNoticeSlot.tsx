@@ -92,6 +92,10 @@ export const SESSION_NOTICE_RANK = {
   worktreeSetupFailed: 3,
   worktreeSetupConfigInvalid: 4,
   accountSwitchFailed: 5,
+  // The provider-HOME lease refusal that stopped the session's last launch (#3240), or, while the
+  // session starts, the busy account its launch is waiting for. Never both at once.
+  providerHomeRefusal: 6,
+  providerHomeWait: 6,
   archived: 7,
   skillsUnavailable: 8,
   setupSuggestion: 9,
@@ -130,6 +134,8 @@ export const PANEL_NOTICE_RANK = {
   workflowDetailsUnavailable: 7,
   olderHistoryTruncated: 8,
   backgroundWorkLost: 9,
+  // A handoff hold waiting on work this list has no row for (#3752), just after lost work.
+  backgroundWorkUnlisted: 9.5,
   staleAttentionLink: 10,
   // Background Work's recovery deliveries, then its acknowledged blocked results (#2871). Each is a
   // band: the panel orders its own entries (warnings, then turn order, then delivery order) and gives

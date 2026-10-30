@@ -16,6 +16,7 @@ import {
   resolveAgentEnvironmentValue, type RunnerConfigAgent, type RunnerConfigWorkspace, type RunnerProviderAccount,
 } from "./config.js";
 import type { SessionMeta } from "./session-store.js";
+import { isUserPrivateGroup } from "./review-private-group.js";
 
 /** Home-relative caches a protected session can write (mirrors execution-isolation's list). */
 const SESSION_WRITABLE_CACHE_PATHS = [
@@ -62,18 +63,30 @@ export function sessionWritableRoots(
   }))];
 }
 
-/** Check one resolved path: outside every session-writable root, and every component owned by
- * `uid` or root and not writable by other users. */
-function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number): void {
+export interface CodexReviewerProtection {
+  /** Only the conventional native install gets an exception. */
+  home: string;
+  /** Launch-time sandbox rules, rather than live writer evidence, protect this installation. */
+}
+
+/** Check the write boundary and ownership of every component, retaining both for the exception. */
+function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number,
+  codex: CodexReviewerProtection | undefined, privateGroup: (uid: number, gid: number) => boolean): void {
   for (const root of roots) {
-    if (within(root, real)) throw new Error(`${real} is inside a directory a session can write (${root})`);
+    if (!within(root, real)) continue;
+    const codexHome = codex && join(codex.home, ".codex");
+    // Broader writable roots (HOME, a checkout, /tmp, an account parent) never get an
+    // exception. The symlink walker checks every link's containing directory too.
+    if (codex && codexHome === root && within(join(codexHome, "packages", "standalone"), real)) {
+      continue;
+    }
+    throw new Error(`${real} is inside a directory a session can write (${root})`);
   }
   const components: string[] = [];
   for (let current = real; ; current = join(current, "..")) {
     components.push(current);
     if (current === "/" || current === join(current, "..")) break;
   }
-  let privateAncestor = false;
   const ordered = components.reverse();
   for (const [index, component] of ordered.entries()) {
     const info = lstatSync(component);
@@ -82,8 +95,12 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
     // anyone, its group included, so it is a safe ancestor; the path itself never may be writable.
     const stickyAncestor = info.isDirectory() && (info.mode & 0o1000) !== 0 && index < ordered.length - 1;
     if ((info.mode & 0o002) && !stickyAncestor) throw new Error(`${component} is writable by every user`);
-    if ((info.mode & 0o020) && !privateAncestor && !stickyAncestor) throw new Error(`${component} is writable by its group`);
-    if (info.isDirectory() && info.uid === uid && (info.mode & 0o077) === 0) privateAncestor = true;
+    if ((info.mode & 0o020) && !stickyAncestor) {
+      let safe = false;
+      try { safe = info.uid === uid && privateGroup(uid, info.gid); }
+      catch (error) { throw new Error(`${component} is writable by its group: ${(error as Error).message}`); }
+      if (!safe) throw new Error(`${component} is writable by its group`);
+    }
   }
 }
 
@@ -91,9 +108,15 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
  * Resolve `path` and refuse it unless no other user, and no session, could have changed it.
  * Links are followed one at a time: each must be owned by `uid` or root and sit in a directory that
  * passes the same checks, so no hop on the way can be repointed. Group-write is accepted only
- * below a directory that only `uid` can enter, which keeps other users out.
+ * for a proven user-private group, even below a private ancestor.
  */
-export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0): string {
+export function trustedPath(path: string, roots: readonly string[], uid: number, rootUid = 0,
+  codex?: CodexReviewerProtection, privateGroup: (uid: number, gid: number) => boolean = isUserPrivateGroup): string {
+  const groups = new Map<number, boolean>();
+  const checkGroup = (owner: number, gid: number) => {
+    if (!groups.has(gid)) groups.set(gid, privateGroup(owner, gid));
+    return groups.get(gid)!;
+  };
   if (!isAbsolute(path)) throw new Error(`${path} is not an absolute path`);
   let resolved = "/";
   const pending = path.split("/").filter(Boolean);
@@ -108,12 +131,12 @@ export function trustedPath(path: string, roots: readonly string[], uid: number,
     if (!info.isSymbolicLink()) { resolved = next; continue; }
     if (++hops > 40) throw new Error(`${path} has too many symbolic links`);
     if (info.uid !== uid && info.uid !== rootUid) throw new Error(`${next} is owned by another user`);
-    checkResolved(resolved, roots, uid, rootUid);
+    checkResolved(resolved, roots, uid, rootUid, codex, checkGroup);
     const target = readlinkSync(next);
     if (isAbsolute(target)) resolved = "/";
     pending.unshift(...target.split("/").filter(Boolean));
   }
-  checkResolved(resolved, roots, uid, rootUid);
+  checkResolved(resolved, roots, uid, rootUid, codex, checkGroup);
   return resolved;
 }
 
@@ -122,7 +145,7 @@ const PROVIDER_HOME_VARIABLES = ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] as const;
 
 /** Where the runner's configuration and its sessions say provider state lives. */
 export interface SessionWritableSources {
-  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants">>;
+  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">>;
   providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "directory">>;
   agents?: ReadonlyArray<Pick<RunnerConfigAgent, "id" | "env">>;
   sessions?: Iterable<Pick<SessionMeta, "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
@@ -146,7 +169,8 @@ export function configuredSessionWritablePaths(sources: SessionWritableSources):
   };
   const hostEnv = sources.hostEnv ?? {};
   fromEnvironment((name) => hostEnv[name]);
-  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []));
+  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []),
+    ...(workspace.sharedWritableDirectories ?? []));
   for (const account of sources.providerAccounts ?? []) paths.push(account.directory);
   for (const agent of sources.agents ?? []) {
     fromEnvironment((name) => {
@@ -168,7 +192,8 @@ export function configuredSessionWritablePaths(sources: SessionWritableSources):
  * planted earlier on PATH is skipped, never run; when no candidate is trusted the first refusal
  * is reported.
  */
-export function trustedExecutable(name: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number): string {
+export function trustedExecutable(name: string, pathEnv: string | undefined, roots: readonly string[], uid: number,
+  rootUid?: number, codex?: CodexReviewerProtection): string {
   let refusal: string | undefined;
   for (const dir of (pathEnv ?? "").split(":")) {
     if (!dir || !isAbsolute(dir)) continue;
@@ -177,7 +202,7 @@ export function trustedExecutable(name: string, pathEnv: string | undefined, roo
       const info = statSync(candidate);
       if (!info.isFile() || !(info.mode & 0o111)) continue;
     } catch { continue; }
-    try { return trustedPath(candidate, roots, uid, rootUid); }
+    try { return trustedPath(candidate, roots, uid, rootUid, codex); }
     catch (error) { refusal ??= (error as Error).message; }
   }
   throw new Error(refusal ?? `${name} is not installed`);
@@ -224,11 +249,37 @@ export function reviewerInterpreter(
   }
 }
 
-/** The verified git, gh and optional ssh the runner reads a session's repository and pull request
- * with, outside every sandbox. */
+/** Installation homes to protect in every native session, regardless of its harness. */
+export function configuredCodexHomes(home: string, sources: SessionWritableSources): string[] {
+  const homes = new Set([join(home, ".codex")]);
+  const environment = (read: (name: string) => string | undefined) => {
+    const explicit = read("CODEX_HOME");
+    if (explicit && isAbsolute(explicit)) homes.add(explicit);
+    const osHome = read("HOME");
+    if (osHome && isAbsolute(osHome)) homes.add(join(osHome, ".codex"));
+  };
+  environment((name) => sources.hostEnv?.[name]);
+  for (const agent of sources.agents ?? []) environment((name) => {
+    try { return resolveAgentEnvironmentValue(agent, name, sources.hostEnv ?? {}); } catch { return undefined; }
+  });
+  // An account root can be selected as CODEX_HOME independently of its current binding.
+  for (const account of sources.providerAccounts ?? []) homes.add(account.directory);
+  for (const session of sources.sessions ?? []) {
+    environment((name) => session.env?.[name]);
+    for (const root of [session.providerCredentialHome, session.providerConversationHome, session.pendingProviderCredentialHome]) {
+      if (root && isAbsolute(root)) homes.add(root);
+    }
+  }
+  return [...homes];
+}
+
+/** The verified git, forge CLIs and optional ssh used outside every sandbox. At least one of gh and
+ * glab is present; a review of a GitHub pull request needs gh, of a GitLab merge request glab. */
 export interface ReviewTools {
   git: string;
-  gh: string;
+  gh?: string;
+  /** v244 (#3539): reads GitLab merge requests for review sessions. */
+  glab?: string;
   /** Without a trusted ssh, mirror fetches use HTTPS only. */
   ssh?: string;
 }
@@ -246,15 +297,23 @@ export interface ReviewToolEnvironment {
   temporaryRoots?: readonly string[];
 }
 
-/** Find and verify git, gh and ssh. Never throws: a refusal is returned as its reason. */
+/** Find and verify git, gh, glab and ssh. Never throws: a refusal is returned as its reason. git
+ * and at least one forge CLI are required; without gh the runner cannot review GitHub pull
+ * requests, without glab GitLab merge requests. */
 export function discoverReviewTools(env: ReviewToolEnvironment): ReviewTools | { unavailable: string } {
-  const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
   try {
+    const roots = sessionWritableRoots(env.home, env.dataDir, env.extraRoots, env.temporaryRoots);
     const git = trustedExecutable("git", env.pathEnv, roots, env.uid, env.rootUid);
-    const gh = trustedExecutable("gh", env.pathEnv, roots, env.uid, env.rootUid);
-    let ssh: string | undefined;
-    try { ssh = trustedExecutable("ssh", env.pathEnv, roots, env.uid, env.rootUid); } catch { ssh = undefined; }
-    return { git, gh, ...(ssh ? { ssh } : {}) };
+    const optional = (name: string): { path?: string; error?: string } => {
+      try { return { path: trustedExecutable(name, env.pathEnv, roots, env.uid, env.rootUid) }; } catch (error) {
+        return { error: (error as Error).message };
+      }
+    };
+    const gh = optional("gh");
+    const glab = optional("glab");
+    if (!gh.path && !glab.path) return { unavailable: gh.error ?? "gh is unavailable" };
+    const ssh = optional("ssh").path;
+    return { git, ...(gh.path ? { gh: gh.path } : {}), ...(glab.path ? { glab: glab.path } : {}), ...(ssh ? { ssh } : {}) };
   } catch (error) {
     return { unavailable: (error as Error).message };
   }

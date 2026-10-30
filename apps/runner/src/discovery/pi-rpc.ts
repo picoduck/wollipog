@@ -17,7 +17,8 @@ import {
   PI_AGENT_CONTROL_PROTOCOL,
   piAgentControlProbeSource,
 } from "../pi-agent-control-extension.js";
-import { killTree, spawnAgent, type AgentProcess } from "../spawn.js";
+import { killTree, provenProcessTreeExit, spawnAgent, type AgentProcess } from "../spawn.js";
+import type { CodexProbeObserver } from "../codex-probe.js";
 import type { ResolvedLaunch } from "./resolve.js";
 
 type Json = Record<string, unknown>;
@@ -33,9 +34,29 @@ function nonempty(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+/** Pi reports a command's scope as `sourceInfo.scope` ("user", "project", "temporary"); releases
+ * before that field reported it as `location`. `sourceInfo.source` is provenance ("cli", "auto",
+ * "builtin"), so the command kind still comes from the top-level `source`. */
 function commandSource(command: Json): AgentSlashCommand["source"] {
-  if (command.location === "project") return "project";
+  const sourceInfo = object(command.sourceInfo);
+  const scope = sourceInfo && "scope" in sourceInfo ? sourceInfo.scope : command.location;
+  if (scope === "project") return "project";
   return command.source === "extension" ? "plugin" : "user";
+}
+
+/** The driver's checkpoint path reads `get_entries` with a `since` cursor at the current leaf and
+ * binds a fork to that leaf. Older releases reported an empty no-session list with a null leaf;
+ * newer ones already hold startup entries, so prove the cursor itself answers at the reported leaf. */
+async function supportsCheckpointCursor(peer: PiRpcPeer, timeoutMs: number): Promise<boolean> {
+  const response = await peer.request<Json>({ type: "get_entries" }, timeoutMs).catch(() => undefined);
+  const data = object(response?.data);
+  if (!Array.isArray(data?.entries)) return false;
+  if (data.leafId === null) return data.entries.length === 0;
+  const leafId = nonempty(data.leafId);
+  if (!leafId || !data.entries.some((entry) => object(entry)?.id === leafId)) return false;
+  const since = await peer.request<Json>({ type: "get_entries", since: leafId }, timeoutMs).catch(() => undefined);
+  const sinceData = object(since?.data);
+  return Array.isArray(sinceData?.entries) && sinceData.entries.length === 0 && sinceData.leafId === leafId;
 }
 
 export interface PiRpcDiscoveryResult {
@@ -59,7 +80,7 @@ export async function probePiRpc(
     env?: Record<string, string>;
     spawn?: typeof spawnAgent;
     kill?: typeof killTree;
-  } = {},
+  } & CodexProbeObserver = {},
 ): Promise<PiRpcDiscoveryResult> {
   const spawn = options.spawn ?? spawnAgent;
   const kill = options.kill ?? killTree;
@@ -71,6 +92,8 @@ export async function probePiRpc(
     return value;
   };
   let child: AgentProcess | null = null;
+  let completeProof!: (value: boolean) => void;
+  const processProof = new Promise<boolean>((resolve) => { completeProof = resolve; });
   let peer: PiRpcPeer | null = null;
   let probeRoot: string | undefined;
   let probeNonce: string | undefined;
@@ -87,6 +110,7 @@ export async function probePiRpc(
       writeFileSync(extension, piAgentControlProbeSource(probeNonce), { flag: "wx", mode: 0o600 });
       extensionArgs.push("--extension", extension);
     }
+    options.onProcess?.(processProof);
     child = spawn({
       command: launch.command,
       args: [...launch.args, ...extensionArgs, "--mode", "rpc",
@@ -98,7 +122,7 @@ export async function probePiRpc(
         ...(probeNonce ? { [PI_AGENT_CONTROL_PROBE_NONCE_ENV]: probeNonce } : {}),
       },
       context,
-      trackDescendants: false,
+      trackDescendants: true,
     });
     let transportError: Error | null = null;
     peer = new PiRpcPeer(child.stdin, child.stdout, (event) => {
@@ -122,9 +146,7 @@ export async function probePiRpc(
     // Entry cursors are an optional, newer capability. Reserve most of the shared deadline for
     // required model probes so an older RPC that ignores unknown commands stays available.
     const entriesTimeoutMs = Math.min(2_000, Math.max(1, Math.floor(remaining() / 4)));
-    const entriesResponse = await peer.request<Json>({ type: "get_entries" }, entriesTimeoutMs).catch(() => undefined);
-    const entries = object(entriesResponse?.data);
-    const supportsConversationFork = Array.isArray(entries?.entries) && entries?.leafId === null;
+    const supportsConversationFork = await supportsCheckpointCursor(peer, entriesTimeoutMs);
 
     const models: AgentModel[] = [];
     for (const rawModel of available) {
@@ -183,8 +205,8 @@ export async function probePiRpc(
       supportsImages: models.some((model) => model.inputModalities?.includes("image")),
       supportsApprovals: piAgentControlSupported,
       // get_entries was added after Pi's persisted-session --fork surface. Requiring its structured
-      // response and an empty no-session leaf prevents older runtimes from advertising a clone
-      // action they cannot bind to an authoritative completed checkpoint.
+      // response and a working `since` cursor at the reported leaf prevents older runtimes from
+      // advertising a clone action they cannot bind to an authoritative completed checkpoint.
       supportsConversationFork,
       supportsSteering: true,
       permissionModes: piAgentControlSupported ? ["default", "dontAsk", "bypassPermissions"] : [],
@@ -228,7 +250,10 @@ export async function probePiRpc(
     };
   } finally {
     peer?.dispose("Pi discovery complete");
-    if (child) kill(child);
+    let proven = false;
+    try {
+      if (child) { kill(child); proven = await provenProcessTreeExit(child); }
+    } finally { completeProof(proven); }
     if (probeRoot) rmSync(probeRoot, { recursive: true, force: true });
   }
 }

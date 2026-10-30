@@ -90,7 +90,7 @@ export function mutationAuthorizationError(
   }
   // Agent Harness defaults are private per-user preferences, not mutations of shared organization
   // resources. The route still requires an authenticated human and can only address that user.
-  if (routePath === "/api/agent-harness-defaults" || routePath === "/api/orchestrator-settings") {
+  if (routePath === "/api/agent-harness-defaults" || routePath === "/api/orchestrator-settings" || routePath === "/api/review-settings") {
     return null;
   }
   if (!canOperate(principal.role)) return "read-only members cannot mutate organization resources";
@@ -161,7 +161,8 @@ export function agentCredentialSessionTargetError(
     routePath === "/api/sessions/:id/steering/:submissionId/resolve" ||
     routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/restart" ||
     routePath === "/api/sessions/:id/config" || routePath === "/api/sessions/:id/archive" ||
-    routePath === "/api/sessions/:id/background-jobs/:jobId/stop";
+    routePath === "/api/sessions/:id/background-jobs/:jobId/stop" ||
+    routePath === "/api/sessions/:id/queue-hold/release";
   // The config service permits a self-target only for maxChildSessions, so a live orchestrator can
   // raise its own delegation concurrency without gaining authority over its spend/tool ceilings.
   if (routePath === "/api/sessions/:id/config" &&
@@ -207,6 +208,14 @@ export function orchestratorSelfWorktreeAuthorizationError(
       principal.credentialSessionId === targetSessionId && strictProjectIsolation
     ? "Strict Project Isolation prevents this Orchestrator from managing its own worktrees; select a child session."
     : null;
+}
+
+/** Whether the session's own agent credential is switching its worktree, as opposed to a person,
+ * a parent Orchestrator, or another session acting on it. Only that switch may continue on its own
+ * after the relaunch it needs (#3810): anyone else's switch arrives with the next prompt anyway. */
+export function worktreeRequestedBySession(principal: AuthPrincipal | null, targetSessionId: string): boolean {
+  return principal?.kind === "agent" && !!principal.credentialSessionId &&
+    principal.credentialSessionId === targetSessionId;
 }
 
 export function forkSnapshotIdentityError(

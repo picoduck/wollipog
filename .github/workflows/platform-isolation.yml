@@ -33,16 +33,49 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event_name == 'pull_request' && github.event.pull_request.draft && github.event.action != 'ready_for_review' && 'draft' || 'active' }}
   cancel-in-progress: true
 
+# Windows image coverage (#3785): both jobs run one Windows lane, `windows-latest`. GitHub's runner
+# images map `windows-latest` and `windows-2025` to the same Windows Server 2025 image
+# (windows-2025-vs2026), so a second `windows-2025` lane repeated every shared Windows step on an
+# identical image and only added the WSL boundary step, which now runs on `windows-latest`. The
+# lane exists for WSL2 and the native Windows adapters, not to compare images; if Windows Server
+# 2022 coverage is ever wanted, add a `windows-2022` lane rather than another alias of the latest.
 jobs:
+  upgrade-compatibility:
+    if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
+    name: Upgrade Compatibility (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install Dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Verify Legacy Journal Upgrades and Interrupted Migration
+        run: node --import tsx --test apps/runner/src/provider-home-lease-upgrade.test.ts
+
   platform-isolation:
     if: github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false
     name: Platform Isolation (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, windows-latest, windows-2025, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 25
+    # Measured on pull-request runs from October 20–29, 2026, the Windows lease-protocol step took
+    # up to 21.1 minutes, the other windows-latest steps up to 7.3, and the WSL boundary step up to
+    # 3.5: about 32 minutes for the merged Windows job, so the job gets 35. Ubuntu and macOS took
+    # under 5 minutes in the same window, so the shared bound does not change their outcome.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -92,7 +125,7 @@ jobs:
           done
 
       - name: Verify Native Isolation Adapter
-        run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts
+        run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts apps/runner/src/linux-cgroup.test.ts
 
       - name: Verify Native Provider-HOME Lease Protocol
         run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts apps/runner/src/provider-home-lease-async.test.ts apps/runner/src/provider-home-lease-worker-protocol.test.ts apps/runner/src/provider-home-lease-heartbeat.test.ts apps/runner/src/provider-home-lease-clock.test.ts apps/runner/src/provider-home-lease-deadline.test.ts apps/runner/src/provider-home-lease-worker-deadline.test.ts
@@ -269,7 +302,7 @@ jobs:
           exit 1
 
       - name: Verify WSL Boundaries Stay Fail-Closed
-        if: matrix.os == 'windows-2025'
+        if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"

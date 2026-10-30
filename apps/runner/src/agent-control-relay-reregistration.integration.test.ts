@@ -23,6 +23,8 @@ import {
 // frozen control plane that is then replaced, and the relaunched provider must recover after the
 // runner reconnects, without any session, provider, or runner restart.
 
+import { transportRunnerEnvironment } from "./fixtures/transport-runner-environment.js";
+
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const MOCK_AGENT = fileURLToPath(new URL("../../mock-agent/index.mjs", import.meta.url));
 const RUNNER_ID = "relay-reregistration-runner";
@@ -117,7 +119,7 @@ test("a relaunch whose credential registration is lost recovers after the runner
     cwd: REPO_ROOT,
     // An isolated HOME keeps the runner's provider-home lease off any real runner on this machine.
     env: {
-      ...hermeticEnv(),
+      ...transportRunnerEnvironment(temp),
       HOME: runnerHome,
       XDG_CONFIG_HOME: join(runnerHome, ".config"),
       XDG_DATA_HOME: join(runnerHome, ".local", "share"),

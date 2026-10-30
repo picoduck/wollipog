@@ -52,7 +52,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     } else {
       await expect(notice).toContainText("no recorded return step");
       await expect(notice).toContainText("will not resubmit them automatically");
-      await expect(panel.locator(".background-work-turn-head")).not.toContainText("Returning Result");
+      await expect(panel.locator(".background-work-turn-head")).not.toContainText("Follow-Up Pending");
     }
     await expect(notice).toContainText("Open More Actions and choose Restart Session");
     await expect(notice).toContainText("Restart ends every job and reports held results; it does not rerun their original commands.");

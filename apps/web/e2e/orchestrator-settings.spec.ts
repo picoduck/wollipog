@@ -97,13 +97,13 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
   });
 }
 
-test("at 1440px the section fits in 1,200px with every disclosure closed, and the save bar stays in view", async ({ page }) => {
+test("at 1440px the section fits in 1,500px with every disclosure closed, and the save bar stays in view", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator");
   await expect(page.getByRole("heading", { name: "Decision Delegation", exact: true })).toBeVisible();
   await expect(page.locator("details.disclosure[open]")).toHaveCount(0);
   const height = await page.locator(".settings-panel").evaluate((element) => element.getBoundingClientRect().height);
-  expect(height, "the section was about 1,850px before #3026").toBeLessThanOrEqual(1200);
+  expect(height, "four review-policy rows extend the 1,200px section without new disclosures or stylesheet debt").toBeLessThanOrEqual(1500);
 
   await makeDirty(page);
   const scroller = page.locator(".main-body");

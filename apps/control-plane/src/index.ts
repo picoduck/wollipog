@@ -2,13 +2,15 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
+import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
+import { AutomationCreationService } from "./automation-creation.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
  * everything, and streams live updates to the UI.
  */
 
 import os from "node:os";
-import { handoffDestinationError, sessionRole, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest } from "@wollipog/protocol";
+import { handoffDestinationError, sessionRole, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -57,7 +59,9 @@ import {
   runnerCapabilityRequirementError,
   runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
+  type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
+  validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
   isWorkspaceReference,
@@ -131,6 +135,7 @@ import {
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
+  type CampaignPullRequestRef,
 } from "@wollipog/protocol";
 import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
@@ -173,7 +178,7 @@ import {
 } from "./local-device-credential.js";
 import { RemoteAccess } from "./remote-access.js";
 import { registerRemoteAccessRoutes } from "./remote-access-route.js";
-import { probePublicOriginWithFetch, registerHostAdminRoute } from "./host-admin-route.js";
+import { probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness } from "./host-admin-route.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
@@ -217,14 +222,19 @@ import {
   SessionNamingSettings,
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
+import { WorkflowEventRetention } from "./workflow-event-retention.js";
+import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
 import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
+import { IncrementalVacuum, INCREMENTAL_VACUUM_ENV, parseIncrementalVacuum } from "./incremental-vacuum.js";
 import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
 import { AgentHarnessDefaultsSettings } from "./agent-harness-defaults.js";
 import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-route.js";
 import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
+import { registerReviewSettingsRoutes } from "./review-settings-route.js";
+import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
@@ -261,6 +271,7 @@ import {
   tailnetIpv4,
 } from "./net.js";
 import {
+  RUNTIME_UPDATE_RUN_LIMIT,
   SESSION_COMMAND_INVOCATION_RETENTION_MS,
   sessionBlocksConversationFork,
   SessionsService,
@@ -342,6 +353,7 @@ import {
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
   orchestratorSelfWorktreeAuthorizationError,
+  worktreeRequestedBySession,
   type AuthPrincipal,
   type HumanPrincipal,
   workflowActorForPrincipal,
@@ -423,7 +435,10 @@ const LOCAL_DEVICE_TOKEN = (() => {
 const LOCAL_DEVICE_TOKEN_HASH = hashToken(LOCAL_DEVICE_TOKEN);
 const LOCAL_PAIRING_URL = localPairingUrl(PORT, LOCAL_DEVICE_TOKEN);
 
-const db = ControlPlaneDb.open(DB_PATH, ARTIFACT_BLOB_DIR ? { artifactBlobDir: ARTIFACT_BLOB_DIR } : {});
+const db = ControlPlaneDb.open(DB_PATH, {
+  ...(ARTIFACT_BLOB_DIR ? { artifactBlobDir: ARTIFACT_BLOB_DIR } : {}),
+  incrementalVacuum: parseIncrementalVacuum(process.env[INCREMENTAL_VACUUM_ENV]).enabled,
+});
 // Model rate table for pricing usage the provider bills opaquely (Codex). One outbound fetch per
 // day; `CONTROL_PLANE_USAGE_PRICING_URL=off` disables it and leaves such usage unpriced.
 const usagePricing = new UsageRateTableService({
@@ -801,14 +816,20 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
   if (routePath === "/api/sessions" && req.method === "POST") {
     const body = (req.body ?? {}) as { runnerId?: unknown; workspaceId?: unknown; workspacePath?: unknown };
-    if (principal.kind === "human" && !organizationAdmin &&
-        typeof body.workspacePath === "string" && body.workspacePath.trim()) {
+    // Creation trims the path, so a blank one launches the named workspace and must pass its check.
+    const arbitraryPath = typeof body.workspacePath === "string" && body.workspacePath.trim() !== "";
+    // A credential delegated as one user reaches that user's runners (#2940), so it may name an
+    // arbitrary host path only when that user, as a Human, could.
+    const delegatedUser = principal.kind === "agent" && principal.delegatedScope.owner.kind === "user"
+      ? principal.delegatedScope.owner.userId : null;
+    if (arbitraryPath && (principal.kind === "human" ? !organizationAdmin
+      : delegatedUser !== null && !db.userAdministersOrganization(principal.delegatedScope.organizationId, delegatedUser))) {
       return "organization owner or admin permission is required to start a session from an arbitrary host path";
     }
     if (typeof body.runnerId !== "string" || !db.canAccessRunner(principal, body.runnerId)) {
       return { statusCode: 404, error: "runner not found" };
     }
-    if (typeof body.workspaceId === "string" && !body.workspacePath &&
+    if (typeof body.workspaceId === "string" && !arbitraryPath &&
         !db.canAccessWorkspace(principal, body.runnerId, body.workspaceId)) {
       return { statusCode: 404, error: "workspace not found" };
     }
@@ -1010,18 +1031,23 @@ const svc = new SessionsService(
 videoEvidence.attach(svc, hub);
 db.setCampaignVideoReviewSource((root, uiEvidenceOwner) => svc.campaignVideoReview(root, uiEvidenceOwner));
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
-  app.log.info({ event, ...fields }, "session role conversion"));
+  app.log.info({ event, ...fields }, "session role conversion"), () => svc.expireAutomationCreationDecisions());
+svc.expireAutomationCreationDecisions();
 if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
   app.log.warn({ controllingSessionId: VIDEO_FRAME_VALIDATION_SESSION_ID },
     "experimental video-frame review validation is enabled for one controlling Session");
 }
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
-const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log });
+const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log, hub });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
+const incrementalVacuum = new IncrementalVacuum(db, { env: process.env, log: app.log });
+const workflowEventRetention = new WorkflowEventRetention(db, { env: process.env, log: app.log });
+registerWorkflowEventRetentionRoutes(app, workflowEventRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
+registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
@@ -1056,17 +1082,20 @@ const campaignForgeObserver = new CampaignForgeObserver({
 campaignForgeObserver.start();
 /** An on-demand read waits at most this long before the route answers with what is stored. */
 const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
+const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullRequestRef[]) => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
+  timer.unref?.();
+  void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
+    clearTimeout(timer);
+    resolve();
+  });
+});
+svc.campaignForgeRefresh = refreshCampaignForge;
+svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
 registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
-  refreshForge: (campaignId, refs) => new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
-    timer.unref?.();
-    void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  }),
+  refreshForge: refreshCampaignForge,
 });
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
@@ -1505,6 +1534,8 @@ app.register(async (instance) => {
         break;
       case "campaign_issue_scope_result":
       case "campaign_launch_inspection_result":
+      case "gitlab_merge_preflight_result":
+      case "github_merge_preflight_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
@@ -1568,7 +1599,9 @@ app.register(async (instance) => {
           app.log.warn(`runner ${runnerId} sent a governance trip without negotiated support`);
           break;
         }
-        svc.onGovernanceTripped(runnerId!, msg);
+        if (svc.onGovernanceTripped(runnerId!, msg)) {
+          automations.onGovernanceTripped(msg.sessionId, Date.now());
+        }
         break;
       case "session_event":
         svc.onSessionEvent(msg.sessionId, msg.payload, msg.seq, msg.ts, runnerId ?? undefined, prepared);
@@ -1775,6 +1808,7 @@ app.register(async (instance) => {
       case "git_result":
       case "session_history_result":
       case "session_history_page_result":
+      case "trim_session_history_result":
       case "reprocess_session_result":
       case "list_external_sessions_result":
       case "adopt_session_result":
@@ -1797,6 +1831,7 @@ app.register(async (instance) => {
       case "host_action_result":
       case "interrupt_turn_result":
       case "stop_background_job_result":
+      case "release_queue_hold_result":
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
@@ -1912,6 +1947,55 @@ app.register(async (instance) => {
     }
   };
 
+  // A run of consecutive queued runtime updates shares one durable commit (#2601). Each frame gets
+  // the same authority checks, activity refresh and attention batching as in handleRunnerFrame.
+  const handleRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
+    const updates = messages as Array<Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>>;
+    try {
+      if (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient)) return;
+      if (!credentialId || !db.isRunnerCredentialActive(runnerId, credentialId)) {
+        socket.close(1008, "runner credential is no longer active");
+        return;
+      }
+      if (runtimeAttentionBatch && (runtimeAttentionFrames >= 1024 || performance.now() - runtimeAttentionStarted >= 1000)) {
+        await flushRuntimeAttention();
+        // The socket may have been replaced while its campaign publications yielded.
+        if (!currentSocket()) return;
+      }
+      const owner = runnerId!;
+      hub.noteRunnerFrameActivity(owner, runnerClient, Date.now());
+      const startedAt = performance.now();
+      if (!runtimeAttentionBatch) {
+        runtimeAttentionBatch = svc.beginRunnerAttentionBatch(owner);
+        runtimeAttentionFrames = 0;
+        runtimeAttentionStarted = performance.now();
+      }
+      runtimeAttentionFrames += updates.length;
+      svc.applySessionRuntimeUpdates(owner, updates.map((msg) => msg.snapshot), runtimeAttentionBatch,
+        (snapshot) => roleConversions.reconcile(owner, snapshot));
+      const durationMs = performance.now() - startedAt;
+      if (durationMs >= 250) {
+        app.log.warn({
+          event: "session_runtime_update_slow",
+          entryPoint: "runner_socket",
+          runnerId: owner,
+          frameCount: updates.length,
+          durationMs: Math.round(durationMs),
+        }, "session runtime update blocked the control plane");
+      }
+    } catch (error) {
+      app.log.error(
+        { err: error, runnerId, messageType: "session_runtime_updated", frameCount: updates.length },
+        "runner frame handler threw — closing offending runner socket",
+      );
+      try {
+        socket.close(1008, "malformed runner frame");
+      } catch {
+        /* socket already tearing down */
+      }
+    }
+  };
+
   type Staging = Promise<StagedSessionEventPayload | null>;
   const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
     try {
@@ -1941,6 +2025,11 @@ app.register(async (instance) => {
       ? svc.stageLiveSessionEventPayload(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
       : undefined,
     discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
+  }, {
+    // A malformed frame is never batched: it reaches handleRunnerFrame and is rejected there.
+    batchable: (msg) => msg.type === "session_runtime_updated" && typeof msg.snapshot?.id === "string",
+    limit: RUNTIME_UPDATE_RUN_LIMIT,
+    handle: handleRuntimeUpdateRun,
   });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());
@@ -2630,6 +2719,7 @@ registerHostAdminRoute(app, {
     status: runner.status,
     version: runner.version,
     protocolVersion: runner.protocolVersion ?? null,
+    harnessReadiness: runnerHarnessReadiness(runner),
   })),
   pairedDeviceCount: () => db.listDevices().length,
   doctor: {
@@ -3454,9 +3544,18 @@ app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, repl
       runner.protocolVersion, "providerAccounts", "default provider account changes",
     ));
   }
-  if (body.accountId !== null && !runner.providerAccounts?.some((account) =>
-    account.provider === provider && account.id === body.accountId)) {
+  const chosen = body.accountId === null ? undefined : runner.providerAccounts?.find((account) =>
+    account.provider === provider && account.id === body.accountId);
+  if (body.accountId !== null && !chosen) {
     return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+  }
+  // A profile only other control planes may use would refuse every session that takes the default
+  // (#3240); adopting it first grants this control plane access.
+  if (chosen?.profile?.access === "not_granted") {
+    return reply.code(409).send({
+      error: "This account's provider profile isn't granted to this control plane. Adopt it as a profile first.",
+      code: "PROVIDER_PROFILE_NOT_GRANTED",
+    });
   }
   const changed = db.setMachineProviderAccountDefault(
     id, provider, body.accountId as string | null, body.expectedRevision as number, Date.now(),
@@ -3726,6 +3825,8 @@ type OpenSessionShellResult =
       capabilityRequirement?: RunnerCapabilityRequirementDetails;
       /** False when a runner timeout/disconnect leaves process creation unknown. */
       definitive?: boolean;
+      /** The Agent TUI's provider-HOME lease refused the open (#3338). */
+      providerHomeRefusal?: ProviderHomeLaunchRefusalView;
     };
 
 async function openSessionShell(
@@ -3791,7 +3892,14 @@ async function openSessionShell(
       // The runner answered definitively that no process was opened. A tombstone is needed only
       // for ambiguous outcomes where a late snapshot could otherwise resurrect a live process.
       shellRegistry.discardUnopened(shellId, session.runnerId);
-      return { ok: false, status: 502, error: res.error ?? "could not open a shell" };
+      // #3338: the TUI's account lease refused it; the client offers the session's recovery for it.
+      // A malformed refusal falls back to the text.
+      const providerHomeRefusal = kind === "agent_tui" && res.providerHomeRefusal !== undefined
+        ? validProviderHomeLaunchRefusal(res.providerHomeRefusal) : null;
+      return {
+        ok: false, status: 502, error: res.error ?? "could not open a shell",
+        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
+      };
     }
     const shell = shellRegistry.setPty(shellId, Boolean(res.pty), Date.now());
     if (!shell) {
@@ -3817,7 +3925,10 @@ app.post("/api/sessions/:id/shells", async (req, reply) => {
   );
   return result.ok
     ? reply.code(result.status).send({ shell: result.shell })
-    : reply.code(result.status).send(failureBody(result));
+    : reply.code(result.status).send({
+      ...failureBody(result),
+      ...(result.providerHomeRefusal ? { providerHomeRefusal: result.providerHomeRefusal } : {}),
+    });
 });
 
 // Best-effort PTY resize (fire-and-forget, like input — pipe shells ignore it).
@@ -4324,6 +4435,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/control", async (req, reply) =
   return respond(reply, svc.setCampaignControl(id, body.proposal, body.expectedRevision!, principal));
 });
 
+// The follow-up approval limit (#2940): the same human-only compare-and-set, re-minting the boundary.
+// No agent allowlist entry exists for this endpoint either.
+app.post("/api/sessions/:id/orchestrator-campaign/follow-up-limit", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  return respond(reply, svc.setCampaignFollowUpLimit(id, req.body as SetCampaignFollowUpLimitRequest, principal));
+});
+
 app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = campaignLedgerPrincipal(req, reply, id);
@@ -4386,6 +4506,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 });
 
 registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
+registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub), requestPrincipal });
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
   const { id } = req.params as { id: string };
@@ -5014,7 +5135,7 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   // control; an agent parent sending to a descendant has neither, which is why its mid-turn
   // message used to vanish (#1406). Give only the agent lane the steer-first admission.
   if (human) {
-    const result = svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config,
+    const result = await svc.promptFromHuman(human, id, text, images, slashCommand, body?.config,
       typeof body?.reviewedResultRevision === "string" ? body.reviewedResultRevision : undefined);
     return respond(reply, result.ok && result.data ? { ...result, data: withSessionCommandPermissions(db, human,
       { ...result.data, attention: db.getSession(id)?.attention }) } : result);
@@ -5153,9 +5274,18 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
   respond(reply, await svc.cancelTurn((req.params as { id: string }).id)),
 );
 
-app.post("/api/sessions/:id/restart", async (req, reply) =>
-  respond(reply, svc.restart((req.params as { id: string }).id)),
-);
+app.post("/api/sessions/:id/restart", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  // #3240: `waitForProviderHome` asks the runner to wait for a busy provider account.
+  const body = (req.body ?? {}) as { waitForProviderHome?: unknown };
+  if (body.waitForProviderHome !== undefined && typeof body.waitForProviderHome !== "boolean") {
+    return reply.code(400).send({ error: "waitForProviderHome must be a boolean" });
+  }
+  // A person restarting a Full Control campaign restores or explains its stale boundary (#2940).
+  const human = requestHuman(req);
+  return respond(reply, (human && svc.restoreHumanCampaignAuthority(human, id)) ??
+    svc.restart(id, body.waitForProviderHome ? { waitForProviderHome: true } : {}));
+});
 
 // #1780: end one managed background job without ending the session. The auth gate has already
 // confined an agent credential to its descendants; only the direct parent Orchestrator remains.
@@ -5169,6 +5299,24 @@ app.post("/api/sessions/:id/background-jobs/:jobId/stop", async (req, reply) => 
   if (refusal) return reply.code(403).send({ error: refusal });
   if (!validParentControlCoordinate(jobId)) return reply.code(400).send({ error: "invalid background job id" });
   return respond(reply, await svc.stopBackgroundJob(id, jobId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
+});
+
+// #3752: release a worktree or provider-account handoff hold now (Proceed Now). It ends every
+// unfinished background job, so it takes exactly the authority of stopping one (#1780).
+app.post("/api/sessions/:id/queue-hold/release", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const session = db.getSession(id);
+  if (!principal || !session) return reply.code(404).send({ error: "session not found" });
+  const refusal = backgroundJobStopAuthorizationError(principal, session,
+    principal.kind === "human" && db.isSessionOwner(principal, id));
+  if (refusal) return reply.code(403).send({ error: refusal });
+  const body = req.body;
+  const holdId = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as { holdId?: unknown }).holdId
+    : undefined;
+  if (!validParentControlCoordinate(holdId)) return reply.code(400).send({ error: "holdId must be a non-empty hold id" });
+  return respond(reply, await svc.releaseQueueHold(id, holdId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
 });
 
 app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {
@@ -5448,6 +5596,13 @@ async function runSessionWorktreeRequest(
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  // Only the session's own switch may continue by itself after its relaunch (#3810). A pre-v255
+  // runner gets no flag and keeps going idle once the relaunch has run.
+  const selfRequest = (request.operation === "create" || request.operation === "attach" || request.operation === "select") &&
+      worktreeRequestedBySession(principal, sessionId) &&
+      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "worktreeSwitchContinuation")
+    ? { requestedBySession: true }
+    : {};
   if (request.operation === "create" && request.progress === true && runnerSupportsProtocol(
     db.getRunner(session.runnerId)?.protocolVersion,
     "progressAwareSessionWorktrees",
@@ -5462,7 +5617,7 @@ async function runSessionWorktreeRequest(
       const res = await hub.requestFromRunner(
         session.runnerId,
         requestId,
-        { ...request, type: "session_worktree", requestId, sessionId, progress: true },
+        { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId, progress: true },
         SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
       );
       if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
@@ -5471,7 +5626,7 @@ async function runSessionWorktreeRequest(
       }
       if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
       db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-      return { snapshot: res.snapshot, worktree: res.worktree };
+      return { snapshot: res.snapshot, worktree: res.worktree, ...(res.isolation ? { isolation: res.isolation } : {}) };
     });
     if (operation.status === "in_progress") {
       return reply.code(202).send({ operation });
@@ -5484,6 +5639,7 @@ async function runSessionWorktreeRequest(
       operation: { id: operation.id, status: operation.status },
       worktree: operation.worktree,
       session: db.getSession(sessionId),
+      ...(operation.isolation ? { isolation: operation.isolation } : {}),
     };
   }
   const requestId = `worktree_${randomUUID().slice(0, 8)}`;
@@ -5491,7 +5647,7 @@ async function runSessionWorktreeRequest(
     const res = await hub.requestFromRunner(
       session.runnerId,
       requestId,
-      { ...request, type: "session_worktree", requestId, sessionId },
+      { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId },
       request.operation === "create"
         ? 65 * 60_000
         : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
@@ -5706,7 +5862,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   }
   const supportsFork = providerSupportsConversationFork(source.driver, sourceAgent?.capabilities);
   if (!supportsFork && !handoff) return reply.code(409).send({ error: "this provider session does not support conversation fork" });
-  if (!source.worktreePath) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
+  if (!source.worktreePath && !handoff) return reply.code(409).send({ error: "conversation fork requires a worktree session" });
   if (sessionBlocksConversationFork(source.status)) {
     return reply.code(409).send({ error: "the source session is busy — wait before forking" });
   }
@@ -5743,7 +5899,18 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       65 * 60_000,
     );
     if (res.type !== "fork_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) return reply.code(409).send({ error: res.error ?? "conversation fork failed" });
+    if (!res.ok || !res.snapshot) {
+      // #3240: the fork's provider launch was refused at the account's lease; the client shows the
+      // same state a refused session launch does. A malformed refusal falls back to the text.
+      const providerHomeRefusal = res.providerHomeRefusal === undefined ? null
+        : validProviderHomeLaunchRefusal(res.providerHomeRefusal);
+      return reply.code(409).send({
+        error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
+          ? "Update the runner to support handoffs from in-place sessions."
+          : res.error ?? "conversation fork failed",
+        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
+      });
+    }
     const snapshotIdError = providerForkSnapshotIdError(targetSessionId, res.snapshot.id);
     if (snapshotIdError) {
       forkCreatedOnRunner = true;
@@ -6797,6 +6964,8 @@ const artifactMaintenanceTimer = setInterval(() => {
 artifactMaintenanceTimer.unref();
 archivedHistoryRetention.start();
 mutationAuditArchiveRetention.start();
+incrementalVacuum.start();
+workflowEventRetention.start();
 // Half-open-socket liveness sweep. A runner whose socket silently died (sleep / Wi-Fi drop / NAT
 // rebind) stays readyState=OPEN with no FIN/RST, so onGone never fires: the runner reads 'online'
 // and its sessions 'running' forever, and prompts written to the dead socket are lost. The app-level
@@ -6857,6 +7026,8 @@ app.addHook("onClose", async () => {
   clearInterval(artifactMaintenanceTimer);
   archivedHistoryRetention.stop();
   mutationAuditArchiveRetention.stop();
+  incrementalVacuum.stop();
+  workflowEventRetention.stop();
   clearInterval(runnerLivenessTimer);
   try {
     await outboundEvents.close();

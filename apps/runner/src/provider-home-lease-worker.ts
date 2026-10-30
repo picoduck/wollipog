@@ -3,6 +3,8 @@ import { leaseWorkerDelay, leaseWorkerNow, parseLeaseWorkerDeadline } from "./pr
 import { ProviderHomeLeaseRegistry, providerHomeLeaseRefusalKind, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRefusalKind } from "./provider-home-lease.js";
 import { adoptProviderProfileMarker, createProviderProfileMarker, revokeProviderProfileMarkerGrant } from "./provider-profile.js";
 import { isLeaseRunnerMarker } from "./provider-home-lease-evidence.js";
+import { isLeaseContainmentEvidence } from "./provider-home-lease-containment.js";
+import { LeaseIoError } from "./provider-home-lease-io.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_CLOCK, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
@@ -12,10 +14,13 @@ export function runProviderHomeLeaseWorker(): void {
   if (instance !== undefined && (typeof instance !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(instance))) throw new Error("invalid lease worker startup");
   const marker: unknown = workerData.runnerMarker;
   if (marker !== undefined && !isLeaseRunnerMarker(marker)) throw new Error("invalid lease worker startup");
+  const containment: unknown = workerData.containment;
+  if (containment !== undefined && (!isLeaseContainmentEvidence(containment) || marker === undefined)) throw new Error("invalid lease worker startup");
   const port = parentPort, epoch: string = workerData.epoch;
   const options: ProviderHomeLeaseOptions = { helperDataDir: workerData.helperDataDir,
     ...(instance === undefined ? {} : { controlPlaneInstanceId: instance.toLowerCase() }),
     ...(marker === undefined ? {} : { runnerMarker: marker }),
+    ...(containment === undefined ? {} : { containment }),
     ...workerData.tests,
     onDiagnostic: d => send({ kind: "diagnostic", epoch, ...d }),
   };
@@ -41,14 +46,17 @@ export function runProviderHomeLeaseWorker(): void {
     port.postMessage(reply);
   }
   const code = (kind: ProviderHomeLeaseRefusalKind | null): LeaseWorkerError | undefined =>
+    kind === "unverifiable" ? "invalid_journal" :
+    kind === "holder_alive" || kind === "boundary_survivor" || kind === "process_survivor" || kind === "boundary_unverifiable" ||
+    kind === "process_uninspectable" || kind === "process_uninspectable_not_delegated" ? kind :
     kind === "busy" || kind === "foreign_owner" || kind === "foreign_host" || kind === "profile_unsupported_control_plane" ||
     kind === "profile_unverifiable" || kind === "profile_not_granted" || kind === "profile_changed" || kind === "profile_grant_limit" ||
     kind === "stale_tip_changed" || kind === "no_reboot_proof" || kind === "recovery_unconfirmed" ? kind : undefined;
   const fail = (error: unknown): LeaseWorkerError => {
     const known = code(providerHomeLeaseRefusalKind(error));
     if (known) return known;
-    const message = error instanceof Error ? error.message : "";
-    return message.includes("helper unavailable") ? "unavailable" : /already in use|publication is in progress/u.test(message) ? "busy" : "refusal";
+    if (error instanceof LeaseIoError) return error.kind === "refusal" ? "invalid_journal" : error.kind;
+    return "refusal";
   };
   port.on("message", (message: LeaseWorkerExecute | LeaseWorkerAccept) => {
     if (!boundedLeaseWorkerFrame(message, LEASE_WORKER_LIMITS.requestBytes) || message?.epoch !== epoch ||
@@ -102,6 +110,7 @@ export function runProviderHomeLeaseWorker(): void {
             ...(found.createdAt && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?Z$/u.test(found.createdAt) ? { createdAt: found.createdAt } : {}),
             sameHost: found.sameHost === true, hasEvidence: found.hasEvidence === true,
             refusal: found.refusal === null ? null : code(found.refusal ?? null) ?? "refusal",
+            ...(found.blockingProcess ? { blockingProcess: found.blockingProcess } : {}),
           };
         } else if (op.method === "lease_recover") {
           registry.recoverStaleLease(op.home, op.provider, { staleTipHash: op.staleTipHash, authorizationId: op.authorizationId }, op.profile);

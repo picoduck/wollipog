@@ -16,7 +16,7 @@ import type { HumanPrincipal } from "./identity.js";
 const allowance = (extra: Partial<CampaignBudgetAuthority> = {}): CampaignBudgetAuthority => ({ version: 1,
   accounting: "managed_workers_only", unpriced: "stop", toolCalls: 120, concurrency: 2, ...extra });
 
-function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
+function harness(path = ":memory:", protocol = PROTOCOL_VERSION, completion?: "retain" | "stop_and_archive") {
   const db = ControlPlaneDb.open(path);
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -26,6 +26,7 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
   db.registerRunner(metadata, 1, protocol);
   db.setUsageRateTable(new Map([["claude-opus-5-5", { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }]])); // Fixture rates, never live pricing.
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+  if (completion) policy.behavior.completion = completion;
   policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [2936], revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
   policy.issueNumbers = [2936];
   const make = (id: string, parentSessionId?: string, config: { costBudgetUsd?: number; maxToolCalls?: number } = {}) => {
@@ -47,6 +48,19 @@ function harness(path = ":memory:", protocol = PROTOCOL_VERSION) {
   const tool = (id: string, toolCallId: string) => db.appendEvent(id, { kind: "tool_call", toolCallId, title: "Read", status: "completed" }, 5);
   const usage = (id: string, costUsd: number) => db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd }, 5, { accrueUsage: true });
   return { db, hub, svc, make, tool, usage, enable, principal, sent, logs,metadata };
+}
+
+/** Historical fixture only: no service admission or runner dispatch is performed. */
+function seedHistoricalReview(h: ReturnType<typeof harness>, request: import("@wollipog/protocol").CampaignReviewJobRequest) {
+  const root = h.db.getSession("root")!;
+  const control = root.orchestratorPolicy!.control!;
+  assert.equal(control.mode, "full_control");
+  if (control.mode !== "full_control") throw Error("fixture authority missing");
+  const item = h.db.campaignWorkLedger.detail("root", request.workItemId, Date.now(), () => true)!;
+  const command = h.db.campaignReviewJobs.reserve("root", "r", item.currentAttempt!.sessionId!, control.boundary.revision,
+    control.boundary.budgetAuthority!.controlledReview!, request,
+    { workItemAttemptId: item.currentAttempt!.id, issue: item.issue! });
+  return { ok: true, data: h.db.campaignReviewJobs.view(command.jobId)!, error: undefined as string | undefined };
 }
 
 test("service launches use the exact reservation and agent reallocations preserve tighter limits", () => {
@@ -230,6 +244,42 @@ test("run fanout carries exactly its admitted limits; downgraded peers refuse al
   } finally {h.db.close();}
 });
 
+test("a run on a runner without campaign budget admission is refused with the shared sentence and versions (#3457)",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100})).ok);
+    h.db.registerRunner({...h.metadata,runnerId:"older"},10,217);
+    // Same campaign Project, so the run reaches the worker gate rather than Location admission.
+    h.db.addProjectLocation(h.db.getSession("root")!.projectId!,{runnerId:"older",workspaceId:"w"});
+    const members=h.db.campaignBudgets.members("root").length;
+    const refused=h.svc.createRun({runnerId:"older",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
+    assert.equal(refused.status,409);
+    assert.equal(refused.error,"This machine needs a newer runner for campaign run workers. Update and restart the runner.");
+    assert.deepEqual(refused.capabilityRequirement,{requiredRunnerProtocolVersion:218,runnerProtocolVersion:217});
+    assert.equal(h.db.campaignBudgets.members("root").length,members,"a refused run leaves no reservation");
+    assert.equal(h.sent.some((m)=>(m as {type?:string}).type==="start_session"),false);
+  } finally {h.db.close();}
+});
+
+test("a campaign with limits on a downgraded runner refuses with the shared sentence and versions (#3803)",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100})).ok);
+    h.db.registerRunner(h.metadata,10,217);
+    const error="This machine needs a newer runner for campaign limits. Update and restart the runner.";
+    const versions={requiredRunnerProtocolVersion:218,runnerProtocolVersion:217};
+    const child=h.svc.createSession({runnerId:"r",workspaceId:"w",agentId:"claude",config:{model:"claude-opus-5-5"},prompt:"Implement authorized #2936"},
+      undefined,undefined,false,false,false,{parentSessionId:"root"});
+    const run=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
+    const prompt=h.svc.prompt("root","continue");
+    for (const [label,refused] of [["child",child],["run",run],["prompt",prompt]] as const) {
+      assert.equal(refused.status,409,label);
+      assert.equal(refused.error,error,label);
+      assert.deepEqual(refused.capabilityRequirement,versions,label);
+    }
+  } finally {h.db.close();}
+});
+
 test("malformed control proposals refuse without changing the human revision",()=>{
   const h=harness();
   try {
@@ -286,10 +336,129 @@ test("human-only grant, CAS, runner compatibility, and revocation preserve usage
     assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
     assert.equal(h.db.campaignBudgets.view("root")!.state, "revoked");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
-    assert.equal(h.enable(allowance({ toolCalls: 1000 }), 3).ok, false, "a new grant cannot reset an exhausted/revoked ledger");
+    // The Human's next explicit grant resumes the allowance that Human revoked (#2940), never refunding usage.
+    assert.ok(h.enable(allowance({ toolCalls: 1000 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.view("root")!.state, "active");
+    assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
+    h.db.campaignBudgets.stop("root", "exhausted", "Campaign allowance reached; unfinished work remains incomplete.");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 4, h.principal).ok);
+    assert.equal(h.enable(allowance({ toolCalls: 2000 }), 5).ok, false, "a new grant cannot reset an exhausted ledger");
   } finally { h.db.close(); }
   const old = harness(":memory:", 217);
   try { assert.equal(old.enable().ok, false); } finally { old.db.close(); }
+});
+
+test("a worker that runs again under Custom counts against the allowance its Human authorizes again (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 })).ok);
+    h.make("worker", "root", { maxToolCalls: 40 });
+    h.db.updateSessionStatus("worker", "completed", 4);
+    const settled = h.db.campaignBudgets.dispatch("worker")!.generation;
+    h.db.campaignBudgets.recordCheckpoint("worker", { generation: settled, historyEpoch: 0, throughSeq: 0, costUsd: 0 });
+    assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 0 }));
+    assert.equal(h.db.campaignBudgets.active("worker"), false);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const restarted = h.svc.restart("worker");
+    assert.ok(restarted.ok, restarted.error ?? "restart under Custom");
+    assert.equal(h.db.campaignBudgets.active("worker"), false, "Custom admits no allowance");
+
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 1 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.active("worker"), true, "the running worker counts again");
+    assert.notEqual(h.db.campaignBudgets.dispatch("worker")!.generation, settled, "with a fresh dispatch generation");
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
+    assert.throws(() => h.make("second", "root", { maxToolCalls: 10 }), /concurrency/);
+  } finally { h.db.close(); }
+});
+
+test("a session limit the person lowers under Custom survives authorizing the allowance again (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+    h.make("worker", "root", { maxToolCalls: 40 });
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.toolCalls, 40);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    const lowered = h.svc.setConfig("worker", { maxToolCalls: 5 });
+    assert.ok(lowered.ok, lowered.error ?? "lower the limit under Custom");
+    h.sent.length = 0;
+
+    assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 }), 3).ok);
+    assert.equal(h.db.campaignBudgets.allocation("worker")!.toolCalls, 5);
+    assert.equal(h.db.campaignBudgets.userLimits("worker")!.maxToolCalls, 5);
+    assert.equal(h.db.getSession("worker")!.maxToolCalls, 5);
+    const rearmed = h.sent.filter((message) => (message as { type: string; sessionId?: string }).type === "rearm_governance" &&
+      (message as { sessionId?: string }).sessionId === "worker") as Array<{ config: { maxToolCalls?: number } }>;
+    assert.ok(rearmed.length > 0 && rearmed.every((message) => (message.config.maxToolCalls ?? 0) <= 5), JSON.stringify(rearmed));
+    assert.throws(() => h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 6 }, {}), /tighter/);
+  } finally { h.db.close(); }
+});
+
+test("an allowance stops governing only when its root's recorded control grants none (#2940)", () => {
+  const h = harness();
+  try {
+    const control = (value: unknown) => {
+      const stored = h.db.sessionOrchestratorPolicy("root")!;
+      if (value === undefined) delete stored.control; else stored.control = value as typeof stored.control;
+      h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    };
+    h.db.campaignBudgets.authorize("root", allowance());
+    control(undefined);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), "root", "a root with no control record keeps its allowance");
+    assert.ok(h.enable().ok);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), "root", "Full Control with an allowance governs");
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.control, { mode: "custom" }, "revoking records Custom explicitly");
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), null, "a revoked-to-Custom allowance never governs");
+    assert.equal(h.db.campaignBudgets.admissionError("root"), null);
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2936", operations: ["implementation_question"],
+      delegatablePolicyIds: [] }, 3, h.principal).ok);
+    assert.equal(h.db.campaignBudgets.governingRoot("root"), null, "Full Control authorized without an allowance does not revive it");
+  } finally { h.db.close(); }
+});
+
+/** An allowance with no personal limits, revoked to Custom, then the root lowered to 5 tool calls (#2940). */
+function revokedAndLowered(before?: (h: ReturnType<typeof harness>) => void) {
+  const h = harness();
+  assert.ok(h.enable(allowance({ toolCalls: 120, concurrency: 2 })).ok);
+  before?.(h);
+  assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, 2, h.principal).ok);
+  const lowered = h.svc.setConfig("root", { maxToolCalls: 5 });
+  assert.ok(lowered.ok, lowered.error ?? "lower the root's limit under Custom");
+  assert.equal(h.db.campaignBudgets.userLimits("root")!.maxToolCalls, null, "the retained record has no personal limit");
+  return h;
+}
+
+test("under Custom, a child's creation is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered();
+  try {
+    const child = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", config: { model: "claude-opus-5-5", maxToolCalls: 10 },
+      prompt: "Implement #2936" }, undefined, undefined, false, false, false, { parentSessionId: "root" });
+    assert.ok(child.ok, child.error ?? "child creation");
+    assert.ok(child.data!.maxToolCalls != null && child.data!.maxToolCalls <= 5, `creation: ${child.data!.maxToolCalls}`);
+  } finally { h.db.close(); }
+});
+
+test("under Custom, a batch of children is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered();
+  try {
+    const run = h.svc.createRun({ runnerId: "r", workspaceId: "w", agentIds: ["claude"], task: "Implement #2936",
+      config: { model: "claude-opus-5-5", maxToolCalls: 10 } }, { parentSessionId: "root" });
+    assert.ok(run.ok, run.error ?? "batch admission");
+    assert.ok(run.data!.sessions.every((member) => member.maxToolCalls != null && member.maxToolCalls <= 5),
+      `batch: ${run.data!.sessions.map((member) => member.maxToolCalls).join(",")}`);
+  } finally { h.db.close(); }
+});
+
+test("under Custom, a child's restart is bounded by the parent's current limit, not the revoked allowance's record (#2940)", () => {
+  const h = revokedAndLowered((h) => {
+    h.make("worker", "root", { maxToolCalls: 10 });
+    h.db.updateSessionStatus("worker", "completed", 4);
+  });
+  try {
+    const restarted = h.svc.restart("worker");
+    assert.equal(restarted.ok, false, "restart re-reserves 10 tool calls against a current limit of 5");
+    assert.match(restarted.error!, /re-reserves 10 tool calls/);
+  } finally { h.db.close(); }
 });
 
 test("root, nested reviewers and replacements share reservations without double counting", () => {
@@ -359,14 +528,16 @@ test("a definitively unsent restart restores its generation and pending final ch
     assert.ok(h.enable(allowance({costUsd:120})).ok);
     h.make("worker","root",{costBudgetUsd:20,maxToolCalls:20});
     h.db.updateSessionStatus("worker","stopped",7,RUNNER_REPORTED_STOP);
-    h.db.reconcileRunnerHistory("worker",0,0);
-    const checkpoint={generation:h.db.campaignBudgets.dispatch("worker")!.generation,historyEpoch:0,throughSeq:0,costUsd:2};
+    // The final event is not hydrated yet, so the checkpoint is still pending evidence.
+    h.db.reconcileRunnerHistory("worker",0,1);
+    const checkpoint={generation:h.db.campaignBudgets.dispatch("worker")!.generation,historyEpoch:0,throughSeq:1,costUsd:2};
     h.db.campaignBudgets.recordCheckpoint("worker",checkpoint);
     const before=h.db.campaignBudgets.dispatchState("worker");
     h.hub.sendToRunner=()=>false;
     assert.equal(h.svc.restart("worker").ok,false);
     assert.deepEqual(h.db.campaignBudgets.dispatchState("worker"),before,"a known-unsent dispatch cannot destroy old retirement evidence");
     h.hub.sendToRunner=()=>true;
+    h.db.setHydratedSeq("worker",1);
     h.svc.onSessionStatus("worker","stopped",undefined,undefined,"r",undefined,undefined,checkpoint);
     await new Promise((r)=>setImmediate(r));
     assert.equal(h.db.campaignBudgets.active("worker"),false,"normal service hydration settles the restored old receipt");
@@ -666,15 +837,23 @@ test("cancellation retains reservations until runner settlement; late spend stil
     h.make("worker", "root", { maxToolCalls: 20 });
     assert.ok(h.svc.stop("worker").ok);
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1);
+    const reserved = h.db.campaignBudgets.view("root")!.outstanding.toolCalls;
     h.svc.onSessionStatus("worker", "stopped");
-    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1, "status alone does not prove final usage");
+    // A runner reports `stopped` while its provider still closes: status alone proves neither
+    // retirement nor final usage (#2940).
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 1, "status alone does not prove provider retirement");
+    assert.equal(h.db.campaignBudgets.view("root")!.outstanding.toolCalls, reserved, "status alone does not prove final usage");
     h.tool("worker", "late");
     assert.equal(h.db.campaignBudgets.view("root")!.actual.toolCalls, 1);
     const generation = h.db.campaignBudgets.dispatch("worker")!.generation;
     h.db.campaignBudgets.recordCheckpoint("worker", { generation, historyEpoch: 0, throughSeq: 2, costUsd: 0 });
+    // The retired runner's final checkpoint frees the slot; the reservation waits for its history.
+    assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0, "the final checkpoint proves retirement");
     assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 1 }), false);
+    assert.equal(h.db.campaignBudgets.active("worker"), true, "the reservation stays until settlement");
     assert.ok(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }));
     assert.equal(h.db.campaignBudgets.view("root")!.occupied, 0);
+    assert.equal(h.db.campaignBudgets.view("root")!.outstanding.toolCalls, reserved - 20, "settlement releases the unspent reservation");
     assert.equal(h.db.campaignBudgets.settleCheckpoint("worker", { historyEpoch: 0, hydratedSeq: 2 }), false, "settlement is one-shot");
     h.db.campaignBudgets.admit("root", { sessionId: "worker", toolCalls: 20 }, {});
     h.db.campaignBudgets.replaceDispatch("worker");
@@ -762,7 +941,72 @@ test("native review reservations price failed attempts, survive replay and enfor
   } finally {h.db.close();}
 });
 
-test("native service binds authority, assigned scope, canonical PR and server-only usage",()=>{
+test("retired campaign review admission refuses supported older and current runners without reserving or dispatching", () => {
+  for (const protocol of [223, 243, PROTOCOL_VERSION]) {
+    const h = harness();
+    try {
+      h.db.registerRunner(h.metadata, 10, protocol);
+      assert.ok(h.enable(allowance({ costUsd: 100, toolCalls: 1000 })).ok);
+      h.sent.length = 0;
+      const result = h.svc.requestCampaignReviewJob("root", { requestId: "retired", workItemId: "old-item",
+        pullRequest: { repository: "picoduck/wollipog", number: 3065 }, baseSha: "a".repeat(40), headSha: "b".repeat(40),
+        costUsd: 5, toolCalls: 20, brief: "Legacy request" });
+      assert.equal(result.status, 410);
+      assert.match(result.error!, /retired.*request_review_session/u);
+      assert.equal(h.db.campaignReviewJobs.commands("r").length, 0);
+      assert.equal(h.sent.length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("retirement receipts retain unknown reservations without a cancellation feedback loop", () => {
+  const h = harness();
+  try {
+    const profile = { profile: "native_opus_5_5_high_read_only", controllerSha256: "a".repeat(64), executableSha256: "b".repeat(64),
+      cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" } as const;
+    h.metadata.runtime = { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignReview: profile };
+    h.db.registerRunner(h.metadata, 10, PROTOCOL_VERSION);
+    assert.ok(h.enable(allowance({ costUsd: 100, toolCalls: 1000, controlledReview: profile })).ok);
+    const request = { requestId: "historical", workItemId: "old-item", pullRequest: { repository: "picoduck/wollipog", number: 3065 },
+      baseSha: "a".repeat(40), headSha: "b".repeat(40), costUsd: 5, toolCalls: 20, brief: "Historical fixture" };
+    const command = h.db.campaignReviewJobs.reserve("root", "r", "root", 2, profile, request);
+    const receipt = { type: "campaign_review_job_update" as const, jobId: command.jobId, nonce: command.nonce,
+      state: "accounting_unavailable" as const, toolCalls: 0 };
+    h.sent.length = 0;
+    h.svc.onCampaignReviewJobUpdate("r", receipt);
+    h.svc.onCampaignReviewJobUpdate("r", receipt);
+    assert.equal(h.db.campaignBudgets.active(command.jobId), true);
+    assert.equal(h.db.campaignReviewJobs.view(command.jobId)?.costUsd, null);
+    assert.equal(h.db.campaignBudgets.view("root")?.state, "accounting_unavailable");
+    assert.equal(h.sent.some(message => ["campaign_review_job", "cancel_campaign_review_job"].includes((message as { type: string }).type)), false);
+  } finally { h.db.close(); }
+});
+
+test("reconnect waits for a priced historical receipt without irreversibly stopping its allowance", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable(allowance({ costUsd: 100, toolCalls: 1000 })).ok);
+    const profile = { profile: "native_opus_5_5_high_read_only", controllerSha256: "a".repeat(64), executableSha256: "b".repeat(64),
+      cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" } as const;
+    const command = h.db.campaignReviewJobs.reserve("root", "r", "root", 2, profile, { requestId: "lost-final", workItemId: "old-item",
+      pullRequest: { repository: "picoduck/wollipog", number: 3065 }, baseSha: "a".repeat(40), headSha: "b".repeat(40),
+      costUsd: 5, toolCalls: 20, brief: "Historical fixture" });
+    h.sent.length = 0;
+    h.svc.recoverCampaignReviewJobs("r");
+    assert.equal(h.db.campaignBudgets.view("root")?.state, "active");
+    assert.equal(h.db.campaignBudgets.active(command.jobId), true, "keep possible usage reserved while waiting");
+    assert.deepEqual(h.sent.map(message => (message as { type: string }).type), ["cancel_campaign_review_job"]);
+    const receipt = { type: "campaign_review_job_update" as const, jobId: command.jobId, nonce: command.nonce,
+      state: "completed" as const, costUsd: 2, toolCalls: 3, attemptValid: false, attemptConsumed: true, receiptSha256: "f".repeat(64) };
+    h.svc.onCampaignReviewJobUpdate("r", receipt);
+    h.svc.onCampaignReviewJobUpdate("r", receipt);
+    assert.equal(h.db.campaignBudgets.view("root")?.state, "active");
+    assert.equal(h.db.campaignBudgets.view("root")?.actual.costUsd, 2);
+    assert.equal(h.db.campaignBudgets.active(command.jobId), false);
+  } finally { h.db.close(); }
+});
+
+test("historical native review receipts retain scope, canonical PR and server-only usage",()=>{
   const h=harness();
   try {
     const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
@@ -779,9 +1023,7 @@ test("native service binds authority, assigned scope, canonical PR and server-on
     assert.ok(assigned.ok,assigned.error??"assignment refused");
     assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
     const request={requestId:"native",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
-    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,costJSON:{costUsd:0}} as any).ok,false);
-    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,pullRequest:{...request.pullRequest,number:999}}).ok,false);
-    const result=h.svc.requestCampaignReviewJob("root",request);
+    const result=seedHistoricalReview(h,request);
     assert.ok(result.ok,result.error??"review refused");
     assert.equal(result.data!.state,"reserved");
     assert.equal(h.db.campaignWorkLedger.accounting.costSummary("root",Date.now()).total.availability,"unavailable","an unpriced native attempt is not displayed as free review");
@@ -817,7 +1059,7 @@ test("native service binds authority, assigned scope, canonical PR and server-on
   } finally {h.db.close();}
 });
 
-test("with no campaign ceiling, controlled review still reserves each job's own bound and meters its usage",()=>{
+test("historical controlled-review reservations retain each job's own bound and metered usage",()=>{
   const h=harness();
   try {
     const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
@@ -833,7 +1075,7 @@ test("with no campaign ceiling, controlled review still reserves each job's own 
     const workItemId=plan.data!.items[0]!.workItemId;
     assert.ok(h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:"worker"}).ok);
     assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
-    const result=h.svc.requestCampaignReviewJob("root",{requestId:"unbounded",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
+    const result=seedHistoricalReview(h,{requestId:"unbounded",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
       baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."});
     assert.ok(result.ok,result.error??"review refused");
     assert.deepEqual(h.db.campaignBudgets.allocation(result.data!.jobId),{sessionId:result.data!.jobId,costUsd:5,toolCalls:20},"the job's own bound is reserved");
@@ -870,7 +1112,7 @@ test("native missing usage stops admission and retains the full outstanding rese
 });
 
 
-test("native reconnect repeats current admission and never dispatches to an unsupported peer",()=>{
+test("retired native reconnect only cancels historical work and never dispatches",()=>{
 
   const h=harness();
   try {
@@ -888,9 +1130,7 @@ test("native reconnect repeats current admission and never dispatches to an unsu
     assert.ok(assigned.ok,assigned.error??"assignment refused");
     assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
     const request={requestId:"native",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
-    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,costJSON:{costUsd:0}} as any).ok,false);
-    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,pullRequest:{...request.pullRequest,number:999}}).ok,false);
-    const result=h.svc.requestCampaignReviewJob("root",request);
+    const result=seedHistoricalReview(h,request);
     assert.ok(result.ok,result.error??"review refused");
     assert.equal(result.data!.state,"reserved");
     assert.equal(h.db.campaignWorkLedger.accounting.costSummary("root",Date.now()).total.availability,"unavailable","an unpriced native attempt is not displayed as free review");
@@ -898,7 +1138,7 @@ test("native reconnect repeats current admission and never dispatches to an unsu
     const command=h.db.campaignReviewJobs.command(result.data!.jobId)!;
 
     h.sent.length=0;h.svc.recoverCampaignReviewJobs("r");
-    assert.equal(h.sent.filter((m)=>(m as any).type==="campaign_review_job").length,1);
+    assert.equal(h.sent.filter((m)=>(m as any).type==="campaign_review_job").length,0);
     assert.equal(h.db.campaignReviewJobs.view(command.jobId)!.state,"reserved");
     h.db.registerRunner(h.metadata,11,217);
     h.sent.length=0;h.svc.recoverCampaignReviewJobs("r");
@@ -935,9 +1175,7 @@ test("supported native reconnect cancels after human revocation without new admi
     assert.ok(assigned.ok,assigned.error??"assignment refused");
     assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
     const request={requestId:"native",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."};
-    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,costJSON:{costUsd:0}} as any).ok,false);
-    assert.equal(h.svc.requestCampaignReviewJob("root",{...request,pullRequest:{...request.pullRequest,number:999}}).ok,false);
-    const result=h.svc.requestCampaignReviewJob("root",request);
+    const result=seedHistoricalReview(h,request);
     assert.ok(result.ok,result.error??"review refused");
     assert.equal(result.data!.state,"reserved");
     assert.equal(h.db.campaignWorkLedger.accounting.costSummary("root",Date.now()).total.availability,"unavailable","an unpriced native attempt is not displayed as free review");
@@ -952,7 +1190,7 @@ test("supported native reconnect cancels after human revocation without new admi
   } finally {h.db.close();}
 });
 
-test("a review-required campaign refuses child ceilings at creation, so every admitted child can get its review (#2940)",()=>{
+test("retirement preserves a legacy boundary's child ceiling restriction until human replacement (#2940)",()=>{
   const h=harness();
   try {
     const profile={profile:"native_opus_5_5_high_read_only",controllerSha256:"a".repeat(64),executableSha256:"b".repeat(64),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId:"claude"} as const;
@@ -967,8 +1205,8 @@ test("a review-required campaign refuses child ceilings at creation, so every ad
       const refused=child(ceiling);
       assert.equal(refused.ok,false,JSON.stringify(ceiling));
       assert.equal(refused.status,409);
-      assert.match(refused.error!,/controlled cross-model review, which cannot run under a per-session cost or tool-call limit/);
-      assert.match(refused.error!,/without costBudgetUsd or maxToolCalls/);
+      assert.match(refused.error!,/retired controlled-review boundary.*person must replace/u);
+      assert.match(refused.error!,/review sessions do not inherit a native-review grant/u);
     }
     assert.equal(members(),before,"a refused child leaves no reservation");
     const runRefused=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5",costBudgetUsd:5}},{parentSessionId:"root"});
@@ -981,7 +1219,7 @@ test("a review-required campaign refuses child ceilings at creation, so every ad
     h.db.updateProject(project.id,{childSessionDefaults:{costBudgetUsd:5,maxToolCalls:30}});
     const projectRefused=child({});
     assert.equal(projectRefused.ok,false);
-    assert.match(projectRefused.error!,/clear them for this campaign's Project/);
+    assert.match(projectRefused.error!,/person must replace that obsolete boundary/u);
     h.db.updateProject(project.id,{childSessionDefaults:null});
 
     const admitted=child({});
@@ -995,13 +1233,13 @@ test("a review-required campaign refuses child ceilings at creation, so every ad
     const workItemId=plan.data!.items[0]!.workItemId;
     assert.ok(h.svc.assignCampaignWorkItem("root",{workItemId,childSessionId:worker}).ok);
     assert.ok(h.svc.updateCampaignWorkItem("root",{workItemId,stage:{stage:"in_review",pullRequests:[{repository:"picoduck/wollipog",number:3065}]}}).ok);
-    const review=h.svc.requestCampaignReviewJob("root",{requestId:"child-review",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
+    const review=seedHistoricalReview(h,{requestId:"child-review",workItemId,pullRequest:{repository:"picoduck/wollipog",number:3065},
       baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the exact head."});
     assert.ok(review.ok,review.error??"the admitted child's required review is admissible");
   } finally {h.db.close();}
 });
 
-test("campaigns without required controlled review keep accepting child ceilings",()=>{
+test("campaigns without a legacy controlled-review boundary keep accepting child ceilings",()=>{
   const h=harness();
   try {
     assert.ok(h.enable(allowance({costUsd:100,toolCalls:1000})).ok);

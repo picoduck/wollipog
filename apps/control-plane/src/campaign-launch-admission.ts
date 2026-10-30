@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
 import {
-  campaignAuthorityPreflight, runnerSupportsProtocol, validCampaignControl,
+  campaignAuthorityPreflight, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignControl,
   FULL_CONTROL_EVIDENCE_EXCEPTIONS, FULL_CONTROL_HUMAN_REQUIRED_LABELS, FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
-  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
-  type CampaignAuthorityOperation, type CampaignLaunchCapability, type CampaignLaunchPreflight,
+  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
+  type CampaignAuthorityBoundary, type CampaignAuthorityOperation, type CampaignBudgetAuthority, type FullControlDerivedLimits, type OrchestratorCampaignPolicy, type CampaignLaunchCapability, type CampaignLaunchPreflight,
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
@@ -60,8 +60,7 @@ export function parseFullControlLaunchRequest(value: unknown, admit: boolean): F
       (r.projectId != null && !text(r.projectId, 256)) || (r.projectLocationId != null && !text(r.projectLocationId, 256)) ||
       (r.task !== undefined && !text(r.task, 4000)) ||
       (r.issueNumbers !== undefined && (!Array.isArray(r.issueNumbers) || r.issueNumbers.length > 100 ||
-        r.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(r.issueNumbers).size !== r.issueNumbers.length)) ||
-      (r.task === undefined && !r.issueNumbers?.length)) return null;
+        r.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) || new Set(r.issueNumbers).size !== r.issueNumbers.length))) return null;
   if (admit ? typeof r.requestId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(r.requestId) ||
       typeof r.preflightDigest !== "string" || !/^[a-f0-9]{64}$/.test(r.preflightDigest)
     : r.requestId !== undefined || r.preflightDigest !== undefined) return null;
@@ -94,6 +93,94 @@ function validOverrides(o: unknown): o is FullControlLaunchOverrides {
   if (v.budget !== undefined && (!record(v.budget) || !only(v.budget, ["costUsd", "toolCalls", "concurrency", "acceptedFollowUps", "checkpointsUsd"]))) return false;
   if (v.issues !== undefined && (!record(v.issues) || !only(v.issues, ["relatedFollowUps", "maxIssues", "closureReasons"]))) return false;
   return true;
+}
+
+/** A Full Control campaign that waits for its owner's first message, or is delivering it (#2940).
+ * Nothing else may start a provider turn for it: no prompt, command, steer, continuation or queued
+ * work. Revoking to Custom ends the wait. */
+export function awaitsFirstMessage(policy: Pick<OrchestratorCampaignPolicy, "firstMessageScope" | "control"> | undefined): boolean {
+  const state = policy?.firstMessageScope?.state;
+  return (state === "pending" || state === "delivering") && policy!.control?.mode === "full_control";
+}
+
+/** A launch that names no task, issues or objective: the owner's first message supplies them (#2940). */
+export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task" | "issueNumbers" | "overrides">): boolean {
+  return request.task === undefined && !request.issueNumbers?.length && request.overrides?.objective === undefined;
+}
+
+const MAX_MESSAGE_ISSUES = 100;
+
+/** Issue references in the owner's first message that name the campaign's own repository: `#123`,
+ * `owner/repo#123` and `https://github.com/owner/repo/issues/123`, or for a GitLab project (#3539)
+ * `http(s)://<host>/<project>/-/issues/123`. References to another repository and pull or merge
+ * request URLs are ignored. These are candidates only; the runner still verifies each one
+ * is an issue of the repository before it enters the scope. */
+export function issueReferencesInMessage(text: string, repository: string): number[] {
+  const own = repository.toLowerCase();
+  const found = new Set<number>();
+  const add = (value: string) => {
+    const n = Number(value);
+    if (Number.isSafeInteger(n) && n > 0) found.add(n);
+  };
+  for (const match of text.matchAll(/(?<![\w./#-])#([1-9][0-9]{0,15})(?![\w-])/gu)) add(match[1]!);
+  for (const match of text.matchAll(/(?<![\w./-])([\w.-]+\/[\w.-]+)#([1-9][0-9]{0,15})(?![\w-])/gu)) {
+    if (match[1]!.toLowerCase() === own) add(match[2]!);
+  }
+  for (const match of text.matchAll(/\bhttps?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9][0-9]{0,15})(?![\w-])/giu)) {
+    if (match[1]!.toLowerCase() === own) add(match[2]!);
+  }
+  if (campaignRepositoryLocation(repository)?.forge === "gitlab") {
+    for (const match of text.matchAll(/\bhttps?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/issues\/([1-9][0-9]{0,15})(?![\w-])/giu)) {
+      if (match[1]!.toLowerCase() === own) add(match[2]!);
+    }
+  }
+  const numbers = [...found].sort((a, b) => a - b);
+  return numbers.length <= MAX_MESSAGE_ISSUES ? numbers : numbers.slice(0, MAX_MESSAGE_ISSUES);
+}
+
+/** The boundary objective a first message states: its text on one line (the boundary refuses
+ * control characters), bounded to the schema's 4000 characters. The digest binds the exact text. */
+export function firstMessageObjective(text: string): string {
+  const line = text.replace(/[\x00-\x1f\x7f\s]+/gu, " ").trim();
+  return line.length <= 4000 ? line : `${line.slice(0, 3999)}…`;
+}
+
+export function firstMessageDigest(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+/** Which of a launch's limits the server derived rather than the Human set (#2940). */
+export function derivedLaunchLimits(overrides: FullControlLaunchOverrides | undefined): FullControlDerivedLimits {
+  return { acceptedFollowUps: overrides?.budget?.acceptedFollowUps === undefined, maxIssues: overrides?.issues?.maxIssues === undefined };
+}
+
+/** The issues a first message can scope: all verified ones, unless the Human set Maximum Issues,
+ * which an explicit ceiling bounds. */
+export function firstMessageIssues(boundary: CampaignAuthorityBoundary, issueNumbers: number[], derived: FullControlDerivedLimits | undefined): number[] {
+  const max = boundary.issueAuthority?.maxIssues;
+  return derived?.maxIssues || max === undefined ? [...issueNumbers] : issueNumbers.slice(0, max);
+}
+
+/** The boundary the owner's first message establishes from the launch's task-only one: the same
+ * operations, policy asks, evidence and ceilings, with the message as objective and its verified
+ * issues as scope. Only a limit the launch derived (no Human override) grows to what a launch
+ * naming those issues derives, never below what was authorized; an explicit ceiling never
+ * changes, and a missing record counts as explicit. */
+export function firstMessageBoundary(boundary: CampaignAuthorityBoundary, followUps: "recommend_only" | "execute_approved",
+  issueNumbers: number[], objective: string, revision: number, issueScopeRevision: number, now: number,
+  derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }): CampaignAuthorityBoundary {
+  const derivedFollowUps = followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0;
+  const budget = boundary.budgetAuthority;
+  // An explicit limit, including No Limit (omitted), is kept as the Human set it (#2940).
+  const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps;
+  const issues = boundary.issueAuthority;
+  // With no follow-up limit, a derived issue limit leaves room up to its ceiling.
+  const maxIssues = issues && (derived.maxIssues
+    ? Math.min(100, Math.max(issues.maxIssues, acceptedFollowUps === undefined ? 100 : issueNumbers.length + acceptedFollowUps)) : issues.maxIssues);
+  const { acceptedFollowUps: _previous, ...rest } = budget ?? {};
+  return structuredClone({ ...boundary, objective, revision, issueScopeRevision, authorizedAt: now,
+    ...(budget ? { budgetAuthority: { ...rest, ...(acceptedFollowUps === undefined ? {} : { acceptedFollowUps }) } as CampaignBudgetAuthority } : {}),
+    ...(issues ? { issueAuthority: { ...issues, epics: [...issueNumbers], maxIssues: maxIssues! } } : {}) });
 }
 
 /** Default root harness: the first available native installation that can enforce Full Control,
@@ -213,7 +300,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const issueNumbers = [...(campaignScope ? campaignScope.issueNumbers : request.issueNumbers ?? [])].sort((a, b) => a - b);
   const behavior = plan.policy.behavior;
   const inspectionVersion = runner.runtime?.campaignLaunchInspection?.version ?? 0;
-  const verified = campaignScope ? campaignScope.authorizedByCaller && /^[\w.-]+\/[\w.-]+$/u.test(campaignScope.repository)
+  const verified = campaignScope ? campaignScope.authorizedByCaller && campaignRepositoryLocation(campaignScope.repository) !== null
     : inspection?.ok === true && inspection.workspaceId === plan.workspaceId &&
       typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
       canonical(inspection.issueNumbers) === canonical(issueNumbers);
@@ -235,8 +322,9 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const relatedFollowUps = overrides.issues?.relatedFollowUps ?? behavior.followUps === "execute_approved";
   const maxIssues = overrides.issues?.maxIssues ?? Math.min(100, Math.max(1, issueNumbers.length + acceptedFollowUps));
   const closureReasons = overrides.issues?.closureReasons ?? ["completed" as const];
-  const objective = overrides.objective ?? request.task?.trim() ??
-    `Deliver ${repository ?? "the selected repository"} ${issueNumbers.map((n) => `#${n}`).join(", ")}.`;
+  const objective = overrides.objective ?? request.task?.trim() ?? (issueNumbers.length
+    ? `Deliver ${repository ?? "the selected repository"} ${issueNumbers.map((n) => `#${n}`).join(", ")}.`
+    : FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
   const advertisedReview = runner.runtime?.campaignReview;
   const reviewOwnerScope = plan.scope.owner.kind === "user";
   // Review admission refuses any root or worker holding an original per-session ceiling; workers
@@ -268,12 +356,14 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   add("repository_scope", "Repository and Issue Scope", verified ? "verified" : "unsupported", campaignScope ? verified
     ? `This campaign's Human-established scope is ${repository}${issueNumbers.length ? ` with issues ${issueNumbers.map((n) => `#${n}`).join(", ")}` : " with no issues yet"}.`
     : !campaignScope.authorizedByCaller ? "Only the person who established this campaign's issue scope can enable Full Control for it."
+    : !campaignScope.repository ? "The runner could not verify this campaign's repository; check that the runner is online and the origin is github.com."
     : "This campaign's issue scope is not repository-qualified; establish its scope first."
     : verified
     ? `The registered workspace's origin is ${repository}${issueNumbers.length ? ` and issues ${issueNumbers.map((n) => `#${n}`).join(", ")} were read from it` : "; no issues were selected, so the campaign starts with an empty issue scope"}.`
     : inspection?.cancelled ? "The workspace inspection was cancelled before it finished; refresh the preflight."
     : !inspectionVersion ? "This runner cannot inspect the workspace origin and issues; update the runner."
     : !issueNumbers.length && inspectionVersion < 2 ? "This runner can inspect only selected issues; select issue numbers or update the runner."
+    : inspection && !issueNumbers.length ? "The registered workspace's origin could not be verified; check that it is a github.com repository."
     : inspection ? "The workspace origin or the selected issues could not be verified; check that the origin is github.com and each issue exists."
     : "The runner did not answer the workspace inspection in time; refresh the preflight.");
 
@@ -285,7 +375,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   add("authority_contract", "Full Control Authority", authority.supported && !facts.invalidPolicyIds.length ? "verified" : "unsupported",
     !authority.supported ? authority.reason ?? "This provider path cannot enforce Full Control."
       : facts.invalidPolicyIds.length ? `Named policy asks are unknown, disabled, built in or Human Required: ${facts.invalidPolicyIds.join(", ")}.`
-      : `The ${plan.driver} root on runner protocol v${runner.protocolVersion} enforces the Full Control authority contract.`);
+      : `The ${plan.driver} root's runner enforces the Full Control authority contract.`);
 
   // Only limits the Human set must be enforceable, so only then is this row mandatory: an explicit
   // ceiling, or derived limits the schema refuses, such as a paused campaign's zero concurrency. With
@@ -302,6 +392,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const checkpointsWithoutCost = Boolean(overrides.budget?.checkpointsUsd?.length) && costUsd === undefined;
   const accounting: [CampaignLaunchCapability["state"], string] =
     limitsInvalid && checkpointsWithoutCost ? ["unsupported", "Cost checkpoints need a cost limit; enter one or remove the checkpoints."]
+    : limitsInvalid && concurrency < 1 ? ["unsupported", "This campaign pauses new children; raise Live Child Limit in Guardrails to enable Full Control."]
     : limitsInvalid ? ["unsupported", "The derived campaign limits are invalid; adjust the budget, concurrency or issue limits."]
     : accountingError ? ceiling ? ["unsupported", accountingError] : ["informational", `No limit. ${accountingError}`]
     : ceiling ? ["verified", `${metering}; the campaign is limited to ${limitText}.`]
@@ -313,7 +404,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   add("native_review", "Controlled Cross-Model Review", controlledReview ? "verified" : "informational",
     controlledReview ? `Reviews run as ${controlledReview.profile} through agent ${controlledReview.agentId}, charged to this campaign.`
       : !advertisedReview ? `This runner does not offer the controlled reviewer, which needs provider isolation (current: ${isolation?.mode ?? "unreported"}), Claude Code CLI 2.1.296 and python3 on Linux${regular}`
-      : !reviewPeer ? `Controlled review needs a protocol-v218 runner${regular}`
+      : !reviewPeer ? `Controlled review needs a newer runner${regular}`
       : !reviewOwnerScope ? `Controlled review accounting needs a user-owned campaign${regular}`
       : facts.dailyLimit ? `Controlled review cannot honor this organization's per-user daily limit${regular}`
       : rootCeiling ? `Controlled review cannot run under the root session's own cost or tool-call limit${regular}`

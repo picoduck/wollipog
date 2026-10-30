@@ -73,6 +73,8 @@ function haveGit(): boolean {
 interface ProviderProcess {
   cwd: string;
   home?: string;
+  /** The ids this process was told the session had already ended (#3752). */
+  ended: string[];
   cb: DriverCallbacks;
 }
 
@@ -88,9 +90,17 @@ function fakeProvider(options: {
   const providers: ProviderProcess[] = [];
   const prompts: Array<{ cwd: string; home?: string; text: string }> = [];
   const live = new Map<string, DriverBackgroundJob>();
+  /** Pending ids reported with no job, as Claude's provisional Monitor launch is (#3752). */
+  const unlisted = new Set<string>();
   const endCalls: number[] = [];
-  const factory = (_driver: unknown, launch: { cwd: string; env: Record<string, string> }, cb: DriverCallbacks) => {
-    const provider: ProviderProcess = { cwd: launch.cwd, home: launch.env.CLAUDE_CONFIG_DIR, cb };
+  const factory = (
+    _driver: unknown,
+    launch: { cwd: string; env: Record<string, string>; endedBackgroundTaskIds?: string[] },
+    cb: DriverCallbacks,
+  ) => {
+    const provider: ProviderProcess = {
+      cwd: launch.cwd, home: launch.env.CLAUDE_CONFIG_DIR, ended: [...(launch.endedBackgroundTaskIds ?? [])], cb,
+    };
     providers.push(provider);
     return {
       pid: providers.length,
@@ -100,12 +110,15 @@ function fakeProvider(options: {
       handoffWaitMaxMs: options.handoffWaitMaxMs,
       endBackgroundWork: async (): Promise<DriverBackgroundWorkEndResult> => {
         endCalls.push(Date.now());
-        if (live.size === 0) return { status: "none" };
+        if (live.size === 0 && unlisted.size === 0) return { status: "none" };
         const terminalAt = Date.now();
-        const jobs: DriverBackgroundTerminalJob[] = [...live.values()].map((job) => ({
+        const ending = [...live.values(), ...[...unlisted].map((id): DriverBackgroundJob =>
+          ({ id, launchType: "monitor", startedAt: terminalAt }))];
+        const jobs: DriverBackgroundTerminalJob[] = ending.map((job) => ({
           ...job, status: "killed", terminalAt, continuationRequired: false, endedByRunner: true,
         }));
         live.clear();
+        unlisted.clear();
         cb.onBackgroundWork?.({ state: null, pendingTaskIds: [], terminalJobs: jobs });
         return { status: "ended", jobs };
       },
@@ -126,17 +139,17 @@ function fakeProvider(options: {
   /** Report the ledger as the driver would after a lifecycle change. */
   const report = (provider: ProviderProcess, terminalJobs: DriverBackgroundTerminalJob[] = []) => {
     const jobs = [...live.values()];
-    provider.cb.onBackgroundWork?.(jobs.length
+    provider.cb.onBackgroundWork?.(jobs.length || unlisted.size
       ? {
           state: "running",
-          pendingTaskIds: jobs.map((job) => job.id).sort(),
+          pendingTaskIds: [...jobs.map((job) => job.id), ...unlisted].sort(),
           jobs,
-          observedTaskIds: jobs.map((job) => job.id).sort(),
+          observedTaskIds: [...jobs.map((job) => job.id), ...unlisted].sort(),
           ...(terminalJobs.length ? { terminalJobs } : {}),
         }
       : { state: null, pendingTaskIds: [], ...(terminalJobs.length ? { terminalJobs } : {}) });
   };
-  return { factory, providers, prompts, live, endCalls, report };
+  return { factory, providers, prompts, live, unlisted, endCalls, report };
 }
 
 /** A turn that launches a monitor that never fires and a subagent, as the incident's did. */
@@ -248,6 +261,10 @@ test("a monitor that never ends is killed after the bound, the sibling result is
       { cwd: requested.worktree.path, home: undefined, text: "third queued" },
     ]);
     assert.deepEqual(fake.providers.map((provider) => provider.cwd), [repo, requested.worktree.path]);
+    // #3752: the relaunched provider is told which jobs already ended, so Claude's late `stopped`
+    // notification for the killed monitor cannot make it pending again and hold the next handoff.
+    assert.deepEqual(fake.providers[0]!.ended, []);
+    assert.deepEqual([...fake.providers[1]!.ended].sort(), ["agent-1", "monitor-1"]);
     await clock.waitFor(() => lifecycle.includes("decision-resume:completed"), "the decision resume did not complete");
     assert.deepEqual(lifecycle, ["decision-resume:queued", "decision-resume:started", "decision-resume:completed"]);
     assert.equal(fake.prompts.filter((prompt) => prompt.text.startsWith(ORPHAN_RECOVERY_PREFIX)).length, 0,
@@ -678,6 +695,162 @@ test("jobs Wollipog ended are retained like delivered ones, so repeated kills ca
     assert.ok(jobs.length <= 128, `retained ${jobs.length} jobs`);
     assert.equal(jobs[0]?.id, "fresh-1", "the live job leads the inventory the control plane reads");
     assert.equal(jobs.at(-1)?.id, "ended-599", "the most recent ended jobs are kept");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("releasing a hold on request ends its work at once, records who asked, and runs the handoff and queue (#3752)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-release-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    // A long bound: only the request can end the work within this test.
+    const fake = fakeProvider({ handoffWaitMaxMs: 3_600_000, onPrompt: (provider, text) => onPrompt(provider, text) });
+    onPrompt = launchesMonitorAndSubagent(fake.live, (provider) => fake.report(provider));
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_release", repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "watch CI and review");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(fake);
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-release" });
+    manager.prompt(spec.sessionId, "first queued");
+    manager.prompt(spec.sessionId, "second queued");
+    await waitFor(() => publishedHolds(sent).some((hold) => hold?.queuedPrompts === 2), "the prompts were not held");
+    const hold = publishedHolds(sent).find((candidate) => candidate?.queuedPrompts === 2)!;
+    assert.equal(hold.canRelease, true, "a live provider that can end its work offers the release");
+
+    // A request for a hold that is no longer the one shown ends nothing.
+    const actor = { kind: "user" as const, userId: "u_owner" };
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, "worktree-rebind:1", actor),
+      { outcome: "refused", reason: "hold_changed" });
+    assert.equal(fake.endCalls.length, 0);
+
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, hold.holdId, actor),
+      { outcome: "released", jobIds: ["monitor-1"] });
+    await waitFor(() => fake.prompts.length === 4, "the handoff and queued prompts did not run after the release");
+    assert.equal(fake.endCalls.length, 1, "the work is ended once");
+    const [, continuation, ...queued] = fake.prompts;
+    assert.ok(continuation!.text.startsWith(CONTINUATION_PREFIX), "the finished sibling's result is still delivered");
+    assert.deepEqual(queued.map((prompt) => [prompt.cwd, prompt.text]), [
+      [requested.worktree.path, "first queued"],
+      [requested.worktree.path, "second queued"],
+    ]);
+    assert.deepEqual(fake.providers.map((provider) => provider.cwd), [repo, requested.worktree.path],
+      "the conversation continues in a moved provider, not a restart");
+
+    const monitor = store.readMeta(spec.sessionId)!.backgroundJobs?.find((job) => job.id === "monitor-1");
+    assert.equal(monitor?.terminalStatus, "killed");
+    assert.deepEqual(monitor?.endedBy && { actor: monitor.endedBy.actor, reason: monitor.endedBy.reason },
+      { actor, reason: "stop_request" });
+    const notice = store.readEvents(spec.sessionId).map((event) => event.payload)
+      .find((payload) => payload.kind === "stderr" && payload.text.startsWith("Wollipog ended")) as { text: string } | undefined;
+    assert.match(notice?.text ?? "", /^Wollipog ended a monitor \(job monitor-1, started [^)]+\) at the request of the session owner, who released the hold on the provider's move to worktree /u);
+    assert.match(notice?.text ?? "", /It is recorded as killed\. The move and the 2 queued messages proceed now\.$/u);
+    assert.equal(publishedHolds(sent).at(-1), null, "the hold is cleared");
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, hold.holdId, actor),
+      { outcome: "refused", reason: "no_hold" });
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a hold waiting only on work Background Work does not list names it, and Proceed Now releases it (#3752)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-unlisted-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    // The observed case: one pending id, and no unfinished job record to show or stop.
+    const fake = fakeProvider({
+      handoffWaitMaxMs: 3_600_000,
+      onPrompt: (provider, text) => {
+        if (text !== "start a watcher") return;
+        fake.unlisted.add("tool:toolu_watch");
+        fake.report(provider);
+      },
+    });
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_unlisted", repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "start a watcher");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundJobs?.some((job) => !job.terminalStatus) ?? false, false,
+      "Background Work lists no unfinished job");
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-unlisted" });
+    manager.prompt(spec.sessionId, "queued");
+    await waitFor(() => publishedHolds(sent).some((hold) => hold?.queuedPrompts === 1), "the prompt was not held");
+    const hold = publishedHolds(sent).find((candidate) => candidate?.queuedPrompts === 1)!;
+    assert.equal(hold.unfinishedBackgroundJobs, 1);
+    assert.equal(hold.oldestUnfinishedJob, undefined);
+    assert.equal(hold.canStopJobs, undefined, "no listed job can be stopped by id");
+    assert.deepEqual(hold.unlistedJobs, [{ id: "tool:toolu_watch", kind: "provisional" }]);
+    assert.equal(hold.canRelease, true);
+
+    const actor = { kind: "user" as const, userId: "u_owner" };
+    assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, hold.holdId, actor),
+      { outcome: "released", jobIds: ["tool:toolu_watch"] });
+    await waitFor(() => fake.prompts.length === 2, "the queued prompt did not run after the release");
+    assert.deepEqual(fake.prompts.at(-1), { cwd: requested.worktree.path, home: undefined, text: "queued" });
+    assert.equal(publishedHolds(sent).at(-1), null, "the hold is cleared");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pending id whose job this conversation already ended holds no handoff (#3752)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-ended-pending-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    const fake = fakeProvider({ handoffWaitMaxMs: 3_600_000 });
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_ended_pending", repo);
+    await manager.start(spec);
+    store.patchMeta(spec.sessionId, {
+      backgroundJobs: [{
+        id: "b-ended", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "repo", context: { kind: "native" },
+        launchType: "shell", registeredAt: 1_000, terminalStatus: "killed", terminalObservedAt: 2_000,
+        continuationRequired: false,
+        endedBy: { actor: { kind: "runner" }, reason: "handoff_wait_bound", endedAt: 2_000 },
+      }],
+    });
+    // The provider reports the dead task as pending again, as its late `stopped` notification once did.
+    fake.unlisted.add("b-ended");
+    fake.report(fake.providers[0]!);
+    const meta = store.readMeta(spec.sessionId)!;
+    assert.deepEqual(meta.pendingBackgroundTaskIds, []);
+    assert.equal(meta.backgroundWorkState, undefined);
+
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-ended-pending" });
+    manager.prompt(spec.sessionId, "runs at once");
+    await waitFor(() => fake.prompts.length === 1, "the prompt did not run");
+    assert.deepEqual(fake.prompts[0], { cwd: requested.worktree.path, home: undefined, text: "runs at once" });
+    assert.equal(publishedHolds(sent).some((hold) => hold != null), false, "nothing was held");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

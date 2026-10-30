@@ -161,10 +161,14 @@ explicit journal record; the old lease is kept, never released on its behalf.
 
 A lease without evidence (from an older runner, or on macOS), or any lease on a HOME without a
 profile grant for this control plane, needs an Owner or Admin's one-time authorization. The Accounts
-list on a v229 Machine shows **Stale Lease** for such an account. **Recover Lease** is offered only
+list on a v229 Machine shows **Recovery Needed** for such an account. **Recover Account** is offered only
 when the runner reports that a recovery would proceed: the record has evidence that proves it
 abandoned, or the Machine has restarted since the record was written. Otherwise the badge's tooltip
-says why. The authorization names the exact record that was inspected and is used once; see
+explains why in plain language. An Owner or Admin can open **View Recovery Details** for the
+structured recovery code and safe blocking-process metadata. For an unreadable process, the primary
+guidance offers another account or saving work and restarting the machine; restarting Wollipog alone
+does not supply the missing proof for a historical lease. No action stops unrelated processes or
+changes the account's recovery records to bypass that check. The authorization names the exact record that was inspected and is used once; see
 [Owner/Admin Recovery Authorization](provider-home-lease-worker.md#owneradmin-recovery-authorization).
 
 ## Web Actions
@@ -188,6 +192,132 @@ Admin of any other organization (whom the routes refuse; see
   control planes are not affected. A `PROVIDER_PROFILE_HAS_ACTIVE_SESSIONS` refusal opens a second
   confirmation, **Revoke Access from Active Sessions**, listing the sessions, which retries with
   `force: true`.
+
+On a Windows Machine, **Adopt as Profile** is shown disabled with the reason: a Windows runner cannot
+verify a profile marker and refuses every adoption as `UNSUPPORTED_HOME`.
+
+## Session Launch Refusals
+
+When a session's launch is refused at a provider HOME's lease (the driver launch, or launch
+preparation for an account HOME), a v233 runner records the refusal's code on the session and
+reports it in session snapshots as `providerHomeRefusal`: the code, the provider, the bound account's
+id and label (absent for the runner's own provider HOME), and the time. It never carries a path. The
+control plane stores it in `sessions.provider_home_refusal`, drops a malformed one, and projects it
+as `SessionView.providerHomeRefusal`; the session's next launch clears it (`null`). Cancellations,
+deadlines and recovery codes are not states of the HOME, so they stay text only. A refusal during
+launch preparation is reported as `provider account unavailable`, no longer as an isolation failure.
+
+A failed or stopped session from a runner without a specific recovery cause shows one notice for
+the code, with the recovery it needs:
+
+| Code | Notice | Actions |
+| --- | --- | --- |
+| `busy` | **Account in Use** | Restart Session, Switch Account… |
+| `foreign_owner` | **Account Locked by Another Runner** | Recover Existing Profile…, Switch Account… |
+| `foreign_host` | **Account in Use on Another Host** | Switch Account…, Set Up Managed Profile… |
+| `unavailable` | **Lease Helper Unavailable** | Restart Session |
+| `unverifiable` | **Lease Can't Be Verified** | Switch Account… |
+| `profile_not_granted` | **Profile Not Granted** | Recover Existing Profile…, Switch Account… |
+| `profile_changed` | **Profile Changed** | Switch Account…, Open Machine Accounts |
+| `profile_unverifiable` | **Profile Can't Be Read** | Open Machine Accounts, Switch Account… |
+
+A refusal of the runner's own provider HOME (no account bound) names it as "this Machine's Claude
+sign-in" (or Codex) and offers no account switch: the way out is a managed profile of this control
+plane, so a busy, locked or foreign-host refusal of that HOME offers **Set Up Managed Profile…**
+(after **Restart Session** when it is only busy). The profile serves new sessions: a session bound
+to no account can't be switched onto an account, so the refused session itself keeps the Machine's
+own HOME. Older runners report only text; the session's **Turn Failed**
+notice says that the runner couldn't use the session's provider account, with the runner's message
+under its details.
+
+When the v235 structured recovery cause is available, the notice instead uses plain-language
+guidance for that cause. A live runner or surviving session offers **Restart Session** after its work
+finishes, then **Switch Account…**; other causes prioritize **Switch Account…**, followed by **Open
+Machine Accounts**. The transcript keeps the established `provider account unavailable:` prefix on
+both launch paths so older clients still recognize the account-specific error; its explanation no
+longer includes process-boundary or journal instructions. Technical recovery codes and process
+metadata stay in the authorized account details rather than the badge tooltip.
+
+### Waiting for a Busy Account
+
+A busy account frees itself once the other holder finishes, so with a v248 runner a **busy** refusal
+(including its live-runner and surviving-session causes) offers **Wait for Account** in place of
+**Restart Session**: its launch starts at once when the account is already free, so a plain restart
+would only risk a second refusal. It restarts the session with `waitForProviderHome` (`POST /api/sessions/:id/restart` with
+`{ "waitForProviderHome": true }`); the control plane refuses the request for an older runner rather
+than letting it fail the launch again.
+
+The runner waits, not the browser. Only that launch waits: every provider-HOME acquisition it makes
+(launch preparation's account HOME and the driver's) retries a `busy` lease with backoff from 2
+seconds up to 30 seconds between attempts. Nothing is held between attempts, and the provider
+starts only after an acquisition is granted. While it waits the session stays **starting** and
+reports `providerHomeWait` in its snapshots: the provider, the busy cause, the bound account and
+when the wait started and ends, never a path. The control plane stores it in
+`sessions.provider_home_wait` and projects it only while the session is starting. The session shows
+**Waiting for Account** (an info notice, not a failure) with **Stop Waiting**, and lists show a
+**Waiting for Account** condition.
+
+- **Stop** (or **Stop Waiting**), a restart, deletion or runner shutdown ends the wait; nothing
+  started, so nothing needs to be stopped, and no refusal is recorded.
+- Any other refusal ends the wait with that refusal, exactly as a launch that didn't wait.
+- After 8 hours the wait gives up and the launch fails with the ordinary **Account in Use**
+  refusal, so a forgotten wait doesn't hold its runner slot indefinitely. A waiting launch keeps
+  the runner capacity it was admitted with, as any starting launch does.
+- The wait is in the runner's memory only and does not survive a runner restart, which ends the
+  launch it belonged to. A later launch of the session, including an account switch or an ordinary
+  restart, doesn't wait unless it is asked to.
+
+### Refused Forks
+
+A conversation fork (including Recover Conversation and Edit in Fork) launches its own provider
+under the source session's account, so its lease can refuse it too. A v248 runner returns the same
+typed `providerHomeRefusal` in `fork_result` for a v248 control plane, which passes it on in the
+fork's 409 response. The fork's failure notice then has the same title as a refused session launch
+and the same guidance, worded for a fork ("so the fork didn't start. Try again once it's free."),
+with the runner's message under its details. A fork is never waited for. The source session is
+unaffected. Older peers keep the text-only failure.
+
+### Refused Agent TUIs
+
+An ordinary Agent TUI runs in its session's provider account: the runner resolves the account's
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME` when the TUI opens and leases exactly that HOME, without writing
+the environment to session metadata (#3338). A TUI of a session without an account leases the HOME
+it inherits, including the runner's own `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. A v258 runner returns the
+lease's typed `providerHomeRefusal` in `shell_open_result` for a v258 control plane, which passes it
+on with the open's error. The terminal's notice then shows the guidance of a refused session launch,
+worded for the TUI ("so the Agent TUI didn't open. Try again once it's free."), in place of the
+generic Terminal Error. An Agent TUI is never waited for, and the session itself is unaffected.
+Older peers keep the text-only failure.
+
+## Set Up and Recover Onboarding
+
+Two control planes connected to the same SSH account share the runner user's own provider HOME,
+so the second one's sessions are refused at its lease. The refusal notice leads to the Machine's
+accounts with one of two actions (#3240):
+
+- **Set Up Managed Profile…** opens **Add Account** with the session's provider selected. The
+  sign-in creates a managed profile granted to this control plane only (see
+  [Managed Profiles](#managed-profiles)). Once it records the account, the section offers
+  **Use for New Sessions**, which saves it as the Machine's default account for that provider, so new
+  sessions that don't choose an account use it.
+- **Recover Existing Profile…** is for a configured account. One confirmation covers what the
+  account needs before this control plane can use it again: **Adopt as Profile** when its profile
+  isn't granted here, then, after inspecting the lock again, **Recover Account** when an earlier
+  runner left it locked. Each step keeps its own checks; a lock the runner still refuses to recover
+  (for example one without reboot proof) is explained in the section and left alone.
+
+The actions follow the routes' authority. Set Up Managed Profile needs manage rights on the
+Machine and a v225 runner; Use for New Sessions and Recover Existing Profile need an Owner or Admin
+of the personal organization as well. A viewer who can't complete one gets **Open Machine
+Accounts** instead, where the section says why. Recover Existing Profile is not offered for the
+runner's own HOME, which has no account to adopt. Importing an existing sign-in into a managed
+profile is tracked separately (#3719).
+
+A session that doesn't choose an account never takes one whose profile only other control planes
+may use (`profile.access` of `not_granted`): the control plane's implicit choice, and New Session's
+displayed preselection, skip it. Such an account can't be saved as the Machine's default either
+(409 `PROVIDER_PROFILE_NOT_GRANTED`); Machine Settings leaves it out of the choices unless it is the
+saved one, which says why. Naming the account explicitly is still the person's decision.
 
 ## Registration and Use
 

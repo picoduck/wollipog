@@ -2,7 +2,7 @@ import React, { createContext, Fragment, useContext, useEffect, useLayoutEffect,
 import { ChevronDownIcon, ChevronLeftIcon, MoreHorizontalIcon, PlusIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
-import { useIsCompact } from "./useIsMobile.js";
+import { useIsCompact, useIsMobile } from "./useIsMobile.js";
 import { windowDragRegion } from "../desktop-window.js";
 
 /**
@@ -254,6 +254,9 @@ export function PageHeader({
 export interface DetailBarAction extends PageAction {
   /** Drawn before the label; in the compact tier the button shows only this (§15.2). */
   icon?: ReactNode;
+  /** Shows only the icon on phones too, where the bar is the app bar (the automation page's Edit
+   * pencil, #2968). */
+  iconOnPhone?: boolean;
 }
 
 /**
@@ -286,6 +289,7 @@ export function DetailBar({
   menuLabel?: string;
 }) {
   const compact = useIsCompact();
+  const phone = useIsMobile();
   const onSearch = useContext(AppBarSearchContext);
   const headingRef = useRef<HTMLDivElement>(null);
   const hasStatus = Boolean(status);
@@ -328,7 +332,7 @@ export function DetailBar({
     };
   }, [compact, title, hasStatus]);
   const action = (item: DetailBarAction, kind: "btn" | "btn primary") => {
-    const iconOnly = compact && Boolean(item.icon);
+    const iconOnly = (compact || (phone && Boolean(item.iconOnPhone))) && Boolean(item.icon);
     return (
       <button
         type="button"

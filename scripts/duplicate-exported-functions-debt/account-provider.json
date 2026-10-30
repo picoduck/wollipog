@@ -1,0 +1,7 @@
+{
+  "reason": "Pre-existing driver-to-account-provider mapping shared in meaning by control-plane account switching and runner account binding; retained pending unification.",
+  "declarations": [
+    { "path": "apps/control-plane/src/provider-account-switch.ts", "symbol": "providerForSessionAccountSwitch" },
+    { "path": "apps/runner/src/provider-accounts.ts", "symbol": "providerForDriver" }
+  ]
+}

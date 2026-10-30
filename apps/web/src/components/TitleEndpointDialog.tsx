@@ -11,6 +11,7 @@ import { Notice } from "./Notice.js";
 import { affixSuffixRef } from "./ui/affix-suffix.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { Select } from "./ui/ChoiceControls.js";
+import { useSecretInput } from "./ui/secret-input.js";
 import {
   DEFAULT_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
@@ -72,9 +73,11 @@ export function TitleEndpointDialog({
     endpoint: "",
     model: saved?.model ?? "",
     timeout: String(saved?.timeoutMs ?? DEFAULT_TIMEOUT_MS),
-    apiKey: "",
   }));
   const [draft, setDraft] = useState(initial);
+  // The key stays out of the DOM and out of state (#3814): Save reads it once and then clears it.
+  const apiKey = useSecretInput();
+  const [keyEntered, setKeyEntered] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<Field, string>>>({});
   const [edited, setEdited] = useState<Partial<Record<Field, boolean>>>({});
   const [failure, setFailure] = useState<PlainFailure | null>(null);
@@ -88,28 +91,36 @@ export function TitleEndpointDialog({
 
   // The machine a key is saved on stays chosen: the server refuses another until the key is deleted.
   const machineLocked = keySaved;
-  const validate = (field: Field, values = draft): string | null => {
+  const validate = (field: Field, values = draft, entered = keyEntered): string | null => {
     switch (field) {
       case "machine": return values.runnerId ? null : "Choose a machine to send through.";
       // A key already saved on the machine travels with every request, just as a new one would.
-      case "endpoint": return endpointUrlError(values.endpoint, keySaved || values.apiKey !== "");
+      case "endpoint": return endpointUrlError(values.endpoint, keySaved || entered);
       case "model": return modelIdError(values.model);
       case "timeout": return timeoutError(values.timeout);
     }
   };
-  const setField = (field: keyof typeof draft, value: string) => {
-    const next = { ...draft, [field]: value };
-    setDraft(next);
+  // An error showing clears as soon as the value is valid (§8.5).
+  const clearFixedErrors = (values: typeof draft, entered: boolean) => {
     setFailure(null);
-    // An error showing clears as soon as the value is valid (§8.5).
     setErrors((previous) => {
       const remaining = { ...previous };
       for (const name of Object.keys(remaining) as Field[]) {
-        if (!validate(name, next)) delete remaining[name];
+        if (!validate(name, values, entered)) delete remaining[name];
       }
       return remaining;
     });
-    if (field !== "apiKey") setEdited((previous) => ({ ...previous, [field === "runnerId" ? "machine" : field]: true }));
+  };
+  const setField = (field: keyof typeof draft, value: string) => {
+    const next = { ...draft, [field]: value };
+    setDraft(next);
+    clearFixedErrors(next, keyEntered);
+    setEdited((previous) => ({ ...previous, [field === "runnerId" ? "machine" : field]: true }));
+  };
+  const setKey = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const entered = apiKey.remember(event) !== "";
+    setKeyEntered(entered);
+    clearFixedErrors(draft, entered);
   };
   const blur = (field: Field) => {
     if (!edited[field]) return;
@@ -134,7 +145,8 @@ export function TitleEndpointDialog({
     }
   };
 
-  const changed = (Object.keys(initial) as Array<keyof typeof initial>).some((key) => draft[key] !== initial[key]);
+  const changed = keyEntered
+    || (Object.keys(initial) as Array<keyof typeof initial>).some((key) => draft[key] !== initial[key]);
   const save = () => run("save", async () => {
     setFailure(null);
     setOutcome(null);
@@ -160,19 +172,21 @@ export function TitleEndpointDialog({
       (target instanceof HTMLInputElement ? target : target?.querySelector<HTMLElement>("button"))?.focus();
       return;
     }
+    const key = apiKey.read();
     try {
       await onSave({
         runnerId: draft.runnerId,
         endpoint: draft.endpoint.trim(),
         model: draft.model.trim(),
         timeoutMs: Number(draft.timeout),
-        ...(draft.apiKey ? { apiKey: draft.apiKey } : {}),
+        ...(key ? { apiKey: key } : {}),
       });
     } catch (caught) {
       setFailure(plainFailure(caught, "Couldn't save the endpoint."));
     } finally {
       // The key is never kept in the page longer than the request that carries it.
-      setDraft((current) => ({ ...current, apiKey: "" }));
+      apiKey.clear();
+      setKeyEntered(false);
     }
   });
 
@@ -363,12 +377,12 @@ export function TitleEndpointDialog({
               <label htmlFor={id("key")}>API Key (Optional)</label>
               <input
                 id={id("key")}
+                ref={apiKey.ref}
                 type="password"
                 autoComplete="off"
-                value={draft.apiKey}
                 disabled={busy}
                 aria-describedby={id("key-helper")}
-                onChange={(event) => setField("apiKey", event.target.value)}
+                onChange={setKey}
               />
               <p className="field-helper" id={id("key-helper")}>The key is sent once to that machine and never shown again.</p>
             </div>
@@ -414,14 +428,16 @@ function ReplaceKeyDialog({ machineName, onReplace, onClose, returnFocusRef }: {
   returnFocusRef: { current: HTMLElement | null };
 }) {
   const ids = useId();
-  const [apiKey, setApiKey] = useState("");
+  // Read once on Replace API Key and cleared afterwards, never in state or the DOM (#3814).
+  const apiKey = useSecretInput();
   const [error, setError] = useState<string | null>(null);
   const [failure, setFailure] = useState<PlainFailure | null>(null);
   const [busy, setBusy] = useState(false);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
   const submit = async () => {
     if (busy) return;
-    if (!apiKey) {
+    const key = apiKey.read();
+    if (!key) {
       setError("Enter the new API key.");
       inputRef.current?.focus();
       return;
@@ -429,12 +445,12 @@ function ReplaceKeyDialog({ machineName, onReplace, onClose, returnFocusRef }: {
     setBusy(true);
     setFailure(null);
     try {
-      await onReplace(apiKey);
+      await onReplace(key);
     } catch (caught) {
       setFailure(plainFailure(caught, "The API key wasn't replaced."));
       setBusy(false);
     } finally {
-      setApiKey("");
+      apiKey.clear();
     }
   };
   return (
@@ -455,17 +471,18 @@ function ReplaceKeyDialog({ machineName, onReplace, onClose, returnFocusRef }: {
         <div className="field">
           <label htmlFor={`${ids}-key`}>New API Key</label>
           <input
-            ref={inputRef}
+            ref={(node) => {
+              inputRef.current = node;
+              apiKey.ref(node);
+            }}
             id={`${ids}-key`}
             type="password"
             autoComplete="off"
-            value={apiKey}
             disabled={busy}
             aria-invalid={error ? true : undefined}
             aria-describedby={error ? `${ids}-error` : `${ids}-helper`}
             onChange={(event) => {
-              setApiKey(event.target.value);
-              if (event.target.value) setError(null);
+              if (apiKey.remember(event)) setError(null);
             }}
           />
           {error

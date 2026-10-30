@@ -217,6 +217,8 @@ export interface DriverCallbacks {
 }
 
 export interface DriverOptions {
+  /** Durable parent for every process owned by one unprotected writer. */
+  reviewWriterCgroup?: import("../linux-cgroup.js").LinuxCgroupGroup;
   command: string;
   args: string[];
   cwd: string;
@@ -242,6 +244,9 @@ export interface DriverOptions {
   sessionStateDir?: string;
   /** Durable Claude task ids that a resumed transport must reconcile before declaring quiescence. */
   initialBackgroundTaskIds?: string[];
+  /** Task ids (and `tool:` aliases) the session already recorded as ended (#3752). A relaunched
+   * transport never treats them as pending again, whatever Claude reports for them afterwards. */
+  endedBackgroundTaskIds?: string[];
   acpSessionContext?: AcpSessionContextConfig;
   isolation?: SpawnIsolation;
   /** Runner-private durable descendant marker for one managed worktree. */

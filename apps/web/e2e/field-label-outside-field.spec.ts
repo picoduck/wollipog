@@ -1,22 +1,19 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { viewPath } from "../src/navigation.js";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * #2366: two forms stack labels over their controls outside a `.field`, and their labels are the
  * field label of docs/design-system.md §8.1: --type-label (12px/500 on a 16px line) in --text, 8px
  * above the control. Archived Sessions: the search label and the filters' `.field-label`s. The
- * Automations page's grid forms, Outbound Events and the signed trigger editor: each grid label's own
- * text, each `.automation-field`'s `.field-label`, and its fieldset legends; a grid label's helper
- * stays dim, 4px under the control. The Automation editor became a page of `.field`s (#2967), whose
+ * New Webhook Trigger (#2972) and New Subscription dialogs' fields: each `.field-label`; a field's
+ * helper stays dim, 4px under the control. The Automation editor became a page of `.field`s (#2967), whose
  * labels are checked here too. The labels that open redesigns owned went with them: Snooze's with #2181,
  * whose Snooze Until is a §8.1 field, Rename Project's with #2199, which made it one `.field`, and
  * the message-action form with #2185, which loads Edit as a New Turn straight into the composer.
  */
 
 type Theme = "dark" | "light";
-
-/** Every label of the Automations page's grid forms: a label wrapping its control, or a `.field-label`. */
-const AUTOMATION_LABELS = ".automation-form-grid > label, .automation-field > .field-label";
 
 /** Every label of the Automation editor (#2967): each `.field`'s first child, before its control. */
 const EDITOR_LABELS = ".automation-editor-form .field > span:first-child";
@@ -66,16 +63,6 @@ async function expectLabelStyle(page: Page, locator: Locator, names: string[]) {
   }
 }
 
-/** A fieldset legend titles a group, not one control: it takes the label's look, not its spacing. */
-async function expectLegendStyle(page: Page, locator: Locator, names: string[]) {
-  const text = await token(page, "--text");
-  const measured = await locator.evaluateAll((elements) => elements.map((legend) => {
-    const style = getComputedStyle(legend);
-    return { text: legend.textContent, color: style.color, size: style.fontSize, lineHeight: style.lineHeight, weight: style.fontWeight };
-  }));
-  expect(measured).toEqual(names.map((name) => ({ text: name, color: text, size: "12px", lineHeight: "16px", weight: "500" })));
-}
-
 async function setTheme(page: Page, theme: Theme) {
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
 }
@@ -116,24 +103,29 @@ for (const theme of ["dark", "light"] as const) {
           ["Auditor Agent", "Orchestrator Agent", "Other Auditor Agent", "Other Orchestrator Agent"]);
       });
 
-      test("the Outbound Events subscription form, on the same grid, has §8.1 field labels", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}`);
+      test("the New Subscription dialog has §8.1 field labels", async ({ page }) => {
+        await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();
-        const editor = page.locator(".outbound-event-editor");
-        await expectLabelStyle(page, editor.locator(AUTOMATION_LABELS), ["Scope Type", "Project", "Callback URL"]);
-        await expectLegendStyle(page, editor.locator(".automation-form-grid legend"), ["Event Kinds"]);
+        const dialog = page.getByRole("dialog", { name: "New Subscription" });
+        await expect(dialog).toBeVisible();
+        await dialogMotionSettled(page);
+        await expectLabelStyle(page, dialog.locator(".field > .field-label"), ["Send Events For", "Callback URL"]);
       });
 
-      test("the signed trigger editor's labels are §8.1 field labels, and its helper stays dim 4px under the control", async ({ page }) => {
+      test("the New Webhook Trigger dialog's labels are §8.1 field labels, and its helper stays dim 4px under the control", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}`);
         await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
-        await page.getByRole("button", { name: "Add Webhook" }).click();
-        await page.getByRole("checkbox", { name: "Accept Delivery Fields" }).check();
-        const editor = page.locator(".automation-trigger-editor");
-        await expectLabelStyle(page, editor.locator(AUTOMATION_LABELS), ["Name", "Kind", "Missing References", "Parameter Names"]);
+        await page.locator(".detail-bar").getByRole("button", { name: "More Actions" }).click();
+        await page.getByRole("menuitem", { name: "Add Webhook Trigger…" }).click();
+        const dialog = page.getByRole("dialog", { name: "New Webhook Trigger" });
+        await expect(dialog).toBeVisible();
+        await dialogMotionSettled(page);
+        await dialog.getByRole("switch", { name: "Let Callers Add Details" }).click();
+        await expectLabelStyle(page, dialog.locator(".field > .field-label"),
+          ["Name", "Named Values", "If a Referenced Value Is Missing"]);
 
         const dim = await token(page, "--text-dim");
-        const helper = await editor.locator(".automation-form-grid > label > small").evaluate((small) => {
+        const helper = await dialog.locator(".field > .field-helper").filter({ hasText: "Separate names with commas." }).evaluate((small) => {
           const style = getComputedStyle(small);
           const control = small.parentElement!.querySelector("input")!.getBoundingClientRect();
           return {

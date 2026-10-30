@@ -1,3 +1,4 @@
+import { ReviewSettingsPanel } from "../components/ReviewSettingsPanel.js";
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -20,6 +21,8 @@ import {
 } from "@wollipog/protocol";
 import { AgentDefaultsPanel } from "../components/AgentDefaultsPanel.js";
 import { ArchivedHistoryRetentionPanel } from "../components/ArchivedHistoryRetentionPanel.js";
+import { WorkflowEventRetentionPanel } from "../components/WorkflowEventRetentionPanel.js";
+import { WORKFLOW_EVENT_RETENTION_LIMITS, type WorkflowEventRetentionView } from "@wollipog/protocol";
 import { OrchestratorSettingsPanel } from "../components/OrchestratorSettingsPanel.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { interceptLeave, interceptTraversal } from "../leave-guard.js";
@@ -218,6 +221,8 @@ harnessDefaultsRepairedView.defaults[0]!.installations[0]!.effortLevels = ["low"
 /** Behavior › Evidence's preference, kept for the page's life so a saved change reads back. */
 let artifactUploadPreference = "manual";
 /** What a save in Settings › Orchestrator stored, for as long as the page is open. */
+let reviewsSaved: import("@wollipog/protocol").ReviewSettings | null = null;
+let reviewsProjectSaved: import("@wollipog/protocol").ReviewSettings | null = null;
 let orchestratorSaved: typeof DEFAULT_ORCHESTRATOR_DEFAULTS | null = null;
 
 /**
@@ -234,6 +239,20 @@ let retentionState: Pick<ArchivedHistoryRetentionView, "retentionDays" | "source
  * `Date.now()`: a spec asserting the schedule must pin the page clock before it, as
  * archived-history-retention.spec.ts does. */
 const RETENTION_ARMED_AT = Date.UTC(2026, 9, 17, 9, 30);
+const workflowRetentionMode = new URLSearchParams(window.location.search).get("workflowRetention");
+let workflowRetentionState: Pick<WorkflowEventRetentionView, "retentionDays" | "source" | "prunesFrom"> = {
+  retentionDays: workflowRetentionMode === "on" ? 90 : null,
+  source: workflowRetentionMode === "on" ? "organization" : "default",
+  prunesFrom: workflowRetentionMode === "on" ? RETENTION_ARMED_AT : null,
+};
+function workflowRetentionView(previewDays: number | null): WorkflowEventRetentionView {
+  return { ...workflowRetentionState, environmentDays: null, canManage: workflowRetentionMode !== "viewer",
+    nextRunAt: Date.UTC(2026, 9, 16, 10, 0), limits: WORKFLOW_EVENT_RETENTION_LIMITS,
+    eligible: workflowRetentionState.retentionDays === null ? { instances: 0, events: 0 } : { instances: 24, events: 17_500 },
+    lastRun: workflowRetentionMode === "on" ? { finishedAt: Date.UTC(2026, 9, 16, 9, 0), instances: 8, events: 4_800 } : null,
+    ...(previewDays === null ? {} : { preview: { retentionDays: previewDays,
+      eligible: { instances: 24, events: 17_500 }, prunesFrom: RETENTION_ARMED_AT } }) };
+}
 
 function retentionView(previewDays: number | null): ArchivedHistoryRetentionView {
   const counts = (days: number) => days >= 180 ? { sessions: 41, events: 182_340 } : { sessions: 128, events: 604_115 };
@@ -254,6 +273,14 @@ const harnessDefaultsTransport: ApiTransport = {
   publicOrigin: window.location.origin,
   close() {},
   async request(path, init) {
+    if (path.startsWith("/api/workflow-event-retention")) {
+      if (init?.method === "PUT") {
+        const { retentionDays } = JSON.parse(String(init.body)) as { retentionDays: number | null };
+        workflowRetentionState = { retentionDays, source: "organization", prunesFrom: retentionDays === null ? null : RETENTION_ARMED_AT };
+      }
+      const preview = new URL(path, window.location.origin).searchParams.get("previewDays");
+      return Response.json(workflowRetentionView(preview === null ? null : Number(preview)));
+    }
     // Behavior › Evidence (#3023). Unstubbed, the read fell through to the agent defaults below and
     // every Behavior capture showed a load failure. `artifact=save-fails` makes a change fail the way
     // a dropped connection does, for the danger notice and its Retry.
@@ -314,6 +341,21 @@ const harnessDefaultsTransport: ApiTransport = {
       return Response.json({ error: "Not Found" }, { status: 404 });
     }
     if (path === "/api/identity") return Response.json({ context: { userId: "fixture-user", organizationId: "fixture-org" } });
+    if (path.startsWith("/api/review-settings")) {
+      const projectId = new URL(path, window.location.origin).searchParams.get("projectId");
+      if (init?.method === "PUT") {
+        const settings = (JSON.parse(String(init.body)) as { settings: import("@wollipog/protocol").ReviewSettings | null }).settings;
+        if (projectId) reviewsProjectSaved = settings; else reviewsSaved = settings;
+      }
+      const identity = (driver: "claude-code" | "codex-app-server") => ({ agentId: driver, driver, context: { kind: "native" as const } });
+      return Response.json({ projectId, source: projectId && reviewsProjectSaved ? "project_override" : reviewsSaved ? "user_default" : "system_default",
+        settings: (projectId ? reviewsProjectSaved : null) ?? reviewsSaved ?? { version: 1, roundBudget: 4, reviewers: [] },
+        projects: [{ id: "project-demo", name: "Demo Project" }],
+        implementers: [{ ...identity("claude-code"), name: "Claude Code" }, { ...identity("codex-app-server"), name: "Codex App Server" }],
+        reviewers: ["claude-code", "codex"].map(harness => ({ harness, name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
+          capabilities: { models: [{ id: harness === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", displayName: harness === "codex" ? "GPT-6.1 Sol" : "Claude Opus 5.5", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
+      });
+    }
     if (path === "/api/orchestrator-settings") {
       const params = new URLSearchParams(window.location.search);
       const drifted = params.get("defaults") === "agent-repair";
@@ -381,8 +423,11 @@ const harnessDefaultsTransport: ApiTransport = {
       return new Response(JSON.stringify({
         defaults,
         source: orchestratorSaved || drifted ? "user_default" : "system_default",
+        ...(params.get("reviewPolicy") === "legacy" ? {} : { reviewPolicySupported: true }),
         ...(params.get("fullControlFixture") === "1" ? { controlModeSupported: true } : {}),
         capabilities: {
+          reviewers: ["codex", "claude-code"].map(harness => ({ harness, name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
+            capabilities: { models: [{ id: harness === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", displayName: harness === "codex" ? "GPT-6.1 Sol" : "Claude Opus 5.5", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
           harnesses: [{
             agentId: "codex-app-server",
             driver: "codex-app-server",
@@ -645,6 +690,7 @@ function Harness() {
                 </ApiProvider>
               ),
               // With the confirmation provider its leave prompt opens in, as the shell has.
+              reviews: <FeedbackProvider><ApiProvider client={harnessDefaultsApi}><ReviewSettingsPanel /></ApiProvider></FeedbackProvider>,
               orchestrator: (
                 <FeedbackProvider>
                   <ApiProvider client={harnessDefaultsApi}><OrchestratorSettingsPanel /></ApiProvider>
@@ -675,7 +721,7 @@ function Harness() {
               ),
               storage: (
                 <FeedbackProvider>
-                  <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /></ApiProvider>
+                  <ApiProvider client={harnessDefaultsApi}><ArchivedHistoryRetentionPanel /><WorkflowEventRetentionPanel /></ApiProvider>
                 </FeedbackProvider>
               ),
               // The production panel with injected state, like Notifications above. Storage is

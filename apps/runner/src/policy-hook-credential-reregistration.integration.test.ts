@@ -17,6 +17,8 @@ import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "../..
 // is written into a frozen control plane that is then replaced, and the relaunched provider's hook
 // must reach the control plane again after the runner reconnects, without any restart.
 
+import { transportRunnerEnvironment } from "./fixtures/transport-runner-environment.js";
+
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 const RUNNER_ID = "policy-hook-reregistration-runner";
 const CONTROL_PLANE_TOKEN = "policy-hook-reregistration-control-plane-token";
@@ -224,7 +226,7 @@ test("a relaunch whose policy-hook credential registration is lost recovers afte
     cwd: REPO_ROOT,
     // An isolated HOME keeps the runner's provider-home lease and hook state off any real runner.
     env: {
-      ...hermeticEnv(),
+      ...transportRunnerEnvironment(temp),
       WOLLIPOG_CLAUDE_HOOKS: "1",
       // Only the fake, node, and system tools: discovery must not find or probe a real harness.
       PATH: [runnerBin, dirname(process.execPath), "/usr/bin", "/bin"].join(":"),

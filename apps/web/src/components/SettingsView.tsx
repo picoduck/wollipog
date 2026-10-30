@@ -113,6 +113,7 @@ const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => React
   notifications: NotificationsIcon,
   behavior: TuningIcon,
   approvals: ShieldCheckIcon,
+  reviews: ShieldCheckIcon,
   orchestrator: OrchestratorControlsIcon,
   network: NetworkIcon,
   storage: StorageIcon,

@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDriverKind, RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import type { ProviderAuthObservation, ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
+import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
 import { SessionManager, type ProviderAccountResolver } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -37,7 +38,7 @@ type HomeState = { observations: ProviderAuthObservation[]; email?: string | nul
 function fakeController(homes: Record<string, HomeState>) {
   const probes: string[] = [];
   const observe = (meta: SessionMeta): ProviderAuthObservation => {
-    const home = meta.env.CLAUDE_CONFIG_DIR ?? "<none>";
+    const home = meta.env.CLAUDE_CONFIG_DIR ?? (meta.env.HOME ? join(meta.env.HOME, ".claude") : "<none>");
     probes.push(home);
     const state = homes[home];
     if (!state) return { status: "unknown" };
@@ -45,7 +46,7 @@ function fakeController(homes: Record<string, HomeState>) {
   };
   const controller: ProviderAuthRecoveryController = {
     describe: (meta) => ({
-      id: `scope:${meta.env.CLAUDE_CONFIG_DIR ?? "<none>"}`,
+      id: `scope:${meta.env.CLAUDE_CONFIG_DIR ?? (meta.env.HOME ? join(meta.env.HOME, ".claude") : "<none>")}`,
       provider: "claude",
       canStartLogin: false,
       configuredCredential: false,
@@ -102,6 +103,7 @@ function harness(
     providerCredentialHome: "/claude/work",
     providerCredentialIdentityId: "identity-work",
   });
+  const defaultLaunchEnv = { HOME: root, CLAUDE_CONFIG_DIR: join(root, "agent-home") };
   const sent: RunnerToControlPlane[] = [];
   const logs: string[] = [];
   const prompts: Array<{ home: string; text: string; resumeId?: string }> = [];
@@ -150,7 +152,7 @@ function harness(
     undefined,
     [],
     (meta: SessionMeta) => {
-      meta.env = meta.providerCredentialHome ? { CLAUDE_CONFIG_DIR: meta.providerCredentialHome } : {};
+      meta.env = meta.providerCredentialHome ? { CLAUDE_CONFIG_DIR: meta.providerCredentialHome, HOME: root } : { ...defaultLaunchEnv };
     },
     undefined,
     undefined,
@@ -162,7 +164,9 @@ function harness(
   (manager as unknown as { resolveProviderAccount: ProviderAccountResolver }).resolveProviderAccount =
     (spec: SessionLaunchSpec) => accounts[spec.providerAccountId as keyof typeof accounts];
   // These fake providers model identity checks and lifecycle; they do not create CLI transcripts.
-  (manager as unknown as { transferAccountTranscript: () => Promise<void> }).transferAccountTranscript = async () => {};
+  const transfers: Array<{ source: string; target: string }> = [];
+  (manager as unknown as { transferAccountTranscript: (context: unknown, id: string, source: string, target: string) => Promise<void> }).transferAccountTranscript =
+    async (_context, _id, source, target) => { transfers.push({ source, target }); };
   return {
     root,
     store,
@@ -173,6 +177,10 @@ function harness(
     callbacks: () => latestCallbacks,
     probes,
     manager,
+    controller,
+    homes,
+    defaultLaunchEnv,
+    transfers,
     cleanup: () => {
       manager.shutdownAll();
       rmSync(root, { recursive: true, force: true });
@@ -600,5 +608,173 @@ for (const race of [false, true]) test(`authentication continuation respects a b
       assert.equal(entry.queue.length, 1, "the raced continuation stays queued behind the handoff");
       assert.equal(h.manager.sessionSnapshots()[0]!.queueHold?.kind, "worktree_rebind");
     }
+  } finally { h.cleanup(); }
+});
+
+
+function unbind(h: ReturnType<typeof harness>) {
+  // This is a fake credential context throughout: no real provider home is read or probed.
+  h.homes[join(h.root, "agent-home")] = h.homes["/claude/work"]!;
+  h.store.patchMeta(SESSION, { providerAccountId: undefined, providerAccountLabel: undefined,
+    providerAccountProvider: undefined, providerCredentialHome: undefined, providerConversationHome: undefined,
+    env: {} });
+}
+
+test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine account", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const before = h.probes.length;
+    assert.deepEqual(h.store.readMeta(SESSION)?.env, {}, "runner-local launch env is never persisted");
+    assert.deepEqual(await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null), { ok: true });
+    assert.equal(h.probes[before], "/claude/personal");
+    await h.manager.providerAuthSelections.get(SESSION);
+    await waitFor(() => h.prompts.length === 1, "retained work did not resume");
+    assert.deepEqual(h.prompts, [{ home: "/claude/personal", text: "hello", resumeId: "claude-conversation" }]);
+    const meta = h.store.readMeta(SESSION)!;
+    assert.equal(meta.providerAccountId, "claude-personal");
+    assert.equal(meta.providerCredentialIdentityId, "identity-personal");
+    assert.equal(meta.providerAuthBlock, undefined);
+    assert.deepEqual(h.transfers, [{ source: join(h.root, "agent-home"), target: "/claude/personal" }],
+      "the default transcript store must be transferred before resuming under the new account");
+  } finally { h.cleanup(); }
+});
+
+for (const phase of ["before", "during"] as const) {
+  for (const initiallyBound of [false, true]) {
+    test(`selection rejects ${initiallyBound ? "bound to unbound" : "unbound to bound"} changes ${phase} the probe`, async () => {
+      const h = harness({
+        "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+        "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+      });
+      try {
+        if (!initiallyBound) unbind(h);
+        const requestId = await parkOnMismatch(h);
+        const change = () => initiallyBound ? unbind(h) : h.store.patchMeta(SESSION, { providerAccountId: "claude-work" });
+        if (phase === "before") change();
+        else {
+          const revalidate = h.controller.revalidate;
+          h.controller.revalidate = async (...args) => { const result = await revalidate(...args); change(); return result; };
+        }
+        const response = await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", initiallyBound ? "claude-work" : null);
+        assert.equal(response.code, "account_changed");
+        assert.deepEqual(h.prompts, []);
+        assert.equal(h.store.readMeta(SESSION)?.pendingApproval?.requestId, requestId);
+      } finally { h.cleanup(); }
+    });
+  }
+}
+
+test("unbound selection never treats missing or empty expectations as permission to skip checks", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] } });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const before = h.probes.length;
+    for (const expected of [undefined, "", false]) {
+      const response = await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", expected as unknown as null);
+      assert.equal(response.code, "account_changed");
+    }
+    for (const account of ["unknown-other-machine", "codex-work"]) {
+      assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, account, null)).code, "account_unavailable");
+    }
+    assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, `${requestId}:stale`, "claude-personal", null)).code, "recovery_changed");
+    assert.equal(h.probes.length, before);
+    assert.deepEqual(h.prompts, []);
+  } finally { h.cleanup(); }
+});
+
+
+for (const [observation, code] of [
+  [{ status: "unauthenticated" }, "sign_in_required"],
+  [{ status: "unknown" }, "status_unknown"],
+  [{ status: "authenticated" }, "status_unknown"],
+] as const) {
+  test(`unbound recovery refuses an unverified target: ${observation.status} without identity`, async () => {
+    const h = harness({
+      "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+      "/claude/personal": { observations: [observation] },
+    });
+    try {
+      unbind(h);
+      const requestId = await parkOnMismatch(h);
+      assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, code);
+      assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+      assert.deepEqual(h.prompts, []);
+    } finally { h.cleanup(); }
+  });
+}
+
+test("unbound recovery refuses a card replaced during the target probe", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const revalidate = h.controller.revalidate;
+    h.controller.revalidate = async (...args) => {
+      const result = await revalidate(...args);
+      h.store.patchMeta(SESSION, { pendingApproval: null, providerAuthBlock: undefined });
+      return result;
+    };
+    assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, "recovery_changed");
+    assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+    assert.deepEqual(h.prompts, []);
+  } finally { h.cleanup(); }
+});
+
+
+test("default-sign-in selection copies only the real saved conversation before its retained work resumes", async () => {
+  const h = harness({ "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] } });
+  try {
+    unbind(h);
+    const source = join(h.root, "agent-home");
+    const target = join(h.root, "added-account");
+    const project = join(source, "projects", "workspace");
+    mkdirSync(project, { recursive: true });
+    mkdirSync(target);
+    writeFileSync(join(project, "claude-conversation.jsonl"), "saved conversation\n");
+    writeFileSync(join(project, "unrelated.jsonl"), "another conversation\n");
+    writeFileSync(join(source, ".credentials.json"), "synthetic credential sentinel\n");
+    h.homes[target] = { observations: [{ status: "authenticated", identityId: "identity-personal" }] };
+    const internals = h.manager as unknown as {
+      resolveProviderAccount: ProviderAccountResolver;
+      transferAccountTranscript: typeof transferClaudeAccountTranscript;
+    };
+    internals.resolveProviderAccount = () => ({ ...accounts["claude-personal"], credentialHome: target });
+    internals.transferAccountTranscript = transferClaudeAccountTranscript;
+    const requestId = await parkOnMismatch(h);
+    assert.deepEqual(await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null), { ok: true });
+    await h.manager.providerAuthSelections.get(SESSION);
+    await waitFor(() => h.prompts.length === 1, "the saved conversation did not resume");
+    assert.equal(readFileSync(join(target, "projects", "workspace", "claude-conversation.jsonl"), "utf8"), "saved conversation\n");
+    assert.equal(existsSync(join(target, "projects", "workspace", "unrelated.jsonl")), false);
+    assert.equal(existsSync(join(target, ".credentials.json")), false);
+    assert.equal(readFileSync(join(project, "claude-conversation.jsonl"), "utf8"), "saved conversation\n");
+    assert.equal(h.prompts[0]?.home, target);
+    assert.equal(h.store.readMeta(SESSION)?.providerConversationHome, target);
+  } finally { h.cleanup(); }
+});
+
+
+test("default-sign-in recovery refuses an ambiguous original transcript home before changing the binding", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    h.defaultLaunchEnv.CLAUDE_CONFIG_DIR = "relative-home";
+    assert.equal((await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null)).code, "not_resumable");
+    assert.equal(h.store.readMeta(SESSION)?.providerAccountId, undefined);
+    assert.deepEqual(h.transfers, []);
+    assert.deepEqual(h.prompts, []);
   } finally { h.cleanup(); }
 });

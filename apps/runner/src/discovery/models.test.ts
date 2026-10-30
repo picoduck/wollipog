@@ -435,15 +435,18 @@ test("Claude model query rejects close-before-response and kills on close and ti
   } as AgentDefinition;
   const closed = fakeAgentProcess();
   let kills = 0;
+  const proofs: Promise<boolean>[] = [];
   const closedQuery = queryClaudeModels(agent, {
     spawn: () => closed,
     kill: () => { kills += 1; },
     requestId: "closed",
     timeoutMs: 100,
+    onProcess: (proof) => proofs.push(proof),
   });
   closed.emit("close", 1, null);
   await assert.rejects(closedQuery, /exited before initialization/);
   assert.equal(kills, 1);
+  assert.deepEqual(await Promise.all(proofs), [false], "an injected boundary-less model probe cannot authorize HOME release");
 
   const timedOut = fakeAgentProcess();
   await assert.rejects(queryClaudeModels(agent, {

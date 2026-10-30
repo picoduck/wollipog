@@ -34,6 +34,8 @@ import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   providerSupportsConversationFork,
+  inPlaceHandoffTurns,
+  validProviderHomeLaunchRefusal,
   type PromptImageInput,
   type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
@@ -85,6 +87,9 @@ import {
   type HiddenColumnFailure,
 } from "./hidden-column-conditions.js";
 import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
+import { availableProviderHomeRefusalActions, providerHomeRefusalCopy, providerHomeWaitCopy } from "../provider-home-refusal.js";
+import { canManageProviderProfiles } from "../provider-profile-access.js";
+import type { MachineAccountsIntent } from "../navigation.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { SessionPlaceholder } from "./SessionPlaceholder.js";
 import { sessionArchiveControlLabel, sessionUnarchiveRestarts } from "../archive-actions.js";
@@ -357,6 +362,7 @@ import {
   type QueuedPromptEditRecovery,
   type QueuedPromptEditState,
 } from "../queued-edit-recovery.js";
+import { queueHoldTrayView } from "../queue-hold-release.js";
 import { materializePromptImages } from "../prompt-image-materialization.js";
 import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionReadingTarget } from "../focus-zones.js";
@@ -675,7 +681,16 @@ function forkFailure(
   cause: unknown,
   ambiguous: AmbiguousForkError | null,
   machineName: string | undefined,
+  /** Names a refused account as the session notices do, masked when identifiers are hidden. */
+  accountName: (label: string | undefined) => string | undefined = (label) => label,
 ): ComposerActionError {
+  // The fork's provider launch was refused at the account's lease (#3240): the same state and copy
+  // as a refused session launch, with the server's words behind Show Details.
+  const refusal = cause instanceof ApiError ? validProviderHomeLaunchRefusal(cause.details?.providerHomeRefusal) : null;
+  if (refusal) {
+    const copy = providerHomeRefusalCopy(refusal, accountName(refusal.providerAccountLabel), { launch: "fork" });
+    return { title: copy.title, message: copy.body, ...(cause instanceof Error && cause.message ? { detail: cause.message } : {}) };
+  }
   if (!ambiguous) return composerActionError(action, cause, machineName);
   const { detail } = composerActionError(action, cause);
   return { title: "Fork Outcome Unknown", message: ambiguous.message, ...(detail ? { detail } : {}) };
@@ -728,7 +743,8 @@ function composerHoldsDraft(
 
 /** "Couldn't send your message." with what happened, for a send the server did not accept. A request
  * that never got an answer is the machine not responding; any other refusal keeps the server's
- * reason behind Show Details. Without `retry` the draft was changed while the send was in flight, so
+ * reason behind Show Details, except one the server words for the person with its recovery. Without
+ * `retry` the draft was changed while the send was in flight, so
  * there is no kept draft to retry. */
 function messageNotSent(cause: unknown, machineName: string | undefined, retry?: ComposerRetry): ComposerError {
   const kept = retry ? " Your draft is kept." : "";
@@ -740,6 +756,11 @@ function messageNotSent(cause: unknown, machineName: string | undefined, retry?:
     };
   }
   const detail = cause.message.trim();
+  // A Full Control campaign's stale authority is explained for the person, with its recovery (#2940).
+  // No Retry: until that recovery, resending meets the same refusal; the kept draft sends after it.
+  if (cause.code === "campaign_authority_stale" && detail) {
+    return { title: "Message Not Sent", message: `${detail}${kept}` };
+  }
   return {
     title: "Message Not Sent",
     message: `Couldn't send your message.${kept}`,
@@ -1354,6 +1375,9 @@ function SessionDetailLoaded({
   const [busy, setBusy] = useState(false);
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
   const [restartPending, setRestartPending] = useState(false);
+  // Which refusal action is restarting the session: Restart Session or Wait for Account (#3240).
+  const [refusalWaitPending, setRefusalWaitPending] = useState(false);
+  const [stopWaitingPending, setStopWaitingPending] = useState(false);
   const [setupRetryPending, setSetupRetryPending] = useState(false);
   const setupSuggestion = useWorktreeSetupSuggestion(
     showWorktreeSetupNotice && session.projectId ? session as SessionView & { projectId: string } : undefined,
@@ -1487,6 +1511,9 @@ function SessionDetailLoaded({
   }, [showComposerError]);
   // The session's machine, named when it is why an action failed; assigned once it is known below.
   const actionMachineNameRef = useRef<string | undefined>(undefined);
+  // Names a refused account in a fork failure as the session notices do (#3240): an email-shaped
+  // label is named by role while identifiers are hidden.
+  const refusalAccountNameRef = useRef<(label: string | undefined) => string | undefined>((label) => label);
   /** A composer action the server refused (#2511): its own title and sentence, and the server's words
    * behind Show Details. */
   const showActionError = useCallback((action: ComposerAction, cause: unknown) => {
@@ -2655,6 +2682,44 @@ function SessionDetailLoaded({
   }, [activeComposerMutation, instanceScope, mutationKey, queuedEditRecovered, queuedEditRecoveryScope, sessionId, replace,
     restoreQueuedPromptEditRecovery, setProgrammaticComposerText, storeQueuedPromptEditRecovery]);
 
+  // Keep this identity tied to the cleanup effect's persistence/scope dependencies only.
+  // Text and images are read from refs so edits do not trigger the cleanup flush.
+  const flushComposerDraft = useCallback(() => {
+    if (!draftDirty.current) return;
+    if (queuedEditRef.current) {
+      const recovery = queuedEditRecoveryScope
+        ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
+        : undefined;
+      if (recovery) {
+        storeQueuedPromptEditRecovery(mutationKey, {
+          ...recovery,
+          edit: queuedEditRef.current,
+          draft: draftState.current,
+        });
+      } else {
+        const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
+        if (pending) {
+          const updated = {
+            ...pending,
+            edit: queuedEditRef.current,
+            draft: draftState.current,
+          };
+          updateQueuedPromptEditMutationRecovery(mutationKey, updated);
+          persistQueuedPromptEditRecovery(updated);
+        }
+      }
+      return;
+    }
+    const latest = draftState.current;
+    const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
+    if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
+        composerDraftMatches(latest, consumed.text, consumed.images)) {
+      return;
+    }
+    void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
+  }, [instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
+    storeQueuedPromptEditRecovery]);
+
   // Coalesce rapid edits so typing beside a large base64 attachment does not rewrite it on every
   // keystroke. Dirty edits save even while hydration is pending; unmount cleanup below flushes
   // captured state when the user navigates away before the timer fires. The draft's text is not state
@@ -2666,41 +2731,7 @@ function SessionDetailLoaded({
     // decided when the timer fires, where the effect used to decide it after the commit.
     const schedule = () => {
       window.clearTimeout(timer);
-      timer = window.setTimeout(save, 400);
-    };
-    const save = () => {
-      if (!draftDirty.current) return;
-      if (queuedEditRef.current) {
-        const recovery = queuedEditRecoveryScope
-          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
-          : undefined;
-        if (recovery) {
-          storeQueuedPromptEditRecovery(mutationKey, {
-            ...recovery,
-            edit: queuedEditRef.current,
-            draft: draftState.current,
-          });
-        } else {
-          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
-          if (pending) {
-            const updated = {
-              ...pending,
-              edit: queuedEditRef.current,
-              draft: draftState.current,
-            };
-            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
-            persistQueuedPromptEditRecovery(updated);
-          }
-        }
-        return;
-      }
-      const latest = draftState.current;
-      const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
-      if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
-          composerDraftMatches(latest, consumed.text, consumed.images)) {
-        return;
-      }
-      void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
+      timer = window.setTimeout(flushComposerDraft, 400);
     };
     if (draftDirty.current) schedule();
     let lastText = composerText.text;
@@ -2713,47 +2744,10 @@ function SessionDetailLoaded({
       unsubscribe();
       window.clearTimeout(timer);
     };
-  }, [composerText, images, instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope,
-    sessionId, storeQueuedPromptEditRecovery]);
+  }, [composerText, flushComposerDraft, images, instanceScope, mutationKey, persistQueuedPromptEditRecovery,
+    queuedEditRecoveryScope, sessionId, storeQueuedPromptEditRecovery]);
 
-  useEffect(
-    () => () => {
-      if (!draftDirty.current) return;
-      if (queuedEditRef.current) {
-        const recovery = queuedEditRecoveryScope
-          ? loadRuntimeQueuedEditRecovery(mutationKey, queuedEditRecoveryScope.accountKey)
-          : undefined;
-        if (recovery) {
-          storeQueuedPromptEditRecovery(mutationKey, {
-            ...recovery,
-            edit: queuedEditRef.current,
-            draft: draftState.current,
-          });
-        } else {
-          const pending = queuedPromptEditMutationRecovery(composerMutationRegistry.get(mutationKey));
-          if (pending) {
-            const updated = {
-              ...pending,
-              edit: queuedEditRef.current,
-              draft: draftState.current,
-            };
-            updateQueuedPromptEditMutationRecovery(mutationKey, updated);
-            persistQueuedPromptEditRecovery(updated);
-          }
-        }
-        return;
-      }
-      const latest = draftState.current;
-      const consumed = consumedDraftsRef.current.get(`${instanceScope}\u0000${sessionId}`);
-      if (consumed && consumed.draftVersion === composerDraftVersionRef.current &&
-          composerDraftMatches(latest, consumed.text, consumed.images)) {
-        return;
-      }
-      void saveComposerDraft(sessionId, latest.text, latest.images, instanceScope);
-    },
-    [instanceScope, mutationKey, persistQueuedPromptEditRecovery, queuedEditRecoveryScope, sessionId,
-      storeQueuedPromptEditRecovery],
-  );
+  useEffect(() => flushComposerDraft, [flushComposerDraft]);
 
   // A newly opened conversation can already exist in the REST API while the UI socket is
   // connecting or its stream acknowledgement is missing. Read one bounded opening window and
@@ -3694,6 +3688,32 @@ function SessionDetailLoaded({
   const accountSwitchFailedOrder = accountSwitchFailure && {
     key: `account-switch-failed:${accountSwitchFailureKey}`, severity: "warning", rank: SESSION_NOTICE_RANK.accountSwitchFailed,
   } as const;
+  // The lease refusal that stopped the last launch (#3240). The next launch clears it, so a session
+  // that is starting or running again never shows one a summary update kept.
+  const providerHomeRefusal = session.status === "failed" || session.status === "stopped"
+    ? session.providerHomeRefusal : undefined;
+  const providerHomeRefusalOrder = providerHomeRefusal && {
+    key: `provider-home-refusal:${providerHomeRefusal.detectedAt}`, severity: "warning", rank: SESSION_NOTICE_RANK.providerHomeRefusal,
+  } as const;
+  // The busy account a starting session's launch is waiting for (#3240): a state, not a failure.
+  const providerHomeWait = session.status === "starting" ? session.providerHomeWait : undefined;
+  const providerHomeWaitOrder = providerHomeWait && {
+    key: `provider-home-wait:${providerHomeWait.waitingSince}`, severity: "info", rank: SESSION_NOTICE_RANK.providerHomeWait,
+  } as const;
+  // Recover Existing Profile needs an Owner or Admin of the personal organization (#3240). The
+  // identity is read only while a refusal notice is shown; until it answers, the notice offers Open
+  // Machine Accounts instead.
+  const [recoverProfileAllowed, setRecoverProfileAllowed] = useState(false);
+  const refusalShown = providerHomeRefusal !== undefined;
+  useEffect(() => {
+    if (!refusalShown) return;
+    let live = true;
+    api.getIdentity().then(
+      (identity) => { if (live) setRecoverProfileAllowed(canManageProviderProfiles(identity.context)); },
+      () => { if (live) setRecoverProfileAllowed(false); },
+    );
+    return () => { live = false; };
+  }, [api, refusalShown]);
   // An archived session that has stopped says so in the slot, with Unarchive as the way back (#2202).
   const archivedOrder = sessionArchivedAtRest(session) ? {
     key: "archived", severity: "info", rank: SESSION_NOTICE_RANK.archived,
@@ -3712,6 +3732,8 @@ function SessionDetailLoaded({
   // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
   const runnerDisp = runnerDisplay(runner, box, session.runnerId);
   actionMachineNameRef.current = runnerDisp.name || undefined;
+  refusalAccountNameRef.current = (label) => label === undefined ? undefined
+    : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
   // Why the composer cannot send a new message now (#2154). Edit & Resend states the same reason.
   // An archived session is also stopped; its notice is in the slot, so the slot's order decides.
   const promptUnavailableReason = composerUnavailableReason({
@@ -3831,18 +3853,31 @@ function SessionDetailLoaded({
   }, [canAnswerPendingQuestion, composerAnswerActive, focusComposerAtDraftEnd, pendingQuestion?.requestId,
     revealComposerFromTerminal]);
 
+  // The session whose Inbox Reply has already opened Answer Mode. The request stays set until the
+  // acknowledgement frame below, and every commit before then reruns this effect; leaving Answer
+  // Mode is one of them, so Escape pressed before that frame would otherwise reopen it (#3517).
+  const replyIntentAnsweredRef = useRef<string | null>(null);
   useLayoutEffect(() => {
-    if (composerFocusIntent !== "reply") return;
+    if (composerFocusIntent !== "reply") {
+      replyIntentAnsweredRef.current = null;
+      return;
+    }
     // An Inbox Reply request is contextual: a pending question owns it before the ordinary
     // composer does. Resolve that ownership during the expansion commit so the very next bare key
     // cannot escape to the global shortcut layer while focus is waiting on an animation frame.
-    enterAnswerMode();
+    // A question that arrives while the request waits still takes it. Once Answer Mode has opened,
+    // a rerun keeps focus in it while it stays open, and never reopens it after the person leaves.
+    if (replyIntentAnsweredRef.current !== sessionId || composerAnswerActive) {
+      enterAnswerMode();
+      if (canAnswerPendingQuestion) replyIntentAnsweredRef.current = sessionId;
+    }
     // Acknowledge only after InboxView's expansion frame records the new surface. Clearing the
     // request in this layout commit would cancel that frame; its replacement sees an ordinary
     // expansion and moves focus back to the reader.
     const frame = window.requestAnimationFrame(() => onComposerFocusConsumed?.());
     return () => window.cancelAnimationFrame(frame);
-  }, [composerFocusIntent, enterAnswerMode, onComposerFocusConsumed, sessionId]);
+  }, [canAnswerPendingQuestion, composerAnswerActive, composerFocusIntent, enterAnswerMode, onComposerFocusConsumed,
+    sessionId]);
 
   useLayoutEffect(() => {
     const liveRequestId = pendingQuestion?.requestId ?? null;
@@ -4450,7 +4485,7 @@ function SessionDetailLoaded({
           const ambiguous = ambiguousForkError(cause);
           if (ambiguous) releaseOnFinish = false;
           if (viewGenerationRef.current === generation) {
-            const failure = forkFailure("fork", cause, ambiguous, actionMachineNameRef.current);
+            const failure = forkFailure("fork", cause, ambiguous, actionMachineNameRef.current, refusalAccountNameRef.current);
             showComposerError("action", failure);
             if (mode === "preview") showToast(failure.message, { tone: "error" });
           }
@@ -4549,7 +4584,7 @@ function SessionDetailLoaded({
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
       if (viewGenerationRef.current === generation) {
-        const failure = forkFailure("recoverConversation", cause, ambiguous, actionMachineNameRef.current);
+        const failure = forkFailure("recoverConversation", cause, ambiguous, actionMachineNameRef.current, refusalAccountNameRef.current);
         showComposerError("action", failure);
         if (mode === "preview") showToast(failure.message, { tone: "error" });
       }
@@ -4607,6 +4642,42 @@ function SessionDetailLoaded({
       }
     }
   }, [api, busy, composerRestartOffered, loadSession, restartPending, restartRefusal, runnerOnline, session.id]);
+  // The launch refusal notice's Restart Session (#3240): the same restart as the header's, for the
+  // failed or stopped session the refusal left.
+  const restartFromRefusal = useCallback(async (waitForProviderHome = false) => {
+    if (!runnerOnline || busy || restartPending || restartRefusal !== null || session.archived ||
+        turnRetryInFlightRef.current) return;
+    const generation = viewGenerationRef.current;
+    setError(null);
+    setBusy(true);
+    setRestartPending(true);
+    setRefusalWaitPending(waitForProviderHome);
+    try {
+      loadSession(await api.restart(session.id, waitForProviderHome ? { waitForProviderHome } : undefined));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) showActionError("restart", cause);
+    } finally {
+      if (viewGenerationRef.current === generation) {
+        setRestartPending(false);
+        setRefusalWaitPending(false);
+        setBusy(false);
+      }
+    }
+  }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.archived, session.id]);
+  // Stop Waiting (#3240): the launch hasn't started a provider, so stopping the session only ends
+  // the wait.
+  const stopWaiting = useCallback(async () => {
+    if (stopWaitingPending) return;
+    const generation = viewGenerationRef.current;
+    setStopWaitingPending(true);
+    try {
+      loadSession(await api.stop(session.id));
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) showActionError("stopWaiting", cause);
+    } finally {
+      if (viewGenerationRef.current === generation) setStopWaitingPending(false);
+    }
+  }, [api, loadSession, session.id, stopWaitingPending]);
   // Retry Turn on a failed turn's notice (#2169): the turn's prompt again, as a new turn. A failed
   // or stopped session restarts first, since the control plane admits no prompt to it until then,
   // but only where the restart resumes the provider conversation.
@@ -4767,20 +4838,31 @@ function SessionDetailLoaded({
     turn,
     conversationForkAvailability(turn, latestKnownTurn, forkContext),
   ])), [conversationCheckpointTurns, forkContext, latestKnownTurn]);
+  const handoffUnavailableReason = checkpointHandoffUnavailableReason({
+    runnerOnline,
+    runnerProtocolVersion: runner?.protocolVersion,
+    hasWorktree: Boolean(session.worktreePath),
+    hasWorktreeHistory: latestKnownTurn !== undefined || !!session.worktrees?.length,
+    status: session.status,
+    queuedPrompts: pendingQueuedPrompts,
+    busy,
+    forkInProgress,
+    forkRefusal,
+  });
+  // No full-history scan while streaming: the shared busy/offline/protocol gate already disables
+  // every handoff. Event count detects appends even when the store retains the events array.
+  const handoffHistoryComplete = eventHistory?.everComplete === true && !eventHistory.refreshing && !eventHistory.error &&
+    (!eventWindow || eventWindow.complete && !eventWindow.laterGap && !eventWindow.error);
+  const handoffEvents = handoffUnavailableReason ? undefined : evs;
+  const inPlaceHandoff = useMemo<ReturnType<typeof inPlaceHandoffTurns> | undefined>(() => session.worktreePath
+    ? undefined : handoffUnavailableReason ? { turns: [] } : inPlaceHandoffTurns(handoffEvents ?? [], { status: session.status, historyComplete: handoffHistoryComplete }),
+  [session.worktreePath, session.status, handoffHistoryComplete, handoffEvents, handoffEvents?.length, handoffUnavailableReason]);
   const handoffControls = useMemo(() => ({
     open: setHandoffTurn,
-    reason: checkpointHandoffUnavailableReason({
-      runnerOnline,
-      runnerProtocolVersion: runner?.protocolVersion,
-      hasWorktree: Boolean(session.worktreePath),
-      status: session.status,
-      queuedPrompts: pendingQueuedPrompts,
-      busy,
-      forkInProgress,
-      forkRefusal,
-    }),
-  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, pendingQueuedPrompts, session.status, busy, forkInProgress,
-    forkRefusal]);
+    ...(inPlaceHandoff ? { inPlaceTurns: new Map(inPlaceHandoff.turns.map((point) => [point.promptSeq, point])),
+      historyReason: inPlaceHandoff.reason } : {}),
+    reason: handoffUnavailableReason,
+  }), [handoffUnavailableReason, inPlaceHandoff]);
   const rewindUnavailableReason = rewindRefusal ?? (session.worktreePath == null
     ? "A worktree is required."
     : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
@@ -4903,7 +4985,7 @@ function SessionDetailLoaded({
       // progress rather than creating a second one.
       const ambiguous = ambiguousForkError(cause);
       if (ambiguous) releaseOnFinish = false;
-      const failure = forkFailure("editInFork", cause, ambiguous, actionMachineNameRef.current);
+      const failure = forkFailure("editInFork", cause, ambiguous, actionMachineNameRef.current, refusalAccountNameRef.current);
       throw new ConfirmationFailure(failure.message, failure.detail);
     } finally {
       if (releaseOnFinish) releaseFork();
@@ -5080,6 +5162,117 @@ function SessionDetailLoaded({
           {accountSwitchApplicable && switchReason !== null && (
             <p className="notice-meta" id="account-switch-refusal">{switchReason}</p>
           )}
+        </Notice>
+      ),
+    });
+  }
+  if (providerHomeRefusal && providerHomeRefusalOrder) {
+    const label = providerHomeRefusal.providerAccountLabel;
+    // With hiding enabled, an email-shaped account is named by role, as the switch failure does.
+    const account = label === undefined ? undefined
+      : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
+    const copy = providerHomeRefusalCopy(providerHomeRefusal, account, {
+      canWait: runnerSupportsProtocol(runner?.protocolVersion, "providerHomeWait"),
+    });
+    const switchReason = !accountSwitchSupported
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "session account switching")
+      : runnerOfflineReason;
+    // The control plane refuses to restart an archived session; Session Archived's Unarchive is the
+    // way back (#2301).
+    const restartReason = runnerOfflineReason ?? restartRefusal ??
+      (session.archived ? "Unarchive the session to restart it." : null);
+    // Set Up Managed Profile adds an account, so it needs manage rights on a Machine whose runner
+    // creates managed profiles (v225); Recover Existing Profile also needs an Owner or Admin.
+    const canSetUpProfile = runner?.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerProfiles");
+    const actions = availableProviderHomeRefusalActions(copy.actions, {
+      canSetUpProfile,
+      canRecoverProfile: canSetUpProfile && recoverProfileAllowed && providerHomeRefusal.providerAccountId !== undefined,
+    }).filter((action) => action !== "switch_account" || accountSwitchApplicable);
+    const buttonClass = (index: number) => index === 0 ? "btn primary sm" : "btn sm";
+    const openMachineAccounts = (accounts?: MachineAccountsIntent) =>
+      navigate({ name: "runners", section: "machines", machineId: session.runnerId, ...(accounts ? { accounts } : {}) });
+    // Each disabled action's reason is visible under the body, once even when both share it.
+    const disabledReasons = [...new Set([
+      actions.includes("restart") || actions.includes("wait") ? restartReason : null,
+      actions.includes("switch_account") ? switchReason : null,
+    ].filter((reason): reason is string => reason !== null))];
+    const reasonId = (reason: string | null) => reason === null ? undefined
+      : `provider-home-refusal-reason-${disabledReasons.indexOf(reason)}`;
+    sessionNotices.push({
+      ...providerHomeRefusalOrder,
+      title: copy.title,
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="status" ariaLabel={copy.title} title={copy.title}
+          trailing={trailing}
+          actions={actions.length > 0 && actions.map((action, index) => action === "wait" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              disabled={restartReason !== null || restartPending || busy}
+              title={restartReason ?? undefined}
+              aria-describedby={reasonId(restartReason)}
+              onClick={() => void restartFromRefusal(true)}>
+              {restartPending && refusalWaitPending ? "Starting to Wait" : "Wait for Account"}
+            </button>
+          ) : action === "restart" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              disabled={restartReason !== null || restartPending || busy}
+              title={restartReason ?? undefined}
+              aria-describedby={reasonId(restartReason)}
+              onClick={() => void restartFromRefusal()}>
+              {restartPending && !refusalWaitPending ? "Restarting Session" : "Restart Session"}
+            </button>
+          ) : action === "switch_account" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              disabled={switchReason !== null}
+              title={switchReason ?? undefined}
+              aria-describedby={reasonId(switchReason)}
+              onClick={(event) => {
+                switchAccountButtonRef.current = event.currentTarget;
+                setSwitchAccountOpen(true);
+              }}>
+              Switch Account…
+            </button>
+          ) : action === "set_up_profile" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              onClick={() => openMachineAccounts({ kind: "add_account", provider: providerHomeRefusal.provider })}>
+              Set Up Managed Profile…
+            </button>
+          ) : action === "recover_profile" ? (
+            <button key={action} type="button" className={buttonClass(index)}
+              onClick={() => openMachineAccounts({ kind: "recover_profile", accountId: providerHomeRefusal.providerAccountId! })}>
+              Recover Existing Profile…
+            </button>
+          ) : (
+            <button key={action} type="button" className={buttonClass(index)} onClick={() => openMachineAccounts()}>
+              Open Machine Accounts
+            </button>
+          ))}>
+          <p>{copy.body}</p>
+          {disabledReasons.map((reason, index) => (
+            <p key={reason} className="notice-meta" id={`provider-home-refusal-reason-${index}`}>{reason}</p>
+          ))}
+        </Notice>
+      ),
+    });
+  }
+  if (providerHomeWait && providerHomeWaitOrder) {
+    const label = providerHomeWait.providerAccountLabel;
+    const account = label === undefined ? undefined
+      : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
+    const copy = providerHomeWaitCopy(providerHomeWait, account);
+    sessionNotices.push({
+      ...providerHomeWaitOrder,
+      title: copy.title,
+      render: ({ trailing }) => (
+        <Notice tone="info" role="status" ariaLabel={copy.title} title={copy.title}
+          trailing={trailing}
+          actions={
+            <button type="button" className="btn sm" disabled={stopWaitingPending || runnerOfflineReason !== null}
+              title={runnerOfflineReason ?? undefined}
+              onClick={() => void stopWaiting()}>
+              {stopWaitingPending ? "Stopping" : "Stop Waiting"}
+            </button>
+          }>
+          <p>{copy.body}</p>
         </Notice>
       ),
     });
@@ -7318,6 +7511,7 @@ function SessionDetailLoaded({
                   {items.length > 0 && (
                     <Profiler id={SESSION_VIEW_PROBE} onRender={reportRenderProbe}>
                       <ProfiledEventTimeline
+                        agents={runner?.agents}
                         readLocal={historyPreview.active}
                         driver={session.driver}
                         items={timelineItems}
@@ -7480,6 +7674,7 @@ function SessionDetailLoaded({
               sessionId={session.id}
               prompts={queuedPromptControls}
               queueHeld={session.queueHeld === true}
+              queueHold={queueHoldTrayView(session, runnerOnline)}
               agent={composerAgent}
               steering={steeringAvailabilityInput}
               requestBusy={composerRequestBusy}
@@ -8072,6 +8267,7 @@ function SessionDetailLoaded({
       {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
         sourceAgentId={session.agentId ?? undefined} machineName={runnerDisp.name || undefined}
         sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn} refusal={forkRefusal}
+        inPlace={!session.worktreePath}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
           if (forkRefusal !== null) throw new Error(forkRefusal);
           const release = acquireSessionFork(sessionId);

@@ -69,7 +69,7 @@ for (const width of [320, 390, 700, 1280]) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null });
     });
     for (const [state, label] of [
-      ["continuation_pending", "Continuation Pending"],
+      ["continuation_pending", "Follow-Up Pending"],
       ["orphaned", "Background Work Lost"],
       ["resumed", null],
       ["running", "Waiting on External Job"],
@@ -98,7 +98,7 @@ for (const width of [320, 390, 700, 1280]) {
     // background work is a row of the Session Status popover, and the live region keeps announcing it.
     for (const [state, label, announced] of [
       ["running", "Waiting on External Job", "Waiting on External Job"],
-      ["continuation_pending", "Continuation Pending", "Continuation Pending"],
+      ["continuation_pending", "Follow-Up Pending", "Follow-Up Pending"],
       ["orphaned", "Background Work Lost", "Lost"],
     ] as const) {
       await page.evaluate((backgroundWorkState) => {

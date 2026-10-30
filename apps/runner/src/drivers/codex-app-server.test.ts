@@ -2350,6 +2350,43 @@ test("an async question exceeding the supported context bound remains a compatib
   h.onItem({ type: "agentMessage", id: "oversized-question", text: "Context is too large.", delivery: "async",
     questions: [{ title: "a".repeat(64 * 1024 + 1), options: ["Approve", "Wait"] }] }, true);
   assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+  assert.ok(h.stderr.some((line) => /async question.*reason=title_length index=0/.test(line)));
+});
+
+// Codex's async question contract sets no upper bound on the question count (#3724); the blocking
+// requestUserInput limit of three must not leak into this path.
+for (const count of [4, 20]) {
+  test(`a Codex async message with ${count} questions surfaces every question in order`, () => {
+    const h = makeHarness();
+    const questions = Array.from({ length: count }, (_, index) => ({
+      title: `Authorize decision ${index + 1}?`, options: ["Approve (Recommended)", "Hold"],
+    }));
+    h.onItem({ type: "agentMessage", id: `many-${count}`, text: "Several decisions.", delivery: "async", questions }, true);
+    assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "question_request"]);
+    const request = h.events[1];
+    if (request?.kind !== "question_request") assert.fail("expected an answerable async question card");
+    assert.deepEqual(request.questions.map(question => [question.id, question.question]),
+      questions.map((question, index) => [String(index), question.title]));
+    assert.equal(h.stderr.length, 0);
+  });
+}
+
+test("a Codex async message above the defensive question cap stays a compatibility failure that names the count", () => {
+  const h = makeHarness();
+  const questions = Array.from({ length: 21 }, (_, index) => ({ title: `Decision ${index + 1}?`, options: ["Yes"] }));
+  h.onItem({ type: "agentMessage", id: "too-many", text: "Too many decisions.", delivery: "async", questions }, true);
+  assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+  assert.ok(h.stderr.some((line) => /async question.*reason=question_count count=21/.test(line)));
+});
+
+test("a subagent's async question stays a compatibility failure that names its origin", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root";
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  (h.driver as any).onItem({ type: "agentMessage", id: "child-ask", text: "Child decision.", delivery: "async",
+    questions: [{ title: "Proceed?", options: ["Yes"] }] }, true, "child");
+  assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+  assert.ok(h.stderr.some((line) => /async question.*reason=subagent/.test(line)));
 });
 
 test("a later Codex turn may reuse an async message item id", async () => {
@@ -2374,6 +2411,58 @@ test("unsupported async question payload reports compatibility failure without a
     questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] }, true);
   assert.deepEqual(h.events.map((event) => event.kind), ["agent_message", "error"]);
   assert.match((h.events[1] as { message: string }).message, /cannot safely answer/);
+  assert.equal((h.events[1] as { nonFatal?: true }).nonFatal, true, "a rejected question is not a failed turn (#3806)");
+  assert.ok(h.stderr.some((line) => /async question.*reason=option_shape index=0/.test(line)));
+});
+
+const REJECTED_ASK = { type: "agentMessage", id: "rejected-ask", text: "Please decide.", delivery: "async",
+  questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] };
+
+test("a rejected async question in an open root turn steers the agent and reports a non-fatal notice (#3806)", async () => {
+  const h = makeHarness();
+  const calls: Array<{ method: string; params: any }> = [];
+  activateSteer(h.driver, async (method, params) => {
+    calls.push({ method, params });
+    return { turnId: "provider-turn-steer" };
+  });
+  h.onItem(REJECTED_ASK, true);
+  await waitForCondition(() => h.events.some((event) => event.kind === "error"));
+  assert.deepEqual(calls.map((call) => call.method), ["turn/steer"]);
+  assert.equal(calls[0]!.params.expectedTurnId, "provider-turn-steer");
+  assert.equal(calls[0]!.params.clientUserMessageId, "wollipog-async-question-rejected:rejected-ask");
+  assert.match(calls[0]!.params.input[0].text, /could not show your async question.*reason: option_shape index=0.*normal message/);
+  assert.deepEqual(h.events.find((event) => event.kind === "error"), {
+    kind: "error",
+    nonFatal: true,
+    message: "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message.",
+  });
+});
+
+test("a refused steer leaves the user-facing guidance to ask the agent and logs why", async () => {
+  const h = makeHarness();
+  activateSteer(h.driver, async () => { throw new Error("turn already completed"); });
+  h.onItem(REJECTED_ASK, true);
+  await waitForCondition(() => h.events.some((event) => event.kind === "error"));
+  const notice = h.events.find((event) => event.kind === "error") as { message: string; nonFatal?: true };
+  assert.equal(notice.nonFatal, true);
+  assert.match(notice.message, /Ask the agent to repeat the question in a normal message\.$/);
+  assert.ok(h.stderr.some((line) => /could not tell Codex its async question was not shown item=rejected-ask outcome=rejected/.test(line)));
+});
+
+test("a subagent's rejected async question never steers the root turn", async () => {
+  const h = makeHarness();
+  const methods: string[] = [];
+  activateSteer(h.driver, async (method) => {
+    methods.push(method);
+    return { turnId: "provider-turn-steer" };
+  });
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  (h.driver as any).onItem({ ...REJECTED_ASK, id: "child-rejected" }, true, "child");
+  await nextTask();
+  assert.deepEqual(methods, []);
+  const notice = h.events.find((event) => event.kind === "error") as { message: string; nonFatal?: true };
+  assert.equal(notice.nonFatal, true);
+  assert.match(notice.message, /Ask the agent to repeat/);
 });
 
 test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {

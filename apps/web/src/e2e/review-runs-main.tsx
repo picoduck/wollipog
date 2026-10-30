@@ -11,11 +11,20 @@ import "../styles.css";
 /**
  * Review's Cross-Model Reviews (#3369): a Claude Code session's three reviews of its pull request —
  * an invalid first attempt on an older head, a Downvote with two findings, and one still reviewing
- * the newest head. `?theme=light` switches the theme; `?state=settled` ends the newest one.
+ * the newest head. `?theme=light` switches the theme; `?state=settled` ends the newest one;
+ * `?state=requested` and `?state=reviewing` show the first round;
+ * `?state=delivering` and `?state=fixing` show a downvote's continuation;
+ * `?state=paged` reports two more, older reviews whose page then fails to load.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+const requested = params.get("state") === "requested";
+const firstRound = requested || params.get("state") === "reviewing";
 const settled = params.get("state") === "settled";
+// The newest review is a downvote whose findings are still on their way to the requester, or delivered.
+const downvoted = params.get("state") === "delivering" || params.get("state") === "fixing";
+const finished = settled || downvoted;
+const paged = params.get("state") === "paged";
 
 const HEAD = "4f1c2e9a7b3d5c6e8f0a1b2c3d4e5f60718293a4";
 const MIDDLE = "9b8a7c6d5e4f30211a2b3c4d5e6f708192a3b4c5";
@@ -30,7 +39,7 @@ const session: SessionView = {
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "claude-code", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
-  reviewRuns: { count: 3, active: settled ? 0 : 1, updatedAt: 1 },
+  reviewRuns: { count: paged ? 5 : 3, active: finished ? 0 : 1, updatedAt: 1 },
 };
 
 const common = {
@@ -41,11 +50,20 @@ const common = {
 const runs: ReviewSessionView[] = [
   {
     ...common, reviewSessionId: "s_review_3", headSha: HEAD,
-    state: settled ? "completed" : "running", terminal: settled,
-    round: { epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: BASE, scopeFiles: ["src/checkout/cart.ts"], since: MIDDLE },
-    validated: settled,
-    verdict: settled ? { valid: true, consumed: true, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] } : null,
-    findings: [], stale: false, output: settled ? "{}" : null, reason: null,
+    state: finished ? "completed" : requested ? "requested" : "running", terminal: finished,
+    round: firstRound
+      ? { epoch: 1, round: 1, attempt: 1, mode: "full", baseSha: BASE, scopeFiles: ["src/checkout/cart.ts"] }
+      : { epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: BASE, scopeFiles: ["src/checkout/cart.ts"], since: MIDDLE },
+    validated: finished,
+    verdict: finished
+      ? { valid: true, consumed: true, effectiveVote: downvoted ? "DOWNVOTE" : "UPVOTE", failureClass: null, validationErrors: [] }
+      : null,
+    findings: downvoted ? [{
+      severity: "medium", blocking: true, file: "src/checkout/cart.ts", line: 21, title: "Clear the cart only after the charge settles",
+      scenario: "A declined charge leaves the cart empty.", evidence: "clearCart() runs before await charge.", verify: "Decline a test card.",
+    }] : [],
+    continuation: downvoted ? (params.get("state") === "delivering" ? "pending" : "delivered") : finished ? "delivered" : null,
+    stale: false, output: finished ? "{}" : null, reason: null,
     createdAt: minutesAgo(3), updatedAt: minutesAgo(1),
   },
   {
@@ -98,7 +116,10 @@ const client: ApiClient = {
     findings: [],
     summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" },
   }),
-  reviewSessions: async () => ({ reviews: runs, nextAfterReviewSessionId: null }),
+  reviewSessions: async (_id: string, page: { afterReviewSessionId?: string } = {}) => {
+    if (page.afterReviewSessionId) throw new Error("The control plane could not be reached.");
+    return { reviews: runs, nextAfterReviewSessionId: paged ? "s_review_1" : null };
+  },
   gitDiff: async () => ({
     diff: {
       scope: "uncommitted", baseRef: "origin/main", headRef: "HEAD", raw: "", files: [],

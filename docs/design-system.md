@@ -386,9 +386,10 @@ needs extra clearance from it. The attachment tray's 20px Remove (#2561) takes t
 its 56px thumbnail rather than reaching past the tile, and a 36px reference chip keeps 4px above and
 below itself for its Remove's centered 44px.
 
-**One hit-area block.** Segmented options, switches and inline text links get their 44px
-coarse-pointer hit area from this block, once, in the shared stylesheet. A segmented option borrows
-the track's 2px inset and 1px edge; the switch uses `::before` because its thumb is `::after`; a link
+**One hit-area block.** Segmented options, switches, inline disclosures (`.disclosure.inline`, §5.5)
+and inline text links get their 44px coarse-pointer hit area from this block, once, in the shared
+stylesheet. A segmented option borrows the track's 2px inset and 1px edge; the switch uses `::before`
+because its thumb is `::after`; an inline disclosure's trigger borrows 4px above and below; a link
 gets a 44px band centered on its line. Components never add their own copies of these rules. A link
 whose line sits closer than 12px to another target (dense prose) keeps its visual size and relies on
 the surrounding row being the target.
@@ -572,7 +573,7 @@ Rules
   One exception: in a request notice inside a narrow card (under 360px wide, such as a
   board card), Approve and Deny may stretch as an **equal pair** that fills the row, matching the
   phone sheet footer rule (§7.5). Only that pair, never a single button. The session notice slot's
-  resolving action below 760px is the other exception (§13.2).
+  resolving action below 760px, while the slot is at most 480px wide, is the other exception (§13.2).
 - Labels are verb plus object in Title Case: "New Skill", "Import from Git…", "Delete Skill". The
   ellipsis means "opens a dialog or menu that asks for more input before anything happens" (§17).
 - A leading `+` icon marks create actions; no other decorative icons in text buttons unless the
@@ -605,7 +606,7 @@ Rules
 | List row | Open (row click) plus one inline action and ⋯. | Inline actions show on hover or focus on fine pointers, always on coarse. |
 | Dialog footer (§7.3) | Cancel and the dialog's one primary, optional destructive tertiary on the left. | 3 on desktop; 2 on phone. |
 | Section (in page) | At most one action, in the section title row, right-aligned (`.section-head .actions`). | 1 + ⋯. |
-| Notice | Its resolving action(s), bottom-left of the copy on desktop, full width on phone. | 2. |
+| Notice | Its resolving action(s), bottom-left of the copy on desktop; in a notice slot, filling the row on a phone held upright (slot at most 480px, #2157). | 2. |
 | Toast | One action plus close. | 1. |
 
 ---
@@ -1385,6 +1386,11 @@ open, with a `--dur-base` transition.
 - The revealed content is `.disclosure-body`: a column with a 12px gap and 8px above.
 - A region may size the trigger to its surroundings (the transcript's Worked row keeps
   `--type-small` in `--text-faint` and fills its row) but keeps the chevron and its rotation.
+- Touch (§2.8): `.disclosure.inline` opts a disclosure in to a small control's target, 36px to
+  look and borrowing 4px above and below for 44px. How to Call in the New Webhook Trigger sheet
+  uses it. It is opt-in because a trigger that fills a list row (the Outbound Events rows, a tool
+  step) or sits flush on a list (the request dock's More Requests) would take its neighbour's
+  taps. Give the modifier only to a disclosure with 4px clear above and below its trigger.
 - Replaces `.access-manual-disclosure`, `.project-location-create-disclosure` (with its `+`/`−`
   text glyph), `.runner-disclosure-chevron` and `.tl-disclosure` (with its `▸` glyph).
   `.share-disclosure` was a risk warning, not an expand and collapse; it moved to a warning Notice
@@ -1485,7 +1491,9 @@ variant by default and offers side by side as a user preference (§6.3).
   is titled by the name with "On <machine>" under it, and leads with a status notice whenever the
   agent is not Ready (warning or danger by its status, neutral for Not Installed): one sentence and
   the fix, a command in a code well, **Approve Launch…**, or **Choose Another Installation…**,
-  which opens Machine Settings at its installations. Then one `.facts` list, the Launch Command in
+  which opens Machine Settings at its installations. Then one `.facts` list, whose Updates fact
+  gives the `harnessUpdateLabel()` and under it, in `--type-small` and `--text-dim`, the runner's
+  release guidance from `harnessUpdateGuidance()` unless the notice already quotes it (#3523); the Launch Command in
   a code well with copy (only for an installed agent whose launch can be copied; a reference-only
   Windows launch keeps its Executable and Arguments facts), and a closed Release Details
   disclosure. Its footer is ghost **Find Sessions…** where the agent can be scanned, ghost danger
@@ -2207,7 +2215,10 @@ workflow step list is a different component and keeps a local name.
 
 Anchored, 8px from the trigger, same container recipe as the menu, padding 16px, width 280–360px.
 Optional title row (`--type-section` + close icon). Used for inline detail (usage cost breakdown,
-context window). Rules for both menus and popovers:
+context window). A field's rules that would otherwise sit under the form as body copy go in an
+`InfoPopover` whose `.icon-btn.sm` sits beside the field's label, overhanging the label's line on a
+fine pointer so the label stays 8px above its control (the Automation editor's About Time Zones,
+#2971). Rules for both menus and popovers:
 
 - `consumeEscape: true` by default (fixes Escape leaving the session).
 - Close on outside click and on ancestor scroll (or re-anchor); never float over a dialog header.
@@ -2341,7 +2352,11 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Skill deployment | Edited (a machine copy differs from the library) | warning |
 | Skill deployment | Update Held (a Git or built-in update waits for review) | warning |
 | Skill deployment | Error | danger |
-| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
+| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger · Last Run Failed: danger (the automation page's one badge when its latest run failed, ahead of Enabled or Paused, #2968) · Target Unavailable: warning. An Automations list row (#2969) shows at most one: Last Run Failed, else Target Unavailable, and none otherwise; its group and its Enabled switch say whether it is scheduled or paused. |
+| Automation run (`automation_run`: the page's Last Run fact, Run History's Result and Run Details, inline) | Starting, Running: info (pulse) · Succeeded: success · Failed: danger · Expired: warning · Skipped: neutral |
+| Automation run step (`automation_step`: Run Details' Steps, inline) | Running: info (pulse) · Sent, Accepted: info · Done: success · Failed: danger · Unconfirmed: warning · Queued, Retried: neutral |
+| Outbound event subscription (`subscription`, #2973) | Active: success · Paused: neutral · Delivery Failed: danger (its latest settled delivery failed, which includes a pause the failures caused). The automation words Enabled and Paused are not used here. |
+| Outbound event delivery (`outbound_delivery`, the Deliveries table's Result, inline) | Delivered: success · the failure in words ("HTTP 500", "Connection Refused", "Timed Out"): danger · Sending: info (pulse) · Pending, Dropped: neutral |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
@@ -2351,9 +2366,12 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
+| Workflow run step (`workflowNode`, #2977: a step's badge and marker on the workflow run page) | Waiting, Skipped, Stopped: neutral · Ready: info · Running: info (pulse) · Awaiting Decision: warning · Succeeded: success · Failed: danger. Amber is Awaiting Decision's alone. |
 | Multi-Agent Run (`run`, `runStatus()`, #2974: the Runs list row) | Awaiting Decision (a workflow node waits at a gate), Approval Required (a member needs the person): warning · Running: info (pulse) · Failed (the workflow failed): danger. In that order; none while every member is idle. |
+| Run follow-up (`followUp`, #2976: each member's send in the run's Follow Up dialog) | Delivered: success (inline) · Failed: danger (inline, with the reason beside it) |
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
-| Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
+| Pod (`podBadgeStatus()`, #2981: the pod page's bar) | Active (open, nothing running): info · Running (automatic turns or any member's turn): info (pulse) · Closed: neutral |
+| Pods list row (`podRowStatus()`, #2979) | Closed: neutral · Conflicted (the newest merge conflicted): warning · Failed (the newest merge failed): danger · Running (automatic turns or any member's turn): info (pulse). In that order; none for an idle open pod. |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signing In: info (pulse) · Signed Out, Status Unknown: neutral · Not Added: neutral (hollow dot; a new account's sign-in ended because the account is already on the machine, #2996) |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
@@ -2362,6 +2380,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
 | Pull request checks (Review's summary, #2846) | Checks Failing: danger · Checks Running: info, pulsing. Passing checks get no badge. |
+| Cross-model review run (`reviewPhase`, the Cross-Model Reviews section's summary, from its newest review, #3369) | Review Requested: neutral · Reviewing, Re-Reviewing (a later round or epoch): info (pulse) · Delivering Findings (a downvote's continuation not yet with the requester): info · Fixing (delivered, the requester's turn): warning · Settled (a valid upvote): success. A newest attempt that did not vote shows its `reviewRun` state instead. |
 | Cross-model review (`reviewRun`, Review's Cross-Model Reviews, #3369) | Requested, Canceled, Not Validated (an older runner that does not check reports): neutral · Reviewing: info (pulse) · Upvote: success · Downvote: warning · Invalid, Failed: danger. Only a valid report votes. A review of a head the pull request has moved past adds a separate neutral Stale badge (no dot). |
 
 "Orphaned" is retired everywhere, including the session header badge, which reads "Background Work
@@ -2379,7 +2398,14 @@ full-width §5.5 disclosure trigger, `--control-h` tall, reading "1 Queued Messa
 Messages" and carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
-lasts while the session stays open, and every session starts collapsed. Expanded, the tray says once
+lasts while the session stays open, and every session starts collapsed. A queue held behind a
+worktree or account handoff (#3752) says why in one sentence-case `.queue-note` right under the
+summary, collapsed or expanded (`.queue-hold`), followed by Proceed Now… (`.btn.sm`) when the runner
+can release the hold and the reader may stop the session's background jobs; a Viewer reads only the
+sentence. Proceed Now… asks first in the danger confirmation titled Proceed Now, with Cancel focused,
+saying that every unfinished background job ends and is recorded as killed and that the handoff and
+the queued messages then run in order; a refusal is a compact danger notice under the button, as
+Stop Job's is. Expanded, the tray says once
 in sentence case what holds for every row: the held explanation, a steering reason every row shares
 ("Claude Code can't take steering mid-turn, so these send when the turn ends."), a cancel none of
 them can use, or a Viewer's refusal. A row carries
@@ -2895,9 +2921,9 @@ scroll to trigger it (#313).
 | Icon | 16px tone icon at the title's first line. |
 | Title | Optional, `--type-body-strong`, Title Case. |
 | Title row | With a title, trailing controls (the slot's "+N More", then the dismiss button) sit in the title row only, so the body and the actions use the full width. |
-| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details" (`Notice`'s `details`): a `.btn.sm.ghost` toggle at the end of the action row that reads "Hide Details" while open; the details are not in the DOM until it opens. |
+| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details" (`Notice`'s `details`): a `.btn.sm.ghost` toggle at the end of the action row that reads "Hide Details" while open; the details are not in the DOM until it opens. When the toggle is the row's only action, its label lines up with the body's text (#3511). |
 | Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
-| Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
+| Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. When it wraps, titled or not, the icon stays on the first line, level with the title or the sentence's first line, and whatever shares that line (the sentence beside a title, the actions, the dismiss button) lines up on it (#3522). |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
 | Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts and queued rows are not notices and do not share this slot: receipts are rows of the transcript under their message (§11.2), and queued rows belong to the composer. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
 
@@ -3004,8 +3030,12 @@ exactly one: the most severe, then the lowest rank.
   a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the
   server). A suggestion about a Project rather than one session also shows once above that
   Project's Sessions tab, never inside a list row.
-- Below 760px the action row is one row: the resolving action fills it (the one exception to "buttons
-  never stretch", §3.1) and a disclosure toggle such as Show Details keeps its own width.
+- Below 760px, while the slot is at most 480px wide (a phone held upright), the action row is one
+  row: the resolving action fills it (the one exception to "buttons never stretch", §3.1) and a
+  disclosure toggle such as Show Details keeps its own width. The slot's own width decides, not the
+  viewport's (#2157): `.session-notice-slot` and `.campaign-notices` are the `notice-slot` inline-size
+  container below 760px, so on a phone on its side or a small tablet the actions keep their own
+  width, left-aligned, as on desktop. Their height is the touch height either way (§2.8).
 
 Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`,
 `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
@@ -3045,7 +3075,7 @@ under it, so Machine Offline leads Couldn't Load Recorded Workers, Background Wo
 Chat's Couldn't Refresh, and a worker's request leads an inventory error. Each tool adds its own
 entries in its own unit; Review, Files and Browser keep the notices at the top of their scrollers.
 Below 760px its notices' buttons, "+N More" included, are 44px, and the resolving action fills the
-action row.
+action row while the slot is at most 480px wide, as in the session notice slot.
 
 - **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
   the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then
@@ -3274,8 +3304,8 @@ follows these rules so it never crowds out the conversation it asks about:
   `Ban` on the card, and Choose Another Account… leaves that request's footer. With no other account
   the dialog is the compact No Other Accounts state with Open Connections. While a sign-in
   runs, Cancel Sign-In is the only button, the sentence carries the sign-in's status, and the runner's
-  sign-in renders in the body without repeating the account, so Open Provider Sign-In and the code
-  field are in view. An agent
+  sign-in renders in the body without repeating the account, so Open Provider Sign-In, the device
+  code in a code well (§11.7) with its icon Copy Device Code (#3521), and the code field are in view. An agent
   with several sign-in methods lists them as ChoiceRows with their descriptions visible and one
   Start Sign-In. A machine-owner-only Start Sign-In is disabled with its reason as the card's
   foot-note. No control in the card has a `title`: every name is visible or is its accessible name.
@@ -3406,9 +3436,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   Agent into its Session cell (§14), and keeps that fold above the tier until the main column fits
   the full layout. The Usage API card's description takes the line and its three segmented
   controls follow as one group: beside the description while it keeps 220px (about 30 characters),
-  otherwise together on their own line below it. The Pod Orchestration Controls keep their five
-  fields on one row; each column is at least as wide as its label on one line, and Arbitration as
-  wide as its longest mode.
+  otherwise together on their own line below it.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip, keeping the session bar's `+N`; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
@@ -3758,13 +3786,14 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Eight other label and value lists still carry their own rules and
+**Remaining `<dl>` recipes.** Seven other label and value lists still carry their own rules and
 move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
-`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
-`.approval-selector-context` and `.automation-facts`.
+`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts` and
+`.approval-selector-context`.
 (`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
-`.campaign-held-child-hold` with Held Children, #2157, and `.runner-meta` and
-`.connection-details-list` with the machine detail's Connection Details, #2988.)
+`.campaign-held-child-hold` with Held Children, #2157, `.runner-meta` and
+`.connection-details-list` with the machine detail's Connection Details, #2988, and
+`.automation-facts` with the automation page's Rules and Limits, #2968.)
 
 ---
 

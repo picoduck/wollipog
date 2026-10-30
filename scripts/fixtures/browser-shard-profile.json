@@ -1,0 +1,876 @@
+{
+  "schemaVersion": 1,
+  "sourceWindow": {
+    "since": "2026-10-22T22:40:00Z",
+    "until": "2026-10-22T22:41:00Z"
+  },
+  "sourceHead": "9a57f6a4efcf5418f4eeb66731ab96a45d9322cf",
+  "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
+  "inventoryFiles": 280,
+  "fallbackDurationMs": 12943,
+  "productionDurationMs": 99000,
+  "files": {
+    "access-scope-change.spec.ts": 27930,
+    "account-email-privacy.spec.ts": 70494,
+    "agent-questions-live.spec.ts": 228338,
+    "agent-questions.spec.ts": 150039,
+    "agents-roster.spec.ts": 40645,
+    "agents.spec.ts": 46450,
+    "app-container.spec.ts": 54447,
+    "attention-shell.spec.ts": 65575,
+    "authentication-recovery.spec.ts": 63728,
+    "automation-page.spec.ts": 104685,
+    "automation-run-history.spec.ts": 35849,
+    "automation-schedule.spec.ts": 35277,
+    "automation-triggers.spec.ts": 45719,
+    "automations-list.spec.ts": 48590,
+    "background-work-visibility.spec.ts": 70161,
+    "behavior-settings.spec.ts": 36164,
+    "browser-panel.spec.ts": 53811,
+    "campaign-status-walkthrough.spec.ts": 24016,
+    "campaign-status.spec.ts": 28529,
+    "checkpoint-rewind.spec.ts": 62793,
+    "colour-schemes.spec.ts": 61239,
+    "command-inbox-projects.spec.ts": 297859,
+    "commit-bar.spec.ts": 28436,
+    "compact-tier.spec.ts": 103033,
+    "composer-bar-first-tap.spec.ts": 43250,
+    "composer-bar-layout.spec.ts": 67106,
+    "composer-idle-capsule.spec.ts": 30446,
+    "composer-image-picker.spec.ts": 86685,
+    "composer-remove-keyboard-focus.spec.ts": 31025,
+    "conversation-handoff.spec.ts": 68200,
+    "conversation-steering.spec.ts": 175227,
+    "copy-button.spec.ts": 32383,
+    "desktop-rail.spec.ts": 30414,
+    "desktop-updates.spec.ts": 51250,
+    "dialog-anatomy.spec.ts": 29046,
+    "diff-sections.spec.ts": 33366,
+    "earlier-activity-desktop.spec.ts": 30418,
+    "evidence-artifacts.spec.ts": 60797,
+    "field-label-outside-field.spec.ts": 31185,
+    "focus-zones.spec.ts": 52574,
+    "full-control-preparation.spec.ts": 72120,
+    "git-visibility.spec.ts": 33749,
+    "inbox-row-layout.spec.ts": 44350,
+    "machine-management.spec.ts": 132704,
+    "mobile-viewport.spec.ts": 79604,
+    "new-session-choices.spec.ts": 51483,
+    "offline-banner.spec.ts": 39008,
+    "orchestrator-controls.spec.ts": 68653,
+    "orchestrator-preset.spec.ts": 125337,
+    "orchestrator-settings.spec.ts": 28931,
+    "outbound-events.spec.ts": 31131,
+    "page-anatomy.spec.ts": 62270,
+    "panel-pages.spec.ts": 31334,
+    "paused-history-gap.spec.ts": 117253,
+    "pinned-summary-dock.spec.ts": 33188,
+    "pinned-summary-rows.spec.ts": 38124,
+    "pods-list.spec.ts": 37639,
+    "project-child-defaults.spec.ts": 55692,
+    "project-memory-sharing.spec.ts": 28571,
+    "projects-master-detail.spec.ts": 44497,
+    "projects-overview.spec.ts": 46691,
+    "provider-home-refusal.spec.ts": 63646,
+    "question-draft-reload.spec.ts": 70990,
+    "question-policies.spec.ts": 29259,
+    "recovery-notice.spec.ts": 35725,
+    "request-surfaces.spec.ts": 122010,
+    "right-panel-overlay.spec.ts": 55062,
+    "session-bar.spec.ts": 109584,
+    "session-detail-retention-live.spec.ts": 41329,
+    "session-follow-up.spec.ts": 38668,
+    "session-header.spec.ts": 102659,
+    "session-notices.spec.ts": 36829,
+    "session-placeholders.spec.ts": 35104,
+    "session-usage.spec.ts": 77715,
+    "sessions-board.spec.ts": 51158,
+    "sessions-list-notices.spec.ts": 58797,
+    "sessions-preview-bar.spec.ts": 34902,
+    "sessions-preview-right.spec.ts": 37602,
+    "sessions-search.spec.ts": 46041,
+    "sessions-split.spec.ts": 46376,
+    "settings-rows.spec.ts": 132746,
+    "settings-sections.spec.ts": 65326,
+    "shell-dock-phone.spec.ts": 28283,
+    "side-chat.spec.ts": 27468,
+    "side-panel-expand.spec.ts": 54328,
+    "skill-groups.spec.ts": 43807,
+    "skill-machine-import.spec.ts": 26918,
+    "skill-notice-slot.spec.ts": 26726,
+    "skill-orphans.spec.ts": 26893,
+    "skill-review-conflict.spec.ts": 38963,
+    "slash-commands.spec.ts": 89750,
+    "stop-turn.spec.ts": 36739,
+    "terminal-panel.spec.ts": 50899,
+    "timeline-reflow.spec.ts": 84513,
+    "transcript-entry.spec.ts": 62599,
+    "transcript-states.spec.ts": 25015,
+    "worker-page.spec.ts": 27528,
+    "workspace-references.spec.ts": 28983,
+    "worktree-recovery.spec.ts": 32069,
+    "xterm-smoke.spec.ts": 33874
+  },
+  "sources": [
+    {
+      "runId": 39866598899,
+      "attempt": 1,
+      "jobId": 120130235547,
+      "jobName": "Browser End-to-End Tests (4)",
+      "suiteSeconds": 1643,
+      "slowestTests": [
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "testId": "7810847e5f6dc21bb2d8da2b53c531441d07f4b554f7113091393cfd984bcf03",
+          "durationMs": 10427,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
+          "testId": "c7c571b0c4a5dd0bf5d1ebbe2a22858e7af6666a59287eadddebd7326f614de9",
+          "durationMs": 9648,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "ed8a77f43ef6978b877c0c68a7fee7449b8db4dcac640365aa03c098c3bc55d5",
+          "testId": "d7bb52faf16283e062467b4d7ba0fa85dd8c58ffb4a7a160d1ee35ecc1d60f84",
+          "durationMs": 8254,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "slowestFiles": [
+        {
+          "fileId": "4f016a6bd340d8d85877311e1fcda3b53b63d581bd2fa3314e0fbbd16a8b3bee",
+          "durationMs": 132746,
+          "count": 83
+        },
+        {
+          "fileId": "8df93f9a1aee7eae1568ae36669c9ea3cc3b8bd4036c1765c103c4ca207b888f",
+          "durationMs": 122010,
+          "count": 66
+        },
+        {
+          "fileId": "fc463d9f51257db5dce535b9508843f4d507cc2485844d130a6bb9f258d44dc5",
+          "durationMs": 109584,
+          "count": 29
+        },
+        {
+          "fileId": "eb9bb6a814f99fd051d13cb756fd42b5d0fa8f3eff2c82f95241b704492f64b2",
+          "durationMs": 102659,
+          "count": 27
+        },
+        {
+          "fileId": "60cfc7260eba1c082748cc0810f677f002ecd28a2ac2dae113209ed6a596fc23",
+          "durationMs": 77715,
+          "count": 50
+        },
+        {
+          "fileId": "ed8a77f43ef6978b877c0c68a7fee7449b8db4dcac640365aa03c098c3bc55d5",
+          "durationMs": 65326,
+          "count": 19
+        },
+        {
+          "fileId": "1eef63a072686a0912c71e3af33117842dae50c98f5ca4aac7475417499b997d",
+          "durationMs": 58797,
+          "count": 14
+        },
+        {
+          "fileId": "2748236e5a31cf808ff5b10c1fde10878558f2836826b92e9be5d2f843933d64",
+          "durationMs": 55062,
+          "count": 10
+        },
+        {
+          "fileId": "fb4d39ed5641cd128bb87dd86d182e75da63ff3b0dbb2269d1e4260955186de3",
+          "durationMs": 54328,
+          "count": 14
+        },
+        {
+          "fileId": "a4eeee5c05662e4228152a5d3146108c0fe0259221c6a603b37b8a86d7084920",
+          "durationMs": 51158,
+          "count": 25
+        },
+        {
+          "fileId": "4dcd680ae2de8924e9e7631f762e10c413deda1b38970b9fd565a146e3426650",
+          "durationMs": 46376,
+          "count": 12
+        },
+        {
+          "fileId": "cc2478179fcca7363ffe16a650dec32161b794fc0d1a20de7b45490d8f6b2ce7",
+          "durationMs": 46041,
+          "count": 20
+        },
+        {
+          "fileId": "a595e9c28da0b81b3f640c6591aa4d8a7a6c337801cbb00065ced459aa0e137a",
+          "durationMs": 38668,
+          "count": 15
+        },
+        {
+          "fileId": "9b2d0183e2b4bd03ef13516f82cdccb600c54db5e4f824bf3c144878352bb237",
+          "durationMs": 37602,
+          "count": 9
+        },
+        {
+          "fileId": "6af1bfdfe830a70644d0fde74b20f7b7f54a6a677d025b9561718bb85f89b9e3",
+          "durationMs": 36829,
+          "count": 11
+        },
+        {
+          "fileId": "e4b373f88d0a6799c664289b1b66cdd1f520865e622e939c8ad1a2775a181132",
+          "durationMs": 35725,
+          "count": 13
+        },
+        {
+          "fileId": "dac70d000e385310ff863d160cb2a74af99a38d034ddcb8e7dccb319d4a20aea",
+          "durationMs": 35104,
+          "count": 10
+        },
+        {
+          "fileId": "eea95825e886b13618c14dae7a4519fee66015bc7b95d356c9bf05389c5f7e94",
+          "durationMs": 34902,
+          "count": 10
+        },
+        {
+          "fileId": "c489ef7a00321155c80c2ee2cb4ae91d0c90e5ba557a56ca190e63a7769342d6",
+          "durationMs": 28283,
+          "count": 10
+        },
+        {
+          "fileId": "934c3ae880986e1467d6ea5b93deb604d1e9c10403ef38804676aead9b018ec1",
+          "durationMs": 27468,
+          "count": 6
+        }
+      ],
+      "count": 725,
+      "failed": 0,
+      "retryOnly": 0,
+      "context": {
+        "runId": "39866598899",
+        "attempt": 1,
+        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
+        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
+      },
+      "phases": {
+        "activeSeconds": 1686,
+        "installSeconds": 17,
+        "otherSetupSeconds": 22,
+        "suiteSeconds": 1643,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      },
+      "skipped": 4,
+      "cancelled": 0,
+      "unmeasured": 0
+    },
+    {
+      "runId": 39866598899,
+      "attempt": 1,
+      "jobId": 120130235621,
+      "jobName": "Browser End-to-End Tests (2)",
+      "suiteSeconds": 1531,
+      "slowestTests": [
+        {
+          "fileId": "f32cd278669edcf5067b88382aee81ac5132e1e7012d0bb30c37dc7f6df563df",
+          "testId": "58c43a06b30a90675d25f600cb880a4b906a324e448508ad580c6ddafc690919",
+          "durationMs": 13609,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "fc7ed2bc00e2a50cac5be0dbcd27b10d2ac673e67fe972215b3cbf0b5f36c9eb",
+          "durationMs": 13604,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "testId": "0a638086d81c81cd9ee3c13cd657929670813662f9fdfa6dd85f7f8e25ed1674",
+          "durationMs": 13601,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "slowestFiles": [
+        {
+          "fileId": "ee173d8788ad0a15b615e6c6fe07fe036d5012f751a345acc31eae01d56969d3",
+          "durationMs": 175227,
+          "count": 45
+        },
+        {
+          "fileId": "d2d900d95627194db12ab91f9d233662c56332a7ba65370c0b345645d7bdb6a4",
+          "durationMs": 103033,
+          "count": 24
+        },
+        {
+          "fileId": "d63e0f5293c44824494e8221898d505337296bf1663bae6edd51330e32017181",
+          "durationMs": 86685,
+          "count": 23
+        },
+        {
+          "fileId": "c8d030972bdc6f6c2ecd31b10d2ca17d69a1d36ba86851334f33d4ad8c1b683e",
+          "durationMs": 72120,
+          "count": 33
+        },
+        {
+          "fileId": "4fe46a32c81057f85c4a433301ac6eac1e94d44e1951dc1f4cae4c1000c5ca01",
+          "durationMs": 68200,
+          "count": 18
+        },
+        {
+          "fileId": "2f9840f44fede593a70b37b9a25c2be73428d689442d0282b2d13f5c732694ec",
+          "durationMs": 67106,
+          "count": 43
+        },
+        {
+          "fileId": "6ac4bc03a1bd4dca9a3f033cd7ed11b96b021dd8258bda760e17e23308391d3a",
+          "durationMs": 60797,
+          "count": 30
+        },
+        {
+          "fileId": "480954301fad999c30acbdf073230e2295586a2ed7b574668e537631c6db8513",
+          "durationMs": 52574,
+          "count": 23
+        },
+        {
+          "fileId": "aa7c02c233a195c4ec43632895b7038554976f920f729d8fe26e7f4909e0d43b",
+          "durationMs": 51250,
+          "count": 55
+        },
+        {
+          "fileId": "3939cfdce4da2439e0b491eccb7ca7c367e127b88a178e0216841f28c2ff0d37",
+          "durationMs": 43250,
+          "count": 11
+        },
+        {
+          "fileId": "cdeb6c5615f43cc69e2a6cb78c2ff6936a037c37cd60be749c9415d1b5ba9da1",
+          "durationMs": 33749,
+          "count": 9
+        },
+        {
+          "fileId": "4a3e7b2e81825f163d8b89c93343d58f79f932ed7a7257bc9292c375ee5164d1",
+          "durationMs": 33366,
+          "count": 13
+        },
+        {
+          "fileId": "64e881559e110a1b8dedb836d302c2df887f929fca7615dd6a2e4d5efaf41102",
+          "durationMs": 32383,
+          "count": 6
+        },
+        {
+          "fileId": "023e55b9ae2266b8f131c62413480b188f4b0c620e0731d91c79b68b914a2ae7",
+          "durationMs": 31185,
+          "count": 20
+        },
+        {
+          "fileId": "142930b81d5392eef26ca59adb304b148ce96d274aaf555053258d8cb724555f",
+          "durationMs": 31025,
+          "count": 9
+        },
+        {
+          "fileId": "eccc27b48fc71cb8448ee9372449f32c5cb76e3fc5a230ca1f6aa4ddb7371efc",
+          "durationMs": 30446,
+          "count": 19
+        },
+        {
+          "fileId": "ed26eb5ae7b2584588bbe6eee19d242f7d433e690c9481ce2083aafffca3648e",
+          "durationMs": 30418,
+          "count": 12
+        },
+        {
+          "fileId": "a97db08be7189fa14de27e602abe4002a90ee98ddbdf52bbacf8a02453a6ed7f",
+          "durationMs": 30414,
+          "count": 13
+        },
+        {
+          "fileId": "8d41ee8750dc84de4c84f4f7ed5b3254652f974c173a3055efb9677866d114f5",
+          "durationMs": 29046,
+          "count": 9
+        },
+        {
+          "fileId": "3b3c11617dffa3ba7a463e7d4978f70fcf23a0a1ff68fd556c8f61853f40184c",
+          "durationMs": 28436,
+          "count": 21
+        }
+      ],
+      "count": 705,
+      "failed": 0,
+      "retryOnly": 0,
+      "context": {
+        "runId": "39866598899",
+        "attempt": 1,
+        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
+        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
+      },
+      "phases": {
+        "activeSeconds": 2203,
+        "installSeconds": 637,
+        "otherSetupSeconds": 31,
+        "suiteSeconds": 1531,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      },
+      "skipped": 4,
+      "cancelled": 0,
+      "unmeasured": 0
+    },
+    {
+      "runId": 39866598899,
+      "attempt": 1,
+      "jobId": 120130235646,
+      "jobName": "Browser End-to-End Tests (5)",
+      "suiteSeconds": 1600,
+      "slowestTests": [
+        {
+          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
+          "testId": "32da7c88c8a1d079f54188ca15170644491cbf8a0d2d2169a39ca96b41472822",
+          "durationMs": 41329,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
+          "testId": "959b6a32f54a09b8557f65e46dd84fcdcdf2b6ec585f4341461531a082db8ce9",
+          "durationMs": 10923,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "9579a51cc63675cfaa417f56027bd4108702fa78ed5d4f44c76a818d4b628d98",
+          "testId": "9e8105eee26d1ae1884cd535e4997a5a76399f3f871d447b35ff04fb9172af77",
+          "durationMs": 8237,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "slowestFiles": [
+        {
+          "fileId": "b86b74e0f3f571141378811c716303cfeee8ba38b3991bcec54ba5ec8e42713b",
+          "durationMs": 125337,
+          "count": 26
+        },
+        {
+          "fileId": "3ba7a7068ec541351b83f60a7a78ae091a50b4d04e832b5503549cab5f37b9b9",
+          "durationMs": 89750,
+          "count": 30
+        },
+        {
+          "fileId": "9c3c6aa65ecfe5660548aeba957d579f048f93f302eb01bd5b8b1a2f93c8a51f",
+          "durationMs": 84513,
+          "count": 44
+        },
+        {
+          "fileId": "3648faed38fa2903652de31bb4136a956672dacdf75a9e08f14e3af2e2e35496",
+          "durationMs": 65575,
+          "count": 25
+        },
+        {
+          "fileId": "29c5d43190a38be29b1e554a5c6b7f3066b7c0e9eba841efdcbe18ca7e7b0412",
+          "durationMs": 62599,
+          "count": 30
+        },
+        {
+          "fileId": "c48d3cb886b313c57f5e7295f20d2120a258301e7fd356df8df55e09d817ddcb",
+          "durationMs": 55692,
+          "count": 15
+        },
+        {
+          "fileId": "96585da966a8c8fd29ea771e3b5fe60cf7d77ae3aa6e6e839197c562f7c1fc0d",
+          "durationMs": 50899,
+          "count": 16
+        },
+        {
+          "fileId": "55c8829024b6b23b58b8be149bf83ebb7dd5855275d56ebdfe2da6179a9ee8d8",
+          "durationMs": 46450,
+          "count": 24
+        },
+        {
+          "fileId": "6b29b7f218aa563725fc8f397a31ddc4f13208c35fc8cd11ab2ad9aa5f3ee002",
+          "durationMs": 43807,
+          "count": 17
+        },
+        {
+          "fileId": "3452527edbc0aba39fe739c52eff1c718c1ac3670d9e32ccac960c157b098d0d",
+          "durationMs": 41329,
+          "count": 1
+        },
+        {
+          "fileId": "3a22280c1e8063383a6e2348651b75e8182b13b3de5671b31a685613814a0fa6",
+          "durationMs": 38963,
+          "count": 24
+        },
+        {
+          "fileId": "2f18265ce0b63584131626925e3fa6a6ceb8d6c245910f878a43f5569afd58b5",
+          "durationMs": 36739,
+          "count": 10
+        },
+        {
+          "fileId": "80285b4cfccee0b1309691d95b0eb5d87cb89eeb51efd203c5b7eb696b866b9e",
+          "durationMs": 33874,
+          "count": 19
+        },
+        {
+          "fileId": "9579a51cc63675cfaa417f56027bd4108702fa78ed5d4f44c76a818d4b628d98",
+          "durationMs": 32069,
+          "count": 11
+        },
+        {
+          "fileId": "4111bde35cb7fa2f076027f02190f461853a447900607f02b53d27bec792b829",
+          "durationMs": 28983,
+          "count": 10
+        },
+        {
+          "fileId": "644fe0aec277f7f94abf7fb11fa60d52c83d784e0e7897b8e164b4bb11753f42",
+          "durationMs": 27528,
+          "count": 9
+        },
+        {
+          "fileId": "39e11c00ecc9db04bb70e4a675e02ba49f15497c0890455a2e5b88a980a9bb33",
+          "durationMs": 26918,
+          "count": 17
+        },
+        {
+          "fileId": "cb650a0a25087fb29395d3ae98a1f009ae2b691c6f41122f76d6fe245979f9f2",
+          "durationMs": 26893,
+          "count": 18
+        },
+        {
+          "fileId": "d6a8f3c0541edd683089dc7333240576e74855dabdae64d809be8f3c790b6b4b",
+          "durationMs": 26726,
+          "count": 12
+        },
+        {
+          "fileId": "2bfd440a6ae78c6f1c1b879eeabd971c40aa9b9a41fffa606958dbe473658dda",
+          "durationMs": 25015,
+          "count": 17
+        }
+      ],
+      "count": 731,
+      "failed": 0,
+      "retryOnly": 0,
+      "context": {
+        "runId": "39866598899",
+        "attempt": 1,
+        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
+        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
+      },
+      "phases": {
+        "activeSeconds": 1637,
+        "installSeconds": 14,
+        "otherSetupSeconds": 19,
+        "suiteSeconds": 1600,
+        "productionSeconds": 0,
+        "cleanupSeconds": 4
+      },
+      "skipped": 0,
+      "cancelled": 0,
+      "unmeasured": 0
+    },
+    {
+      "runId": 39866598899,
+      "attempt": 1,
+      "jobId": 120130235688,
+      "jobName": "Browser End-to-End Tests (3)",
+      "suiteSeconds": 1615,
+      "slowestTests": [
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "testId": "b3cbcb5a6b4de37fb3d39810d0dbf36fac3472d4e6f2cab3759fcc12255a0d22",
+          "durationMs": 23898,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "testId": "a91e6bc0ae0146d2930c6bd2f14834c58494afd140cdbec4cfb7b7e89983ad10",
+          "durationMs": 23083,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "testId": "c01af1ab7baa42b25a1ecf26433b12ed42800f333d069504006a2f7e5809b1f2",
+          "durationMs": 16321,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "slowestFiles": [
+        {
+          "fileId": "f0e0441575a53d32e94e528691fb97540ccbb74a11eec99c5e21e1babfe12513",
+          "durationMs": 132704,
+          "count": 70
+        },
+        {
+          "fileId": "705aeb874404404ac17a44b51f9164ba2706db10bb15fded3684e0c8504a8264",
+          "durationMs": 117253,
+          "count": 13
+        },
+        {
+          "fileId": "42a9c4e8adad65160872d843b956ae6a03a616b7d11b3b3fe306011a7f1dbc40",
+          "durationMs": 79604,
+          "count": 41
+        },
+        {
+          "fileId": "6377d239dc170dabd88f1c2adca6827790ca723e14f0eb0b0b06bbb4d34a38a0",
+          "durationMs": 70990,
+          "count": 18
+        },
+        {
+          "fileId": "b1b134901fe272e867d7bbf95db9dbb69c25feb2fe898c088cf4d4b2088a4696",
+          "durationMs": 68653,
+          "count": 22
+        },
+        {
+          "fileId": "8569d3ded262b2a29398385dc716a95493fa69973527cfdb54d3083524a0c76b",
+          "durationMs": 63646,
+          "count": 4
+        },
+        {
+          "fileId": "1898d1e03fbcc10b927d4a2cb345b9b509d7639b74c1352eea18c49cdcfc1827",
+          "durationMs": 62270,
+          "count": 20
+        },
+        {
+          "fileId": "20747b983374467898371c2e4d48e3cf6cb93ba440ad59f68e86ddf8c4a7a796",
+          "durationMs": 51483,
+          "count": 39
+        },
+        {
+          "fileId": "5c2157999b207812522e4d848a33d2f5d699ea4b33b1284d963d5614fc0cbca9",
+          "durationMs": 46691,
+          "count": 10
+        },
+        {
+          "fileId": "7566717d883b1598c0e8bb439fcac72996d4348d7ee4532a91c97862861f9480",
+          "durationMs": 44497,
+          "count": 11
+        },
+        {
+          "fileId": "8624950d9795be97e917861a5b5c4ef9418ada9c2491c6c4137faa94dd62dda2",
+          "durationMs": 44350,
+          "count": 23
+        },
+        {
+          "fileId": "a56acf6b823b467eb5aebe7d676f0d39fa781145386a8da12a6e4c91fbfd2fd2",
+          "durationMs": 39008,
+          "count": 8
+        },
+        {
+          "fileId": "c766fa11a7e93bb1b61598a48c2f7f70b4849a7d7d3b42de8c2a784e3bc05057",
+          "durationMs": 38124,
+          "count": 11
+        },
+        {
+          "fileId": "dd4d76728db89459762f6829cbbde03913e013ad5bab3f1124571486dff2ced5",
+          "durationMs": 37639,
+          "count": 32
+        },
+        {
+          "fileId": "7edfa92c437fb3f30c72aece4a91ba1fb36a0c20ccb4b0e338cfb05e792901c7",
+          "durationMs": 33188,
+          "count": 9
+        },
+        {
+          "fileId": "61996624d526dd15d510669b5bd5c976019856cf368a29c77f27c2f7aa9cf199",
+          "durationMs": 31334,
+          "count": 15
+        },
+        {
+          "fileId": "03ce846071f12ce7499334ce45a17b9e865816cd26aa94308ec865319ed2dcef",
+          "durationMs": 31131,
+          "count": 25
+        },
+        {
+          "fileId": "1870a9c11b9e91284f36b67ec98a359084037ce6bc4c24eb08230ca6730e25fc",
+          "durationMs": 29259,
+          "count": 23
+        },
+        {
+          "fileId": "987b6c446fb37bb0d2ae140ffa7c19faffa08eb6932436be8b01258ebc21c68d",
+          "durationMs": 28931,
+          "count": 20
+        },
+        {
+          "fileId": "a6493a160f0c9435b88c30f7620282051aea617f908e631d998573214368ca0e",
+          "durationMs": 28571,
+          "count": 4
+        }
+      ],
+      "count": 743,
+      "failed": 0,
+      "retryOnly": 0,
+      "context": {
+        "runId": "39866598899",
+        "attempt": 1,
+        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
+        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
+      },
+      "phases": {
+        "activeSeconds": 1650,
+        "installSeconds": 12,
+        "otherSetupSeconds": 20,
+        "suiteSeconds": 1615,
+        "productionSeconds": 0,
+        "cleanupSeconds": 3
+      },
+      "skipped": 69,
+      "cancelled": 0,
+      "unmeasured": 0
+    },
+    {
+      "runId": 39866598899,
+      "attempt": 3,
+      "jobId": 120202516638,
+      "jobName": "Browser End-to-End Tests (1)",
+      "suiteSeconds": 1817,
+      "slowestTests": [
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "5c924f767d0fecca9db7192dfa81952cb6e741ac68a0fe7a58dd808b574e59e0",
+          "durationMs": 13722,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "testId": "6c7caf5b8d7fad52e386b29b8d021637204205b9db7bfa76b4ac1d7b770e7504",
+          "durationMs": 13647,
+          "state": "passing",
+          "retry": 0
+        },
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "testId": "9f45e3f00e6b183e94b5438e7e9ee85605bc3e9149915416659041df68cf5a4e",
+          "durationMs": 11901,
+          "state": "passing",
+          "retry": 0
+        }
+      ],
+      "slowestFiles": [
+        {
+          "fileId": "a744385c6a66aef4a5573ac71e0091aa057fd9ca6caab813d270d80b71182d48",
+          "durationMs": 297859,
+          "count": 52
+        },
+        {
+          "fileId": "10697a9df047387b834c1cf389cb2bbdf2536b1a2485147b650190ccefa2da09",
+          "durationMs": 228338,
+          "count": 28
+        },
+        {
+          "fileId": "0870d9217fe84838fcda1eccccc4b24796dfe149d78ce09b5ff785f982b4db75",
+          "durationMs": 150039,
+          "count": 91
+        },
+        {
+          "fileId": "0901d1d7e1c81efd103c88d777c73ce9cfc829892a4ae416865666fa3bcc5d9f",
+          "durationMs": 104685,
+          "count": 65
+        },
+        {
+          "fileId": "5c89475eae168bac13869ef018048d2a08fb712f80ee048721f9fdb438c330de",
+          "durationMs": 70494,
+          "count": 14
+        },
+        {
+          "fileId": "57dbb9c8af8fd67b40be299e1fc53fd446533afe0ae21d689ada386d49dda101",
+          "durationMs": 70161,
+          "count": 15
+        },
+        {
+          "fileId": "88376137501f250687e602a30b42a427fb8e2e2fb73c73044068f450eb3085d7",
+          "durationMs": 63728,
+          "count": 24
+        },
+        {
+          "fileId": "67ef8a70b6eb25a5f9189ba7ab43ddb5b23eeace1e710d07eca93b8d7c7870c1",
+          "durationMs": 62793,
+          "count": 28
+        },
+        {
+          "fileId": "4a79b4baef33ff7a4cd61c91d157b6cad3830bc3dbf6f324a337623b77db91c1",
+          "durationMs": 61239,
+          "count": 62
+        },
+        {
+          "fileId": "97220f376d72dd789f185e72a1270dbb43671a18444afc57c21ec7cc3268ec0f",
+          "durationMs": 54447,
+          "count": 19
+        },
+        {
+          "fileId": "500c9c6425dc6b5154bb26fae93d922b4a68e71a18d2722848c301f565954d99",
+          "durationMs": 53811,
+          "count": 18
+        },
+        {
+          "fileId": "62db2f099c421a712cbf957d14b112ce7256d4ed3db94ea52b71419c10c84006",
+          "durationMs": 48590,
+          "count": 45
+        },
+        {
+          "fileId": "fcfcc149c48ce98550cd689d9f6fd9b29bd7bc1aa86b6b36c9e7de2edca43e1d",
+          "durationMs": 45719,
+          "count": 27
+        },
+        {
+          "fileId": "736584b1b05354cee821e6aa714e0af2e7e290d8329e8a0656a00e8355e72b4f",
+          "durationMs": 40645,
+          "count": 14
+        },
+        {
+          "fileId": "ec1e87178a5492a53beb3954d2cffb30d5d266f9d08e2589a70986cf8eaef0e6",
+          "durationMs": 36164,
+          "count": 17
+        },
+        {
+          "fileId": "77c0b320f6b47b8cf37a2e5d1107322c09d46283ac8d2bee7383134e9a058bd4",
+          "durationMs": 35849,
+          "count": 18
+        },
+        {
+          "fileId": "b2314e03376af35a7e2acfee720d35013680f656bcafa33302da8c554bd35e40",
+          "durationMs": 35277,
+          "count": 24
+        },
+        {
+          "fileId": "a0be1640251948b6dab4f83ab868dd2aa64f34005ca3171bb1bb66c84d562640",
+          "durationMs": 28529,
+          "count": 16
+        },
+        {
+          "fileId": "0afe5bd1759ac20909ffd8b4895334c23eb1278eda466a89fc9cf20baa6325de",
+          "durationMs": 27930,
+          "count": 6
+        },
+        {
+          "fileId": "ba172d137900021c232d6f2081bf172a4391f1bd6cd5817a2d23d8cfece46c99",
+          "durationMs": 24016,
+          "count": 5
+        }
+      ],
+      "count": 771,
+      "failed": 0,
+      "retryOnly": 0,
+      "context": {
+        "runId": "39866598899",
+        "attempt": 3,
+        "testedSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb",
+        "workflowSha": "8183eb56c4beb1ebfa4bfcc2693591e8d8a8cfbb"
+      },
+      "phases": {
+        "activeSeconds": 1956,
+        "installSeconds": 11,
+        "otherSetupSeconds": 26,
+        "suiteSeconds": 1817,
+        "productionSeconds": 99,
+        "cleanupSeconds": 3
+      },
+      "skipped": 52,
+      "cancelled": 0,
+      "unmeasured": 0
+    }
+  ]
+}

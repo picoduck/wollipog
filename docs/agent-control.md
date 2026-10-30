@@ -46,7 +46,10 @@ The runner injects these non-transcript environment values at launch:
 - `WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`: native Linux provider-mode FIFO channel directory for the
   same relay. Only the CLI reads it; the MCP adapter keeps the loopback endpoint.
 - `WOLLIPOG_CLI`: directly executable session CLI launcher on POSIX and WSL.
-- `WOLLIPOG_CLI_ARGS`: empty on POSIX and WSL; native Windows retains JSON-encoded re-entry arguments. The launcher never contains a bearer credential.
+- `WOLLIPOG_CLI_ARGS`: the empty string on POSIX and WSL, where the launcher already carries its
+  re-entry arguments, so `"$WOLLIPOG_CLI" $WOLLIPOG_CLI_ARGS session list --json` adds nothing.
+  Native Windows retains a JSON-encoded re-entry argument array. The launcher never contains a
+  bearer credential.
 
 The standalone installer publishes the same verified SEA bytes as both `wollipog-runner` and
 `wollipog` (`wollipog.exe` on Windows). The invocation name selects the user-facing CLI; no Node
@@ -165,11 +168,11 @@ wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
 wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
-wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
-wollipog review run --repo OWNER/NAME --pr N --head SHA [--brief-file PATH] [--scope delta|full] [--full-reason TEXT] --json
-wollipog review get JOB_ID --json
-wollipog review list [--limit N] [--cursor JOB_ID] --json
-wollipog review cancel JOB_ID --json
+wollipog pr wait PR [--repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
+wollipog review session run --repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
+wollipog review session get REVIEW_SESSION_ID --json
+wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
+wollipog review session cancel REVIEW_SESSION_ID --json
 wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
 wollipog decision get OCCURRENCE_ID --json
 wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
@@ -201,7 +204,15 @@ GitHub's `mergeStateStatus` to confirm it, because an unseen context could still
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
-for 10 seconds. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
+for 10 seconds. The same query reads the latest merge-queue timeline event and the latest force push
+(#3712), so a call that starts after GitHub removed the entry also reports `queue_ejected`, confirmed
+over the same 10 seconds from its first observation (a different removal restarts the interval), with
+`mergeQueueRemoval` carrying GitHub's `reason` and `removedAt`. The removal counts only when it is
+the latest merge-queue event, no force push happened at or after it, and the open head has a check
+suite created for the pull request's own head branch after the latest force push (or in its second
+when that push left this very commit) and before the removal; a suite's time is its creating push or
+event, so a delayed or re-run job cannot move it. A pull request never enqueued, one queued again, or a head pushed after the removal (including
+a commit already tested on another branch) keeps reporting its own checks. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
 caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
 reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
 checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
@@ -209,105 +220,153 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
-`wollipog review run` (MCP `request_cross_model_review`, #3306) asks the runner to run the installed
-cross-model review controller for the calling session's own pull request, outside the session's
-sandbox. A protected native Linux session cannot run the controller itself: its root is read-only and
-a reviewer's sandbox cannot nest inside the session's user namespace. The runner runs it instead, with
-the other model family as the reviewer (Codex for a Claude Code session, Claude Code for a Codex
-session) under that reviewer's normal read-only sandbox. The reviewer reads a snapshot checked out
-from a runner-owned mirror at the exact head, so nothing writes to the session's worktree or its Git
-metadata, and the session can keep working during the review. The runner refuses, and reports a fixed
-reason for, any request outside scope: the session must own a native managed worktree it created; the
-pull request must be open, from the same repository as the session's project (fork pull requests are
-refused), and on the worktree's branch; and `--head` must be its pushed head. The first round of a
-pull request needs `--brief-file` (MCP `brief`, at most 100 KiB: intent, acceptance criteria and
-verification); the runner keeps it, and later rounds review only the changes since the last valid
-round unless `--scope full` is given with `--full-reason`. The controller's limits apply per pull
-request: four valid rounds and two consumed attempts per round, with a rebase or force-push starting
-a new review epoch. A head that does not descend from the head the epoch was reviewed at (its last
-valid round's or, before any valid round, its most recent attempt's) counts as a rebase, so attempts
-spent before a rebase do not block the rebased head. One review runs per session at a time, and a runner at its review concurrency
-limit refuses a request as busy instead of queueing it.
+A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
+timeout, interval, budget, and read-only contract. Give it as a merge request URL,
+`<gitlab-host>/group/project!IID`, or an IID with `--repo <gitlab-host>/group/project`; the host is
+always required, because a bare path would make `glab` resolve against gitlab.com, and every read
+passes `--hostname`. Each poll reads the merge request (its head pipeline is the merged-results
+pipeline where the project runs them) and, while it is open, its merge-train car; the project's
+"pipelines must succeed" setting is read once. Outcomes: `checks_passed` only for a `success`
+pipeline; `checks_failed` for a failed or canceled one; `checks_blocked` for a skipped pipeline or one
+waiting for a manual action, which will not finish on its own; `no_required_checks` when the project
+does not require a pipeline and the merge request has none; `queue_failed` when the train pipeline
+fails or is canceled; `queue_ejected` when the car stays gone for 10 seconds without a merge; and
+`merged`, `closed`, `head_changed`, or `timeout` as for GitHub. The summary carries `forge: "gitlab"`,
+the pipeline and train state, and GitLab's `detailed_merge_status`. A bare IID without `--repo` still
+resolves only a GitHub repository.
 
-The request returns a job at once in state `requested`; the runner then reports `running` and finally
-`completed`, `failed`, or `not_launched` with a fixed reason. `review get` (`get_cross_model_review`)
-reads the job; once `terminal` is true it also returns the controller's one-line summary, its
-`report.json` and the tail of the runner-owned ledger (each at most 256 KiB, with `reportTruncated`
-and `ledgerTruncated`). Pass `include` to the MCP tool to fetch only the report or the ledger. The
-ledger is read-only to the session; adjudication stays in the pull request. `review list`
-(`list_cross_model_reviews`) pages the session's jobs newest first, and `review cancel`
-(`cancel_cross_model_review`) stops an unfinished one; a cancelled launched attempt still counts.
-Jobs are durable: a runner that reconnects receives every unfinished job again and reports its
-result, and it recovers a review that was running when it restarted.
+### Retired Review Jobs
 
-The routes are `/api/sessions/:id/cross-model-reviews` (POST to request, GET to list),
-`.../:jobId`, `.../:jobId/artifacts` and `.../:jobId/cancel` (POST). Only the session's own credential
-may request or cancel; the session and people with access to it may read. Orchestrator sessions do not
-have these tools. A session in a campaign with an allowance is refused, so the allowance cannot be
-bypassed: its Orchestrator runs the campaign's controlled review job (`run_campaign_review_job`,
-[campaign limits](./campaign-limits.md)) instead. The feature needs protocol 223 on both the control
-plane and the runner, and a Linux runner that advertises `runtime.sessionReview`.
+Use [Review Sessions](#review-sessions) for your own pushed PR, including from an isolated campaign
+child. Protocol 254 retires the runner-mediated review bridge and controlled campaign review job.
+Their MCP tools and CLI commands are no longer advertised or callable. Old tool names and command
+spellings receive an explicit migration refusal pointing to `request_review_session` and
+`wollipog review session run`; they are never silently forwarded or retried through another route.
+The legacy HTTP admission routes return 410 after their existing identity/audience checks.
 
-The runner discovers the installation at each registration and runs only files no session can
-change. The controller is read from its installed skill directory (`~/.devbox/skills/cross-model-review`,
-or `WOLLIPOG_SESSION_REVIEW_SKILL_DIR` in the runner's environment), never through a provider home's
-`skills` link. The controller, `python3`, `git`, `gh` (which the runner itself runs to read the pull
-request), and the `codex` and `claude` reviewer CLIs found on the runner's `PATH` must each be owned
-by the runner's user or root, have no path component writable by other users, and lie outside every
-root a session can write: provider credential homes (`~/.codex` and `~/.claude`, every configured
-provider account's directory, provider homes an agent's or a session's environment names, and each
-session's current and pending credential homes), the shared package caches, temporary directories,
-project checkouts and worktrees, and the runner's data directory. The first trusted candidate on
-`PATH` is used and an untrusted one earlier on it is skipped, never run; without a trusted
-`python3`, `git` and `gh` nothing is advertised. A reviewer installed under `~/.codex` or `~/.claude`
-is therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix,
-and put that location on the runner's `PATH`. A reviewer that is a script run through `env` (npm's
-`#!/usr/bin/env node`, with Node from nvm or fnm, for example) also needs that program, `node`,
-on the runner's `PATH` and trusted by the same checks; otherwise the reviewer is unavailable and
-the reason says so. The runner advertises what it found and why anything is unavailable, and
-records a digest of the controller's files with each job. Reviewers use the runner's default Codex
-and Claude sign-ins.
+Upgrade in this order:
 
-Nothing the runner runs for a review finds a program through the runner's own `PATH`, which could
-name a directory a session can write. The `git` and `gh` commands that read the pull request and
-build the snapshot, and the controller's recovery step, run with `PATH` set to a runner-private
-directory of links to the verified `git`, `gh` and `ssh`, followed by `/usr/bin:/bin`, and without
-the runner's `GIT_*` and `*ASKPASS` variables. `HOME` is kept, so your own git and GitHub CLI
-configuration and credentials still apply, but a credential helper must be named by an absolute
-path or live in a system directory. A fetch over SSH runs the verified `ssh` by its path
-(`GIT_SSH_COMMAND`); when no trusted `ssh` is found, the mirror is fetched over HTTPS only, whatever
-the origin's spelling. The controller's own `PATH` holds links to the verified reviewer, `git` and
-the reviewer's `env` program, then `/usr/bin:/bin`.
+1. Drain every legacy job's execution with its prior runner and retain its final receipt and usage,
+   including terminal `accounting_unavailable` receipts. These cannot be turned into priced
+   receipts by repeating cancellation; unknown cost remains unknown after execution has stopped.
+   Do not delete job records or infer zero cost from missing state. Unknown campaign usage keeps
+   its reservation and blocks protected admission until authenticated settlement.
+2. Upgrade the control plane. It admits no new legacy jobs; reconnect recovery sends only
+   cancellation, never a legacy dispatch. Older runners can still provide authenticated final
+   receipts to settle previously admitted work. Their cancel handlers do not re-send already-finished
+   or unknown jobs: a lost final update or never-delivered request stays pending until the runner is
+   upgraded to replay its historical receipt or explicitly refuse missing state. Existing archive
+   read routes retain their audience checks, bounded output, historical charges and deduplicated receipts.
+3. Upgrade the runner. A new runner refuses an older or unverified control plane at registration
+   with an actionable version error. Older servers sanitize unknown job refusal messages and can
+   replay dispatch, so silently accepting that pairing would hide the migration. Startup also
+   refuses unfinished, malformed or still-live/uninspectable local legacy execution without changing
+   records or launching a controller. A drained terminal unpriced receipt permits upgrade and replays
+   unchanged, retaining its unknown cost and reservation. Recorded process identities and surviving
+   controller groups must be gone; use the prior runner to drain them before upgrading.
+4. Request review sessions. Campaign members request their own sessions against the campaign
+   allowance. A human must replace any obsolete controlled-review profile boundary; no authority
+   or budget is silently converted. Missing reviewer/admission/budget support remains a blocker.
 
-The controller runs under `python3 -I`, with only its own installed directory added for its sibling
-modules. A controller preflight failure launches nothing and consumes no attempt: the job completes
-with the controller's summary (`attempt_consumed: false`, its `failure_class` and
-`validation_errors`), and the round's attempts are unchanged. A job stays running, with its snapshot
-and its share of the concurrency limit, until both the controller and the reviewer it started have
-exited, so a reviewer that outlives a killed controller is still supervised, cancelled through the
-controller's process group, and stopped by the time limit. When the controller dies without a
-result, its recovery step runs once; until it finishes, neither a repeated request nor a cancel
-ends the job, and its recovered result is what the job reports.
-
-Before the controller is spawned, the job is saved with a per-launch marker that the controller
-(and the reviewer it starts) carries in its environment. A runner that restarts before it recorded
-the controller's process looks for that marker: a live process is adopted and supervised as usual;
-an attempt directory or controller output with no live process is a controller that died, and is
-recovered; with neither, the job reports `not_launched` and the attempt is not charged. If the
-runner cannot record a controller it has just started, it stops that controller and reports the
-job failed.
+No controller discovery, native subprocess launcher or recovery executor remains. Compatibility
+message types and database ledgers remain only for refusal, cancellation and historical settlement.
+A new runner replays an exact settled legacy receipt; a missing receipt is an unknown outcome and
+never a zero-cost refund. See [ADR 0013](./adr/0013-review-sessions-replace-native-review-jobs.md).
 
 ### Review Sessions
 
-`wollipog review session run` (MCP `request_review_session`, #3368, phase 1 of #561) starts a
+#### Optional Merge Decision Evidence
+
+Protocol 243 adds `mergeReviewEvidence`. A `pr_merge` snapshot may cite `reviewSessionId`, the
+immutable attempt that upvoted its exact `headSha`. It is optional: uncited decisions preserve
+their existing behavior. The control plane checks that the attempt exists, belongs to the
+requester's own review run on that repository and PR, completed with a server-validated UPVOTE,
+and has not been superseded by a newer valid UPVOTE or DOWNVOTE on that PR. Repository matching is
+case insensitive. A newer invalid, cancelled, failed or unfinished attempt does not supersede it.
+A refusal identifies the mismatch or the superseding review session and head and directs the
+requester to obtain and cite a valid review session for the exact head.
+
+`get_workflow_decision` and `list_workflow_decisions` return current server-derived
+`reviewEvidence`: `verified` with the reviewer, requester, PR, head, vote, epoch, round, attempt and
+completion time, or `refused` with its reason. Orchestrators read these facts from the server;
+`reviewResult` remains the requester's recommendation. Evidence is checked at request, approval,
+arming, and the correlated merge authorization boundary. Record-only reconciliation and lifecycle
+settlement still require the exact armed command, current authority and forge proof of the merged
+head; a later vote cannot erase a completed action. A new vote can revoke a stale grant.
+The review records survive reconnect and restart; ordinary stop/restart decision revocation still
+applies. Review approval never grants human approval, merge authorization or passing CI checks.
+
+Upgrade the control plane and runner before using citations. A current runner refuses to send a
+cited snapshot to an older or unverified control plane, rather than letting it drop the citation;
+a current control plane refuses citations from an older runner. The CLI shares the MCP transport
+gate. Neither side silently retries without the citation. An uncited decision remains available
+under its existing review and authority rules; removing a citation changes the exact snapshot and
+requires a new decision.
+
+Settings → Reviews stores personal reviewer choices in the control plane, so they follow the user
+across devices. Each configured implementing harness can select a trusted, discovered native Codex
+or Claude Code reviewer, a discovered model and an effort. Automatic uses that reviewer's discovered
+default model and high effort. A missing configured combination refuses the review with an
+actionable reason; it never substitutes another reviewer. Same-family reviews require explicit
+consent, checked at admission and again by the runner against the implementing session's model.
+
+The round budget applies to all harnesses (1–32 valid rounds, default four). A review run pins its
+initial budget; changing settings does not expand an existing run, whose additional rounds still
+require the exact typed extension. The Project selector creates a personal project override by
+copying the user's current settings. That document replaces all user defaults for the user's
+sessions in that project; Reset to User Settings removes it. Missing settings rows retain the
+original opposite-family, high-effort, four-round launch without new configuration fields.
+
+`GET` and `PUT /api/review-settings?projectId=…` require a human principal and project access; PUT
+accepts `{ settings }`, or `{ settings: null }` to reset. The caller's user ID is server-derived.
+Configured reviews require the runner's `runtime.reviewSession.configuration` capability. Older
+runners keep the original launch when there are no settings rows, and refuse configured launches
+with update guidance. The permission preset, trusted command checks and read-only snapshot remain
+runner-owned. The `review_session_requested` event records the resolved configuration; admission
+refusals emit `review_configuration_refused`, correlated by the requesting session ID.
+
+Settings → Orchestrator and the launch policy editor expose Review Harness, Review Model, Review
+Effort and Review Round Budget when `reviewPolicySupported` is advertised. Each accepts Automatic
+or a fixed discovered choice (a round budget is 1–32). Automatic inherits the launching user's
+complete project override, then personal settings, then built-in defaults. Fixed campaign fields
+take precedence. New campaigns carry `reviewPolicySnapshotVersion: 1`; each child's selected fields,
+including its concrete discovered model when available, are persisted atomically at launch and
+projected as `SessionView.reviewPolicy`. Later settings or campaign edits affect future children.
+Same-family consent is never frozen: admission rechecks the current user's effective project-over-user
+rule. Its explicit consent applies only when that rule selects the actual reviewer harness; a retained
+toggle on another harness cannot authorize a campaign override.
+Missing configured harnesses and models refuse with an actionable reason and no fallback. Legacy
+campaigns without the marker retain their existing behavior; older clients omitting the fields
+preserve saved review policy. `campaign_child_review_policy_snapshot` logs the selected launch
+snapshot with the child and parent session IDs, without exposing the user's other review rules.
+
+`wollipog review session run` (MCP `request_review_session`, #561) is the default route for a
+session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
 **review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
 session, with a live and recorded transcript, instead of as an external controller. It reviews the
-calling session's own pull request at its pushed head, with the same scope as the bridge above: a
+calling session's own pull request at its pushed head. The scope is a
 native managed worktree the session created, an open pull request from the same repository on that
 worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
 100 KiB) is required and is the reviewer's only context besides the pinned patch.
 
-The control plane creates the review session on the requester's runner. The reviewer is the other
+Protocol v244 (#3539) adds GitLab merge requests. `--repo` (MCP `repository`) names the project by
+its host and full namespace, `<host>/group[/subgroup…]/project`, and `--pr` (MCP `number`) is the
+merge request's IID. The project checkout's `origin` must name exactly that host and project. Because
+that origin is session-writable configuration, a self-managed host must also be named by the user's
+global glab configuration (`glab config get api_protocol --host <host> --global`, the same local check
+every GitLab reader makes); otherwise the review is refused with `the runner's glab is not configured
+for this GitLab host` before any authenticated request. gitlab.com needs no such proof. The
+runner reads the merge request with a trusted `glab` (`glab api projects/<project>/merge_requests/<iid>
+--hostname <host>`, with the user's own glab login) and requires it to be `opened` (a `locked` merge
+request is not), from the same project, on the worktree's branch, at `--head`. The base is GitLab's
+merge base for that head (`diff_refs.base_sha`), so the head and base normally come from the session's
+own branch without a forge fetch. The runner needs a trusted `gh` only for GitHub reviews and a
+trusted `glab` only for GitLab reviews; it refuses with `the runner is missing a trusted glab for
+GitLab reviews` (or `gh for GitHub reviews`) otherwise. A pre-v244 runner is refused with an update
+message, and review-round extensions name a GitLab run the same way.
+
+
+The control plane creates the review session on the requester's runner. By default, the reviewer is the other
 model family, through the native agent the runner advertises for that harness in
 `runtime.reviewSession`. The runner proves the scope again against the requester's runner-recorded
 worktree, fills the same verified mirror as the bridge, and checks out the exact head into a
@@ -333,7 +392,12 @@ review contract and output schema (version 2) are ported from the cross-model-re
 
 A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
 active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
-no descendant authority. The requester's remaining cost budget, if it has one, bounds the review.
+no descendant authority. The requester's original human cost ceiling, if it has one, bounds its
+own spending and review attempts together. Campaign members use this same interface: the server
+reserves allowance before launch and records actual Session usage against the campaign allowance
+when present. Exhausted, stopped or unavailable allowances refuse admission with a reason;
+admission failures cannot be bypassed through the bridge. A worker's campaign allocation does
+not cap its reviews, which reserve allowance separately.
 A requester has one active review session at a time. A review session runs one turn: it takes no
 further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
 converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
@@ -365,6 +429,26 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
+- An epoch that used its rounds takes more only through a typed
+  `review_round_extension` workflow decision (`request_workflow_decision`).
+  - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
+    of the last valid round, 1 to 4 extra rounds, and a reason of at most 1000 characters.
+  - **Resource key:** `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<rounds>`.
+  - **Checks:** the control plane checks the request against the run as it records it. A run with
+    rounds left or any other epoch, round count or blocking count is refused. After an upvote,
+    protocol 237+ requires `upvotedHeadSha` naming the last valid upvoted head and a different
+    `headSha`. An unchanged upvoted head keeps the existing refusal. The granted round (including
+    retries) reviews only the delta since that upvote; `fullReason` cannot broaden it. Older peers
+    fail closed. Merge decisions for an existing review run require a valid review of their head.
+    Unused grants are rechecked against the run at consumption and admission; stale and superseded
+    grants do not add rounds. Extensions keep the normal campaign admission and cost accounting.
+  - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
+    itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
+    an explicit Parent Control grant; Full Control never takes it as part of its own boundary.
+  - **Effect:** approved and consumed extensions add their rounds to that epoch's budget. The next
+    review request consumes an approved one, so a session restart, which revokes unconsumed
+    decisions, cannot take back rounds already granted. A policy stored before this category
+    existed reads it as human-owned.
 
 Each finished attempt is judged against the review contract (`verdict`: `valid`, `consumed`,
 `effectiveVote`, `failureClass`, at most 8 `validationErrors`): the report must name the reviewed
@@ -379,6 +463,29 @@ first, and `review session cancel` (`cancel_review_session`) stops the review se
 persists the outcome before reporting it and re-sends it at each registration; a runner restart
 fails any unsettled review session for good, and the checkout is removed once the review settles.
 
+#### Review Continuation
+
+End the requesting turn when you have no independent work: there is no need to poll mid-turn.
+Read the full verdict and report with `review session get` on continuation; use that read to
+recover a missing notification, or poll every minute or two on older peers without continuations.
+A finished review owes its requester exactly one continuation (#3369), recorded with the review's
+outcome so a crash cannot lose it. A review the requester cancelled, or one whose launch was
+refused at once, owes nothing. The continuation is a framed prompt,
+`[Wollipog Cross-Model Review — <reviewSessionId>]` … `[End Wollipog Cross-Model Review]`:
+- the reviewer, the pull request, its head, and the round and epoch;
+- the outcome: a valid UPVOTE or DOWNVOTE with its findings (up to 20, one bounded line each), an
+  invalid attempt with its first reason, or the fixed reason a review failed;
+- an instruction to read the full report with `get_review_session`, adjudicate every finding,
+  and request the next round once fixes are pushed.
+
+Like a restart notice, it goes only to an idle requester that nothing would refuse it for. A
+requester mid-turn takes it after its turn settles, through the control plane's retry sweep. A
+worktree-backed session receives it as a durable command that a reconnect or runner restart
+delivers exactly once; any other session receives it on the immediate lane, recorded as
+delivered before the send. A requester that ends for good is owed nothing more. The review's
+`continuation` field reads `pending`, `delivered`, `uncertain`, `failed` or `abandoned`, or
+null when nothing was owed.
+
 In the web app, a review session is titled **Codex Review** or **Claude Review** of its pull
 request. The requester's Review panel lists its reviews under Cross-Model Reviews, newest first:
 each with its round and epoch, one state badge (Requested, Reviewing, Upvote, Downvote, Invalid,
@@ -389,9 +496,11 @@ Open Transcript. The list is read-only; the requester's own view carries a summa
 
 The routes are `/api/sessions/:id/review-sessions` (POST to request, GET to list),
 `.../:reviewSessionId` and `.../:reviewSessionId/cancel` (POST), with the bridge's credential rules.
-Orchestrator sessions do not have these tools, and a session in a campaign with an allowance is
-refused as with the bridge. The feature needs protocol 226 on both the control plane and the runner,
-and a Linux runner that advertises `runtime.reviewSession`; review runs need protocol 228.
+Orchestrator sessions do not have these tools. Campaign members request their own review sessions;
+unlike the bridge, this route admits them against their campaign allowance. The feature needs
+protocol 226 on both the control plane and the runner, and a Linux runner that advertises
+`runtime.reviewSession`; review runs need protocol 228. Campaign charging requires protocol 232;
+older runners refuse campaign review sessions with upgrade guidance.
 
 A Codex reviewer's read-only sandbox can still read files outside the checkout: Codex's read-only
 sandbox policy has no readable-roots restriction. Network access is off for its commands, but what it
@@ -714,6 +823,16 @@ For a native Linux provider already launched in a *selected requested worktree*,
 worktree boundary is the read-only parent of that selected child. A newly requested sibling is
 therefore not writable during the current turn. Select it and relaunch before editing it. This
 keeps the selected root and Git registration intact; it does not preserve writable file contents.
+
+Create, attach, and select results report this as `isolation.writableNow`, read from the live
+process's boundary rather than the configured mode, so a `provider`-mode runner whose provider runs
+in this boundary reports it too. A worktree counts as writable only when its Git admin directory is,
+which this boundary grants only to the launch worktree and the worktrees bound with it. When the
+session's own turn makes such a switch, the result also reports `continuesAfterRelaunch` (protocol
+v255, #3810). The turn's end relaunches the session in that worktree, and the runner submits one
+automatic continuation turn there. It does not when a prompt is already waiting (that prompt runs
+instead), the turn was interrupted or stopped, the relaunch failed, or the session is held. A switch
+made by a person or another session relaunches the same way and then waits for the next prompt.
 
 ### Other Managed Worktrees of the Session
 
@@ -1245,6 +1364,70 @@ arms that exact command while the decision remains approved. The matching one-sh
 command permission is then admitted and the decision is marked consumed only after the allow
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
+
+Protocol v239 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
+its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
+request IID, and three fields exist only for GitLab and are then required: `mergeMethod`
+(`merge_train` or `merge`), `squash`, and `removeSourceBranch`. GitHub snapshots and their digests
+are unchanged. The canonical command is one `glab api` call pinned to the approved head with `sha=`
+and always naming the host:
+
+- `merge_train`: `glab api --method POST projects/<url-encoded project>/merge_trains/merge_requests/<iid>
+  --hostname <host> -f sha=<approved-head-sha> -F squash=<true|false>`. It omits
+  `when_pipeline_succeeds`, which GitLab 17.7 rejects for a merge request that is already mergeable.
+- `merge`: `glab api --method PUT projects/<url-encoded project>/merge_requests/<iid>/merge --hostname
+  <host> -f sha=<approved-head-sha> -F squash=<true|false> -F should_remove_source_branch=<true|false>`.
+
+Before arming it, the control plane asks the child's runner (v239) for `gitlab_merge_preflight`,
+which reads GitLab through the child's own `glab` login and context. A merge request that is not
+open or is a draft, a head that moved since approval, a direct merge on a project that runs merge
+trains (GitLab would merge it straight past the train), a train merge on a project without them or
+on an instance older than the merge-train API (15.11), squash outside the project's squash option,
+or a train whose merge request deletes its source branch differently from the approval revokes the
+decision. GitLab being unreadable proves nothing, so nothing is armed and the child may try again.
+The forge proof reads the merge request's own URL through `glab`. A failed train pipeline is not
+retried: `wait_pull_request` reports it as `queue_failed`, and the child requests a new decision.
+
+### Closing References in GitHub Merges
+
+GitHub closes an issue when a merged pull request's description puts a closing keyword (close, fix
+or resolve, in any tense, any case, optionally followed by a colon) directly before the issue's
+reference, whatever the sentence says. "This PR does not close #3635" closed #3635 on 2026-10-26,
+"does not resolve #3157's" closed #3157, and "must not auto-close #N" would have closed #N. An issue
+linked by hand in the pull request's Development section closes the same way. A campaign that closes
+issues through the typed `issue_closure` route therefore writes "Refs #N" and never puts a closing
+verb before a reference that must stay open (#3713).
+
+Protocol v242 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
+`pr_merge` snapshot may carry `intendedClosures`: every issue the merge is meant to close, as `#N`,
+`owner/repo#N`, or an issue URL, normalized to sorted unique `owner/repo#N`. It is omitted when the
+merge must close nothing, so earlier digests are unchanged; GitLab snapshots refuse it. When the
+child's runner is v242, the control plane asks it for `github_merge_preflight` before creating the
+decision. The runner reads the open pull request through the child's own `gh` login: its head, its
+description and GitHub's `closingIssuesReferences`. It reports every issue either would close, with
+the description's line for each. The decision is created only when those issues are exactly the
+declared ones. Otherwise the request is refused, naming each undeclared issue with its line (or as
+linked on GitHub) and each declared issue the merge would not close, and nothing is pending for a
+reviewer. The created decision records the read as `closingReferenceCheck`, which the request card
+shows as **Closes on Merge**. Consuming the approval reads GitHub again, because the description can
+change after approval: a different set of closures, a moved head, or a pull request that is no
+longer open revokes the decision, and GitHub being unreadable arms nothing and may be retried. A
+pre-v242 child runner is not asked; its decisions carry no `closingReferenceCheck`, and the card says
+the closures were not checked.
+
+The description matcher follows GitHub's measured behavior (each case was checked against
+`closingIssuesReferences` on a draft pull request): `#N`, `GH-N`, `owner/repo#N`, an `https` issue or
+pull URL, and a Markdown link to one all count, in any block outside code; inline code, fenced and
+indented code, HTML comments, a line break or no-break space between keyword and reference, a missing
+space, a parenthesis, emphasis that ends between the two, and a second reference after one keyword
+(`Closes #1, #2` closes only #1) do not. Where the matcher is unsure it reports rather than hides:
+an unclosed fence, a fence left by its quote or list item, fences and backticks inside raw HTML
+blocks, code spans and inline comments that cross a line, comments only one of cmark-gfm and the
+HTML parser would hide, and indented code are all read as visible text. The
+title and commit messages are not read: GitHub never links from the title, and a merge-queue squash
+commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
+an open pull request, or for a draft description with `--file`, compared with `--intended`.
+
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
 child verification settles an approved evidence decision as consumed instead of requiring the child
@@ -1435,7 +1618,35 @@ queued behind a turn that had never started.
   hold but not the wait: the hold keeps its identity and deadline, and the work is ended as soon as
   that turn settles if the deadline has passed. Orphaned work is not bounded: its one recovery turn
   already crosses the barrier.
-- **The way out is stated.** For a bounded hold, or one whose runner can stop a single job, the
+- **It can be released now (#3752).** On protocol v247, a hold whose live provider can end its
+  background work carries `canRelease`, whether or not the bound is enabled. MCP
+  `release_queue_hold` with the session and the hold's `holdId` (CLI
+  `wollipog session release-hold <session-id> <hold-id>`), `POST /api/sessions/:id/queue-hold/release`
+  with `{ "holdId": "..." }`, or **Proceed Now** beside the queued messages runs the deadline's path
+  at once: every unfinished job ends and is recorded as `killed` with `endedBy` naming the requester
+  and the reason `stop_request`, the timeline notice names the jobs and who released the hold after
+  how long, a finished sibling's result is still delivered, and the handoff and the queued prompts
+  then run in their original order. The conversation keeps running. The answer lists the ended
+  `jobIds`. Releasing takes exactly the authority of stopping one job (#1780): the session owner or
+  its controlling Orchestrator (the direct parent), never the session itself, and the reader's
+  `canStopJobs` verdict covers both. The `holdId` must be the hold the requester read, so a request
+  that raced a cleared or replaced hold ends nothing. The request is refused with 409 when the hold
+  changed (`hold_changed`), no hold remains (`no_hold`), a turn started meanwhile (`turn_active`),
+  the work is already being ended (`in_progress`), no live provider process owns it
+  (`no_live_process`; only orphan recovery or a restart clears that hold), the provider reported
+  nothing to end (`nothing_to_end`), the harness cannot end its work (`unsupported`), or the runner
+  is offline or older than v247; with 504 when the runner does not answer in time.
+- **It names work Background Work does not list (#3752).** On protocol v250, a pending id with no
+  unfinished job record is listed in the hold's `unlistedJobs` (at most 20, sorted; the count still
+  covers all of them): `provisional` for a launch the provider has not confirmed as a task yet
+  (`tool:<tool-use-id>`), `unregistered` for a task id the runner tracks without a job record. The
+  hold's reason says how many of its jobs Background Work does not list, and Background Work shows a
+  **Handoff Waiting on Unlisted Work** notice naming each one and, for a reader who may take it,
+  Proceed Now. A pending id whose job this conversation already recorded as ended no longer counts:
+  it cannot be running, so it holds no handoff and no queued prompt.
+- **The way out is stated.** A releasable hold's recovery action, for a reader who may stop jobs,
+  names `release_queue_hold` with its hold id and **Proceed Now** first, then stopping a single job
+  where the runner can. For a bounded hold, or one whose runner can stop a single job, the
   recovery action says to wait or stop that job and advises against a restart. Otherwise — an older
   runner, a disabled bound, or a provider that cannot end its work — it says to wait for the job,
   or, if it never ends, to restart the session, and what that costs. What a restart costs depends
@@ -1485,7 +1696,8 @@ queued behind a turn that had never started.
   `endedBy`, and a v191 or older runner sends none, so its killed row names no actor.
 - **The advice is written for its reader (#1857, #1863).** The server's copy of a hold's recovery
   action names every way out. An agent credential reads a copy that names only the tools its
-  routes admit: `stop_background_job` only for the controlling Orchestrator (the direct parent),
+  routes admit: `stop_background_job` and `release_queue_hold` only for the controlling
+  Orchestrator (the direct parent),
   restarting only for an ancestor (a session cannot restart itself), and `select_worktree` and
   `create_worktree` only for a credential that may manage that session's worktrees (a worker its
   own session; an Orchestrator its descendants, and itself unless Strict Project Isolation is on).

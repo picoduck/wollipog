@@ -36,6 +36,13 @@ preserve the source session owner. A stale or unknown snapshot workspace falls b
 scope and never widens access; a runner fork response must preserve the source driver and agent
 identity. Non-admin members cannot submit an arbitrary host path. An agent session credential receives only
 its live persisted session scope, and its route allowlist remains an additional ceiling.
+The one exception is runner-family access (runners, their workspaces and agent installations) for a
+credential whose session is user-owned, such as a Full Control root and its children: it acts for
+that user, so it may list, inspect and launch on the runners that user can use as an active,
+non-viewer member (organization-owned, the user's own, and the user's teams'). It never inherits an
+owner/admin role, and sessions, Projects, artifacts and decisions keep the exact session-scope rule.
+Like that user, it launches only into registered workspaces the user can access, and it names an
+arbitrary host path only when the user is an active organization owner or admin.
 Workflow-engine orchestrators are explicitly organization-owned even when their worker sessions use
 a user/team-owned project: workflow definitions, runs, artifacts, and policies are still
 organization resources, while each worker keeps the selected project scope.

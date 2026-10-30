@@ -2132,6 +2132,49 @@ test("provider sign-in projections are validated, version-gated, and replace ato
   assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
 });
 
+test("a failed sign-in's failure code is only ever one from the closed set, and its error is validated as before (#3519)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const duplicate = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude" as const,
+    status: "failed" as const,
+    expectsCode: false,
+    error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+    startedAt: 500,
+  };
+  const stored = () => db.getRunner("runner-1")?.providerLogins?.[0];
+  db.registerRunner(meta({ providerLogins: [duplicate] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  assert.deepEqual(stored(), duplicate, "a login without the code, from an older runner, is stored as it was");
+  assert.equal(stored()?.failureCode, undefined);
+
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: "account_already_on_machine" }], 525);
+  assert.deepEqual(stored(), { ...duplicate, failureCode: "account_already_on_machine" }, "the known code passes with its sentence");
+
+  // A code outside the closed set never passes, and is not simply dropped either: without a code the
+  // dashboard would match this duplicate sentence and show Already on This Machine for what the
+  // newer runner reported as some other failure. `unrecognized` keeps it a plain failure.
+  for (const failureCode of ["account_already_on_this_machine", "", 7, { code: "account_already_on_machine" }]) {
+    db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode } as never], 550);
+    assert.deepEqual(stored(), { ...duplicate, failureCode: "unrecognized" },
+      `an unknown code is replaced, and the login and its sentence kept: ${JSON.stringify(failureCode)}`);
+  }
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: null } as never], 560);
+  assert.deepEqual(stored(), duplicate, "a null code reads as none");
+  db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, status: "awaiting_code", error: undefined, failureCode: "account_already_on_machine",
+  }], 575);
+  assert.equal(stored()?.failureCode, undefined, "only a failed sign-in carries a failure code");
+
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "x".repeat(501),
+  }], 600), /provider sign-in inventory/, "the error sentence is still validated beside a code");
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "bad\u0000sentence",
+  }], 625), /provider sign-in inventory/);
+});
+
 test("machine sign-in dismissals persist per user, runner, and completed attempt", () => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-login-dismiss-"));
   const location = join(temp, "control-plane.db");
@@ -2643,6 +2686,44 @@ test("a queue hold keeps the runner's word that one job can be stopped (#1780)",
     id: "not-stoppable-hold", status: "queued", queueHold: { ...queueHold, canStopJobs: "yes" as never },
   }), "runner-1", 6_000);
   assert.equal(db.getSession("not-stoppable-hold")!.queueHold?.canStopJobs, undefined, "only an exact true is kept");
+});
+
+test("a queue hold keeps the runner's word that it can be released now (#3752)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "provider_account_switch" as const, holdId: "provider-account-switch:5000", since: 5_000, target: "Work",
+    queuedPrompts: 2, unfinishedBackgroundJobs: 1, canRelease: true as const,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "releasable-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("releasable-hold")!;
+  assert.deepEqual(held.queueHold, queueHold);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /release_queue_hold \(hold provider-account-switch:5000\)/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "not-releasable-hold", status: "queued", queueHold: { ...queueHold, canRelease: "yes" as never },
+  }), "runner-1", 6_000);
+  const unreleasable = db.getSession("not-releasable-hold")!;
+  assert.equal(unreleasable.queueHold?.canRelease, undefined, "only an exact true is kept");
+  assert.doesNotMatch(unreleasable.holds?.[0]?.recoveryAction ?? "", /release_queue_hold/u);
+});
+
+test("a queue hold keeps the unlisted work it waits on, dropping malformed entries (#3752)", () => {
+  const db = withRunner();
+  const unlistedJobs = [{ id: "tool:toolu_watch", kind: "provisional" as const }, { id: "b5p3g2lyb", kind: "unregistered" as const }];
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 2, unlistedJobs,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "unlisted-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("unlisted-hold")!;
+  assert.deepEqual(held.queueHold?.unlistedJobs, unlistedJobs);
+  assert.match(held.holds?.[0]?.reason ?? "", /none of which Background Work lists\.$/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "malformed-unlisted-hold", status: "queued",
+    queueHold: { ...queueHold, unlistedJobs: [{ id: "", kind: "provisional" }, { id: "x", kind: "other" }, unlistedJobs[0]] as never },
+  }), "runner-1", 6_000);
+  const malformed = db.getSession("malformed-unlisted-hold")!;
+  assert.equal(malformed.queueHold?.holdId, "worktree-rebind:5000", "the hold itself is kept");
+  assert.deepEqual(malformed.queueHold?.unlistedJobs, [unlistedJobs[0]]);
 });
 
 test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {
@@ -4204,6 +4285,26 @@ test("setSessionArchived hides from default listSessions but visible with includ
   assert.equal(db.listSessions({ includeArchived: true }).length, 1);
 });
 
+test("runnerSessionInventory matches listSessions for one runner without materializing other runners", () => {
+  const db = withRunner();
+  db.registerRunner(meta({ runnerId: "runner-2", hostname: "host-2" }), 500);
+  db.createSession(newSession({ id: "old", now: 1000 }));
+  db.createSession(newSession({ id: "archived", now: 2000 }));
+  db.createSession(newSession({ id: "other", runnerId: "runner-2", now: 3000 }));
+  db.createSession(newSession({ id: "new", now: 4000 }));
+  db.setSessionArchived("archived", true, 5000);
+  db.setWorktreePath("archived", "/worktrees/archived");
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?")
+    .run(JSON.stringify([{ id: "wt", path: "/worktrees/archived", branch: "agent/archived", source: "created" }]), "archived");
+  db.updateSessionStatus("old", "completed", 6000);
+  const fields = ["id", "runnerId", "projectId", "status", "archived", "worktreePath", "worktrees"] as const;
+  const expected = db.listSessions({ includeArchived: true }).filter((session) => session.runnerId === "runner-1")
+    .map((session) => Object.fromEntries(fields.map((field) => [field, session[field]])));
+  assert.deepEqual(db.runnerSessionInventory("runner-1"), expected);
+  assert.deepEqual(expected.map((session) => session.id), ["new", "archived", "old"]);
+  assert.deepEqual(db.runnerSessionInventory("runner-2").map((session) => session.id), ["other"]);
+});
+
 /* ----------------------------- Events ---------------------------------- */
 
 test("appendEvent + listEvents return events in seq order with stable ids", () => {
@@ -4468,6 +4569,85 @@ test("provider account switch failures round-trip and clear through runner snaps
   assert.equal(db.getSession("account-switch-failure")?.providerAccountId, "work");
 });
 
+test("provider-HOME launch refusals round-trip, survive an older runner's snapshot, and clear (#3240)", () => {
+  const db = withRunner();
+  const refusal = { code: "foreign_owner" as const, provider: "claude" as const, providerAccountId: "work",
+    providerAccountLabel: "Work", detectedAt: 2_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "launch-refusal", providerHomeRefusal: refusal }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("launch-refusal")?.providerHomeRefusal, refusal);
+
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal" }), 3_000);
+  assert.deepEqual(db.getSession("launch-refusal")?.providerHomeRefusal, refusal, "an absent field keeps it");
+
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal",
+    providerHomeRefusal: { ...refusal, home: "/home/user/.claude" } as never }), 4_000);
+  assert.equal(db.getSession("launch-refusal")?.providerHomeRefusal, undefined, "a malformed refusal is not stored");
+
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal", providerHomeRefusal: refusal }), 5_000);
+  db.updateSessionFromSnapshot("launch-refusal", snapshot({ id: "launch-refusal", providerHomeRefusal: null }), 6_000);
+  assert.equal(db.getSession("launch-refusal")?.providerHomeRefusal, undefined, "null clears it");
+});
+
+test("a starting session's provider-HOME wait is stored, projected only while starting, and cleared (#3240)", () => {
+  const db = withRunner();
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  const wait = { provider: "codex" as const, cause: "holder_alive" as const, providerAccountId: "work",
+    providerAccountLabel: "Work", waitingSince: 2_000, waitUntil: 3_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "waiting", status: "starting", providerHomeWait: wait }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("waiting")?.providerHomeWait, wait);
+  assert.deepEqual(summary("waiting")?.providerHomeWait, wait, "lists show it too");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 1 }), 3_000);
+  assert.deepEqual(db.getSession("waiting")?.providerHomeWait, wait, "an older runner's absent field keeps it");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 2,
+    providerHomeWait: { ...wait, home: "/home/user/.codex" } as never }), 4_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a malformed wait is not stored");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 3, providerHomeWait: wait }), 5_000);
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 4, providerHomeWait: null }), 6_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "null clears it");
+
+  // A wait never outlives its launch: any other status hides it, and a status change ends it.
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "running", seq: 5, providerHomeWait: wait }), 7_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined);
+  assert.equal(summary("waiting")?.providerHomeWait, undefined);
+  db.updateSessionStatus("waiting", "failed", 8_000);
+  db.updateSessionStatus("waiting", "starting", 9_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a later launch starts without the old wait");
+});
+
+test("a session's worktree switch is stored, projected while it lives, kept when absent and cleared by null (#3810)", () => {
+  const db = withRunner();
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  const pending = { phase: "pending" as const, branch: "fix/switch", since: 2_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "switching", status: "idle", worktreeSwitch: pending }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, pending);
+  assert.deepEqual(summary("switching")?.worktreeSwitch, pending, "lists show it too");
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 1 }), 3_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, pending, "an older runner's absent field keeps it");
+
+  const relaunching = { ...pending, phase: "relaunching" as const };
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 2,
+    worktreeSwitch: relaunching }), 4_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, relaunching);
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 3,
+    worktreeSwitch: { ...pending, path: "/home/user/worktrees/fix" } as never }), 5_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined, "a malformed switch, or one naming a path, is not stored");
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 4, worktreeSwitch: pending }), 6_000);
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 5, worktreeSwitch: null }), 7_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined, "null clears it");
+
+  // A finished session is switching nothing, even if the clearing snapshot never arrived.
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 6, worktreeSwitch: pending }), 8_000);
+  db.updateSessionStatus("switching", "stopped", 9_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined);
+  assert.equal(summary("switching")?.worktreeSwitch, undefined);
+});
+
 test("a session's recorded provider profile id is stored, projected, kept when absent and cleared by null (#3239)", () => {
   const db = withRunner();
   const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
@@ -4526,6 +4706,27 @@ test("the adopted marker round-trips through create/update snapshot into Session
   // adopted is runner-authoritative — an updated snapshot carries it through
   db.updateSessionFromSnapshot("no", snapshot({ id: "no", adopted: true }), 3000);
   assert.equal(db.getSession("no")?.adopted, true);
+});
+
+test("follow-up facts round-trip through full and summary views, and old peers clear live claims", () => {
+  const db = withRunner();
+  const followUp = { state: "queued" as const, queuedAt: 1_000, retryScheduled: true };
+  const snap = snapshot({ backgroundWorkState: "continuation_pending", backgroundFollowUp: followUp });
+  db.createSessionFromSnapshot(snap, "runner-1", 2_000);
+  const summary = () => db.listSessionSummaries().find((session) => session.id === snap.id)!;
+  assert.deepEqual(db.getSession(snap.id)?.backgroundFollowUp, followUp);
+  assert.deepEqual(summary().backgroundFollowUp, followUp);
+  const blocked = { state: "blocked" as const, queuedAt: 1_000, blocker: "budget" as const };
+  db.updateSessionFromSnapshot(snap.id, { ...snap, backgroundFollowUp: blocked }, 3_000);
+  assert.deepEqual(db.getSession(snap.id)?.backgroundFollowUp, blocked);
+  assert.deepEqual(summary().backgroundFollowUp, blocked);
+  // Persisted rows survive projection/reload without inventing a new queue start time.
+  assert.match(db.raw().prepare("SELECT background_follow_up FROM sessions WHERE id=?").get(snap.id)!.background_follow_up as string,
+    /"queuedAt":1000/);
+  db.updateSessionFromSnapshot(snap.id, { ...snap, backgroundFollowUp: undefined }, 4_000);
+  assert.equal(db.getSession(snap.id)?.backgroundFollowUp, undefined);
+  assert.equal(summary().backgroundFollowUp, undefined);
+  db.close();
 });
 
 test("background work state round-trips while legacy settled sentinels clear current status", () => {
@@ -6353,6 +6554,7 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     }, "legacy rows gain no implicit granular delegation");
     initial.updateSessionParentControl("sess-1", "questions_and_approvals", 2_000);
@@ -6362,6 +6564,7 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 2_000, 0), {
       revision: 1,
       decisions: {
@@ -6370,11 +6573,12 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     });
     assert.equal(initial.updateSessionParentControlPolicy("sess-1", {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
     }, 2_001, 0), null, "stale policy revisions cannot overwrite a newer human choice");
     assert.equal(initial.getSession("sess-1")?.parentControl, "questions_and_approvals");
     initial.close();
@@ -6399,11 +6603,12 @@ test("Parent Control defaults off and persists opt-in across restart", () => {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     }, "malformed or future granular policies fail closed after a rolling restart");
     assert.equal(conservative.updateSessionParentControlPolicy("sess-1", {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
     }, 3_000, 99)?.revision, 100, "the surfaced durable revision lets the conservative UI repair the row");
     conservative.close();
   } finally {
@@ -6438,7 +6643,7 @@ test("legacy Orchestrator sessions gain an inspectable fail-closed campaign snap
     assert.equal(policy.delegation.parentControl, "questions");
     assert.equal(policy.execution.strictProjectIsolation, true,
       "legacy Orchestrators retain their original strict boundary");
-    assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human"]);
+    assert.deepEqual(Object.values(policy.delegation.decisions), ["human", "human", "human", "human", "human", "human"]);
     assert.deepEqual(new Set(Object.values(policy.sources.behavior)), new Set(["legacy_session"]));
     assert.deepEqual(new Set(Object.values(policy.sources.delegation.decisions)), new Set(["legacy_session"]));
     assert.equal(policy.sources.execution.strictProjectIsolation, "legacy_session");
@@ -6469,7 +6674,7 @@ test("stored campaign harness identities discard presentation and credential-adj
         parentControl: "off",
         decisions: {
           implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-          follow_up_issue_publication: "human", ui_evidence_approval: "human",
+          follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
         },
       },
       execution: { strictProjectIsolation: false },
@@ -6484,6 +6689,7 @@ test("stored campaign harness identities discard presentation and credential-adj
             implementation_question: "system_default", pr_merge: "system_default",
             merged_branch_deletion: "system_default", follow_up_issue_publication: "system_default",
             ui_evidence_approval: "system_default",
+            review_round_extension: "system_default",
           },
         },
         execution: { strictProjectIsolation: "system_default" },
@@ -6530,7 +6736,7 @@ test("established human Orchestrator provenance survives the creation-actor migr
       pr_merge: "human" as const,
       merged_branch_deletion: "human" as const,
       follow_up_issue_publication: "human" as const,
-      ui_evidence_approval: "human" as const,
+      ui_evidence_approval: "human", review_round_extension: "human" as const,
     };
     initial.createSession({
       ...newSession(),
@@ -6563,6 +6769,7 @@ test("established human Orchestrator provenance survives the creation-actor migr
               merged_branch_deletion: "system_default",
               follow_up_issue_publication: "system_default",
               ui_evidence_approval: "system_default",
+              review_round_extension: "system_default",
             },
           },
         },
@@ -6611,6 +6818,7 @@ test("creation-actor migration does not promote a detached agent-created Orchest
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         sources: {
@@ -6629,6 +6837,7 @@ test("creation-actor migration does not promote a detached agent-created Orchest
               merged_branch_deletion: "system_default",
               follow_up_issue_publication: "system_default",
               ui_evidence_approval: "system_default",
+              review_round_extension: "system_default",
             },
           },
         },

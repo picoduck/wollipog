@@ -99,6 +99,9 @@ export function isPolicyHookApiRouteAllowed(method: string, routePath: string): 
  * the HTTP method so a newly-added API is denied until it is deliberately added here.
  */
 const AGENT_CONTROL_API_ROUTES = new Set([
+  "POST /api/sessions/:id/automation-proposals",
+  "GET /api/sessions/:id/automation-proposals/:occurrenceId",
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
   "GET /api/compatibility",
   "GET /api/runners",
   "GET /api/sessions",
@@ -162,6 +165,9 @@ const AGENT_CONTROL_API_ROUTES = new Set([
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([
+  "POST /api/sessions/:id/automation-proposals",
+  "GET /api/sessions/:id/automation-proposals/:occurrenceId",
+  "POST /api/sessions/:id/automation-proposals/:occurrenceId/execute",
   "POST /api/sessions/:id/result/handoff",
   "GET /api/compatibility", "GET /api/runners", "GET /api/sessions", "GET /api/sessions/:id",
   "GET /api/sessions/:id/events", "GET /api/governance/policies",
@@ -197,7 +203,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/steering", "GET /api/sessions/:id/steering/:submissionId",
   "POST /api/sessions/:id/steering/:submissionId/resolve",
   "POST /api/sessions/:id/restart", "POST /api/sessions/:id/config", "POST /api/sessions/:id/archive",
-  "POST /api/sessions/:id/background-jobs/:jobId/stop",
+  "POST /api/sessions/:id/background-jobs/:jobId/stop", "POST /api/sessions/:id/queue-hold/release",
   "GET /api/sessions/:id/descendant-requests", "POST /api/sessions/:id/descendant-requests/resolve",
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence",
   "POST /api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",

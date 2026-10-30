@@ -81,9 +81,11 @@ Kept in full, because they live outside the transcript:
   preview, cost, pull-request links, parent and child links, attention and acknowledgments;
 - session attachments, which keep their own 180-day expiry.
 
-Separate policies cover the [mutation audit archive](#mutation-audit-archive-retention).
-Workflow runs and their events, and the runners' own session logs, are outside this session-history
-policy. A pruned session's runner keeps its full log until the session is deleted.
+Separate policies cover the [mutation audit archive](#mutation-audit-archive-retention) and
+[workflow event retention](./workflow-event-retention.md). Workflow event retention ages terminal
+instances from completion, with its own Storage controls and environment default. These policies
+are independent. Capable runners also trim their session logs after a completed control-plane prune,
+as described [below](#runner-logs-and-upgrades).
 
 ## Mutation audit archive retention
 
@@ -165,16 +167,115 @@ after it, so a crash can never restore an artifact row whose blob is gone. See
   every supported Node.js bundles. Terms deleted before the option was set stay until the index
   merges their segments.
 - Search rows are deleted by key. New search rows are written with their event's row id; rows
-  indexed earlier are mapped to their events once, in paced steps, before the first prune. If an
+  indexed earlier are mapped to their events once, in paced steps at the start of a background pass,
+  even when every organization's retention policy is off. Mapping uses the same 10-minute startup
+  delay and per-step rests, saves its cursor after at most 1,000 rows, and resumes after a restart.
+  It enables keyed session deletion without turning retention on or pruning history. If an
   older build has written to the database since, the mapping starts again from the first row: that
   build numbers its rows from the highest one left, which a prune may have lowered below rows
   already mapped.
-- The database file does not shrink: freed pages are reused, so it stops growing. To return the
-  space, stop the control plane and run `sqlite3 control-plane.db 'VACUUM'`, which needs as much free
-  disk as the database itself. The control plane never vacuums automatically: on its single
-  connection a vacuum would block every request for as long as it takes.
+- By default the database file does not shrink: freed pages are reused. The host operator can
+  enable [incremental vacuum](#returning-free-pages-to-the-filesystem) to return them in paced steps.
+  A full `VACUUM` still requires downtime and substantial temporary disk; startup and background
+  maintenance never run one.
 - WAL frames and existing backups keep old content until they are overwritten or rotated. Blob files
   are unlinked, not overwritten.
+
+## Returning free pages to the filesystem
+
+Incremental vacuum (#3321) is **off by default**, including after upgrade. Only the host operator
+can enable it, with `CONTROL_PLANE_DB_INCREMENTAL_VACUUM=1` in `control-plane.env`. There is no
+organization override, API, agent tool or UI switch: all organizations share the same database file.
+Unset, empty or `0` is off; other values log a warning and are treated as off. Environment changes
+are observed at the next operator-controlled start. Enabling waits **24 hours**, using a persisted
+arming deadline like retention (#2777); unchanged restarts do not delay it again. An observed off
+disables immediately and clears the deadline; reenabling arms anew. Changes made and undone between
+starts are not observed. File mode stays incremental when maintenance is disabled.
+
+An enabled **new empty database** sets `auto_vacuum=INCREMENTAL` before creating its schema. An
+existing database is never rewritten at startup. If its mode is not incremental, it stays usable,
+maintenance refuses to run, and startup logs `incremental_vacuum_conversion_required` with this
+guide. Changing the environment alone cannot convert an existing database.
+
+### One-time offline conversion
+
+Use a matching source checkout with dependencies installed and a supported Node.js runtime:
+
+1. Make and verify a SQLite-aware backup. Arrange downtime and stop every control-plane instance,
+   reader and backup process that opens this file. Do not run conversion from an agent hosted by
+   that control plane; an independent operator must perform the downtime procedure.
+2. Reserve free disk on **both** the database and SQLite temporary-file filesystems. With
+   `N = max(page_count × page_size, main-file bytes)`, each must report at least
+   `2 × N + max(256 MiB, ceil(N / 10))` free bytes. If both paths use the same filesystem, this is
+   one requirement, not twice the requirement. SQLite can need two additional copies during a
+   full rewrite; the extra margin leaves headroom. Other processes can still consume disk after
+   the check, so avoid concurrent large writes.
+3. Run `pnpm db:enable-incremental-vacuum --db <existing-database-file> --owner-stopped`.
+   Optional `--temp-dir <directory>` chooses the temporary-file directory (otherwise the OS temp
+   directory). The command pins and verifies SQLite's temp directory and takes an exclusive SQLite
+   lock before checking disk or changing mode. Missing acknowledgement, a contended lock,
+   unsupported temp-directory control, unknown space or insufficient space refuses conversion.
+   The mode is not changed on those refusals; there is no startup or unchecked fallback.
+4. The command sets `auto_vacuum=INCREMENTAL` and runs one full offline `VACUUM`, preserving WAL
+   mode and logical records. It prints a structured completion or refusal record and returns
+   nonzero on failure. Running it on an already incremental file is a no-op. Verify the backup and
+   database before the independent operator starts the control plane with the opt-in environment.
+
+Exclusive locking keeps other SQLite operations out during conversion; it cannot prove that all
+idle rollback-mode handles have been closed or prevent an operator trying to reopen the file.
+The stopped-owner acknowledgement is an operational requirement, not an automatic process stop.
+An I/O or disk failure during the rewrite is reported; inspect the database and backup before
+retrying. Never copy only the main file of a live WAL database as a backup.
+
+### Pacing and limits
+
+The first pass waits 10 minutes after startup; subsequent passes start an hour after the previous
+one finishes, once armed. Passes are independent of retention, so pages freed by every deletion
+policy qualify. A pass starts only with at least **256 free pages** (1 MiB at 4 KiB pages), then
+drains free pages in steps starting at **1 page**, adapting toward **4 ms above the measured
+one-page cost**, capped at **32 pages**. One-page samples account for the fixed `FULL` sync cost;
+a faster multi-page step lowers an inflated baseline estimate.
+growth is at most doubling per step. When a complete step reaches **12 ms**, the next budget is
+reduced proportionally toward **8 ms**, regardless of that baseline, to leave headroom below 16 ms.
+After every step it rests at least **1 ms and three times the measured step duration**. A pass
+stops after **1,000 steps** and continues at the next scheduled pass. Stop interrupts between
+steps; a restart safely resumes from SQLite's current free-page list. Busy or other failures defer
+until the next pass without using the request connection's 250 ms lock wait.
+
+At 4 KiB pages the ceiling is **about 128 MiB per hourly pass** (32 × 1,000 pages); initial small
+steps and slow storage reduce throughput. Reclaiming 2 GiB can therefore take more than 16 passes.
+This is bounded background reclamation, not immediate recovery from a full disk. The existing WAL
+checkpointer copies the truncation to the main file; retained readers can delay visible shrinkage.
+No forced checkpoint or change to checkpoint thresholds is introduced.
+
+Structured startup logs report enabled state, mode and arming deadline. Pass logs include run ID,
+entry point, reclaimed pages/bytes, average reclaimed pages per step (`pagesPerStep`), p95 and maximum
+complete-step latency, interruption and step-limit status and slow-step count. The first step reaching 16 ms in each pass warns with
+`incremental_vacuum_slow_step`; further slow steps are counted in its summary. A failed pass logs
+`incremental_vacuum_deferred`. Run `pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` on
+the database's storage to measure complete steps with concurrent `FULL` writes and the normal
+checkpoint worker. It creates and removes its own fixture, verifies file shrinkage and kept data,
+and fails at **p95 >= 16 ms**. This is a measured target, not a hard real-time guarantee on arbitrary
+storage. Slow-step warnings mean the operator should benchmark the storage or disable maintenance.
+
+For example, a Linux/Node 24.18.1 NVMe fixture run with 16,000 indexed records, the checkpoint worker
+and 1,548 interleaved `FULL` writes reclaimed **50.24 MiB in 10.89 seconds** (about **4.61 MiB/s**
+during the pass), shrinking the file from 68,575,232 to 15,896,576 bytes. It used **411 steps**,
+averaging **31.29 pages/step**, reached the **32-page** budget and measured **8.73 ms p95 /
+10.46 ms max**. The fixture drained before the step cap. Before the fixed-sync-cost adaptation
+fix (#3575), the same benchmark on this disk stayed at one page, reclaiming about **3.91 MiB** in
+1,000 steps with **9.83 ms p95**. These are measured examples, not promised hourly rates;
+memory-backed measurements are not a substitute for testing the database's filesystem.
+
+`secure_delete`, WAL checkpoints and every existing durability guard remain unchanged; each vacuum
+step uses the connection's normal `FULL` durability. Vacuum changes allocation, not which records
+retention keeps. It does not add an erasure guarantee for WAL files, backups or external blobs.
+SQLite-aware backups keep their usual consistency and rotation requirements. A restore retains
+the source's auto-vacuum mode: a pre-conversion backup needs offline conversion again, and startup
+will never do it silently. Persisted opt-in/arming state also restores with the backup; a mature
+deadline can resume at the next eligible pass when the host environment is enabled. Leave the
+environment off if maintenance should stay disabled after a restore. See
+[database durability](./control-plane-database-durability.md).
 
 ## Pruned sessions
 
@@ -197,20 +298,76 @@ with the runner and is unaffected, and new activity is numbered after the pruned
 sequence number is reused. If it is archived again, a later prune applies the same rule to the whole
 session: everything outside the kept set goes, and the newest final response is the one kept.
 
-Reprocessing a pruned session asks its runner for the full log again. If the runner still holds it,
-the whole transcript returns and the prune record is cleared; a session still past the threshold is
-pruned again on the next pass.
+Reprocessing an adopted pruned session asks its runner for the full log again. Once that runner
+has trimmed it, Reprocess explicitly reports that full history cannot be restored; it leaves the
+cached transcript and prune record unchanged. If an older runner still holds the full log, the
+whole transcript returns and the prune record is cleared; a session still past the threshold is
+pruned again on the next pass. Provider-native transcripts outside the runner store are not a
+restoration promise and are never deleted by this policy.
 
 Existing transcript shares keep their own snapshot. New exports and shares contain the kept events.
 
 ## Compatibility
 
-Pruning changes only the control plane's cache. Runners are not told, and no protocol version
-changes. The hydration cursor (`hydrated_seq`, `runner_history_tail_seq`, `runner_history_epoch`)
-never moves, and every runner version asks only for events after it: indexed-history runners,
-legacy full-history runners, and the history preview reader. A pruned event is therefore never sent
-again. A runner history-epoch change, from Reprocess or a runner that reset its log, replaces the
-history as it always has.
+Control-plane-only pruning remains compatible with older runners. A protocol-v231 runner
+advertises `runnerHistoryRetention`; only a capable runner receives `trim_session_history`.
+Older control planes send no such command, and older runners retain their complete logs.
+
+### Runner logs and upgrades
+
+There is **no separate runner switch or operator opt-in**. The same organization policy controls
+runner trimming: off by default, 7–3650 whole days after archiving (suggested 90), the same
+`CONTROL_PLANE_ARCHIVED_HISTORY_RETENTION_DAYS` default, and the same 24-hour delay on enable or
+shorten. After the control plane finishes pruning a fully hydrated, archived, settled session with
+no Stop pending, it asks its capable runner to trim through that exact runner epoch and sequence.
+There is no additional grace period. The control plane saves a durable completion receipt only
+when the runner explicitly confirms that both trimming and deletion of superseded files are
+complete. Later hourly passes skip that session while its runner log epoch, trim sequence and
+cached-history generation are unchanged, including after a control-plane restart.
+
+A failed request, offline runner, incomplete cleanup or older runner without explicit cleanup
+confirmation stays retryable. Replacing or restoring history clears the receipt; a new log epoch
+or an advanced trim boundary also requires another confirmation. Eligibility and policy are checked
+again immediately before each request, so turning retention off stops new requests. Each runner
+receives at most one trim request at a time; other runners progress independently, including across
+organizations. A pass waits for its outstanding requests before the next hourly interval begins.
+
+**Upgrade effect:** an organization that already enabled archived-history retention also enables
+runner trimming as soon as both components support it. An already-armed policy does not receive
+another 24-hour delay on upgrade. Previously pruned sessions can lose their runner's full log on
+the next retention pass. Back up runner data before upgrading if that full history is needed, or
+turn the organization policy off before the upgrade. Existing policies that are off remain off.
+
+The runner keeps the control-plane transcript kept set plus approval, permission and question
+decisions, review, workflow, automation and provenance events, checkpoints and other resume
+evidence. It retains unknown additive event kinds conservatively. Removed tool-call ids remain
+in a hashed accounting sidecar, without their command/output text, so resuming or adding a tool
+limit never resets its lifetime count. Session metadata, native resume ids, costs and usage are
+unchanged. Provider-native transcripts outside the runner store are out of scope.
+
+Copying reads 64 KiB slices and yields to live I/O, with bounded record buffers. Kept data is
+written into immutable segments targeting 1 MiB (a single record can exceed that target, up to
+the existing history-page record limit). An index is built during the copy and named by the same manifest, so data and index switch together. At most one retention copy runs per runner, including after a control-plane request times out. The writer lock is
+free during copying; any live provider or changed source wins and defers trimming. New files
+are flushed before an atomic manifest switch; a crash before it keeps the original readable,
+and a crash after it keeps the complete retained log readable. The next pass finishes unlinking
+superseded generations, including the original monolithic log. Open-file deletion failures are
+retried. Files are unlinked, not securely overwritten.
+
+Completion logs count the bytes of superseded files actually unlinked, consistently on the first
+pass and on cleanup retries. This is a deletion counter, rather than the net change in directory
+size after allocating kept data and its derived index.
+
+The runner keeps its event sequence high-water and epoch. Only certified gaps in the retained
+prefix are permitted; appends after that boundary remain contiguous. Control-plane hydration
+cursors, accounting epochs and campaign proofs do not change. Resume and restart use the same
+provider-native state and allocate new events above the old boundary. Re-archiving and pruning
+again keeps all prompts and reports plus the newest final response under the same rules.
+
+Retained manifests use format 2; older runner binaries fail closed on that format. To downgrade
+a trimmed runner, stop it and restore its pre-upgrade runner-data backup with the older binaries;
+do not point an older binary at the retained data. A control-plane downgrade does not recover
+removed data. Existing exports, shares and backups retain their own snapshots.
 
 ## Guards
 

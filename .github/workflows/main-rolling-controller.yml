@@ -1,0 +1,70 @@
+name: Main Rolling Controller
+
+on:
+  push:
+    branches: [main]
+  workflow_run:
+    workflows: [Main Rolling Validation]
+    types: [completed]
+  schedule:
+    - cron: '7,17,27,37,47,57 * * * *'
+  workflow_dispatch:
+    inputs:
+      candidate_sha:
+        description: Exact main-ancestry candidate SHA (empty for ordinary reconciliation)
+        type: string
+        default: ''
+      purpose:
+        description: Candidate request purpose
+        type: choice
+        options: [release, repair]
+        default: release
+
+permissions: {}
+
+jobs:
+  request:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.candidate_sha != ''
+    name: Record Exact Candidate Request
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    # CAS serializes writes. No shared pending lane may cancel an unrecorded request.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Request Exact Candidate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/main-rolling-validation.mjs request
+
+  reconcile:
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository))
+    name: Reconcile Rolling Main Validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    # Coalesce controller wakes only. Admission uses CAS without joining this pending lane.
+    concurrency:
+      group: main-rolling-state
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Reconcile and Dispatch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/main-rolling-validation.mjs reconcile

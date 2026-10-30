@@ -5,7 +5,7 @@ import { test, type TestContext } from "node:test";
 import { runInNewContext } from "node:vm";
 import { transformSync } from "esbuild";
 import {
-  PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol,
+  PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
   type PendingSkillReportRequest, type RegisteredMessage, type SkillsStateMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "../../control-plane/src/db.js";
@@ -49,9 +49,11 @@ function fixture(t: TestContext) {
   class InertSocket extends EventEmitter {
     static OPEN = 1;
     readyState = 1;
+    deferClose = false;
     failSend = false;
     readonly server: Socket = { send: data => this.emit("message", Buffer.from(data)), close() {} };
     constructor(_url: string) { super(); sockets.push(this); }
+    terminate() { this.readyState = 3; if (!this.deferClose) this.emit("close"); }
     send(data: string) {
       if (this.failSend) throw new Error("Fixture handoff refused");
       const message = JSON.parse(data);
@@ -67,7 +69,7 @@ function fixture(t: TestContext) {
     }
   }
   const scope: Record<string, any> = {
-    ws: null, registered: true, controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    ws: null, registered: true, controlPlanePeerRefused: false, controlPlaneProtocolVersion: PROTOCOL_VERSION,
     automaticAccountSwitchConfigurationSynchronized: true,
     heartbeatPongObserved: false, missedHeartbeatPongs: 3,
     sessions: { setAutomaticAccountSwitchAuthorityReady() {}, liveSessionIds: () => [] },
@@ -76,7 +78,7 @@ function fixture(t: TestContext) {
     WebSocket: InertSocket, validateControlPlaneUrl: (url: string) => url, allowInsecureTransport: false,
     agentsForControlPlane: () => [], providerAccountsForControlPlane: () => [], registrationSessionSnapshots: () => [],
     providerProfileGrants: { reportedProfileIds: () => [] },
-    PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol,
+    PROTOCOL_VERSION, parseMessage, runnerSupportsProtocol, reviewRetirementPeerRefusal,
     projectMessageForCurrentProtocol: (message: SkillsStateMessage) => message,
     stagedRunnerCredential: { promote() {} }, backoff: 99, INITIAL_BACKOFF_MS: 1,
     log: (message: string) => logs.push(message), errText: (error: Error) => error.message,
@@ -87,7 +89,7 @@ function fixture(t: TestContext) {
   const reporter = new SkillStateReporter("fixture", scope.sendSkillState, scope.log, () => 1_000_000 + elapsed);
   scope.skillStateReporter = reporter;
   const registrationPrefix = slice(runnerSource, '    case "registered":', "      harnessInstallationChoices =");
-  install(`function applyRegistered(msg) { switch(msg.type) { ${registrationPrefix} break; } }`, scope);
+  install(`function applyRegistered(msg) { switch(msg.type) { ${registrationPrefix} break; } } }`, scope);
   scope.handleCommand = (message: { type: string; requestId?: string }) => {
     commands.push(message.type);
     if (message.type === "registered") scope.applyRegistered(message);
@@ -284,7 +286,7 @@ for (const malformed of [
   f.advance(30_000); assert.equal((await pending).error!.name, "RunnerRequestTimeoutError");
 });
 
-test("older peers omit/ignore authority; cancelled/resolved/wrong-owner/non-skill requests are excluded", async t => {
+test("older runner capabilities omit authority; cancelled/resolved/wrong-owner/non-skill requests are excluded", async t => {
   const f = fixture(t), pending = f.request();
   const old = f.start(true, 208);
   assert.equal(old.response.pendingSkillRequests, undefined);
@@ -373,8 +375,19 @@ test("valid unknown authority is ignored and older server authority is never ado
   f.reporter.report(empty()); assert.equal((await pending).error, undefined);
   assert.deepEqual(f.messages.map(message => message.requestId), ["R"]);
   const oldServerPending = f.request("old-server"), c = f.start(false);
+  c.socket.deferClose = true;
+  const before = f.counts(), commandsBefore = f.commands.length;
   f.scope.applyRegistered({ ...c.response, protocolVersion: 208 });
-  f.reporter.report(empty()); assert.equal(f.messages.at(-1)!.requestId, undefined);
+  assert.equal(f.scope.controlPlanePeerRefused, true);
+  assert.equal(c.socket.readyState, 3, "the refused socket is terminated before its close event");
+  c.socket.emit("message", Buffer.from(JSON.stringify({ type: "skills_sync", requestId: "refused-frame" })));
+  assert.equal(f.commands.length, commandsBefore, "buffered frames cannot reach the handler before close");
+  c.socket.emit("close");
+  assert.equal(f.counts().reconnects, before.reconnects + 1);
+  assert.equal(f.counts().heartbeatStops, before.heartbeatStops + 1);
+  assert.throws(() => f.scope.sendSkillState({ type: "skills_state" }), /not registered/);
+  f.reporter.report(empty());
+  assert.deepEqual(f.messages.map(message => message.requestId), ["R"]);
   f.advance(30_000); assert.equal((await oldServerPending).error!.name, "RunnerRequestTimeoutError");
 });
 

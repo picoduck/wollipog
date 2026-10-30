@@ -19,6 +19,8 @@ export type SessionKind = "standard" | "review";
 /** The reviewer harnesses a runner can launch as review sessions, each through one configured
  * native agent. Advertised with the runner's runtime metadata. */
 export interface ReviewSessionCapability {
+  /** #3370: revalidates configured reviewer/model/effort, same-family consent and round budget. */
+  configuration?: true;
   reviewers: Array<{ harness: SessionReviewHarness; agentId: string }>;
   /** Why a reviewer (or the whole feature, under "tools") is unavailable, for display. */
   unavailable?: Partial<Record<SessionReviewHarness | "tools", string>>;
@@ -27,6 +29,8 @@ export interface ReviewSessionCapability {
 /** Runner-enforced review launch, carried on the review session's `start_session`. The runner
  * proves the scope again against the requester's own runner-recorded worktree. */
 export interface ReviewLaunchPolicy {
+  /** Sent only to a runner advertising reviewSession.configuration. */
+  configuration?: import("./review-settings.js").ReviewConfiguration;
   requesterSessionId: string;
   pullRequest: { repository: string; number: number };
   headSha: string;
@@ -47,6 +51,8 @@ export interface ReviewSessionLink {
 }
 
 export interface ReviewSessionRequest {
+  /** A GitHub `owner/name` and pull request number, or (v244, #3539) a GitLab project named by its
+   * host and full namespace and a merge request IID. */
   pullRequest: { repository: string; number: number };
   /** The exact head to review; it must be the pull request's pushed head. */
   headSha: string;
@@ -59,9 +65,17 @@ export interface ReviewSessionRequest {
 
 export type ReviewSessionState = "requested" | "running" | "completed" | "failed" | "cancelled";
 
+/** Informational host-access snapshot; these launches do not block Codex admission (#3705).
+ * Optional for compatibility with peers predating this observation. */
+export interface ReviewSessionAdmission {
+  observedAt: number;
+  unsandboxedSessions: Array<{ sessionId: string; kind: "provider" | "agent_tui" }>;
+}
+
 /** A review session as its requester sees it. `output` is the reviewer's final structured output
  * exactly as returned: it is not validated against the review contract in this phase. */
 export interface ReviewSessionView {
+  admission?: ReviewSessionAdmission;
   reviewSessionId: string;
   requesterSessionId: string;
   pullRequest: { repository: string; number: number };
@@ -80,6 +94,10 @@ export interface ReviewSessionView {
   findings: ReviewReportFinding[];
   /** A newer review of the same pull request has a different head. */
   stale: boolean;
+  /** #3369: the one continuation a finished review owes its requester: pending until the
+   * requester's session takes it, then delivered (or failed, uncertain or abandoned). Null when none
+   * is owed (a review still running, or one its requester cancelled). */
+  continuation?: ReviewContinuationState | null;
   output: string | null;
   outputTruncated: boolean;
   reason: string | null;
@@ -89,6 +107,8 @@ export interface ReviewSessionView {
 }
 
 export interface ReviewSessionsPage { reviews: ReviewSessionView[]; nextAfterReviewSessionId: string | null }
+
+export type ReviewContinuationState = "pending" | "delivered" | "uncertain" | "failed" | "abandoned";
 
 /** #3369: on a requester's own view, what its review sessions add up to, so a client reads them only
  * when there are any and again whenever one changes. Omitted for a session that requested none. */
@@ -127,6 +147,7 @@ export interface ReviewAttemptVerdictView {
 /** Runner to control plane: the review session's outcome. Accepted only from the runner that owns
  * the review session; a terminal state is final. */
 export interface ReviewSessionUpdate {
+  admission?: ReviewSessionAdmission;
   type: "review_session_update";
   sessionId: string;
   state: Exclude<ReviewSessionState, "requested">;
@@ -152,13 +173,19 @@ export function reviewerHarnessFor(driver: string | null | undefined): SessionRe
 }
 
 const REVIEW_SESSION_REASONS = new Set([
+  "the configured reviewer is unavailable or belongs to the implementer's model family without explicit permission",
   "the review must cover the session's own native managed worktree",
+  "resume this session once so the runner can verify its automatic worktree before requesting a review",
+  "the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review",
   "the pull request is not this session's open, same-repository pull request",
   "the requested head is not the pull request's pushed head",
   "the review snapshot could not be prepared",
   "the runner cannot launch this reviewer",
   "the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches",
   "the runner is missing a trusted git or gh for reviews",
+  "the runner is missing a trusted gh for GitHub reviews",
+  "the runner is missing a trusted glab for GitLab reviews",
+  "the runner's glab is not configured for this GitLab host",
   "the review session could not be launched",
   "the review was cancelled",
   "the review ended without a result",

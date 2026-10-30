@@ -28,6 +28,7 @@ import {
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
 import { currentProviderHomeRunnerMarker, PROVIDER_HOME_RUNNER_MARKER_ENV } from "./provider-home-lease-evidence.js";
+import { spawnWithLinuxCgroup, type LinuxCgroupBoundary, type LinuxCgroupGroup } from "./linux-cgroup.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -166,6 +167,8 @@ export interface BwrapSpawnIsolation {
   preservesProviderHome?: true;
   /** Narrow durable state exceptions; source lives under runner data, target is the CLI's home path. */
   writableBinds?: Array<{ source: string; target: string }>;
+  /** Exact operator-approved project runtime roots also admitted by the provider's inner sandbox. */
+  projectSharedWritableRoots?: string[];
   /** A managed worktree whose parent must remain read-only while the child stays writable.
    * `ownedWorktrees` are the session's other worktrees this boundary binds writable (#3316), each
    * with its own admin directory, so a provider's inner sandbox can grant exactly the same set. */
@@ -178,6 +181,8 @@ export interface BwrapSpawnIsolation {
   /** Runner-owned administrative entries bound read-only over themselves. Rendered after every
    * writable bind, including the cwd, so the narrower rule is the one that lands. */
   readOnlyBinds?: string[];
+  /** Exact host package directories protected by this launch's readonly root/overlays. */
+  codexPackageReadOnlyPaths?: readonly string[];
   /** The runner's hook state directory, replaced by an empty read-only tmpfs so neither the
    * provider nor anything it spawns can read, list, or change it (#1336). `readable` entries are
    * bound back read-only; `socket` is the verdict socket inside one of them. Rendered LAST, so no
@@ -214,6 +219,8 @@ export interface SeatbeltSpawnIsolation {
   writableRoots: string[];
   /** Runner-owned entries the profile denies writes to even though a writable root contains them. */
   readOnlyPaths?: string[];
+  /** Exact package directories denied writes (including ancestor relocation). */
+  codexPackageReadOnlyPaths?: readonly string[];
   /** The hook state directory the profile denies, with the entries it re-exposes (#1336). */
   guardStateMask?: { directory: string; readable: string[]; socket?: string };
 }
@@ -755,23 +762,33 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     );
   }
   let child: AgentProcess;
+  let containment: LinuxCgroupBoundary | undefined;
   try {
     if (opts.isolation?.backend === "container") {
       opts.isolation.verifyDefaults?.();
       opts.isolation.verifyRuntimeIdentity(launchEnv);
     }
-    child = spawn(file, args, {
+    const spawnOptions = {
       cwd,
       env: launchEnv,
       // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
       shell,
-      stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
       // POSIX: make the agent a process-group leader so killTree can signal the whole
       // group — claude/codex spawn bash/tool children that a single-pid SIGTERM would
       // orphan. Windows uses taskkill /T; the WSL bridge has its own setsid+PGID reap.
       detached: !isWindows,
-    }) as AgentProcess;
+    };
+    if (ownsNativePosixDescendants) {
+      const launch = spawnWithLinuxCgroup(file, args, spawnOptions);
+      child = launch.child as AgentProcess;
+      containment = launch.containment;
+    } else {
+      // Ordinary user shells do not acquire provider-HOME ownership. Preserve their historical
+      // launch/lifetime even if provider containment is unavailable. Agent TUIs and shells
+      // whose cleanup owns descendants use the tracked branch above.
+      child = spawn(file, args, { ...spawnOptions, stdio: ["pipe", "pipe", "pipe"] }) as AgentProcess;
+    }
   } catch (error) {
     disposeBridge?.();
     throw error;
@@ -797,7 +814,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     }
   });
   if (!isWindows && !wslReap && !remoteBoundary && opts.trackDescendants !== false && child.pid) {
-    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker);
+    child.posixBoundary = new PosixProcessBoundary(child.pid, opts.descendantOwner, descendantMarker, undefined, undefined, containment);
     child.once("exit", () => child.posixBoundary?.markRootExited());
   }
   if (wslReap) child.wslReap = wslReap;
@@ -894,12 +911,12 @@ export function terminateDescendantBoundariesAfterPendingKills(): void {
 
 /** True when `child`'s process tree is gone by the same standard runner shutdown uses before it
  * releases every provider-HOME lease: the POSIX boundary terminated every process it tracks
- * (parent links plus the inherited environment marker) and found no survivor. It is idempotent,
+ * (a joined Linux cgroup when available, otherwise parent links and the environment marker) and
+ * found no survivor. It is idempotent,
  * so a boundary already terminated on close returns that result.
  *
- * Known limit, shared with shutdown: a helper that detaches with a scrubbed environment before its
- * parent link is observed, or whose environment cannot be read, is invisible to that tracking.
- * Closing it needs kernel containment (a Linux subreaper or cgroup).
+ * Without Linux cgroup containment, a helper that detaches with a scrubbed environment before its
+ * parent link is observed, or whose environment cannot be read, can be invisible to tracking.
  *
  * Without a boundary (Windows, WSL, remote or untracked spawns) only the root's exit is
  * observable, which is not a tree proof, so the answer is false. */
@@ -926,10 +943,18 @@ export class ProviderProcessLedger {
   private readonly closedSeparate = new WeakSet<AgentProcess>();
   private readonly namespaces = new Set<ClaudeNamespaceLifetime>();
   private readonly proofs = new Map<boolean, Promise<boolean>>();
+  private readonly observations = new Set<Promise<boolean>>();
   private readonly namespaceFor: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined;
 
-  constructor(options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined } = {}) {
+  constructor(private readonly options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined; cgroup?: LinuxCgroupGroup } = {}) {
     this.namespaceFor = options.namespaceFor ?? claudeNamespaceFor;
+  }
+
+  /** Enter the writer's durable parent before spawning, never after a child can execute. */
+  launch(spawn: typeof spawnAgent, options: SpawnAgentOptions): AgentProcess {
+    this.assertOpen();
+    const work = () => this.record(spawn(options));
+    return this.options.cgroup ? this.options.cgroup.run(work) : work();
   }
 
   /** Throws once the instance has ended; call before every spawn. */
@@ -980,12 +1005,30 @@ export class ProviderProcessLedger {
     return provenProcessTreeExit(child);
   }
 
-  /** Run work that may start processes outside any boundary. Nothing can prove those processes
-   * gone, even after the work settles (a probe's group kill misses a descendant that left its
-   * group), so the instance stays unprovable for good and its references are retained. */
+  /** Uninstrumented work remains conservatively unprovable. Codex probes use observe instead. */
   async untracked<T>(work: () => Promise<T>): Promise<T> {
     this.unprovable = true;
     return await work();
+  }
+
+  /** Register asynchronous preparation before it can start any probe. Disposal must await the
+   * entire operation, including probes that start after an earlier await or share a cached proof.
+   * Completed operations are compacted to a sticky failure or forgotten after true proof. */
+  async observe<T>(work: (observer: { onProcess(proof: Promise<boolean>): void }) => Promise<T>): Promise<T> {
+    this.assertOpen();
+    const processes: Promise<boolean>[] = [];
+    let finish!: () => void;
+    const finished = new Promise<void>((resolve) => { finish = resolve; });
+    const proof = finished.then(async () => (await Promise.all(processes)).every(Boolean)).catch(() => false);
+    this.observations.add(proof);
+    void proof.then((proven) => {
+      if (!proven) this.unprovable = true;
+      this.observations.delete(proof);
+    });
+    try {
+      const run = () => work({ onProcess: (process: Promise<boolean>) => { processes.push(process.catch(() => false)); } });
+      return await (this.options.cgroup ? this.options.cgroup.run(run) : run());
+    } finally { finish(); }
   }
 
   /** `terminate: true` after disposal (kills survivors, as disposal already started to); `false`
@@ -1003,6 +1046,7 @@ export class ProviderProcessLedger {
       const namespaces = [...this.namespaces].map((namespace) => namespaceEnded(namespace, options.terminate));
       const results = await Promise.all([
         ...owned, ...[...this.separate].map((child) => this.proveSeparate(child, options.terminate)), ...namespaces,
+        ...this.observations,
       ].map((work) => work.catch(() => false)));
       return results.every(Boolean) && !this.unprovable;
     })().catch(() => false);

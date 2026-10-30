@@ -40,6 +40,9 @@ test("titleCaseLabel formats trusted compact UI labels while preserving acronyms
   assert.equal(titleCaseLabel("ChatGPT plus or pro"), "ChatGPT Plus or Pro");
   assert.equal(titleCaseLabel("OpenCode zen"), "OpenCode Zen");
   assert.equal(titleCaseLabel("API key"), "API Key");
+  // An ordinal's suffix stays with its number (#2971).
+  assert.equal(titleCaseLabel("monthly on the 1st at 9:00 AM"), "Monthly on the 1st at 9:00 AM");
+  assert.equal(titleCaseLabel("the 22nd and 3rd"), "The 22nd and 3rd");
 });
 
 test("formatTokens: small counts are exact", () => {

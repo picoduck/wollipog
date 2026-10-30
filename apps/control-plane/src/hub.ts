@@ -25,6 +25,7 @@ import type {
   HostActionResultMessage,
   InterruptTurnResultMessage,
   StopBackgroundJobResultMessage,
+  ReleaseQueueHoldResultMessage,
   ListDirectoryResultMessage,
   ListExternalSessionsResultMessage,
   ListSessionFilesResultMessage,
@@ -58,6 +59,8 @@ import type {
   ProviderLoginResultMessage,
   RemoveProviderAccountResultMessage,
   WorkflowActionAdmissionRecordedMessage,
+  GitLabMergePreflightResultMessage,
+  GithubMergePreflightResultMessage,
   WorkflowActionReconciliationResultMessage,
   GithubIssueClosureResultMessage,
   CampaignForgeObserveResultMessage,
@@ -83,7 +86,9 @@ export function reminderWakeReasonForEvent(
   if (payload.kind === "permission_request" ||
       (payload.kind === "status" && payload.status === "input_required")) return "approval";
   if (payload.kind === "question_request") return "question";
-  if (payload.kind === "error" || (payload.kind === "status" && payload.status === "failed")) return "failure";
+  // A non-fatal driver problem (#3806) leaves the turn running, so it is no failure to wake for.
+  if ((payload.kind === "error" && !payload.nonFatal) ||
+      (payload.kind === "status" && payload.status === "failed")) return "failure";
   if (payload.kind === "background_continuation_delivered") return "background_job";
   if (payload.kind === "agent_response_completed" ||
       (payload.kind === "agent_message" && payload.final === true)) return "agent_response";
@@ -350,6 +355,7 @@ export type RunnerRequestResult =
   | ForkResultMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage
+  | import("@wollipog/protocol").TrimSessionHistoryResultMessage
   | ReprocessSessionResultMessage
   | ListExternalSessionsResultMessage
   | ListDirectoryResultMessage
@@ -368,6 +374,7 @@ export type RunnerRequestResult =
   | HostActionResultMessage
   | InterruptTurnResultMessage
   | StopBackgroundJobResultMessage
+  | ReleaseQueueHoldResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
   | EditQueuedPromptResultMessage
@@ -379,6 +386,8 @@ export type RunnerRequestResult =
   | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
+  | GitLabMergePreflightResultMessage
+  | GithubMergePreflightResultMessage
   | WorkflowActionReconciliationResultMessage
   | import("@wollipog/protocol").CampaignIssueScopeResultMessage
   | GithubIssueClosureResultMessage
@@ -601,20 +610,19 @@ export class Hub {
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "artifactSessionGuidance")) return msg;
     const session = this.db.getSession(sessionId);
     if (!session || session.runnerId !== runnerId) return msg;
-    const owner = this.db.sessionOwnerUser(sessionId);
-    const artifactUploads = this.db.artifactUploadPreference(owner?.userId);
+    const artifactUploads = this.db.artifactUploadPreference(this.db.artifactUploadPreferenceUser(sessionId));
     if (msg.type === "durable_session_command") return { ...msg, artifactUploads };
     if (msg.type === "start_session") return { ...msg, spec: { ...msg.spec, artifactUploads } };
     if (msg.type === "prompt_session") return { ...msg, artifactUploads };
     return msg;
   }
 
-  private syncSessionArtifactUploads(session: SessionView, userId?: string): void {
-    const owner = this.db.sessionOwnerUser(session.id);
-    if (userId && owner?.userId !== userId) return;
+  private syncSessionArtifactUploads(session: Pick<SessionView, "id" | "runnerId">, userId?: string): void {
+    const owner = this.db.artifactUploadPreferenceUser(session.id);
+    if (userId && owner !== userId) return;
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(session.runnerId), "artifactSessionGuidance")) return;
     this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
-      preference: this.db.artifactUploadPreference(owner?.userId) });
+      preference: this.db.artifactUploadPreference(owner) });
   }
 
   syncArtifactUploads(userId?: string, runnerId?: string): void {
@@ -1391,7 +1399,7 @@ export class Hub {
     this.broadcast({ type: "project_upsert", project });
   }
 
-  private syncSessionProjectMemory(session: SessionView): void {
+  private syncSessionProjectMemory(session: Pick<SessionView, "id" | "runnerId" | "projectId">): void {
     if ((this.runnerProtocolVersion(session.runnerId) ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return;
     this.sendToRunner(session.runnerId, { type: "set_session_project_memory", sessionId: session.id,
       projectMemory: { projectId: session.projectId ?? null,
@@ -1399,10 +1407,11 @@ export class Hub {
   }
 
   syncProjectMemory(projectId?: string, runnerId?: string): void {
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (runnerId && session.runnerId !== runnerId) continue;
-      // Reconnect already hydrates every retained session; share that scan so artifact metadata
-      // does not add another synchronous full inventory before credential handshakes can run.
+    // Reconnect runs this before credential handshakes can be answered: read only this runner's
+    // routing fields, never a full view of every retained session (#2601). Artifact metadata
+    // shares the same pass instead of adding another inventory.
+    const sessions = runnerId ? this.db.runnerSessionInventory(runnerId) : this.db.listSessions({ includeArchived: true });
+    for (const session of sessions) {
       if (runnerId) this.syncSessionArtifactUploads(session);
       if (projectId && session.projectId !== projectId) continue;
       this.syncSessionProjectMemory(session);

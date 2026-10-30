@@ -22,6 +22,13 @@ import {
 const USER_LAYOUT = serviceLayout("user", { home: "/home/op", user: "op", env: {} });
 const SYSTEM_LAYOUT = serviceLayout("system", { home: "/root", user: "root", env: {} });
 
+test("runner services delegate provider containment in user and system installs", () => {
+  for (const layout of [USER_LAYOUT, SYSTEM_LAYOUT]) {
+    assert.match(renderRunnerUnit(layout, { executable: "/opt/wollipog/runner" }), /^Delegate=yes$/m);
+    assert.doesNotMatch(renderControlPlaneUnit(layout, { executable: "/opt/wollipog/control-plane", host: "127.0.0.1", port: 4317, publicOrigin: null, tailnetOnly: false, webDist: null }), /^Delegate=yes$/m);
+  }
+});
+
 test("service layout follows XDG in user mode and FHS with a dedicated account in system mode", () => {
   assert.equal(USER_LAYOUT.unitDir, "/home/op/.config/systemd/user");
   assert.equal(USER_LAYOUT.dataDir, "/home/op/.local/share/wollipog");

@@ -10,6 +10,7 @@ import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
 import { isProviderProfileId } from "./provider-profile.js";
+import { validateSharedDirectoryConfiguration } from "./project-shared-directories.js";
 import { captureAccountConfigPreimage, publishAccountConfig, type AccountConfigPreimage } from "./provider-account-config-publication.js";
 
 export interface RunnerConfigAgent {
@@ -49,6 +50,8 @@ export interface RunnerConfigWorkspace {
   mcpServers?: AcpMcpServerConfig[];
   /** Exact absolute roots a user may opt into for an ACP session. */
   additionalDirectoryGrants?: string[];
+  /** Operator-owned, exact shared runtime directories for this workspace's native Linux providers. */
+  sharedWritableDirectories?: string[];
 }
 
 export interface RunnerAdmissionPolicy {
@@ -494,7 +497,8 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
       }
       return grant;
     });
-    return { ...w, path: resolveWorkspacePath(w.path), additionalDirectoryGrants };
+    return { ...w, path: resolveWorkspacePath(w.path), additionalDirectoryGrants,
+      sharedWritableDirectories: validateSharedDirectoryConfiguration(w.sharedWritableDirectories) };
   });
   for (const workspace of workspaces) {
     if ((workspace.additionalDirectoryGrants?.length ?? 0) > 64) {

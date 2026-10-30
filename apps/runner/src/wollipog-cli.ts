@@ -1,3 +1,4 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 /** Provider-neutral Wollipog CLI plus the general stdio MCP entrypoint. */
 
 import { readFileSync } from "node:fs";
@@ -7,6 +8,7 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  canonicalIssueReference,
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
@@ -17,7 +19,9 @@ import {
 } from "./session-management-mcp.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
-import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
+import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS, parsePullRequestRef } from "./pull-request-wait.js";
+import { inspectPullRequestClosures, pullRequestClosures } from "./github-merge-preflight.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import {
@@ -179,12 +183,15 @@ export async function runPullRequestCli(
   signal?: AbortSignal,
   /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
   graceMs = PULL_REQUEST_WAIT_READ_GRACE_MS,
+  /** `glab` for a GitLab merge request (#3602); defaults to this machine's own login. */
+  glab?: GlabRunner,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
     return code;
   };
-  const words = positional(args, ["--repo", "--head"]);
+  const words = positional(args, ["--repo", "--head", "--file", "--intended"]);
+  if (words[1] === "closures") return runPullRequestClosuresCli(args, words, json, io, gh, signal);
   if (words[1] !== "wait" || words.length !== 3) return fail(pullRequestHelp(), 2);
   const timeoutMs = numeric(option(args, "--timeout"));
   const intervalMs = numeric(option(args, "--interval"));
@@ -220,6 +227,7 @@ export async function runPullRequestCli(
     ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
   }, {
     fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh,
+    ...(glab ? { glab } : {}),
     ...(signal ? { signal } : {}),
     ...(readGraceMs !== undefined ? { pullRequestReadGraceMs: readGraceMs } : {}),
   });
@@ -229,6 +237,77 @@ export async function runPullRequestCli(
   const outcome = (data as { outcome?: unknown }).outcome;
   if (outcome === "timeout") return 124;
   return PULL_REQUEST_WAIT_SUCCESS.has(String(outcome)) ? 0 : 3;
+}
+
+/** The largest draft description `pr closures --file` reads; GitHub's own limit is 65,536 characters. */
+const CLOSURES_FILE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * `wollipog pr closures` (#3713): every issue merging a pull request would close, or a draft
+ * description would, compared with the ones meant to close (`--intended`). Local and read-only, like
+ * `pr wait`, and the same read the control plane makes before a GitHub merge decision.
+ */
+async function runPullRequestClosuresCli(
+  args: string[],
+  words: string[],
+  json: boolean,
+  io: { stdout: Write; stderr: Write },
+  gh: GhRunner,
+  signal?: AbortSignal,
+): Promise<number> {
+  const fail = (message: string, code: number): number => {
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    return code;
+  };
+  const file = option(args, "--file");
+  if ((optionPresent(args, "--file") && (!file || file.startsWith("--"))) || (file ? words.length !== 2 : words.length !== 3) ||
+      options(args, "--intended").length !== args.filter((arg) => arg === "--intended" || arg.startsWith("--intended=")).length) {
+    return fail(pullRequestHelp(), 2);
+  }
+  let repository = option(args, "--repo");
+  if (!repository && (file || /^#?\d+$/u.test(words[2]!))) {
+    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], signal);
+    repository = resolved.code === null ? resolved.stdout.trim() : "";
+    if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
+  }
+  let pullRequest: number | undefined;
+  if (!file) {
+    const parsed = parsePullRequestRef(words[2], repository);
+    if ("error" in parsed) return fail(parsed.error, 2);
+    repository = parsed.repository;
+    pullRequest = parsed.number;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
+    return fail("pr closures reads GitHub pull requests only; pass a GitHub owner/name", 2);
+  }
+  const intended: string[] = [];
+  for (const value of options(args, "--intended")) {
+    const issue = canonicalIssueReference(value, repository);
+    if (!issue) return fail(`--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    if (!intended.includes(issue)) intended.push(issue);
+  }
+  let read: { state?: string; headSha?: string; closures: ReturnType<typeof pullRequestClosures> };
+  if (file) {
+    let text: string;
+    try {
+      const bytes = readFileSync(resolvePath(file));
+      if (bytes.length > CLOSURES_FILE_MAX_BYTES) return fail(`${file} is larger than ${CLOSURES_FILE_MAX_BYTES} bytes`, 2);
+      text = bytes.toString("utf8");
+    } catch {
+      return fail(`could not read ${file}`, 1);
+    }
+    read = { closures: pullRequestClosures(text, repository!, []) };
+  } else {
+    const inspected = await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
+    if (!inspected.ok) return fail(inspected.reason, 1);
+    read = inspected;
+  }
+  const undeclared = read.closures.map((closure) => closure.issue).filter((issue) => !intended.includes(issue));
+  const unmade = intended.filter((issue) => !read.closures.some((closure) => closure.issue === issue));
+  const data = { repository, ...(pullRequest ? { pullRequest, state: read.state, headSha: read.headSha } : {}),
+    closures: read.closures, undeclared, unmade };
+  io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
+  return undeclared.length || unmade.length ? 3 : 0;
 }
 
 function invocationArgs(argv: string[]): string[] {
@@ -241,6 +320,22 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "automation") {
+    if (optionPresent(args, "--session")) return { error: "automation commands act only on the injected session" };
+    const groupIndex = args.indexOf("automation");
+    const verb = args[groupIndex + 1];
+    if (verb === "request") {
+      const proposal = jsonObjectOption(args, "--proposal");
+      return "error" in proposal ? proposal : { tool: "request_automation_creation", input: proposal.value };
+    }
+    const occurrenceId = args[groupIndex + 2];
+    if (verb === "get" && occurrenceId && !occurrenceId.startsWith("--")) return { tool: "get_automation_creation", input: { occurrenceId } };
+    const resourceDigest = option(args, "--digest");
+    if (verb === "execute" && occurrenceId && !occurrenceId.startsWith("--") && resourceDigest) {
+      return { tool: "execute_automation_creation", input: { occurrenceId, resourceDigest } };
+    }
+    return { error: "use automation request --proposal <json>, automation get <occurrence-id>, or automation execute <occurrence-id> --digest <digest>" };
+  }
   if (words[0] === "issue-scope") {
     if (optionPresent(args, "--session")) return { error: "issue-scope commands act only on the injected session" };
     if (words[1] === "get") {
@@ -284,13 +379,9 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const body = input();
       return "error" in body ? body : { tool: "allocate_campaign_budget", input: body.value };
     }
-    if (verb === "review") {
-      const body=jsonObjectOption(args,"--input");
-      return "error" in body?body:{tool:"run_campaign_review_job",input:body.value};
+    if (["review", "review-job", "review-jobs", "review-report"].includes(verb ?? "")) {
+      return { error: REVIEW_JOBS_RETIRED_REASON };
     }
-    if(verb==="review-job") return {tool:"get_campaign_review_job",input:{jobId:operand(2)}};
-    if(verb==="review-report") return {tool:"get_campaign_review_report",input:{jobId:operand(2)}};
-    if(verb==="review-jobs") return {tool:"list_campaign_review_jobs",input:{limit:numeric(option(args,"--limit")),afterJobId:option(args,"--cursor"),workItemId:option(args,"--item")}};
     if (verb === "plan") {
       const body = input();
       return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
@@ -481,7 +572,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const headSha = option(args, "--head");
       const briefFile = option(args, "--brief-file");
       if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha || !briefFile || briefFile.startsWith("--")) {
-        return { error: "review session run requires --repo <owner/name>, --pr <number>, --head <sha> and --brief-file <path>" };
+        return { error: "review session run requires --repo <owner/name or GitLab host/group/project>, --pr <number or merge request IID>, --head <sha> and --brief-file <path>" };
       }
       let brief: string;
       try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
@@ -503,42 +594,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
   if (words[0] === "review") {
     if (optionPresent(args, "--session")) return { error: "review commands act only on the injected session and do not accept --session" };
     const verb = words[1];
-    if (verb === "run") {
-      const repository = option(args, "--repo");
-      const number = option(args, "--pr");
-      const headSha = option(args, "--head");
-      if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha) {
-        return { error: "review run requires --repo <owner/name>, --pr <number>, and --head <sha>" };
-      }
-      const scope = option(args, "--scope");
-      if (optionPresent(args, "--scope") && scope !== "delta" && scope !== "full") return { error: "review run --scope is delta or full" };
-      const fullReason = option(args, "--full-reason");
-      if (optionPresent(args, "--full-reason") && (scope !== "full" || !fullReason?.trim() || fullReason.startsWith("--"))) {
-        return { error: "review run --full-reason needs text and --scope full" };
-      }
-      const briefFile = option(args, "--brief-file");
-      let brief: string | undefined;
-      if (optionPresent(args, "--brief-file")) {
-        if (!briefFile || briefFile.startsWith("--")) return { error: "review run --brief-file requires a path" };
-        try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
-        catch (error) { return { error: `could not read the brief: ${(error as Error).message}` }; }
-      }
-      return {
-        tool: "request_cross_model_review",
-        input: {
-          repository, number: Number(number), headSha,
-          ...(brief !== undefined ? { brief } : {}),
-          ...(scope ? { scope } : {}),
-          ...(fullReason ? { fullReason } : {}),
-        },
-      };
-    }
-    if ((verb === "get" || verb === "cancel") && words[2]) {
-      return { tool: verb === "get" ? "get_cross_model_review" : "cancel_cross_model_review", input: { jobId: words[2] } };
-    }
-    if (verb === "list") {
-      return { tool: "list_cross_model_reviews", input: { limit: numeric(option(args, "--limit")), afterJobId: option(args, "--cursor") } };
-    }
+    if (["run", "get", "list", "cancel"].includes(verb ?? "")) return { error: REVIEW_JOBS_RETIRED_REASON };
     return { error: reviewHelp() };
   }
   if (words[0] !== "session" && words[0] !== "sessions") return { error: usage() };
@@ -673,6 +729,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2] && words[3]
         ? { tool: "stop_background_job", input: { sessionId: words[2], jobId: words[3] } }
         : { error: "session stop-job requires a session id and a job id" };
+    case "release-hold":
+      return words[2] && words[3]
+        ? { tool: "release_queue_hold", input: { sessionId: words[2], holdId: words[3] } }
+        : { error: "session release-hold requires a session id and a hold id" };
     case "restart":
       return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
     case "archive":
@@ -879,10 +939,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
-    : ["allocate_campaign_budget","run_campaign_review_job","get_campaign_review_job","list_campaign_review_jobs","get_campaign_review_report"].includes(parsed.tool)
+    : parsed.tool === "allocate_campaign_budget"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
-    : ["request_cross_model_review", "get_cross_model_review", "list_cross_model_reviews", "cancel_cross_model_review"].includes(parsed.tool)
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob
     : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",

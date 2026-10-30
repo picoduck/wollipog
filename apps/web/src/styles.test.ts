@@ -66,7 +66,7 @@ test("known late form rules cannot outrank the focus-zoom guard", () => {
   // These are the rules that beat the previous attempt. They must appear BEFORE the guard so the
   // specificity tie resolves in the guard's favour on document order.
   const guard = css.lastIndexOf(":root .composer-input {");
-  for (const selector of [".automation-form-grid input", ".usage-retention input"]) {
+  for (const selector of [".usage-retention input"]) {
     const at = css.indexOf(selector);
     assert.notEqual(at, -1, `${selector} should still exist`);
     assert.ok(at < guard, `${selector} must appear before the focus-zoom guard`);
@@ -259,10 +259,9 @@ test("a Sessions row's selection, unread state and focus are three different tre
  * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
  */
 /** The rule that lets a container's gap space a `.field-label`, and the field label rule (§8.1). */
-const STACKED_FIELD_LABELS = [".field > .field-label", ".archive-filter > .field-label", ".automation-field > .field-label"];
-/** Labels of two forms that stack them over the control outside a `.field` (#2366). */
-const OUTSIDE_FIELD_LABELS = [".archive-search > span", ".archive-filter > .field-label", ".automation-form-grid > label",
-  ".automation-field > .field-label", ".automation-form-grid legend"];
+const STACKED_FIELD_LABELS = [".field > .field-label", ".archive-filter > .field-label"];
+/** Labels of a form that stacks them over the control outside a `.field` (#2366). */
+const OUTSIDE_FIELD_LABELS = [".archive-search > span", ".archive-filter > .field-label"];
 const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ...OUTSIDE_FIELD_LABELS, ".new-session-field-label"].join(",\n");
 
 /** The line under a field's control (§8.1): the helper, the error that replaces it, or a `.field-foot`. */
@@ -310,20 +309,15 @@ test("every field row is one column under 480px, by one shared rule and no size 
 });
 
 /**
- * #2366: Archived Sessions and the Automations editor stack their labels over the control outside a
- * `.field`. Those labels share the §8.1 rule above, their containers space them by --space-2, and no
- * other rule gives them a colour or type of their own (the old weight-600 overrides are gone). A grid
- * label's helper is dim, 4px under the control. e2e/field-label-outside-field.spec.ts measures them.
+ * #2366: Archived Sessions stacks its labels over the control outside a `.field`. Those labels share
+ * the §8.1 rule above, their containers space them by --space-2, and no other rule gives them a
+ * colour or type of their own (the old weight-600 overrides are gone).
+ * e2e/field-label-outside-field.spec.ts measures them.
  */
 test("a label stacked outside a .field is the §8.1 label, 8px above its control", () => {
   for (const container of [".archive-search", ".archive-filter"]) {
     assert.match(soleRuleBody(container), /gap: var\(--space-2\);/, `${container} spaces label and control by --space-2`);
   }
-  for (const container of [".automation-form-grid > label", ".automation-form-grid > .automation-field"]) {
-    assert.equal(soleRuleBody(container), "display: grid;\ngap: var(--space-2);", `${container} spaces label and control by --space-2`);
-  }
-  assert.equal(soleRuleBody(".automation-form-grid > label > small"),
-    "margin-top: calc(-1 * var(--space-1));\ncolor: var(--text-dim);\nfont: var(--type-small);");
   const overrides: string[] = [];
   postcss.parse(css).walkRules((rule) => {
     if (rule.selector === FIELD_LABEL) return;
@@ -409,9 +403,6 @@ test("form controls and buttons inherit the app's type, and bare buttons reset",
   assert.equal(baseRule("input, select, textarea").split("\n")[0], "font-weight: 400;");
   assert.equal(baseRule(":where(button)"),
     ["background: none;", "border: 0;", "color: inherit;", "font: inherit;", "padding: 0;"].join("\n"));
-  // The Automation form's fields inherited 600 from their label through a local `font: inherit`.
-  assert.doesNotMatch(soleRuleBody(".automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea"),
-    /font:/, "a local font shorthand would re-inherit the label's weight");
 });
 
 /**

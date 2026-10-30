@@ -1,0 +1,138 @@
+name: Harness Assumption Probes
+
+# Re-measures the undocumented CLI behaviour Wollipog depends on whenever a supported harness
+# publishes a release. Credential-free: throwaway homes and scripted loopback model servers only.
+# A changed or could-not-run result fails the run. Contract: docs/harness-assumption-probes.md.
+on:
+  schedule:
+    # Avoids 00:00-02:00 UTC.
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: Harness to measure in full even if already measured; the others are not measured
+        required: true
+        default: all
+        type: choice
+        # "all" plus one entry per HARNESSES id in scripts/harness-assumptions.mjs.
+        options: [all, codex, pi, claude]
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    name: ${{ matrix.harness }} Assumptions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    # At most one measurement per harness at a time, so the shared runner pool never holds more
+    # measurements than one run's matrix; the seconds-long excluded and summary jobs are unbounded.
+    # A job waits for an in-progress job of its harness, but GitHub keeps only one waiting job per
+    # group: a newer one cancels it before it starts, and the summarize job then reports that
+    # harness as dropped and fails, so the run never concludes success (GitHub marks it cancelled).
+    # A harness the dispatch excludes takes a group of its own, so it neither waits for nor
+    # displaces a measurement.
+    concurrency:
+      group: ${{ (github.event_name != 'workflow_dispatch' || inputs.harness == 'all' || inputs.harness == matrix.harness) && format('harness-assumption-probes-{0}', matrix.harness) || format('harness-assumption-probes-{0}-excluded-{1}', matrix.harness, github.run_id) }}
+      cancel-in-progress: false
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per HARNESSES id in scripts/harness-assumptions.mjs.
+        harness: [codex, pi, claude]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Detect Releases
+        id: detect
+        env:
+          DISPATCH_HARNESS: ${{ inputs.harness }}
+        run: node scripts/harness-assumptions.mjs detect --harness "${{ matrix.harness }}"
+
+      - name: Restore Measurement Record
+        if: steps.detect.outputs.excluded != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/harness-assumption-record/${{ matrix.harness }}
+          key: ${{ steps.detect.outputs.key }}
+
+      - name: Decide Whether to Measure
+        id: decide
+        if: steps.detect.outputs.excluded != 'true'
+        env:
+          DISPATCH_HARNESS: ${{ inputs.harness }}
+        run: node scripts/harness-assumptions.mjs decide --harness "${{ matrix.harness }}"
+
+      - name: Setup pnpm
+        if: steps.decide.outputs.measure == 'true'
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24 With pnpm Cache
+        if: steps.decide.outputs.measure == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      # Releases are unreviewed code: each suite runs as an unprivileged user without sudo against a
+      # read-only staged copy (dependencies installed there), and nothing it starts outlives it.
+      - name: Measure Assumptions
+        id: measure
+        if: steps.decide.outputs.measure == 'true'
+        env:
+          HARNESS_PROBE_USER: harness-probe
+          HARNESS_PROBE_ROOT: /opt/harness-probe
+        run: node scripts/harness-assumptions.mjs measure --harness "${{ matrix.harness }}"
+
+      - name: Upload Report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: harness-assumptions-${{ matrix.harness }}
+          path: ${{ runner.temp }}/harness-assumptions/${{ matrix.harness }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # Only a fully matched measurement is recorded, so changed or could-not-run re-measures next time.
+      - name: Save Measurement Record
+        if: steps.measure.outcome == 'success' && steps.measure.outputs.exit == '0'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/harness-assumption-record/${{ matrix.harness }}
+          key: ${{ steps.detect.outputs.key }}
+
+  # Lists every harness's outcome in this run; a harness without a complete report was dropped or
+  # interrupted, which is annotated and fails this job instead of passing silently.
+  summarize:
+    name: Summarize Measurements
+    needs: probe
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Download Reports
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: harness-assumptions-*
+          path: ${{ runner.temp }}/harness-assumption-reports
+
+      # Runs even when the download failed: a harness without a report is listed as dropped.
+      - name: Summarize
+        if: always()
+        run: node scripts/harness-assumptions.mjs summarize --reports "${{ runner.temp }}/harness-assumption-reports"

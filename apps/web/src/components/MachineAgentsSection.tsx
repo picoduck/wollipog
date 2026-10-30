@@ -19,7 +19,7 @@ import {
   notInstalledLabel,
   type MachineAgentRow,
 } from "../machine-agents.js";
-import { agentInstallHints } from "../runners.js";
+import { agentInstallHints, harnessUpdateGuidance } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { agentSessionDiscoveryUnavailableReason, agentSupportsSessionDiscovery, AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
@@ -91,6 +91,10 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
     : !registrySupported ? runnerCapabilityRequirement(runner.protocolVersion, "acpRegistryApproval", "registry approval")
       : null;
   const transport = registry?.transport ?? agent.acpTransport;
+  // How to update this exact copy, or clear a failed check (#3523). A notice that already quotes it
+  // (a Codex that is missing or too old) keeps it, so it is said once.
+  const updateGuidance = agent.update ? harnessUpdateGuidance(agent, os) : undefined;
+  const updateGuidanceShown = updateGuidance && !notice?.text.includes(updateGuidance) ? updateGuidance : undefined;
   const launchTitleId = useId();
 
   // Both confirmations wait on the request, so a failure stays in view (§7.4).
@@ -164,7 +168,15 @@ function AgentDetailsDialog({ agent, name, machineName, runner, online, returnFo
         )}
         <div><dt>Version</dt><dd>{agent.version ? `v${agent.version}` : "Unknown"}</dd></div>
         <div><dt>Sign-In</dt><dd>{agentSignInFact(agent)}</dd></div>
-        {agent.update && <div><dt>Updates</dt><dd>{harnessUpdateLabel(agent.update, online)}</dd></div>}
+        {agent.update && (
+          <div>
+            <dt>Updates</dt>
+            {/* Under the label, so on a machine that is not online it reads as last reported too. */}
+            <dd>{updateGuidanceShown
+              ? <><div>{harnessUpdateLabel(agent.update, online)}</div><div className="machine-agent-update-guidance">{updateGuidanceShown}</div></>
+              : harnessUpdateLabel(agent.update, online)}</dd>
+          </div>
+        )}
         {registry && (
           <div>
             <dt>Registry</dt>
@@ -247,6 +259,7 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
   const probing = agents.length === 0 && runner.agentsRefreshed !== true;
   const verified = runnerSupportsProtocol(runner.protocolVersion, "verifiedAgentAvailability");
   const installCommands = agentInstallHints(runner.os).filter((hint) => hint.command);
+  const nativeHarnessListed = listed.some(({ agent }) => agent.driver === "claude-code" || agent.driver === "codex-app-server");
 
   return (
     <DetailSection title="Agents" count={probing ? undefined : agents.length}>
@@ -270,10 +283,13 @@ export function MachineAgentsSection({ runner, online, machineName, canFindSessi
             <State compact title="No Agents Ready" className="machine-agents-empty">
               {verified ? (
                 <>
+                  {listed.length > 0 && <p>Open an agent’s details to resolve its availability, then rediscover.</p>}
+                  {!nativeHarnessListed && <>
                   <p>Install Claude Code or Codex on this machine, then rediscover.</p>
                   {installCommands.map((hint) => (
                     <CodeWell key={hint.name} value={hint.command!} name={`${hint.name} Install Command`} />
                   ))}
+                  </>}
                 </>
               ) : (
                 <p>Update this runner to verify its configured agent availability.</p>

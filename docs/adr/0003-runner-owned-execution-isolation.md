@@ -99,6 +99,51 @@ CLI tolerating read-only auxiliary files such as Claude's root project index/tod
 deterministic mount tests do not claim that live parity. Provider-mode history is not copied into the
 isolated store, so switching an existing session may be non-resumable.
 
+Native bwrap and Seatbelt launches also protect `packages/` beneath configured Codex homes,
+including a writable credential home preserved by a managed worktree. Linux overlays the directory
+read-only after writable mounts; macOS denies writes after its writable-root rules and prevents
+renaming package ancestors outside those rules. Only package directories within existing write
+grants receive Linux overlays; unrelated readonly account aliases are ignored, and package aliases
+inside writable homes fail closed. An already-readonly package tree needs no new bind. Credentials
+and transcripts keep their existing write permissions. Package updates must run outside these agent
+boundaries. A real Codex App smoke test exercises a failed installer write followed by two local
+mock-inference turns; a separate bwrap test verifies the mount when user namespaces are available.
+
+Reviewer admission for review sessions and the legacy controller bridge uses only static trust
+checks, required tools and available native agents. The conventional
+`~/.codex/packages/standalone` exception follows from the launch invariant, not runtime writer
+tracking. Every native bwrap/Seatbelt launch protects configured reviewer executable and
+interpreter installation directories as well as Codex packages. Symlink hops are inventoried as
+exact entries rather than turning their containers into installations: a dotfiles-managed
+`~/bin` link must not make HOME a read-only installation overlay or mask writable cache/worktree
+grants below it. Linux pins those entries through the existing read-only root or installation
+mount; it refuses a resolution link whose parent remains exposed to a writable identity or
+remapped mount, naming the link and writable root. A bind on a symlink would follow its target
+and does not pin the link. Seatbelt denies writes to exact link entries and unlinking their
+ancestor entries, preserving sibling writes. Only links on actual reviewer/interpreter resolution
+paths participate. Empty package
+directories under writable grants are pinned before launch to prevent planting future installs.
+Unverifiable installation protection fails the launch with the affected path. Writable remapped
+sources that expose a protected installation are refused. Other session-writable executables,
+world-writable paths and other-user-owned components remain untrusted.
+Installations containing requested writable roots are refused with both paths rather than
+silently masking worktree or cache writes. Installation directories must be dedicated to code.
+
+A group-write bit is safe only for a proven user-private group: system passwd/group lookups must
+show the owner's primary gid, no other supplementary member and no other primary-group user.
+All same-gid group entries and any separate `initgroups` NSS source participate in this proof.
+Unknown or configured remote NSS sources fail closed. Listed but provably unconfigured and
+inactive SSSD is non-contributing; local files/systemd identity sources are supported. No
+identity evidence comes from environment variables. Shared group writes remain refused even below private ancestors; sticky-parent
+protections still apply. See [Review Writer Recovery](../review-writer-recovery.md) for details.
+
+Writer records and the offline state doctor remain non-blocking process lifecycle diagnostics.
+Retaining them preserves exact process-tree retirement and shutdown behavior without involving
+it in admission. Records from any runner generation, leases, stale statuses and launch fences
+never affect reviewer availability. Running Orchestrators, unsandboxed agents and Agent TUIs
+already have host-user access; this boundary does not defend against those processes. No release
+digest pin is implemented, so pre-existing same-user tampering remains outside static trust.
+
 Repository checkpoints use the same stable owner identity under
 `refs/{wollipog,mam}/owners/<ownerHash>/<sessionId>`. A durable layout discriminator and cleanup-ledger
 owner hash keep restarts, rollback, and deletion on the exact namespace originally selected. Legacy
@@ -155,6 +200,12 @@ selective retirement belongs to reconciliation once every live provider id can b
 Credentials, configuration, plugin state, and unknown ACP adapter layouts remain read-only. OAuth
 refresh or an adapter that requires a different writable home path may fail with `EROFS`; the runner
 does not broaden home write access by guessing. Provider mode remains the native compatibility option.
+
+For deliberately shared application runtime state, an operator may configure exact per-workspace
+`sharedWritableDirectories` on native Linux. These are explicit exceptions, separate from provider
+credentials and private transcript state; see [Project Shared Runtime Directories](../project-shared-directories.md).
+The containing credential directory remains read-only. Reviewers and scratch-only Orchestrators do
+not inherit these grants.
 
 The runner creates an empty real-home target directory when a provider has never created its transcript
 path; bubblewrap needs that mountpoint under the read-only parent. An explicit absolute agent `HOME`

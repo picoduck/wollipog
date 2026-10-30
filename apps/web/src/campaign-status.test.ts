@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { CampaignWorkItemSummary } from "@wollipog/protocol";
+import type { CampaignForgeGitLabMergeRequestObservation, CampaignWorkItemSummary } from "@wollipog/protocol";
 import {
   CAMPAIGN_STATUS_UNSUPPORTED_REASON,
   CAMPAIGN_ORIGIN_FILTER_OPTIONS,
@@ -20,8 +20,10 @@ import {
   elapsedMs,
   forgePullRequestView,
   issueRefHref,
+  issueRefLabel,
   observationUnavailableText,
   measuredDuration,
+  pullRequestShortLabel,
   workItemOriginLabel,
   workItemTimeView,
   workItemTitle,
@@ -226,6 +228,88 @@ test("Rows name the issue when there is no title, and origins carry their genera
   assert.equal(issueRefHref({ repository: "a/b", number: 0 }), null);
 });
 
+test("GitLab refs link to their own host and read as GitLab writes them (#3539)", () => {
+  const project = "gitlab.example.com/group/subgroup/project";
+  assert.equal(issueRefHref({ repository: project, number: 4 }), "https://gitlab.example.com/group/subgroup/project/-/issues/4");
+  assert.equal(issueRefHref({ repository: project, number: 9 }, "pull"),
+    "https://gitlab.example.com/group/subgroup/project/-/merge_requests/9");
+  assert.equal(issueRefHref({ repository: "gitlab.example.com:8443/group/project", number: 9 }, "pull"),
+    "https://gitlab.example.com:8443/group/project/-/merge_requests/9");
+  assert.equal(issueRefLabel({ repository: project, number: 4 }), `${project}#4`);
+  assert.equal(issueRefLabel({ repository: project, number: 9 }, "pull"), `${project}!9`);
+  assert.equal(issueRefLabel({ repository: "picoduck/wollipog", number: 9 }, "pull"), "picoduck/wollipog#9");
+  assert.equal(pullRequestShortLabel({ repository: project, number: 9 }), "MR !9");
+  assert.equal(pullRequestShortLabel({ repository: "picoduck/wollipog", number: 9 }), "PR #9");
+  // A bare nested path names no host, so it is never guessed to be gitlab.com.
+  assert.equal(issueRefHref({ repository: "group/subgroup/project", number: 4 }), null);
+  assert.equal(issueRefHref({ repository: "github.com/picoduck/wollipog", number: 4 }), null);
+  // A GitLab merge request's unavailable reasons name GitLab and its CLI, never GitHub (#3600).
+  for (const reason of ["not_authorized", "not_observed", "runner_disconnected", "runner_unsupported", "forge_cli_missing",
+    "forge_unauthenticated", "forge_unreachable", "forge_unsupported", "forge_not_found", "forge_rate_limited", "forge_error"] as const) {
+    const view = forgePullRequestView({ availability: "unavailable", reason }, NOW, { repository: project, number: 9 });
+    assert.equal(view.forge, "GitLab");
+    const text = view.kind === "unavailable" ? view.reason : "";
+    assert.match(text, /GitLab/u, reason);
+    assert.doesNotMatch(text, /GitHub|\bgh\b/u, reason);
+    assert.match(text, /^[A-Z].*\.$/u, `${reason} reads as a sentence`);
+  }
+  const github = forgePullRequestView({ availability: "unavailable", reason: "not_observed" }, NOW, { repository: "picoduck/wollipog", number: 9 });
+  assert.equal(github.kind === "unavailable" ? github.reason : "", observationUnavailableText("not_observed"));
+  assert.equal(github.forge, "GitHub");
+});
+
+test("An observed GitLab merge request reads approvals, pipeline, and merge train in GitLab's terms (#3600)", () => {
+  const ref = { repository: "gitlab.example.com/platform/agents/wollipog", number: 7 };
+  const value: CampaignForgeGitLabMergeRequestObservation = {
+    forge: "gitlab", state: "open", draft: false, headSha: "5c1e0b7a90f2c3d4e5f60718293a4b5c6d7e8f90", baseRef: "main",
+    approvals: { approved: false, approvedBy: 1, left: 1 },
+    pipeline: { id: 901, status: "running" },
+    mergeTrain: { status: "fresh", position: 2 },
+    mergeCommitSha: null,
+  };
+  const view = forgePullRequestView({ availability: "fresh", value, observedAt: NOW - MINUTE }, NOW, ref);
+  assert.ok(view.kind === "observed");
+  assert.equal(view.forge, "GitLab");
+  assert.equal(view.status, "Open");
+  assert.deepEqual(view.rows, [
+    { label: "Approvals", text: "Approval Required", note: "1 more approval needed." },
+    { label: "Pipeline", text: "Running", note: "Pipeline #901." },
+    { label: "Merge Train", text: "Running, Position 2", note: null },
+    { label: "Head", text: "5c1e0b7", note: null },
+    { label: "Target Branch", text: "main", note: null },
+  ]);
+  for (const row of view.rows) assert.equal(titleCaseLabel(row.label), row.label, `${row.label} is Title Case`);
+  for (const row of view.rows.slice(0, 3)) assert.equal(titleCaseLabel(row.text), row.text, `${row.text} is Title Case`);
+  const read = (overrides: Partial<CampaignForgeGitLabMergeRequestObservation>, availability: "fresh" | "stale" = "fresh") => {
+    const result = forgePullRequestView({ availability, value: { ...value, ...overrides }, observedAt: NOW - MINUTE }, NOW, ref);
+    assert.ok(result.kind === "observed");
+    return result;
+  };
+  const row = (view: ReturnType<typeof read>, label: string) => view.rows.find((candidate) => candidate.label === label);
+  assert.deepEqual(row(read({ pipeline: null }), "Pipeline"),
+    { label: "Pipeline", text: "None", note: "GitLab reports no pipeline for this merge request. This is not passing." });
+  assert.equal(row(read({ pipeline: { id: 3, status: "success" } }), "Pipeline")?.text, "Passed");
+  for (const status of ["failed", "running", "pending", "canceled", "skipped", "manual", "unknown"] as const) {
+    assert.notEqual(row(read({ pipeline: { id: 3, status } }), "Pipeline")?.text, "Passed", `${status} never reads as passed`);
+  }
+  assert.match(row(read({ pipeline: { id: 3, status: "unknown" } }), "Pipeline")?.note ?? "", /isn't shown as passing/u);
+  assert.equal(row(read({ approvals: { approved: true, approvedBy: 0, left: 0 } }), "Approvals")?.text, "Not Required");
+  // Community Edition reports no rule count: unapproved is not "required" (#3606 review).
+  assert.deepEqual(row(read({ approvals: { approved: false, approvedBy: 0, left: null } }), "Approvals"),
+    { label: "Approvals", text: "Not Approved", note: null });
+  assert.equal(row(read({ approvals: { approved: false, approvedBy: 0, left: 0 } }), "Approvals")?.text, "Not Approved");
+  assert.deepEqual(row(read({ approvals: { approved: true, approvedBy: 2, left: 0 } }), "Approvals"),
+    { label: "Approvals", text: "Approved", note: "2 approvals." });
+  assert.equal(row(read({ mergeTrain: null }), "Merge Train")?.text, "Not on a Train");
+  assert.equal(row(read({ mergeTrain: { status: "merging", position: null } }), "Merge Train")?.text, "Merging");
+  const merged = read({ state: "merged", mergeCommitSha: "a1b2c3d4e5f60718293a4b5c6d7e8f9001234567", mergeTrain: null });
+  assert.equal(merged.status, "Merged");
+  assert.equal(row(merged, "Merge Commit")?.text, "a1b2c3d");
+  const stale = read({}, "stale");
+  assert.equal(stale.current, false);
+  assert.equal(row(stale, "Pipeline")?.text, "Last Seen Running", "a stale pipeline never reads as current");
+});
+
 test("The list defaults to unfinished work in queue order, and every filter and sort is honored", () => {
   const item = (id: string, overrides: Partial<CampaignWorkItemSummary>) => itemSummary(id, NOW, overrides);
   const items = [
@@ -304,6 +388,6 @@ test("GitHub facts: no required checks is not passing, an unconfirmed rollup is 
     const text = observationUnavailableText(reason);
     assert.match(text, /^[A-Z].*\.$/u, `${reason} reads as a sentence`);
     assert.doesNotMatch(text, /passing|approved|merged/iu, `${reason} never suggests a favourable value`);
-    assert.deepEqual(forgePullRequestView({ availability: "unavailable", reason }, now), { kind: "unavailable", reason: text, lastObservedAt: null });
+    assert.deepEqual(forgePullRequestView({ availability: "unavailable", reason }, now), { kind: "unavailable", forge: "GitHub", reason: text, lastObservedAt: null });
   }
 });

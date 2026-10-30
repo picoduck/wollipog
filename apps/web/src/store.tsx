@@ -1376,6 +1376,7 @@ function reducer(state: State, action: Action): State {
                 parentControlPolicy: previous.parentControlPolicy,
                 orchestratorCampaign: previous.orchestratorCampaign,campaignMembership: previous.campaignMembership,
                 providerAccountSwitchFailure: previous.providerAccountSwitchFailure,
+                providerHomeRefusal: previous.providerHomeRefusal,
                 agentCapabilities: previous.agentCapabilities,
                 executionTarget: previous.executionTarget,executionHandoff: previous.executionHandoff,
                 backgroundJobs: previous.backgroundJobs,backgroundJobsTruncated: previous.backgroundJobsTruncated,
@@ -2254,9 +2255,10 @@ export class Store {
   reconnectNow = (): boolean => this.reconnectHandler?.() ?? false;
 
   /**
-   * A view that asks for something to be focused — a session's attention target, or a Settings
-   * control a redirect lands on (#3023) — is an activation: each arrival gets a fresh id, so arriving
-   * again on the same address focuses it again rather than being dropped as the same view.
+   * A view that asks for something to be focused — a session's attention target, a Settings
+   * control a redirect lands on (#3023), or a Machine accounts action (#3240) — is an activation:
+   * each arrival gets a fresh id, so arriving again on the same address focuses it again rather
+   * than being dropped as the same view.
    */
   private activate(view: View): { view: View; activation: boolean } {
     if (view.name === "session" && view.attention) {
@@ -2264,6 +2266,9 @@ export class Store {
     }
     if (view.name === "settings" && view.focus) {
       return { view: { ...view, focus: { ...view.focus, activationId: ++this.attentionActivation } }, activation: true };
+    }
+    if (view.name === "runners" && view.accounts) {
+      return { view: { ...view, accounts: { ...view.accounts, activationId: ++this.attentionActivation } }, activation: true };
     }
     return { view, activation: false };
   }

@@ -16,6 +16,15 @@ recovers it.
   still fails fast, and periodic work defers its tick as before.
 - `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
   control-plane decision is durable once it has been acknowledged.
+- Live runtime snapshots (`session_runtime_updated`) stay `FULL` but are grouped. After
+  registration a runner republishes one snapshot per retained session, and a separate flush for
+  each held newer live snapshots back for tens of seconds under disk contention (#2601). A run of
+  up to 32 consecutive queued snapshots from one runner, for distinct sessions, now commits in one
+  transaction (`updateSessionsFromRuntimeSnapshots`). Nothing about the run is broadcast or sent
+  to a runner until that commit returns, and a failed commit rolls back the whole run. A snapshot
+  with stop, decision, hook, policy, media or cost-repair work keeps its own commit, in order. The
+  event loop still yields between runs. A crash before a run commits loses only frames that nothing
+  has acknowledged yet, and the runner republishes them when it next registers.
 - `secure_delete=ON`: SQLite overwrites deleted ordinary-table content with zeros rather than
   leaving session text, credentials or decision content recoverable from free pages in the main
   database file. The extra delete I/O is an intentional privacy tradeoff; reducing maintenance
@@ -83,6 +92,72 @@ events, 10 streaming sessions and 6 dashboards:
 | `appendEvent` p50                          | 5.1 ms               | 0.07 ms              |
 | Runner-to-dashboard p50 / p95, 200 events/s | 1.4 s / 2.9 s        | 0.5 ms / 9 ms        |
 | Runner-to-dashboard p50 / p95, 300 events/s | 4.4 s / 8.6 s        | 0.5 ms / 12 ms       |
+
+## Optional incremental vacuum
+
+`CONTROL_PLANE_DB_INCREMENTAL_VACUUM=1` opts the **host** into paced free-page reclamation (#3321).
+It is off by default; unset, empty and `0` are off, invalid values warn and are off. There is no
+organization/API/UI override. Like #2777, an observed off-to-on transition arms for **24 hours**,
+persisted across restarts; observed off disables immediately at startup and reenabling arms anew.
+Only enabled new empty databases choose `auto_vacuum=INCREMENTAL` before schema creation. Existing
+files require the [explicit offline conversion](./archived-history-retention.md#one-time-offline-conversion).
+Startup never runs full `VACUUM` and refuses incremental maintenance on an unconverted database.
+
+The offline operator CLI is
+`pnpm db:enable-incremental-vacuum --db <existing-file> --owner-stopped [--temp-dir <directory>]`.
+Stop all owners/readers/backups first, from outside the hosting stack, and verify a SQLite-aware
+backup. The command requires exclusive SQLite access and pins SQLite's temp directory. On both
+the database and temporary-file filesystems it requires free bytes of at least
+`2 × N + max(256 MiB, ceil(N / 10))`, where `N = max(page_count × page_size, main-file bytes)`.
+Unknown or insufficient space, missing acknowledgement or failed locking refuses before setting
+auto-vacuum mode or starting the full rewrite. Unsupported temp-directory control also refuses.
+The same filesystem needs that amount once. Other writers can consume space after the check;
+the margin is headroom, not a disk reservation. Exclusive locking cannot prove an idle rollback
+handle is closed, so operator downtime remains mandatory. Conversion preserves WAL mode and
+logical records; failures require inspection before restart. It is never a live maintenance step.
+
+Once armed, maintenance starts 10 minutes after startup and hourly after the preceding pass ends,
+independently of retention. It starts only with at least **256 free pages**, then drains in **1–32-page**
+steps, initially one page, adapting toward **4 ms above the measured one-page cost** and resting
+at least **1 ms and 3× work time** after every step. Each pass caps at **1,000 steps**: at 4 KiB pages,
+at most about **128 MiB per hourly pass**, with warmup and slower storage reducing that throughput. A 2 GiB reclamation takes
+more than 16 passes. It is not an emergency full-disk recovery mechanism.
+
+One-page samples estimate the fixed cost of a `FULL` commit, so sync latency alone cannot pin
+the budget at one page (#3575). A faster multi-page step lowers that estimate, so an initial
+latency spike cannot keep it inflated. Growth is at most doubling per step. Complete steps reaching
+**12 ms** reduce the next page budget proportionally toward **8 ms**, regardless of the baseline,
+leaving headroom below the 16 ms target. These estimates cannot guarantee a bound on arbitrary I/O.
+
+Each step runs with the main connection's normal **`synchronous=FULL`**, outside retention's or
+ingest's relaxed transactions. No replay, approval, accounting or privacy guard is weakened;
+`secure_delete=ON` and FTS5 secure-delete are unchanged. Only for the synchronous maintenance
+call, `busy_timeout` is zero so lock contention defers instead of blocking for the request path's
+250 ms; it is restored in `finally`, without an asynchronous gap. Steps are independent SQLite
+transactions; interruption safely leaves the remaining free list for the next pass. Retained
+records do not change. WAL checkpoints, worker settings, backstops and SQLite-version guards are
+unchanged. Shrinkage becomes visible as ordinary checkpoints apply the WAL's truncation; a reader
+can delay it. No forced checkpoint is added.
+
+Startup logs report mode/arming; pass logs report reclaimed pages/bytes, p95/max complete-step
+latency, average reclaimed pages per step (`pagesPerStep`), slow-step count and stop/limit state
+with a run ID and entry point. Busy/errors defer to the next pass; the first step >=16 ms warns once per pass.
+`pnpm benchmark:incremental-vacuum [--dir <fixture-parent>]` creates a disposable
+file-backed fixture, checks kept data and physical shrinkage, and measures complete steps alongside
+ordinary `FULL` writes and the existing checkpoint worker, failing at **p95 >=16 ms**. The 16 ms
+target requires measurement on the operator's storage, not an unconditional timing guarantee.
+
+On a Linux/Node 24.18.1 NVMe fixture with 16,000 indexed records, the worker and concurrent `FULL`
+writes, the updated adaptation reclaimed **50.24 MiB in 10.89 seconds** (about **4.61 MiB/s** during
+the pass): **411 steps**, averaging **31.29 pages/step**, with **8.73 ms p95 / 10.46 ms max**.
+The fixture drained before the 1,000-step cap; this is a measured example, not a guaranteed hourly rate.
+
+Backups and restores retain their existing SQLite-aware consistency, durability, privacy and
+rotation requirements. A restored pre-conversion backup retains `auto_vacuum=NONE` and needs
+conversion again; startup does not rewrite it. A converted backup retains incremental mode.
+Persisted arming state is backed up too: an enabled environment can resume an already mature
+deadline after restore, so leave it off if maintenance should remain disabled. Shrinking allocation
+does not erase old content from WAL, backups or external artifact storage.
 
 ## What a Crash Can Lose
 

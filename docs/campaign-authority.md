@@ -100,11 +100,22 @@ snapshot digest, current revision, supersession, stop/restart revocation and one
 remain enforced.
 
 Synchronous root provider requests cannot wait for the parked root model to answer itself. The
-server resolves eligible one-time repository operations from the standing authorization and
-answers verified root choice forms using the root's recommended choice (or first offered
-assumption). It records a system resolution, rather than an agent-created grant. Root forms with
-no bounded suggested answer, ambiguous recommendations or invalid cardinality are dismissed (class
-`root_forms_without_suggested_answers`). A real NDJSON fixture verifies that both callbacks settle and the provider
+server resolves eligible one-time repository operations from the standing authorization. It
+records a system resolution, rather than an agent-created grant. A root's own questions (class
+`root_questions`) are dismissed at once, whatever options they offer: the root is the campaign's
+only owner, so nobody else can answer them, and applying one of the root's options would record a
+decision no person made. A live root once asked the person to confirm "Approved in Wollipog" for a
+closure it owned itself. After the root's first dismissal in a policy revision, the server queues
+one notice to the root (the `FULL_CONTROL_ROOT_QUESTION_MESSAGE` constant). It says nobody sees the
+root's questions, and that the root decides Orchestrator-owned matters with the typed tools,
+approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
+session ID. Later questions in the same revision are still dismissed but wake the root with no
+further notice, so a root that answers each notice with another question cannot loop; the bound is
+the durable decline ledger's first-for-class record. Neither provider's dismissal can carry text
+(Claude Code sends a fixed deny message, Codex an empty answer set), so the guidance travels as a
+prompt. The dismissal is not blocked work.
+The root's own pending typed workflow decisions never park its provider, so they never stop a
+standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
 Human mode admission also attempts existing eligible parked root occurrences. If delivering a
 standing response fails, the exact request carries `standingAdmissionFailure` and is disclosed as
@@ -145,7 +156,7 @@ root standing response the runner could not receive (`provider_delivery_unavaila
 | Any tool effect not attested inside the session's own worktree (a target or cwd outside it, an escaping symlink, globs, scripts, interpreters, Git, partial or pre-v230 evidence) | Declined | Declined |
 | `external_elicitation` and other forms | Orchestrator decides once | Declined |
 | `unverified_tool_effects`, `script_execution_without_bounded_effect_proof` with every target inside the worktree | Orchestrator decides once | Declined |
-| `root_forms_without_suggested_answers` | Not applicable | Dismissed |
+| `root_questions` (every question the root asks) | Not applicable | Dismissed, with a notice |
 | `undelegated_policy_asks` (every target inside the worktree) | Orchestrator decides once | Declined |
 | `human_required_rules` (marked Human Required, or built in) | Human | Human |
 
@@ -220,7 +231,9 @@ every UI evidence decision, including video without a certified media reviewer, 
 an Orchestrator whose client cannot view images. It is delivered only the child's own inspectable
 screenshots, and approval still needs a receipt for every item, so it asks the child for screenshots
 attached as Session artifacts or denies the claim as unproven. Certified delegated video review
-still applies when available. Ownership the Orchestrator holds only because Full Control kept a
+still applies when available, and operator-enabled frame review derives a short video's frames for
+the boundary's UI Evidence Approval exactly as it does for a Custom saved Orchestrator owner; the
+root's own saved owner plays no part (#1321). Ownership the Orchestrator holds only because Full Control kept a
 decision from the Human can deny, never approve: an approval needs every evidence route (screenshot
 review, operator-enabled frame review, the certified media-only reviewer) directly available to the
 Orchestrator when it resolves, and an approved decision stays consumable only while they still are,

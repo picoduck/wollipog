@@ -44,8 +44,25 @@ retain the drafting context, exact sanitized payload, fresh duplicate checks and
 Follow-up recommendations go to the parent for recording and deduplication before anyone acts.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
-references in campaigns so merge cannot bypass the closure gate. Delivery comments compare every
+references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put
+close, fix or resolve (any tense, even negated as in "does not close" or hyphenated as in
+"auto-close") directly before an issue reference that must stay open, in a PR description, title or
+commit message. Code spans do not close an issue, but paraphrase rather than rely on them. Check a
+draft with `wollipog pr closures --file <draft>` and an open PR with `wollipog pr closures <url>`. A
+GitHub `pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge
+would close (#3713). Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
+
+Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
+cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
+skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
+and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
+review epoch. Exhausted rounds require the exact `review_round_extension` decision; its default
+owner is human and Full Control does not delegate it. With protocol 232 or later, campaign review
+sessions reserve allowance before launch and record actual Session usage against it. Exhausted,
+stopped or unavailable allowances refuse admission with a reason; original human cost ceilings
+still apply across attempts. The older bridge and controlled campaign review jobs are retired.
+Upgrade unsupported peers; never use a native subprocess to bypass an admission or budget refusal.
 
 Run the required cross-model review using the installed workflow's exact reviewer model/effort,
 read-only contract, attempt limits and private ledger. Independently adjudicate every finding.
@@ -53,23 +70,19 @@ Delegated review does not permit extra attempts after an exhausted limit or trea
 attempt as valid. External unmetered reviewers are unsupported for production admission when
 managed budget reservations are required; do not disguise an ordinary CLI review as accounted work.
 
-The installed Codex cross-model-review runner launches its controlled Claude Opus 5.5 high reviewer
-as a native subprocess. A manual launch outside supported campaign admission remains unaccounted
-for protected admission purposes; report its actual raw costs and invalid attempts, never zero
-cost. Main includes the #2936 controlled native adapter described in `docs/campaign-limits.md`.
-Its availability requires the actual registered `campaignReview` profile, matching audited
-controller/executable, human-established controlled-review budget authority and available limits;
-a protocol number or merged feature code proves none of those. Preserve the installed runner's
-strict Read-only/dontAsk contract, full pinned patch and tracked-path catalog, exact harness/model/
-effort, coverage validation, no helper or MCP tools, and four-valid-round/two-attempt limits with
-a 30-minute attempt timeout including infrastructure. Do not substitute a matching model on a
-different harness, edit installed guardrails, change campaign settings or invent accounting.
-#2939 must prove actual integrated delivery, cost and zero-prompt behavior before production
-readiness is claimed. This policy alignment grants no live configuration or paid-launch authority.
+Hosted review sessions preserve the required harness/model/effort, read-only snapshot, coverage
+contract and attempt limits. Native reviewer subprocesses outside managed Session accounting remain
+unaccounted for protected admission; disclose their actual raw cost and invalid attempts. Retirement
+adds no native fallback or paid-launch authority. Drain historical jobs with their prior runner and
+follow the control-plane-first transition in `docs/agent-control.md`; never update the hosting stack
+from this session. Old grants and unknown charges require their existing human/accounting recovery.
 
 Before merge, verify the reviewed head equals the pushed head and required CI passed on that SHA.
 The required check is `Typecheck, Test & Sidecar Bundle`; an empty required list into `main` with
-an active workflow is pending. Draft-skipped and absent runs need repair. Inspect dependencies and
+an active workflow is pending. Merge groups run full regression: the fast merge-group gate and
+regression admission are disabled, and activating them needs the separate human approvals in
+`docs/fast-gate-activation-proposal.md`. Agents never set `CI_MERGE_GROUP_GATE`,
+`CI_REGRESSION_ADMISSION` or `CI_PR_SUITE_ROUTING`, or change the ruleset. Draft-skipped and absent runs need repair. Inspect dependencies and
 direct stacked children. Request the exact typed merge decision and arm/execute the canonical
 `gh pr merge URL --squash --match-head-commit SHA` command; never use `--delete-branch` on enqueue.
 Wait for merge-group CI and actual `MERGED` state. Obtain a separate typed branch-deletion approval

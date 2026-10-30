@@ -52,7 +52,9 @@ export function titleCaseLabel(value: string): string {
   const last = wordIndexes.at(-1);
   return words.map((word, index) => {
     if (!/[A-Za-z]/.test(word) || /^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$/.test(word)) return word;
-    return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part) => {
+    return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part, offset: number) => {
+      // An ordinal's suffix ("1st", "22nd") belongs to its number and stays lowercase.
+      if (/\d/.test(word[offset - 1] ?? "")) return part;
       const segments = part.split("-");
       return segments.map((segment, segmentIndex) => {
         if (!segment) return segment;
@@ -419,4 +421,56 @@ export function describeSshFailure(
   if (e.includes("could not resolve hostname")) return `This computer couldn't find ${host}. Check the SSH target.`;
   if (e.includes("connection refused")) return `${host} refused the connection. Check that SSH runs there and the port is right.`;
   return `Wollipog couldn't reach ${host} over SSH.`;
+}
+
+/** The calendar day of `instant` in `timeZone` (the viewer's when omitted), as a UTC midnight. */
+function calendarDay(instant: number, timeZone?: string): number {
+  return Date.parse(new Intl.DateTimeFormat("en-CA", {
+    year: "numeric", month: "2-digit", day: "2-digit", ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(instant)));
+}
+
+/**
+ * A moment in words, without seconds (#2968): "Today, 2:00 AM", "Tomorrow, 2:00 AM",
+ * "Yesterday, 2:00 AM", "Sat, 9:00 AM" later this week, and "Oct 14, 9:00 AM" otherwise, with the
+ * year only when it is not this year's. In the viewer's time zone unless one is given.
+ */
+export function formatCalendarTime(instant: number, now = Date.now(), timeZone?: string, locale?: string): string {
+  if (!Number.isFinite(instant) || !Number.isFinite(now)) return "";
+  const zone = timeZone ? { timeZone } : {};
+  const format = (options: Intl.DateTimeFormatOptions) =>
+    new Intl.DateTimeFormat(locale, { ...options, ...zone }).format(new Date(instant));
+  const time = format({ hour: "numeric", minute: "2-digit" });
+  const days = Math.round((calendarDay(instant, timeZone) - calendarDay(now, timeZone)) / 86_400_000);
+  if (days === 0) return `Today, ${time}`;
+  if (days === 1) return `Tomorrow, ${time}`;
+  if (days === -1) return `Yesterday, ${time}`;
+  if (days > 1 && days < 7) return `${format({ weekday: "short" })}, ${time}`;
+  const year = (value: number) => new Intl.DateTimeFormat("en-CA", { year: "numeric", ...zone }).format(new Date(value));
+  return `${format({ month: "short", day: "numeric", ...(year(instant) !== year(now) ? { year: "numeric" } : {}) })}, ${time}`;
+}
+
+const countOf = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"}`;
+
+/**
+ * A moment still to come, as its time and how long until it (#2977): "2:36 AM, in 4 minutes",
+ * "2:36 AM, in less than a minute", "3:40 AM, in 1 hour 4 minutes"; on another day the time is
+ * `formatCalendarTime()`'s ("Tomorrow, 2:36 AM, in 23 hours"). The wait counts the clock's minutes
+ * from now to then, so at 2:31 the words for 2:36 always say 5 minutes, whatever the seconds. Under a
+ * minute away reads "in less than a minute", and a moment already here reads "now". In the viewer's
+ * time zone unless one is given.
+ */
+export function formatFuture(at: number, now = Date.now(), timeZone?: string, locale?: string): string {
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return "";
+  const wait = at - now;
+  if (wait <= 0) return "now";
+  const time = calendarDay(at, timeZone) === calendarDay(now, timeZone)
+    ? formatClock(at, locale, timeZone)
+    : formatCalendarTime(at, now, timeZone, locale);
+  const minutes = Math.floor(at / 60_000) - Math.floor(now / 60_000);
+  const until = wait < 60_000 ? "less than a minute"
+    : minutes < 60 ? countOf(minutes, "minute")
+      : minutes % 60 === 0 || minutes >= 24 * 60 ? countOf(Math.round(minutes / 60), "hour")
+        : `${countOf(Math.floor(minutes / 60), "hour")} ${countOf(minutes % 60, "minute")}`;
+  return `${time}, in ${until}`;
 }

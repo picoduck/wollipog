@@ -2,7 +2,7 @@
  * The reviewed snapshot of a session's pull request (#3306, #561): which pull request a session
  * may have reviewed, and a runner-owned checkout of its exact pushed head.
  *
- * Scope: the session's own created native worktree, an open pull request from the same repository
+ * Scope: the session's own runner-owned native worktree, an open pull request from the same repository
  * whose head branch is that worktree's branch, at a head equal to the pull request's pushed head.
  * The repository is read from the runner-recorded project checkout, never through the worktree's
  * own `.git` pointer, which the session can rewrite.
@@ -16,12 +16,27 @@
 import { randomBytes, createHash } from "node:crypto";
 import { existsSync, lstatSync, mkdirSync, realpathSync, renameSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { githubSlug } from "./git-ops.js";
+import { campaignRepositoryLocation } from "@wollipog/protocol";
+import { githubSlug, parseForgeRemote } from "./git-ops.js";
 import type { ReviewTools } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
+import { parseWorktreePorcelain, sameWorktreePath } from "./worktree.js";
 
-/** A GitHub `owner/name`; the only form a review request may name. */
+/** A GitHub `owner/name`. */
 export const GITHUB_REPOSITORY = /^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u;
+
+/** The forge repository a review request names: a GitHub `owner/name`, or (v244, #3539) a GitLab
+ * project named by its host and full namespace, `<host>/group[/subgroup…]/project`. */
+export type ReviewRepository =
+  | { forge: "github"; repository: string }
+  | { forge: "gitlab"; host: string; project: string };
+
+export function reviewRepository(repository: unknown): ReviewRepository | null {
+  if (typeof repository !== "string") return null;
+  if (GITHUB_REPOSITORY.test(repository)) return { forge: "github", repository };
+  const location = campaignRepositoryLocation(repository);
+  return location?.forge === "gitlab" ? { forge: "gitlab", host: location.host, project: location.project } : null;
+}
 export const SESSION_IDENTITY = /^[A-Za-z0-9_-]{1,128}$/u;
 export const PUSHED_HEAD = /^[0-9a-f]{40}$/u;
 
@@ -46,9 +61,12 @@ function sha256(bytes: string | Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-/** A case-insensitive directory name for a validated `owner/name` (`_` cannot occur in an owner). */
+/** A case-insensitive directory name for a validated repository. A GitHub `owner/name` keeps its
+ * readable form (`_` cannot occur in an owner); a GitLab project, whose path can nest, is hashed,
+ * and its key has no `__`, so the two never collide. */
 export function repositoryKey(repository: string): string {
-  return repository.toLowerCase().replace("/", "__");
+  if (GITHUB_REPOSITORY.test(repository)) return repository.toLowerCase().replace("/", "__");
+  return `gitlab-${sha256(repository.toLowerCase()).slice(0, 32)}`;
 }
 
 export const shellQuote = (value: string) => `'${value.replace(/'/gu, `'\\''`)}'`;
@@ -102,7 +120,7 @@ export interface BoundPullRequestScope {
 
 /**
  * Prove that `request` names the session's own open, same-repository pull request at its pushed
- * head, from the session's own created native worktree. Throws `ReviewScopeRefusal` otherwise.
+ * head, from the session's own runner-owned native worktree. Throws `ReviewScopeRefusal` otherwise.
  */
 export async function bindPullRequestScope(input: {
   meta: SessionMeta | null | undefined;
@@ -111,26 +129,65 @@ export async function bindPullRequestScope(input: {
   env: NodeJS.ProcessEnv;
   exec: ReviewExec;
   pullRequest: (gh: string, repository: string, number: number, env?: NodeJS.ProcessEnv) => Promise<PullRequestFacts>;
+  /** A GitLab merge request's facts, read with the verified `glab` (v244, #3539). Without it, only
+   * GitHub pull requests can be bound. */
+  mergeRequest?: (glab: string, host: string, project: string, iid: number, env?: NodeJS.ProcessEnv) => Promise<PullRequestFacts>;
+  /** Whether the user's global glab configuration names `host` (a local, unauthenticated read).
+   * gitlab.com needs no proof; without this check no other host is ever asked. */
+  gitlabHostConfigured?: (glab: string, host: string, env?: NodeJS.ProcessEnv) => Promise<boolean>;
   /** Further refusals that apply once the worktree is proven to be the session's own. */
   beforeRepository?: () => void;
 }): Promise<BoundPullRequestScope> {
   const { meta, request, tools, env, exec } = input;
-  if (!GITHUB_REPOSITORY.test(request.repository) || !Number.isSafeInteger(request.number) || request.number <= 0) {
+  const named = reviewRepository(request.repository);
+  if (!named || (named.forge === "gitlab" && !input.mergeRequest) ||
+      !Number.isSafeInteger(request.number) || request.number <= 0) {
     refuseReview("the pull request is not this session's open, same-repository pull request");
   }
   const worktree = meta?.worktreePath ? meta.worktrees?.find((candidate) => candidate.path === meta.worktreePath) : undefined;
-  if (!meta || !worktree || worktree.source !== "created" || meta.context?.kind !== "native" ||
+  if (!meta || !meta.worktreePath ||
+      (worktree && worktree.source !== "created" && worktree.source !== "legacy") || meta.context?.kind !== "native" ||
       (meta.executionTarget?.adapter && meta.executionTarget.adapter !== "host")) {
     refuseReview("the review must cover the session's own native managed worktree");
+  }
+  if (!worktree) {
+    refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
+  }
+  const automatic = worktree!.source === "legacy";
+  if (automatic) {
+    const proof = meta!.launchWorktreeProof;
+    if (!proof || proof.sessionId !== meta!.sessionId || proof.repoPath !== meta!.repoPath ||
+        proof.path !== worktree!.path || proof.branch !== worktree!.branch ||
+        proof.branch !== `agent/${meta!.sessionId}` ||
+        (meta!.worktreeBranch !== undefined && meta!.worktreeBranch !== proof.branch)) {
+      refuseReview("resume this session once so the runner can verify its automatic worktree before requesting a review");
+    }
   }
   input.beforeRepository?.();
   const repoPath = realpathSync(meta!.repoPath);
   const origin = (await exec(tools.git, [...SAFE_GIT, "-C", repoPath, "remote", "get-url", "origin"], { env })).trim();
   const repository = request.repository;
-  if (githubSlug(origin)?.toLowerCase() !== repository.toLowerCase()) {
+  const remote = parseForgeRemote(origin);
+  const sameRepository = named!.forge === "github"
+    ? githubSlug(origin)?.toLowerCase() === repository.toLowerCase()
+    // GitLab: the origin names exactly this host and project; `glab --hostname` then proves both.
+    : remote?.host.toLowerCase() === named!.host.toLowerCase() &&
+      remote.project.toLowerCase() === named!.project.toLowerCase();
+  if (!sameRepository) {
     refuseReview("the pull request is not this session's open, same-repository pull request");
   }
-  const pr = await input.pullRequest(tools.gh, repository, request.number, env);
+  if (named!.forge === "github" && !tools.gh) refuseReview("the runner is missing a trusted gh for GitHub reviews");
+  if (named!.forge === "gitlab" && !tools.glab) refuseReview("the runner is missing a trusted glab for GitLab reviews");
+  // The origin is session-writable configuration, and glab may hold credentials that are not bound
+  // to one host (GITLAB_TOKEN). So, like every other GitLab reader, no authenticated request goes to
+  // a self-managed host the user's own global glab configuration does not name.
+  if (named!.forge === "gitlab" && named!.host.toLowerCase() !== "gitlab.com" &&
+      !(input.gitlabHostConfigured && await input.gitlabHostConfigured(tools.glab!, named!.host, env).catch(() => false))) {
+    refuseReview("the runner's glab is not configured for this GitLab host");
+  }
+  const pr = named!.forge === "github"
+    ? await input.pullRequest(tools.gh!, repository, request.number, env)
+    : await input.mergeRequest!(tools.glab!, named!.host, named!.project, request.number, env);
   if (pr.state !== "open" || pr.baseRepository.toLowerCase() !== repository.toLowerCase() ||
       pr.headRepository.toLowerCase() !== repository.toLowerCase() || pr.headRef !== worktree!.branch) {
     refuseReview("the pull request is not this session's open, same-repository pull request");
@@ -138,14 +195,38 @@ export async function bindPullRequestScope(input: {
   if (!PUSHED_HEAD.test(request.headSha) || pr.headSha !== request.headSha) {
     refuseReview("the requested head is not the pull request's pushed head");
   }
+  // GitLab reports no base until it has computed the merge request's diff for this head.
+  if (!PUSHED_HEAD.test(pr.baseSha)) refuseReview("the review snapshot could not be prepared");
   // The checkout's own `.git` directory, never a gitdir file or link that could name another
   // repository; and no `commondir` indirection inside it.
   const commonDir = join(repoPath, ".git");
   if (!lstatSync(commonDir, { throwIfNoEntry: false })?.isDirectory() || existsSync(join(commonDir, "commondir"))) {
     refuseReview("the review snapshot could not be prepared");
   }
-  const forgeUrl = /^https:\/\//iu.test(origin) || !tools.ssh
-    ? `https://github.com/${pr.baseRepository}.git` : `git@github.com:${pr.baseRepository}.git`;
+  if (automatic) {
+    // Read the primary checkout's registration/HEAD records. The worktree's own pointer is only
+    // compared with that trusted repository, never used to choose the snapshot's source.
+    // A durable launch proof cannot authorize a removed/replaced tree or a later branch switch.
+    let registered = false;
+    try {
+      const listed = await exec(tools.git, [...SAFE_GIT, "--git-dir", commonDir,
+        "worktree", "list", "--porcelain", "-z"], { env });
+      registered = parseWorktreePorcelain(listed).some((entry) => !entry.primary &&
+        sameWorktreePath(meta!.context, entry.path, worktree!.path) && entry.branch === worktree!.branch && !!entry.head);
+      if (registered) {
+        const actual = (await exec(tools.git, [...SAFE_GIT, "-C", worktree!.path,
+          "rev-parse", "--path-format=absolute", "--git-common-dir", "--symbolic-full-name", "HEAD"], { env })).trim().split("\n");
+        registered = actual.length === 2 && sameWorktreePath(meta!.context, actual[0]!, commonDir) &&
+          actual[1] === `refs/heads/${worktree!.branch}`;
+      }
+    } catch { /* an unreadable registration fails closed */ }
+    if (!registered) refuseReview("the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review");
+  }
+  // Only a fallback: the head and, for GitLab, the merge base normally come from the session's own
+  // branch. An SSH origin on a custom port is not reproduced; that fetch fails rather than guessing.
+  const host = named!.forge === "github" ? "github.com" : named!.host;
+  const path = named!.forge === "github" ? pr.baseRepository : named!.project;
+  const forgeUrl = /^https:\/\//iu.test(origin) || !tools.ssh ? `https://${host}/${path}.git` : `git@${host}:${path}.git`;
   return { repoPath, commonDir, branch: worktree!.branch, pullRequest: pr, forgeUrl };
 }
 
@@ -164,15 +245,16 @@ export class ReviewSnapshotter {
   ) {}
 
   /**
-   * The environment for every git and gh command the runner runs for a review. PATH holds only a
-   * runner-private directory of links to the verified git, gh and ssh, then the system
+   * The environment for every git, gh and glab command the runner runs for a review. PATH holds only a
+   * runner-private directory of links to the verified git, gh, glab and ssh, then the system
    * directories, so no program that git or a credential helper looks up by name (`ssh` for an SSH
    * fetch above all) can come from a directory a session can write; SSH runs by its verified path.
-   * HOME stays, so the user's own git and gh configuration and credentials keep working.
+   * HOME stays, so the user's own git, gh and glab configuration and credentials keep working.
    */
   helperEnvironment(tools: ReviewTools): NodeJS.ProcessEnv {
     const links: Record<string, string> = {
-      git: tools.git, ...(tools.gh ? { gh: tools.gh } : {}), ...(tools.ssh ? { ssh: tools.ssh } : {}),
+      git: tools.git, ...(tools.gh ? { gh: tools.gh } : {}), ...(tools.glab ? { glab: tools.glab } : {}),
+      ...(tools.ssh ? { ssh: tools.ssh } : {}),
     };
     const bin = join(this.root, "tools", sha256(JSON.stringify(links)).slice(0, 24));
     if (!existsSync(bin)) {
@@ -188,7 +270,7 @@ export class ReviewSnapshotter {
     return {
       ...helperEnvironmentBase(),
       PATH: `${bin}:/usr/bin:/bin`,
-      GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0",
+      GH_PROMPT_DISABLED: "1", GH_PAGER: "cat", NO_PROMPT: "1", GIT_OPTIONAL_LOCKS: "0", GIT_TERMINAL_PROMPT: "0",
       // Overrides any `core.sshCommand`; without a verified ssh no fetch is allowed SSH at all.
       GIT_SSH_COMMAND: tools.ssh ? shellQuote(tools.ssh) : "/bin/false",
     };

@@ -15,8 +15,9 @@ import { HIDE_ACCOUNT_EMAILS_STORAGE_KEY, setHideAccountEmails } from "../accoun
 import { ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import type { MachineAccountsIntent } from "../navigation.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage } from "./ProviderAccountsSection.js";
+import { ProviderAccountsSection, providerAccountRemovalRefusal, providerProfileErrorMessage, PROFILES_UNSUPPORTED_ON_WINDOWS } from "./ProviderAccountsSection.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -101,21 +102,28 @@ function client(handlers: {
   return { client: value, calls };
 }
 
-async function render(props: {
+type RenderProps = {
   runner?: RunnerView; online?: boolean; canManageProfiles?: boolean; api?: ApiClient; machineName?: string;
-}) {
+  intent?: MachineAccountsIntent;
+  profileAccessKnown?: boolean;
+};
+
+async function render(props: RenderProps) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const settle = () => act(async () => { for (let index = 0; index < 5; index += 1) await new Promise((resolve) => setTimeout(resolve, 0)); });
-  await act(async () => root.render(
-    <ApiProvider client={props.api ?? client().client}>
+  const apiClient = props.api ?? client().client;
+  const draw = (next: RenderProps) => root.render(
+    <ApiProvider client={apiClient}>
       <FeedbackProvider>
-        <ProviderAccountsSection runner={props.runner ?? runnerView()} online={props.online ?? true}
-          machineName={props.machineName ?? "Studio Mac"} canManageProfiles={props.canManageProfiles ?? true} />
+        <ProviderAccountsSection runner={next.runner ?? runnerView()} online={next.online ?? true}
+          machineName={next.machineName ?? "Studio Mac"} canManageProfiles={next.canManageProfiles ?? true} intent={next.intent}
+          profileAccessKnown={next.profileAccessKnown ?? true} />
       </FeedbackProvider>
     </ApiProvider>,
-  ));
+  );
+  await act(async () => draw(props));
   await settle();
   const body = domWindow.document.body as unknown as HTMLElement;
   const dialog = () => body.querySelector('[role="dialog"]') as HTMLElement | null;
@@ -164,6 +172,8 @@ async function render(props: {
   const toasts = () => [...body.querySelectorAll<HTMLElement>(".toast")].map((toast) => toast.textContent ?? "");
   return {
     container, body, dialog, rows, row, buttons, button, more, menu, openMenu, menuItems, choose, closeMenu, toasts, settle,
+    /** Draws the section again with changed props, as a new runner snapshot would. */
+    rerender: async (next: RenderProps) => { await act(async () => draw({ ...props, ...next })); await settle(); },
     badge: (label: string) => row(label).querySelector<HTMLElement>(".status"),
     sub: (label: string) => [...row(label).querySelectorAll(".provider-account-sub > span")].map((part) => part.textContent),
     notice: () => container.querySelector<HTMLElement>('.notice[role="alert"]'),
@@ -394,6 +404,36 @@ test("a timed-out sign-in for a new account offers Start Again with the same pro
     assert.deepEqual(api.calls[0], { kind: "login", body: { provider: "claude", label: "Studio" } });
   } finally {
     await ui.unmount();
+  }
+});
+
+test("a v253 duplicate-account ending is Not Added with Dismiss only by its failure code, even with a reworded sentence (#3519)", async () => {
+  const cases: [string, ProviderLoginView, boolean][] = [
+    ["code, reworded sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed",
+      "That Claude login belongs to an account this machine already has; nothing was added."),
+    failureCode: "account_already_on_machine" }, true],
+    // What the control plane stores for a newer runner's code beside today's sentence (db.test.ts).
+    ["unrecognized code, today's sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE),
+      failureCode: "unrecognized" }, false],
+    ["unknown code, today's sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE),
+      failureCode: "some_future_code" as ProviderLoginView["failureCode"] }, false],
+  ];
+  for (const [name, login, duplicate] of cases) {
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [login] }) });
+    try {
+      const expansion = ui.row("Work 2").nextElementSibling as HTMLElement;
+      if (duplicate) {
+        assert.equal(ui.badge("Work 2")?.textContent, "Not Added", name);
+        assert.equal(expansion.querySelector(".notice-title")?.textContent, "Already on This Machine", name);
+        assert.deepEqual(ui.buttons(expansion), ["Dismiss"], name);
+      } else {
+        assert.notEqual(ui.badge("Work 2")?.textContent, "Not Added", name);
+        assert.equal(expansion.querySelector(".notice-title")?.textContent, "Sign-In Failed", name);
+        assert.ok(ui.buttons(expansion).includes("Try Again"), name);
+      }
+    } finally {
+      await ui.unmount();
+    }
   }
 });
 
@@ -891,6 +931,45 @@ test("Owners and Admins get Adopt as Profile… and Revoke Access… by access s
   }
 });
 
+test("a Windows Machine explains that its accounts can't be adopted, and still offers Revoke Access… (#3240)", async () => {
+  const ui = await render({ runner: runnerView({ os: "windows" }) });
+  try {
+    const opened = await ui.openMenu("Legacy Work");
+    assert.deepEqual(ui.menuItems(opened).filter((item) => item.label === "Adopt as Profile…"),
+      [{ label: "Adopt as Profile…", disabled: true, reason: PROFILES_UNSUPPORTED_ON_WINDOWS }]);
+    await ui.closeMenu();
+    assert.deepEqual(await profileItems(ui, "Granted Work"), ["Revoke Access…"]);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("a menu whose every item is unavailable takes focus and closes on Escape (#3240)", async () => {
+  // While Work signs in on a Windows Machine, Adopt as Profile… and Remove Account… are both disabled.
+  const ui = await render({
+    runner: runnerView({
+      os: "windows",
+      providerAccounts: SIGN_IN_ACCOUNTS,
+      providerLogins: [{ ...runningLogin("work", "Work"), provider: "codex", userCode: "WOLL-IPOGS",
+        verificationUrl: "https://auth.openai.com/codex/device" }],
+    }),
+  });
+  try {
+    const opened = await ui.openMenu("Work");
+    assert.ok(ui.menuItems(opened).every((item) => item.disabled), JSON.stringify(ui.menuItems(opened)));
+    // A browser focuses the menu only when it is focusable; happy-dom focuses it either way.
+    assert.equal(opened.getAttribute("tabindex"), "-1", "the menu itself can take focus");
+    assert.ok((domWindow.document.activeElement as unknown) === opened, "the menu itself takes focus");
+    await act(async () => {
+      opened.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as unknown as Event);
+    });
+    await ui.settle();
+    assertNoDomNode(ui.menu(), "Escape closes the menu");
+  } finally {
+    await ui.unmount();
+  }
+});
+
 test("a member with manage rights, or a runner below v225, gets no profile actions", async () => {
   for (const props of [
     { canManageProfiles: false },
@@ -1075,7 +1154,7 @@ test("coded adoption refusals read as sentences, and uncoded ones keep the runne
 // Stale lease recovery (#3241).
 const LEASE_RECOVERY = RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeLeaseRecovery;
 const TIP = "c".repeat(64);
-const NO_REBOOT = "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.";
+const NO_REBOOT = "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.";
 
 function leaseClient(options: { recover?: (accountId: string, tip: string) => Promise<unknown> } = {}) {
   const inspected: string[] = [];
@@ -1096,30 +1175,56 @@ function leaseClient(options: { recover?: (accountId: string, tip: string) => Pr
       return { status: "recovered", authorizationId: "a" };
     },
   } as unknown as ApiClient;
-  return { client: value, inspected, recovered };
+  return { client: value, inspected, recovered, state };
 }
 
-test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Lease… enabled only where it can proceed", async () => {
+test("authorized account diagnostics name the blocker and do not disable another usable account", async () => {
+  const api = leaseClient();
+  Object.assign(api.state.other!, { cause: "process_uninspectable_not_delegated",
+    blockingProcess: { pid: 4242, startTime: "987654", kind: "uninspectable", cgroupMembership: "unavailable" } });
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: 235 }) });
+  try {
+    const title = ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title") ?? "";
+    assert.match(title, /can't check a running program/);
+    assert.match(title, /save your work and restart the machine/);
+    assert.doesNotMatch(title, /lease|journal|systemd|delegat|PID|cgroup|start time|fallback/iu);
+    const menu = await ui.openMenu("Other Work");
+    assert.equal(ui.menuItems(menu).find(item => item.label === "Recover Account…")?.reason, title);
+    await ui.closeMenu();
+    await ui.choose("Other Work", "View Recovery Details…");
+    const details = ui.dialog()!;
+    assert.match(details.textContent ?? "", /process_uninspectable_not_delegated/);
+    assert.match(details.textContent ?? "", /PID 4242, start time 987654, uninspectable process, cgroup membership unavailable/);
+    assert.match(details.textContent ?? "", /Keep the account's files and lease journal intact/);
+    assert.deepEqual(api.recovered, [], "viewing diagnostics never attempts recovery");
+    await act(async () => { ui.button(details, "Close").click(); });
+    await ui.settle();
+    const usable = await ui.openMenu("Pending Work");
+    assert.equal(ui.menuItems(usable).find(item => item.label === "Recover Account…")?.disabled, false);
+  } finally { await ui.unmount(); }
+});
+
+test("an Owner or Admin sees a stale lease as line-2 meta, with Recover Account… enabled only where it can proceed", async () => {
   const api = leaseClient();
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
   try {
     assert.deepEqual([...api.inspected].sort(), ["granted", "legacy", "other", "pending"]);
-    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
-    assert.deepEqual(ui.sub("Other Work"), ["Codex", "Not Granted", "Stale Lease"]);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Recovery Needed"]);
+    assert.deepEqual(ui.sub("Other Work"), ["Codex", "Not Granted", "Recovery Needed"]);
     assert.equal(ui.row("Other Work").querySelector(".provider-account-lease")?.getAttribute("title"), NO_REBOOT,
       "the reason a recovery would be refused is the label's tooltip");
-    assert.equal(ui.row("Pending Work").querySelector(".provider-account-lease")?.getAttribute("title"), null);
+    assert.match(ui.row("Pending Work").querySelector(".provider-account-lease")?.getAttribute("title") ?? "", /Choose Recover Account/);
     assert.deepEqual(ui.sub("Granted Work"), ["Claude", "Profile"]);
     assert.deepEqual(ui.sub("Legacy Work"), ["Codex"]);
 
     const pending = await ui.openMenu("Pending Work");
-    assert.deepEqual(ui.menuItems(pending).find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    assert.deepEqual(ui.menuItems(pending).find((item) => item.label === "Recover Account…"), { label: "Recover Account…", disabled: false, reason: null });
     await ui.closeMenu();
     const other = await ui.openMenu("Other Work");
-    assert.deepEqual(ui.menuItems(other).find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: true, reason: NO_REBOOT });
+    assert.deepEqual(ui.menuItems(other).find((item) => item.label === "Recover Account…"), { label: "Recover Account…", disabled: true, reason: NO_REBOOT });
     await ui.closeMenu();
     const granted = await ui.openMenu("Granted Work");
-    assert.ok(!ui.menuItems(granted).some((item) => item.label === "Recover Lease…"));
+    assert.ok(!ui.menuItems(granted).some((item) => item.label === "Recover Account…"));
     await ui.closeMenu();
   } finally {
     await ui.unmount();
@@ -1132,12 +1237,12 @@ test("a row that is signing in and has a stale lease keeps both: the sign-in's h
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY, ...signingIn }) });
   try {
     assert.equal(ui.badge("Pending Work")?.textContent, "Signing In");
-    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Stale Lease"]);
+    assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending", "Recovery Needed"]);
     assert.ok(ui.buttons(ui.row("Pending Work")).includes("Cancel"));
     assert.ok((ui.row("Pending Work").nextElementSibling as HTMLElement).querySelector(".signin"), "the sign-in expands the row");
     const menu = await ui.openMenu("Pending Work");
     const items = ui.menuItems(menu);
-    assert.deepEqual(items.find((item) => item.label === "Recover Lease…"), { label: "Recover Lease…", disabled: false, reason: null });
+    assert.deepEqual(items.find((item) => item.label === "Recover Account…"), { label: "Recover Account…", disabled: false, reason: null });
     assert.deepEqual(items.find((item) => item.label === "Remove Account…"),
       { label: "Remove Account…", disabled: true, reason: "A sign-in is running. Cancel it first." });
     await ui.closeMenu();
@@ -1152,7 +1257,7 @@ test("a row that is signing in and has a stale lease keeps both: the sign-in's h
         providerLogins: [runningLogin("pending", "pending@example.com")] }),
     });
     try {
-      assert.deepEqual(hidden.sub("Signing In to Claude"), ["Email hidden", "Stale Lease"],
+      assert.deepEqual(hidden.sub("Signing In to Claude"), ["Email hidden", "Recovery Needed"],
         "the provider and profile give way to Email hidden, and the lease stays");
       assert.doesNotMatch(hidden.container.innerHTML, /pending@example\.com/);
     } finally {
@@ -1161,27 +1266,27 @@ test("a row that is signing in and has a stale lease keeps both: the sign-in's h
   });
 });
 
-test("Recover Lease… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {
+test("Recover Account… confirms with the account and record time, recovers the inspected record, and inspects again", async () => {
   const api = leaseClient();
   const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
   try {
-    await ui.choose("Pending Work", "Recover Lease…");
+    await ui.choose("Pending Work", "Recover Account…");
     const dialog = ui.dialog();
     assert.ok(dialog);
     const text = dialog.textContent ?? "";
-    assert.match(text, /Recover Lease/);
-    assert.match(text, /Another runner left this account's HOME leased and no longer holds it\./);
+    assert.match(text, /Recover Account/);
+    assert.match(text, /An earlier Wollipog runner left this account locked\./);
     assert.match(text, /Pending Work/);
-    assert.match(text, /Lease recorded/);
+    assert.match(text, /Locked since/);
     await act(async () => { ui.button(dialog, "Cancel").click(); });
     await ui.settle();
     assert.deepEqual(api.recovered, [], "Cancel recovers nothing");
 
-    await ui.choose("Pending Work", "Recover Lease…");
-    await act(async () => { ui.button(ui.dialog()!, "Recover Lease").click(); });
+    await ui.choose("Pending Work", "Recover Account…");
+    await act(async () => { ui.button(ui.dialog()!, "Recover Account").click(); });
     await ui.settle();
     assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }], "the exact inspected record is named");
-    assert.match(domWindow.document.body.textContent ?? "", /Lease recovered\./);
+    assert.match(domWindow.document.body.textContent ?? "", /Account unlocked\./);
     assert.deepEqual(ui.sub("Pending Work"), ["Claude", "Grant Pending"], "the account is inspected again after recovery");
     assert.equal(ui.error(), null);
   } finally {
@@ -1193,11 +1298,11 @@ test("a refused recovery is the section's notice, and nothing is inspected witho
   const refused = leaseClient({ recover: async () => { throw new ApiError("lease changed", 409, "TIP_CHANGED"); } });
   const ui = await render({ api: refused.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }) });
   try {
-    await ui.choose("Pending Work", "Recover Lease…");
-    await act(async () => { ui.button(ui.dialog()!, "Recover Lease").click(); });
+    await ui.choose("Pending Work", "Recover Account…");
+    await act(async () => { ui.button(ui.dialog()!, "Recover Account").click(); });
     await ui.settle();
     assert.match(ui.notice()?.textContent ?? "", /Couldn't Recover the Lease for Pending Work/);
-    assert.equal(ui.error(), "The lease changed after it was checked. Reopen this machine to check it again.");
+    assert.equal(ui.error(), "The account lock changed after it was checked. Reopen this machine to check it again.");
   } finally {
     await ui.unmount();
   }
@@ -1211,7 +1316,7 @@ test("a refused recovery is the section's notice, and nothing is inspected witho
     const view = await render({ ...props, api: api.client });
     try {
       assert.deepEqual(api.inspected, [], JSON.stringify(props));
-      assert.ok(!(view.sub("Pending Work").includes("Stale Lease")));
+      assert.ok(!(view.sub("Pending Work").includes("Recovery Needed")));
     } finally {
       await view.unmount();
     }
@@ -1222,4 +1327,265 @@ test("a refused recovery is the section's notice, and nothing is inspected witho
   assert.equal(recover(409, "PROVIDER_HOME_LEASE_RECOVERY_FAILED"),
     "The machine could not confirm the recovery. Reopen this machine to check the lease before retrying.");
   assert.equal(recover(409, undefined, "runner is offline"), "The machine is offline. Recovering a lease needs the machine to be online.");
+});
+
+test("authorized recovery details respect hidden account emails", async () => {
+  await withHiddenEmails(async () => {
+    const api = leaseClient();
+    Object.assign(api.state.other!, { cause: "process_uninspectable", blockingProcess: {
+      pid: 4242, kind: "uninspectable", cgroupMembership: "unavailable",
+    } });
+    const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: 235,
+      providerAccounts: ACCOUNTS.map(account => account.id === "other" ? { ...account, label: "private@example.com" } : account),
+    }) });
+    try {
+      const buttons = [...ui.container.querySelectorAll<HTMLButtonElement>("button[aria-label^='More Actions for']")];
+      const hidden = buttons.find(button => button.getAttribute("aria-label") === "More Actions for Hidden Account");
+      assert.ok(hidden);
+      await act(async () => { hidden.click(); });
+      await ui.settle();
+      const details = [...ui.menu()!.querySelectorAll<HTMLButtonElement>("[role='menuitem']")].find(item => item.textContent === "View Recovery Details…");
+      assert.ok(details);
+      await act(async () => { details.click(); });
+      await ui.settle();
+      assert.doesNotMatch(ui.dialog()?.textContent ?? "", /private@example\.com/);
+      assert.match(ui.dialog()?.textContent ?? "", /PID 4242/);
+    } finally { await ui.unmount(); }
+  });
+});
+
+// --- Set Up Managed Profile and Recover Existing Profile from a refused session (#3240) ---
+
+async function typeAccountLabel(dialog: HTMLElement, value: string) {
+  const labelFor = [...dialog.querySelectorAll("label")].find((label) => label.textContent === "Account Label")!;
+  const input = dialog.querySelector<HTMLInputElement>(`#${labelFor.getAttribute("for")}`)!;
+  await act(async () => {
+    input.focus();
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    // react-dom loads before these globals exist, so it detects changes on keyup.
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+  });
+}
+
+const selectedProvider = (dialog: HTMLElement) =>
+  dialog.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim();
+
+test("Set Up Managed Profile opens Add Account for the refused session's provider, once per activation", async () => {
+  const api = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const intent: MachineAccountsIntent = { kind: "add_account", provider: "codex", activationId: 1 };
+  const ui = await render({ api: api.client, intent });
+  try {
+    const dialog = ui.dialog()!;
+    assert.ok(dialog, "Add Account opens on arrival");
+    assert.equal(selectedProvider(dialog), "Codex");
+    await act(async () => { ui.button(dialog, "Cancel").click(); });
+    await ui.settle();
+    await ui.rerender({ intent });
+    assertNoDomNode(ui.dialog(), "the same activation does not open it again");
+    await ui.rerender({ intent: { ...intent, activationId: 2 } });
+    assert.ok(ui.dialog(), "a new activation opens it again");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Set Up Managed Profile on an offline Machine opens nothing and the section says why", async () => {
+  const ui = await render({ online: false, intent: { kind: "add_account", provider: "claude", activationId: 1 } });
+  try {
+    assertNoDomNode(ui.dialog());
+    assert.match(ui.container.textContent ?? "", /This machine is offline\./);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("once the sign-in it started records its account, an Owner can use it for new sessions", async () => {
+  const saved: unknown[] = [];
+  const base = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const api = {
+    ...base.client,
+    updateMachineProviderAccountDefault: async (runnerId: string, provider: string, body: unknown) => {
+      saved.push({ runnerId, provider, body });
+      return { providerAccountDefault: { provider, accountId: "codex-new", revision: 4 } };
+    },
+  } as unknown as ApiClient;
+  const defaults = [{ provider: "codex" as const, accountId: null, revision: 3 }];
+  const ui = await render({ api, runner: runnerView({ providerAccountDefaults: defaults }),
+    intent: { kind: "add_account", provider: "codex", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    await typeAccountLabel(dialog, "Codex New");
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+    assert.deepEqual(base.calls.filter((call) => call.kind === "login").map((call) => call.body), [{ provider: "codex", label: "Codex New" }]);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "not offered before the account exists");
+
+    await ui.rerender({ runner: runnerView({ providerAccountDefaults: defaults, providerAccounts: [...ACCOUNTS,
+      { id: "codex-new", label: "Codex New", provider: "codex", authStatus: "authenticated", profile: { id: "p9", access: "granted" } }] }) });
+    const offer = ui.container.querySelector<HTMLElement>('[aria-label="Use for New Sessions"]');
+    assert.ok(offer, "offered once the sign-in recorded the account");
+    assert.match(offer.textContent ?? "", /New Codex sessions on this machine that don't choose an account will use it\./);
+    await act(async () => { ui.button(offer, "Use for New Sessions").click(); });
+    await ui.settle();
+    assert.deepEqual(saved, [{ runnerId: "runner-1", provider: "codex", body: { accountId: "codex-new", expectedRevision: 3 } }]);
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'), "the offer ends once saved");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Use for New Sessions is not offered to a member who can add accounts but not save Machine defaults", async () => {
+  const api = client({ login: async () => ({ login: { ...runningLogin("codex-new", "Codex New"), provider: "codex" } }) });
+  const ui = await render({ api: api.client, canManageProfiles: false, intent: { kind: "add_account", provider: "codex", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    await typeAccountLabel(dialog, "Codex New");
+    await act(async () => { ui.button(dialog, "Start Sign-In").click(); });
+    await ui.settle();
+    assert.equal(api.calls.filter((call) => call.kind === "login").length, 1, "the member's sign-in started");
+    await ui.rerender({ runner: runnerView({ providerAccounts: [...ACCOUNTS,
+      { id: "codex-new", label: "Codex New", provider: "codex", authStatus: "authenticated" }] }) });
+    assertNoDomNode(ui.container.querySelector('[aria-label="Use for New Sessions"]'));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+async function confirmDialog(ui: Awaited<ReturnType<typeof render>>, label: string) {
+  const dialog = ui.dialog()!;
+  assert.ok(dialog, "a confirmation opens");
+  await act(async () => { ui.button(dialog, label).click(); });
+  await ui.settle();
+}
+
+/** The lease client, with adoption recorded in the same order as recovery. */
+function recoveringClient(options: Parameters<typeof leaseClient>[0] = {}) {
+  const api = leaseClient(options);
+  const order: string[] = [];
+  const client = {
+    ...api.client,
+    adoptProviderProfile: async (_runnerId: string, accountId: string) => {
+      order.push(`adopt:${accountId}`);
+      return { status: "active", profileId: "p2", grantId: "g" };
+    },
+    recoverProviderHomeLease: async (runnerId: string, accountId: string, tip: string) => {
+      order.push(`recover:${accountId}`);
+      return (api.client as unknown as { recoverProviderHomeLease: (r: string, a: string, t: string) => Promise<unknown> })
+        .recoverProviderHomeLease(runnerId, accountId, tip);
+    },
+  } as unknown as ApiClient;
+  return { ...api, client, order };
+}
+
+test("Recover Existing Profile unlocks a stale lease, then adopts the profile, in one confirmation", async () => {
+  const api = recoveringClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
+  try {
+    const dialog = ui.dialog()!;
+    assert.match(dialog.textContent ?? "", /Recover Existing Profile/);
+    assert.match(dialog.textContent ?? "", /unlocks it only after checking that no earlier session is still using it, then adopts it/);
+    assert.match(dialog.textContent ?? "", /Locked since/);
+    await confirmDialog(ui, "Recover Existing Profile");
+    // Adoption takes the HOME's lease, so another runner's stale lease is recovered first.
+    assert.deepEqual(api.order, ["recover:pending", "adopt:pending"]);
+    assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }]);
+    assert.ok(ui.toasts().some((toast) => toast.includes("Profile recovered.")), ui.toasts().join("|"));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile recovers exactly the lock its confirmation showed", async () => {
+  const api = recoveringClient({ recover: async (_accountId, tip) => {
+    if (tip !== TIP) return { status: "recovered", authorizationId: "a" };
+    throw new ApiError("The lease changed", 409, "TIP_CHANGED");
+  } });
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
+  try {
+    // While the confirmation is open, another stale record replaces the one it shows.
+    api.state.pending = { ...api.state.pending!, tipHash: "e".repeat(64) };
+    await confirmDialog(ui, "Recover Existing Profile");
+    assert.deepEqual(api.recovered, [{ accountId: "pending", tip: TIP }], "only the confirmed record is authorized");
+    assert.deepEqual(api.order, ["recover:pending"], "nothing is adopted once the recovery is refused");
+    assert.match(ui.error() ?? "", /changed after it was checked/);
+    assert.ok(!ui.toasts().some((toast) => /recovered|unlocked|adopted/iu.test(toast)), ui.toasts().join("|"));
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile explains a lock the runner refuses to recover, before asking and without adopting", async () => {
+  const api = recoveringClient();
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "other", activationId: 1 } });
+  try {
+    assertNoDomNode(ui.dialog(), "nothing to confirm");
+    assert.deepEqual(api.order, []);
+    assert.match(ui.error() ?? "", /until this machine has restarted/);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+for (const [label, inspect, expected] of [
+  ["an inspection that fails", async () => { throw new Error("offline"); }, /couldn't check whether this account is locked/],
+  ["an unverifiable lease", async () => ({ state: "unverifiable" as const }), /could not check whether this account is still in use/],
+] as const) {
+  test(`Recover Existing Profile reports ${label} instead of success`, async () => {
+    const api = recoveringClient();
+    const client = { ...api.client, inspectProviderHomeLease: inspect } as unknown as ApiClient;
+    const ui = await render({ api: client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+      intent: { kind: "recover_profile", accountId: "granted", activationId: 1 } });
+    try {
+      assertNoDomNode(ui.dialog());
+      assert.deepEqual(api.order, []);
+      assert.match(ui.error() ?? "", expected);
+      assert.ok(!ui.toasts().some((toast) => /can already be used|unlocked|recovered/iu.test(toast)), ui.toasts().join("|"));
+    } finally {
+      await ui.unmount();
+    }
+  });
+}
+
+test("Recover Existing Profile waits for the viewer's permissions instead of refusing on the way", async () => {
+  const api = recoveringClient();
+  const intent: MachineAccountsIntent = { kind: "recover_profile", accountId: "pending", activationId: 1 };
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    canManageProfiles: false, profileAccessKnown: false, intent });
+  try {
+    assertNoDomNode(ui.dialog());
+    assertNoDomNode(ui.notice(), "no refusal while the identity is still loading");
+    await ui.rerender({ canManageProfiles: true, profileAccessKnown: true, intent });
+    assert.ok(ui.dialog(), "it opens once the identity says the viewer is an Owner");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile is refused with its reason for a viewer who isn't an Owner or Admin", async () => {
+  const api = leaseClient();
+  const ui = await render({ api: api.client, canManageProfiles: false, runner: runnerView({ protocolVersion: LEASE_RECOVERY }),
+    intent: { kind: "recover_profile", accountId: "pending", activationId: 1 } });
+  try {
+    assertNoDomNode(ui.dialog());
+    assert.equal(ui.error(), "Only an Owner or Admin can recover an account's profile.");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("Recover Existing Profile waits for the account it names to be listed", async () => {
+  const api = leaseClient();
+  const intent: MachineAccountsIntent = { kind: "recover_profile", accountId: "pending", activationId: 1 };
+  const ui = await render({ api: api.client, runner: runnerView({ protocolVersion: LEASE_RECOVERY, providerAccounts: [] }), intent });
+  try {
+    assertNoDomNode(ui.dialog(), "nothing opens before the account is listed");
+    await ui.rerender({ runner: runnerView({ protocolVersion: LEASE_RECOVERY }), intent });
+    assert.ok(ui.dialog(), "it opens once the account arrives");
+  } finally {
+    await ui.unmount();
+  }
 });

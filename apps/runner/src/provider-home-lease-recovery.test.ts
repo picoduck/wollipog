@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { providerHomeLeaseRefusalKind, ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import type { LeaseProcessProbe } from "./provider-home-lease-evidence.js";
+import type { LeaseContainmentEvidence, LeaseContainmentResult } from "./provider-home-lease-containment.js";
+import { LEASE_CHECKPOINT_LIMITS } from "./provider-home-lease-checkpoint.js";
 import { adoptProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileMarker } from "./provider-profile.js";
 
 const previousMask = process.umask(0o077);
@@ -25,13 +27,14 @@ const INSTANCE_ID = "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3";
 const GRANTED = { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE_ID] };
 const skip = process.platform === "win32";
 
-interface World { boot: string; running: Map<number, string>; marked: number[]; uninspectable: number[] }
+interface World { boot: string; running: Map<number, string>; marked: number[]; uninspectable: number[]; boundary?: LeaseContainmentResult }
 
 function probe(world: World): LeaseProcessProbe {
   return {
     bootId: () => world.boot,
     startTime: (pid) => world.running.get(pid) ?? null,
     scan: (marker) => ({ marked: marker === MARKER_A ? world.marked : [], uninspectable: world.uninspectable }),
+    containment: () => world.boundary ?? "unverifiable",
   };
 }
 
@@ -59,7 +62,7 @@ function chain(home: string): Array<Record<string, unknown> & { hash: string }> 
 }
 
 /** A runner of owner A on this host that crashed while holding the profiled HOME. */
-function crashedHome(t: { after: (fn: () => void) => void }, options: { profiled?: boolean; evidence?: boolean } = {}) {
+function crashedHome(t: { after: (fn: () => void) => void }, options: { profiled?: boolean; evidence?: boolean; containment?: LeaseContainmentEvidence } = {}) {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-recovery-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
   if (options.profiled !== false) writeProviderProfileMarker(home, profileMarker());
@@ -67,6 +70,7 @@ function crashedHome(t: { after: (fn: () => void) => void }, options: { profiled
   const crashed = new ProviderHomeLeaseRegistry(OWNER_A, {
     pid: 101, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID, processProbe: probe(world),
     ...(options.evidence === false ? {} : { runnerMarker: MARKER_A }),
+    ...(options.containment ? { containment: options.containment } : {}),
   });
   crashed.acquireHome(home, "claude", options.profiled === false ? undefined : GRANTED);
   world.running.delete(101); // the runner died without releasing
@@ -129,7 +133,7 @@ test("a live runner, a surviving descendant, or an uninspectable process prevent
     const result = refusal(() => replacement(world).acquireHome(home, "claude", GRANTED));
     assert.notEqual(result, "acquired", scenario);
     if (result === "acquired") continue;
-    assert.equal(result.kind, scenario === "uninspectable" ? "unverifiable" : "busy", scenario);
+    assert.equal(result.kind, scenario === "uninspectable" ? "process_uninspectable" : scenario === "runner" ? "holder_alive" : "process_survivor", scenario);
     if (scenario === "descendant") assert.match(result.message, /still used by a process the leasing runner launched/u);
     assert.deepEqual(chain(home), before, `${scenario}: nothing is published`);
   }
@@ -172,13 +176,92 @@ test("the same owner's restart needs the same proof: a surviving descendant bloc
   world.marked = [4242];
   const restarted = replacement(world, OWNER_A, 303);
   const blocked = refusal(() => restarted.acquireHome(home, "claude", GRANTED));
-  assert.ok(blocked !== "acquired" && blocked.kind === "busy", "a dead runner PID alone no longer reclaims an evidenced lease");
+  assert.ok(blocked !== "acquired" && blocked.kind === "process_survivor", "a dead runner PID alone no longer reclaims an evidenced lease");
   world.marked = [];
   restarted.acquireHome(home, "claude", GRANTED);
   const tip = chain(home).at(-1)!;
-  assert.deepEqual({ owner: tip.ownerHash, pid: tip.pid, recovery: tip.recovery }, { owner: OWNER_A, pid: 303, recovery: undefined },
-    "a same-owner reclaim is an ordinary transition");
+  assert.deepEqual({ owner: tip.ownerHash, pid: tip.pid, recovery: tip.recovery }, { owner: OWNER_A, pid: 303, recovery: { proof: "process_scan" } },
+    "a same-owner reclaim also records its recovery proof");
   restarted.releaseAll();
+});
+
+test("versioned boundary recovery retains journal history and profile authorization across replacement and reboot", { skip }, (t) => {
+  const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "123" };
+  for (const reboot of [false, true]) {
+    const { home, world } = crashedHome(t, { containment });
+    const before = chain(home);
+    world.uninspectable = [444];
+    world.running.set(101, "999");
+    world.boundary = "empty";
+    if (reboot) { world.boot = NEW_BOOT; world.boundary = "populated"; world.running.set(101, "500"); }
+    const next = replacement(world);
+    next.acquireHome(home, "claude", GRANTED);
+    assert.deepEqual(chain(home).slice(0, 1), before);
+    assert.deepEqual(chain(home).at(-1)!.recovery, { proof: reboot ? "reboot" : "linux_cgroup", profileId: PROFILE_ID });
+    assert.equal(next.releaseAll(), true);
+  }
+  const { home, world } = crashedHome(t, { profiled: false, containment }); world.boundary = "empty";
+  const result = refusal(() => replacement(world).acquireHome(home));
+  assert.ok(result !== "acquired" && result.kind === "foreign_owner", "empty cgroup never grants profile authority");
+});
+
+test("version-5 ownership and recovery remain verifiable through canonical checkpoint compaction", { skip, timeout: 120_000 }, (t) => {
+  const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "123" };
+  const { home, world } = crashedHome(t, { containment });
+  // Native checkpoint publication independently correlates the record PID with its real caller.
+  // Simulate process start identities, but retain the real actor PID rather than inventing one.
+  // The separate cgroup test exercises actual different-process replacement.
+  world.boundary = "empty";
+  world.running.set(process.pid, "900001");
+  const holder = new ProviderHomeLeaseRegistry(OWNER_A, { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID,
+    runnerMarker: MARKER_B, processProbe: probe(world), containment,
+    onCheckpointFailureForTest: (error) => { throw error; } });
+  let anchor: { version: number; checkpoint?: { previousTip: string } } | undefined;
+  for (let turn = 0; turn < LEASE_CHECKPOINT_LIMITS.hardTransitions; turn++) {
+    holder.acquireHome(home, "claude", GRANTED);
+    anchor = JSON.parse(readFileSync(join(leaseRoot(home), "mutable-home.recovery.json"), "utf8")) as typeof anchor;
+    if (anchor?.version === 4) break;
+    assert.equal(holder.releaseAll(), true);
+  }
+  assert.ok(anchor?.version === 4 && anchor.checkpoint, "v5 acquisition must actually publish a checkpoint within the existing growth bound");
+  assert.equal(JSON.parse(anchor.checkpoint.previousTip).version, 5, "checkpoint retains the incompatible tip version for old readers");
+  assert.deepEqual(holder.getDiagnostics(), [], "v5 compaction must not silently fall back to an uncompacted chain");
+  // Reuse the real actor PID with a distinct start identity for a fresh registry's recovery.
+  world.running.set(process.pid, "900002");
+  world.uninspectable = [444];
+  const next = new ProviderHomeLeaseRegistry(OWNER_B, { pid: process.pid, hostname: "host-a", controlPlaneInstanceId: INSTANCE_ID,
+    runnerMarker: MARKER_B, processProbe: probe(world), onCheckpointFailureForTest: (error) => { throw error; } });
+  next.acquireHome(home, "claude", GRANTED);
+  assert.equal(next.releaseAll(), true, "a different runner recovers and releases the checkpointed v5 chain");
+});
+
+test("surviving or unverifiable recorded boundaries refuse without falling back to a clean process scan", { skip }, (t) => {
+  const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "123" };
+  for (const boundary of ["populated", "unverifiable"] as const) {
+    const { home, world } = crashedHome(t, { containment }); world.boundary = boundary;
+    const before = chain(home);
+    const result = refusal(() => replacement(world).acquireHome(home, "claude", GRANTED));
+    assert.ok(result !== "acquired" && result.kind === (boundary === "populated" ? "boundary_survivor" : "boundary_unverifiable"));
+    assert.deepEqual(chain(home), before);
+  }
+});
+
+test("legacy and non-delegated leases retain scan-based proof and explain why boundary recovery is unavailable", { skip }, (t) => {
+  for (const delegated of [false, true]) {
+    const { home, world } = crashedHome(t, delegated ? { containment: { kind: "marker-parent-links", reason: "cgroup-not-delegated" } } : {});
+    world.uninspectable = [444];
+    const before = chain(home);
+    const next = replacement(world);
+    const result = refusal(() => next.acquireHome(home, "claude", GRANTED));
+    assert.notEqual(result, "acquired"); if (result === "acquired") continue;
+    assert.equal(result.kind, delegated ? "process_uninspectable_not_delegated" : "process_uninspectable");
+    assert.match(result.message, delegated ? /systemd unit is not delegated/u : /legacy lease has no recorded boundary evidence/u);
+    assert.deepEqual(chain(home), before);
+    world.uninspectable = [];
+    next.acquireHome(home, "claude", GRANTED);
+    assert.deepEqual(chain(home).at(-1)!.recovery, { proof: "process_scan", profileId: PROFILE_ID });
+    assert.equal(next.releaseAll(), true);
+  }
 });
 
 test("forged recovery records and malformed evidence are refused", { skip }, (t) => {

@@ -10,16 +10,20 @@ import { MenuSurface } from "./Menu.js";
  * (`PanelHeaderActions`). Anchored on a fine pointer, a bottom sheet with the grabber on phones.
  * Escape closes only the popover and returns focus to its button.
  *
- * Its content is a short sentence-case `children` and an optional `.facts` list.
+ * Its content is a short sentence-case `children` and an optional `.facts` list. Beside a field's
+ * label (Time Zone's About Time Zones, #2971) its button is the small `.icon-btn.sm`.
  */
 export function InfoPopover({
   tool,
   facts,
+  size,
   children,
 }: {
   /** The tool's name, Title Case: the button and the popover are "About <tool>". */
   tool: string;
   facts?: readonly { term: string; value: ReactNode }[];
+  /** `sm` beside a field's label. */
+  size?: "sm";
   children: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -34,7 +38,7 @@ export function InfoPopover({
       <button
         ref={popover.triggerRef}
         type="button"
-        className="icon-btn"
+        className={size ? `icon-btn ${size}` : "icon-btn"}
         title={name}
         aria-label={name}
         aria-haspopup="dialog"

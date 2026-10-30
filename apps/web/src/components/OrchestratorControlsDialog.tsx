@@ -1,16 +1,9 @@
 import { useEffect, useId, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import {
-  FULL_CONTROL_EVIDENCE_EXCEPTIONS,
-  FULL_CONTROL_HUMAN_REQUIRED_LABELS,
-  FULL_CONTROL_DECLINED_NOTE,
-  FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   WORKFLOW_DECISION_CATEGORIES,
-  fullControlStandingHumanRequired,
-  type CampaignAuthorityOperation,
   type CampaignControl,
   type DelegatableWorkflowDecisionCategory,
   type OrchestratorCampaignProjection,
-  type OrchestratorDefaults,
   type ParentControlDecisionPolicy,
   type ParentControlMode,
   type SessionView,
@@ -20,6 +13,7 @@ import {
 import { useApi } from "../api-context.js";
 import { ApiError } from "../api.js";
 import { titleCaseLabel } from "../format.js";
+import { FULL_CONTROL_LINE } from "../orchestrator-policy.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
@@ -31,7 +25,8 @@ import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceControls.js";
 import { SAVED_MS } from "./ui/SettingsRows.js";
-import { FullControlEnableButton, FullControlEnablePanel, OrchestratorControlChoice, type FullControlEnableAction } from "./FullControlPreparation.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { enableFullControlCampaign, OrchestratorControlChoice } from "./FullControlPreparation.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -47,6 +42,7 @@ export const WORKFLOW_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategor
   merged_branch_deletion: "Merged Branch Deletion",
   follow_up_issue_publication: "Follow-Up Issue Publication",
   ui_evidence_approval: "UI Evidence Approval",
+  review_round_extension: "Review Round Extensions",
 };
 
 const AUTHORITY_OPTIONS = [
@@ -313,8 +309,6 @@ export function OrchestratorControlsDialog({
 
   const parentControl = (pending.parentControl?.value as ParentControlMode | undefined) ?? session.parentControl ?? "off";
   const policy = session.parentControlPolicy;
-  const projectedControl = session.orchestratorCampaign?.control !== undefined && Number.isSafeInteger(session.orchestratorCampaign.policyRevision)
-    ? session.orchestratorCampaign.control : undefined;
   const control = effectiveCampaignControl(session);
   const fullControl = control?.mode === "full_control";
   const canRevoke = fullControl && !session.parentSessionId && policy !== undefined && refusal === null;
@@ -327,17 +321,25 @@ export function OrchestratorControlsDialog({
     setChoiceFollows(effectiveMode);
     if (effectiveMode !== "unknown") setControlPreview(effectiveMode);
   }
-  // The saved Full Control budget is proposed when enabling; Revoke never needs it.
-  const [savedDefaults, setSavedDefaults] = useState<OrchestratorDefaults | null>(null);
   const canEnable = !fullControl && !session.parentSessionId && session.orchestratorPolicy !== undefined;
-  // The panel's Enable action, shown in the footer so it stays in view below the long summary.
-  const [enableAction, setEnableAction] = useState<FullControlEnableAction | null>(null);
-  useEffect(() => {
-    if (!canEnable || controlPreview !== "full_control") return;
-    let live = true;
-    api.orchestratorSettings().then((view) => { if (live) setSavedDefaults(view.defaults); }, () => undefined);
-    return () => { live = false; };
-  }, [api, canEnable, controlPreview]);
+  // Enabling is one action, as starting is (#2940): the server derives the boundary from the
+  // campaign's own scope or first message, and only a genuine impossibility stops it.
+  const [enabling, setEnabling] = useState(false);
+  const [enableError, setEnableError] = useState<string | null>(null);
+  useEffect(() => { setEnableError(null); }, [controlPreview]);
+  const enable = async () => {
+    if (enabling) return;
+    setEnabling(true); setEnableError(null);
+    try {
+      onSessionChanged(await enableFullControlCampaign(api, session.id));
+      showSaved("control");
+    } catch (cause) {
+      setEnableError(cause instanceof Error ? cause.message : "Full Control was not enabled.");
+    } finally { setEnabling(false); }
+  };
+  // Full Control, chosen or in effect, shows only its choice, its line and its one action (#2940): the
+  // Custom owners, requests, evidence notes and stored behavior have no effect under its boundary.
+  const fullControlView = effectiveMode === "full_control" || (canEnable && controlPreview === "full_control");
   const savedStatus = saved === null
     ? ""
     : `${saved === "parentControl" ? "Child Session Requests" : saved === "control" ? "Orchestrator Control" : WORKFLOW_DECISION_LABELS[saved]} saved`;
@@ -350,7 +352,9 @@ export function OrchestratorControlsDialog({
       className="orchestrator-controls"
       footer={<>
         <button type="button" className="btn" onClick={onClose}>Done</button>
-        {canEnable && controlPreview === "full_control" && enableAction && <FullControlEnableButton {...enableAction} />}
+        {canEnable && controlPreview === "full_control" && <BusyButton className="btn primary" busy={enabling}
+          progress="Enabling Full Control…" disabled={refusal !== null || Object.keys(pending).length > 0}
+          onClick={() => void enable()}>Enable Full Control</BusyButton>}
       </>}
     >
       {refusal !== null && <Notice tone="neutral" compact>{refusal}</Notice>}
@@ -361,11 +365,10 @@ export function OrchestratorControlsDialog({
         </div>
         <p className="section-note">Effective Mode: {effectiveMode === "full_control" ? "Full Control" : effectiveMode === "custom" ? "Custom" : "Current Root State Not Reported"}.</p>
         {canEnable && <>
-          <OrchestratorControlChoice surface="campaign" embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null} />
-          {controlPreview === "full_control" && <FullControlEnablePanel session={session} savedDefaults={savedDefaults}
-            disabled={refusal !== null || Object.keys(pending).length > 0} onAction={setEnableAction}
-            onEnabled={(next) => { onSessionChanged(next); showSaved("control"); }} />}
+          <OrchestratorControlChoice embedded mode={controlPreview} onChange={setControlPreview} disabled={refusal !== null || enabling} />
+          {controlPreview === "full_control" && enableError && <Notice tone="danger" role="alert" title="Couldn't Enable Full Control">{enableError}</Notice>}
         </>}
+        {effectiveMode === "full_control" && !canEnable && <p className="section-note">{FULL_CONTROL_LINE}</p>}
         {fullControl && <>
           <p className="section-note">Revoking Full Control updates this root campaign and its descendants and invalidates unused approvals. Your saved defaults and selected session configuration stay unchanged.</p>
           <button type="button" className="btn" disabled={!canRevoke || Object.keys(pending).length > 0}
@@ -376,13 +379,12 @@ export function OrchestratorControlsDialog({
         {session.parentSessionId && <p className="section-note">Change control on the root campaign.</p>}
       </section>}
 
-      <section className="section" aria-labelledby={`${ids}-requests`}>
+      {!fullControlView && <section className="section" aria-labelledby={`${ids}-requests`}>
         <div className="section-head">
           <h3 className="section-title" id={`${ids}-requests`}>Child Session Requests</h3>
           {saved === "parentControl" && <SavedCheck />}
         </div>
-        {control?.mode === "full_control" ? <FullControlRequests control={control} customChoice={childSessionRequestsLabel(parentControl)} />
-          : effectiveMode === "unknown" ? <p className="section-note">
+        {effectiveMode === "unknown" ? <p className="section-note">
             {ROOT_CONTROL_NOT_REPORTED} Who answers these isn't known here, so they can't be changed until it is.
           </p>
           : <ChoiceRows<ParentControlMode>
@@ -396,18 +398,13 @@ export function OrchestratorControlsDialog({
               change("parentControl", mode, () => api.setParentControl(session.id, mode));
             }}
           />}
-      </section>
-
-      {policy && control?.mode === "full_control" && (
-        <FullControlDecisions control={control} campaign={projectedControl ? session.orchestratorCampaign : undefined}
-          titleId={`${ids}-decisions`} />
-      )}
+      </section>}
 
       {policy && effectiveMode === "unknown" && (
         <UnknownRootDecisions campaign={session.orchestratorCampaign} titleId={`${ids}-decisions`} />
       )}
 
-      {policy && effectiveMode === "custom" && (
+      {policy && effectiveMode === "custom" && !fullControlView && (
         <section className="section" aria-labelledby={`${ids}-decisions`}>
           <div className="section-head">
             <h3 className="section-title" id={`${ids}-decisions`}>Workflow Decisions</h3>
@@ -456,7 +453,7 @@ export function OrchestratorControlsDialog({
         </section>
       )}
 
-      {session.orchestratorPolicy && <CampaignBehavior session={session} titleId={`${ids}-campaign`} />}
+      {session.orchestratorPolicy && !fullControlView && <CampaignBehavior session={session} titleId={`${ids}-campaign`} />}
 
       <span className="sr-only" role="status">{savedStatus}</span>
       {failure && (
@@ -466,84 +463,6 @@ export function OrchestratorControlsDialog({
       )}
     </Modal>
   );
-}
-
-const FULL_CONTROL_REQUEST_OPERATIONS: ReadonlyArray<{ operation: CampaignAuthorityOperation; label: string }> = [
-  { operation: "question", label: "Questions" },
-  { operation: "tool_approval", label: "One-Time Approvals" },
-  { operation: "policy_ask", label: "Governance Policy Asks" },
-];
-
-/** Full Control decides descendant requests from its boundary, so the Custom choice is shown as
- * what returns after Revoke, never as a control that would have no effect now. */
-function FullControlRequests({ control, customChoice }: { control: Extract<CampaignControl, { mode: "full_control" }>; customChoice: string }) {
-  return <>
-    <p className="section-note">
-      Full Control decides these. Inside the authorized boundary the Orchestrator answers once; requests for
-      credentials, sign-in or wider access are declined as blocked work. Only your Human Required rules and anything
-      outside the boundary come to you. Your Custom choice, {customChoice}, applies again only after you revoke Full
-      Control.
-    </p>
-    <dl className="facts orchestrator-facts">
-      {FULL_CONTROL_REQUEST_OPERATIONS.map(({ operation, label }) => <div key={operation}>
-        <dt>{label}</dt>
-        <dd>{control.boundary.operations.includes(operation) ? "Orchestrator" : "Human"}</dd>
-      </div>)}
-    </dl>
-  </>;
-}
-
-/** Under Full Control each gate's owner is the server's effective owner for this campaign, read-only:
- * the saved per-gate choices have no effect until Revoke. */
-function FullControlDecisions({ control, campaign, titleId }: {
-  control: Extract<CampaignControl, { mode: "full_control" }>; campaign: OrchestratorCampaignProjection | undefined;
-  titleId: string;
-}) {
-  // The server's list for this campaign (#2940); an older server's absence still discloses the rules.
-  const standing = campaign?.fullControlHumanRequired ?? fullControlStandingHumanRequired(true);
-  // Only an authorization that leaves UI Evidence Approval out (or cannot enforce it) keeps evidence human.
-  const evidenceToHuman = campaign?.decisionOwners.ui_evidence_approval === "human";
-  // Evidence never comes to the Human under Full Control. Video is the one item a certified
-  // media-only reviewer lets the Orchestrator inspect (#1321); only the server's campaign fact says so.
-  const video = campaign?.videoEvidenceReview;
-  const exceptions = FULL_CONTROL_EVIDENCE_EXCEPTIONS
-    .filter((item) => item.id !== "video_evidence" || video?.status !== "available")
-    .map((item) => item.id === "video_evidence" && video ? { ...item, reason: video.reason } : item);
-  const reasonFor = (category: DelegatableWorkflowDecisionCategory) =>
-    category === "ui_evidence_approval" && campaign?.uiEvidenceReview.status === "unavailable"
-      ? campaign.uiEvidenceReview.reason ?? "This Orchestrator can't inspect the evidence images."
-      : !control.boundary.operations.includes(category) ? "Not part of this campaign's authorization."
-      : "This runner can't enforce Full Control for this gate.";
-  return <>
-    <section className="section" aria-labelledby={titleId}>
-      <div className="section-head">
-        <h3 className="section-title" id={titleId}>Workflow Decisions</h3>
-      </div>
-      <p className="section-note">
-        Full Control decides these for this campaign. Your per-gate choices apply again only after you revoke to Custom.
-      </p>
-      <EffectiveOwnerFacts campaign={campaign} reasonFor={reasonFor} />
-    </section>
-    <section className="section" aria-labelledby={`${titleId}-human-required`}>
-      <div className="section-head">
-        <h3 className="section-title" id={`${titleId}-human-required`}>Human Required</h3>
-      </div>
-      {standing.length || evidenceToHuman ? <ul>
-        {evidenceToHuman && <li><strong>UI Evidence Review:</strong> {reasonFor("ui_evidence_approval")}</li>}
-        {standing.map((id) => <li key={id}><strong>{FULL_CONTROL_HUMAN_REQUIRED_LABELS[id] ?? id}:</strong> {FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON}</li>)}
-      </ul> : <p className="section-note">Nothing comes to you under Full Control.</p>}
-      <p className="section-note">{FULL_CONTROL_DECLINED_NOTE}</p>
-    </section>
-    {campaign?.decisionOwners.ui_evidence_approval === "orchestrator" && exceptions.length > 0 &&
-      <section className="section" aria-labelledby={`${titleId}-uninspectable`}>
-        <div className="section-head">
-          <h3 className="section-title" id={`${titleId}-uninspectable`}>Evidence the Orchestrator Can't Inspect</h3>
-        </div>
-        <ul>
-          {exceptions.map((item) => <li key={item.id}><strong>{item.exception}:</strong> {item.reason}</li>)}
-        </ul>
-      </section>}
-  </>;
 }
 
 /** A descendant whose root's control isn't reported: the server's effective owners, read-only, since
@@ -652,6 +571,13 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
           value={behavior.childEffort ? titleCaseLabel(behavior.childEffort) : "Automatic"}
           source={sourceLabel(sources.behavior.childEffort)}
         />
+        {policy.reviewPolicySnapshotVersion === 1 && <>
+          <Fact label="Review Harness" value={behavior.reviewHarness === "codex" ? "Codex" : behavior.reviewHarness === "claude-code" ? "Claude Code" : "Automatic"}
+            source={sourceLabel(sources.behavior.reviewHarness ?? "compatibility_fallback")} />
+          <Fact label="Review Model" value={behavior.reviewModel ?? "Automatic"} source={sourceLabel(sources.behavior.reviewModel ?? "compatibility_fallback")} />
+          <Fact label="Review Effort" value={behavior.reviewEffort ? titleCaseLabel(behavior.reviewEffort) : "Automatic"} source={sourceLabel(sources.behavior.reviewEffort ?? "compatibility_fallback")} />
+          <Fact label="Review Round Budget" value={behavior.reviewRoundBudget ?? "Automatic"} source={sourceLabel(sources.behavior.reviewRoundBudget ?? "compatibility_fallback")} />
+        </>}
         <Fact
           label="Maximum Concurrent Children"
           value={behavior.maximumConcurrentChildren}

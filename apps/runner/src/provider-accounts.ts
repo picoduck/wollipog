@@ -84,6 +84,9 @@ export function agentForProviderAccount(
     (!supportedDrivers || supportedDrivers.includes(candidate.driver ?? "acp")));
   const preferred = (compatible: AgentDefinition[], ambiguousTargetContexts: boolean) =>
     compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+    // Retired configured entries can precede a working installation after discovery. Prefer
+    // positive availability within native execution without changing explicit/context choices.
+    compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native" && candidate.available === true) ??
     compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
     (!ambiguousTargetContexts || compatible.length === 1 ? compatible[0] : undefined);
   if (account.directory === undefined) return preferred(providerAgents, false);

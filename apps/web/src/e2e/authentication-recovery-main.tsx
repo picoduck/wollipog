@@ -21,6 +21,7 @@ import "../styles.css";
 /** Real-browser SessionDetail with a sign-in card (#1649, #2198), one scenario per state the
  * runner can put it in:
  * - `email` (default): signed in as a different account than the session uses (Use Current Account);
+ * - `default-sign-in`: the same, without an added-account binding (#1743);
  * - `no-email`: the same, but the provider reports no email;
  * - `signed-out`: nobody is signed in and the runner can start a sign-in (Start Sign-In);
  * - `not-manager`: signed out, for a viewer who cannot manage the Machine;
@@ -37,8 +38,10 @@ import "../styles.css";
  * `?emailLabels=1` names two of the other accounts with an email, as people often do.
  * `?deviceCode=1` makes the `signing-in` sign-in a device-code one: the provider shows a code to
  * enter on its page, and nothing is pasted back.
+ * `?rejectCode=1` has the provider reject every code submitted on the `signing-in` card.
  * `?chooserSignIn=1` has a sign-in running for the signed-out Team account, started from Choose
- * Another Account, so the dialog shows its steps (#2996).
+ * Another Account, so the dialog shows its steps (#2996). `?chooserSignIn=failed` or `=timed_out` has
+ * that sign-in ended instead, and its Dismiss drops it from the Machine as the runner reports it (#3520).
  * `__WOLLIPOG_AUTH_RECOVERY_E2E__.removeAccount(id)` removes an account from the Machine, as the
  * runner reports it, while the page is open.
  * `?theme=light|dark`, `?width=`, `?height=`. */
@@ -48,7 +51,8 @@ const frameWidth = Number(params.get("width") ?? "1100");
 const frameHeight = Number(params.get("height") ?? "760");
 const emailLabels = params.get("emailLabels") === "1";
 const deviceCode = params.get("deviceCode") === "1";
-const chooserSignIn = params.get("chooserSignIn") === "1";
+const chooserSignIn = params.get("chooserSignIn");
+const rejectCode = params.get("rejectCode") === "1";
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
 declare global {
@@ -144,9 +148,11 @@ const runner = {
     accountId: "claude-team",
     label: emailLabels ? "team.pilot@example.org" : "Team Pilot",
     provider: "claude",
-    status: "awaiting_code",
-    verificationUrl: "https://claude.ai/oauth/authorize?code=true",
-    expectsCode: true,
+    ...chooserSignIn === "failed"
+      ? { status: "failed", expectsCode: false, error: "The provider did not confirm authentication." }
+      : chooserSignIn === "timed_out"
+      ? { status: "timed_out", expectsCode: false, error: "Sign-in timed out before the provider confirmed authentication." }
+      : { status: "awaiting_code", verificationUrl: "https://claude.ai/oauth/authorize?code=true", expectsCode: true },
     startedAt: Date.now() - 30_000,
   }] : [],
 } as unknown as RunnerView;
@@ -260,7 +266,7 @@ const session = {
   tokensOut: 1337,
   costUsd: 0.42,
   adopted: false,
-  ...(methods ? {} : { providerAccountId: "claude-work", providerAccountLabel: "Work Subscription" }),
+  ...(methods || scenario === "default-sign-in" ? {} : { providerAccountId: "claude-work", providerAccountLabel: "Work Subscription" }),
 } as unknown as SessionView;
 
 const events: SessionEvent[] = [
@@ -348,7 +354,7 @@ const client = {
   authenticationAccounts: async () => ({ accounts: [...accountOptions] }),
   selectAuthenticationAccount: async (
     _id: string,
-    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null },
   ) => {
     selections.push(input);
     if (scenario === "refused") {
@@ -372,9 +378,15 @@ const client = {
     return { accepted: true as const };
   },
   startProviderLogin: async () => ({}) as never,
+  dismissProviderLoginNotice: async (_runnerId: string, operationId: string) => {
+    runner.providerLogins = runner.providerLogins!.filter((login) => login.operationId !== operationId);
+    socket?.onmessage?.({ data: JSON.stringify({ type: "runner_upsert", runner } satisfies ControlPlaneToUi) });
+    return {};
+  },
   // The sign-in keeps waiting, so a capture shows the card the code was submitted from.
   submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
     codes.push(code);
+    if (rejectCode) throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409);
     return {};
   },
   // The card stays as it is, so a capture shows what the person pressed rather than the next state.

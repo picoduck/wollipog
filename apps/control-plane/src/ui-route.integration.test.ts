@@ -942,14 +942,20 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       available: true,
       context: { kind: "native" },
     }],
-    providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      // Another control plane's profile on the same Machine (#3240).
+      { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated",
+        profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
+    ],
   }));
   await waitForValue(
     async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
       runners: Array<{ runnerId: string; providerAccounts?: Array<{ id: string }> }>;
     }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerAccounts,
-    (accounts) => accounts?.some((account) => account.id === "work") === true,
-    "the advertised provider account in the Machine view",
+    (accounts) => accounts?.some((account) => account.id === "work") === true &&
+      accounts.some((account) => account.id === "theirs"),
+    "the advertised provider accounts in the Machine view",
   );
   const defaultUrl = `${httpBase}/api/runners/runner-ui-route/provider-account-defaults/claude`;
   const defaultBody = { accountId: "work", expectedRevision: 0 };
@@ -973,6 +979,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     method: "PUT", body: JSON.stringify(defaultBody), headers: { "content-type": "application/json" },
   });
   assert.equal(staleDefaultChange.status, 409);
+  const notGrantedDefault = await fetchWithBearer(defaultUrl, ownerToken, {
+    method: "PUT", body: JSON.stringify({ accountId: "theirs", expectedRevision: 1 }), headers: { "content-type": "application/json" },
+  });
+  assert.equal(notGrantedDefault.status, 409, "a profile only other control planes may use is not a default here (#3240)");
+  assert.equal((await notGrantedDefault.json() as { code?: string }).code, "PROVIDER_PROFILE_NOT_GRANTED");
   const projectedDefaults = await waitForValue(
     async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
       runners: Array<{ runnerId: string; providerAccountDefaults?: Array<{ provider: string; accountId: string }> }>;
@@ -1264,6 +1275,37 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     `/api/sessions/${createdSessionId}/shells/${initialTui.shellId}`,
     { method: "DELETE" },
   )).status, 204);
+  // #3338: a TUI its account lease refused carries the session's typed refusal to the client, and a
+  // malformed one falls back to the runner's sentence.
+  const busyRefusal = {
+    code: "busy", provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 7,
+  };
+  for (const [providerHomeRefusal, expected] of [
+    [busyRefusal, busyRefusal],
+    [{ ...busyRefusal, homePath: "/private/account" }, undefined],
+  ] as const) {
+    const refusedOpen = ownerFetch(`/api/sessions/${createdSessionId}/shells`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "agent_tui" }),
+    });
+    const refusedRequest = await runnerInbox.take((message) =>
+      message.type === "shell_open" && message.sessionId === createdSessionId &&
+      message.shellId !== initialTui.shellId);
+    runner.send(JSON.stringify({
+      type: "shell_open_result",
+      requestId: refusedRequest.requestId,
+      ok: false,
+      error: "provider home is busy",
+      providerHomeRefusal,
+    }));
+    const refused = await refusedOpen;
+    assert.equal(refused.status, 502);
+    assert.deepEqual(await refused.json(), {
+      error: "provider home is busy",
+      ...(expected ? { providerHomeRefusal: expected } : {}),
+    });
+  }
   const manualOpen = ownerFetch(`/api/sessions/${createdSessionId}/shells`, {
     method: "POST",
     headers: { "content-type": "application/json" },

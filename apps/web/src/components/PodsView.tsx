@@ -1,207 +1,484 @@
 import { PodsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
-import { StatusBadge } from "./StatusBadge.js";
-import { statusMeta } from "../status-meta.js";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
-import {
-  isTerminal,
-  runnerCapabilityRequirement,
-  runnerSupportsProtocol,
-  type PodArbitrationMode,
-  type PodContextEntry,
-  type PodMemberRole,
-  type PodMemberView,
-  type PodOrchestrationPolicy,
-  type PodReconciliation,
-  type PodRelayReceipt,
-  type SessionView,
+import { StatusBadge, statusToneClass } from "./StatusBadge.js";
+import { sessionStatusSummary, statusMeta } from "../status-meta.js";
+import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
+import { flushSync } from "react-dom";
+import type {
+  PodContextEntry,
+  PodMemberView,
+  PodRelayReceipt,
+  PodView,
+  RelayPodRequest,
+  SessionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { relativeTime, titleCaseLabel } from "../format.js";
+import { formatRecordedRelativeTime } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { SessionStatusIndicators } from "./common.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
-import { EventTimeline } from "./EventTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { useTimeline } from "./useTimeline.js";
 import { subscriptionRecoveryRevision } from "../ui-subscriptions.js";
 import { recoverSessionHistories, sessionHistoryEpochKey } from "../history-recovery.js";
 import { detailPlaceholder, listPlaceholder } from "../detail-placeholder.js";
-import { selectComparisonEvents, selectComparisonHistory } from "../comparison-selectors.js";
+import { selectComparisonEvents, selectComparisonHistory, selectComparisonSession } from "../comparison-selectors.js";
 import { transcriptPresentation } from "../transcript-presentation.js";
 import { matchesShortcut } from "../shortcuts.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { confirmWhileAllowed } from "../confirmation-fence.js";
-import { DetailBar, PageHeader } from "./PageHeader.js";
-import { backLabel, destination, viewTitle } from "../navigation.js";
-import { isTimelineSessionActive } from "../timeline-clock.js";
+import { DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
+import { absoluteViewUrl, backLabel, destination, viewTitle } from "../navigation.js";
+import { useDashboardPublicOrigin } from "../remote-access-context.js";
+import { writeClipboardText } from "../clipboard.js";
+import {
+  comparePodsForList,
+  podBadgeStatus,
+  podEntrySourceName,
+  podMemberNames,
+  podMemberShortName,
+  podMemberTask,
+  podModeLabel,
+  podRoleLabel,
+  podRowStatus,
+  podShareReason,
+  podTurnsStopNotice,
+} from "../pod-presentation.js";
+import { StaleContent } from "./StaleContent.js";
+import { POD_MAX_SESSIONS } from "../pod-session-choices.js";
+import { PodAddMembersDialog, PodMemberSettingsDialog } from "./PodMemberDialogs.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { DEFAULT_POD_ORCHESTRATION_POLICY, PodAutomaticTurnsDialog } from "./PodAutomaticTurnsDialog.js";
+import { PodMergeWorkDialog, PodRecentMergesDialog } from "./PodMergeWorkDialog.js";
+import { CompareMemberBody, CompareMemberHead, CompareRow } from "./CompareColumns.js";
+import { memberActivity, memberActivityLine } from "../member-activity.js";
+import { useTimelineClock } from "../timeline-clock.js";
+import { useIsMobile } from "./useIsMobile.js";
+import { TabList } from "./Tabs.js";
+import { humanResolver, resolverName, ViewerIdentityContext } from "../resolver-identity.js";
 
 const EMPTY_MEMBER_IDS: string[] = [];
 const sameMemberIds = (left: readonly string[], right: readonly string[]) =>
   left.length === right.length && left.every((id, index) => id === right[index]);
 
 const EMPTY_POD_CONTEXT: PodContextEntry[] = [];
-const DEFAULT_ORCHESTRATION_POLICY: PodOrchestrationPolicy = {
-  mode: "manual",
-  contextTokenBudget: 4_096,
-  summaryTokenBudget: 512,
-  maxTurns: 12,
-  maxRepeatedOutputs: 2,
-};
 
-function shortHead(head: string | undefined): string {
-  return head ? head.slice(0, 10) : "pending";
+const POD_CLOSED = "This pod is closed.";
+const MERGE_RUNNING = "Available when the merge finishes.";
+const BUSY_REASON = "Available when the current action finishes.";
+const NO_POD_LINK_REASON = "Open Wollipog in a browser to copy a link.";
+const BACK_TO_MORE_ACTIONS = "Back to More Actions";
+const TURNS_RUNNING_MEMBERS = "Stop automatic turns to change members.";
+const MIN_MEMBERS = "A pod needs at least two members.";
+const WRITE_OR_SELECT = "Write a note or select entries to relay.";
+/** The control plane composes at most this many huddle entries into one relay. */
+const MAX_RELAY_ENTRIES = 16;
+
+/** Stop banners already dismissed in this window, by pod, run and stop, so each says why once. */
+const dismissedStopBanners = new Set<string>();
+
+/** A relay that did not reach every member: each member's receipt, and what Retry Failed sends. */
+interface RelayFailure {
+  receipts: PodRelayReceipt[];
+  /** The relay's entries, with its note as the log entry it became, so a retry never adds the
+   * note to the log twice. */
+  retry: Omit<RelayPodRequest, "sessionIds">;
 }
 
-const PodMemberTimeline = memo(function PodMemberTimeline({
-  sessionId,
-  eventEpoch,
-  title,
-  status,
-}: {
+const relayedSentence = (count: number) => `Relayed to ${count} ${count === 1 ? "member" : "members"}`;
+
+/** What a member's ⋯ needs from the page: why each action is unavailable, and the actions. */
+interface MemberTools {
+  member: PodMemberView;
+  /** Why the log takes no answers at all (a closed pod), which outranks the member's own reason. */
+  shareClosed: string | null;
+  /** Another action is running, after the member's own reason. */
+  busy: boolean;
+  /** Why Member Settings… is unavailable, or null. */
+  settingsReason: string | null;
+  /** Why Remove from Pod… is unavailable, or null. */
+  removeReason: string | null;
+  onShare: () => void;
+  onSettings: () => void;
+  onRemove: (agent: string, reopen: () => void) => void;
+}
+
+/**
+ * One member's column (#2981, #2975's recipe): the head with the agent, "<Role> · <task>", its
+ * status and ⋯ (#2983), what it did, and its activity. On a phone it is the member tab's panel and
+ * its head the member bar. Its own component, so each member subscribes to its own events.
+ */
+function PodMemberColumn({ sessionId, tools, onRetry, panel }: {
   sessionId: string;
-  eventEpoch: number;
-  title: string;
-  status: SessionView["status"];
+  tools: MemberTools;
+  onRetry: () => void;
+  panel?: { id: string; labelledBy: string };
 }) {
-  const driver = useStoreSelector((state) => state.sessions.get(sessionId)?.driver);
+  const { navigate } = useStoreActions();
+  const session = useStoreSelector((state) => selectComparisonSession(state, sessionId));
   const events = useStoreSelector((state) => selectComparisonEvents(state, sessionId));
   const history = useStoreSelector((state) => selectComparisonHistory(state, sessionId));
+  const runnerOnline = useStoreSelector((state) => session
+    ? state.runners.get(session.runnerId)?.status !== "offline"
+    : true);
   const conn = useStoreSelector((state) => state.conn);
-  const items = useTimeline(sessionId, events, eventEpoch);
+  const items = useTimeline(sessionId, events, session?.eventEpoch ?? 0);
+  const activity = useMemo(() => memberActivity(items), [items]);
+  if (!session) return null;
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const known = presentation.body === "timeline" || presentation.body === "empty";
+  const did = memberActivityLine(statusMeta("session", session.status).pulse, known ? activity : null);
+  const shareReason = tools.shareClosed ?? podShareReason(session, events, agentLabel) ?? (tools.busy ? BUSY_REASON : null);
+  // Destructive last, after a separator (§3.3); every disabled item says why (§9.1).
+  const menu: PageMenuAction[] = [
+    { label: "Open Session", onClick: () => navigate({ name: "session", id: sessionId }) },
+    {
+      label: "Share Latest Answer",
+      disabled: Boolean(shareReason),
+      description: shareReason ?? undefined,
+      onClick: tools.onShare,
+    },
+    {
+      label: "Member Settings…",
+      disabled: Boolean(tools.settingsReason),
+      description: tools.settingsReason ?? undefined,
+      onClick: tools.onSettings,
+    },
+    {
+      label: "Remove from Pod…",
+      danger: true,
+      disabled: Boolean(tools.removeReason),
+      description: tools.removeReason ?? undefined,
+      onClick: ({ reopen }) => tools.onRemove(agentLabel, reopen),
+    },
+  ];
   return (
-    <div className="compare-body measured-virtual-scroll" ref={scrollRef} role="region" aria-label={`${title} activity`} aria-busy={presentation.busy} tabIndex={0}>
-      {presentation.notice === "refreshing" && <div className="muted sm" role="status">Checking for missed activity…</div>}
-      {presentation.notice === "stale" && <div className="muted sm" role="status">Showing cached activity.</div>}
-      {presentation.notice === "error" && <div className="muted sm" role="status">Activity refresh failed.</div>}
-      {presentation.body === "timeline" ? (
-        <EventTimeline
-          items={items}
-          driver={driver}
-          sessionActive={isTimelineSessionActive(status)}
-          scrollRef={scrollRef}
-          historyKey={`${sessionId}:${eventEpoch}`}
-        />
-      ) : presentation.body === "empty" ? <div className="muted sm" role="status">No activity yet.</div>
-        : presentation.body === "skeleton" ? <div className="muted sm" role="status">Loading activity…</div>
-          : <div className="muted sm" role="status">Activity unavailable.</div>}
-    </div>
-  );
-});
-
-function ReconciliationReceipt({
-  receipt,
-  sessions,
-}: {
-  receipt: PodReconciliation;
-  sessions: ReadonlyMap<string, SessionView>;
-}) {
-  const source = sessions.get(receipt.sourceSessionId)?.title ?? receipt.sourceSessionId;
-  const target = sessions.get(receipt.targetSessionId)?.title ?? receipt.targetSessionId;
-  return (
-    <article className={`pod-reconcile-receipt pod-reconcile-receipt-${receipt.status}`}>
-      <div className="pod-reconcile-receipt-head">
-        <strong>{source} → {target}</strong>
-        <span>{titleCaseLabel(receipt.status.replaceAll("_", " "))} · {relativeTime(receipt.completedAt ?? receipt.createdAt)}</span>
-      </div>
-      <div className="pod-reconcile-heads">
-        <span>Source {shortHead(receipt.sourceHead)}</span>
-        <span>Target {shortHead(receipt.targetHead)}</span>
-        {receipt.resultHead && <span>Result {shortHead(receipt.resultHead)}</span>}
-        {receipt.mergeBase && <span>Base {shortHead(receipt.mergeBase)}</span>}
-      </div>
-      {receipt.conflictPaths?.length ? (
-        <div className="pod-reconcile-conflicts">Conflicts: {receipt.conflictPaths.join(", ")}</div>
-      ) : null}
-      {receipt.error && <div className="pod-reconcile-error">{receipt.error}</div>}
-    </article>
+    <section
+      className="compare-member pod-member"
+      aria-label={panel ? undefined : agentLabel}
+      id={panel?.id}
+      role={panel ? "tabpanel" : undefined}
+      aria-labelledby={panel?.labelledBy}
+    >
+      <CompareMemberHead
+        agent={agentLabel}
+        sub={`${podRoleLabel(tools.member.role)} · ${podMemberTask(tools.member, session)}`}
+        session={session}
+        runnerOnline={runnerOnline}
+        menu={menu}
+      />
+      <p className="compare-member-meta">{did}</p>
+      <CompareMemberBody
+        agent={agentLabel}
+        session={session}
+        items={items}
+        presentation={presentation}
+        conn={conn}
+        loaded={events?.length ?? 0}
+        onRetry={onRetry}
+      />
+    </section>
   );
 }
 
-function PodMemberColumn({
-  session,
-  member,
-  selected,
-  removable,
-  settingsDisabled,
-  onToggle,
-  onOpen,
-  onRemove,
-  onShare,
-  onRole,
-  onBudget,
-  sharing,
-}: {
-  session: SessionView;
-  member: PodMemberView;
+const HUDDLE_TAB_ID = "pod-huddle-tab";
+const memberTabId = (index: number) => `pod-member-tab-${index}`;
+const TAB_PANEL_ID = "pod-tab-panel";
+
+/** A phone's member tab: the agent and its status as a dot, named in words (#2975's tab). */
+function MemberTab({ sessionId, index, selected, onSelect, onKeyDown }: {
+  sessionId: string;
+  index: number;
   selected: boolean;
-  removable: boolean;
-  settingsDisabled: boolean;
-  onToggle: () => void;
-  onOpen: () => void;
-  onRemove: () => void;
-  onShare: () => void;
-  onRole: (role: PodMemberRole) => void;
-  onBudget: (budget: number | null) => void;
-  sharing: boolean;
+  onSelect: () => void;
+  onKeyDown: (event: KeyboardEvent<HTMLButtonElement>) => void;
 }) {
-  const events = useStoreSelector((state) => state.events.get(session.id));
-  const runnerOnline = useStoreSelector((state) => state.runners.get(session.runnerId)?.status === "online");
-  const canShare = session.status !== "starting" && session.status !== "running" &&
-    Boolean(events?.some((event) => event.payload.kind === "agent_message" && !event.payload.parentToolUseId && event.payload.text));
+  const session = useStoreSelector((state) => selectComparisonSession(state, sessionId));
+  const runnerOnline = useStoreSelector((state) => session
+    ? state.runners.get(session.runnerId)?.status !== "offline"
+    : true);
+  if (!session) return null;
+  const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
+  const status = sessionStatusSummary(session, { runnerOnline }).primary.meta;
   return (
-    <div className="compare-col pod-member-col">
-      <div className="compare-head pod-member-head">
-        <button className="pod-member-open" onClick={onOpen}>
-          <span className="compare-agent">{sessionAgentLabel(session.agentName, session.driver, session.agentId)}</span>
-          <span className="muted sm">{session.title}</span>
+    <button
+      id={memberTabId(index)}
+      type="button"
+      role="tab"
+      aria-selected={selected}
+      aria-controls={TAB_PANEL_ID}
+      tabIndex={selected ? 0 : -1}
+      className="tab compare-tab"
+      onClick={onSelect}
+      onKeyDown={onKeyDown}
+    >
+      <span className={`compare-tab-dot ${statusToneClass(status.tone)}`} aria-hidden="true" />
+      {agentLabel}
+      <span className="sr-only">, {status.label}</span>
+    </button>
+  );
+}
+
+/**
+ * An entry's text, clamped to three lines with Show More when it runs longer. Whether it runs
+ * longer is measured against the clamp whenever the text or the panel's width changes.
+ */
+function HuddleEntryText({ text }: { text: string }) {
+  const id = `pod-huddle-text-${useId().replace(/:/g, "")}`;
+  const [expanded, setExpanded] = useState(false);
+  const [truncates, setTruncates] = useState(false);
+  const textRef = useRef<HTMLParagraphElement>(null);
+  useLayoutEffect(() => {
+    const body = textRef.current;
+    if (!body) return;
+    const measure = () => {
+      body.classList.add("is-clamped");
+      const hidden = body.scrollHeight > body.clientHeight + 1;
+      if (expanded) body.classList.remove("is-clamped");
+      setTruncates(hidden);
+    };
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(measure);
+    observer.observe(body);
+    return () => observer.disconnect();
+  }, [text, expanded]);
+  return (
+    <>
+      <p id={id} ref={textRef} className={`pod-huddle-text${expanded ? "" : " is-clamped"}`}>{text}</p>
+      {(truncates || expanded) && (
+        <button
+          type="button"
+          className="link pod-huddle-more"
+          aria-expanded={expanded}
+          aria-controls={id}
+          onClick={() => setExpanded((open) => !open)}
+        >
+          {expanded ? "Show Less" : "Show More"}
         </button>
-        <SessionStatusIndicators session={session} disconnected={!runnerOnline} />
-        <label className="pod-member-setting">
-          <span>Role</span>
-          <select
-            aria-label={`Role for ${session.title}`}
-            value={member.role}
-            disabled={settingsDisabled}
-            onChange={(event) => onRole(event.target.value as PodMemberRole)}
-          >
-            <option value="lead">Lead</option>
-            <option value="worker">Worker</option>
-            <option value="reviewer">Reviewer</option>
-          </select>
-        </label>
-        <label className="pod-member-setting">
-          <span>Context</span>
-          <select
-            aria-label={`Context budget for ${session.title}`}
-            value={member.contextTokenBudget ?? ""}
-            disabled={settingsDisabled}
-            onChange={(event) => onBudget(event.target.value ? Number(event.target.value) : null)}
-          >
-            <option value="">Inherit</option>
-            <option value="4096">4k</option>
-            <option value="8192">8k</option>
-            <option value="16384">16k</option>
-            <option value="32768">32k</option>
-          </select>
-        </label>
-        <Checkbox label="Relay" title="Include this member in the next manual relay"
-          checked={selected} onChange={onToggle} />
-        <button className="btn ghost sm" disabled={!canShare || sharing} onClick={onShare}>
-          {sharing ? "Sharing…" : "Share Latest"}
-        </button>
-        {removable && <button className="btn ghost sm" onClick={onRemove}>Remove</button>}
+      )}
+    </>
+  );
+}
+
+interface HuddleProps {
+  pod: PodView;
+  sessions: ReadonlyMap<string, SessionView>;
+  entries: readonly PodContextEntry[];
+  /** Whether older entries exist above the loaded ones. */
+  more: boolean;
+  loadError: string | null;
+  onRetryLoad: () => void;
+  onLoadEarlier: () => void;
+  selectedEntries: readonly string[];
+  onToggleEntry: (id: string) => void;
+  text: string;
+  onText: (text: string) => void;
+  targets: readonly string[];
+  onToggleTarget: (sessionId: string) => void;
+  busy: string | null;
+  /** Why the pod cannot relay now (closed, automatic turns, a merge), which also holds Retry Failed back. */
+  relayBlocked: string | null;
+  /** Why Relay is unavailable, or null. */
+  relayReason: string | null;
+  noteError: string | null;
+  relayError: string | null;
+  relayFailure: RelayFailure | null;
+  onDismissFailure: () => void;
+  onSaveNote: () => void;
+  onRelay: () => void;
+  onRetryFailed: () => void;
+  panel?: { id: string; labelledBy: string };
+}
+
+/**
+ * The Huddle (#2981): its head with the entry count and Load Earlier, the log newest last, each
+ * entry a selectable row, and one composer at the bottom that saves a note or relays it with the
+ * selected entries to the members checked under Relay To.
+ */
+function Huddle({
+  pod, sessions, entries, more, loadError, onRetryLoad, onLoadEarlier, selectedEntries, onToggleEntry,
+  text, onText, targets, onToggleTarget, busy, relayBlocked, relayReason, noteError, relayError, relayFailure,
+  onDismissFailure, onSaveNote, onRelay, onRetryFailed, panel,
+}: HuddleProps) {
+  const ids = useId();
+  const viewer = useContext(ViewerIdentityContext);
+  const now = useTimelineClock(entries.length > 0);
+  const active = pod.status === "active";
+  const memberIds = pod.members.map((member) => member.sessionId);
+  // Relay To names each member by role and agent; results name them the same way.
+  const names = podMemberNames(pod, sessions, [...memberIds, ...(relayFailure?.receipts.map((receipt) => receipt.sessionId) ?? [])], "agent");
+  const person = (actorId: string) => {
+    const resolver = humanResolver(viewer, actorId);
+    return resolver ? resolverName(resolver, { titleCase: true }) : "A Person";
+  };
+
+  // Newest last: the log follows a new entry while the person is at its end, and keeps what they
+  // read in place when Load Earlier adds older entries above it, so the composer never moves.
+  const logRef = useRef<HTMLDivElement>(null);
+  const anchor = useRef<{ first?: string; last?: string; fromBottom: number; atEnd: boolean }>({ fromBottom: 0, atEnd: true });
+  const remember = () => {
+    const log = logRef.current;
+    if (!log) return;
+    anchor.current.fromBottom = log.scrollHeight - log.scrollTop;
+    anchor.current.atEnd = log.scrollHeight - log.scrollTop - log.clientHeight < 8;
+  };
+  useLayoutEffect(() => {
+    const log = logRef.current;
+    if (!log) return;
+    const seen = anchor.current;
+    const first = entries[0]?.id;
+    const last = entries.at(-1)?.id;
+    if (last !== seen.last && seen.atEnd) log.scrollTop = log.scrollHeight;
+    else if (first !== seen.first) log.scrollTop = log.scrollHeight - seen.fromBottom;
+    seen.first = first;
+    seen.last = last;
+    remember();
+  }, [entries]);
+
+  const reasonId = `${ids}-reason`;
+  const relayToId = `${ids}-relay-to`;
+  const failed = relayFailure?.receipts.filter((receipt) => receipt.status === "failed") ?? [];
+  const relayLabel = targets.length ? `Relay to ${targets.length}` : "Relay";
+  return (
+    <aside
+      className="pod-huddle"
+      aria-label={panel ? undefined : "Huddle"}
+      id={panel?.id}
+      role={panel ? "tabpanel" : undefined}
+      aria-labelledby={panel?.labelledBy}
+    >
+      <div className="pod-huddle-head">
+        <h2 className="pod-huddle-title">Huddle</h2>
+        <span className="count" aria-label={`${entries.length}${more ? " or more" : ""} entries`}>{entries.length}{more ? "+" : ""}</span>
+        {more && (
+          <BusyButton className="btn sm ghost" busy={busy === "older"} progress="Loading earlier entries…"
+            disabled={Boolean(busy) && busy !== "older"} onClick={onLoadEarlier}>
+            Load Earlier
+          </BusyButton>
+        )}
       </div>
-      <PodMemberTimeline
-        sessionId={session.id}
-        eventEpoch={session.eventEpoch ?? 0}
-        title={session.title}
-        status={session.status}
-      />
-    </div>
+      <div className="pod-huddle-log" ref={logRef} onScroll={remember} role="region" aria-label="Huddle Log" tabIndex={0}>
+        {loadError && (
+          <Notice tone="danger" compact role="alert" className="pod-huddle-notice"
+            actions={<button type="button" className="btn sm" onClick={onRetryLoad}>Retry</button>}>
+            The huddle didn't load.
+          </Notice>
+        )}
+        {entries.length === 0 ? (
+          !loadError && <p className="pod-huddle-empty">No notes yet. Save a note, or share a member's latest answer.</p>
+        ) : (
+          <ul className="pod-huddle-entries">
+            {entries.map((entry) => {
+              const selected = selectedEntries.includes(entry.id);
+              const source = podEntrySourceName(entry, pod, sessions, entry.source.kind === "human" ? person(entry.source.actorId) : "");
+              const time = formatRecordedRelativeTime(entry.ts, now);
+              return (
+                <li
+                  key={entry.id}
+                  className={`pod-huddle-entry${selected ? " is-selected" : ""}`}
+                  onClick={(event) => {
+                    // The row selects, as its box does; its own controls keep their clicks.
+                    if (!active || (event.target as Element).closest("button, a, input, label")) return;
+                    onToggleEntry(entry.id);
+                  }}
+                >
+                  <Checkbox
+                    labelHidden
+                    label="Include in Next Relay"
+                    ariaLabel={`Include in Next Relay: ${source}, ${time}`}
+                    checked={selected}
+                    disabled={!active}
+                    onChange={() => onToggleEntry(entry.id)}
+                  />
+                  <div className="pod-huddle-entry-body">
+                    <p className="pod-huddle-entry-meta">
+                      <span className="pod-huddle-entry-source">{source}</span>
+                      <time dateTime={new Date(entry.ts).toISOString()} title={new Date(entry.ts).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}>{time}</time>
+                    </p>
+                    <HuddleEntryText text={entry.content} />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+      <div className="pod-composer">
+        {relayFailure && (
+          <Notice
+            tone="danger"
+            role="alert"
+            title="Couldn't Relay to Every Member"
+            onDismiss={onDismissFailure}
+            actions={failed.length > 0 && (
+              <BusyButton className="btn sm" busy={busy === "retry"} progress="Retrying the failed members…"
+                disabled={(Boolean(busy) && busy !== "retry") || Boolean(relayBlocked)}
+                onClick={onRetryFailed}>
+                Retry Failed
+              </BusyButton>
+            )}
+          >
+            <ul className="pod-results">
+              {relayFailure.receipts.map((receipt) => (
+                <li key={receipt.sessionId}>
+                  <span className="pod-result-name">{names.get(receipt.sessionId) ?? receipt.sessionId}</span>
+                  <StatusBadge meta={statusMeta("delivery", receipt.status === "delivered" ? "delivered" : "delivery_failed")} inline />
+                  {receipt.status === "failed" && receipt.error && <span className="pod-result-reason">{receipt.error}</span>}
+                </li>
+              ))}
+            </ul>
+          </Notice>
+        )}
+        {relayError && (
+          <Notice tone="danger" role="alert" details={<code>{relayError}</code>}>The relay didn't run.</Notice>
+        )}
+        {noteError && (
+          <Notice tone="danger" role="alert" details={<code>{noteError}</code>}>The note wasn't saved.</Notice>
+        )}
+        <textarea
+          className="pod-composer-note"
+          rows={3}
+          value={text}
+          aria-label="Note"
+          disabled={!active}
+          placeholder="Write a note for the huddle…"
+          onChange={(event) => onText(event.target.value)}
+          onKeyDown={(event) => {
+            if (matchesShortcut(event.nativeEvent, "relay-pod-note")) {
+              event.preventDefault();
+              onRelay();
+            }
+          }}
+        />
+        <div className="pod-recipients" role="group" aria-labelledby={relayToId}>
+          <span className="pod-recipients-label" id={relayToId}>Relay To</span>
+          {memberIds.map((sessionId) => (
+            <Checkbox
+              key={sessionId}
+              label={names.get(sessionId) ?? sessionId}
+              checked={targets.includes(sessionId)}
+              disabled={!active}
+              onChange={() => onToggleTarget(sessionId)}
+            />
+          ))}
+        </div>
+        {relayReason && <p className="pod-composer-reason" id={reasonId}>{relayReason}</p>}
+        <div className="pod-composer-actions">
+          <BusyButton className="btn" busy={busy === "note"} progress="Saving the note…"
+            disabled={!active || (Boolean(busy) && busy !== "note") || !text.trim()} onClick={onSaveNote}>
+            Save Note
+          </BusyButton>
+          <BusyButton className="btn primary" busy={busy === "relay"} progress="Relaying…"
+            disabled={!active || (Boolean(relayReason || busy) && busy !== "relay")}
+            aria-describedby={relayReason ? reasonId : undefined}
+            onClick={onRelay}>
+            {relayLabel}
+          </BusyButton>
+        </div>
+      </div>
+    </aside>
   );
 }
 
@@ -210,82 +487,125 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   const pods = useStoreSelector((state) => state.pods);
   const conn = useStoreSelector((state) => state.conn);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
-  const list = useMemo(() => [...pods.values()].sort((a, b) => b.updatedAt - a.updatedAt), [pods]);
+  const sessions = useStoreSelector((state) => state.sessions);
+  const list = useMemo(() => [...pods.values()].sort(comparePodsForList), [pods]);
+  const now = useTimelineClock(list.length > 0);
   const podsDestination = destination("pods");
-  const header = (
-    <PageHeader
-      title={podsDestination.name}
-      description={podsDestination.description}
-      primary={{ label: "New Pod", onClick: onNewPod }}
-    />
-  );
-  if (list.length === 0) {
+
+  let body: ReactNode;
+  const empty = list.length === 0 && snapshotLoaded && conn === "online";
+  if (list.length === 0 && !empty) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
-    if (!snapshotLoaded || conn !== "online") {
-      const placeholder = listPlaceholder("pods", conn);
-      return (
-        <div className="page">
-          {header}
-          <State variant={placeholder.variant} icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>
-        </div>
-      );
-    }
-    return (
-      <div className="page">
-        {header}
-        <State
-          icon={<PodsIcon />}
-          title={`No ${podsDestination.name} Yet`}
-          actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
-        >
-          Group isolated sessions to relay context across agents and runners.
-        </State>
-      </div>
+    const placeholder = listPlaceholder("pods", conn);
+    body = <State variant={placeholder.variant} icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
+  } else if (empty) {
+    body = (
+      <State
+        icon={<PodsIcon />}
+        title={`No ${podsDestination.name} Yet`}
+        actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
+      >
+        Group two or more sessions so their agents can share notes and merge each other's work.
+      </State>
+    );
+  } else {
+    // Disconnected with pods: the last-known rows stay, dimmed and still openable, under one line
+    // that says why (§12.5). Never an empty state.
+    const stale = conn !== "online";
+    body = (
+      <>
+        {stale && <Notice compact tone="neutral" role="status" className="list-reconnecting">Reconnecting…</Notice>}
+        <StaleContent stale={stale}>
+          <div className="surface">
+            {list.map((pod) => (
+              <PodRow key={pod.id} pod={pod} sessions={sessions} now={now} onOpen={() => navigate({ name: "pod", id: pod.id })} />
+            ))}
+          </div>
+        </StaleContent>
+      </>
     );
   }
+
   return (
     <div className="page">
-    {header}
-    <div className="surface">
-      {list.map((pod) => (
-        <button key={pod.id} type="button" className="row row-2" onClick={() => navigate({ name: "pod", id: pod.id })}>
-          <span className="row-body">
-            <span className="row-line">
-              <span className="row-title">{pod.title}</span>
-              <StatusBadge meta={statusMeta("pod", pod.status)} />
-            </span>
-            <span className="row-sub">{pod.objective || "Manual collaboration pod"}</span>
-          </span>
-          <span className="row-trail">
-            {pod.members.length} Members · {titleCaseLabel(pod.orchestration?.policy.mode.replaceAll("_", " ") ?? "manual")}
-            {pod.orchestration?.state.status === "running" ? ` · turn ${pod.orchestration.state.turnsUsed}` : ""}
-            {` · updated ${relativeTime(pod.updatedAt)}`}
-          </span>
-        </button>
-      ))}
+      {/* The empty state owns the one create action, so the header offers none beside it (§12.1). */}
+      <PageHeader
+        title={podsDestination.name}
+        description={podsDestination.description}
+        primary={empty ? undefined : { label: "New Pod", onClick: onNewPod }}
+      />
+      {body}
     </div>
-    </div>
+  );
+}
+
+/**
+ * One pod (§5.2), on the Runs list's row recipe: a two-line row that opens the pod. Line 1 is the
+ * title and a badge only while something is happening (`podRowStatus()`); line 2 is meta 12px
+ * apart: the members, how turns pass, the turn while automatic turns run, and the objective, or
+ * "No objective". The last update trails. On phones the badge leads line 2, and the turn moves
+ * ahead of the mode, so the line keeps a running pod's progress when it folds facts away.
+ */
+export function PodRow({ pod, sessions, now, onOpen }: {
+  pod: PodView;
+  sessions: ReadonlyMap<string, SessionView>;
+  /** The shared clock the last update reads against. */
+  now: number;
+  onOpen: () => void;
+}) {
+  const status = podRowStatus(pod, sessions);
+  const orchestration = pod.orchestration;
+  const turnsRunning = pod.status === "active" && orchestration?.state.status === "running";
+  const objective = pod.objective.trim();
+  const updated = new Date(pod.updatedAt);
+  return (
+    <button type="button" className="row row-2" onClick={onOpen}>
+      <span className="row-icon" aria-hidden="true"><PodsIcon size={16} /></span>
+      <span className="row-body list-row-body">
+        <span className="row-title" title={pod.title}>{pod.title}</span>
+        {status && <StatusBadge meta={statusMeta("pod", status)} className="list-row-status" />}
+        <span className="row-sub list-row-meta pod-row-meta">
+          <span>{pod.members.length === 1 ? "1 member" : `${pod.members.length} members`}</span>
+          <span className="pod-row-mode">{podModeLabel(orchestration?.policy.mode)}</span>
+          {turnsRunning && <span>{`turn ${orchestration.state.turnsUsed} of ${orchestration.policy.maxTurns}`}</span>}
+          <span className="list-row-fill">
+            <span className={objective ? undefined : "pod-row-no-objective"} title={objective || undefined}>{objective || "No objective"}</span>
+          </span>
+        </span>
+      </span>
+      <span className="row-trail">
+        <time dateTime={updated.toISOString()} title={`Updated ${updated.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" })}`}>
+          {formatRecordedRelativeTime(pod.updatedAt, now)}
+        </time>
+      </span>
+    </button>
   );
 }
 
 /** Keyed by pod: the route renders this in place, so a direct pod-to-pod change would otherwise
  * reuse one instance and carry the previous pod's draft, errors, receipts and unsaved policy. */
-export function PodDetail({ podId }: { podId: string }) {
-  return <PodDetailContent key={podId} podId={podId} />;
+export function PodDetail({ podId, member, onNewSession }: {
+  podId: string;
+  /** The member tab the URL names (`?member=`), which a phone shows; otherwise the Huddle. */
+  member?: string;
+  /** Opens New Session with its own worktree, from Add Member…'s empty state. */
+  onNewSession?: () => void;
+}) {
+  return <PodDetailContent key={podId} podId={podId} member={member} onNewSession={onNewSession} />;
 }
 
-function PodDetailContent({ podId }: { podId: string }) {
+function PodDetailContent({ podId, member, onNewSession }: { podId: string; member?: string; onNewSession?: () => void }) {
   const api = useApi();
-  const { confirm } = useFeedback();
+  const phone = useIsMobile();
+  const { confirm, showToast } = useFeedback();
   const { eventEpoch, loadEvents, loadPodContext, navigate, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad } = useStoreActions();
   const pod = useStoreSelector((state) => state.pods.get(podId));
   const sessions = useStoreSelector((state) => state.sessions);
   const runners = useStoreSelector((state) => state.runners);
-  const pods = useStoreSelector((state) => state.pods);
   const conn = useStoreSelector((state) => state.conn);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const memberIds = useStoreSelector(
-    (state) => state.pods.get(podId)?.members.map((member) => member.sessionId) ?? EMPTY_MEMBER_IDS,
+    (state) => state.pods.get(podId)?.members.map((candidate) => candidate.sessionId) ?? EMPTY_MEMBER_IDS,
     sameMemberIds,
   );
   const contextEntries = useStoreSelector((state) => state.podContext.get(podId) ?? EMPTY_POD_CONTEXT);
@@ -302,41 +622,35 @@ function PodDetailContent({ podId }: { podId: string }) {
   const [targets, setTargets] = useState<string[]>([]);
   const [selectedContext, setSelectedContext] = useState<string[]>([]);
   const [text, setText] = useState("");
-  const [addSessionId, setAddSessionId] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [receipts, setReceipts] = useState<PodRelayReceipt[]>([]);
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [relayError, setRelayError] = useState<string | null>(null);
+  const [relayFailure, setRelayFailure] = useState<RelayFailure | null>(null);
+  const [contextError, setContextError] = useState<string | null>(null);
+  const [contextRetry, setContextRetry] = useState(0);
   const [beforeSeq, setBeforeSeq] = useState<number | undefined>();
-  const [orchestrationMode, setOrchestrationMode] = useState<PodArbitrationMode>("manual");
-  const [contextTokenBudget, setContextTokenBudget] = useState(4_096);
-  const [summaryTokenBudget, setSummaryTokenBudget] = useState(512);
-  const [maxTurns, setMaxTurns] = useState(12);
-  const [maxRepeatedOutputs, setMaxRepeatedOutputs] = useState(2);
-  const [orchestrationSeed, setOrchestrationSeed] = useState("");
-  const [firstSessionId, setFirstSessionId] = useState("");
-  const [reconcileSourceId, setReconcileSourceId] = useState("");
-  const [reconcileTargetId, setReconcileTargetId] = useState("");
-
-  const members = useMemo(
-    () => memberIds.map((id) => sessions.get(id)).filter((session): session is SessionView => Boolean(session)),
-    [memberIds, sessions],
-  );
-  const occupied = useMemo(
-    () => new Set([...pods.values()].filter((candidate) => candidate.status === "active").flatMap((candidate) => candidate.members.map((member) => member.sessionId))),
-    [pods],
-  );
-  const addCandidates = useMemo(
-    () => [...sessions.values()]
-      .filter((session) => session.useWorktree && !isTerminal(session.status) && !occupied.has(session.id))
-      .sort((a, b) => b.updatedAt - a.updatedAt),
-    [sessions, occupied],
-  );
+  // Retry on a member's failed history loads every member's history again.
+  const [historyRetry, setHistoryRetry] = useState(0);
+  const retryHistory = useCallback(() => setHistoryRetry((value) => value + 1), []);
+  // The dialogs own their drafts, so reopening one shows what is saved (#2980).
+  const [dialog, setDialog] = useState<"turns" | "merge" | "merges" | "add" | null>(null);
+  // The member whose Member Settings… is open (#2983).
+  const [settingsFor, setSettingsFor] = useState<string | null>(null);
+  const [, setDismissals] = useState(0);
+  const dashboardOrigin = useDashboardPublicOrigin();
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   useEffect(() => {
     setTargets((current) => {
       const retained = current.filter((id) => memberIds.includes(id));
       return retained.length ? retained : [...memberIds];
     });
+    // A member that leaves takes its Member Settings with it, so rejoining never reopens them.
+    setSettingsFor((current) => current !== null && !memberIds.includes(current) ? null : current);
   }, [memberIds]);
 
   useEffect(() => {
@@ -360,7 +674,7 @@ function PodDetailContent({ podId }: { podId: string }) {
       },
     );
     return () => { current = false; };
-  }, [api, memberIds, conn, recoveryRevision, recoveryEpochKey, recoveryGeneration, eventEpoch, loadEvents, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad]);
+  }, [api, memberIds, conn, recoveryRevision, recoveryEpochKey, recoveryGeneration, eventEpoch, loadEvents, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad, historyRetry]);
 
   useEffect(() => {
     if (!pod || conn !== "online" || recoveryRevision == null) return;
@@ -370,47 +684,26 @@ function PodDetailContent({ podId }: { podId: string }) {
         if (!current) return;
         loadPodContext(pod.id, page.entries);
         setBeforeSeq(page.beforeSeq);
+        setContextError(null);
       })
-      .catch((cause) => { if (current) setError((cause as Error).message); });
+      .catch((cause) => { if (current) setContextError((cause as Error).message); });
     return () => { current = false; };
-  }, [api, pod?.id, conn, recoveryRevision, loadPodContext]);
+  }, [api, pod?.id, conn, recoveryRevision, loadPodContext, contextRetry]);
 
   useEffect(() => {
     setSelectedContext((current) => current.filter((id) => contextEntries.some((entry) => entry.id === id)));
   }, [contextEntries]);
 
-  const policy = pod?.orchestration?.policy ?? DEFAULT_ORCHESTRATION_POLICY;
+  const policy = pod?.orchestration?.policy ?? DEFAULT_POD_ORCHESTRATION_POLICY;
   const orchestrationState = pod?.orchestration?.state;
   const orchestrationRunning = orchestrationState?.status === "running";
   const reconciliationRunning = Boolean(pod?.reconciliations?.some((receipt) => receipt.status === "running"));
   const closeBlocked = useRef(false);
   closeBlocked.current = Boolean(busy) || reconciliationRunning;
-
-  useEffect(() => {
-    setOrchestrationMode(policy.mode);
-    setContextTokenBudget(policy.contextTokenBudget);
-    setSummaryTokenBudget(policy.summaryTokenBudget);
-    setMaxTurns(policy.maxTurns);
-    setMaxRepeatedOutputs(policy.maxRepeatedOutputs);
-  }, [policy.mode, policy.contextTokenBudget, policy.summaryTokenBudget, policy.maxTurns, policy.maxRepeatedOutputs]);
-
-  useEffect(() => {
-    if (!pod) return;
-    const eligible = pod.members.filter((member) => member.role !== "lead");
-    setFirstSessionId((current) => pod.members.some((member) => member.sessionId === current)
-      ? current
-      : (eligible[0]?.sessionId ?? pod.members[0]?.sessionId ?? ""));
-  }, [pod?.members]);
-
-  useEffect(() => {
-    if (!pod) return;
-    const targetDefault = pod.members.find((member) => member.role === "lead")?.sessionId ?? pod.members[0]?.sessionId ?? "";
-    const sourceDefault = pod.members.find((member) => member.sessionId !== targetDefault)?.sessionId ?? "";
-    setReconcileTargetId((current) => pod.members.some((member) => member.sessionId === current) ? current : targetDefault);
-    setReconcileSourceId((current) => pod.members.some((member) => member.sessionId === current) && current !== targetDefault
-      ? current
-      : sourceDefault);
-  }, [pod?.members]);
+  // Whatever would disable Remove from Pod… also takes back a confirmation that is already open.
+  const removeBlocked = useRef(false);
+  removeBlocked.current = Boolean(busy) || reconciliationRunning || orchestrationRunning ||
+    pod?.status !== "active" || (pod?.members.length ?? 0) <= 2;
 
   if (!pod) {
     const placeholder = detailPlaceholder("Pod", { authoritative: snapshotLoaded, conn });
@@ -430,233 +723,267 @@ function PodDetailContent({ podId }: { podId: string }) {
     );
   }
   const active = pod.status === "active";
-  const policyDirty = orchestrationMode !== policy.mode || contextTokenBudget !== policy.contextTokenBudget ||
-    summaryTokenBudget !== policy.summaryTokenBudget || maxTurns !== policy.maxTurns ||
-    maxRepeatedOutputs !== policy.maxRepeatedOutputs;
-  const lastStep = pod.orchestration?.lastStep;
-  const reconcileSource = sessions.get(reconcileSourceId);
-  const reconcileTarget = sessions.get(reconcileTargetId);
-  const reconcileRunner = reconcileTarget ? runners.get(reconcileTarget.runnerId) : undefined;
-  const reconcileCapabilityCopy = runnerCapabilityRequirement(
-    reconcileRunner?.protocolVersion,
-    "podReconciliation",
-    "pod worktree reconciliation",
-  );
-  const reconcileIssue = (() => {
-    if (!active) return "This pod is closed.";
-    if (orchestrationRunning) return "Stop the automatic cycle before reconciling worktrees.";
-    if (reconciliationRunning) return "A reconciliation is already running for this pod.";
-    if (!reconcileSource || !reconcileTarget) return "Choose a source and integration target.";
-    if (reconcileSource.id === reconcileTarget.id) return "Source and integration target must be different sessions.";
-    if (!reconcileSource.useWorktree || !reconcileTarget.useWorktree || !reconcileSource.worktreePath || !reconcileTarget.worktreePath) {
-      return "Both sessions must use isolated worktrees.";
+  const receipts = pod.reconciliations ?? [];
+  // Every disabled ⋯ item says why on its second line (§9.1).
+  const turnsReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING
+    : orchestrationRunning ? "Stop automatic turns to change them." : null;
+  const mergeReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING : null;
+  const closeReason = reconciliationRunning ? MERGE_RUNNING : busy ? BUSY_REASON : null;
+  // Membership and member settings wait for automatic turns and a merge, as the control plane does.
+  const membershipReason = !active ? POD_CLOSED : reconciliationRunning ? MERGE_RUNNING
+    : orchestrationRunning ? TURNS_RUNNING_MEMBERS : null;
+  const removeReason = membershipReason ?? (pod.members.length <= 2 ? MIN_MEMBERS : busy ? BUSY_REASON : null);
+  const addReason = membershipReason ?? (pod.members.length >= POD_MAX_SESSIONS ? `A pod holds at most ${POD_MAX_SESSIONS} members.` : null);
+  const runningSentence = [
+    "Automatic turns are running",
+    `Turn ${orchestrationState?.turnsUsed ?? 0} of ${policy.maxTurns}`,
+    ...(orchestrationState?.currentSessionId
+      ? [`${podMemberShortName(pod, sessions, orchestrationState.currentSessionId)} is up`]
+      : []),
+  ].join(" · ");
+  const stopNotice = podTurnsStopNotice(orchestrationState);
+  const stopKey = `${pod.id}:${orchestrationState?.runId ?? ""}:${orchestrationState?.updatedAt ?? 0}`;
+  const showStopNotice = Boolean(stopNotice) && !dismissedStopBanners.has(stopKey);
+
+  // The selected entries in the log's order, which is the order a relay composes them in.
+  const selectedEntries = contextEntries.filter((entry) => selectedContext.includes(entry.id)).map((entry) => entry.id);
+  // Why the pod cannot relay now, which also holds Retry Failed back; then why this relay cannot
+  // go. The composer shows the first that applies under Relay To (§3.1).
+  const relayBlocked = !active ? POD_CLOSED
+    : orchestrationRunning ? "Automatic turns are running."
+      : reconciliationRunning ? MERGE_RUNNING
+        : null;
+  const relayReason = relayBlocked
+    ?? (!text.trim() && selectedEntries.length === 0 ? WRITE_OR_SELECT
+      : selectedEntries.length > MAX_RELAY_ENTRIES ? `Select at most ${MAX_RELAY_ENTRIES} entries.`
+        : targets.length === 0 ? "Check a member to relay to."
+          : null);
+
+  /** Settles a relay or a retry: every member reached is a toast; anything else is the notice. */
+  const settleRelay = (results: PodRelayReceipt[], retry: RelayFailure["retry"]) => {
+    if (results.every((receipt) => receipt.status === "delivered")) {
+      setRelayFailure(null);
+      showToast(relayedSentence(results.length), { tone: "success" });
+    } else {
+      setRelayFailure({ receipts: results, retry });
     }
-    if (reconcileSource.runnerId !== reconcileTarget.runnerId) return "Cross-runner reconciliation is not supported.";
-    if (!reconcileSource.workspaceId || reconcileSource.workspaceId !== reconcileTarget.workspaceId) {
-      return "Both sessions must belong to the same configured workspace.";
-    }
-    if (reconcileSource.status !== "idle" || reconcileTarget.status !== "idle") return "Both sessions must be idle.";
-    if (reconcileSource.pendingApproval || reconcileTarget.pendingApproval) return "Resolve pending approvals before reconciling.";
-    if (reconcileRunner?.status !== "online") return "The shared runner is offline.";
-    if (!runnerSupportsProtocol(reconcileRunner.protocolVersion, "podReconciliation")) return reconcileCapabilityCopy;
-    return null;
-  })();
+  };
 
   const relay = async () => {
-    if (busy || orchestrationRunning || reconciliationRunning || (!text.trim() && selectedContext.length === 0) || targets.length === 0) return;
+    if (relayReason || busy) return;
+    // The field stays editable while the relay runs, so only what it sent is cleared afterwards.
+    const draft = text;
+    const note = draft.trim();
+    const entries = selectedEntries;
     setBusy("relay");
-    setError(null);
-    setReceipts([]);
+    setRelayError(null);
+    setNoteError(null);
+    setRelayFailure(null);
     try {
       const result = await api.relayPod(pod.id, {
-        ...(text.trim() ? { text: text.trim() } : {}),
-        sessionIds: targets,
-        contextEntryIds: selectedContext,
+        ...(note ? { text: note } : {}),
+        sessionIds: targets.filter((id) => memberIds.includes(id)),
+        contextEntryIds: entries,
       });
       if (result.appendedEntry) loadPodContext(pod.id, [result.appendedEntry]);
-      setReceipts(result.receipts ?? result.sessions.map((session) => ({ sessionId: session.id, status: "delivered" as const })));
-      setText("");
-      setSelectedContext([]);
+      setText((current) => current === draft ? "" : current);
+      setSelectedContext((current) => current.filter((id) => !entries.includes(id)));
+      // A retry relays the note as the entry it became; past the entry limit it sends the note again.
+      const withNote = result.appendedEntry ? [...entries, result.appendedEntry.id] : entries;
+      const retry = withNote.length <= MAX_RELAY_ENTRIES ? { contextEntryIds: withNote } : { text: note, contextEntryIds: entries };
+      settleRelay(result.receipts ?? result.sessions.map((session) => ({ sessionId: session.id, status: "delivered" as const })), retry);
     } catch (cause) {
-      setError((cause as Error).message);
+      setRelayError((cause as Error).message);
     } finally {
       setBusy(null);
     }
+  };
+
+  const retryFailed = async () => {
+    if (!relayFailure || busy || relayBlocked) return;
+    const failed = relayFailure.receipts.filter((receipt) => receipt.status === "failed").map((receipt) => receipt.sessionId);
+    if (!failed.length) return;
+    setBusy("retry");
+    const retry = relayFailure.retry;
+    let next: PodRelayReceipt[];
+    try {
+      const result = await api.relayPod(pod.id, { ...retry, sessionIds: failed });
+      // Only a relay past the entry limit sends its note again, which logs it again.
+      if (result.appendedEntry) loadPodContext(pod.id, [result.appendedEntry]);
+      const answered = new Map((result.receipts ?? []).map((receipt) => [receipt.sessionId, receipt]));
+      next = relayFailure.receipts.map((receipt) => answered.get(receipt.sessionId) ?? receipt);
+    } catch (cause) {
+      // Nothing was sent: each retried member keeps Delivery Failed, with the reason it was refused.
+      const reason = (cause as Error).message;
+      next = relayFailure.receipts.map((receipt) => receipt.status === "failed" ? { ...receipt, error: reason } : receipt);
+    } finally {
+      setBusy(null);
+    }
+    settleRelay(next, retry);
   };
 
   const saveNote = async () => {
-    if (busy || !text.trim()) return;
+    if (busy || !active || !text.trim()) return;
+    const draft = text;
     setBusy("note");
-    setError(null);
+    setNoteError(null);
+    setRelayError(null);
     try {
-      const result = await api.appendPodContext(pod.id, { kind: "note", text: text.trim() });
+      const result = await api.appendPodContext(pod.id, { kind: "note", text: draft.trim() });
       loadPodContext(pod.id, [result.entry]);
-      setText("");
+      // An edit made while the note was saving is a new draft, which stays.
+      setText((current) => current === draft ? "" : current);
     } catch (cause) {
-      setError((cause as Error).message);
+      setNoteError((cause as Error).message);
     } finally {
       setBusy(null);
     }
   };
 
-  const shareLatest = async (sessionId: string) => {
+  /** Runs a member or log action; a failure is an error toast that names what did not happen. */
+  const memberAction = async (key: string, failure: string, action: () => Promise<unknown>) => {
     if (busy) return;
-    setBusy(`share:${sessionId}`);
-    setError(null);
+    setBusy(key);
     try {
-      const result = await api.appendPodContext(pod.id, { kind: "member_output", sessionId });
-      loadPodContext(pod.id, [result.entry]);
+      await action();
     } catch (cause) {
-      setError((cause as Error).message);
+      showToast(`${failure}: ${(cause as Error).message}`, { tone: "error" });
     } finally {
       setBusy(null);
     }
   };
 
-  const loadOlder = async () => {
-    if (busy || beforeSeq === undefined) return;
-    setBusy("older");
-    setError(null);
-    try {
+  const shareLatest = (sessionId: string) => memberAction(`share:${sessionId}`, "The latest answer wasn't shared", async () => {
+    const result = await api.appendPodContext(pod.id, { kind: "member_output", sessionId });
+    loadPodContext(pod.id, [result.entry]);
+    // On a phone the Huddle is another tab, so the share says it landed.
+    showToast("Shared to the huddle.", { tone: "success" });
+  });
+
+  const loadOlder = () => {
+    if (beforeSeq === undefined) return;
+    return memberAction("older", "Earlier entries didn't load", async () => {
       const page = await api.podContext(pod.id, beforeSeq);
       loadPodContext(pod.id, page.entries);
       setBeforeSeq(page.beforeSeq);
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
+    });
   };
 
-  const contextSource = (entry: PodContextEntry) => entry.source.kind === "human"
-    ? `Human · ${entry.source.actorId}`
-    : `${entry.source.agentLabel} · ${entry.source.sessionTitle}`;
-
-  const addMember = async () => {
-    if (busy || reconciliationRunning || !addSessionId) return;
-    setBusy("add");
-    setError(null);
-    try {
-      await api.addPodMember(pod.id, { sessionId: addSessionId });
-      setAddSessionId("");
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const removeMember = async (sessionId: string) => {
-    if (busy || reconciliationRunning) return;
-    setBusy(`remove:${sessionId}`);
-    setError(null);
-    try {
-      await api.removePodMember(pod.id, sessionId);
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const updateMember = async (sessionId: string, patch: { role?: PodMemberRole; contextTokenBudget?: number | null }) => {
-    if (busy || orchestrationRunning || reconciliationRunning) return;
-    setBusy(`member:${sessionId}`);
-    setError(null);
-    try {
-      await api.updatePodMember(pod.id, sessionId, patch);
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const saveOrchestration = async () => {
-    if (busy || orchestrationRunning || reconciliationRunning) return;
-    setBusy("orchestration-policy");
-    setError(null);
-    try {
-      await api.updatePodOrchestration(pod.id, {
-        mode: orchestrationMode,
-        contextTokenBudget,
-        summaryTokenBudget,
-        maxTurns,
-        maxRepeatedOutputs,
-      });
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const startOrchestration = async () => {
-    if (busy || orchestrationRunning || reconciliationRunning || orchestrationMode === "manual") return;
-    setBusy("orchestration-start");
-    setError(null);
-    try {
-      const result = await api.startPodOrchestration(pod.id, {
-        ...(orchestrationSeed.trim() ? { instruction: orchestrationSeed.trim() } : {}),
-        ...((orchestrationMode === "event_triggered" || orchestrationMode === "round_robin") && firstSessionId
-          ? { firstSessionId }
-          : {}),
-      });
-      if (result.appendedEntry) loadPodContext(pod.id, [result.appendedEntry]);
-      setOrchestrationSeed("");
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
+  const removeMember = async (sessionId: string, agent: string, reopen: () => void) => {
+    if (!await confirmWhileAllowed(confirm, () => removeBlocked.current, {
+      title: "Remove from Pod",
+      message: `${agent} leaves “${pod.title}”. Its session keeps running, and the huddle keeps its notes.`,
+      confirmLabel: "Remove from Pod",
+      tone: "danger",
+      back: { label: BACK_TO_MORE_ACTIONS, run: reopen },
+    })) return;
+    await memberAction(`remove:${sessionId}`, "The member wasn't removed", () => api.removePodMember(pod.id, sessionId));
   };
 
   const stopOrchestration = async () => {
     if (busy || !orchestrationRunning) return;
     setBusy("orchestration-stop");
-    setError(null);
     try {
       await api.stopPodOrchestration(pod.id);
     } catch (cause) {
-      setError((cause as Error).message);
+      showToast(`Automatic turns didn't stop: ${(cause as Error).message}`, { tone: "error" });
     } finally {
       setBusy(null);
     }
   };
 
-  const reconcile = async () => {
-    if (busy || reconcileIssue) return;
-    setBusy("reconcile");
-    setError(null);
-    try {
-      await api.reconcilePod(pod.id, {
-        sourceSessionId: reconcileSourceId,
-        targetSessionId: reconcileTargetId,
-      });
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
+  const copyLink = async () => {
+    if (!dashboardOrigin) return;
+    const invoker = document.activeElement;
+    const current = () => mountedRef.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === invoker);
+    const copied = await writeClipboardText(absoluteViewUrl(dashboardOrigin, { name: "pod", id: pod.id }), current);
+    if (copied === null) return;
+    if (invoker instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) invoker.focus();
+    if (copied) showToast("Link copied.", { tone: "success" });
+    else showToast("Couldn't copy the link.", { tone: "error" });
   };
 
-  const close = async () => {
+  const close = async (reopen: () => void) => {
     if (!await confirmWhileAllowed(confirm, () => closeBlocked.current, {
       title: "Close Pod",
-      message: "Relays and membership changes stop for this pod. Its membership stays readable.",
+      message: `Relays and membership changes stop for “${pod.title}”. Its membership stays readable.`,
       confirmLabel: "Close Pod",
       tone: "danger",
+      back: { label: BACK_TO_MORE_ACTIONS, run: reopen },
     })) return;
-    setBusy("close");
-    setError(null);
-    try {
-      await api.closePod(pod.id);
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
-    }
+    await memberAction("close", "The pod didn't close", () => api.closePod(pod.id));
   };
+
+  const toolsFor = (sessionId: string): MemberTools => ({
+    member: pod.members.find((candidate) => candidate.sessionId === sessionId)!,
+    shareClosed: active ? null : POD_CLOSED,
+    busy: Boolean(busy),
+    settingsReason: membershipReason,
+    removeReason,
+    onShare: () => void shareLatest(sessionId),
+    onSettings: () => setSettingsFor(sessionId),
+    onRemove: (agent, reopen) => void removeMember(sessionId, agent, reopen),
+  });
+  const settingsMember = settingsFor === null ? undefined : pod.members.find((candidate) => candidate.sessionId === settingsFor);
+  const settingsSession = settingsMember && sessions.get(settingsMember.sessionId);
+
+  // A phone shows one tab: the member the URL names while it is still a member, else the Huddle.
+  const shownMember = member !== undefined && memberIds.includes(member) ? member : null;
+  const selectTab = (sessionId: string | null) => {
+    // The choice replaces the entry rather than adding one, so Back still leaves the pod.
+    navigate(sessionId === null ? { name: "pod", id: podId, tab: "huddle" } : { name: "pod", id: podId, member: sessionId }, { replace: true });
+  };
+  const tabs = [null, ...memberIds];
+  const tabId = (sessionId: string | null) => sessionId === null ? HUDDLE_TAB_ID : memberTabId(memberIds.indexOf(sessionId));
+  const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    const last = tabs.length - 1;
+    const next = event.key === "ArrowRight" ? (index === last ? 0 : index + 1)
+      : event.key === "ArrowLeft" ? (index === 0 ? last : index - 1)
+        : event.key === "Home" ? 0
+          : event.key === "End" ? last
+            : null;
+    if (next === null) return;
+    event.preventDefault();
+    flushSync(() => selectTab(tabs[next]!));
+    document.getElementById(tabId(tabs[next]!))?.focus();
+  };
+
+  const huddle = (panel?: { id: string; labelledBy: string }) => (
+    <Huddle
+      pod={pod}
+      sessions={sessions}
+      entries={contextEntries}
+      more={beforeSeq !== undefined}
+      loadError={contextError}
+      onRetryLoad={() => setContextRetry((count) => count + 1)}
+      onLoadEarlier={() => void loadOlder()}
+      selectedEntries={selectedEntries}
+      onToggleEntry={(id) => setSelectedContext((current) => current.includes(id)
+        ? current.filter((candidate) => candidate !== id)
+        : [...current, id])}
+      text={text}
+      onText={(value) => {
+        setText(value);
+        setNoteError(null);
+      }}
+      targets={targets}
+      onToggleTarget={(sessionId) => setTargets((current) => current.includes(sessionId)
+        ? current.filter((id) => id !== sessionId)
+        : [...current, sessionId])}
+      busy={busy}
+      relayBlocked={relayBlocked}
+      relayReason={relayReason}
+      noteError={noteError}
+      relayError={relayError}
+      relayFailure={relayFailure}
+      onDismissFailure={() => setRelayFailure(null)}
+      onSaveNote={() => void saveNote()}
+      onRelay={() => void relay()}
+      onRetryFailed={() => void retryFailed()}
+      panel={panel}
+    />
+  );
 
   return (
     <div className="run-detail pod-detail">
@@ -664,272 +991,163 @@ function PodDetailContent({ podId }: { podId: string }) {
         title={viewTitle({ name: "pod", id: podId }, pod.title)}
         backLabel={backLabel("pods")}
         onBack={() => navigate({ name: "pods" })}
-        status={<StatusBadge meta={statusMeta("pod", pod.status)} />}
-        // Closing is destructive, so it lives only in ⋯ (§3.3).
-        menu={active ? [{
-          label: "Close Pod",
-          danger: true,
-          disabled: Boolean(busy) || reconciliationRunning,
-          onClick: () => void close(),
-        }] : []}
+        status={<StatusBadge meta={statusMeta("pod", podBadgeStatus(pod, sessions))} />}
+        // Add Member… is the bar's secondary, and on a phone the first item in ⋯ (§3.3, #2983).
+        secondary={active && !phone ? {
+          label: "Add Member…",
+          disabled: Boolean(addReason),
+          title: addReason ?? undefined,
+          onClick: () => setDialog("add"),
+        } : undefined}
+        // Automatic turns and merging are occasional, so they are dialogs from ⋯; closing is
+        // destructive, so it comes last after a separator (§3.3, #2980). A closed pod can no longer
+        // merge, so its merges stay readable from Recent Merges… (#2981).
+        menu={[
+          ...(active && phone ? [{
+            label: "Add Member…",
+            disabled: Boolean(addReason),
+            description: addReason ?? undefined,
+            onClick: () => setDialog("add"),
+          }] : []),
+          {
+            label: "Automatic Turns…",
+            disabled: Boolean(turnsReason),
+            description: turnsReason ?? undefined,
+            onClick: () => setDialog("turns"),
+          },
+          !active && receipts.length > 0 ? {
+            label: "Recent Merges…",
+            onClick: () => setDialog("merges"),
+          } : {
+            label: "Merge Work…",
+            disabled: Boolean(mergeReason),
+            description: mergeReason ?? undefined,
+            onClick: () => setDialog("merge"),
+          },
+          {
+            label: "Copy Link",
+            disabled: !dashboardOrigin,
+            description: dashboardOrigin ? undefined : NO_POD_LINK_REASON,
+            onClick: () => void copyLink(),
+          },
+          ...(active ? [{
+            label: "Close Pod…",
+            danger: true,
+            disabled: Boolean(closeReason),
+            description: closeReason ?? undefined,
+            onClick: ({ reopen }: { reopen: () => void }) => void close(reopen),
+          }] : []),
+        ]}
       />
-      <p className="detail-summary">{pod.objective || "Manual collaboration pod"}</p>
-
-      <section className="pod-orchestration" aria-label="Pod Orchestration Policy">
-        <div className="pod-relay-head">
-          <div>
-            <strong>Orchestration Controls</strong>
-            <p className="muted sm">Durable role arbitration with per-member context cursors, bounded summaries, loop detection, and hard turn caps.</p>
-          </div>
-          <StatusBadge meta={statusMeta("pod", orchestrationState?.status ?? "idle")} />
-        </div>
-        <div className="pod-orchestration-grid">
-          <label className="field compact">
-            <span>Arbitration</span>
-            <select value={orchestrationMode} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setOrchestrationMode(event.target.value as PodArbitrationMode)}>
-              <option value="manual">Manual Only</option>
-              <option value="round_robin">Round Robin</option>
-              <option value="lead_driven">Lead Driven</option>
-              <option value="event_triggered">Event Triggered</option>
-            </select>
-          </label>
-          <label className="field compact">
-            <span>Default Context Tokens</span>
-            <select value={contextTokenBudget} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setContextTokenBudget(Number(event.target.value))}>
-              <option value={4096}>4,096</option>
-              <option value={8192}>8,192</option>
-              <option value={16384}>16,384</option>
-              <option value={32768}>32,768</option>
-            </select>
-          </label>
-          <label className="field compact">
-            <span>Summary Tokens</span>
-            <input type="number" min={128} max={Math.min(4096, Math.floor(contextTokenBudget / 2))} step={128} value={summaryTokenBudget} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setSummaryTokenBudget(Number(event.target.value))} />
-          </label>
-          <label className="field compact">
-            <span>Turn Cap</span>
-            <input type="number" min={1} max={100} value={maxTurns} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setMaxTurns(Number(event.target.value))} />
-          </label>
-          <label className="field compact">
-            <span>Repeated-Output Cap</span>
-            <input type="number" min={2} max={5} value={maxRepeatedOutputs} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setMaxRepeatedOutputs(Number(event.target.value))} />
-          </label>
-        </div>
-        <div className="pod-orchestration-runner">
-          <textarea
-            rows={2}
-            value={orchestrationSeed}
-            disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)}
-            placeholder="Optional attributed instruction for the next automatic cycle…"
-            onChange={(event) => setOrchestrationSeed(event.target.value)}
-          />
-          {(orchestrationMode === "event_triggered" || orchestrationMode === "round_robin") && (
-            <label className="field compact">
-              <span>{orchestrationMode === "event_triggered" ? "Trigger Member" : "First Member"}</span>
-              <select value={firstSessionId} disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)} onChange={(event) => setFirstSessionId(event.target.value)}>
-                {pod.members
-                  .filter((member) => orchestrationMode !== "event_triggered" || member.role !== "lead")
-                  .map((member) => (
-                    <option key={member.sessionId} value={member.sessionId}>
-                      {sessions.get(member.sessionId)?.title || member.sessionId} · {titleCaseLabel(member.role)}
-                    </option>
-                  ))}
-              </select>
-            </label>
+      {orchestrationRunning && (
+        <Notice
+          tone="info"
+          className="pod-turns-banner"
+          role="status"
+          actions={(
+            <BusyButton className="btn sm" busy={busy === "orchestration-stop"} progress="Stopping automatic turns…"
+              disabled={Boolean(busy) && busy !== "orchestration-stop"} onClick={() => void stopOrchestration()}>
+              Stop Automatic Turns
+            </BusyButton>
           )}
-        </div>
-        <div className="pod-orchestration-summary">
-          <span>
-            Turns {orchestrationState?.turnsUsed ?? 0}/{policy.maxTurns}
-            {orchestrationState?.currentSessionId ? ` · active: ${sessions.get(orchestrationState.currentSessionId)?.title || orchestrationState.currentSessionId}` : ""}
-            {orchestrationState?.stopReason ? ` · ${orchestrationState.stopReason}` : ""}
-          </span>
-          {lastStep && (
-            <span>
-              Last Turn #{lastStep.turn} · {sessions.get(lastStep.targetSessionId)?.title || lastStep.targetSessionId}
-              {` · ${lastStep.estimatedTokens} est. tokens · ${titleCaseLabel(lastStep.status)}`}
-            </span>
-          )}
-        </div>
-        <div className="pod-relay-actions">
-          <button className="btn ghost" disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy) || !policyDirty} onClick={() => void saveOrchestration()}>
-            {busy === "orchestration-policy" ? "Saving…" : policyDirty ? "Save Policy" : "Policy Saved"}
-          </button>
-          {orchestrationRunning ? (
-            <button className="btn ghost danger" disabled={Boolean(busy)} onClick={() => void stopOrchestration()}>
-              {busy === "orchestration-stop" ? "Stopping…" : "Stop Auto-Advance"}
-            </button>
-          ) : (
-            <button
-              className="btn primary"
-              disabled={!active || reconciliationRunning || Boolean(busy) || policyDirty || orchestrationMode === "manual" ||
-                (orchestrationMode === "event_triggered" && !firstSessionId)}
-              onClick={() => void startOrchestration()}
-            >
-              {busy === "orchestration-start" ? "Starting…" : "Start Automatic Cycle"}
-            </button>
-          )}
-        </div>
-      </section>
-
-      <section className="pod-reconcile" aria-label="Pod Worktree Reconciliation">
-        <div className="pod-relay-head">
-          <div>
-            <strong>Reconcile Committed Work</strong>
-            <p className="muted sm">Merge one clean, idle member worktree into another on the same runner and workspace. Conflicts roll the target back unchanged.</p>
-          </div>
-          <StatusBadge meta={statusMeta("pod", reconciliationRunning ? "running" : "ready")} />
-        </div>
-        <div className="pod-reconcile-grid">
-          <label className="field compact">
-            <span>Committed Source</span>
-            <select value={reconcileSourceId} disabled={!active || reconciliationRunning || Boolean(busy)} onChange={(event) => setReconcileSourceId(event.target.value)}>
-              {pod.members.map((member) => (
-                <option key={member.sessionId} value={member.sessionId}>
-                  {sessions.get(member.sessionId)?.title || member.sessionId} · {titleCaseLabel(member.role)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className="pod-reconcile-arrow" aria-hidden="true">→</span>
-          <label className="field compact">
-            <span>Integration Target</span>
-            <select value={reconcileTargetId} disabled={!active || reconciliationRunning || Boolean(busy)} onChange={(event) => setReconcileTargetId(event.target.value)}>
-              {pod.members.map((member) => (
-                <option key={member.sessionId} value={member.sessionId}>
-                  {sessions.get(member.sessionId)?.title || member.sessionId} · {titleCaseLabel(member.role)}
-                </option>
-              ))}
-            </select>
-          </label>
-          <button className="btn primary" disabled={Boolean(busy) || Boolean(reconcileIssue)} title={reconcileIssue ?? undefined} onClick={() => void reconcile()}>
-            {busy === "reconcile" ? "Reconciling…" : "Merge Committed Work"}
-          </button>
-        </div>
-        {reconcileIssue && <p className="pod-reconcile-issue muted sm">{reconcileIssue}</p>}
-        {(pod.reconciliations?.length ?? 0) > 0 && (
-          <div className="pod-reconcile-receipts" aria-label="Worktree Reconciliation Receipts">
-            {pod.reconciliations!.map((receipt) => (
-              <ReconciliationReceipt key={receipt.reconciliationId} receipt={receipt} sessions={sessions} />
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="pod-relay" aria-label="Manual Pod Relay">
-        <div className="pod-relay-head">
-          <div>
-            <strong>Manual Relay</strong>
-            <p className="muted sm">Select shared-log entries, add an optional note, and relay the composed context to isolated members.</p>
-          </div>
-          <span className="muted sm">{targets.length}/{pod.members.length} Targets</span>
-        </div>
-        {error && <Notice tone="danger" compact>{error}</Notice>}
-        {receipts.length > 0 && (
-          <div className="pod-receipts" aria-label="Relay Delivery Receipts">
-            {receipts.map((receipt) => (
-              <span key={receipt.sessionId} className={`pod-receipt pod-receipt-${receipt.status}`}>
-                {sessions.get(receipt.sessionId)?.title || receipt.sessionId}: {titleCaseLabel(receipt.status)}
-                {receipt.error ? ` · ${receipt.error}` : ""}
-              </span>
-            ))}
-          </div>
-        )}
-        <textarea
-          rows={4}
-          value={text}
-          disabled={!active || Boolean(busy)}
-          placeholder={active ? "Add an attributed note to the huddle log, with or without relaying it…" : "This pod is closed."}
-          onChange={(event) => setText(event.target.value)}
-          onKeyDown={(event) => {
-            if (matchesShortcut(event.nativeEvent, "relay-pod-note")) {
-              event.preventDefault();
-              void relay();
-            }
+        >
+          {runningSentence}
+        </Notice>
+      )}
+      {!orchestrationRunning && showStopNotice && stopNotice && (
+        <Notice
+          tone="neutral"
+          className="pod-turns-banner"
+          role="status"
+          details={stopNotice.details ? <code>{stopNotice.details}</code> : undefined}
+          onDismiss={() => {
+            dismissedStopBanners.add(stopKey);
+            setDismissals((count) => count + 1);
           }}
-        />
-        <div className="pod-relay-actions">
-          {active && !orchestrationRunning && !reconciliationRunning && addCandidates.length > 0 && (
-            <div className="pod-add-member">
-              <select value={addSessionId} onChange={(event) => setAddSessionId(event.target.value)}>
-                <option value="">Add an Isolated Session…</option>
-                {addCandidates.map((session) => <option key={session.id} value={session.id}>{session.title} · {session.runnerId}</option>)}
-              </select>
-              <button className="btn ghost sm" disabled={!addSessionId || Boolean(busy)} onClick={() => void addMember()}>
-                {busy === "add" ? "Adding…" : "Add Member"}
-              </button>
-            </div>
-          )}
-          <button className="btn ghost" disabled={!active || Boolean(busy) || !text.trim()} onClick={() => void saveNote()}>
-            {busy === "note" ? "Saving…" : "Save Note"}
-          </button>
-          <button className="btn primary" disabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy) || (!text.trim() && selectedContext.length === 0) || targets.length === 0} onClick={() => void relay()}>
-            {busy === "relay" ? "Relaying…" : "Relay to Selected"}
-          </button>
-        </div>
-      </section>
-
-      <section className="pod-context" aria-label="Shared Huddle Context">
-        <div className="pod-relay-head">
-          <div>
-            <strong>Shared Huddle Log</strong>
-            <p className="muted sm">Append-only, durable, and frozen with source attribution.</p>
-          </div>
-          <span className="muted sm">{selectedContext.length} Selected</span>
-        </div>
-        {beforeSeq !== undefined && (
-          <button className="btn ghost sm" disabled={Boolean(busy)} onClick={() => void loadOlder()}>
-            {busy === "older" ? "Loading…" : "Load Earlier Entries"}
-          </button>
-        )}
-        {contextEntries.length === 0 ? (
-          <p className="muted sm">No shared context yet. Save a note or share a settled member output.</p>
-        ) : (
-          <div className="pod-context-list">
-            {contextEntries.map((entry) => (
-              <label key={entry.id} className={`pod-context-entry ${selectedContext.includes(entry.id) ? "on" : ""}`}>
-                <input
-                  type="checkbox"
-                  disabled={!active}
-                  checked={selectedContext.includes(entry.id)}
-                  onChange={() => setSelectedContext((current) => current.includes(entry.id)
-                    ? current.filter((id) => id !== entry.id)
-                    : [...current, entry.id])}
-                />
-                <span>
-                  <span className="pod-context-meta">#{entry.seq} · {contextSource(entry)} · {relativeTime(entry.ts)}</span>
-                  <span className="pod-context-content">{entry.content}</span>
-                </span>
-              </label>
+        >
+          {stopNotice.sentence}
+        </Notice>
+      )}
+      {phone ? (
+        // One tab at a time under the bar (§15.1): the Huddle first, then each member.
+        <div className="pod-phone">
+          <p className={`pod-objective${pod.objective ? "" : " is-empty"}`} title={pod.objective || undefined}>{pod.objective || "No objective"}</p>
+          <TabList label="Pod" className="compare-tabs pod-tabs">
+            <button
+              id={HUDDLE_TAB_ID}
+              type="button"
+              role="tab"
+              aria-selected={shownMember === null}
+              aria-controls={TAB_PANEL_ID}
+              tabIndex={shownMember === null ? 0 : -1}
+              className="tab compare-tab"
+              onClick={() => selectTab(null)}
+              onKeyDown={(event) => onTabKeyDown(event, 0)}
+            >
+              Huddle
+            </button>
+            {memberIds.map((sessionId, index) => (
+              <MemberTab
+                key={sessionId}
+                sessionId={sessionId}
+                index={index}
+                selected={sessionId === shownMember}
+                onSelect={() => selectTab(sessionId)}
+                onKeyDown={(event) => onTabKeyDown(event, index + 1)}
+              />
             ))}
+          </TabList>
+          {shownMember === null
+            ? huddle({ id: TAB_PANEL_ID, labelledBy: HUDDLE_TAB_ID })
+            : (
+              <PodMemberColumn
+                key={shownMember}
+                sessionId={shownMember}
+                tools={toolsFor(shownMember)}
+                onRetry={retryHistory}
+                panel={{ id: TAB_PANEL_ID, labelledBy: tabId(shownMember) }}
+              />
+            )}
+        </div>
+      ) : (
+        <div className="pod-layout">
+          <div className="pod-main">
+            <p className={`pod-objective${pod.objective ? "" : " is-empty"}`} title={pod.objective || undefined}>{pod.objective || "No objective"}</p>
+            <CompareRow label="Members">
+              {memberIds.map((sessionId) => (
+                <PodMemberColumn key={sessionId} sessionId={sessionId} tools={toolsFor(sessionId)} onRetry={retryHistory} />
+              ))}
+            </CompareRow>
           </div>
-        )}
-      </section>
-
-      <div className="compare-grid" style={{ gridTemplateColumns: `repeat(${Math.max(members.length, 1)}, minmax(320px, 1fr))` }}>
-        {members.map((session) => {
-          const member = pod.members.find((candidate) => candidate.sessionId === session.id)!;
-          return (
-            <PodMemberColumn
-              key={session.id}
-              session={session}
-              member={member}
-              selected={targets.includes(session.id)}
-              removable={active && !orchestrationRunning && !reconciliationRunning && pod.members.length > 2}
-              settingsDisabled={!active || orchestrationRunning || reconciliationRunning || Boolean(busy)}
-              onToggle={() => setTargets((current) => current.includes(session.id)
-                ? current.filter((id) => id !== session.id)
-                : [...current, session.id])}
-              onOpen={() => navigate({ name: "session", id: session.id })}
-              onRemove={() => void removeMember(session.id)}
-              onShare={() => void shareLatest(session.id)}
-              onRole={(role) => void updateMember(session.id, { role })}
-              onBudget={(contextTokenBudget) => void updateMember(session.id, { contextTokenBudget })}
-              sharing={busy === `share:${session.id}`}
-            />
-          );
-        })}
-      </div>
+          {huddle()}
+        </div>
+      )}
+      {dialog === "turns" && <PodAutomaticTurnsDialog pod={pod} sessions={sessions} onClose={() => setDialog(null)} />}
+      {dialog === "merge" && <PodMergeWorkDialog pod={pod} sessions={sessions} runners={runners} onClose={() => setDialog(null)} />}
+      {dialog === "merges" && <PodRecentMergesDialog pod={pod} sessions={sessions} onClose={() => setDialog(null)} />}
+      {dialog === "add" && (
+        <PodAddMembersDialog
+          pod={pod}
+          blockedReason={membershipReason}
+          onClose={() => setDialog(null)}
+          onNewSession={onNewSession && (() => {
+            setDialog(null);
+            onNewSession();
+          })}
+        />
+      )}
+      {settingsMember && (
+        <PodMemberSettingsDialog
+          key={settingsMember.sessionId}
+          pod={pod}
+          member={settingsMember}
+          name={settingsSession
+            ? `${sessionAgentLabel(settingsSession.agentName, settingsSession.driver, settingsSession.agentId)} · ${podMemberTask(settingsMember, settingsSession)}`
+            : podRoleLabel(settingsMember.role)}
+          blockedReason={membershipReason}
+          onClose={() => setSettingsFor(null)}
+        />
+      )}
     </div>
   );
 }

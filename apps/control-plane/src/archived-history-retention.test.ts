@@ -690,6 +690,71 @@ test("search rows indexed before keyed rows are mapped first, so their pruned te
   }
 });
 
+test("legacy search mapping is bounded, paced and restart-safe while retention is off", async () => {
+  const root = mkdtempSync(join(tmpdir(), "retention-off-mapping-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    const path = join(root, "db.sqlite");
+    db = openDb(path);
+    createSession(db, "s1");
+    for (let index = 0; index < 2_005; index += 1) {
+      db.appendEvent("s1", { kind: "command_output", text: "legacysearchword" }, T0 + index);
+    }
+    archive(db, "s1", T0);
+    db.raw().exec(`UPDATE session_events_fts SET rowid=rowid+900000;
+      UPDATE fts_state SET keyed_through=NULL;
+      DELETE FROM control_plane_metadata WHERE key='session_events_fts_legacy_scan'`);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    const cursor = () => JSON.parse((db!.raw().prepare(
+      "SELECT value FROM control_plane_metadata WHERE key='session_events_fts_legacy_scan'",
+    ).get() as { value: string }).value) as { cursor: number; end: number };
+    const initial = cursor();
+    assert.equal(initial.cursor, 0);
+    const clock = new Clock();
+    clock.now = T0 + 365 * DAY;
+    const warnings: string[] = [];
+    let firstSleeps = 0;
+    const interrupted = new ArchivedHistoryRetention(db, {
+      env: {}, now: () => clock.now,
+      log: { info() {}, warn: (_details, message) => warnings.push(message) },
+      sleep: async (ms) => {
+        assert.ok(ms >= 1, "every mapping transaction yields");
+        firstSleeps += 1;
+        assert.equal(db!.raw().prepare("SELECT COUNT(*) AS n FROM session_events_fts_legacy_rowids").get()!.n, 1_000,
+          "only one bounded step runs before yielding");
+        interrupted.stop();
+      },
+    });
+    assert.equal(interrupted.policy(ORG).retentionDays, null);
+    assert.equal((await interrupted.runPass()).events, 0);
+    assert.equal(firstSleeps, 1);
+    assert.equal(db.legacySearchRowsPending(), true);
+    const saved = cursor();
+    assert.ok(saved.cursor > 0 && saved.cursor < saved.end);
+    db.close();
+    db = ControlPlaneDb.open(path);
+    assert.deepEqual(cursor(), saved, "restart preserves mapping progress");
+    const resumed = retention(db, clock, {}, warnings);
+    assert.equal(resumed.policy(ORG).retentionDays, null);
+    assert.equal((await resumed.runPass()).events, 0);
+    assert.equal(db.legacySearchRowsPending(), false);
+    assert.equal(clock.sleeps.length, 2, "the remaining 1,005 rows take two paced steps");
+    assert.ok(clock.sleeps.every((ms) => ms >= 1));
+    assert.equal(db.listEvents("s1").length, 2_005, "off never prunes transcript events");
+    assert.equal(db.getSession("s1")!.historyPruned, undefined);
+    assert.equal(db.archivedHistoryRetentionLastRun(ORG), null, "mapping is not recorded as a retention run");
+    assert.equal(searchHits(db, "legacysearchword", "s1"), 2_005, "mapping preserves searchable text");
+    assert.deepEqual(warnings, []);
+    const completedSleeps = clock.sleeps.length;
+    await resumed.runPass();
+    assert.equal(clock.sleeps.length, completedSleeps, "completed mapping is not scanned again");
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a search row id collision falls back to a recorded row the prune still removes", async () => {
   const db = openDb();
   try {
@@ -740,7 +805,7 @@ test("a later legacy scan keeps a recorded fallback row and removes duplicates a
   }
 });
 
-test("an older build's search row numbered below a finished scan is mapped and leaves search with its event", () => {
+test("an older build's search row numbered below a finished scan is mapped and leaves search with its event", async () => {
   const root = mkdtempSync(join(tmpdir(), "retention-rescan-reused-"));
   try {
     const path = join(root, "db.sqlite");
@@ -766,7 +831,12 @@ test("an older build's search row numbered below a finished scan is mapped and l
     db.close();
     db = ControlPlaneDb.open(path);
     assert.equal(db.legacySearchRowsPending(), true);
-    while (db.mapLegacySearchRows(100).pending) { /* paced steps */ }
+    const clock = new Clock();
+    const policy = retention(db, clock);
+    assert.equal(policy.policy(ORG).retentionDays, null);
+    assert.equal((await policy.runPass()).events, 0);
+    assert.equal(db.legacySearchRowsPending(), false, "off still remaps an older build's rows from the first row");
+    assert.equal(searchHits(db, "rescansecret", "s1"), 1);
     while (!db.pruneArchivedHistoryBatch("s1", input).finished) { /* batches */ }
     assert.deepEqual(kinds(db, "s1"), ["user_message"]);
     assert.equal(searchHits(db, "rescansecret", "s1"), 0);
@@ -814,5 +884,305 @@ for (const protocolVersion of [53, PROTOCOL_VERSION]) {
     } finally {
       db.close();
     }
+  });
+}
+
+for (const protocol of [228, 229, 230, PROTOCOL_VERSION]) {
+  test(`runner trimming follows armed org policy and completed hydration (runner protocol ${protocol})`, async () => {
+    const db = openDb(":memory:", protocol);
+    const clock = new Clock();
+    const sent: ControlPlaneToRunner[] = [];
+    const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+      now: () => clock.now, sleep: clock.sleep, hub: {
+        isRunnerOnline: () => true,
+        requestFromRunner: async (_runnerId, requestId, msg) => {
+          sent.push(msg);
+          return { type: "trim_session_history_result", requestId, sessionId: "runner-pruned", ok: true, trimmed: true, cleanupComplete: true, bytesRemoved: 1234 };
+        },
+      } });
+    try {
+      createSession(db, "runner-pruned");
+      const transcript = appendTranscript(db, "runner-pruned", 2);
+      db.reconcileRunnerHistory("runner-pruned", 1, transcript.runnerSeq);
+      db.setHydratedSeq("runner-pruned", transcript.runnerSeq);
+      archive(db, "runner-pruned", T0);
+      clock.now = T0 + 100 * DAY;
+      await subject.runPass();
+      assert.equal(sent.length, 0, "off by default");
+      subject.update(ORG, 90, null);
+      await subject.runPass();
+      assert.equal(sent.length, 0, "24-hour arming delay");
+      clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+      await subject.runPass();
+      assert.equal(sent.length, protocol >= 231 ? 1 : 0);
+      if (protocol >= 231) {
+        const msg = sent[0]!;
+        assert.equal(msg.type, "trim_session_history");
+        if (msg.type === "trim_session_history") {
+          assert.equal(msg.logEpoch, 1);
+          assert.equal(msg.throughSeq, transcript.runnerSeq);
+        }
+        assert.ok(db.getSession("runner-pruned")!.historyPruned);
+        // A confirmed complete trim must not be sent again on an unchanged pass.
+        await subject.runPass();
+        assert.equal(sent.length, 1, "a completed trim is not resent");
+        subject.update(ORG, null, null);
+        await subject.runPass();
+        assert.equal(sent.length, 1, "turning retention off immediately stops new runner requests");
+      }
+    } finally { subject.stop(); db.close(); }
+  });
+}
+
+test("runner trimming defers an incompletely hydrated or unarchived session", async () => {
+  const db = openDb(":memory:", PROTOCOL_VERSION);
+  const clock = new Clock();
+  let calls = 0;
+  const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+    now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId) => {
+        calls++;
+        return { type: "trim_session_history_result", requestId, sessionId: "deferred", ok: true, trimmed: true };
+      },
+    } });
+  try {
+    createSession(db, "deferred");
+    const transcript = appendTranscript(db, "deferred", 2);
+    db.reconcileRunnerHistory("deferred", 1, transcript.runnerSeq + 1);
+    archive(db, "deferred", T0);
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    assert.equal(calls, 0);
+    db.setHydratedSeq("deferred", transcript.runnerSeq + 1);
+    db.setSessionArchived("deferred", false, clock.now);
+    await subject.runPass();
+    assert.equal(calls, 0);
+  } finally { subject.stop(); db.close(); }
+});
+
+function prepareRunnerTrim(db: ControlPlaneDb, id: string): number {
+  createSession(db, id);
+  const { runnerSeq } = appendTranscript(db, id, 2);
+  db.reconcileRunnerHistory(id, 1, runnerSeq);
+  db.setHydratedSeq(id, runnerSeq);
+  archive(db, id, T0);
+  return runnerSeq;
+}
+
+test("105 completed runner trims send no requests on later passes or after database reopen", async () => {
+  const root = mkdtempSync(join(tmpdir(), "runner-trim-receipts-"));
+  const location = join(root, "control-plane.db");
+  let db = openDb(location, PROTOCOL_VERSION);
+  const clock = new Clock();
+  let calls = 0;
+  const makeSubject = () => new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+    now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId, message) => {
+        assert.equal(message.type, "trim_session_history");
+        if (message.type !== "trim_session_history") throw new Error("unexpected request");
+        calls++;
+        return { type: "trim_session_history_result", requestId, sessionId: message.sessionId,
+          ok: true, trimmed: true, cleanupComplete: true };
+      },
+    } });
+  let subject = makeSubject();
+  try {
+    for (let i = 0; i < 105; i++) prepareRunnerTrim(db, `trim-${String(i).padStart(3, "0")}`);
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    assert.equal(calls, 105, "all pages are acknowledged");
+    assert.deepEqual(db.runnerHistoryTrimCandidates(ORG, clock.now - 90 * DAY, "", 200), []);
+    await subject.runPass();
+    assert.equal(calls, 105, "N unchanged sessions cause zero new requests");
+    subject.stop(); db.close();
+    db = openDb(location, PROTOCOL_VERSION);
+    subject = makeSubject();
+    await subject.runPass();
+    assert.equal(calls, 105, "receipts survive a control-plane restart");
+  } finally { subject.stop(); db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const firstResult of ["incomplete", "legacy", "failed", "throw", "wrong-session", "wrong-request", "offline"] as const) {
+  test(`runner trim retries ${firstResult} results before recording completion`, async () => {
+    const db = openDb(":memory:", PROTOCOL_VERSION);
+    const clock = new Clock();
+    let calls = 0;
+    let online = firstResult !== "offline";
+    const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+      now: () => clock.now, sleep: clock.sleep, hub: {
+        isRunnerOnline: () => online,
+        requestFromRunner: async (_runner, requestId) => {
+          calls++;
+          if (calls === 1 && firstResult === "throw") throw new Error("runner unavailable");
+          return { type: "trim_session_history_result",
+            requestId: calls === 1 && firstResult === "wrong-request" ? "other" : requestId,
+            sessionId: calls === 1 && firstResult === "wrong-session" ? "other" : "retry",
+            ok: calls !== 1 || firstResult !== "failed", trimmed: true,
+            ...(calls === 1 && firstResult === "legacy" ? {} : {
+              cleanupComplete: calls !== 1 || firstResult !== "incomplete",
+            }) };
+        },
+      } });
+    try {
+      prepareRunnerTrim(db, "retry");
+      clock.now = T0 + 100 * DAY;
+      subject.update(ORG, 90, null);
+      clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+      await subject.runPass();
+      assert.equal(db.runnerHistoryTrimCandidates(ORG, clock.now - 90 * DAY, "", 1).length, 1);
+      online = true;
+      await subject.runPass();
+      await subject.runPass();
+      assert.equal(calls, firstResult === "offline" ? 1 : 2);
+    } finally { subject.stop(); db.close(); }
+  });
+}
+
+test("runner receipts are invalidated by an advanced boundary, restored cache and replacement epoch", async () => {
+  const db = openDb(":memory:", PROTOCOL_VERSION);
+  const clock = new Clock();
+  const sent: Array<{ logEpoch: number; throughSeq: number }> = [];
+  const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+    now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId, message) => {
+        if (message.type !== "trim_session_history") throw new Error("unexpected request");
+        sent.push(message);
+        return { type: "trim_session_history_result", requestId, sessionId: "changes", ok: true,
+          trimmed: true, cleanupComplete: true };
+      },
+    } });
+  try {
+    let tail = prepareRunnerTrim(db, "changes");
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    tail = appendTranscript(db, "changes", 1, { runnerSeq: tail, start: clock.now }).runnerSeq;
+    db.reconcileRunnerHistory("changes", 1, tail);
+    db.setHydratedSeq("changes", tail);
+    await subject.runPass();
+    assert.equal(sent.length, 2);
+    assert.equal(sent[1]!.throughSeq, tail);
+
+    db.clearSessionEvents("changes");
+    tail = appendTranscript(db, "changes", 3).runnerSeq;
+    db.reconcileRunnerHistory("changes", 1, tail);
+    db.setHydratedSeq("changes", tail);
+    await subject.runPass();
+    assert.equal(sent.length, 3, "same runner coordinates still retry after cache restoration");
+    assert.equal(sent[2]!.throughSeq, sent[1]!.throughSeq);
+
+    db.reconcileRunnerHistory("changes", 2, 3);
+    for (const [index, payload] of ([{ kind: "user_message", text: "new" },
+      { kind: "command_output", text: "discard" }, { kind: "agent_message", text: "answer" }] as SessionEventPayload[]).entries()) {
+      db.appendEvent("changes", payload, clock.now + index, { runnerSeq: index + 1, historyEpoch: 2 });
+    }
+    db.setHydratedSeq("changes", 3);
+    await subject.runPass();
+    await subject.runPass();
+    assert.equal(sent.length, 4);
+    assert.equal(sent[3]!.logEpoch, 2);
+  } finally { subject.stop(); db.close(); }
+});
+
+test("a stale runner reply cannot acknowledge a restored history at identical coordinates", async () => {
+  const db = openDb(":memory:", PROTOCOL_VERSION);
+  const clock = new Clock();
+  let calls = 0;
+  const receipts: boolean[] = [];
+  const subject = new ArchivedHistoryRetention(db, { env: {},
+    log: { warn() {}, info(details) {
+      if ("receiptRecorded" in details) receipts.push(Boolean(details.receiptRecorded));
+    } }, now: () => clock.now, sleep: clock.sleep, hub: {
+      isRunnerOnline: () => true,
+      requestFromRunner: async (_runner, requestId) => {
+        if (++calls === 1) {
+          db.clearSessionEvents("stale");
+          const { runnerSeq } = appendTranscript(db, "stale", 2);
+          db.reconcileRunnerHistory("stale", 1, runnerSeq);
+          db.setHydratedSeq("stale", runnerSeq);
+        }
+        return { type: "trim_session_history_result", requestId, sessionId: "stale", ok: true,
+          trimmed: true, cleanupComplete: true };
+      },
+    } });
+  try {
+    prepareRunnerTrim(db, "stale");
+    clock.now = T0 + 100 * DAY;
+    subject.update(ORG, 90, null);
+    clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+    await subject.runPass();
+    await subject.runPass();
+    await subject.runPass();
+    assert.equal(calls, 2);
+    assert.deepEqual(receipts, [false, true], "structured telemetry distinguishes discarded stale receipts");
+  } finally { subject.stop(); db.close(); }
+});
+
+for (const cancel of ["none", "stop", "policy", "unarchive", "stop-intent"] as const) {
+  test(`a slow runner does not hold up another organization or runner; cancellation=${cancel}`, async () => {
+    const db = openDb(":memory:", PROTOCOL_VERSION);
+    const clock = new Clock();
+    const otherOrg = "z-other";
+    const fastRunner = "z-fast";
+    db.raw().prepare("INSERT INTO identity_organizations VALUES (?, ?, ?, ?)").run(otherOrg, "Other", T0, T0);
+    db.registerRunner({ ...runnerMeta(), runnerId: fastRunner }, T0, PROTOCOL_VERSION);
+    db.registerRunner({ ...runnerMeta(), runnerId: "offline" }, T0, PROTOCOL_VERSION);
+    let release!: () => void;
+    const blocked = new Promise<void>((resolve) => { release = resolve; });
+    let notifyFast!: () => void;
+    const fastSent = new Promise<void>((resolve) => { notifyFast = resolve; });
+    const sent: string[] = [];
+    let activeSlow = 0;
+    let maxActiveSlow = 0;
+    const subject = new ArchivedHistoryRetention(db, { env: {}, log: QUIET_LOG,
+      now: () => clock.now, sleep: clock.sleep, hub: {
+        isRunnerOnline: (id) => id !== "offline",
+        requestFromRunner: async (runnerId, requestId, message) => {
+          if (message.type !== "trim_session_history") throw new Error("unexpected request");
+          sent.push(message.sessionId);
+          if (runnerId === RUNNER_ID) {
+            maxActiveSlow = Math.max(maxActiveSlow, ++activeSlow);
+            await blocked;
+            activeSlow--;
+          } else notifyFast();
+          return { type: "trim_session_history_result", requestId, sessionId: message.sessionId,
+            ok: true, trimmed: true, cleanupComplete: true };
+        },
+      } });
+    let running: Promise<unknown> | undefined;
+    try {
+      for (const id of ["slow-a", "slow-b", "fast", "offline-session"]) prepareRunnerTrim(db, id);
+      db.raw().prepare("UPDATE sessions SET runner_id=? WHERE id='fast'").run(fastRunner);
+      db.raw().prepare("UPDATE sessions SET runner_id='offline' WHERE id='offline-session'").run();
+      db.raw().prepare("UPDATE session_ownership SET organization_id=? WHERE session_id IN ('slow-b','fast')").run(otherOrg);
+      clock.now = T0 + 100 * DAY;
+      subject.update(ORG, 90, null); subject.update(otherOrg, 90, null);
+      clock.now += ARCHIVED_HISTORY_RETENTION_DELAY_MS;
+      running = subject.runPass();
+      await Promise.race([fastSent, new Promise<never>((_resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("fast runner blocked behind slow runner")), 5_000);
+        timer.unref();
+      })]);
+      assert.deepEqual(sent, ["slow-a", "fast"]);
+      if (cancel === "stop") subject.stop();
+      if (cancel === "policy") subject.update(otherOrg, null, null);
+      if (cancel === "unarchive") db.setSessionArchived("slow-b", false, clock.now);
+      if (cancel === "stop-intent") {
+        db.raw().prepare(`INSERT INTO session_stop_intents (session_id, runner_id, created_at, archive_after_stop, operation_id)
+          VALUES ('slow-b', ?, ?, 0, 'stop-trim')`).run(RUNNER_ID, clock.now);
+      }
+      release();
+      await running;
+      assert.equal(maxActiveSlow, 1, "one request per runner across organizations");
+      assert.deepEqual(sent, cancel === "none" ? ["slow-a", "fast", "slow-b"] : ["slow-a", "fast"]);
+    } finally { release(); await running; subject.stop(); db.close(); }
   });
 }

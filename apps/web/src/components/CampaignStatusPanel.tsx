@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  CampaignForgePullRequestObservation,
+  CampaignForgeChangeRequestObservation,
   CampaignIssueRef,
   CampaignObservedCleanup,
   CampaignObservedFact,
@@ -39,6 +39,7 @@ import {
   forgePullRequestView,
   issueRefLabel,
   observationUnavailableText,
+  pullRequestShortLabel,
   stateCauseText,
   timeAgo,
   workItemOriginLabel,
@@ -56,6 +57,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -246,6 +248,16 @@ function AvailableCampaignStatus({
                 <CampaignRecoveryNotice key={record.id} record={record} />
               ))}
               {data.summary.campaign?.recovery?.truncated && <p>More recovery records are available through the campaign tools.</p>}
+              {data.summary.campaign?.budget?.followUpApprovals && (
+                <CampaignFollowUpLimit
+                  campaignId={availability.campaignSessionId}
+                  budget={data.summary.campaign.budget}
+                  policyRevision={data.summary.campaign.policyRevision}
+                  canEdit={availability.role === "campaign"}
+                  findRequest={(occurrenceId) => findRequest({ occurrenceId, sessionId: availability.campaignSessionId })}
+                  onOpenRequest={onOpenRequest}
+                />
+              )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
@@ -358,8 +370,7 @@ export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/prot
   const limits = [budget.authority.costUsd === undefined && budget.authority.toolCalls === undefined ? "No limit" : null,
     budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
     budget.authority.toolCalls === undefined ? null : `${budget.authority.toolCalls} tool calls`,
-    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`,
-    budget.authority.acceptedFollowUps === undefined ? null : `${budget.authority.acceptedFollowUps} accepted follow-ups`].filter(Boolean).join(", ");
+    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`].filter(Boolean).join(", ");
   return <>
     <div><dt>Campaign Allowance</dt><dd>{limits}<span className="campaign-status-meta">{budget.reason ?? "Human authorized; allocations cannot enlarge this allowance."}</span></dd></div>
     <div><dt>Session Limits</dt><dd>{budget.sessionLimits?.costBudgetUsd == null ? "No session cost ceiling" : `$${budget.sessionLimits.costBudgetUsd.toFixed(2)}`}, {budget.sessionLimits?.maxToolCalls == null ? "no session tool ceiling" : `${budget.sessionLimits.maxToolCalls} tool calls`}</dd></div>
@@ -584,7 +595,7 @@ function RecordedTime({ at, now, prefix }: { at: number | null; now: number; pre
 
 function IssueLink({ issue, kind }: { issue: CampaignIssueRef; kind: "issues" | "pull" }) {
   const href = issueRefHref(issue, kind);
-  const label = issueRefLabel(issue);
+  const label = issueRefLabel(issue, kind);
   return href ? <a href={href} target="_blank" rel="noreferrer">{label}</a> : <>{label}</>;
 }
 
@@ -623,11 +634,11 @@ function ForgePullRequestFacts({
   entry,
   now,
 }: {
-  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> };
+  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgeChangeRequestObservation> };
   now: number;
 }) {
-  const view = forgePullRequestView(entry.fact, now);
-  const label = `PR #${entry.ref.number}`;
+  const view = forgePullRequestView(entry.fact, now, entry.ref);
+  const label = pullRequestShortLabel(entry.ref);
   if (view.kind === "unavailable") {
     return (
       <div className="campaign-forge-pr">
@@ -636,7 +647,7 @@ function ForgePullRequestFacts({
           {UNAVAILABLE}
           <span className="campaign-status-meta">
             {view.reason}
-            {view.lastObservedAt !== null && <> Last observed on GitHub <RecordedTime at={view.lastObservedAt} now={now} />.</>}
+            {view.lastObservedAt !== null && <> Last observed on {view.forge} <RecordedTime at={view.lastObservedAt} now={now} />.</>}
           </span>
         </dd>
       </div>
@@ -650,8 +661,8 @@ function ForgePullRequestFacts({
           {view.status}
           <span className="campaign-status-meta">
             {view.current
-              ? <RecordedTime at={view.observedAt} now={now} prefix="Observed on GitHub" />
-              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix="observed on GitHub" />. It may have changed since.</>}
+              ? <RecordedTime at={view.observedAt} now={now} prefix={`Observed on ${view.forge}`} />
+              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix={`observed on ${view.forge}`} />. It may have changed since.</>}
           </span>
         </dd>
       </div>
@@ -894,7 +905,7 @@ function CampaignWorkItemDetailView({
                 <div>
                   <dt>Review and Checks</dt>
                   <dd>{detail.observed.pullRequests
-                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub status is observed for the pull requests the Orchestrator reports.</span></>
+                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub and GitLab status is observed for the pull requests and merge requests the Orchestrator reports.</span></>
                     : <ObservedValue fact={undefined} now={now} render={() => null} />}</dd>
                 </div>
               )}

@@ -1,14 +1,17 @@
+import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
 import type {
   CampaignForgeRefreshResponse,
   CampaignWorkItemDetailResponse,
   CampaignWorkItemsPage,
   AddBoxRequest,
   BackgroundJobStopResponse,
+  QueueHoldReleaseResponse,
   SessionWorktreeCreateOperationSummary,
   SessionWorktreeCreateOperationView,
   AccessScopeChangePreview,
   AddPodMemberRequest,
   AppendPodContextRequest,
+  ArchiveSessionMetadata,
   ApprovalQueueItem,
   ApprovalQueueRejectRequest,
   ApprovalQueueRejectResult,
@@ -358,6 +361,10 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
+  reviewSettings: (projectId: string | null = null) => req<import("@wollipog/protocol").ReviewSettingsView>(`/api/review-settings${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
+  updateReviewSettings: (projectId: string | null, settings: import("@wollipog/protocol").ReviewSettings | null) =>
+    req<import("@wollipog/protocol").ReviewSettingsView>(`/api/review-settings${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ settings }) }),
   videoReviewStatus: () => req<import("@wollipog/protocol").VideoReviewSettingsStatus>("/api/video-evidence/review-status"),
   fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest, signal?: AbortSignal) =>
     req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight }>("/api/full-control-campaigns/preflight", {
@@ -424,6 +431,10 @@ export function createApiClient(transport: ApiTransport) {
 
   /** The organization's archived-history retention (#2777). `previewDays` adds what that threshold
    * would prune, for confirming a change before it is saved. */
+  workflowEventRetention: (previewDays?: number) => req<WorkflowEventRetentionView>(
+    `/api/workflow-event-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`),
+  updateWorkflowEventRetention: (body: UpdateWorkflowEventRetentionRequest) =>
+    req<WorkflowEventRetentionView>("/api/workflow-event-retention", { method: "PUT", body: JSON.stringify(body) }),
   archivedHistoryRetention: (previewDays?: number) => req<ArchivedHistoryRetentionView>(
     `/api/archived-history-retention${previewDays === undefined ? "" : `?previewDays=${previewDays}`}`,
   ),
@@ -916,7 +927,12 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify({ action }) },
     ),
 
-  restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+  /** `waitForProviderHome` (#3240): wait for a busy provider account instead of failing. */
+  restart: (id: string, options?: { waitForProviderHome?: boolean }) =>
+    req<SessionView>(`/api/sessions/${id}/restart`, {
+      method: "POST",
+      ...(options?.waitForProviderHome ? { body: JSON.stringify({ waitForProviderHome: true }) } : {}),
+    }),
   sessionRolePreview: (id: string, role: import("@wollipog/protocol").SessionRole) =>
     req<import("@wollipog/protocol").SessionRoleConversionPreview>(`/api/sessions/${encodeURIComponent(id)}/role?role=${role}`),
   changeSessionRole: (id: string, role: import("@wollipog/protocol").SessionRole,
@@ -946,7 +962,7 @@ export function createApiClient(transport: ApiTransport) {
     ),
   selectAuthenticationAccount: (
     id: string,
-    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null },
   ) =>
     req<SelectProviderAuthenticationAccountResponse>(
       `/api/sessions/${encodeURIComponent(id)}/authentication/account`,
@@ -1123,7 +1139,7 @@ export function createApiClient(transport: ApiTransport) {
     return req<{
       sessions: SessionView[];
       snippets: Record<string, string>;
-      metadata: Record<string, { project: string; location: string; agent: string }>;
+      metadata: Record<string, ArchiveSessionMetadata>;
       nextCursor: string | null;
       hasMore: boolean;
       facets: { projects: string[]; locations: string[]; agents: string[] };
@@ -1138,6 +1154,13 @@ export function createApiClient(transport: ApiTransport) {
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/control`, {
       method: "POST",
       body: JSON.stringify({ proposal: { mode: "custom" }, expectedRevision }),
+    }),
+  /** Authenticated Human-only change to a Full Control campaign's follow-up approval limit (#2940);
+   * `null` clears it. Compare-and-set on the campaign's policy revision. */
+  setCampaignFollowUpLimit: (id: string, acceptedFollowUps: number | null, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/follow-up-limit`, {
+      method: "POST",
+      body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
@@ -1215,6 +1238,14 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/background-jobs/${encodeURIComponent(jobId)}/stop`,
       { method: "POST" },
     ),
+
+  /** Proceed Now (#3752): end the work a worktree or account handoff hold waits on, then run the
+   * queued prompts. `holdId` is the hold the person confirmed; the server refuses any other. */
+  releaseQueueHold: (id: string, holdId: string) =>
+    req<QueueHoldReleaseResponse>(`/api/sessions/${encodeURIComponent(id)}/queue-hold/release`, {
+      method: "POST",
+      body: JSON.stringify({ holdId }),
+    }),
 
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {

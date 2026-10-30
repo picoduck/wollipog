@@ -14,17 +14,20 @@ import { StatusBadge } from "./StatusBadge.js";
 import { Steps } from "./Steps.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
-/** The runner's failure for a new account whose identity matches an account already on the
+/** The runner's failure sentence for a new account whose identity matches an account already on the
  * Machine (`existingAccountWithSameIdentity` in provider-login.ts). */
 const ALREADY_ON_MACHINE = /^This (?:Claude|Codex) account is already on this Machine\./u;
 
 /**
  * Whether a sign-in ended because its account is already on the Machine, so the runner discarded it
- * (#2996). The runner reports no failure code for this yet, so its message is matched; older runners
- * will keep saying it this way even once a code exists.
+ * (#2996). From protocol v253 the runner says so with `failureCode` (#3519), which decides whenever
+ * it is present: any other code is a plain failure. Only without a code (a pre-v253 runner or
+ * control plane, or an ending stored before the upgrade) is the runner's sentence matched instead.
  */
-export function providerSignInAlreadyOnMachine(login: Pick<ProviderLoginView, "status" | "error">): boolean {
-  return login.status === "failed" && ALREADY_ON_MACHINE.test(login.error ?? "");
+export function providerSignInAlreadyOnMachine(login: Pick<ProviderLoginView, "status" | "error" | "failureCode">): boolean {
+  if (login.status !== "failed") return false;
+  if (login.failureCode !== undefined) return login.failureCode === "account_already_on_machine";
+  return ALREADY_ON_MACHINE.test(login.error ?? "");
 }
 
 /**
@@ -251,7 +254,7 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
   const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const name = `${accountLabelText(login.label, undefined, privacy.hide)} Provider Sign-In`;
-  if (embedded) return <EmbeddedSignIn runnerId={runnerId} login={login} name={name} />;
+  if (embedded) return <EmbeddedSignIn key={login.operationId} runnerId={runnerId} login={login} name={name} />;
 
   const running = providerLoginRunning(login);
   const hiddenTitle = providerSignInHiddenTitle(login, privacy.hide);
@@ -293,20 +296,26 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
 }
 
 /** The Request Card's and the recovery panel's sign-in body: the link, the device code and the code
- * field as they were before the shared steps (#2198). */
+ * field as they were before the shared steps (#2198). The device code sits in a code well (§11.7)
+ * with Copy Device Code, untitled like the card's other controls (#3521). */
 function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: ProviderLoginView; name: string }) {
   const api = useApi();
-  const [code, setCode] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Uncontrolled, like `ProviderSignIn`'s field (#3529): the code is never in the DOM.
+  const [hasCode, setHasCode] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const submit = async () => {
-    if (busy || !code.trim()) return;
+    const input = inputRef.current;
+    const code = input?.value ?? "";
+    if (busy || !input || !code.trim()) return;
     setBusy(true);
     setError(null);
     try {
       await api.submitProviderLoginCode(runnerId, login.operationId, code);
-      setCode("");
+      input.value = "";
+      setHasCode(false);
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -324,7 +333,10 @@ function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: Pr
       {login.userCode && (
         <div className="provider-login-device-code">
           <span>Device Code</span>
-          <code>{login.userCode}</code>
+          <div className="code-well">
+            <code>{login.userCode}</code>
+            <CopyButton text={login.userCode} iconOnly ariaLabel="Copy Device Code" className="icon-btn sm" tooltip={false} />
+          </div>
         </div>
       )}
       {login.expectsCode && (
@@ -332,14 +344,14 @@ function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: Pr
           <label>
             <span>Authorization Code</span>
             <input
+              ref={inputRef}
               type="password"
               autoComplete="off"
-              value={code}
               maxLength={4_096}
-              onChange={(event) => setCode(event.target.value)}
+              onChange={(event) => setHasCode(event.target.value.trim() !== "")}
             />
           </label>
-          <BusyButton type="submit" className="btn sm" busy={busy} progress="Submitting the code…" disabled={!code.trim()}>
+          <BusyButton type="submit" className="btn sm" busy={busy} progress="Submitting the code…" disabled={!hasCode}>
             Submit Code
           </BusyButton>
         </form>

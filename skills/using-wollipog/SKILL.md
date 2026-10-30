@@ -26,10 +26,16 @@ wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
-wollipog pr wait <number|owner/name#number|url> [--head <sha>] [--timeout <ms>] --json
-wollipog review run --repo <owner/name> --pr <number> --head <sha> [--brief-file <path>] --json
-wollipog review get <job-id> --json
+wollipog session release-hold <session-id> <hold-id> --json
+wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
+wollipog pr closures <number|owner/name#number|url> [--intended <issue>]... --json
+wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... --json
+wollipog review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path> [--full-reason <text>] --json
+wollipog review session get <review-session-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
+wollipog automation request --proposal '<json>' --json
+wollipog automation get <occurrence-id> --json
+wollipog automation execute <occurrence-id> --digest <resource-digest> --json
 wollipog worktree create --branch <name> [--base <ref>] --json
 wollipog worktree attach --path <absolute-path> --json
 wollipog worktree select --path <absolute-path> --json
@@ -72,7 +78,10 @@ job is left running; should it end later, it is still recorded as your stop, so 
 request just to be named. `session stop` and `session restart` end every job
 instead: a stop discards the queued prompts, while a restart keeps them and runs them after it, but
 starts a new Claude Code conversation. Only the session's owner and its controlling Orchestrator may
-use `stop-job`.
+use `stop-job`. When a child's queued handoff hold reports `canRelease`, `session release-hold`
+(MCP `release_queue_hold`) with the hold's id from `session get` ends every unfinished job at once,
+records each as killed by you, and runs the handoff and queued prompts in order without a restart;
+it takes the same authority as `stop-job` and is refused if the hold changed since you read it.
 
 An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
 from its prompt. Call `get_campaign` at campaign start and after a human changes policy. It returns
@@ -154,6 +163,12 @@ CLI). Every record lands in the root campaign, including from a nested Orchestra
   dispatch again. A reported stage is a claim: `merged` does not mark the item delivered. Name the
   item's pull requests in the stage (`pullRequests`); Wollipog observes their GitHub review,
   checks, and merge-queue state separately, through the runner's `gh` login, beside your claim.
+  For GitLab merge requests it observes approvals, the head pipeline, and merge-train state
+  through the runner's `glab` login, so do not poll `glab` from your own turns to watch them.
+- Issue and pull request refs are `{repository, number}`. A GitHub repository is `owner/repo`. A
+  GitLab project names its host and full namespace (`gitlab.example.com/group/subgroup/project`),
+  never a bare path; `number` is the issue or merge request IID. Older control planes refuse
+  GitLab refs, and older runners leave them unobserved.
 - `adjudicate_campaign_recommendation` records accepted, rejected, deferred, or duplicate for a
   recorded follow-up; pass `originWorkItemIds` when recording it.
 - `get_campaign_work_items` reads the summary and a page or one item. Restart from the first page
@@ -184,6 +199,11 @@ An older runner leaves cleanup pending and requires the explicit recovery shown 
 Worktree commands default to `WOLLIPOG_SESSION_ID`; paired-device callers add `--session <id>`.
 Creation without `--base` fetches the repository's remote default branch. Use the returned path
 for file and Git commands in the current turn; a later provider launch resumes in the selection.
+Under a platform sandbox the result's `isolation.writableNow` may be `false`: the live sandbox
+cannot write or commit there until the session relaunches in it when the current turn ends. Do not
+work around it. Follow `isolation.nextStep`. When `isolation.continuesAfterRelaunch` is `true`, end
+the turn with a short note and do not ask the user to send a message: Wollipog relaunches the
+session in that worktree and continues the task with one automatic turn.
 Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
 clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
 upstream deleted with the remote branch, but only when it exactly matches the local head, whatever
@@ -217,6 +237,11 @@ position and state, failed jobs with run links, and whether it merged.
 - Required checks come from the base branch's rules. One that has not been reported yet is
   `pending`, never passing, so the wait does not end early the way `gh pr checks --required --watch`
   does while an aggregator check is unreported. A base with no required checks returns at once.
+- A GitLab merge request works the same way: pass its URL, `<gitlab-host>/group/project!<iid>`, or
+  the IID with the project including its host as the repository. The runner reads it through this
+  machine's `glab` login and returns when its head pipeline or merge-train pipeline finishes, it
+  leaves the train, merges, closes, or its head moves. Only a successful pipeline passes; a skipped
+  pipeline, or one waiting for a manual action, returns `checks_blocked`.
 - Use the longest timeout one call can survive in your harness (up to 3 hours) and call again on
   `timeout`. A background shell command that wakes you on exit can use the maximum; an MCP call or
   foreground command must finish inside the harness's tool-call limit.
@@ -228,53 +253,183 @@ position and state, failed jobs with run links, and whether it merged.
   enqueueing, wait again: only `merged` means landed; `queue_failed` means GitHub marked the entry
   unmergeable and `queue_ejected` that it left the queue without merging. A failed merge-group
   check alone keeps the wait going, because GitHub may rebuild the group and still merge it.
+- `queue_ejected` also covers an entry GitHub removed before the call started, for example on a
+  merge-group check timeout between two waits: when the latest merge-queue event removed the current
+  head and the pull request is still open, `mergeQueueRemoval` gives GitHub's `reason` (such as
+  `checks_timed_out`, `failed_checks`, or `manual`) and `removedAt`. Re-enqueueing is your decision,
+  under the same gates as the first enqueue. A pull request never enqueued, or one whose head moved
+  since the removal, still reports its own checks.
 - CLI exit status: 0 for `checks_passed`, `merged`, or `no_required_checks`; 3 for other outcomes;
   124 for `timeout`; 1 when GitHub could not be read.
 - Where the command or tool is missing (an older runner) or `gh` cannot read the repository, fall
   back to one long blocking shell loop that sleeps minutes between checks.
 
-## Cross-Model Review Through the Runner
+## Issue References in Pull Requests
 
-When your workflow requires a cross-model review and the review controller cannot run inside your
-session (for example, a read-only root or a reviewer sandbox that cannot start), ask the runner to run
-it: `wollipog review run --repo <owner/name> --pr <number> --head <sha> --brief-file <path> --json`, or
-the MCP tool `request_cross_model_review`. The runner runs the installed controller outside your
-sandbox, with the other model family as a read-only reviewer, against a private snapshot of your
-pushed head; it never writes to your worktree.
+GitHub closes an issue when a merged pull request's description puts a closing keyword (close, fix
+or resolve, in any tense or case) directly before the issue's reference, whatever the sentence says:
+"does not close #12", "must not auto-close #12" and "doesn't resolve #12's cause" all close #12. An
+issue linked in the pull request's Development section closes too.
 
-- It reviews only your own open pull request, from your project's repository, on your managed
-  worktree's branch, at its current pushed head. Push before requesting; anything else is refused
-  with a fixed reason.
-- The first round of a pull request needs a brief: intent, acceptance criteria and verification.
-  Later rounds reuse it and review only the changes since the last valid round; use
-  `--scope full --full-reason <text>` for a full re-review.
-- The request returns a job id at once. Poll `wollipog review get <job-id> --json`
-  (`get_cross_model_review`) every minute or two until `terminal` is true, then read the summary,
-  report and ledger it returns. The ledger is read-only to you; record adjudication in the pull
-  request as your workflow requires. `review list` and `review cancel` manage your jobs.
-- One review runs per session at a time, and the controller's round and attempt limits apply.
-- A session in a campaign with an allowance is refused; ask its Orchestrator for the campaign's
-  controlled review instead. A refusal that names a missing installation or reviewer means the
-  runner cannot run this review; report it rather than running the reviewer some other way.
+- Write "Refs #N" for every issue that must stay open, in the description, the title and commit
+  messages. Never put a closing verb directly before such a reference, not even in an example that
+  describes this rule; paraphrase it instead.
+- Check a draft description before publishing it with `wollipog pr closures --file <draft> --json`,
+  and an open pull request with `wollipog pr closures <pr> --json`. Pass each issue the merge should
+  close with `--intended`. Exit status 3 lists `undeclared` closures and `unmade` declarations; 0
+  means the merge closes exactly the intended issues.
+- A GitHub `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
+  `owner/repo#N`, or an issue URL); omit it when the merge must close none. A current runner reads
+  the pull request before the decision is created and again before it is armed. If GitHub would
+  close anything else, or not close a declared issue, the request is refused with each reference and
+  its line, and a changed description revokes an approval at consume. Fix the text or the
+  declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what the
+  merge closes; it is absent when the child's runner predates the check.
 
-### Review Sessions
+## Review Sessions
 
-`wollipog review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path>
---json` (MCP `request_review_session`) runs the reviewer as its own read-only Wollipog session
-instead of an external controller, with the same scope rules. It loads none of the repository's
-settings, hooks, skills or MCP servers, takes no session slot, and returns `reviewSessionId` at once.
+Reviewer availability depends on static executable/interpreter trust, required tools and the
+native agent catalog. Running sessions, Agent TUIs, stale statuses, worktree leases and old
+writer records do not block admission. Every native bubblewrap/Seatbelt launch must protect
+reviewer installations read-only or fail with the affected path. A trust refusal still requires
+an installation outside session-writable locations (apart from the protected conventional Codex
+standalone package). Group-writable paths require a proven user-private group from the system
+identity databases; configured remote or unknown membership sources refuse that exception.
+The optional `review-writers` state doctor now cleans up diagnostics only, not admission blockers.
 
-- You can follow its transcript with `get_session_events`. Poll `wollipog review session get <id>
-  --json` (`get_review_session`) every minute or two until `terminal` is true.
-- Reviews of one pull request form a run: the first round reviews it in full, later rounds only
-  the changes since the last valid round with its open findings (add `--full-reason <text>` for a
-  full review), and a rebased head starts a new epoch that reviews the range-diff. Each epoch allows
-  4 valid rounds and each round 2 counted attempts; an upvoted or unchanged head is refused.
-- A finished review carries its `verdict`. Only a valid report's vote and `findings` count; an
-  invalid attempt's output is not a review, so request the round again. Prove every finding before
-  changing code, and treat a `stale` review as covering an older head.
-- One review session is active per session at a time; `review session cancel` stops it. A review
-  session takes no messages; request a new one for a new head.
+Use a review session for the required cross-model review of your own pull request, including from
+an isolated campaign child. Push first, then request it through MCP `request_review_session`
+(`repository`, `number`, `headSha`, `brief`) or the CLI:
+
+```text
+wollipog review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path> --json
+```
+
+The runner launches the other model family as its own read-only Wollipog session against a private
+checkout of exactly that pushed head. It never writes to your worktree or loads the repository's
+settings, hooks, skills or MCP servers. The pull request must be open, from your project's
+repository, on your managed worktree's branch, with `headSha` equal to its current pushed head.
+For a GitLab merge request, `repository` is the project's `<host>/group[/subgroup…]/project` and
+`number` its IID; the runner reads it with its own trusted `glab`.
+The brief supplies intent, acceptance criteria, applicable invariants and verification already run;
+reuse it for later requests. Preserve your workflow's reviewer, isolation and admission requirements.
+
+- Automatic launch worktrees keep their existing identity. If an older session lacks launch proof,
+  resume it once so the runner can verify its worktree before requesting a review.
+- The request returns `reviewSessionId` at once. Continue independent work, or end your turn and
+  wait: a finished review delivers a `[Wollipog Cross-Model Review — …]` continuation once you are
+  idle. There is no need to poll mid-turn. On continuation, read `get_review_session` or
+  `wollipog review session get <id> --json` for the full `verdict`, `output` report and `findings`.
+  Use that read to recover a missing continuation; where continuations are unavailable, poll every
+  minute or two until `terminal` is true. `get_session_events` exposes the reviewer's transcript.
+- Only a validated, valid report's vote and findings count. After an invalid attempt, request the
+  same head again to retry that round within its attempt limit; `verdict.consumed: false` does not
+  use an attempt. Preserve invalid attempts and costs. Older runners that return no verdict have
+  not supplied a validated
+  review. Prove every finding yourself, record its adjudication as your workflow requires, fix only
+  verified defects, then commit and push before requesting the next round. Check the actual head:
+  `stale` flags a newer review of another head, not every intervening push.
+- Reviews of one pull request form a run. The first round reviews it in full; later rounds review
+  the changes since the last valid head with its open findings. Add `--full-reason <text>` (MCP
+  `fullReason`) only when a full re-review is needed. A rebased or force-pushed head that no longer
+  descends from the reviewed head starts a new epoch, reviewing the range-diff with carried
+  findings (in full if the earlier commits are unavailable). Each epoch starts with 4 valid rounds,
+  each round with 2 counted attempts. Stop after an upvote on the current head; an upvoted or
+  unchanged reviewed head is refused. A changed head needs review under the applicable workflow.
+- If an epoch exhausts its rounds, including after an upvote followed by a verified fix at a changed
+  head, stop and request a typed
+  `review_round_extension` decision, once, using `request_workflow_decision` or `decision request`.
+  Use resource key `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<roundsUsed>`
+  and snapshot fields `category`, `repository`, `pullRequest`, `epoch`, `headSha`, `roundsUsed`,
+  `blockingFindings` (the last valid report's open blocking count), `extraRounds` (1–4) and `reason`.
+  After an upvote, also bind `upvotedHeadSha` to the last valid upvoted head (protocol 237+);
+  `headSha` must differ. The granted round and its retries review only that delta, even with
+  `fullReason`. An unchanged upvoted head remains refused. A merge still needs a valid review of
+  the current head. Stale or superseded grants cannot admit a round; attempts and costs retain
+  their normal limits and accounting.
+  Read the exact decision's owner and outcome; it is human-owned by default and requires an
+  explicit grant to delegate. Consume an approval with the unchanged snapshot immediately before
+  the matching review request; the next review request also consumes an approved extension.
+  An extension adds rounds to that epoch; it does not raise the per-round attempt or cost limits.
+  Missing typed support or an exhausted attempt limit is a blocker, not a reason to switch routes.
+- Campaign members request their own review sessions through the same interface. Campaign
+  charging requires a compatible runner (protocol 232 or later): the server reserves allowance
+  before launch and records actual Session usage against the campaign allowance when one exists.
+  Exhausted, stopped or unavailable allowances refuse admission with a reason. Original human
+  cost ceilings still apply across review attempts. Reviews take no session or child slot.
+  Report admission or budget refusals; never use a native subprocess or the bridge to bypass them.
+- One review session is active per requester at a time; `review session list` lists them and
+  `review session cancel` stops one. A review session takes no messages; request a new one after
+  pushing a new head. An upvote grants no merge authority or exemption from exact-head CI.
+
+## Review Session Compatibility and Merge Evidence
+
+The older review bridge and controlled campaign review jobs are retired. Their old tool names
+and CLI spellings refuse with review-session guidance. Upgrade unsupported peers; do not launch
+a native reviewer to bypass trust, admission, budget or review-limit refusals.
+
+Protocol 254 requires the retirement-aware control plane for new runners. Before upgrading,
+finish or cancel legacy jobs using their prior runner and preserve their final receipts and usage.
+Upgrade the control plane first, then the runner. New runners refuse unfinished or unverified
+legacy execution without changing records or starting a controller. Drained terminal unpriced
+receipts permit upgrade and replay unchanged, retaining unknown cost and reservations. Older
+runners may not re-send a lost finished result on cancellation; upgrading delivers the historical
+receipt without redispatch. Reconnect never redispatches those
+jobs. Missing usage remains unknown, with campaign reservations retained. A human must replace
+an obsolete controlled-review boundary; this migration never grants new authority or budget.
+
+A `pr_merge` snapshot may optionally cite `reviewSessionId`, the immutable attempt that
+upvoted its exact head (protocol 243+). The server checks the requester's own run, repository,
+PR, head and valid UPVOTE. A newer valid UPVOTE or DOWNVOTE supersedes it; invalid, cancelled,
+failed and unfinished attempts do not. Read the exact decision's server-derived `reviewEvidence`
+with `get_workflow_decision` before relying on it. A refusal names the mismatch or superseding
+session and head. Citation is optional and grants no merge authority, human approval or passing CI.
+Authorization rechecks it immediately before action. Record-only reconciliation of a proven
+completed merge preserves the original action without authorizing another one.
+
+## Creating an Automation With Human Approval
+
+The approving session owner must also have the existing automation administration
+permissions: owner or admin of the personal control-plane organization. Session
+ownership alone does not grant permission to create global automations.
+
+Normal and Orchestrator sessions can propose persistent scheduled work with
+`request_automation_creation` (`automation request --proposal '<json>'`). Supply
+`requestId`, a stable `resourceKey` for the intended automation, and the complete
+AutomationSpec as `spec`: name, five-field cron, IANA timezone, enabled state,
+action, missed-run and runner policies, concurrency, finite cost/tool limits and
+notification settings. Inspect machines, workspaces and agent capabilities first.
+
+The server prepares the effective configuration and returns a human-owned typed
+decision. It creates no automation yet. This approval is never delegated to an
+agent, including a Full Control Orchestrator. The human must be able to inspect
+the exact prompt, schedule, targets, installation/configuration, policies and
+limits before approving. Do not approve your own request or borrow a human's
+credential to bypass this gate.
+
+Explicit configuration stays fixed; omitted model, effort and permission settings
+are inherited at each normal run. The approval card previews current defaults per
+target without persisting them as overrides. In particular, a prompt automation
+does not restore a target session's former permission mode after its owner changes
+it. Workflow roles and alternate targets keep their independent defaults.
+
+Read the outcome with `get_automation_creation` (`automation get <occurrence-id>`).
+After human approval, call `execute_automation_creation` with that occurrence and
+its exact `resourceDigest` (`automation execute <id> --digest <digest>`). Proposals
+expire after 24 hours and approvals after 30 minutes. Target/configuration drift
+or changes to the proposal require fresh human approval; execution accepts no
+configuration override. A new request ID with the same resource key replaces an
+older unconsumed proposal.
+
+Retry an uncertain proposal with the same request ID and unchanged contents.
+Retry uncertain execution with the same occurrence and digest. Creation and its
+receipt are atomic: `automationCreationResult` gives the original automation ID,
+navigation path, saved spec and time, even after later human edits or deletion.
+Never create a replacement merely because the response was lost. Scheduled runs
+retain their own permissions, budgets and approval gates. This capability does
+not grant general automation administration. If the command/tool is missing or
+reports unsupported components, report the limitation; do not invent a command,
+broaden credentials or restart the stack hosting you.
 
 ## Private Session Artifacts
 
@@ -360,6 +515,11 @@ it is waiting for. That is not a failure: report the deferred path and reason in
 and leave it alone. The runner resumes retirement after provider exit and removes the worktree only
 when its ownership, cleanliness, publication, and pull-request safety checks pass.
 
+A squash-merged branch whose upstream is missing or already deleted still retires when the forge
+reports a merged change request whose head is exactly the worktree's tip: a GitHub pull request, or
+a GitLab merge request on gitlab.com or on a self-managed host that `glab` is configured for in the
+session's context. So deleting the remote branch before or after retirement both work.
+
 If `wollipog` is not on `PATH`, use the injected executable directly on POSIX
 hosts and WSL:
 
@@ -367,8 +527,9 @@ hosts and WSL:
 "$WOLLIPOG_CLI" session list --json
 ```
 
-The POSIX and WSL launcher includes its own re-entry arguments; do not parse or
-append `WOLLIPOG_CLI_ARGS`. On native Windows, including Git Bash sessions, run
+The POSIX and WSL launcher includes its own re-entry arguments, so
+`WOLLIPOG_CLI_ARGS` is empty there: do not parse it, and appending it adds
+nothing. On native Windows, including Git Bash sessions, run
 this PowerShell form so the runner receives its mode argument. It reads the
 injected JSON argument array without copying a launcher path into a prompt:
 
@@ -402,9 +563,19 @@ a prompt that mentions the issue does not bind an unassigned child by itself.
 Custom campaigns require a human-owned typed decision. Full Control delegates only when the server
 confirms a human-established issue boundary, verified delivered report and actual default-branch
 merges, or a supported recorded not-planned disposition. Never infer this authority from a prompt.
-Read the exact decision and effective owner with
-`get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
-`resourceDigest`. The CLI equivalents are:
+The closure is created `pending`, and `close_github_issue` refuses a pending closure. The exact
+sequence is:
+
+1. `request_github_issue_closure`.
+2. Read the exact decision and its effective owner (`authority`) with `get_workflow_decision`.
+3. Approve it. When `authority` is `orchestrator` (Full Control's standing authorization), the
+   root approves it itself: call `resolve_descendant_workflow_decision` with `sessionId` set to
+   its own session ID, the `occurrenceId`, and `outcome: "approve"`. No person will approve it,
+   so do not ask one. When `authority` is `human`, a person approves it in Wollipog; wait
+   for that, and never approve it yourself.
+4. Execute it with `close_github_issue` with its exact `occurrenceId` and `resourceDigest`.
+
+The CLI equivalents of steps 1, 2 and 4 are:
 
 ```text
 wollipog issue-closure request --proposal '<json>' --json
@@ -416,7 +587,9 @@ Approval expires 30 minutes after resolution. Changed issue evidence, policy, or
 work requires renewed review, as does a child moving into or out of the included set.
 Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
-its server-recorded standing authorization. Read `issueClosureResult`: `closed` and `already_closed`
+its server-recorded standing authorization; the server rechecks it when the root resolves. Under
+Full Control nobody sees the root's own questions: the server dismisses them unanswered and tells
+the root to decide with these typed tools. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
 accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
 Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
@@ -437,9 +610,14 @@ and exact `additions` and `removals`, each an array of `{ "repository": "owner/r
 Custom requires an authenticated human to approve the exact change. In Full Control with a separate
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
-The server refuses incidental references, foreign repositories and changes beyond human-set limits.
+A publication the boundary's author or a campaign owner approved as a person under the current
+objective also qualifies. The server
+refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
+failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
-only an eligible occurrence backed by its standing human authorization.
+only an eligible occurrence backed by its standing human authorization: when the effective owner is
+`orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as
+`sessionId`; nobody else will.
 Pending, denied, stale and replayed proposals leave scope unchanged. After approval, re-read the scope.
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 

@@ -75,6 +75,83 @@ test("a process whose stat and environment both fail to read stays uninspectable
   assert.deepEqual(probe.scan(MARKER, "1"), { marked: [], uninspectable: [] }, "an exited process is no survivor");
 });
 
+test("legacy admin diagnostics exclude zombies and older unreadable processes but inspect their live descendants", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(401, { start: "99", environ: "directory", command: "older login" });
+  proc.add(402, { start: "101", state: "Z", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  proc.add(403, { start: "102", ppid: 402, env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`], command: "survivor" });
+  proc.add(404, { start: "103", environ: "directory", command: "sshd" });
+  const result = linuxLeaseProcessProbe(proc.root, UID, 300)!.scan(MARKER, "100", true, true);
+  assert.deepEqual(result.marked, [403]);
+  assert.deepEqual(result.uninspectable, [404]);
+  assert.deepEqual(result.blockers, [
+    { pid: 403, startTime: "102", command: "survivor", reason: "marked" },
+    { pid: 404, startTime: "103", command: "sshd", reason: "uninspectable" },
+  ]);
+});
+
+test("fallback diagnostics identify the observed process without its command or environment", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(210, { environ: "directory", start: "999", command: "private command" });
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300)!;
+  const result = proveLeaseAbandoned({ bootId: BOOT, startTime: "100", marker: MARKER }, 101, probe);
+  assert.deepEqual(result, { proven: false, reason: "uninspectable", blockingProcess: {
+    pid: 210, startTime: "999", kind: "uninspectable", cgroupMembership: "unavailable",
+  } });
+  assert.doesNotMatch(JSON.stringify(result), /private command|environ|marker|\/tmp/);
+  rmSync(join(proc.root, "210"), { recursive: true });
+  proc.add(210, { start: "1000", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`, "SECRET=private"] });
+  assert.deepEqual(proveLeaseAbandoned({ bootId: BOOT, startTime: "100", marker: MARKER }, 101, probe), {
+    proven: false, reason: "marked_process", blockingProcess: { pid: 210, startTime: "1000", kind: "provider_descendant", cgroupMembership: "unavailable" },
+  }, "a reused PID is reported with its observed start time");
+});
+
+test("boundary diagnostics report relative membership and omit a reused PID's membership", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  const boundary = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "private/unit/provider", inode: "123" };
+  proc.add(210, { start: "999", command: "private command" });
+  writeFileSync(join(proc.root, "210/cgroup"), "0::/private/unit/provider/leaf\n");
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300)!;
+  assert.deepEqual(probe.boundaryMember!(boundary), { pid: 210, startTime: "999", kind: "boundary_member", cgroupMembership: "recorded_boundary" });
+  assert.equal(probe.membership!(210, "999", boundary), "recorded_boundary");
+  assert.equal(probe.membership!(210, "1000", boundary), "unavailable", "a different start time is never the observed process");
+  writeFileSync(join(proc.root, "210/cgroup"), "0::/private/unrelated\n");
+  assert.equal(probe.membership!(210, "999", boundary), "outside_recorded_boundary");
+  assert.equal(probe.boundaryMember!(boundary), undefined);
+});
+
+test("a PID reused during fallback inspection never reports the previous identity's start time", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(210, { start: "999", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  let replaced = false;
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300, { afterInspection: pid => {
+    if (pid !== 210 || replaced) return;
+    replaced = true;
+    rmSync(join(proc.root, "210"), { recursive: true });
+    proc.add(210, { start: "1000" });
+  } })!;
+  const result = proveLeaseAbandoned({ bootId: BOOT, startTime: "100", marker: MARKER }, 101, probe);
+  assert.deepEqual(result, { proven: false, reason: "marked_process", blockingProcess: {
+    pid: 210, kind: "provider_descendant", cgroupMembership: "unavailable",
+  } }, "the observed marker still refuses ownership, but its raced start time is omitted");
+});
+
+test("fallback diagnostics recheck only the reported blocker, preferring marked work to uninspectable processes", { skip: process.platform !== "linux" }, (t) => {
+  const proc = fakeProc(t);
+  proc.add(210, { start: "999", environ: "directory" });
+  proc.add(211, { start: "1000", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  proc.add(212, { start: "1001" });
+  proc.add(213, { start: "1002", env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
+  const rechecked: number[] = [];
+  const probe = linuxLeaseProcessProbe(proc.root, UID, 300, { afterInspection: pid => { rechecked.push(pid); } })!;
+  assert.deepEqual(probe.scan(MARKER, "100", true), {
+    marked: [211, 213], uninspectable: [210], blockingProcess: {
+      pid: 211, startTime: "1000", kind: "provider_descendant", cgroupMembership: "unavailable",
+    },
+  });
+  assert.deepEqual(rechecked, [211], "only the reported process incurs the extra diagnostic identity read");
+});
+
 test("a marked process forked after the listing by a listed process that then exits is still found", { skip: process.platform !== "linux" }, (t) => {
   const proc = fakeProc(t);
   proc.add(220, { env: [`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${MARKER}`] });
@@ -177,5 +254,31 @@ test("the runner marker is created once and replaces an inherited value in the e
       if (before === undefined) delete process.env[PROVIDER_HOME_RUNNER_MARKER_ENV];
       else process.env[PROVIDER_HOME_RUNNER_MARKER_ENV] = before;
     }
+  }
+});
+
+test("versioned cgroup evidence proves replacement and PID reuse without scanning unrelated processes", () => {
+  const containment = { kind: "linux-cgroup-v2" as const, bootId: BOOT, mountRoot: "/", cgroupPath: "runner/providers", inode: "1234" };
+  const evidence = { version: 2 as const, bootId: BOOT, startTime: "777", marker: MARKER, containment };
+  assert.equal(isLeaseProcessEvidence(evidence), true);
+  assert.equal(Object.keys(evidence).length === 3, false, "old readers' exact three-key validator refuses this format");
+  const probe: LeaseProcessProbe = { bootId: () => BOOT, startTime: () => "999", containment: (recorded) => {
+    assert.deepEqual(recorded, containment); return "empty";
+  }, scan: () => { throw new Error("unrelated SSH environment is unreadable and must not be scanned"); } };
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, probe), { proven: true, proof: "linux_cgroup" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "populated" }), { proven: false, reason: "boundary_populated" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: undefined }), { proven: false, reason: "boundary_unverifiable" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "unverifiable" }), { proven: false, reason: "boundary_unverifiable" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, containment: () => "unit_removed" }), { proven: true, proof: "linux_cgroup_unit_removed" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, startTime: () => "777" }), { proven: false, reason: "runner_alive" });
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, bootId: () => OTHER_BOOT, containment: () => { throw new Error("old boundary irrelevant after reboot"); } }),
+    { proven: true, proof: "reboot" });
+  let checks = 0;
+  assert.deepEqual(proveLeaseAbandoned(evidence, 101, { ...probe, startTime: () => ++checks === 2 ? "777" : null }), { proven: false, reason: "runner_alive" });
+  for (const bad of [ { ...evidence, version: 3 }, { ...evidence, containment: { ...containment, inode: "0" } },
+    { ...evidence, containment: { ...containment, cgroupPath: "../escape" } },
+    { ...evidence, containment: { ...containment, cgroupPath: "/another/path" } },
+    { ...evidence, containment: { ...containment, bootId: OTHER_BOOT } }, { ...evidence, containment: undefined } ]) {
+    assert.equal(isLeaseProcessEvidence(bad), false, JSON.stringify(bad));
   }
 });

@@ -24,7 +24,7 @@ continuations to settle. A parent's own result and descendant result rollups sta
 Review while any unarchived descendant has unfinished work, including children hidden by filters or
 collapsed threads. An at-rest parent shows Children Working instead; human questions and approvals
 keep priority. Child dots and working counts include background work, and dot tooltips name Waiting
-on External Job or Continuation Pending. Intermediate results remain stored for later review.
+on External Job or Follow-Up Pending. Intermediate results remain stored for later review.
 
 Only a successful response-completed boundary following live top-level output creates a result.
 An individually completed message can still be intermediate commentary; older peers without an

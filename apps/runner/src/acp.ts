@@ -50,7 +50,7 @@ import {
 } from "./acp-contract.js";
 import type { RpcError } from "./jsonrpc.js";
 import { JsonRpcPeer } from "./jsonrpc.js";
-import { spawnAgent, killTree, type AgentProcess, type SpawnIsolation } from "./spawn.js";
+import { spawnAgent, killTree, provenProcessTreeExit, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import {
   acpSessionPresentation,
   normalizeAcpCommands,
@@ -137,6 +137,7 @@ export class AcpClient {
       artifactGuidance?: string;
       sessionContext?: AcpSessionContextConfig;
       isolation?: SpawnIsolation;
+      reviewWriterCgroup?: import("./linux-cgroup.js").LinuxCgroupGroup;
       containerAgentLaunch?: boolean;
       cloudAgentLaunch?: boolean;
       orchestrator?: boolean;
@@ -164,7 +165,7 @@ export class AcpClient {
     this.mcpEnvironment = { ...process.env, ...opts.env };
     const context = opts.context ?? { kind: "native" as const };
     this.filesystem = new AcpFilesystemService(opts.cwd, context);
-    this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation);
+    this.terminals = new AcpTerminalService(this.filesystem, context, opts.isolation, { cgroup: opts.reviewWriterCgroup });
     this.kill = deps.kill ?? killTree;
     this.child = (deps.spawn ?? spawnAgent)(opts);
     this.peer = new JsonRpcPeer(this.child.stdin, this.child.stdout, (err) =>
@@ -640,6 +641,13 @@ export class AcpClient {
    * anything itself. */
   proveTerminalTreesGone(): Promise<boolean> {
     return this.terminals.proveTreesGone().catch(() => false);
+  }
+
+  /** Discovery settles its HOME reference only after disposing this initialize-only client and
+   * proving the entire launched tree gone, including detached helpers. */
+  async proveProcessTreeGone(): Promise<boolean> {
+    const [agent, terminals] = await Promise.all([provenProcessTreeExit(this.child), this.proveTerminalTreesGone()]);
+    return agent && terminals;
   }
 
   private settlePendingPermissions(): void {

@@ -26,6 +26,7 @@ const SETTLED: Record<SettingsSection, (page: Page) => Locator> = {
   behavior: (page) => page.getByText("Upload only when the task or project asks for it.", { exact: true }),
   // The tool policies arrive after the routine questions they load with.
   approvals: (page) => page.getByRole("button", { name: /^Review Agent-Created Sessions/ }),
+  reviews: (page) => page.getByRole("spinbutton", { name: "Valid Rounds", exact: true }),
   orchestrator: (page) => page.getByRole("radiogroup", { name: "Completion" }),
   network: (page) => page.getByRole("switch", { name: "Tailnet Access" }),
   // Eligible Now shows once the organization's policy has loaded.

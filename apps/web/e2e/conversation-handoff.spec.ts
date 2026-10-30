@@ -3,6 +3,27 @@ import { expect, test, type Locator } from "@playwright/test";
 import { pinWidestFace } from "./font-geometry";
 import { expectGeometry } from "./geometry-margins";
 
+// A narrow label may wrap, but a turn number must stay on the same line as “Turn”.
+async function expectTurnNumberTogether(divider: Locator) {
+  const lines = await divider.locator(".tl-divider-label").evaluate((element) => {
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    let node: Node | null;
+    while ((node = walker.nextNode())) {
+      const text = node.textContent ?? "";
+      const turn = text.lastIndexOf("Turn");
+      const number = text.match(/\d+$/);
+      if (turn < 0 || number?.index === undefined) continue;
+      const range = document.createRange();
+      range.setStart(node, turn); range.setEnd(node, turn + 4);
+      const turnTop = range.getBoundingClientRect().top;
+      range.setStart(node, number.index); range.setEnd(node, text.length);
+      return [turnTop, range.getBoundingClientRect().top];
+    }
+    throw new Error("No turn label found");
+  });
+  expect(lines[1], "the number shares Turn's rendered line").toBe(lines[0]);
+}
+
 // Insets are measured to the text column: the description's --space-6 gutters are its own inline
 // padding (#2184), so its border box may span the row on a phone while its text stays inset.
 const readDescriptionLayout = (description: Locator) => description.evaluate((element) => {
@@ -38,6 +59,125 @@ const readFieldGeometry = (dialog: Locator) => dialog.evaluate((element) => {
     .filter((node) => node.scrollWidth > node.clientWidth + 1)
     .map((node) => node.textContent);
   return { edges, clipped };
+});
+
+for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
+  test(`in-place handoff uses current files and leaves an unsent draft at ${width}px ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    const url = "/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1";
+    await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
+    await page.evaluate((theme) => document.documentElement.dataset.theme = theme, theme);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    const more = page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" });
+    await more.click();
+    const menu = page.getByRole("menu", { name: "More Turn Actions" });
+    const handoff = menu.getByRole("menuitem", { name: "Hand Off After This Turn…" });
+    await expect(handoff).toBeEnabled();
+    await expect(menu.getByRole("menuitem", { name: "Fork After This Turn…" })).toHaveCount(0);
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-enabled.png") });
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
+    await more.click();
+    await expect(handoff).toBeDisabled();
+    await expect(handoff.locator(".menu-desc")).toHaveText("The runner is offline.");
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-offline.png") });
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("online"));
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(109));
+    await more.click();
+    await expect(handoff).toBeDisabled();
+    await expect(handoff.locator(".menu-desc")).toContainText("Update the runner");
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-old-runner.png") });
+    await page.keyboard.press("Escape");
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(110));
+    await more.click(); await handoff.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toContainText("repository's current files and dialogue up to Turn 1");
+    await dialog.locator("details.disclosure summary").click();
+    await expect(dialog).toContainText("The repository at hand-off time, not the selected turn.");
+    await expect(dialog).toContainText("ignored untracked files are left out");
+    await expect(dialog.locator(".field-error")).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Create Handoff", exact: true })).toBeEnabled();
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-file-disclosure.png") });
+    await dialog.getByRole("button", { name: "Create Handoff", exact: true }).click();
+    await expect(page.locator(".composer-input")).toHaveValue(/Files reflect the repository at hand-off time, not the selected turn/);
+    await expect(page.locator(".composer-input")).toHaveValue(/Keep the interface accessible on mobile/);
+    await expect(page.locator(".composer-input")).toHaveValue(/through event 3; 1 event or message omitted/);
+    await expect(page.locator(".composer-input")).not.toHaveValue(/checkpoint event/);
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-unsent-draft.png") });
+  });
+}
+
+for (const [query, reason] of [
+  ["unfinishedTurn=1", "This turn didn't finish, so it can't be handed off yet."],
+  ["partialHistory=1", "Load earlier messages to hand off this session."],
+  ["busyTurn=1", "The source session is busy."],
+  ["removedWorktree=1", "This session's worktree is unavailable. Choose or create a worktree before handing it off."],
+]) {
+  test(`in-place handoff fails visibly closed for ${query}`, async ({ page }) => {
+    await page.goto(`/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&${query}`);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" }).first().click();
+    const handoff = page.getByRole("menuitem", { name: "Hand Off After This Turn…" });
+    await expect(handoff).toBeDisabled();
+    await expect(handoff.locator(".menu-desc")).toHaveText(reason!);
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-history-refusal.png") });
+  });
+}
+
+test("an incomplete in-place opening stays visibly loading and offers no handoff", async ({ page }) => {
+  await page.goto("/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&partialTail=1");
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  await waitForSessionPreview(page);
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  if (await expand.isVisible()) await expand.click();
+  await expect(page.getByRole("status", { name: "Loading Session Activity", exact: true })).toBeVisible();
+  await expect(page.getByText(/Loading a long conversation/)).toBeVisible();
+  await expect(page.locator(".tl-turn-footer")).toHaveCount(0);
+  await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-incomplete-opening.png") });
+});
+
+for (const query of ["interrupted=1", "guardrail=1"]) {
+  test(`a settled in-place turn remains available for handoff after ${query}`, async ({ page }) => {
+    await page.goto(`/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&${query}`);
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    await waitForSessionPreview(page);
+    const expand = page.getByRole("button", { name: "Open Session", exact: true });
+    if (await expand.isVisible()) await expand.click();
+    await page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" }).click();
+    const handoff = page.getByRole("menuitem", { name: "Hand Off After This Turn…" });
+    await expect(handoff).toBeEnabled();
+    await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-settled-turn.png") });
+    await handoff.click();
+    await expect(page.getByRole("button", { name: "Create Handoff", exact: true })).toBeEnabled();
+    await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
+    await expect(page.locator(".composer-input")).toHaveValue(/current files preserve the accessible layout/);
+    expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);
+  });
+}
+
+for (const [query, reason] of [
+  ["legacyHandoff=1", "Update the runner to support handoffs from in-place sessions."],
+  ["unsupportedRepository=1", "Handoff needs a Git repository with at least one readable commit."],
+  ["savedHistoryIncomplete=1", "This session's saved history is incomplete, so it can't be handed off."],
+]) test(`an in-place runner refusal remains visible in the handoff dialog for ${query}`, async ({ page }) => {
+  await page.goto(`/command-inbox-projects-e2e.html?scenario=conversation-handoff&inPlace=1&${query}`);
+  await page.getByRole("button", { name: /Alpha Session/ }).click();
+  await waitForSessionPreview(page);
+  const expand = page.getByRole("button", { name: "Open Session", exact: true });
+  if (await expand.isVisible()) await expand.click();
+  await page.locator(".tl-turn-footer").getByRole("button", { name: "More Turn Actions" }).click();
+  await page.getByRole("menuitem", { name: "Hand Off After This Turn…" }).click();
+  await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(reason!);
+  await page.screenshot({ animations: "disabled", path: test.info().outputPath("in-place-runner-refusal.png") });
 });
 
 for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
@@ -128,8 +268,11 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: test.info().outputPath("handoff-tier-chosen.png") });
     await page.getByRole("button", { name: "Create Handoff", exact: true }).click();
     await expect(page.locator(".composer-input")).toHaveValue(/Keep the interface accessible on mobile/);
-    const handoff = page.getByRole("separator", { name: "Handoff from codex to claude After Turn 1" });
+    const handoff = page.getByRole("separator", { name: "Handoff from Codex to Claude Code after Turn 1" });
     await expect(handoff).toBeVisible();
+    await expect(handoff).toHaveText("Handoff from Codex to Claude Code after Turn 1");
+    await expectTurnNumberTogether(handoff);
+    await expect(page.locator(".composer-input")).toHaveValue(/1 event or message omitted/);
     const handoffDescriptionId = await handoff.getAttribute("aria-describedby");
     expect(handoffDescriptionId).toBeTruthy();
     const description = page.locator(`[id="${handoffDescriptionId}"]`);
@@ -164,6 +307,20 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
       expectGeometry(wideLayout.leftInset, `the 60ch cap stays inside the row with ${wideFace}`)
         .toBeGreaterThanOrEqual(100);
     }
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitSessionEvent("handoff-child", {
+      kind: "conversation_forked", sourceSessionId: "historical-source", turn: 2,
+      handoff: { sourceAgent: "retired-agent", destinationAgent: "historical-destination", disclosure: "Historical hand-off." },
+    }));
+    const historical = page.getByRole("separator", { name: "Handoff from retired-agent to historical-destination after Turn 2", exact: true });
+    await expect(historical).toBeVisible();
+    await expect(historical).toHaveText("Handoff from retired-agent to historical-destination after Turn 2");
+    await expectTurnNumberTogether(historical);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitSessionEvent("handoff-child", {
+      kind: "conversation_forked", sourceSessionId: "historical-source", turn: 1234,
+    }));
+    const fork = page.getByRole("separator", { name: "Forked from Turn 1234", exact: true });
+    await expect(fork).toBeVisible();
+    await expectTurnNumberTogether(fork);
     await page.getByRole("button", { name: "Send", exact: true }).click();
     await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(1);
   });

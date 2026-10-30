@@ -4,7 +4,7 @@
  * A provider loads its hooks when it starts, so a running TUI cannot be given the guard afterwards.
  * Every guardable TUI is provisioned with it from the start, over an empty list the live refresh
  * keeps in step — but provisioning can fail for a session that owns nothing to protect (for Codex,
- * the person's own untrusted hooks rule out the trust bypass; for Claude, their own `--settings`
+ * neither hash trust nor legacy fallback can be verified; for Claude, their own `--settings`
  * would be shadowed), and that TUI is opened anyway rather than refused. If the session then
  * acquires a runner-owned worktree while that TUI is still open, the worktree is unprotected inside
  * it. Nothing can repair that from outside the process, so the session is told, once per TUI, to

@@ -112,6 +112,30 @@ test("untracked work that has finished still leaves its survivors unproven", pos
   assert.equal(await ledger.prove({ terminate: true }), false, "a finished probe's survivor is never proven gone");
 });
 
+for (const result of [true, false]) {
+  test(`an observed operation waits for late probes and cleanup before proving ${result}`, async () => {
+    const ledger = new ProviderProcessLedger();
+    let proceed!: () => void;
+    const gate = new Promise<void>((resolve) => { proceed = resolve; });
+    let cleanup!: (proof: boolean) => void;
+    const proof = new Promise<boolean>((resolve) => { cleanup = resolve; });
+    const work = ledger.observe(async (observer) => { await gate; observer.onProcess(proof); });
+    const proving = ledger.prove({ terminate: true });
+    let settled = false;
+    void proving.then(() => { settled = true; });
+    await settledTurn();
+    assert.equal(settled, false);
+    proceed();
+    await work;
+    await settledTurn();
+    assert.equal(settled, false, "operation completion does not replace its process proof");
+    cleanup(result);
+    assert.equal(await proving, result);
+  });
+}
+
+function settledTurn(): Promise<void> { return new Promise((resolve) => setImmediate(resolve)); }
+
 function separateChild(terminate: () => Promise<boolean>, owner?: object) {
   let calls = 0;
   const child = Object.assign(new EventEmitter(), {

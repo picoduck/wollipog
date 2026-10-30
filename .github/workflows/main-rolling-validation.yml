@@ -1,0 +1,115 @@
+name: Main Rolling Validation
+run-name: Rolling ${{ inputs.target_sha }} ${{ inputs.claim_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_sha:
+        description: Immutable main snapshot to validate
+        type: string
+        required: true
+      claim_id:
+        description: Durable controller claim identity
+        type: string
+        required: true
+
+permissions: {}
+
+# Covers dispatch duplicates AND manual reruns, including rerun-failed-jobs which can reuse
+# successful admission outputs. Never cancel an active full suite. GitHub retains one pending
+# worker. The controller dispatches the durable pending claim before active completion.
+concurrency:
+  group: main-rolling-full-validation
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    if: github.ref == 'refs/heads/main'
+    name: Admit Main Snapshot
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+      actions: write
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+    steps:
+      # Only trusted workflow-revision code sees the write token. Never check out target here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Admit Durable Claim
+        id: admit
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/main-rolling-validation.mjs admit
+      - name: Confirm Current Rolling Claim
+        if: steps.admit.outputs.admitted == 'true'
+        run: echo 'Current rolling claim admitted.'
+      - name: Skip Superseded Rolling Claim
+        if: steps.admit.outputs.admitted != 'true'
+        run: echo 'Superseded claim; full validation was not admitted.'
+      - name: Wake After Superseded Admission
+        if: steps.admit.outputs.admitted != 'true'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY"
+
+  validation:
+    if: needs.admit.outputs.admitted == 'true'
+    needs: admit
+    name: Full Validation
+    permissions:
+      contents: read
+    uses: ./.github/workflows/ci.yml
+    with:
+      target_sha: ${{ inputs.target_sha }}
+
+  health_wake:
+    if: always() && github.ref == 'refs/heads/main'
+    needs: [admit, validation]
+    name: Wake Main CI Health
+    # Delivery is control-plane overhead, never part of the full-test verdict.
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      # Dispatch returns before this worker can be terminal. Health waits for this exact attempt.
+      # No checkout, artifacts, target code or event fields interpolated into shell source.
+      - name: Dispatch Exact Worker Health
+        id: dispatch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_RUN_ID: ${{ github.run_id }}
+          WORKER_ATTEMPT: ${{ github.run_attempt }}
+        run: timeout 30 gh workflow run main-ci-health.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"
+      - name: Retry Exact Worker Health
+        id: retry
+        if: steps.dispatch.outcome == 'failure'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WORKER_RUN_ID: ${{ github.run_id }}
+          WORKER_ATTEMPT: ${{ github.run_attempt }}
+        run: timeout 30 gh workflow run main-ci-health.yml --ref main --repo "$GITHUB_REPOSITORY" -f worker_run_id="$WORKER_RUN_ID" -f worker_attempt="$WORKER_ATTEMPT"
+      - name: Record Health Dispatch Delivery
+        if: always()
+        env:
+          FIRST_OUTCOME: ${{ steps.dispatch.outcome }}
+          RETRY_OUTCOME: ${{ steps.retry.outcome }}
+        run: |
+          if [ "$FIRST_OUTCOME" = success ] || [ "$RETRY_OUTCOME" = success ]; then
+            echo '{"event":"main_ci_health_wake","delivery":"dispatched"}'
+          else
+            echo '::warning::Main CI Health dispatch failed; use trusted manual health recovery.'
+            echo '{"event":"main_ci_health_wake","delivery":"failed"}'
+            exit 1
+          fi

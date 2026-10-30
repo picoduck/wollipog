@@ -1,4 +1,4 @@
-import type { SessionStatus, SessionView } from "@wollipog/protocol";
+import type { ArchiveSessionMetadata, SessionStatus, SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { statusMeta } from "./status-meta.js";
 
@@ -11,12 +11,6 @@ export interface ArchiveBrowserFilters {
   agent: string | null;
   archive: ArchiveStateFilter;
   lifecycle: SessionStatus | "all";
-}
-
-export interface ArchiveSessionMetadata {
-  project: string;
-  location: string;
-  agent: string;
 }
 
 /** The provider lifecycles a session can be filtered by, in the order the filter lists them. */

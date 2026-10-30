@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, runnerSupportsProtocol } from "@wollipog/protocol";
+import { AUTOMATION_TARGET_INSTALLATION_UNAVAILABLE, AUTOMATION_TARGET_UNAVAILABLE, pendingRequests, runnerSupportsProtocol } from "@wollipog/protocol";
 import type {
   AutomationAction,
   AutomationAuditEvent,
@@ -34,7 +34,7 @@ import {
   type ServiceResult,
   type SessionsService,
 } from "./sessions.js";
-import { nextCronFire, parseCron, validateTimeZone } from "./automation-schedule.js";
+import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
 import { automationCommandDigest, AutomationCommandOutbox } from "./automation-command-outbox.js";
 import {
   automationTriggerBodySha256,
@@ -337,7 +337,7 @@ export function validateAutomationSpec(value: unknown): ServiceResult<Automation
   return ok(value as unknown as AutomationSpec);
 }
 
-function automationCapabilityError(
+export function automationCapabilityError(
   db: ControlPlaneDb,
   sessions: SessionsService,
   spec: AutomationSpec,
@@ -415,7 +415,7 @@ function automationCapabilityError(
 
 /** Pin an exact advertised installation. Legacy create-session ids are recaptured only when their
  * saved id has one advertised installation; unresolved and explicit unbound choices stay blocked. */
-function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
+export function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
   if (spec.action.kind === "prompt_session") return spec;
   const uniqueInstallation = (runnerId: string, agentId: string) => {
     const advertised = db.getRunner(runnerId)?.agents.filter((agent) =>
@@ -579,11 +579,28 @@ export class AutomationsService {
     message: DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage,
     now = Date.now(),
   ): boolean {
+    const command = this.db.getAutomationCommand(message.commandId);
+    if (command?.runnerId === runnerId && (message.sessionId === undefined || message.sessionId === command.sessionId)) {
+      const execution = this.db.getAutomationExecution(command.executionId);
+      // A crash can leave the validated trip durable before its automation callback runs.
+      // Recover it before retry handling can supersede the command carrying its provenance.
+      if (execution && ["dispatching", "running"].includes(execution.status)) {
+        this.pauseForGovernance(execution, now, command.sessionId);
+      }
+    }
     return this.commandOutbox.receipt(runnerId, message, now);
   }
 
+  /** The list (#2969): each automation with its newest execution's status and time, so the
+   * Automations list can flag a failed last run without reading every automation's history. */
   list(): { automations: AutomationSchedule[] } {
-    return { automations: this.db.listAutomations() };
+    const latest = this.db.latestAutomationExecutions();
+    return {
+      automations: this.db.listAutomations().map((automation) => {
+        const execution = latest.get(automation.automationId);
+        return execution ? { ...automation, latestExecution: execution } : automation;
+      }),
+    };
   }
 
   get(automationId: string): ServiceResult<{
@@ -947,10 +964,110 @@ export class AutomationsService {
     }
   }
 
+  /** A validated runner card proves cancellation; a CP usage crossing or provider text does not.
+   * Persist before the trailing cancelled receipt, and recover from the durable card on restart. */
+  onGovernanceTripped(sessionId: string, now: number): void {
+    for (const execution of this.db.activeAutomationExecutions()) {
+      this.pauseForGovernance(execution, now, sessionId);
+    }
+  }
+
+  private pauseForGovernance(execution: AutomationExecution, now: number, onlySessionId?: string): boolean {
+    const commands = this.db.listAutomationCommands(execution.executionId);
+    const sources = [
+      ...commands.filter((command) => command.supersededBy === undefined)
+        .map((command) => ({ sessionId: command.sessionId, commandId: command.commandId,
+          startedAt: command.startedAt, completedAt: command.completedAt })),
+      ...(execution.workflowInstanceId ? this.db.listWorkflowAttempts(execution.workflowInstanceId)
+        .filter((attempt) => ["dispatching", "running", "awaiting_output"].includes(attempt.status))
+        .flatMap((attempt) => attempt.sessionId ? [{ sessionId: attempt.sessionId, startedAt: attempt.startedAt,
+          completedAt: attempt.completedAt, commandId: undefined }] : []) : []),
+      ...(execution.deliveryMode !== "receipted_v53" && execution.sessionId && execution.startedAt !== undefined
+        ? [{ sessionId: execution.sessionId, startedAt: execution.startedAt, completedAt: execution.completedAt,
+          commandId: undefined }] : []),
+    ];
+    for (const { sessionId, commandId, startedAt, completedAt } of sources) {
+      if (onlySessionId && sessionId !== onlySessionId) continue;
+      const session = this.db.getSession(sessionId);
+      if (!session) continue;
+      // Exact command ownership recovers missing-start and terminal-first reconnect replay.
+      // Without correlation, retain the original bounded execution-window safeguard. Explicit
+      // ownership of another command must never fall back to a coincidental timestamp match.
+      const trip = pendingRequests(session.pendingApproval).find(({ runnerGuardrail: evidence }) => {
+        if (!evidence) return false;
+        if (evidence.commandId !== undefined && commandId !== undefined) {
+          return this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, commandId, execution.createdAt, now);
+        }
+        if (startedAt === undefined) return false;
+        const since = Math.max(execution.createdAt, startedAt);
+        const until = completedAt ?? now;
+        if (evidence.commandId === undefined) {
+          return this.db.hasRunnerGovernanceTripInWindow(sessionId, evidence, since, until);
+        }
+        // CP-dispatched attempts (including workflows with launch commands) and legacy
+        // execution sources retain their original bounded window for ordinary durable prompts.
+        // Launch IDs cannot use this path: only the separate prompt-command table resolves here.
+        const prompt = this.db.getSessionPromptCommand(evidence.commandId);
+        return prompt?.sessionId === sessionId && prompt.runnerId === session.runnerId &&
+          prompt.createdAt >= since && prompt.createdAt <= until &&
+          this.db.hasRunnerGovernanceTripForCommand(sessionId, evidence, evidence.commandId, since, until);
+      })?.runnerGuardrail;
+      if (!trip) continue;
+      if (execution.actionKind === "workflow_run") {
+        this.failWorkflowExecution(execution, commands, sessionId,
+          commands.find((command) => command.sessionId === sessionId && command.supersededBy === undefined)?.commandId,
+          `runner governance paused ${trip.kind} at ${trip.threshold}`, now);
+      }
+      const settled = this.db.settleAutomationExecution({
+        executionId: execution.executionId, status: "ceiling_paused",
+        governancePause: { sessionId, ...trip },
+        actor: { kind: "system", id: "runner-governance" }, now,
+      });
+      const schedule = this.executionSchedule(execution);
+      // Existing failure subscriptions still notify, with an explicit pause notification.
+      if (settled && schedule) this.emit(schedule, settled, "failed");
+      return true;
+    }
+    return false;
+  }
+
+  /** Governance changes the receipt classification, not a failed workflow's cleanup boundary.
+   * Stop all siblings and finish the instance before settlement releases its concurrency slot. */
+  private failWorkflowExecution(
+    execution: AutomationExecution,
+    commands: AutomationCommandRecord[],
+    sourceSessionId: string,
+    sourceCommandId: string | undefined,
+    error: string,
+    now: number,
+  ): void {
+    this.db.terminalizeAutomationExecutionCommands(execution.executionId, sourceCommandId ?? "", error, now);
+    const siblings = new Map(commands.filter((command) => command.sessionId !== sourceSessionId &&
+      !["completed", "rejected", "uncertain"].includes(command.state))
+      .map((command) => [command.sessionId, command.runnerId]));
+    if (execution.workflowInstanceId) {
+      const instance = this.db.getWorkflowInstance(execution.workflowInstanceId);
+      if (instance && !["succeeded", "failed", "stopped"].includes(instance.status)) {
+        for (const attempt of instance.attempts) {
+          if (!attempt.sessionId || attempt.sessionId === sourceSessionId ||
+              !["dispatching", "running", "awaiting_output"].includes(attempt.status)) continue;
+          const sibling = this.db.getSession(attempt.sessionId);
+          if (sibling) siblings.set(sibling.id, sibling.runnerId);
+        }
+        this.db.finishWorkflowInstance({ instanceId: execution.workflowInstanceId, status: "failed",
+          error, actor: { kind: "system", id: "automation-outbox" }, now });
+      }
+    }
+    for (const [sessionId, runnerId] of siblings) {
+      this.hub.sendToRunner(runnerId, { type: "cancel_session", sessionId });
+    }
+  }
+
   private reconcileExecution(executionId: string, now: number): void {
     const execution = this.db.getAutomationExecution(executionId);
-    if (!execution || execution.deliveryMode !== "receipted_v53" ||
-        !["dispatching", "running"].includes(execution.status)) return;
+    if (!execution || !["dispatching", "running"].includes(execution.status)) return;
+    if (this.pauseForGovernance(execution, now)) return;
+    if (execution.deliveryMode !== "receipted_v53") return;
     const commands = this.db.listAutomationCommands(executionId);
     if (!commands.length) return;
     const schedule = this.executionSchedule(execution);
@@ -959,28 +1076,8 @@ export class AutomationsService {
       (command.state === "rejected" || command.state === "uncertain") && command.supersededBy === undefined);
     if (failed) {
       if (execution.actionKind === "workflow_run") {
-        this.db.terminalizeAutomationExecutionCommands(
-          executionId,
-          failed.commandId,
-          `workflow sibling '${failed.commandId}' became ${failed.state}`,
-          now,
-        );
-        for (const command of commands) {
-          if (command.commandId === failed.commandId || ["completed", "rejected", "uncertain"].includes(command.state)) continue;
-          this.hub.sendToRunner(command.runnerId, { type: "cancel_session", sessionId: command.sessionId });
-        }
-        if (execution.workflowInstanceId) {
-          const instance = this.db.getWorkflowInstance(execution.workflowInstanceId);
-          if (instance && !["succeeded", "failed", "stopped"].includes(instance.status)) {
-            this.db.finishWorkflowInstance({
-              instanceId: execution.workflowInstanceId,
-              status: "failed",
-              error: failed.lastError ?? `workflow launch command '${failed.commandId}' became ${failed.state}`,
-              actor: { kind: "system", id: "automation-outbox" },
-              now,
-            });
-          }
-        }
+        this.failWorkflowExecution(execution, commands, failed.sessionId, failed.commandId,
+          failed.lastError ?? `workflow sibling '${failed.commandId}' became ${failed.state}`, now);
       } else if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
         // A rejected launch is a runner failure receipt, or a command never sent: either way no
         // provider process started for it.

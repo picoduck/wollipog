@@ -387,6 +387,28 @@ test("a person's Held Children advice is written for them, looking up only the o
     "its queue-hold advice is written for it");
 });
 
+test("a held child whose runner can only release its hold has its ownership read for a person's advice (#3752)", () => {
+  const releasable: SessionQueueHoldView = {
+    kind: "provider_account_switch", holdId: "qh_release", since: 1, target: "Work", queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1, canRelease: true,
+  };
+  let owned = false;
+  const ownerLookups: string[] = [];
+  const source: SessionCommandPermissionSource = {
+    isSessionOwner: (_principal, id) => { ownerLookups.push(id); return owned; },
+    isSessionDescendant: () => false,
+    canAccessSession: () => true,
+    sessionHoldRecords: () => new Map([["s_release", { parentSessionId: "s_orch", queueHold: releasable }]]),
+  };
+  const projection = { heldChildren: [{ sessionId: "s_release", holds: sessionHolds({ queueHold: releasable }) }] };
+  const advice = () => withCampaignHoldAdviceFor(source, human("admin"), projection).heldChildren[0]!.holds[0]!.recoveryAction;
+  assert.doesNotMatch(advice(), /release_queue_hold|Proceed Now/u, "a non-owner cannot release it");
+  assert.deepEqual(ownerLookups, ["s_release"], "the child's ownership is read even though no job can be stopped alone");
+  owned = true;
+  assert.match(advice(), /release_queue_hold \(hold qh_release\)/u, "its owner is told how to release it");
+  assert.doesNotMatch(advice(), /stop_background_job/u, "no single job can be stopped on this runner");
+});
+
 test("a person's session reads and live updates carry worktree-recovery advice written for them (#1867)", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "person-hold-advice-"));
   const database = join(root, "control-plane.db");

@@ -1,8 +1,12 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
-import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
-import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { assertLegacyReviewsDrained, retiredReviewReceipt } from "./retired-review-jobs.js";
+import { reviewRetirementPeerRefusal } from "@wollipog/protocol";
+import { configuredSessionWritablePaths } from "./review-trust.js";
+import { configuredCodexHomes } from "./review-trust.js";
+import { reviewerInstallations } from "./reviewer-installations.js";
+import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
-import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
+import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
@@ -54,7 +58,6 @@ import {
   type RegisterMessage,
   type ReprocessSessionMessage,
   type RunnerMetadata,
-  type SessionReviewCapability,
   type RunnerToControlPlane,
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
@@ -188,6 +191,7 @@ import {
   selectProviderAccount,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
+import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -201,6 +205,7 @@ import {
   terminateDescendantBoundariesAfterPendingKills,
   waitForPendingKills,
 } from "./spawn.js";
+import { providerContainmentEmpty, providerContainmentIdentity } from "./linux-cgroup.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -228,7 +233,7 @@ import {
   searchWorkspaceReferences,
 } from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
-import { prepareAgentTuiLaunch } from "./agent-tui.js";
+import { agentTuiProviderEnvironment, prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import { UnguardedAgentTuiRegistry } from "./agent-tui-guard-notice.js";
 import { capabilitiesFor } from "./catalog.js";
@@ -434,6 +439,9 @@ if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
   log(`using isolated runner state at ${dataDirLease.dataDir}; prior owner state remains untouched`);
 }
 config.dataDir = dataDirLease.dataDir;
+// Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
+// runner data directory when the temporary filesystem is noexec. This never moves the runner.
+providerContainmentIdentity(config.dataDir);
 process.once("exit", dataDirLease.release);
 if (dataDirLease.migratedLegacyDataDir) {
   log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
@@ -529,6 +537,9 @@ const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
+// Refuse unfinished legacy work before constructing any provider/session managers.
+assertLegacyReviewsDrained(config.dataDir);
+
 const configuredAgentDefinitions = config.agents.map((a) => {
   const driver = a.driver ?? "acp";
   // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
@@ -586,8 +597,6 @@ const metadata: RunnerMetadata = {
       ),
     },
     maxConcurrentSessions: config.maxConcurrentSessions,
-    campaignReview: config.executionIsolation.mode==="provider"?await discoverControlledReview(configuredAgentDefinitions.find((a)=>
-      a.driver==="claude-code" && (!a.context || a.context.kind==="native") && a.command==="claude")?.id):undefined,
     admission: config.admission,
     executionIsolation: config.executionIsolation,
   },
@@ -684,6 +693,13 @@ function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, co
   const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
   if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
   return { ...(exact?.env ?? resolveAdoptionLaunch(driver, context)?.env ?? {}) };
+}
+
+/** The runner-local agent environment a session launch starts from (see `prepareLaunch`). */
+function sessionAgentEnvironment(meta: SessionMeta): Record<string, string> {
+  return meta.adopted && !meta.agentId
+    ? adoptedLaunchEnvironment(meta)
+    : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
 }
 
 /** Native adopted rows retain the recorded launch command across later selection changes. */
@@ -792,6 +808,7 @@ function sameAcpCapabilities(
 }
 
 let ws: WebSocket | null = null;
+let controlPlanePeerRefused = false;
 let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
 let policyHookRegistrationGeneration = 0;
@@ -1095,6 +1112,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     await provisionAgentControl(
       meta,
       {
+        onProcess: (proof) => cancellation?.providerHome?.onProcess(proof),
         controlPlaneUrl: config.controlPlaneUrl,
         controlPlaneProtocolVersion,
         allowInsecureTransport,
@@ -1120,18 +1138,18 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     // human, which is exactly the behaviour it had before this. The runner says which it got.
     //
     // Provisioned LAST, after everything that rewrites `meta.args`: `provisionAgentControl` runs
-    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path, which drops
-    // `--dangerously-bypass-hook-trust` and then appends the preset's own arguments, so a guard
-    // proved before it would be a proof about a different argv than the one that launches.
+    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path and appends its own arguments.
+    // A guard proved before it would describe a different argv than the one that launches.
     let codexLaunchArgs: string[] | undefined;
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
-      // The guard's hook inventory spawns a real Codex app-server outside any provable boundary
-      // (tracking it is deferred to #3340), and a failed plugin inheritance may leave the HOME
-      // half-written: either way the launch keeps its provider-HOME reference until shutdown.
-      cancellation?.providerHome?.markUnprovable();
       // Prepare the exact plugin inventory before guard enumeration, without persisting default
       // plugin flags into the session (which would freeze them across subsequent launches).
-      const inheritedPluginArgs = inheritProviderPlugins(meta, "codex");
+      let inheritedPluginArgs: string[];
+      try { inheritedPluginArgs = inheritProviderPlugins(meta, "codex"); }
+      catch (error) {
+        cancellation?.providerHome?.markUnprovable();
+        throw error;
+      }
       log(JSON.stringify({ event: "provider_plugin_inheritance_prepared", entryPoint: "session_launch",
         sessionId: meta.sessionId, provider: "codex" }));
       const codexGuardSocket = await memoryGuardSocket(
@@ -1143,6 +1161,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
           cwd: meta.worktreePath ?? meta.repoPath,
           ...(codexGuardSocket ? { guardSocket: codexGuardSocket } : {}),
           isolateForeignHooks: isOrchestratorLaunch(meta),
+          onProcess: (proof) => cancellation?.providerHome?.onProcess(proof),
         },
         log,
         claudeHookHost,
@@ -1230,6 +1249,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   () => subscriptionUsage.inventory(),
   attestation.instanceId,
 );
+sessions.configureSharedDirectories(config.workspaces, [parsed.configPath,
+  ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)]);
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
@@ -1250,6 +1271,7 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   log,
 };
 const providerHomeLeaseCommands: ProviderHomeLeaseCommandDeps = {
+  controlPlaneProtocolVersion: () => controlPlaneProtocolVersion,
   accounts: () => config.providerAccounts,
   inspect: (home) => sessions.inspectProviderHomeLease(home),
   recover: (home, provider, staleTipHash, authorizationId) => sessions.recoverProviderHomeLease(home, provider, staleTipHash, authorizationId),
@@ -1265,6 +1287,10 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // authoritative inventory after every registration instead.
 /** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
 const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
+// Writer lifecycle diagnostics are native-Linux only and never gate reviewer admission.
+const reviewWriters = new ReviewWriterRegistry(process.platform === "linux"
+  ? join(config.dataDir, "unprotected-agent-writers") : undefined);
+sessions.setReviewWriterRegistry(reviewWriters);
 const shells = new ShellManager({
   onOutput: (shellId, sessionId, stream, data, seq) => {
     if (ws && ws.readyState === WebSocket.OPEN && registered) {
@@ -1275,7 +1301,7 @@ const shells = new ShellManager({
     unguardedAgentTuis.exited(shellId);
     sendUp({ type: "shell_exit", sessionId, shellId, code, outputSeq });
   },
-});
+}, undefined, reviewWriters);
 sessions.setWorktreeShellRetirement((sessionId, context, path) =>
   shells.closeForWorktree(sessionId, context, path));
 // Keep the Claude managed-worktree guard's protection set live: a worktree created, activated,
@@ -1433,7 +1459,8 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 
 function sendUp(msg: RunnerToControlPlane): void {
   // Registration precedes agent discovery, so the review-session capability it advertised can say
-  // no reviewer is available. Every discovery result carries it again, from the agents it found.
+  // no reviewer is available. Every update recomputes it, including the existing five-minute
+  // discovery pass, so repaired tools/agents recover without reconnecting.
   if (msg.type === "agents_updated" && process.platform === "linux") {
     msg = { ...msg, reviewSession: reviewSessionCapability() ?? null };
   }
@@ -1603,25 +1630,23 @@ function recoverStaleSessionCommands(): void {
 }
 
 sessions.setSend(sendUp);
-const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"campaign-review-jobs"),store,sendUp,
-  (jobId,agentId)=>sessions.reserveControlledReviewAdmission(jobId,agentId),(jobId)=>sessions.releaseControlledReviewAdmission(jobId));
-// A session's own cross-model review, run outside its sandbox (#3306). Linux only: job liveness is
-// read from /proc, and the protected session namespace it works around exists only there.
-// Nothing it runs may live where a session can write: project checkouts, provider account homes,
-// provider homes an agent's or session's environment names, and every session's provider homes.
+// Shared trusted-tool roots for review sessions.
 const sessionWritablePaths = () => configuredSessionWritablePaths({
   workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
   sessions: store.listSessions(), hostEnv: process.env,
 });
-const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths);
-// One owner of every review mirror, so the bridge's fetches and review sessions' never race.
-const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
-const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
-  sessionReviewDependencies, undefined, reviewSnapshots);
-// Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
-const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
-  defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
-    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
+  providerAccounts: config.providerAccounts, agents: config.agents,
+  sessions: store.listSessions(), hostEnv: process.env,
+}));
+const codexProtection = () => sessions.codexReviewerProtection();
+sessions.setReviewerInstallations(() => reviewerInstallations(agentsForControlPlane(),
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+const reviewDependencies = defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
+  codexProtection);
+const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), reviewDependencies.exec, log);
+const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store, reviewDependencies);
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({
@@ -1679,30 +1704,20 @@ const mediaReviewers = new MediaReviewerDispatcher({
   log,
 });
 
-/** Discovery runs at every registration so an installed or removed controller is advertised. */
-function sessionReviewCapability(): SessionReviewCapability | undefined {
-  if (process.platform !== "linux") return undefined;
-  try {
-    return sessionReviewJobs.capability();
-  } catch (error) {
-    log(`session review discovery failed: ${errText(error)}`);
-    return undefined;
-  }
-}
 /** The review-session capability from the agents discovered so far (#3368, #3369). */
 function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
+  if (process.platform !== "linux") return undefined;
   try {
     return reviewSessionLauncher.capability();
   } catch (error) {
     log(`review session discovery failed: ${errText(error)}`);
-    return undefined;
+    return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
   }
 }
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
-  const { sessionReview: _previous, reviewSession: _previousReviewSession, ...rest } = runtime;
-  const sessionReview = sessionReviewCapability();
+  const { sessionReview: _previous, campaignReview: _previousCampaignReview, reviewSession: _previousReviewSession, ...rest } = runtime;
   const reviewSession = reviewSessionCapability();
-  return { ...rest, ...(sessionReview ? { sessionReview } : {}), ...(reviewSession ? { reviewSession } : {}) };
+  return { ...rest, ...(reviewSession ? { reviewSession } : {}) };
 }
 
 function startTrackedSession(
@@ -2102,26 +2117,27 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           dataDir: config.dataDir,
           allowedAgentIds: config.acpRegistryAgents,
           refresh: refreshModels,
+          authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
         }).catch((error) => {
           log(`ACP Registry unavailable: ${(error as Error).message}`);
           return [];
         })
       : Promise.resolve([]);
     const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
-      discoverAgents(),
+      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
       registryPromise,
       probeConfiguredAcpAgents(configAgents, (agentId) => {
         const configured = config.agents.find((agent) => agent.id === agentId);
         if (!configured) throw new Error("configured agent is unavailable");
         return resolveAgentEnvironment(configured);
-      }),
+      }, { authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
       discoverEditors(),
     ]);
     const configuredPiAgents = await probeConfiguredPiAgents(configAgents, (agentId) => {
       const configured = config.agents.find((agent) => agent.id === agentId);
       if (!configured) throw new Error("configured agent is unavailable");
       return resolveAgentEnvironment(configured);
-    }, { discovered: nativeAgents });
+    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) });
     const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
@@ -2136,6 +2152,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
           new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
+        authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
       }),
       claudeHookFeatureEnabled,
       log,
@@ -2311,8 +2328,11 @@ function runCommandTask(kind: string, task: Promise<void>): void {
 }
 
 function handleCommand(msg: ControlPlaneToRunner): void {
+  if (controlPlanePeerRefused) return;
   switch (msg.type) {
-    case "registered":
+    case "registered": {
+      const refusal = reviewRetirementPeerRefusal(msg.protocolVersion);
+      if (refusal) { controlPlanePeerRefused = true; log(refusal); ws?.terminate(); break; }
       try {
         stagedRunnerCredential.promote();
       } catch (error) {
@@ -2386,6 +2406,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
       for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
       break;
+    }
     case "register_rejected":
       log(`registration rejected: ${msg.reason}`);
       // Keep the staged bytes for the reconnect loop. A transient rejection can be followed by a
@@ -2483,16 +2504,43 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "campaign_issue_scope": {
-      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg).then(sendUp));
+      // The Orchestrator's own forge login and environment, as its agent would read the issues (#3539).
+      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "github_issue_closure": {
-      runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg).then(sendUp));
+      runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "campaign_forge_observe": {
       // The same runner-local environment the Orchestrator's agent launches with (see prepareLaunch).
       runCommandTask("campaign_forge_observe", sessions.campaignForgeObserve(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
+    case "gitlab_merge_preflight": {
+      // The child's own glab login and environment, as its agent would run the merge (#3602).
+      runCommandTask("gitlab_merge_preflight", sessions.gitlabMergePreflight(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
+    case "github_merge_preflight": {
+      // The child's own gh login and environment, as its agent would run the merge (#3713).
+      runCommandTask("github_merge_preflight", sessions.githubMergePreflight(msg, {
         agentEnv: (meta) => meta.adopted && !meta.agentId
           ? adoptedLaunchEnvironment(meta)
           : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
@@ -2510,7 +2558,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ...(msg.runnerHistoryEpoch !== undefined ? { runnerHistoryEpoch: msg.runnerHistoryEpoch } : {}),
         ...(msg.actionProviderThreadId ? { actionProviderThreadId: msg.actionProviderThreadId } : {}),
         ...(msg.actionProviderTurnId ? { actionProviderTurnId: msg.actionProviderTurnId } : {}),
-      }, controlPlaneProtocolVersion).then((reconciled) => {
+      }, controlPlaneProtocolVersion, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then((reconciled) => {
         sendUp({
           type: "workflow_action_reconciliation_result",
           requestId: msg.requestId,
@@ -2765,6 +2817,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       );
       break;
     }
+    case "release_queue_hold": {
+      const { requestId, sessionId, holdId } = msg;
+      void sessions.releaseQueueHold(sessionId, holdId, msg.actor).then(
+        (result) => sendUp({ type: "release_queue_hold_result", requestId, sessionId, holdId, ...result }),
+        (error) => {
+          log(`releasing queue hold ${holdId} of ${sessionId} failed: ${errText(error)}`);
+          sendUp({
+            type: "release_queue_hold_result", requestId, sessionId, holdId, outcome: "refused", reason: "in_progress",
+          });
+        },
+      );
+      break;
+    }
     case "cancel_queued_prompt":
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;
@@ -2813,16 +2878,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       mediaReviewers.stop(msg.request);
       break;
     case "campaign_review_job":
-      runCommandTask("campaign_review_job",campaignReviewer.dispatch(msg));
+      sendUp(retiredReviewReceipt(config.dataDir, "campaign", msg.jobId, msg.nonce));
       break;
     case "cancel_campaign_review_job":
-      campaignReviewer.cancel(msg.jobId,msg.nonce);
+      sendUp(retiredReviewReceipt(config.dataDir, "campaign", msg.jobId, msg.nonce));
       break;
     case "session_review_job":
-      runCommandTask("session_review_job", sessionReviewJobs.dispatch(msg));
+      sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
       break;
     case "cancel_session_review_job":
-      sessionReviewJobs.cancel(msg.jobId, msg.nonce);
+      sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
       break;
     case "priced_session_cost":
       sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd, msg);
@@ -2913,6 +2978,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             events: result.events,
             handoffDraft: result.handoffDraft,
             retainedPrompt: result.retainedPrompt,
+            ...(result.providerHomeRefusal &&
+              runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeForkRefusals")
+              ? { providerHomeRefusal: result.providerHomeRefusal } : {}),
           }),
         )
         .catch((err) =>
@@ -2939,13 +3007,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         path?: ".wollipog.json";
         detected?: string[];
       }> = msg.operation === "create"
-        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
+        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress,
+          { requestedBySession: msg.requestedBySession === true })
         : msg.operation === "attach"
-          ? sessions.attachWorktree(msg.sessionId, msg.path)
+          ? sessions.attachWorktree(msg.sessionId, msg.path, { requestedBySession: msg.requestedBySession === true })
           : msg.operation === "select"
-            ? sessions.selectWorktree(msg.sessionId, msg.path).then((snapshot) => ({
+            ? sessions.selectWorktreeWithNotice(msg.sessionId, msg.path,
+              { requestedBySession: msg.requestedBySession === true }).then(({ snapshot, isolation }) => ({
               snapshot,
               worktree: snapshot.worktrees?.find((item) => item.path === snapshot.worktreePath),
+              isolation,
             }))
             : msg.operation === "retry_setup"
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
@@ -3472,6 +3543,18 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "adopt_session":
       runCommandTask("adopt_session", handleAdopt(msg));
       break;
+    case "trim_session_history":
+      runCommandTask("trim_session_history", (async () => {
+        try {
+          const result = await sessions.trimArchivedHistory(msg);
+          log(JSON.stringify({ event: "runner_history_retention", sessionId: msg.sessionId, requestId: msg.requestId, ...result }));
+          sendUp({ type: "trim_session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true, ...result });
+        } catch (error) {
+          log(JSON.stringify({ event: "runner_history_retention_deferred", sessionId: msg.sessionId, requestId: msg.requestId }));
+          sendUp({ type: "trim_session_history_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: false, error: errText(error) });
+        }
+      })());
+      break;
     case "reprocess_session":
       runCommandTask("reprocess_session", handleReprocess(msg));
       break;
@@ -3511,14 +3594,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           // `provision` writes an agent-control credential file or registers a credential (#1379).
           assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
           assertLaunchCurrent: assertCurrent,
+          agentEnvironment: sessionAgentEnvironment,
           provision: async (prepared) => {
-            prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
-            if (prepared.providerCredentialHome && prepared.providerAccountProvider) {
-              Object.assign(prepared.env, providerAccountEnvironment({
-                provider: prepared.providerAccountProvider,
-                credentialHome: prepared.providerCredentialHome,
-              }));
-            }
+            prepared.env = agentTuiProviderEnvironment(prepared, sessionAgentEnvironment(prepared));
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
@@ -3531,12 +3609,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           hookStateDir: claudeHookHost.configDir,
           // The TUI is a spawn like any other: it gets the same fresh settings document and the
           // same live protection list a runner-driven launch gets (#1337).
-          provisionManagedWorktreeGuard: (prepared, cwd) => provisionAgentTuiManagedWorktreeGuard(
+          provisionManagedWorktreeGuard: (prepared, cwd, observer) => provisionAgentTuiManagedWorktreeGuard(
             prepared,
             {
               controlPlaneUrl: config.controlPlaneUrl,
               controlPlaneProtocolVersion,
               enabled: claudeHookFeatureEnabled,
+              onProcess: observer?.onProcess,
               allowInsecureTransport,
               registerCredential: registerPolicyHookCredential,
               // Resolved when provisioning runs, never from the launch snapshot: that snapshot
@@ -3602,6 +3681,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         },
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
+        providerHomeRefusal: (error, meta) =>
+          runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeAgentTuiRefusals")
+            ? providerHomeLaunchRefusal(error, meta) : undefined,
       }));
       break;
     }
@@ -3798,6 +3880,9 @@ async function handleReprocess(msg: ReprocessSessionMessage): Promise<void> {
   const replyFail = (error: string) =>
     sendUp({ type: "reprocess_session_result", requestId, sessionId, ok: false, error });
 
+  if (store.historyRetention(sessionId)) {
+    return replyFail("Full history cannot be restored: the runner has trimmed this session’s log under archived-history retention.");
+  }
   const meta = store.readMeta(sessionId);
   if (!meta || !meta.agentSessionId || !isAdoptedSession(meta)) {
     return replyFail("only adopted sessions can be re-imported");
@@ -4133,6 +4218,7 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
 function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
+  controlPlanePeerRefused = false;
   controlPlaneProtocolVersion = null;
   automaticAccountSwitchConfigurationSynchronized = false;
   sessions.setAutomaticAccountSwitchAuthorityReady(false);
@@ -4167,7 +4253,7 @@ function connect(): void {
   });
 
   socket.on("message", (raw: Buffer) => {
-    if (ws !== socket) return;
+    if (ws !== socket || controlPlanePeerRefused) return;
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
     if (!msg) return;
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not
@@ -4237,8 +4323,6 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
   bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
-  // Running reviews continue detached and are recovered from their job files on restart.
-  bestEffort("stop session review polling", () => sessionReviewJobs.close());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.
@@ -4265,12 +4349,15 @@ function shutdown(exitCode = 0): void {
     CLAUDE_GRACEFUL_STOP_BUDGET_MS + DESCENDANT_BOUNDARY_TERMINATION_BUDGET_MS + 500,
   )
     .then(async (processTreesReaped) => {
+      await sessions.retireReviewWritersAfterShutdown();
       // Never let a throw here skip the exit. Only release the lease when session cleanup completed
       // cleanly AND every tracked process tree was reaped; otherwise retain it (fail closed) so a
       // possibly-still-alive provider cannot share its HOME with a replacement runner.
       try {
         if (sessionsCleanlyShutDown) {
-          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped)) {
+          const providerBoundaryEmpty = providerContainmentEmpty();
+          if (!providerBoundaryEmpty) log("provider-HOME boundary is still populated or uninspectable; a detached provider review controller can retain ownership until its work finishes");
+          if (!await sessions.releaseProviderHomeLeasesAfterShutdown(processTreesReaped && providerBoundaryEmpty)) {
             log("process-tree cleanup was incomplete — retaining provider-home lease; inspect the preceding survivor diagnostic before restarting this runner");
           }
         } else {

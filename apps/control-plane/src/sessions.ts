@@ -1,6 +1,11 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
+import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
+import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
+import { configuredReview, ReviewSettingsError } from "./review-settings.js";
+import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
-import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
@@ -16,21 +21,24 @@ import type { HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
-import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
+import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, issueWork, closureEvidence, publicationEvidence, reservedPublicationSlots } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
+import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
-  type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
+  compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
 } from "@wollipog/protocol";
-import { SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewHarness, type SessionReviewJobArtifacts,
-  type SessionReviewJobCommand, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
+import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
+import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 /**
@@ -78,6 +86,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL,
   worktreeRecoveryAction,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  completeParentControlDecisions,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
@@ -108,6 +117,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type BackgroundJobStopActor,
   type BackgroundJobStopResponse,
   type StopBackgroundJobRefusal,
+  type ReleaseQueueHoldRefusal,
+  type QueueHoldReleaseResponse,
   type ExternalSessionDescriptor,
   type GovernanceActor,
   type GovernanceAuditEntry,
@@ -152,6 +163,9 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type PolicyHookEvaluationResponse,
   type RecordPolicyHookDecisionMessage,
   type RecordWorkflowActionAdmissionMessage,
+  type GitLabMergePreflightResultMessage,
+  type GithubMergePreflightResultMessage,
+  type PullRequestClosingReferenceCheck,
   type ReconcileWorkflowActionMessage,
   type PodContextEntry,
   type PodMemberRole,
@@ -240,6 +254,7 @@ import {
   type CampaignRequestResolutionRecord,
   type ControlPlaneDb,
   type RestartNoticeEntry,
+  type RunnerHistoryReconciliation,
   type RunnerHistoryState,
   type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
@@ -264,6 +279,7 @@ import {
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
 import { capabilityRefusal, failureBody } from "./capability-refusal.js";
@@ -339,12 +355,29 @@ export interface RunnerAttentionBatch {
   defer(before: SessionView | null): void;
 }
 
+/** At most this many live runtime snapshots share one durable commit (#2601). The same bound as a
+ * registration step (#2125): the event loop yields between runs, never inside one. */
+export const RUNTIME_UPDATE_RUN_LIMIT = 32;
+
+/** What a runtime snapshot's publication needs once its update has committed. */
+interface CommittedRuntimeUpdate {
+  existing: SessionView;
+  runtimeSnapshot: SessionSnapshot;
+  unacknowledgedRevision: number;
+  campaignBefore: SessionView | null;
+}
+
 export const EXTERNAL_SESSION_ENUMERATION_TIMEOUT_MS = 30_000;
 export const EXTERNAL_SESSION_ADOPTION_TIMEOUT_MS = 45_000;
 export const STEERING_REQUEST_TIMEOUT_MS = 15_000;
 /** Leave headroom inside the hook sidecar's 1.5s HTTP deadline for request parsing and response. */
 export const POLICY_HOOK_EVENT_APPEND_TIMEOUT_MS = 1_000;
 export const WORKFLOW_ACTION_ADMISSION_APPEND_TIMEOUT_MS = 5_000;
+/** #3602: the GitLab merge preflight reads up to three endpoints at 15 seconds each. */
+export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
+/** The child runner's GitHub read for a merge's closing references (#3713): one `gh` call of at
+ * most 30 seconds. The session tools wait 75 seconds for a merge request or consume. */
+export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -625,9 +658,21 @@ function capabilityFail<T>(
   return { ok: false, status: 409, error, capabilityRequirement };
 }
 
+/** A campaign refusal: a sentence, or an older runner's shared sentence with its versions (#3803). */
+type CampaignRefusal = string | ({ error: string } & RunnerCapabilityRequirementDetails);
+
+function campaignRefusalFail<T>(refusal: CampaignRefusal): ServiceResult<T> {
+  return typeof refusal === "string" ? fail(refusal, 409) : capabilityFail(refusal);
+}
+
 /** Rolls back a campaign child's creation when its work-item attempt cannot be recorded (#3106). */
 class CampaignAttemptRefusal extends Error {
   constructor(message: string, readonly status: number) { super(message); }
+}
+
+/** A runner capability gate refused inside a transaction, so its catch can return the versions too. */
+class RunnerCapabilityRefusal extends Error {
+  constructor(readonly requirement: { error: string } & RunnerCapabilityRequirementDetails) { super(requirement.error); }
 }
 
 /** Re-type a failed result, keeping its status, error and any capability-gate versions. */
@@ -665,10 +710,28 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
       `(resource ${decisionLiteral(decision.resourceKey)})${option}` +
       (decision.childMessage ? " and left this message for you:" : "."),
     ...(decision.childMessage ? [decision.childMessage] : []),
+    ...(decision.category === "campaign_follow_up_admission" ? [decision.status === "approved"
+      ? "Repeat the same request for that follow-up; the campaign applies it once and consumes this approval. Do not call consume_workflow_decision."
+      : "Do not repeat that request for that follow-up: it stays refused."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
   ].join("\n");
+}
+
+/** Why an issue closure cannot execute yet, naming the next step (#2940). A pending closure the
+ * root owns under its standing authorization is approved by that root itself, never by a person:
+ * a bare "pending" refusal once left a Full Control root asking a person who could not answer. */
+function issueClosureNotApprovedMessage(decision: WorkflowDecisionView): string {
+  if (decision.status !== "pending") return `issue closure cannot execute from ${decision.status} state`;
+  if (decision.authority === "human") {
+    return "issue closure cannot execute from pending state: a person must approve this human-owned closure " +
+      "in Wollipog first. Never approve it yourself; read it again with get_workflow_decision before retrying.";
+  }
+  return "issue closure cannot execute from pending state: you own this closure under your standing Full Control " +
+    "authorization, and no person will approve it. Approve it yourself with resolve_descendant_workflow_decision " +
+    `(sessionId ${decisionLiteral(decision.sessionId)}, your own session; occurrenceId ${decisionLiteral(decision.occurrenceId)}; ` +
+    "outcome \"approve\"), then call close_github_issue again with the same occurrenceId and resourceDigest.";
 }
 
 /** Why a session whose ancestry the campaign walk refuses can neither request nor keep a typed
@@ -682,6 +745,52 @@ const MALFORMED_ANCESTRY_DECISION_REFUSAL =
 const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
   "this session's ancestry is malformed (a cycle, a missing parent session, or more than 64 levels of " +
   "nesting), so its campaign policy and Parent Control authority cannot be determined";
+
+/** How one finished review reads in its requester's continuation (#3369). Reviewer-written text is
+ * bounded to single lines (compactReviewFinding) or quoted, so it can never forge a framing line. */
+function reviewContinuationOutcome(review: ReviewSessionView): string[] {
+  const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
+  const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch})` : "";
+  const separator = campaignRepositoryLocation(review.pullRequest.repository)?.forge === "gitlab" ? "!" : "#";
+  const head = `${review.pullRequest.repository}${separator}${review.pullRequest.number} at ${review.headSha.slice(0, 12)}`;
+  const verdict = review.verdict;
+  let outcome: string;
+  if (review.state === "completed" && verdict?.valid) {
+    const blocking = review.findings.filter((finding) => finding.blocking).length;
+    outcome = verdict.effectiveVote === "UPVOTE"
+      ? `a valid UPVOTE${review.findings.length ? ` with ${review.findings.length} non-blocking finding(s)` : ""}`
+      : `a valid DOWNVOTE with ${review.findings.length} finding(s), ${blocking} blocking`;
+  } else if (verdict && !verdict.valid) {
+    const why = verdict.validationErrors[0];
+    outcome = `an invalid attempt that does not count as a review${why ? `: ${decisionLiteral(why)}` : ""}` +
+      (verdict.consumed ? "" : " (it did not use one of the round's attempts)");
+  } else if (review.state === "completed") {
+    outcome = "a report that was not checked against the review contract (an older runner)";
+  } else {
+    outcome = `no review: ${decisionLiteral(review.reason ?? "the review ended without a result")}`;
+  }
+  const shown = review.findings.slice(0, 20).map(compactReviewFinding);
+  const atLimit = review.reason === REVIEW_ROUND_REFUSALS.roundLimit;
+  return [
+    `[Wollipog Cross-Model Review — ${review.reviewSessionId}]`,
+    `${reviewer} of ${head}${round} ended with ${outcome}.`,
+    ...(atLimit ? [
+      "More rounds need a review_round_extension workflow decision (request_workflow_decision) naming this epoch, " +
+        "the rounds it used, the open blocking findings of its last valid round, the head to review, 1 to 4 extra " +
+        "rounds and why. Once its owner approves it, request the review again.",
+    ] : []),
+    ...shown,
+    ...(review.findings.length > shown.length ? [`- and ${review.findings.length - shown.length} more`] : []),
+    `Read the full report with get_review_session ${review.reviewSessionId} before acting. Adjudicate every finding: ` +
+      "prove it against the code, fix what holds, and request the next round once the fixes are pushed. " +
+      "A review grants no merge approval. If you have already acted on this review, continue from where you are.",
+    "[End Wollipog Cross-Model Review]",
+  ];
+}
+
+function reviewContinuationPrompt(reviews: readonly ReviewSessionView[]): string {
+  return reviews.flatMap(reviewContinuationOutcome).join("\n");
+}
 
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
  * lifecycle end is deliberate and stays: a relaunched provider must never act on a grant made to the
@@ -705,11 +814,11 @@ function restartRevokedDecisionsPrompt(revoked: readonly RestartNoticeEntry[]): 
 }
 
 export function validateParentControlDecisions(value: unknown): value is ParentControlDecisionPolicy {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const record = value as Record<string, unknown>;
-  if (Object.keys(record).length !== WORKFLOW_DECISION_CATEGORIES.length) return false;
-  return WORKFLOW_DECISION_CATEGORIES.every((category) =>
-    record[category] === "human" || record[category] === "orchestrator");
+  const complete = completeParentControlDecisions(value);
+  if (!complete) return false;
+  // A client from before a later category sends no key for it: human-owned, filled in here.
+  Object.assign(value as object, complete);
+  return true;
 }
 
 /** Media types the human review card shows in place, after checking the bytes against the digest. */
@@ -731,9 +840,47 @@ export function normalizeWorkflowDecisionSnapshot(
   }
   const value = input as Record<string, unknown>;
   const category = value.category;
+  if (category === "automation_creation") {
+    const snapshot = normalizeAutomationCreationSnapshot(value);
+    return snapshot ? ok(snapshot) : fail("automation creation requires a server-prepared exact configuration");
+  }
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
     return normalized ? ok(normalized) : fail("scope changes require exact bounded repository, revision, additions, removals, and affected work");
+  }
+  if (category === "campaign_follow_up_admission") {
+    // Server-created from the campaign's own records (#2940): the follow-up, its title and issue, the
+    // counts that made it need the Human, and for a change to an admitted follow-up the approval it
+    // replaces. Nothing else is accepted.
+    const subject = value.subject && typeof value.subject === "object" && !Array.isArray(value.subject)
+      ? value.subject as Record<string, unknown> : null;
+    const count = (candidate: unknown) => Number.isSafeInteger(candidate) && (candidate as number) >= 0 ? candidate as number : null;
+    const normalizedSubject = !subject || Object.keys(subject).length !== 2 ? null
+      : subject.kind === "recommendation" && boundedDecisionString(subject.recommendationId, 256)
+        ? { kind: "recommendation" as const, recommendationId: subject.recommendationId }
+        : subject.kind === "work_item" && boundedDecisionString(subject.key, 256) ? { kind: "work_item" as const, key: subject.key } : null;
+    const issue = value.issue && typeof value.issue === "object" && !Array.isArray(value.issue) ? value.issue as Record<string, unknown> : null;
+    // Any repository the work ledger accepts: GitHub `owner/name`, or a host-qualified GitLab project.
+    const normalizedIssue = issue && Object.keys(issue).length === 2 && boundedDecisionString(issue.repository, 256) &&
+      campaignRepositoryLocation(issue.repository) !== null && Number.isSafeInteger(issue.number) && (issue.number as number) > 0
+      ? { repository: issue.repository, number: issue.number as number } : null;
+    const acceptedFollowUps = count(value.acceptedFollowUps), limit = value.limit === null ? null : count(value.limit);
+    const revises = value.revises;
+    const identityDigest = typeof value.identityDigest === "string" && /^[a-f0-9]{64}$/u.test(value.identityDigest) ? value.identityDigest : null;
+    const recommendationTitle = value.recommendationTitle;
+    if (!normalizedSubject || !boundedDecisionString(value.title, 200) || acceptedFollowUps === null || !identityDigest ||
+        value.limit !== null && limit === null || value.issue !== null && !normalizedIssue ||
+        (revises === undefined ? limit === null || acceptedFollowUps < limit : !boundedDecisionString(revises, 256)) ||
+        (recommendationTitle === undefined ? normalizedSubject.kind === "recommendation" && value.rebinds !== undefined
+          : normalizedSubject.kind !== "recommendation" || !boundedDecisionString(recommendationTitle, 200)) ||
+        value.rebinds !== undefined && (value.rebinds !== true || revises === undefined || normalizedSubject.kind !== "recommendation") ||
+        Object.keys(value).some((key) => !["category", "subject", "title", "issue", "recommendationTitle", "identityDigest", "acceptedFollowUps",
+          "limit", "revises", "rebinds"].includes(key))) {
+      return fail("a follow-up admission names one follow-up, its title and issue, and the accepted count that reached the limit");
+    }
+    return ok({ category, subject: normalizedSubject, title: value.title, issue: normalizedIssue,
+      ...(typeof recommendationTitle === "string" ? { recommendationTitle } : {}), identityDigest, acceptedFollowUps, limit,
+      ...(typeof revises === "string" ? { revises } : {}), ...(value.rebinds === true ? { rebinds: true as const } : {}) });
   }
   if (category === "issue_closure") {
     const normalized = normalizeIssueClosureSnapshot(value);
@@ -785,7 +932,21 @@ export function normalizeWorkflowDecisionSnapshot(
       ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
   }
   if (category === "pr_merge") {
-    const repo = repository();
+    if (value.reviewSessionId !== undefined && (!boundedDecisionString(value.reviewSessionId, 128) ||
+        !/^[A-Za-z0-9_-]+$/u.test(value.reviewSessionId))) return fail("reviewSessionId must identify a review session", 400);
+    // A GitLab project is named by host and full namespace (#3602) and pins how it merges; those
+    // fields exist only for GitLab, so a GitHub snapshot and its digest are unchanged.
+    const gitlab = campaignRepositoryLocation(value.repository)?.forge === "gitlab";
+    const repo = gitlab ? value.repository as string : repository();
+    const gitlabFields = ["mergeMethod", "squash", "removeSourceBranch"];
+    if (gitlab
+      ? (value.mergeMethod !== "merge_train" && value.mergeMethod !== "merge") ||
+        typeof value.squash !== "boolean" || typeof value.removeSourceBranch !== "boolean"
+      : gitlabFields.some((key) => value[key] !== undefined)) {
+      return fail(gitlab
+        ? "a GitLab merge decision requires mergeMethod (merge_train or merge), squash, and removeSourceBranch"
+        : "mergeMethod, squash, and removeSourceBranch apply only to a GitLab merge decision");
+    }
     const pullRequest = Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0
       ? value.pullRequest as number : null;
     const headSha = sha(value.headSha);
@@ -806,13 +967,56 @@ export function normalizeWorkflowDecisionSnapshot(
         !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
+    // #3713: the issues a GitHub merge is meant to close; the runner's check compares them with
+    // what GitHub would close. Omitted when none are declared, so earlier digests are unchanged.
+    if (gitlab && value.intendedClosures !== undefined) {
+      return fail("intendedClosures applies only to a GitHub merge decision");
+    }
+    const intendedClosures = gitlab ? undefined : normalizeIntendedClosures(value.intendedClosures, repo);
+    if (intendedClosures === null) {
+      return fail(`intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
+    }
     return ok({ category, repository: repo, pullRequest, headSha,
+      ...(typeof value.reviewSessionId === "string" ? { reviewSessionId: value.reviewSessionId } : {}),
       reviewResult: value.reviewResult, requiredChecks: {
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
-      } });
+      },
+      ...(intendedClosures ? { intendedClosures } : {}),
+      ...(gitlab ? {
+        mergeMethod: value.mergeMethod as "merge_train" | "merge",
+        squash: value.squash as boolean,
+        removeSourceBranch: value.removeSourceBranch as boolean,
+      } : {}) });
+  }
+  if (category === "review_round_extension") {
+    // The shape only; the requester's review run is checked against it when it is requested. A
+    // GitLab merge request's run is named by host and full namespace (v244, #3539).
+    const repo = repository() ?? (campaignRepositoryLocation(value.repository)?.forge === "gitlab"
+      ? value.repository as string : null);
+    const headSha = sha(value.headSha);
+    const count = (candidate: unknown, min: number, max: number) =>
+      Number.isSafeInteger(candidate) && (candidate as number) >= min && (candidate as number) <= max ? candidate as number : null;
+    const pullRequest = count(value.pullRequest, 1, Number.MAX_SAFE_INTEGER);
+    const epoch = count(value.epoch, 1, 10_000);
+    const roundsUsed = count(value.roundsUsed, 1, 1000);
+    const blockingFindings = count(value.blockingFindings, 0, 1000);
+    const extraRounds = count(value.extraRounds, 1, 4);
+    const upvotedHeadSha = value.upvotedHeadSha === undefined ? undefined : sha(value.upvotedHeadSha);
+    if (!repo || !headSha || pullRequest === null || epoch === null || roundsUsed === null || blockingFindings === null ||
+        extraRounds === null || upvotedHeadSha === null || !boundedDecisionString(value.reason, 1000) ||
+        Object.keys(value).some((key) => ![
+          "category", "repository", "pullRequest", "epoch", "headSha", "upvotedHeadSha", "roundsUsed", "blockingFindings", "extraRounds", "reason",
+        ].includes(key))) {
+      return fail("a review round extension requires the repository, pull request, epoch, head, rounds used, open blocking " +
+        "findings, 1 to 4 extra rounds and a reason of at most 1000 characters");
+    }
+    return ok({ category, repository: repo, pullRequest, epoch, headSha, ...(upvotedHeadSha ? { upvotedHeadSha } : {}), roundsUsed, blockingFindings, extraRounds,
+      reason: value.reason as string });
   }
   if (category === "merged_branch_deletion") {
-    const repo = repository();
+    // A GitLab project is named by host and full namespace, as in the campaign ledger (#3601).
+    const repo = repository() ?? (campaignRepositoryLocation(value.repository)?.forge === "gitlab"
+      ? value.repository as string : null);
     const dependency = value.dependentPullRequests && typeof value.dependentPullRequests === "object" &&
       !Array.isArray(value.dependentPullRequests)
       ? value.dependentPullRequests as Record<string, unknown> : null;
@@ -829,6 +1033,8 @@ export function normalizeWorkflowDecisionSnapshot(
       dependentPullRequests: { checkedAt: checked, open: [] } });
   }
   if (category === "follow_up_issue_publication") {
+    // #3539: GitLab issues can be closed and scoped, but follow-up publication stays GitHub-only.
+    if (campaignRepositoryLocation(value.repository)?.forge === "gitlab") return fail("Campaign issue publication supports GitHub repositories only");
     const repo = repository();
     if (!repo || !boundedDecisionString(value.sanitizedTitle, 256) ||
         !boundedDecisionString(value.sanitizedBody, 65_536) || !Array.isArray(value.labels) ||
@@ -914,7 +1120,31 @@ export function normalizeWorkflowDecisionSnapshot(
 export function canonicalPrMergeEnqueueCommand(
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
 ): string {
+  const gitlab = campaignRepositoryLocation(snapshot.repository);
+  if (gitlab?.forge === "gitlab") {
+    // #3602: one exact `glab api` call pinned to the approved head with `sha=`, always naming the
+    // host. A train merge omits `when_pipeline_succeeds`, which GitLab 17.7 rejects for an MR that
+    // is already mergeable; a direct merge is admitted only where the project runs no train.
+    const project = encodeURIComponent(gitlab.project);
+    const host = gitlab.host.toLowerCase();
+    return snapshot.mergeMethod === "merge_train"
+      ? `glab api --method POST projects/${project}/merge_trains/merge_requests/${snapshot.pullRequest} ` +
+        `--hostname ${host} -f sha=${snapshot.headSha} -F squash=${snapshot.squash === true}`
+      : `glab api --method PUT projects/${project}/merge_requests/${snapshot.pullRequest}/merge ` +
+        `--hostname ${host} -f sha=${snapshot.headSha} -F squash=${snapshot.squash === true} ` +
+        `-F should_remove_source_branch=${snapshot.removeSourceBranch === true}`;
+  }
   return `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${snapshot.headSha}`;
+}
+
+/** The pull request's or merge request's web URL, as the forge proof reads it (#3602). */
+export function prMergeChangeRequestUrl(
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+): string {
+  const gitlab = campaignRepositoryLocation(snapshot.repository);
+  return gitlab?.forge === "gitlab"
+    ? `https://${gitlab.host.toLowerCase()}/${gitlab.project}/-/merge_requests/${snapshot.pullRequest}`
+    : `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
 }
 
 export function normalizeWorkflowDecisionAction(
@@ -1458,7 +1688,7 @@ export function workflowRunCapabilityError(
   return null;
 }
 
-function auditDigest(value: unknown): string | undefined {
+export function auditDigest(value: unknown): string | undefined {
   if (value == null) return undefined;
   return createHash("sha256").update(JSON.stringify(value), "utf8").digest("hex");
 }
@@ -1609,6 +1839,24 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
   }
 }
 
+/** Why the runner could not release a queue hold, in words the requester can act on (#3752). */
+function queueHoldReleaseRefusal(reason: ReleaseQueueHoldRefusal | undefined): string {
+  switch (reason) {
+    case "session_not_found": return "The runner has no record of this session.";
+    case "no_hold": return "The session is no longer held, so there is nothing to release.";
+    case "hold_changed": return "The hold changed before it could be released; reload the session and try again.";
+    case "unsupported": return "This session's harness cannot end its background work, so its hold cannot be released.";
+    case "turn_active": return "A turn started while the hold was being released, so nothing was ended; " +
+      "reload the session and try again if it is still held.";
+    case "in_progress": return "The session's background work is being ended right now; try again shortly.";
+    case "no_live_process": return "No running provider process owns the work this hold waits on, so it cannot be " +
+      "released; the hold clears when Wollipog recovers the orphaned work or the session is restarted.";
+    case "nothing_to_end": return "The provider reported no unfinished background work to end; " +
+      "reload the session to see whether the hold has cleared.";
+    default: return "The runner could not release the hold.";
+  }
+}
+
 const PREPARED_MEDIA_CAPTURE = Symbol("private prepared media Session capture");
 type PreparedMediaCapture = { identity: PreparedMediaIdentity; subject: PreparedMediaSubject; decision: WorkflowDecisionView; operatorValidation?: OperatorVideoValidationPurpose; command: Extract<DurableSessionCommand, { type: "start_session" }> | null };
 
@@ -1651,6 +1899,18 @@ export class SessionsService {
   /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
   private readonly forgeMergeSettlements = new Set<string>();
   private readonly archiveWorktreeRetirements = new Set<string>();
+  /** Full Control campaigns whose first message is being established (#2940). */
+  private readonly firstMessagesInFlight = new Set<string>();
+  /** The one session whose established first message is being admitted right now. */
+  private firstMessageDelivery: string | null = null;
+  /** Bounded on-demand forge read, wired by the server once its observer exists. A delivered item's
+   * pull requests leave the background pass, so completed closure refreshes them itself (#2940). */
+  campaignForgeRefresh: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<void>) | null = null;
+  /** The observer's uncached, still concurrency-bounded read, for proof execution must not take from
+   * an earlier answer. Without it an excluded pull request cannot be re-proven (#2940). */
+  campaignForgeReadNow: ((campaignId: string, refs: readonly CampaignPullRequestRef[]) => Promise<ForgeReadResult[] | null>) | null = null;
+  /** One in-flight excluded-pull-request read per closure occurrence; concurrent executes share it. */
+  private readonly excludedClosureReads = new Map<string, Promise<boolean>>();
 
   constructor(
     private readonly db: ControlPlaneDb,
@@ -1681,7 +1941,8 @@ export class SessionsService {
     if (operatorValidationPermits && operatorValidationPermits.database !== db.raw()) throw new Error("Validation permits require the same durable database.");
     if (preparedMediaActiveStops && preparedMediaActiveStops.database !== db.raw()) throw new Error("Dedicated media Stop requires the same durable database.");
     this.mediaSessionPurposes = new MediaSessionPurposes(this.db.raw());
-    this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
+    this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log,
+      (now) => this.expireAutomationCreationDecisions(now));
     this.campaignRecovery = new CampaignRecoveryService(this.db, id => this.hub.sessionChangedById(id), this.log);
     // Replayed events took new sequence numbers after a crash: the upsert's new epoch makes open
     // dashboards drop their transcript and recover it again.
@@ -1692,8 +1953,10 @@ export class SessionsService {
     this.db.pauseInterruptedPodOrchestrations(Date.now());
     this.db.failInterruptedPodReconciliations(Date.now());
     this.db.settleInterruptedSteeringAttempts(Date.now());
+    this.recoverFirstMessageDeliveries(Date.now());
     this.db.compactSteeringAttempts(Date.now());
     this.maintainSessionCommands(Date.now());
+    this.reconcileReviewSessionDisposal(undefined, true);
   }
 
   /** Notify on a (possible) transition. Reads the FRESH view so a same-call re-park (e.g.
@@ -2055,8 +2318,7 @@ export class SessionsService {
 
   recoverWorkflowRunner(runnerId: string): number {
     let recovered = 0;
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (session.runnerId !== runnerId) continue;
+    for (const session of this.db.runnerSessionInventory(runnerId)) {
       for (const attempt of this.db.activeWorkflowAttemptsForSession(session.id)) {
         if (session.status === "idle" || session.status === "completed") {
           if (this.db.setWorkflowAttemptStatus(attempt.attemptId, ["dispatching", "running"], "awaiting_output")) recovered++;
@@ -3530,15 +3792,26 @@ export class SessionsService {
         this.db.sessionWasHumanCreatedOrchestrator(parent.id),
       ),
     ]);
-    const fingerprint = createHash("sha256").update(JSON.stringify({
+    const identity = {
       request,
       ...(childCount === 1 ? {} : { childCount }),
       parentSessionId,
       ordinal: this.db.childSessionAllocations(parentSessionId).count,
-    })).digest("hex");
-    const requestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
+    };
+    // Keys are sorted at every depth so a REST body and the MCP tool's body for the same request
+    // share one approval whatever order their fields arrive in (#3685).
+    const fingerprint = createHash("sha256").update(canonicalAutomationCommandJson(identity)).digest("hex");
+    const canonicalRequestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
+    // An approval recorded before the upgrade is keyed to the client's key order. It keeps
+    // resolving for the exact body that created it, ahead of any canonical card a reordered retry
+    // queued behind it. Once either record creates the child the ordinal advances, so the other
+    // can no longer match any request and lapses at its fence.
+    const legacyRequestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${
+      createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
     this.reconcilePolicyHookTimeouts(now, parentSessionId);
-    const stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
+    const legacy = this.db.getPolicyHookApproval(parentSessionId, legacyRequestId);
+    const requestId = legacy ? legacyRequestId : canonicalRequestId;
+    const stored = legacy ?? this.db.getPolicyHookApproval(parentSessionId, canonicalRequestId);
     if (stored) {
       if (stored.status === "allowed") return ok(null);
       if (stored.status !== "pending" && stored.status !== "queued") {
@@ -3668,7 +3941,7 @@ export class SessionsService {
       }
       const guarded = childSessionGuardrails({
         ...parent,
-        ...this.db.campaignBudgets.userLimits(parent.id),
+        ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + reserved.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + reserved.maxToolCalls,
       }, candidate, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - reserved.liveCount,
@@ -3856,6 +4129,8 @@ export class SessionsService {
     }
     this.hub.sessionChanged(session);
     this.log.info(`session created ${session.id} on ${session.runnerId} (${session.agentId} @ ${session.workspaceId})`);
+    if (session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
+      entryPoint: "prepared_media", sessionId: session.id, parentSessionId: session.parentSessionId, ...session.reviewPolicy }));
   }
 
   createSession(
@@ -3881,6 +4156,10 @@ export class SessionsService {
         /** Minted against the new root id only when every launch peer declares the private
          * media contract; screenshot review never depends on it. */
         evidenceAuthority?: EvidenceAuthorityProposal;
+        /** The launch named no task (#2940): the root starts idle, like any Orchestrator, and its
+         * owner's first message sets the objective and issue scope before its first turn. Only
+         * the limits it derived (no Human override) may grow to fit that message's issues. */
+        firstMessage?: { derivedLimits: import("@wollipog/protocol").FullControlDerivedLimits };
       };
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
@@ -3938,7 +4217,7 @@ export class SessionsService {
       const allocated = this.db.childSessionAllocations(parentSessionId);
       const guarded = childSessionGuardrails({
         ...parent,
-        ...this.db.campaignBudgets.userLimits(parent.id),
+        ...this.childCeilingsOf(parent),
         costUsd: (parent.costUsd ?? 0) + allocated.costBudgetUsd,
         toolCallCount: (parent.toolCallCount ?? 0) + allocated.maxToolCalls,
       }, req.config, (parent.maxChildSessions ?? DEFAULT_CHILD_SPAWN_CAP) - allocated.liveCount,
@@ -4022,7 +4301,9 @@ export class SessionsService {
     if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
       const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
-      if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) return fail(preflight.reason ?? "campaign authority boundary is stale", 409);
+      if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
+        return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
+      }
       if (req.runnerId !== campaignController.runnerId || req.workspaceId !== campaignController.workspaceId || req.workspacePath) {
         return fail("Full Control children must use the campaign's repository workspace and runner", 409);
       }
@@ -4093,13 +4374,26 @@ export class SessionsService {
       runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
       ? this.db.machineProviderAccountDefault(runner.runnerId, launchProvider)?.accountId
       : undefined;
+    // The implicit choice skips a profile this control plane may not use (#3240): another control
+    // plane connected to the same runner reports its accounts as not granted here.
     const implicitProviderAccountId = (launch.context?.kind ?? "native") === "native"
-      ? compatibleProviderAccounts[0]?.id
+      ? compatibleProviderAccounts.find((account) => account.profile?.access !== "not_granted")?.id
       : undefined;
     const providerAccountId = usesRunnerProviderAccount
       ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
         savedProviderAccountId ?? defaultProviderAccountId ?? implicitProviderAccountId
       : undefined;
+    // With no account chosen and every compatible one another control plane's profile, the runner
+    // would fall back to the first of them and refuse it at its lease (#3240): say so here instead.
+    if (usesRunnerProviderAccount && !providerAccountId && (launch.context?.kind ?? "native") === "native" &&
+        compatibleProviderAccounts.length > 0 &&
+        compatibleProviderAccounts.every((account) => account.profile?.access === "not_granted")) {
+      return fail(
+        "Every account for this provider on this Machine is a profile of another control plane. " +
+          "Set up a managed profile for this control plane, or adopt one, in the Machine's accounts.",
+        409,
+      );
+    }
     const providerAccount = providerAccountId
       ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
       : undefined;
@@ -4338,6 +4632,7 @@ export class SessionsService {
       ) ? DEFAULT_ORCHESTRATOR_DEFAULTS.delegation.parentControl : "off";
       const inheritedCampaign = parentSessionId ? campaignController?.orchestratorPolicy : undefined;
       const campaignBase = inheritedCampaign ? {
+        ...(inheritedCampaign.reviewPolicySnapshotVersion === 1 ? { reviewPolicySnapshotVersion: 1 as const } : {}),
         behavior: { ...inheritedCampaign.behavior },
         delegation: {
           parentControl: inheritedCampaign.delegation.parentControl,
@@ -4362,7 +4657,7 @@ export class SessionsService {
         orchestratorPolicy.control = structuredClone(inheritedCampaign.control);
         const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion,
           this.pacedVideoInstallationContract(req.runnerId, req.agentId));
-        if (!preflight.supported) return fail(preflight.reason!, 409);
+        if (!preflight.supported) return campaignRefusalFail(preflight.requirement ?? preflight.reason!);
       }
       // A saved account default must remain portable across a mixed runner fleet. Capabilities
       // that predate the selected runner fail closed without turning an otherwise supported
@@ -4592,6 +4887,12 @@ export class SessionsService {
     if (orchestratorPolicy && (orchestratorIssueNumbers.length || inheritedIssueScope)) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
     }
+    // Provenance for Full Control enable (#2940): these numbers came from the authenticated Human's
+    // own create request, not an inherited scope, a snapshot, a staged delivery or a later backfill.
+    if (orchestratorPolicy && orchestratorIssueNumbers.length && !inheritedIssueScope && !snapshotSpec?.orchestrator?.issueNumbers &&
+        !campaignIssueNumbers && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand && !delivery) {
+      orchestratorPolicy.issueNumbersSource = "human_launch_request";
+    }
     let text = requestedText;
     if (!snapshotCommand && campaignController?.orchestratorPolicy && (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
@@ -4602,13 +4903,14 @@ export class SessionsService {
     // Cloned so the clamp below never mutates the caller's request object.
     const config = { ...requestedConfig };
     const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
-    const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
+    const budgetSource = creationContext?.review?.policy.requesterSessionId ?? parentSessionId;
+    const budgetRoot = budgetSource ? this.db.campaignBudgets.governingRoot(budgetSource) : null;
     if (budgetRoot) {
       if (delivery) return fail("Campaign budget admission for pre-staged automation dispatch is unsupported.", 409);
       const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
       if (ceilingError) return fail(ceilingError, 409);
-      const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
-      if(parentError) return fail(parentError,409);
+      const parentError=this.campaignBudgetConfigError(this.db.getSession(budgetSource!)!);
+      if(parentError) return campaignRefusalFail(parentError);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
       if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
@@ -4708,7 +5010,7 @@ export class SessionsService {
       }
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
-      if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
+      if (!authoritySupport.supported) return campaignRefusalFail(authoritySupport.requirement ?? authoritySupport.reason ?? "campaign authority is unsupported");
       // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
         control.boundary.budgetAuthority?.costUsd !== undefined);
@@ -4721,14 +5023,20 @@ export class SessionsService {
           rule.policyId === policyId && rule.enabled && rule.effect === "ask" && !rule.builtin && !rule.conditions?.humanRequired))) {
         return fail("unknown, disabled or Human Required policy asks cannot enter the launch boundary", 400);
       }
+      if (humanLaunch.firstMessage && (requestedText || humanLaunch.issueScope.issueNumbers.length)) {
+        return fail("a first-message launch starts with a task-only scope and no initial prompt", 409);
+      }
       orchestratorPolicy.control = control;
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
+      if (humanLaunch.firstMessage) orchestratorPolicy.firstMessageScope = { state: "pending", derivedLimits: { ...humanLaunch.firstMessage.derivedLimits } };
       parentControlPolicy = { decisions: structuredClone(orchestratorPolicy.delegation.decisions) };
-      text = requestedText || control.boundary.objective;
+      text = humanLaunch.firstMessage ? "" : requestedText || control.boundary.objective;
     }
     const commandSpec: SessionLaunchSpec = {
       sessionId: id,
+      // For an ad-hoc browsed path there is NO workspace — send null, not the stale configured id, so
+      // the runner's persisted metadata + snapshots don't misattribute it to a workspace it isn't in.
       workspaceId,
       workspacePath,
       agentId: req.agentId,
@@ -4792,10 +5100,23 @@ export class SessionsService {
       const gate = this.sessionSpawnGate(parentSessionId, spawnRequest);
       if (!gate.ok) return failAs(gate);
     }
+    const snapshotReviews = campaignController?.orchestratorPolicy?.reviewPolicySnapshotVersion === 1 && !creationContext?.review;
+    const reviewFields = snapshotReviews ? parseOrchestratorReviewPolicy(campaignController!.orchestratorPolicy!.behavior) : null;
+    if (snapshotReviews && !reviewFields) return fail("the campaign's review policy is invalid; update it before launching a child", 409);
     if (delivery) delivery.stage(plan!);
     let session: SessionView;
     const sessionInput: Parameters<ControlPlaneDb["createSession"]>[0] = {
+      ...(reviewFields ? { reviewPolicyCapture: { fields: reviewFields,
+        implementer: agentHarnessIdentityFor({ id: req.agentId, driver: launch.driver, context: launch.context }),
+        resolveModel: (harness, model, effort) => {
+          const reviewerId = runner?.runtime?.reviewSession?.reviewers.find(entry => entry.harness === harness)?.agentId;
+          const reviewer = runner?.agents.find(entry => entry.id === reviewerId && entry.available === true);
+          return resolveEffectiveModelEffort({ ...(model ? { model } : {}), effort }, reviewer?.capabilities,
+            harness === "codex" ? "codex-app-server" : "claude-code").value?.model ?? null;
+        } } } : {}),
+      reviewSettingsUserId: creationContext?.defaultOwnerUserId,
       campaignBudgetUserLimits,
+      reviewRequesterSessionId: creationContext?.review?.policy.requesterSessionId,
       id,
       parentSessionId,
       creationActor: creationContext?.defaultOwnerUserId
@@ -4826,7 +5147,14 @@ export class SessionsService {
       automationOrigin: delivery?.automationOrigin,
       now,
     };
-    const insert = () => this.db.createSession(sessionInput);
+    const insert = () => {
+      const policy = creationContext?.review?.policy;
+      return policy ? this.db.createReviewSession(sessionInput, {
+        requesterSessionId: policy.requesterSessionId, pullRequest: policy.pullRequest,
+        headSha: policy.headSha, reviewer: policy.harness,
+        roundBudget: policy.history?.roundBudget ?? policy.configuration?.roundBudget,
+      }) : this.db.createSession(sessionInput);
+    };
     try {
       if (humanLaunch) {
         const admitted = this.db.createHumanCampaignLaunch(sessionInput, humanLaunch.principal, humanLaunch.requestId, humanLaunch.digest);
@@ -4841,14 +5169,6 @@ export class SessionsService {
       if (error instanceof CampaignAttemptRefusal) return fail(error.message, error.status);
       if (budgetRoot || humanLaunch) return fail((error as Error).message, 409);
       throw error;
-    }
-    // The review row is what makes this session a review, so it exists before anything is sent.
-    if (creationContext?.review) {
-      const policy = creationContext.review.policy;
-      this.db.reviewSessions.record({
-        reviewSessionId: id, requesterSessionId: policy.requesterSessionId, runnerId: req.runnerId,
-        pullRequest: policy.pullRequest, headSha: policy.headSha, reviewer: policy.harness,
-      }, now);
     }
     if (!humanLaunch && config.costBudgetUsd && config.costBudgetUsd > 0) {
       this.db.updateSessionCostBudget(id, config.costBudgetUsd, now);
@@ -4875,37 +5195,16 @@ export class SessionsService {
     // The runner emits the user_message into the box store (source of truth) when it runs the
     // initial prompt — the control plane no longer appends it locally.
 
+    // Keep the staged command separate: its durable snapshot has no budget dispatch. Resolve
+    // dispatch here, after materialization, image externalization and sessionChanged, as before.
+    const { sessionId: launchSessionId, ...sharedSpec } = commandSpec;
     const spec: SessionLaunchSpec = {
-      sessionId: id,
+      sessionId: launchSessionId,
       campaignBudgetDispatch: this.db.campaignBudgets.dispatch(id),
-      // For an ad-hoc browsed path there is NO workspace — send null, not the stale configured id, so
-      // the runner's persisted metadata + snapshots don't misattribute it to a workspace it isn't in.
-      workspaceId,
-      workspacePath,
-      agentId: req.agentId,
-      providerAccountId: providerAccount?.id,
-      providerAccountLabel: providerAccount?.label,
-      agentVersion: launch.version,
-      capabilities: launch.capabilities,
-      title,
-      titleSource,
-      command: launch.command,
-      args: launch.args,
-      env: launch.env,
-      useWorktree,
-      executionTarget,
-      executionHandoff,
-      driver: launch.driver,
-      context: launch.context,
-      config,
-      ...(orchestratorPolicy ? { orchestrator: {
-        ...orchestratorPolicy.execution,
-        ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
-        ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
-        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
-      } } : {}),
-      acpSessionContext,
-      ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
+      ...sharedSpec,
+      // The original frames also had distinct orchestrator containers; their nested values and
+      // config were already shared. Preserve that ownership without changing the staged frame.
+      ...(commandSpec.orchestrator ? { orchestrator: { ...commandSpec.orchestrator } } : {}),
     };
     if (capture) {
       if (command.type !== "start_session") throw new Error("Prepared media command is malformed.");
@@ -4942,7 +5241,7 @@ export class SessionsService {
           this.db.deleteSession(id);
           // An undelivered review never ran: it settles, so it no longer holds its requester's one
           // active review, and stays on record.
-          if (creationContext?.review) this.db.reviewSessions.abandon(id, "the review session could not be launched", Date.now());
+          if (creationContext?.review) this.db.reviewSessions.abandon(id, "the review session could not be launched", Date.now(), false);
           this.hub.sessionRemoved(id);
           if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
           return fail("runner disconnected while launching the session", 409);
@@ -4953,6 +5252,8 @@ export class SessionsService {
       }
     }
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
+    if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
+      entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
     return ok(this.db.getSession(id)!, 201);
   }
 
@@ -4964,6 +5265,8 @@ export class SessionsService {
     slashCommand?: string,
     config?: SessionConfig,
     reviewedResultRevision?: string,
+    /** Internal: a Full Control first message's own durable identity (#2940). */
+    binding?: Parameters<SessionsService["prompt"]>[8],
   ): ServiceResult<PromptAdmissionView> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -4980,6 +5283,7 @@ export class SessionsService {
       undefined,
       "session",
       true,
+      binding,
     );
     if (!result.ok) return result;
     if (reviewedResultRevision && this.db.acknowledgeSessionResult(sessionId, userId, reviewedResultRevision)) {
@@ -4994,6 +5298,253 @@ export class SessionsService {
     );
     if (removed.kind === "removed") this.hub.sessionReminderRemoved(userId, sessionId);
     return result;
+  }
+
+  /** A Full Control campaign launched without a task waits for its owner's first message (#2940),
+   * and stays fenced while that message is delivered. Both states are durable, so the fence
+   * survives a control-plane restart. */
+  private awaitingFirstMessage(session: SessionView | null | undefined): boolean {
+    return awaitsFirstMessage(session?.orchestratorPolicy);
+  }
+
+  /** Every ingress that can start a provider turn refuses while the campaign waits for its owner's
+   * first message, except that message's own delivery. */
+  private firstMessageFence(sessionId: string, session = this.db.getSession(sessionId)): string | null {
+    return this.firstMessageDelivery !== sessionId && (this.awaitingFirstMessage(session) || this.firstMessagesInFlight.has(sessionId))
+      ? "This Full Control campaign starts from its owner's first message." : null;
+  }
+
+  /** At startup, a first message whose delivery the last process never settled: one admitted to
+   * the durable queue stays `delivering`, and the queue sends it ahead of any older held work until
+   * the runner acknowledges it; one never admitted reopens the wait, still fenced. It is never
+   * resent, so no duplicate turn can start. */
+  private recoverFirstMessageDeliveries(now: number): void {
+    for (const { sessionId } of this.db.firstMessageDeliveries()) this.reconcileFirstMessageDelivery(sessionId, now, true);
+  }
+
+  /** The runner's acknowledgement of the first message's exact command opens the fence (#2940):
+   * accepted or later settles it as established and releases held work; a known failure or an
+   * uncertain delivery reopens the wait. A command still pending or sent keeps every other
+   * ingress and queued command closed, so nothing can reach the runner before the owner's
+   * message. A delivery with no admitted command reopens only when `orphaned` (at startup). */
+  private reconcileFirstMessageDelivery(sessionId: string, now: number, orphaned = false): void {
+    const first = this.db.getSession(sessionId)?.orchestratorPolicy?.firstMessageScope;
+    if (first?.state !== "delivering") return;
+    // Settled by identity alone: any acknowledged-or-later state of this exact command, including a
+    // completed receipt that arrives first (it clears the stored payload).
+    const state = this.db.firstMessageDeliveryState(sessionId, first.deliveryId);
+    const acknowledged = state !== null && ["accepted", "queued", "started", "completed", "recorded"].includes(state);
+    const undelivered = state === null ? orphaned : state === "failed" || state === "uncertain";
+    if (!acknowledged && !undelivered) return;
+    if (!this.db.settleFirstMessageDelivery(sessionId, first.messageDigest, acknowledged, now)) return;
+    this.log.info(JSON.stringify({ event: "full_control_first_message_settled", sessionId, delivered: acknowledged,
+      commandState: state, messageDigest: first.messageDigest }));
+    if (acknowledged) this.promptOutbox.flush(now, this.db.getSession(sessionId)?.runnerId);
+    this.hub.sessionChangedById(sessionId);
+  }
+
+  /** The authenticated Human's message. To a Full Control campaign still waiting for its first
+   * message, it is the task (#2940): see `deliverFirstFullControlMessage`. */
+  async promptFromHuman(
+    principal: HumanPrincipal,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[] = [],
+    slashCommand?: string,
+    config?: SessionConfig,
+    reviewedResultRevision?: string,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    if (!this.awaitingFirstMessage(this.db.getSession(sessionId))) {
+      const authorityRefusal = this.restoreHumanCampaignAuthority(principal, sessionId);
+      if (authorityRefusal) return authorityRefusal;
+      return this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    }
+    if (this.firstMessagesInFlight.has(sessionId)) return fail("This campaign's first message is still being delivered; wait for it to appear.", 409);
+    this.firstMessagesInFlight.add(sessionId);
+    try {
+      return await this.deliverFirstFullControlMessage(principal, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+    } finally {
+      this.firstMessagesInFlight.delete(sessionId);
+    }
+  }
+
+  /** The ceilings a parent's children are bounded by, over its own session fields. Under a governing
+   * allowance the parent's session limits are its campaign allocation, so its original personal
+   * limits apply; otherwise (a campaign revoked to Custom) its current session limits do (#2940). */
+  private childCeilingsOf(parent: SessionView): Partial<Record<"costBudgetUsd" | "maxToolCalls", number | null>> {
+    return this.db.campaignBudgets.governingRoot(parent.id) ? this.db.campaignBudgets.userLimits(parent.id) ?? {} : {};
+  }
+
+  /** Before a Human's message or restart reaches a Full Control campaign whose boundary is stale
+   * (#2940): when the boundary trails only issue scope this Human approved, it is restored from
+   * those approval records (`repairHumanScopeBoundary`) and the action proceeds; otherwise the
+   * refusal names what happened and how to recover, instead of the allowance check's generic one. */
+  restoreHumanCampaignAuthority(principal: HumanPrincipal, sessionId: string): ServiceResult<never> | null {
+    const session = this.db.getSession(sessionId);
+    const root = session ? this.orchestratorCampaignController(session) : null;
+    if (!root || root === "refused" || root.orchestratorPolicy?.control?.mode !== "full_control" || campaignBoundaryCurrent(root)) return null;
+    const repairer = this.db.humanScopeBoundaryRepairUser(root.id);
+    const owner = this.db.isSessionOwner(principal, root.id);
+    if (owner && repairer === principal.userId) {
+      const now = Date.now();
+      const revoked = this.db.repairHumanScopeBoundary(root.id, principal.userId, now);
+      if (revoked) {
+        for (const decision of revoked) {
+          this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+          this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+        }
+        const repaired = this.db.getSession(root.id)!;
+        const boundary = (repaired.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+        this.log.info(JSON.stringify({ event: "campaign_boundary_restored_from_scope_approval", sessionId: root.id,
+          boundaryRevision: boundary.revision, issueScopeRevision: boundary.issueScopeRevision, revokedDecisions: revoked.length }));
+        for (const member of scopeParticipants(this.db, repaired)) this.hub.sessionChangedById(member.id);
+        this.publishCampaignAttentionTransition(repaired);
+        return null;
+      }
+    }
+    const recovery = "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.";
+    const error = repairer && repairer !== principal.userId
+      ? "This Full Control campaign's authority doesn't yet cover the issue scope another person approved, so it can't continue. " +
+        `That person can restore it by sending a message here; otherwise, ${recovery}`
+      : `This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. ${recovery}`;
+    return { ok: false, status: 409, error, errorDetails: { code: "campaign_authority_stale" } };
+  }
+
+  /** The owner's first message establishes the Full Control boundary the launch left task-only:
+   * the message is the objective, and the issue references it makes to the campaign's own
+   * repository that the runner verifies as issues become the scope. Scope and boundary commit as
+   * the next revisions, bound to the message digest, and reach the runner before the message does,
+   * so the Orchestrator's first turn already runs inside them. Only the Human who authorized the
+   * launch can do this; any other message is refused until then, so agent-authored text can never
+   * establish or widen the scope. A message that is not delivered reopens the wait. */
+  private async deliverFirstFullControlMessage(
+    principal: HumanPrincipal,
+    sessionId: string,
+    text: string,
+    images: PromptImageInput[],
+    slashCommand: string | undefined,
+    config: SessionConfig | undefined,
+    reviewedResultRevision: string | undefined,
+  ): Promise<ServiceResult<PromptAdmissionView>> {
+    const session = this.db.getSession(sessionId)!;
+    const policy = session.orchestratorPolicy!;
+    const control = policy.control as Extract<CampaignControl, { mode: "full_control" }>;
+    if (principal.kind !== "human" || control.boundary.authorizedByUserId !== principal.userId ||
+        !this.db.isSessionOwner(principal, sessionId)) {
+      return fail("Only the person who started this Full Control campaign can send its first message.", 403);
+    }
+    if (!text.trim() || slashCommand) return fail("Send this campaign's task as its first message.", 409);
+    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    const repository = control.boundary.repository.toLowerCase();
+    const references = issueReferencesInMessage(text, repository);
+    const issueNumbers = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
+    const current = this.db.getSession(sessionId);
+    const revision = current?.parentControlPolicy?.revision ?? 0;
+    const scope = current?.orchestratorPolicy?.issueScope;
+    const currentControl = current?.orchestratorPolicy?.control;
+    const pending = current?.orchestratorPolicy?.firstMessageScope;
+    if (!current || pending?.state !== "pending" || !this.awaitingFirstMessage(current) || !scope || currentControl?.mode !== "full_control" ||
+        currentControl.boundary.revision !== revision) {
+      return fail("This campaign's authorization changed; send the message again.", 409);
+    }
+    const now = Date.now();
+    const messageDigest = firstMessageDigest(text);
+    // The durable prompt command the message is admitted as: its exact identity, chosen up front.
+    const deliveryId = `first_message_${randomUUID()}`;
+    const scoped = firstMessageIssues(currentControl.boundary, issueNumbers, pending.derivedLimits);
+    const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers: scoped, revision: scope.revision + 1,
+      authorizedByUserId: principal.userId, authorizedAt: now };
+    const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
+      current.orchestratorPolicy!.behavior.followUps, scoped, firstMessageObjective(text), revision + 1, nextScope.revision, now,
+      pending.derivedLimits) };
+    let established: boolean;
+    try {
+      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, messageDigest, deliveryId,
+        expectedRevision: revision, now });
+    } catch (error) { return fail((error as Error).message, 409); }
+    if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
+    this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
+      scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length, messageDigest }));
+    // A runner that misses this keeps its older revision, which authorizes no issue write; every
+    // issue operation synchronizes again before it acts.
+    await this.synchronizeCampaignIssueScope(sessionId);
+    this.firstMessageDelivery = sessionId;
+    let result: ServiceResult<PromptAdmissionView>;
+    try {
+      // Admitted to the durable queue under its delivery id, where it stays held until established.
+      result = this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision, {
+        durable: true,
+        stage: (runnerId, command, at) => this.promptOutbox.stage(sessionId, runnerId, command, at, deliveryId),
+        claimImmediate: () => true,
+      });
+    } finally { this.firstMessageDelivery = null; }
+    if (!result.ok) {
+      this.db.settleFirstMessageDelivery(sessionId, messageDigest, false, Date.now());
+    } else if (this.db.getSessionPromptCommand(deliveryId)) {
+      // Admitted to the durable queue: the fence stays closed until the runner acknowledges it.
+      this.reconcileFirstMessageDelivery(sessionId, Date.now());
+    } else {
+      // A runner without durable queue identity took it on the session's ordered socket at once.
+      this.db.settleFirstMessageDelivery(sessionId, messageDigest, true, Date.now());
+      this.promptOutbox.flush(Date.now(), session.runnerId);
+    }
+    this.hub.sessionChangedById(sessionId);
+    return result;
+  }
+
+  /** Enabling Full Control on a campaign with no issue scope derives one (#2940): the runner's
+   * repository and the issues the server recorded from the owner's own launch request, as the
+   * runner verifies them. Without such issues the scope is task-only and the owner's next message,
+   * through the fenced first-message path, is the task. Null when the repository cannot be verified. */
+  async campaignScopeFromFirstMessage(sessionId: string): Promise<{ repository: string; issueNumbers: number[]; firstMessage: boolean } | null> {
+    const root = this.db.getSession(sessionId);
+    if (!root?.orchestratorPolicy || root.orchestratorPolicy.issueScope || !this.hub.isRunnerOnline(root.runnerId)) return null;
+    let repository: string | undefined;
+    try {
+      const requestId = `full_control_scope_${randomUUID()}`;
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+        { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId }, 30_000);
+      if (response.type === "campaign_issue_scope_result" && response.ok && response.sessionId === sessionId &&
+          typeof response.repository === "string" && campaignRepositoryLocation(response.repository) &&
+          !gitlabIssueCompatibility(this.db, root, response.repository)) repository = response.repository.toLowerCase();
+    } catch { /* An unreachable runner verifies no repository. */ }
+    if (!repository) return null;
+    // Transcript messages record no author, and a restart backfill reads the transcript, so only
+    // numbers the server marked as the Human's own launch request count. Anything else waits for
+    // the owner's next message.
+    const trusted = root.orchestratorPolicy.issueNumbersSource === "human_launch_request" ? root.orchestratorPolicy.issueNumbers ?? [] : [];
+    const candidates = [...new Set(trusted)].sort((a, b) => a - b).slice(0, 100);
+    const issueNumbers = candidates.length ? await this.verifiedMessageIssues(root, repository, candidates) : [];
+    // Only a fresh root waits for its owner's first message. A campaign with any history is
+    // established at once, task-only without trusted issues, and its retained work runs under it.
+    return { repository, issueNumbers, firstMessage: issueNumbers.length === 0 && !this.db.sessionHasConversationHistory(sessionId) };
+  }
+
+  /** The referenced issues the runner reads as issues of the campaign repository. A pull request,
+   * a missing issue or an unreadable one is left out; an unreachable runner verifies none. */
+  private async verifiedMessageIssues(root: SessionView, repository: string, numbers: number[]): Promise<number[]> {
+    const inspect = async (issues: number[]): Promise<number[] | "refused" | "unavailable"> => {
+      const requestId = `first_message_issues_${randomUUID()}`;
+      try {
+        const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+          { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, issues }, 30_000);
+        if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id) return "unavailable";
+        if (!response.ok || response.repository?.toLowerCase() !== repository) return "refused";
+        return issues.filter((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === repository));
+      } catch { return "unavailable"; }
+    };
+    const all = await inspect(numbers);
+    if (Array.isArray(all)) return all;
+    if (all === "unavailable" || numbers.length === 1) return [];
+    // One reference that is not an issue refuses the whole read, so read each one on its own.
+    const kept: number[] = [];
+    for (let offset = 0; offset < numbers.length; offset += 4) {
+      const batch = numbers.slice(offset, offset + 4);
+      const results = await Promise.all(batch.map((n) => inspect([n])));
+      if (results.includes("unavailable")) break;
+      results.forEach((result, index) => { if (Array.isArray(result) && result.length) kept.push(batch[index]!); });
+    }
+    return kept;
   }
 
   /** A campaign child's assignment carries its Orchestrator's server-derived policy preamble. It
@@ -5142,6 +5693,8 @@ export class SessionsService {
       stage: (runnerId: string, command: DurableSessionCommand, now: number) => SessionPromptCommandRecord;
       claimImmediate: () => boolean;
       admitAs?: "queued";
+      /** Always admit through the durable queue when the runner supports its identity. */
+      durable?: boolean;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -5157,6 +5710,10 @@ export class SessionsService {
     }
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // Only its owner's first message can start a Full Control campaign launched without a task
+    // (#2940); nothing an agent or automation sends may reach it first.
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
@@ -5164,13 +5721,13 @@ export class SessionsService {
     if (budgetError) return fail(budgetError, 409);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
     const budgetConfigError = this.campaignBudgetConfigError(session, requestedConfig);
-    if (budgetConfigError) return fail(budgetConfigError, 409);
+    if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
     if (!snapshotCommand) {
       const campaignBehaviorError = this.campaignChildBehaviorError(session, requestedConfig);
-      if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+      if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
@@ -5392,7 +5949,8 @@ export class SessionsService {
       runnerSupportsProtocol(
         this.db.getRunner(session.runnerId)?.protocolVersion,
         "worktreeRecovery",
-      ));
+      )) || (binding?.durable === true && !delivery &&
+        runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durablePromptQueueIdentity"));
     if (durablePrompt) {
       try {
         if (binding) binding.stage(session.runnerId, command, now);
@@ -5450,7 +6008,12 @@ export class SessionsService {
   }
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
+    this.expireAutomationCreationDecisions(now);
     this.campaignRecovery.maintain(now, runnerId);
+    // A first message whose command expired or failed without a receipt reopens its wait.
+    for (const { sessionId } of this.db.firstMessageDeliveries()) {
+      if (!this.firstMessagesInFlight.has(sessionId)) this.reconcileFirstMessageDelivery(sessionId, now);
+    }
     this.maintainCampaignContinuations(now, runnerId);
     // A receipt recorded just before a restart may never have reached its decision's resume.
     for (const commandId of this.db.settledWorkflowDecisionResumeCommands(runnerId)) {
@@ -5466,6 +6029,14 @@ export class SessionsService {
     for (const sessionId of this.db.sessionsWithHeldRestartNotices(runnerId)) {
       this.deliverHeldRestartNotices(sessionId, now);
     }
+    // And for a finished review's continuation to its requester (#3369).
+    for (const commandId of this.db.settledReviewContinuationCommands(runnerId)) {
+      this.reconcileReviewContinuationCommand(commandId, now);
+    }
+    for (const sessionId of this.db.sessionsWithHeldReviewContinuations(runnerId)) {
+      this.deliverHeldReviewContinuations(sessionId, now);
+    }
+    this.reconcileReviewSessionDisposal(runnerId);
     return this.promptOutbox.flush(now, runnerId);
   }
 
@@ -5479,9 +6050,12 @@ export class SessionsService {
   ): boolean {
     const handled = this.promptOutbox.receipt(runnerId, message);
     if (handled) {
+      const first = this.db.getSession(message.sessionId)?.orchestratorPolicy?.firstMessageScope;
+      if (first?.state === "delivering" && first.deliveryId === message.commandId) this.reconcileFirstMessageDelivery(message.sessionId, Date.now());
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
+      this.reconcileReviewContinuationCommand(message.commandId, Date.now());
     }
     return handled;
   }
@@ -5494,6 +6068,8 @@ export class SessionsService {
       if (active) continue;
       const campaign = this.db.campaignContinuationLifecycle(campaignSessionId);
       if (!campaign || campaign.archived || campaign.status !== "idle" || campaign.hasPendingApproval) continue;
+      // Only its owner's first message may start a Full Control campaign launched without a task (#2940).
+      if (this.firstMessageFence(campaignSessionId)) continue;
       if (this.db.campaignContinuationAdmission(campaignSessionId).state !== "available") continue;
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
       const projection = this.db.campaignProjection(campaignSessionId);
@@ -5755,6 +6331,8 @@ export class SessionsService {
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     const candidate = this.promptOutbox.retryableKnownUndeliveredPrompt(sessionId, commandId);
     if (candidate === "not_found") return fail("pending prompt not found", 404);
     if (candidate === "not_retryable") {
@@ -5774,9 +6352,9 @@ export class SessionsService {
     const configInputError = sessionGuardrailConfigError(candidate.command.config);
     if (configInputError) return fail(configInputError, 400);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session, candidate.command.config);
-    if (budgetError) return fail(budgetError, 409);
+    if (budgetError) return campaignRefusalFail(budgetError);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, candidate.command.config);
-    if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+    if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, candidate.command.config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     const incomingMode = candidate.command.config?.permissionMode;
@@ -5911,9 +6489,9 @@ export class SessionsService {
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
     const budgetConfigError = this.campaignBudgetConfigError(session, config);
-    if (budgetConfigError) return fail(budgetConfigError, 409);
+    if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, config);
-    if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+    if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     if (actor.kind === "agent" && actor.id === sessionId &&
         (config.maxChildSessions === undefined ||
           Object.keys(config).some((key) => key !== "maxChildSessions"))) {
@@ -6120,6 +6698,9 @@ export class SessionsService {
 
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    // A provider command can start a turn of its own, so it waits for the owner's first message too.
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     const existing = this.db.getSessionCommandInvocationBySubmission(sessionId, request.submissionId);
     if (existing) {
       if (existing.providerCommandId !== request.providerCommandId ||
@@ -6369,6 +6950,8 @@ export class SessionsService {
     this.db.compactSteeringAttempts(Date.now());
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
+    const firstMessageRefusal = this.firstMessageFence(sessionId, session);
+    if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     if (!request || typeof request.submissionId !== "string" || !request.submissionId.trim() ||
         request.submissionId.length > 256 || request.submissionId.trim() !== request.submissionId) {
       return fail("submissionId must be a non-empty identifier", 400);
@@ -7102,6 +7685,47 @@ export class SessionsService {
     }
   }
 
+  /** Release a session's worktree or provider-account handoff hold now (#3752): the runner ends the
+   * work the hold waits on exactly as the hold's deadline would, records every ended job as killed
+   * at the actor's request, and then runs the handoff and the queued prompts in order. `holdId` is
+   * the hold the requester saw; a cleared or replaced hold is refused without ending anything. The
+   * caller has already established that the actor is the session owner or its controlling
+   * Orchestrator, the same authority that stops one background job. */
+  async releaseQueueHold(
+    sessionId: string,
+    holdId: string,
+    actor: BackgroundJobStopActor,
+  ): Promise<ServiceResult<QueueHoldReleaseResponse>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const unsupported = this.capabilityFailure(session.runnerId, "queueHoldRelease", "releasing a queue hold");
+    if (unsupported) return unsupported;
+    const requestId = `releasehold_${randomUUID()}`;
+    try {
+      const result = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "release_queue_hold",
+        requestId,
+        sessionId,
+        holdId,
+        actor,
+      }, BACKGROUND_JOB_STOP_TIMEOUT_MS);
+      if (result.type !== "release_queue_hold_result" || result.sessionId !== sessionId || result.holdId !== holdId) {
+        return fail("runner returned an invalid queue hold release response", 502);
+      }
+      if (result.outcome === "refused") return fail(queueHoldReleaseRefusal(result.reason), 409);
+      if (result.outcome !== "released" || !Array.isArray(result.jobIds) ||
+        !result.jobIds.every((jobId) => typeof jobId === "string")) {
+        return fail("runner returned an invalid queue hold release response", 502);
+      }
+      return ok({ sessionId, holdId, outcome: "released", jobIds: [...result.jobIds] });
+    } catch (error) {
+      const message = (error as Error).message;
+      if (/offline|not sent/i.test(message)) return fail("runner is offline", 409);
+      if (/respond in time/i.test(message)) return fail("the runner did not answer the release request in time", 504);
+      return fail(`releasing the queue hold failed: ${message}`, 502);
+    }
+  }
+
   /** Restore an archived session to the Inbox and relaunch it as one server-owned operation. Every
    * restart preflight runs while the session is still archived, and the archive flag is cleared only
    * after the launch is handed to the runner, so a refusal leaves it archived and untouched. */
@@ -7122,7 +7746,11 @@ export class SessionsService {
     return this.restart(sessionId, { unarchive: true });
   }
 
-  restart(sessionId: string, options: { unarchive?: boolean } = {}): ServiceResult<SessionView> {
+  restart(sessionId: string, options: {
+    unarchive?: boolean;
+    /** #3240: wait for a busy provider account instead of failing the launch. */
+    waitForProviderHome?: boolean;
+  } = {}): ServiceResult<SessionView> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "runs once and cannot be restarted");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before restarting", 409);
@@ -7130,8 +7758,8 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
-    if (budgetError) return fail(budgetError, 409);
-    const budgetRoot = this.db.campaignBudgets.root(sessionId);
+    if (budgetError) return campaignRefusalFail(budgetError);
+    const budgetRoot = this.db.campaignBudgets.governingRoot(sessionId);
     const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
       return fail("retry the failed Stop before restarting the session", 409);
@@ -7151,7 +7779,7 @@ export class SessionsService {
           return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
         }
         const allowanceError = childRestartAllowanceError(
-          { ...parent, ...this.db.campaignBudgets.userLimits(parent.id) },
+          { ...parent, ...this.childCeilingsOf(parent) },
           allocated,
           this.db.childSessionRestartReservation(session.id),
         );
@@ -7171,6 +7799,11 @@ export class SessionsService {
       (session.workspaceId ? this.db.getWorkspacePath(session.runnerId, session.workspaceId) : null);
     if (!workspacePath) return fail("session has no resolvable workspace directory to restart from", 400);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
+    // An older runner would ignore the request and fail the launch on the busy account again.
+    if (options.waitForProviderHome) {
+      const unsupported = this.capabilityFailure(session.runnerId, "providerHomeWait", "waiting for a busy account");
+      if (unsupported) return unsupported;
+    }
     // The workspace strategy is not frozen at creation, and the runner derives the placement it
     // expects from the launch's own `useWorktree`. A selected session worktree is what decides
     // where this relaunch lands — the runner reattaches one whether or not the flag asks it to — so
@@ -7312,6 +7945,7 @@ export class SessionsService {
     const spec: SessionLaunchSpec = {
       sessionId,
       controlPlaneLaunchId: restartLaunchId,
+      ...(options.waitForProviderHome ? { waitForProviderHome: true } : {}),
       workspaceId: session.workspaceId,
       workspacePath,
       agentId,
@@ -7357,7 +7991,7 @@ export class SessionsService {
     const priorBudgetDispatch = budgetRoot ? this.db.campaignBudgets.dispatchState(sessionId) : null;
     if (budgetRoot) {
       const unsupported = this.campaignBudgetConfigError(session, spec.config, launch.driver);
-      if (unsupported) return fail(unsupported, 409);
+      if (unsupported) return campaignRefusalFail(unsupported);
       try { this.db.campaignBudgets.admit(budgetRoot, this.db.campaignBudgets.allocation(sessionId)!, {}); }
       catch (error) { return fail((error as Error).message, 409); }
       spec.campaignBudgetDispatch = this.db.campaignBudgets.replaceDispatch(sessionId);
@@ -7739,17 +8373,77 @@ export class SessionsService {
 
   private ledgerWrite<T extends { revision: number }>(
     scope: { caller: SessionView; root: SessionView },
-    write: () => { ok: true; data: T } | { ok: false; status: number; error: string },
+    write: () => { ok: true; data: T } | { ok: false; status: number; error: string; details?: Record<string, string | number> },
   ): ServiceResult<T> {
     const before = this.db.campaignWorkLedger.revision(scope.root.id);
     const attemptsBefore = this.db.campaignWorkLedger.openAttemptsBySession(scope.root.id);
+    const approvedBefore = this.db.campaignFollowUpApprovedOccurrences(scope.root.id);
     const result = write();
-    if (!result.ok) return fail(result.error, result.status);
+    if (!result.ok) {
+      return result.details?.code === "follow_up_approval_required"
+        ? this.followUpApprovalRequired(scope.root, result.details) : fail(result.error, result.status);
+    }
+    // A follow-up admitted past the approval limit consumed the Human's approval in the same write.
+    const now = Date.now();
+    for (const occurrenceId of approvedBefore) {
+      const consumed = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (consumed?.status !== "consumed") continue;
+      this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: scope.caller.id }, now);
+      this.log.info(JSON.stringify({ event: "campaign_follow_up_admitted", sessionId: scope.root.id, occurrenceId }));
+      this.hub.sessionChangedById(scope.root.id);
+    }
     if (result.data.revision !== before) {
       this.campaignLedgerChanged(scope.root.id, scope.caller.id);
       this.campaignMembershipsChanged(scope.root.id, attemptsBefore);
     }
     return ok(result.data);
+  }
+
+  /** A follow-up past the campaign's approval limit (#2940) becomes the Human's decision instead of a
+   * refusal: the first attempt requests it for exactly that follow-up, and accepting it again after
+   * approval admits it once. While pending, or after a denial, accepting it is refused by name. */
+  private followUpApprovalRequired(root: SessionView, details: Record<string, string | number>): ServiceResult<never> {
+    const subject: CampaignFollowUpSubject = details.subjectKind === "recommendation"
+      ? { kind: "recommendation", recommendationId: String(details.subjectId) } : { kind: "work_item", key: String(details.subjectId) };
+    const limit = details.limit === undefined ? null : Number(details.limit), accepted = Number(details.acceptedFollowUps);
+    const title = String(details.title);
+    const issue = details.issueRepository === undefined ? null : { repository: String(details.issueRepository), number: Number(details.issueNumber) };
+    const revises = details.revises === undefined ? undefined : String(details.revises);
+    const rebinds = revises !== undefined && details.rebinds === 1;
+    const recommendationTitle = details.recommendationTitle === undefined ? undefined : String(details.recommendationTitle);
+    const identityDigest = String(details.identityDigest);
+    const snapshot: CampaignFollowUpAdmissionSnapshot = { category: "campaign_follow_up_admission", subject, title, issue,
+      ...(recommendationTitle === undefined ? {} : { recommendationTitle }), identityDigest,
+      acceptedFollowUps: accepted, limit, ...(revises ? { revises } : {}), ...(rebinds ? { rebinds: true as const } : {}) };
+    // A follow-up admitted past the limit stays bound to what the person approved: a change to its
+    // title or issue is a decision of its own (#2940).
+    const named = rebinds
+      ? `Accepting recommendation "${recommendationTitle}" into a follow-up admitted past the campaign's follow-up limit as "${title}" needs the person's approval`
+      : revises
+      ? "This follow-up was admitted past the campaign's follow-up limit, so changing its title or issue needs the person's approval"
+      : `This follow-up is past the campaign's limit of ${limit} follow-up${limit === 1 ? "" : "s"} without approval (${accepted} accepted)`;
+    const again = revises ? "make the change again" : "accept it again";
+    const latest = this.db.campaignFollowUpAdmission(root.id, subject);
+    // A decision about other content for the same follow-up is not about this request.
+    const bound = latest?.resourceSnapshot;
+    const same = bound?.category === "campaign_follow_up_admission" && bound.revises === revises && bound.identityDigest === identityDigest;
+    if (same && latest?.status === "denied") {
+      return fail(`${named}, and the person denied it (decision ${latest.occurrenceId}). Do not ${again}; ` +
+        (revises ? "keep the follow-up as approved." : "it stays refused unless they raise the follow-up limit."), 409);
+    }
+    if (same && latest?.status === "pending") {
+      return fail(`${named}. It is waiting for the person's decision ${latest.occurrenceId}; ${again} once they approve it.`, 409);
+    }
+    const requested = this.createWorkflowDecision(root.id, {
+      requestId: `follow_up_admission_${randomUUID()}`,
+      resourceKey: campaignFollowUpAdmissionKey(root.id, subject),
+      resourceSnapshot: snapshot,
+    }, () => true, { trustedFollowUpAdmission: true });
+    if (!requested.ok || !requested.data) return fail(`${named}, and its approval could not be requested: ${requested.error}`, 409);
+    this.log.info(JSON.stringify({ event: "campaign_follow_up_approval_requested", sessionId: root.id,
+      occurrenceId: requested.data.occurrenceId, acceptedFollowUps: accepted, limit, revision: Boolean(revises) }));
+    return fail(`${named}${revises ? "." : ", so it needs the person's approval."} Requested decision ${requested.data.occurrenceId}; ` +
+      `${again} once they approve it. If they deny it, it stays refused.`, 409);
   }
 
   /** A session's `campaignMembership` names its open attempt, so re-send every session whose open
@@ -7966,6 +8660,7 @@ export class SessionsService {
    * rather than resolved to whichever Orchestrator the loop saw last; every caller must then refuse
    * its operation (#2468). A sound chain never exceeds the loop's bound, so its result is unchanged. */
   private orchestratorCampaignController(start: SessionView | null): SessionView | null | "refused" {
+    if (start?.kind === "review") return null;
     if (start && this.db.campaignAncestryRoot(start.id) === "refused") return "refused";
     const seen = new Set<string>();
     let current = start;
@@ -7989,6 +8684,7 @@ export class SessionsService {
   }
 
   private campaignAttentionController(session: SessionView | null, batch?: RunnerAttentionBatch): SessionView | null {
+    if (session?.kind === "review") return null;
     if (batch) return batch.capture(session);
     return session?.parentSessionId
       ? this.campaignEventController(this.db.getSession(session.parentSessionId))
@@ -8160,20 +8856,19 @@ export class SessionsService {
     if (full && evaluation.owner === "orchestrator" && evaluation.disposition === "decline") {
       return this.declineStandingRequest(controller, session, request, evaluation);
     }
-    if (declineOnly || controller.id !== sessionId || !request.occurrenceId ||
-        pendingRequests(session.pendingApproval).some((candidate) =>
-          isPolicyApproval(candidate) && candidate.requestId !== request.requestId)) return false;
+    // The root's own typed workflow decisions never park its provider, so they cannot stand between
+    // it and a standing response: counting them once left a root waiting on itself (#2940).
+    if (declineOnly || controller.id !== sessionId || !request.occurrenceId || request.kind === "question" ||
+        pendingRequests(session.pendingApproval).some((candidate) => isPolicyApproval(candidate) &&
+          candidate.kind !== "workflow_decision" && candidate.requestId !== request.requestId)) return false;
     if (evaluation.owner !== "orchestrator" || evaluation.basis !== "standing_authorization") return false;
     const actor: GovernanceActor = { kind: "system", id: "campaign-standing-authorization" };
-    const answers = request.kind === "question" ? standingRootQuestionAnswers(request) : null;
     const optionId = request.options.find((option) => option.kind === "allow_once")?.optionId;
-    if (!(request.kind === "question" ? answers : optionId)) return false;
+    if (!optionId) return false;
     // At most once per exact occurrence: a card a snapshot restores is never answered again.
     const fence = this.standingResponseFence(controller, session, request);
     if (!fence.claimed) return true;
-    const result = request.kind === "question" && answers
-      ? this.answerQuestion(sessionId, request.requestId, answers, actor, "submit", sessionId, request.occurrenceId)
-      : this.approve(sessionId, request.requestId, optionId!, actor, sessionId);
+    const result = this.approve(sessionId, request.requestId, optionId, actor, sessionId);
     if (!result?.ok) {
       fence.release();
       const pending = this.db.getSession(sessionId)?.pendingApproval;
@@ -8261,6 +8956,26 @@ export class SessionsService {
           this.log.warn(`unresolved-effect decline guidance failed for ${session.id}: ${(error as Error).message}`);
         }
       });
+    } else if (evaluation.requestClass === "root_questions" && session.id === controller.id) {
+      // The question was observed as an Orchestrator-owned request just before it was dismissed;
+      // settle that record now rather than show the root a request it can no longer answer.
+      const first = this.db.campaignRecovery.recordDecline(controller.id, session.id, "root_questions", occurrence, revision, now).firstForClass;
+      this.campaignRecovery.synchronize(this.db.getSession(controller.id) ?? controller, now);
+      // A bare dismissal reads as a person declining (#2940). Tell the root once per policy revision
+      // that nobody sees its questions and how to decide them itself, after this event settles; a
+      // root that ended its turn on the dismissal is woken by this message rather than left idle.
+      // Later questions are still dismissed but wake nothing: one notice per question could loop a
+      // root that answers each notice with another question. Neither provider's dismissal carries
+      // text (Claude Code sends a fixed deny message; Codex an empty answer set), so the guidance
+      // cannot ride on the dismissal itself without a runner protocol change.
+      if (first) setImmediate(() => {
+        try {
+          const delivered = this.prompt(session.id, FULL_CONTROL_ROOT_QUESTION_MESSAGE);
+          if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);
+        } catch (error) {
+          this.log.warn(`root question guidance failed for ${session.id}: ${(error as Error).message}`);
+        }
+      });
     }
     this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "standing_decline",
       sessionId: session.id, controllingSessionId: controller.id, requestId: request.requestId,
@@ -8275,7 +8990,13 @@ export class SessionsService {
     issueAuthority?: CampaignAuthorityBoundary["issueAuthority"];
     budgetAuthority?: CampaignAuthorityBoundary["budgetAuthority"];
     evidenceAuthority?: EvidenceAuthorityProposal;
-  }, expectedRevision: number, principal: HumanPrincipal): ServiceResult<SessionView> {
+  }, expectedRevision: number, principal: HumanPrincipal,
+  /** Enable only, for a campaign with no issue scope yet (#2940): the scope the server derived
+   * from the runner's repository and the campaign's first message, which this Human establishes
+   * with the boundary. `firstMessage` when no message has been sent: the next one is the task. */
+  derivedScope?: { repository: string; issueNumbers: number[]; firstMessage: boolean },
+  /** This authorization's own limit provenance, which a waiting campaign keeps (#2940). */
+  derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
     const root = this.orchestratorCampaignController(session);
@@ -8283,14 +9004,24 @@ export class SessionsService {
     if (!proposal || typeof proposal !== "object" || Array.isArray(proposal) || !["custom", "full_control"].includes(proposal.mode)) return fail("invalid campaign control mode", 400);
     if (proposal.mode === "custom" && Object.keys(proposal).some((key) => key !== "mode")) return fail("Custom has no authority boundary", 400);
     if (proposal.mode === "full_control" && Object.keys(proposal).some((key) => !["mode", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key))) return fail("invalid campaign authority fields", 400);
-    const scope = session.orchestratorPolicy?.issueScope;
+    // A reauthorization cannot race the first message it would bound (#2940).
+    if (proposal.mode === "full_control" && (this.firstMessagesInFlight.has(sessionId) ||
+        session.orchestratorPolicy?.firstMessageScope?.state === "delivering")) {
+      return fail("The first message is being delivered; try again in a moment.", 409);
+    }
     const now = Date.now();
+    const storedScope = session.orchestratorPolicy?.issueScope;
+    if (derivedScope && (storedScope || proposal.mode !== "full_control")) return fail("the campaign's issue scope changed; refresh and retry", 409);
+    const mintedScope: CampaignIssueScope | undefined = derivedScope ? { repository: derivedScope.repository.toLowerCase(),
+      issueNumbers: [...derivedScope.issueNumbers].sort((a, b) => a - b), revision: 1, authorizedByUserId: principal.userId, authorizedAt: now } : undefined;
+    const scope = storedScope ?? mintedScope;
     const control = proposal.mode === "custom" ? { mode: "custom" as const } : scope &&
       authorizeFullControl(principal, scope, proposal, expectedRevision + 1, now);
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
       if (control.boundary.issueAuthority) {
-        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues) {
+        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) >
+            this.db.campaignIssueLimit(sessionId, control.boundary.issueAuthority.maxIssues)) {
           return fail("The issue boundary exceeds its human-set scope limit.", 409);
         }
         const outdated = scopeParticipants(this.db, session).find((participant) =>
@@ -8320,7 +9051,7 @@ export class SessionsService {
         if (participant.runnerId !== session.runnerId || participant.workspaceId !== session.workspaceId) return fail("campaign participants must share the repository workspace and runner", 409);
         const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion,
           this.pacedVideoInstallationContract(participant.runnerId, participant.agentId));
-        if (!preflight.supported) return fail(preflight.reason!, 409);
+        if (!preflight.supported) return campaignRefusalFail(preflight.requirement ?? preflight.reason!);
         if (control.boundary.budgetAuthority) {
           const accountingError = this.db.campaignBudgetAccountingError(participant.driver, participant.model, control.boundary.budgetAuthority.costUsd !== undefined);
           if (accountingError || participant.adopted || this.activeAgentTuiGuardrailError(participant, { maxToolCalls: 1 })) return fail(accountingError ?? "Campaign allowance cannot cover an unmetered provider launch.", 409);
@@ -8334,8 +9065,13 @@ export class SessionsService {
     }
     const outstanding = this.db.unconsumedWorkflowDecisionsForController(sessionId);
     try {
-      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now)) return fail("campaign authority revision changed; refresh and retry", 409);
+      if (!this.db.updateSessionCampaignControl(sessionId, control, expectedRevision, now,
+        mintedScope ? { issueScope: mintedScope, firstMessage: derivedScope!.firstMessage } : undefined,
+        proposal.mode === "full_control" ? derivedLimits : undefined)) return fail("campaign authority revision changed; refresh and retry", 409);
     } catch (error) { return fail((error as Error).message, 409); }
+    // The runner holds the scope it enforces issue writes against; each issue operation also
+    // synchronizes again before it acts.
+    if (mintedScope) void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of this.db.campaignBudgets.members(sessionId)) this.syncCampaignAllocation(id);
     this.recoverCampaignReviewJobs(session.runnerId);
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);
@@ -8360,6 +9096,37 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  /** The campaign owner's change to how many follow-ups its Full Control campaign accepts without
+   * approval (#2940), `null` for no limit. Human-only, compare-and-set on the policy revision; the
+   * boundary is re-minted around it (`ControlPlaneDb.setCampaignFollowUpLimit`). */
+  setCampaignFollowUpLimit(sessionId: string, request: SetCampaignFollowUpLimitRequest, principal: HumanPrincipal): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
+    const root = this.orchestratorCampaignController(session);
+    if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) {
+      return fail("Only a live root campaign can change its follow-up limit.", 409);
+    }
+    const limit = request?.acceptedFollowUps;
+    if (!request || typeof request !== "object" || Array.isArray(request) || !Number.isSafeInteger(request.expectedRevision) ||
+        Object.keys(request).some((key) => key !== "acceptedFollowUps" && key !== "expectedRevision") ||
+        !(limit === null || Number.isSafeInteger(limit) && limit >= 0 && limit <= 1000)) {
+      return fail("Enter a whole number of follow-ups from 0 to 1000, or choose no limit.", 400);
+    }
+    const now = Date.now();
+    const result = this.db.setCampaignFollowUpLimit(sessionId, limit, principal.userId, request.expectedRevision, now);
+    if (!result.ok) return fail(result.error, result.status);
+    for (const decision of result.revoked) {
+      this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+      this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+    }
+    const updated = this.db.getSession(sessionId)!;
+    this.log.info(JSON.stringify({ event: "campaign_follow_up_limit_changed", sessionId, acceptedFollowUps: limit,
+      policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
+    for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
+    this.publishCampaignAttentionTransition(updated);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
   /** A root can exercise its existing human authorization, but cannot manufacture a campaign or
    * resolve protected requests by treating itself as a descendant. */
   private workflowDecisionRelationship(controllerId: string, requesterId: string): boolean {
@@ -8370,15 +9137,13 @@ export class SessionsService {
       campaignBoundaryCurrent(controller) && root !== "refused" && root?.id === controllerId;
   }
 
-  /** Controlled review refuses any worker holding its own cost or tool-call ceiling, so a campaign
-   * that requires it admits only children the campaign allocation alone limits. Refusing here,
-   * before any write, keeps every admitted child review-admissible. */
+  /** Preserve the existing human boundary until its owner replaces the obsolete native profile;
+   * retirement must not silently weaken the grant's original ceiling restrictions. */
   private controlledReviewCeilingError(budgetRoot: string, limits: { costUsd?: number; toolCalls?: number }): string | null {
     if (!this.db.campaignBudgets.view(budgetRoot)?.authority.controlledReview) return null;
     if (!((limits.costUsd ?? 0) > 0 || (limits.toolCalls ?? 0) > 0)) return null;
-    return "This campaign requires controlled cross-model review, which cannot run under a per-session cost or tool-call limit. " +
-      "Create the child without costBudgetUsd or maxToolCalls; the campaign allocation limits it. " +
-      "If the Project sets child-session defaults, a person must clear them for this campaign's Project.";
+    return "This campaign retains a retired controlled-review boundary. A person must replace that obsolete boundary " +
+      "before adding per-session cost or tool-call ceilings; review sessions do not inherit a native-review grant.";
   }
 
   /** Production reviewer adapters must use this preflight rather than treating a shell worker
@@ -8396,7 +9161,7 @@ export class SessionsService {
         !this.db.campaignBudgets.active(member.id) || isTerminal(member.status) || hasBlockingPendingRequest(member.pendingApproval) ||
         member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
     const accountingError = this.campaignBudgetConfigError(member);
-    if (accountingError) return fail(accountingError, 409);
+    if (accountingError) return campaignRefusalFail(accountingError);
     const error = this.db.campaignBudgets.admissionError(worker.sessionId);
     if (error) return fail(error, 409);
     const admission = { rootSessionId: campaignId, authorityRevision: control.boundary.revision,
@@ -8416,14 +9181,14 @@ export class SessionsService {
     const member = this.db.getSession(allocation.sessionId);
     if (!member) return fail("allocation worker not found", 404);
     const peerError = this.campaignBudgetConfigError(member);
-    if (peerError) return fail(peerError, 409);
+    if (peerError) return campaignRefusalFail(peerError);
     const prior = this.db.campaignBudgets.allocation(member.id)!;
     allocation = { ...prior, ...allocation };
     const active = this.db.campaignBudgets.active(member.id);
     if (active && ((allocation.costUsd ?? 0) < (prior.costUsd ?? 0) ||
         (allocation.toolCalls ?? 0) < (prior.toolCalls ?? 0))) return fail("a live allocation cannot be released before cancellation settles; finish this worker before redistributing its unspent reservation", 409);
     if (!isTerminal(member.status) && !this.hub.isRunnerOnline(member.runnerId)) return fail("allocation cannot change while its runner is offline", 409);
-    try { this.db.campaignBudgets.admit(rootId, allocation, {}, active); }
+    try { this.db.campaignBudgets.admit(rootId, allocation, {}, active, false); }
     catch (error) { return fail((error as Error).message, 409); }
     if (!this.syncCampaignAllocation(member.id)) {
       // Keep the reservation until delivery/reconnect; never refund a possibly applied change.
@@ -8436,47 +9201,9 @@ export class SessionsService {
 
   requestCampaignReviewJob(callerSessionId: string, request: import("@wollipog/protocol").CampaignReviewJobRequest,
     canAccess: (id:string)=>boolean=()=>true): ServiceResult<import("@wollipog/protocol").CampaignReviewJobView> {
-    const scope=this.campaignLedgerScope(callerSessionId,canAccess);
-    if(!scope.ok || !scope.data) return failAs(scope);
-    const root=scope.data.root,control=root.orchestratorPolicy?.control;
-    if(!request || typeof request!=="object" || Object.keys(request).some((k)=>!["requestId","workItemId","pullRequest","baseSha","headSha","costUsd","toolCalls","brief"].includes(k)) ||
-        typeof request.requestId!=="string" || !/^[a-zA-Z0-9_-]{1,128}$/.test(request.requestId) || typeof request.workItemId!=="string" ||
-        typeof request.brief!=="string" || request.brief.length<1 || request.brief.length>100_000 ||
-        !/^[a-f0-9]{40}$/.test(request.baseSha) || !/^[a-f0-9]{40}$/.test(request.headSha) ||
-        !Number.isFinite(request.costUsd) || request.costUsd<=0 || !Number.isSafeInteger(request.toolCalls) || request.toolCalls<=0 ||
-        !request.pullRequest || !/^[a-zA-Z0-9_.-]+\/[a-zA-Z0-9_.-]+$/.test(request.pullRequest.repository) ||
-        !Number.isSafeInteger(request.pullRequest.number) || request.pullRequest.number<=0 ||
-        Object.keys(request.pullRequest).some((k)=>!["repository","number"].includes(k))) return fail("invalid bounded review request",400);
-    if(control?.mode!=="full_control" || !campaignBoundaryCurrent(root) || !control.boundary.budgetAuthority?.controlledReview ||
-        root.archived || isTerminal(root.status) || hasBlockingPendingRequest(root.pendingApproval) ||
-        this.db.campaignBudgets.view(root.id)?.state!=="active") return fail("Required native reviewer admission is unsupported without current human-minted budget/profile authority and unblocked owner admission.",409);
-    const runner=this.db.getRunner(root.runnerId),profile=runner?.runtime?.campaignReview;
-    if(!this.hub.isRunnerOnline(root.runnerId) || !runnerSupportsProtocol(runner?.protocolVersion,"campaignBudgetAdmission") || !profile ||
-        controlledReviewCapabilityKey(profile)!==controlledReviewCapabilityKey(control.boundary.budgetAuthority.controlledReview)) return fail("Required native reviewer capability/profile is unavailable or changed; unattended readiness is refused.",409);
-    const item=this.db.campaignWorkLedger.detail(root.id,request.workItemId,Date.now(),canAccess);
-    const worker=item?.currentAttempt?.sessionId?this.db.getSession(item.currentAttempt.sessionId):null;
-    if(!item?.issue || !worker || !canAccess(root.id) || !canAccess(worker.id) || hasBlockingPendingRequest(worker.pendingApproval) || worker.runnerId!==root.runnerId || worker.workspaceId!==root.workspaceId ||
-        this.db.campaignBudgets.root(worker.id)!==root.id || !worker.worktreePath ||
-        item.issue.repository.toLowerCase()!==request.pullRequest.repository.toLowerCase() ||
-        !root.orchestratorPolicy?.issueScope?.issueNumbers.includes(item.issue.number) ||
-        !item.stage?.pullRequests?.some((pr)=>pr.repository.toLowerCase()===request.pullRequest.repository.toLowerCase() && pr.number===request.pullRequest.number)) return fail("review target must be the authorized assigned work item and its recorded canonical PR",409);
-    const ownerScope=this.db.sessionScope(root.id);
-    if(ownerScope?.owner.kind!=="user") return fail("Required native review accounting for non-user campaign ownership is unsupported.",409);
-    if(ownerScope && this.db.getUsageDailyBudget(ownerScope.organizationId).perUserUsd!==null) return fail("Required native review admission with organization daily limits is unsupported; no daily allowance may be bypassed.",409);
-    for(const id of [root.id,worker.id]) {
-      const personal=this.db.campaignBudgets.userLimits(id);
-      if(personal?.costBudgetUsd!=null || personal?.maxToolCalls!=null) return fail("Required native review admission with inherited tighter session limits is unsupported; the campaign envelope cannot override them.",409);
-    }
-    try {
-      request={requestId:request.requestId,workItemId:request.workItemId,pullRequest:{repository:request.pullRequest.repository.toLowerCase(),number:request.pullRequest.number},baseSha:request.baseSha,headSha:request.headSha,costUsd:request.costUsd,toolCalls:request.toolCalls,brief:request.brief};
-      const command=this.db.campaignReviewJobs.reserve(root.id,root.runnerId,worker.id,control.boundary.revision,profile,request,
-        {workItemAttemptId:item.currentAttempt!.id,issue:item.issue});
-      const view=this.db.campaignReviewJobs.view(command.jobId)!;
-      if(["reserved","running"].includes(view.state) && !this.hub.sendToRunner(root.runnerId,command)) return fail("review reservation retained while runner delivery is unavailable",409);
-      this.hub.sessionChangedById(root.id);
-      this.log.info(JSON.stringify({event:"campaign_review_job_admitted",rootId:root.id,jobId:command.jobId,round:view.round,attempt:view.attempt,costUsd:request.costUsd,toolCalls:request.toolCalls}));
-      return ok(view);
-    } catch(error) { return fail((error as Error).message,409); }
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok) return failAs(scope);
+    return fail(REVIEW_JOBS_RETIRED_REASON, 410);
   }
 
   campaignReviewJob(callerSessionId:string,jobId:string,canAccess:(id:string)=>boolean=()=>true):ServiceResult<import("@wollipog/protocol").CampaignReviewJobView> {
@@ -8536,18 +9263,22 @@ export class SessionsService {
     const command=this.db.campaignReviewJobs.command(update.jobId)!;
     const root=this.db.getSession(command.rootSessionId),control=root?.orchestratorPolicy?.control;
     const supported=runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion,"campaignBudgetAdmission");
+    // A retirement-aware runner has no live controller. Replaying its terminal/unknown receipt
+    // must not elicit another cancel and create a cancel/receipt feedback loop.
+    const cancelLive = update.state === "running" || update.state === "accounting_unavailable" &&
+      !runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "reviewSessionOnly");
     if(!supported) this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable",
       "Required native review updates need a supported accounting peer; charges are retained and protected admission stopped.");
     const view=this.db.campaignBudgets.view(command.rootSessionId);
     const ownerScope=root?this.db.sessionScope(root.id):null;
     if(ownerScope && this.db.getUsageDailyBudget(ownerScope.organizationId).perUserUsd!==null) {
       this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable","Native review admission cannot continue across a newly enabled organization daily limit.");
-      if(supported) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+      if(supported && cancelLive) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
       this.enforceCampaignBudget(command.rootSessionId,Date.now());
     }
     if(control?.mode!=="full_control" || !root || !campaignBoundaryCurrent(root) || control.boundary.revision!==command.authorityRevision || view?.state!=="active" ||
         update.toolCalls>=command.request.toolCalls || (update.costUsd??0)>=command.request.costUsd) {
-      if(supported) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
+      if(supported && cancelLive) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
     }
     if(view?.state!=="active") this.enforceCampaignBudget(command.rootSessionId,Date.now());
     this.hub.sessionChangedById(command.rootSessionId);
@@ -8555,89 +9286,24 @@ export class SessionsService {
   }
 
   recoverCampaignReviewJobs(runnerId:string):void {
-    const supported=runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion,"campaignBudgetAdmission");
-    for(const command of this.db.campaignReviewJobs.commands(runnerId)) {
-      if(!supported) {
-        // A downgraded peer cannot receive either review dispatch or cancellation frames. Keep
-        // all possible charges reserved and stop protected admission rather than re-dispatching.
-        this.db.campaignBudgets.stop(command.rootSessionId,"accounting_unavailable",
-          "Required native review recovery needs a supported accounting peer; reservation retained and protected admission stopped.");
-        this.enforceCampaignBudget(command.rootSessionId,Date.now());
-        continue;
+    const supported = runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "campaignBudgetAdmission");
+    for (const command of this.db.campaignReviewJobs.commands(runnerId)) {
+      // Never redispatch a retired job. Unknown launched cost stays reserved until an owning
+      // runner's authenticated final receipt settles it; cancellation itself refunds nothing.
+      if (supported) this.hub.sendToRunner(runnerId, { type: "cancel_campaign_review_job", jobId: command.jobId, nonce: command.nonce });
+      if (!supported) {
+        this.db.campaignBudgets.stop(command.rootSessionId, "accounting_unavailable", REVIEW_JOBS_RETIRED_REASON);
+        this.enforceCampaignBudget(command.rootSessionId, Date.now());
       }
-      // Reuse the exact existing request, applying the same current profile/owner/scope/limits
-      // checks as first dispatch. Its durable request identity cannot admit another provider.
-      const admitted=this.requestCampaignReviewJob(command.rootSessionId,command.request);
-      if(!admitted.ok) this.hub.sendToRunner(runnerId,{type:"cancel_campaign_review_job",jobId:command.jobId,nonce:command.nonce});
     }
   }
 
-  /**
-   * #3306: a session asks its runner to run the installed cross-model review controller for the
-   * session's own open pull request at its pushed head, outside the session's sandbox. A session
-   * may request only its own review; the runner checks the worktree, pull request and head itself.
-   */
+  /** Authenticated compatibility tombstone; the retired route never admits work. */
   requestSessionReviewJob(callerSessionId: string, request: SessionReviewJobRequest,
     canAccess: (id: string) => boolean = () => true): ServiceResult<SessionReviewJobView> {
     const session = this.db.getSession(callerSessionId);
     if (!session || !canAccess(session.id)) return fail("session not found", 404);
-    const pullRequest = request?.pullRequest;
-    if (!request || typeof request !== "object" || Array.isArray(request) ||
-        Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "scope", "fullReason"].includes(key)) ||
-        !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
-        typeof pullRequest.repository !== "string" || !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
-        !Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
-      return fail("a review needs pullRequest {repository: \"owner/name\", number: a positive integer}", 400);
-    }
-    if (typeof request.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(request.headSha)) {
-      return fail("headSha must be the pull request's full 40-character lowercase head commit", 400);
-    }
-    if (request.brief !== undefined && (typeof request.brief !== "string" || !request.brief.trim())) return fail("brief must be non-empty text", 400);
-    if (request.brief !== undefined && Buffer.byteLength(request.brief) > SESSION_REVIEW_BRIEF_LIMIT_BYTES) {
-      return fail(`the brief exceeds its ${SESSION_REVIEW_BRIEF_LIMIT_BYTES / 1024} KiB limit`, 400);
-    }
-    if (request.scope !== undefined && request.scope !== "delta" && request.scope !== "full") return fail("scope must be delta or full", 400);
-    if (request.fullReason !== undefined && (request.scope !== "full" || typeof request.fullReason !== "string" ||
-        !request.fullReason.trim() || request.fullReason.length > 500)) {
-      return fail("fullReason (up to 500 characters) is accepted only with scope full", 400);
-    }
-    if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
-    // Decision for #3306: a campaign's allowance accounts for its reviews through the campaign's
-    // controlled review job, so no session under a campaign allowance can bypass it here.
-    if (this.db.campaignBudgets.root(session.id) !== null) {
-      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
-    }
-    const runner = this.db.getRunner(session.runnerId);
-    if (!runnerSupportsProtocol(runner?.protocolVersion, "sessionReviewJob")) {
-      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "sessionReviewJob", "cross-model review through the runner"));
-    }
-    const capability = runner?.runtime?.sessionReview;
-    if (!capability) {
-      return fail("This session's runner has no trusted cross-model review installation. It needs Linux and the cross-model review controller installed outside every directory a session can write.", 409);
-    }
-    const reviewer: SessionReviewHarness | null = session.driver === "claude-code" ? "codex"
-      : session.driver === "codex" || session.driver === "codex-app-server" ? "claude-code" : null;
-    if (!reviewer) return fail("this session's harness has no cross-model reviewer; reviews cover Claude Code and Codex sessions", 409);
-    if (!capability.reviewers.includes(reviewer)) {
-      const why = (capability.unavailable?.[reviewer] ?? capability.unavailable?.controller ?? "").slice(0, 300);
-      return fail(`The ${reviewer === "codex" ? "Codex" : "Claude Code"} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
-    }
-    if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
-    let command: SessionReviewJobCommand;
-    try {
-      command = this.db.sessionReviewJobs.create(session.id, session.runnerId, {
-        pullRequest: { repository: pullRequest.repository, number: pullRequest.number }, headSha: request.headSha,
-        ...(request.brief !== undefined ? { brief: request.brief } : {}),
-        ...(request.scope !== undefined ? { scope: request.scope } : {}),
-        ...(request.fullReason !== undefined ? { fullReason: request.fullReason } : {}),
-      }, Date.now());
-    } catch (error) { return fail((error as Error).message, 409); }
-    // The job is durable; one the runner did not receive is sent again when it reconnects.
-    this.hub.sendToRunner(session.runnerId, command);
-    this.hub.sessionChangedById(session.id);
-    this.log.info(JSON.stringify({ event: "session_review_job_requested", sessionId: session.id, jobId: command.jobId,
-      repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha, scope: request.scope ?? "delta" }));
-    return ok(this.db.sessionReviewJobs.view(command.jobId)!, 201);
+    return fail(REVIEW_JOBS_RETIRED_REASON, 410);
   }
 
   sessionReviewJob(sessionId: string, jobId: string): ServiceResult<SessionReviewJobView> {
@@ -8660,8 +9326,8 @@ export class SessionsService {
     return page ? ok(page) : fail("review job not found", 404);
   }
 
-  /** Cancel an unfinished review. The runner reports the outcome; a job it never received is sent
-   * first so the cancellation has something to stop, and settles as not launched. */
+  /** Cancel historical work without admitting it. Supported peers must acknowledge a terminal
+   * outcome; an offline cancellation remains durable for reconnect. */
   cancelSessionReviewJob(sessionId: string, jobId: string): ServiceResult<SessionReviewJobView> {
     const view = this.sessionReviewJob(sessionId, jobId);
     if (!view.ok || !view.data) return view;
@@ -8675,10 +9341,9 @@ export class SessionsService {
   private sendSessionReviewCancel(jobId: string): void {
     const command = this.db.sessionReviewJobs.command(jobId), runnerId = this.db.sessionReviewJobs.runnerId(jobId);
     if (!command || !runnerId) return;
-    // Dispatch is idempotent on the runner, and a cancel that arrives while it prepares stops the
-    // launch; one that finds the job finished does nothing. An offline runner gets both on reconnect.
-    if (this.db.sessionReviewJobs.view(jobId)?.state === "requested" && !this.hub.sendToRunner(runnerId, command)) return;
-    this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId, nonce: command.nonce });
+    if (runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "sessionReviewJob")) {
+      this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId, nonce: command.nonce });
+    } else this.db.sessionReviewJobs.abandon(jobId, REVIEW_JOBS_RETIRED_REASON, Date.now());
   }
 
   onSessionReviewJobUpdate(runnerId: string, update: SessionReviewJobUpdate): void {
@@ -8689,19 +9354,16 @@ export class SessionsService {
       state: view.state, round: view.round, attempt: view.attempt, reviewer: view.reviewer, reason: view.reason }));
   }
 
-  /** On registration, send every unfinished job again: the runner re-sends a finished job's result,
-   * resumes a running one, and starts one it never received. A runner without support cannot
-   * report, so its jobs finish here. */
+  /** Registration retries cancellation only. Never relaunch a retired job or lose an offline
+   * cancel before the owning runner's terminal receipt. */
   recoverSessionReviewJobs(runnerId: string): void {
     const supported = runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "sessionReviewJob");
     for (const job of this.db.sessionReviewJobs.unfinished(runnerId)) {
-      if (!supported) {
-        this.db.sessionReviewJobs.abandon(job.command.jobId, "the runner no longer supports session reviews", Date.now());
-        this.hub.sessionChangedById(job.command.sessionId);
-        continue;
-      }
-      if (!this.hub.sendToRunner(runnerId, job.command)) return;
-      if (job.cancelRequested) this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId: job.command.jobId, nonce: job.command.nonce });
+      if (supported) {
+        this.db.sessionReviewJobs.requestCancel(job.command.jobId, Date.now());
+        this.hub.sendToRunner(runnerId, { type: "cancel_session_review_job", jobId: job.command.jobId, nonce: job.command.nonce });
+      } else this.db.sessionReviewJobs.abandon(job.command.jobId, REVIEW_JOBS_RETIRED_REASON, Date.now());
+      this.hub.sessionChangedById(job.command.sessionId);
     }
   }
 
@@ -8727,10 +9389,14 @@ export class SessionsService {
     if (!request || typeof request !== "object" || Array.isArray(request) ||
         Object.keys(request).some((key) => !["pullRequest", "headSha", "brief", "fullReason"].includes(key)) ||
         !pullRequest || typeof pullRequest !== "object" || Object.keys(pullRequest).some((key) => !["repository", "number"].includes(key)) ||
-        typeof pullRequest.repository !== "string" || !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
+        typeof pullRequest.repository !== "string" ||
+        // A GitHub `owner/name`, or (v244, #3539) a GitLab `<host>/group[/subgroup…]/project`.
+        !(/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(pullRequest.repository) ||
+          campaignRepositoryLocation(pullRequest.repository)?.forge === "gitlab") ||
         !Number.isSafeInteger(pullRequest.number) || pullRequest.number <= 0) {
-      return fail("a review needs pullRequest {repository: \"owner/name\", number: a positive integer}", 400);
+      return fail("a review needs pullRequest {repository: \"owner/name\" or a GitLab \"<host>/group/project\", number: a positive pull request number or merge request IID}", 400);
     }
+    const gitlab = campaignRepositoryLocation(pullRequest.repository)?.forge === "gitlab";
     if (typeof request.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(request.headSha)) {
       return fail("headSha must be the pull request's full 40-character lowercase head commit", 400);
     }
@@ -8743,22 +9409,34 @@ export class SessionsService {
       return fail(`fullReason, when given, says in at most ${REVIEW_FULL_REASON_LIMIT} characters why the whole pull request needs review again`, 400);
     }
     if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot request a review", 409);
-    // As with the #3330 bridge: a campaign allowance accounts for its reviews through the campaign's
-    // controlled review job until review sessions are charged to campaigns (#3371).
-    if (this.db.campaignBudgets.root(session.id) !== null) {
-      return fail("This session is part of a campaign with an allowance, so its cross-model reviews run through the campaign's controlled review job (run_campaign_review_job, dispatched by the campaign's Orchestrator), which accounts for their cost. Ask the Orchestrator for that review.", 409);
-    }
     const runner = this.db.getRunner(session.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "reviewSession")) {
       return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "reviewSession", "review sessions"));
     }
-    const harness = reviewerHarnessFor(session.driver);
+    if (gitlab && !runnerSupportsProtocol(runner?.protocolVersion, "gitlabReviewSessions")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "gitlabReviewSessions", "review sessions of GitLab merge requests"));
+    }
+    let configured: ReturnType<typeof configuredReview>;
+    try { configured = configuredReview(this.db, session, runner, resolveEffectiveModelEffort); }
+    catch (error) {
+      if (error instanceof ReviewSettingsError) {
+        this.log.info(JSON.stringify({ event: "review_configuration_refused", entryPoint: "request_review_session", sessionId: session.id }));
+        return fail(error.message, 409);
+      }
+      throw error;
+    }
+    const harness = configured?.harness ?? reviewerHarnessFor(session.driver);
+    const budgetRoot = this.db.campaignBudgets.governingRoot(session.id);
+    if (budgetRoot && !runnerSupportsProtocol(runner?.protocolVersion, "campaignReviewSessions")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "campaignReviewSessions", "review sessions charged to the campaign allowance"));
+    }
     if (!harness) return fail("this session's harness has no cross-model reviewer; reviews cover Claude Code and Codex sessions", 409);
     const capability = runner?.runtime?.reviewSession;
     const reviewer = capability?.reviewers.find((entry) => entry.harness === harness);
     const label = harness === "codex" ? "Codex" : "Claude Code";
     if (!reviewer) {
-      const why = (capability?.unavailable?.[harness] ?? capability?.unavailable?.tools ?? "").slice(0, 300);
+      const why = (capability?.unavailable?.[harness] ?? capability?.unavailable?.tools ??
+        (capability ? "reviewer not advertised by the runner" : "runner reported no review-session capability")).slice(0, 500);
       return fail(`The ${label} reviewer is unavailable on this session's runner${why ? `: ${why}` : ""}.`, 409);
     }
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("this session's runner is offline; request the review again once it reconnects", 409);
@@ -8767,8 +9445,11 @@ export class SessionsService {
     // The requester's guardrails: a review spends from what remains of its cost budget after its own
     // spending and everything its earlier reviews spent, so repeated reviews cannot exceed it.
     let costBudgetUsd: number | undefined;
-    if (session.costBudgetUsd != null && session.costBudgetUsd > 0) {
-      costBudgetUsd = session.costBudgetUsd - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
+    // Campaign allocations reserve this worker's own spend; reviews reserve separately. Only
+    // an original human session ceiling also limits its reviews, never the worker allocation.
+    const requesterCeiling = budgetRoot ? this.db.campaignBudgets.userLimits(session.id)?.costBudgetUsd : session.costBudgetUsd;
+    if (requesterCeiling != null && requesterCeiling > 0) {
+      costBudgetUsd = requesterCeiling - (session.costUsd ?? 0) - this.db.reviewSessions.spentFor(session.id);
       if (!(costBudgetUsd > 0)) return fail("this session has no cost budget left for a review", 409);
     }
     const policy: ReviewLaunchPolicy = {
@@ -8776,11 +9457,23 @@ export class SessionsService {
       pullRequest: { repository: pullRequest.repository, number: pullRequest.number },
       headSha: request.headSha,
       harness,
+      ...(configured ? { configuration: configured.configuration } : {}),
     };
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
-      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest);
+      policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha, true, configured?.configuration.roundBudget);
+      if (policy.history.postUpvoteExtension && !runnerSupportsProtocol(runner?.protocolVersion, "postUpvoteReviewExtensions")) {
+        return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "postUpvoteReviewExtensions", "post-upvote review extensions"));
+      }
       if (request.fullReason !== undefined) policy.fullReason = request.fullReason.trim();
+      // An approved extension the history counts is consumed now, so a later restart, which
+      // revokes unconsumed decisions, cannot take back rounds the run has been granted.
+      const now = Date.now();
+      for (const occurrenceId of this.db.reviewSessions.extensions(session.id, policy.pullRequest, policy.history.epoch, request.headSha).approved) {
+        if (this.db.consumeWorkflowDecision(occurrenceId, now)) {
+          this.log.info(JSON.stringify({ event: "review_round_extension_consumed", sessionId: session.id, occurrenceId }));
+        }
+      }
     }
     const workspacePath = this.db.getAdHocWorkspacePath(session.id) ?? undefined;
     const created = this.createSession({
@@ -8788,19 +9481,22 @@ export class SessionsService {
       workspaceId: session.workspaceId ?? "",
       ...(workspacePath ? { workspacePath } : {}),
       agentId: reviewer.agentId,
-      title: `${harness === "codex" ? "Codex" : "Claude"} Review of ${pullRequest.repository}#${pullRequest.number}`,
+      title: `${harness === "codex" ? "Codex" : "Claude"} Review of ${pullRequest.repository}${gitlab ? "!" : "#"}${pullRequest.number}`,
       prompt: request.brief,
       useWorktree: false,
       config: {
         permissionMode: harness === "claude-code" ? "dontAsk" : "read-only",
-        effort: "high",
+        effort: configured?.configuration.effort ?? "high",
+        ...(configured?.configuration.model ? { model: configured.configuration.model } : {}),
         ...(costBudgetUsd !== undefined ? { costBudgetUsd } : {}),
       },
     }, undefined, this.db.sessionScope(session.id) ?? undefined, true, false, true, { review: { policy } });
     if (!created.ok || !created.data) return failAs(created, "the review session could not be created");
     this.hub.sessionChangedById(session.id);
     this.log.info(JSON.stringify({ event: "review_session_requested", sessionId: session.id, reviewSessionId: created.data.id,
-      reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha }));
+      ...(budgetRoot ? { campaignRootSessionId: budgetRoot, allocation: this.db.campaignBudgets.allocation(created.data.id) } : {}),
+      reviewer: harness, repository: pullRequest.repository, number: pullRequest.number, headSha: request.headSha,
+      configuration: configured?.configuration ?? null }));
     return ok(this.db.reviewSessions.view(created.data.id)!, 201);
   }
 
@@ -8818,6 +9514,35 @@ export class SessionsService {
     return page ? ok(page) : fail("review session not found", 404);
   }
 
+  /** Repair pre-parentage rows and retry disposal after a restart or missed delivery receipt. */
+  private reconcileReviewSessionDisposal(runnerId?: string, repairParentage = false): void {
+    for (const id of this.db.reviewSessions.sessionIds(runnerId, repairParentage)) {
+      if (repairParentage) this.db.linkReviewSession(id);
+      const review = this.db.reviewSessions.view(id)!;
+      const requester = this.db.getSession(review.requesterSessionId);
+      if (requester?.archived) {
+        this.db.abandonReviewContinuations(requester.id, Date.now());
+        this.cancelReviewSession(requester.id, id);
+        this.setArchived(id, true);
+      } else this.disposeReviewSession(id, repairParentage ? "startup" : "retry_sweep");
+    }
+  }
+
+  // Diagnostics: which review was disposed, whether delivery was confirmed, and which path
+  // requested cleanup. Pending Stop/Archive remains visible through the existing durable intent.
+  private disposeReviewSession(sessionId: string, entryPoint: "startup" | "retry_sweep" | "review_result" | "session_status" | "continuation_delivery"): void {
+    const review = this.db.reviewSessions.view(sessionId);
+    // Pending, uncertain and failed delivery are not delivery proof. Keep the child readable
+    // while the existing continuation machinery retries or awaits recovery.
+    if (!review?.terminal || review.continuation !== null && review.continuation !== "delivered" &&
+        review.continuation !== "abandoned") return;
+    const session = this.db.getSession(sessionId);
+    if (!session || session.archived || session.archiveOperation) return;
+    this.setArchived(sessionId, true);
+    this.log.info(JSON.stringify({ event: "review_session_disposal_requested", entryPoint, reviewSessionId: sessionId,
+      requesterSessionId: review.requesterSessionId, continuation: review.continuation }));
+  }
+
   /** Cancel an unfinished review by stopping its session; the runner reports the cancellation. */
   cancelReviewSession(requesterSessionId: string, reviewSessionId: string): ServiceResult<ReviewSessionView> {
     const view = this.reviewSessionView(requesterSessionId, reviewSessionId);
@@ -8826,7 +9551,7 @@ export class SessionsService {
     this.db.reviewSessions.requestCancel(reviewSessionId, Date.now());
     const stopped = this.stop(reviewSessionId);
     // A review whose session is already gone cannot report: it ends here.
-    if (!stopped.ok && this.db.reviewSessions.abandon(reviewSessionId, "the review was cancelled", Date.now())) {
+    if (!stopped.ok && this.db.reviewSessions.abandon(reviewSessionId, "the review was cancelled", Date.now(), false)) {
       this.log.info(JSON.stringify({ event: "review_session_abandoned", reviewSessionId, reason: "cancelled without a session" }));
     }
     this.hub.sessionChangedById(requesterSessionId);
@@ -8841,6 +9566,8 @@ export class SessionsService {
     this.log.info(JSON.stringify({ event: "review_session_update", reviewSessionId: view.reviewSessionId,
       requesterSessionId: view.requesterSessionId, state: view.state, reviewer: view.reviewer, reason: view.reason,
       outputTruncated: view.outputTruncated }));
+    if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId);
+    this.disposeReviewSession(view.reviewSessionId, "review_result");
   }
 
   /** A review session's own status moves its review: launched is running, and a session that ends
@@ -8851,9 +9578,11 @@ export class SessionsService {
     const changed = status === "starting" || status === "running"
       ? this.db.reviewSessions.markRunning(sessionId, now)
       : isTerminal(status) && this.db.reviewSessions.abandon(sessionId, "the review ended without a result", now);
+    this.disposeReviewSession(sessionId, "session_status");
     if (!changed) return;
     const view = this.db.reviewSessions.view(sessionId)!;
     this.hub.sessionChangedById(view.requesterSessionId);
+    if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId, now);
   }
 
   /** On registration: a runner without review sessions can no longer report its reviews. */
@@ -8863,13 +9592,81 @@ export class SessionsService {
       if (!this.db.reviewSessions.abandon(reviewSessionId, "the review session's runner no longer supports review sessions", Date.now())) continue;
       const view = this.db.reviewSessions.view(reviewSessionId)!;
       this.hub.sessionChangedById(view.requesterSessionId);
+      this.deliverHeldReviewContinuations(view.requesterSessionId);
     }
+  }
+
+  /**
+   * Offer a requester the continuations its finished reviews owe it (#3369): one framed prompt
+   * naming each review's outcome, carried by a durable command bound to every review it names, so
+   * a reconnect or runner restart delivers it exactly once. Like a restart notice (#1861), it goes
+   * only to an idle session nothing would refuse it for; a requester mid-turn (often polling the
+   * review itself) takes it at its next settle, through the retry sweep. Returns why it is still
+   * held, or null once nothing is owed.
+   */
+  private deliverHeldReviewContinuations(requesterSessionId: string, now = Date.now()): string | null {
+    const held = this.db.reviewSessions.heldContinuations(requesterSessionId);
+    if (!held.length) return null;
+    const session = this.db.getSession(requesterSessionId);
+    if (!session) return "session not found";
+    if (session.status !== "idle") return `session is ${session.status}`;
+    if (!this.hub.isRunnerOnline(session.runnerId)) return "runner is offline";
+    if (session.worktreeRecovery) return "worktree recovery is required";
+    if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
+    const daily = this.dailyBudgetFor(requesterSessionId);
+    if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    const ids = held.map((review) => review.reviewSessionId);
+    let claimed = false;
+    const sent = this.prompt(
+      requesterSessionId, reviewContinuationPrompt(held), [], undefined, undefined, undefined, "session", true, {
+        admitAs: "queued" as const,
+        stage: (runnerId, command, at) => this.promptOutbox.stageReviewContinuation(ids, requesterSessionId, runnerId, command, at),
+        // Without a durable command there is no receipt to follow: recorded delivered before the
+        // send, so a crash between the two can lose it but never send it twice.
+        claimImmediate: () => (claimed = this.db.claimHeldReviewContinuations(requesterSessionId, ids, now)),
+      },
+    );
+    if (!sent.ok) {
+      if (claimed) this.db.releaseReviewContinuationClaim(requesterSessionId, ids, Date.now());
+      return sent.error ?? "the continuation was refused";
+    }
+    this.hub.sessionChangedById(requesterSessionId);
+    for (const id of ids) this.disposeReviewSession(id, "continuation_delivery");
+    return null;
+  }
+
+  /** Follow the durable command that carries a review continuation, as a restart notice's is. */
+  private reconcileReviewContinuationCommand(commandId: string, now: number): void {
+    const requesterSessionId = this.db.reviewContinuationRequesterForCommand(commandId);
+    if (!requesterSessionId) return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
+        command.userEventSeq === undefined) {
+      if (!this.db.holdReviewContinuationCommand(requesterSessionId, commandId, now)) return;
+      this.hub.sessionChangedById(requesterSessionId);
+      this.deliverHeldReviewContinuations(requesterSessionId, now);
+      return;
+    }
+    const state = command.state === "started" || command.state === "completed" ? "delivered" as const
+      : command.state === "uncertain" ? "uncertain" as const
+      : command.state === "failed" ? "failed" as const
+      : null;
+    if (!state) return;
+    this.db.setReviewContinuationCommandState(commandId, state, now);
+    for (const id of this.db.reviewSessions.forRequester(requesterSessionId)) this.disposeReviewSession(id, "continuation_delivery");
+    if (state === "failed") {
+      this.log.warn(`review continuation failed for ${requesterSessionId}: ${command.error ?? "unknown error"}`);
+    }
+    this.hub.sessionChangedById(requesterSessionId);
+    this.settleQueuedAdmission(command, now);
   }
 
   recoverCampaignBudgetAllocations(runnerId:string):void {
     for(const id of this.db.campaignBudgets.membersForRunner(runnerId)) {
       const member=this.db.getSession(id);
-      if(!member) continue;
+      // A campaign the Human revoked to Custom runs under ordinary session rules (#2940).
+      if(!member || !this.db.campaignBudgets.governingRoot(id)) continue;
       const error=this.campaignBudgetConfigError(member);
       if(error) {
         if(!isTerminal(member.status)) this.stopAtGuardrail(member,Date.now());
@@ -8897,15 +9694,15 @@ export class SessionsService {
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
 
-  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): string | null {
-    const rootId = this.db.campaignBudgets.root(session.id);
+  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): CampaignRefusal | null {
+    const rootId = this.db.campaignBudgets.governingRoot(session.id);
     if (!rootId) return null;
     const view = this.db.campaignBudgets.view(rootId)!;
     const controller = this.db.getSession(rootId), control = controller?.orchestratorPolicy?.control;
     if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
     const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
       this.pacedVideoInstallationContract(session.runnerId, session.agentId));
-    if (!preflight.supported) return preflight.reason ?? "campaign allowance requires supported accounting peers";
+    if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
     if (session.runnerId !== controller.runnerId || session.workspaceId !== controller.workspaceId) return "campaign allowance requires the original runner and workspace";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
     if(view.authority.controlledReview) {
@@ -8920,7 +9717,7 @@ export class SessionsService {
   }
 
   private enforceCampaignBudget(sessionId: string, now: number): boolean {
-    const rootId = this.db.campaignBudgets.root(sessionId);
+    const rootId = this.db.campaignBudgets.governingRoot(sessionId);
     if (!rootId) return false;
     let view = this.db.campaignBudgets.view(rootId)!;
     // Unpriced usage stops only a campaign whose cost ceiling depends on pricing (#2940).
@@ -8940,7 +9737,7 @@ export class SessionsService {
     return true;
   }
 
-  private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
+  private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): CampaignRefusal | null {
     if (!session.parentSessionId || !config) return null;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
     if (controller === "refused") return MALFORMED_ANCESTRY_AUTHORITY_REFUSAL;
@@ -8948,7 +9745,7 @@ export class SessionsService {
       const preflight = campaignAuthorityPreflight(controller.orchestratorPolicy.control, session.driver,
         this.db.getRunner(session.runnerId)?.protocolVersion,
         this.pacedVideoInstallationContract(session.runnerId, session.agentId));
-      if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.reason ?? "campaign authority boundary is stale";
+      if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale";
     }
     const behavior = controller?.orchestratorPolicy?.behavior;
     if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel) {
@@ -9008,14 +9805,21 @@ export class SessionsService {
       const initialCaller = this.db.getSession(sessionId);
       const initialController = initialCaller && this.workflowDecisionController(initialCaller, "follow_up_issue_publication");
       const admitted = await this.admitCampaignPublication(sessionId, request, normalized.data, canAccess);
-      if (admitted.ok) return admitted;
+      if (!("failure" in admitted) && admitted.ok) return admitted;
       const currentCaller = this.db.getSession(sessionId);
       const currentController = currentCaller && this.workflowDecisionController(currentCaller, "follow_up_issue_publication");
-      if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) return admitted;
+      if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) {
+        return "failure" in admitted ? fail("Publication authority changed during inspection; request it again", 409) : admitted;
+      }
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
-      // preserve the original configured/human request path without a standing issue grant.
+      // preserve the original configured/human request path without a standing issue grant,
+      // and record why on the decision so the person is never asked without a reason (#2940).
       const { recommendationId: _recommendationId, ...snapshot } = normalized.data;
-      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess);
+      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess,
+        "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
+    }
+    if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
+      return this.createGithubMergeDecision(sessionId, request, normalized.data, canAccess);
     }
     if (!normalized.ok || normalized.data?.category !== "ui_evidence_approval") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -9054,10 +9858,11 @@ export class SessionsService {
         return ok(previous);
       }
     }
+    // Eligibility is the same direct authority that resolution checks: the saved owner under Custom,
+    // the current campaign boundary under Full Control, where the root's saved owner plays no part (#1321).
     if (!child || !controller || !canAccess(child.id) || !canAccess(controller.session.id) ||
-        controller.policy.decisions.ui_evidence_approval !== "orchestrator" ||
-        evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(
-          controller.session, controller.policy.decisions.ui_evidence_approval,
+        evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(controller.session,
+          this.campaignDecisionOwner(controller.session, controller.policy, sessionId, normalized.data),
         )).effectiveOwner !== "orchestrator") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
     }
@@ -9198,32 +10003,58 @@ export class SessionsService {
     }
   }
 
+  /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
+   * any member whose gates the root controls may request it: the drafting child usually does. A
+   * refusal names its condition, logged here and recorded on the human-owned fallback (#2940). */
   private async admitCampaignPublication(sessionId: string, request: CreateWorkflowDecisionRequest,
-    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, canAccess: (id: string) => boolean): Promise<ServiceResult<WorkflowDecisionView>> {
-    const root = this.db.getSession(sessionId);
-    if (!root || !canAccess(sessionId) || this.db.campaignRootForMember(sessionId) !== sessionId || !issueBoundary(root) || scopeCompatibility(this.db, root)) return fail("Bounded publication requires a supported root Full Control issue boundary", 403);
-    if (snapshot.issueAdmission) return fail("Publication admission is server-derived", 403);
-    const evidence = publicationEvidence(this.db, root, snapshot);
-    if (!evidence || new Set(snapshot.labels).size !== snapshot.labels.length) return fail("Publication requires a unique accepted related recommendation, sanitized exact payload, unique labels, authorized origins and remaining scope capacity", 409);
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, canAccess: (id: string) => boolean,
+  ): Promise<ServiceResult<WorkflowDecisionView> | { failure: CampaignPublicationAdmissionFailure }> {
+    const caller = this.db.getSession(sessionId);
+    const rootId = this.db.campaignRootForMember(sessionId);
+    const root = rootId ? this.db.getSession(rootId) : null;
+    const refused = (failure: CampaignPublicationAdmissionFailure, boundaryRevision?: number) => {
+      this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
+        ...(root ? { controllingSessionId: root.id } : {}), ...(boundaryRevision === undefined ? {} : { boundaryRevision }),
+        recommendationId: snapshot.recommendationId, outcome: "human_fallback", reason: failure }));
+      return { failure };
+    };
+    if (!caller || !root || !canAccess(sessionId) || !canAccess(root.id)) return refused("requester_outside_campaign");
+    if (!issueBoundary(root) || scopeCompatibility(this.db, root)) return refused("no_issue_boundary");
+    // The boundary is the root's; a nested Orchestrator's own gates are outside it.
+    if (this.workflowDecisionController(caller, snapshot.category)?.session.id !== root.id) return refused("requester_outside_campaign");
+    const boundaryRevision = issueBoundary(root)!.revision;
+    if (new Set(snapshot.labels).size !== snapshot.labels.length) return refused("unsafe_payload", boundaryRevision);
+    const checked = publicationEvidenceCheck(this.db, root, snapshot);
+    if (!("evidence" in checked)) return refused(checked.failure, boundaryRevision);
+    const evidence = checked.evidence;
+    let publicationDigest: string;
     try {
+      // Inspection and consumption both run as the root, whose runner and repository own the boundary.
       const requestId = `publication_inspect_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect",
-        requestId, sessionId, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
-      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== sessionId || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest) return fail("Fresh publication duplicate and sanitation inspection failed", 409);
-      const current = this.db.getSession(sessionId)!;
-      if (issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return fail("Publication lineage or boundary changed during inspection", 409);
-      this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
-        boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted" }));
-      return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
-        resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
-          evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }),
-          publicationAuthority: { authorizedByUserId: issueBoundary(current)!.authorizedByUserId, objectiveDigest: issueEvidenceDigest(issueBoundary(current)!.objective) } } } }, canAccess, { trustedPublication: true });
-    } catch { return fail("Publication inspection failed; no issue was published", 409); }
+        requestId, sessionId: root.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
+      // The tag-insensitive title proof needs a runner whose duplicate search and comparison are too;
+      // an older one misses an existing issue that differs from this title only by its tag.
+      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== root.id || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest ||
+          result.duplicateSearch !== "subject") return refused("inspection_failed", boundaryRevision);
+      publicationDigest = result.publicationDigest;
+    } catch { return refused("inspection_failed", boundaryRevision); }
+    const current = this.db.getSession(root.id)!;
+    const boundary = issueBoundary(current);
+    if (!boundary || issueEvidenceDigest(publicationEvidence(this.db, current, snapshot)) !== issueEvidenceDigest(evidence)) return refused("evidence_changed", boundaryRevision);
+    this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
+      controllingSessionId: root.id, boundaryRevision: evidence.boundaryRevision, scopeRevision: evidence.scopeRevision, recommendationId: snapshot.recommendationId, outcome: "admitted" }));
+    return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
+      resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
+        evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
+        publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess, { trustedPublication: true });
   }
 
-  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number): Promise<boolean> {
+  /** `humanApproved`: the caller verified a person's qualifying approval of a publication that has
+   * no bounded admission (#2940); without it, only a bounded grant is inspected. */
+  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number, humanApproved = false): Promise<boolean> {
     if (grant.status !== "consumed" || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-        !grant.resourceSnapshot.issueAdmission || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
+        !grant.resourceSnapshot.issueAdmission && !humanApproved || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
     const publication = grant.resourceSnapshot;
     const root = this.db.getSession(sessionId)!;
     const requestId = `publication_verify_${randomUUID()}`;
@@ -9255,15 +10086,18 @@ export class SessionsService {
       if (seed !== undefined && response.type === "campaign_issue_scope_result" && !response.ok) {
         const fallbackId = `issue_scope_repository_${randomUUID()}`;
         response = await this.hub.requestFromRunner(root.runnerId, fallbackId, { type: "campaign_issue_scope", operation: "inspect", requestId: fallbackId, sessionId: root.id }, 30_000);
-        candidateMessage = "Could not resolve the epic's members within the bounded inspection. Check GitHub access and the member list, or enter an explicit set of repository-qualified issues below.";
+        candidateMessage = "Could not resolve the epic's members within the bounded inspection. Check GitHub or GitLab access and the member list, or enter an explicit set of repository-qualified issues below.";
       }
       if (response.type === "campaign_issue_scope_result" && response.sessionId === root.id && !response.ok &&
           response.failure === "unsupported_execution_target") {
         return fail(campaignScopeTargetFailureMessage(response.targetFailureReason), 409);
       }
       if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
-          !response.repository || !/^[\w.-]+\/[\w.-]+$/u.test(response.repository) ||
-          stored && stored.repository.toLowerCase() !== response.repository.toLowerCase()) return fail("Cannot verify the campaign repository and members. Check the runner's GitHub origin and gh authentication, then retry.", 409);
+          !response.repository || !campaignRepositoryLocation(response.repository) ||
+          stored && stored.repository.toLowerCase() !== response.repository.toLowerCase()) return fail("Cannot verify the campaign repository and members. Check the runner's GitHub or GitLab origin and gh or glab authentication, then retry.", 409);
+      // #3539: a GitLab repository needs every participating runner to read GitLab issues.
+      const gitlab = gitlabIssueCompatibility(this.db, root, response.repository);
+      if (gitlab) return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), supported: false, ...compatibilityFields(gitlab) });
       return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), candidates: response.candidates ?? [], ...(candidateMessage ? {candidateMessage} : {}) });
     } catch { return fail("Campaign scope inspection requires an online runner with GitHub access. Reconnect the runner and retry.", 409); }
   }
@@ -9276,6 +10110,8 @@ export class SessionsService {
     if (unsupported) return capabilityFail(unsupported);
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
     if (!view.ok || !view.data) return failAs(view);
+    const gitlab = gitlabIssueCompatibility(this.db, root, view.data.repository);
+    if (gitlab) return capabilityFail(gitlab);
     if (!view.data.supported) return fail(view.data.compatibilityMessage ?? "Campaign issue scope changes are unavailable.", 409);
     if (request?.expectedRevision !== view.data.revision) return fail("Campaign scope changed. Refresh and propose against the current revision.", 409);
     for (const member of scopeParticipants(this.db, root)) {
@@ -9291,7 +10127,7 @@ export class SessionsService {
         { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId, issues: snapshot.additions }, 60_000);
       if (response.type !== "campaign_issue_scope_result" || !response.ok || response.sessionId !== sessionId ||
           response.repository?.toLowerCase() !== snapshot.repository ||
-          !snapshot.additions.every((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository))) return fail("GitHub could not verify every proposed addition in the campaign repository.", 409);
+          !snapshot.additions.every((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository))) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
       const latest = this.db.getSession(sessionId);
       if (!latest || (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
       if (human) {
@@ -9308,35 +10144,72 @@ export class SessionsService {
       }
       const boundary = issueBoundary(latest);
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
+        // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
+        const refuse = (code: CampaignScopeAdmissionFailure): ServiceResult<WorkflowDecisionView> => {
+          this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+            boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: snapshot.lineage?.kind ?? "none", outcome: "refused", reason: code }));
+          const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
+          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code } };
+        };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
-        if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) > boundary.issueAuthority!.maxIssues) return fail("Scope and publication reservations exceed the human-established issue limit", 409);
+        if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) >
+            this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues)) return refuse("capacity_exhausted");
         let evidence: unknown = { removals: snapshot.removals };
         if (snapshot.additions.length) {
-          if (snapshot.lineage?.kind === "epic" && boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) {
+          if (!snapshot.lineage) return refuse("lineage_missing");
+          if (snapshot.lineage.kind === "epic") {
+            if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
             const members = await this.campaignIssueScope(sessionId, snapshot.lineage.epic, canAccess, false);
             if (!members.ok || members.data?.candidateMessage || !snapshot.additions.every((n) => members.data?.candidates?.some((c) =>
-              c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source)))) return fail("Additions are not verified members of a human-authorized epic", 409);
+              c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source)))) return refuse("epic_members_unverified");
             evidence = { epic: snapshot.lineage.epic, members: members.data?.candidates };
-          } else if (snapshot.lineage?.kind === "follow_up" && boundary.issueAuthority!.relatedFollowUps && snapshot.additions.length === 1) {
+          } else {
+            if (!boundary.issueAuthority!.relatedFollowUps) return refuse("follow_ups_not_authorized");
+            if (snapshot.additions.length !== 1) return refuse("follow_up_not_single");
             const grant = this.db.workflowDecisionByOccurrence(snapshot.lineage.publicationOccurrenceId);
-            if (!grant || grant.controllingSessionId !== sessionId || grant.status !== "consumed" || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-                !grant.resourceSnapshot.issueAdmission || grant.resourceSnapshot.repository !== snapshot.repository ||
-                this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return fail("Follow-up scope requires an unused exact consumed bounded publication grant", 409);
+            if (!grant || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
+                grant.resourceSnapshot.repository !== snapshot.repository) return refuse("publication_not_found");
+            if (grant.status !== "consumed") return refuse("publication_not_consumed");
+            if (this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return refuse("publication_already_admitted");
             const publication = grant.resourceSnapshot;
-            const authority = publication.issueAdmission!.publicationAuthority;
-            if (publication.issueAdmission!.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
-                authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) return fail("The publication's original human/objective authority does not match the current boundary; use fresh human scope review", 403);
-            const recommendation = publication.recommendationId && this.db.campaignWorkLedger.recommendation(sessionId, publication.recommendationId);
-            if (!recommendation || recommendation.disposition !== "accepted" || recommendation.duplicateOfId ||
-                !recommendation.resultingIssue || recommendation.resultingIssue.number !== snapshot.additions[0] || recommendation.resultingIssue.repository.toLowerCase() !== snapshot.repository) return fail("Record the verified published issue on its accepted recommendation before admitting scope", 409);
+            // A bounded grant carries its own delegated authority. A publication without one counts
+            // only when a person approved its exact payload under the current objective and could
+            // approve this scope directly: the boundary's author or a campaign owner. The objective is
+            // proven when the approval followed the current authorization, or when the boundary the
+            // server recorded with it has the current author and objective, as publicationAuthority
+            // proves it for a bounded grant across a same-objective re-mint. Otherwise only fresh
+            // human scope review can admit the issue.
+            let approval: { kind: "human"; approvedByUserId: string; approvedAt: number; basis: "boundary_author" | "campaign_owner";
+              objective: "current_authorization" | "recorded_boundary" } | undefined;
+            if (publication.issueAdmission) {
+              const authority = publication.issueAdmission.publicationAuthority;
+              if (publication.issueAdmission.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
+                  authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) return refuse("publication_authority_changed");
+            } else {
+              const approver = this.db.workflowDecisionHumanApprover(grant);
+              if (!approver) return refuse("publication_unapproved");
+              const recorded = approver.publicationAuthority;
+              const objective = approver.approvedAt >= boundary.authorizedAt ? "current_authorization"
+                : recorded?.authorizedByUserId === boundary.authorizedByUserId && recorded.objectiveDigest === issueEvidenceDigest(boundary.objective) ? "recorded_boundary" : null;
+              if (!objective) return refuse("publication_approved_under_earlier_boundary");
+              const basis = approver.userId === boundary.authorizedByUserId ? "boundary_author" : this.db.campaignOwnerUser(sessionId, approver.userId) ? "campaign_owner" : null;
+              if (!basis) return refuse("publication_approver_not_owner");
+              approval = { kind: "human", approvedByUserId: approver.userId, approvedAt: approver.approvedAt, basis, objective };
+            }
+            const bound = scopePublicationRecommendation(this.db, sessionId, publication, snapshot.additions[0]!);
+            if ("failure" in bound) return refuse(bound.failure);
+            const { recommendation } = bound;
             if (!recommendation.originWorkItemIds.length || recommendation.originWorkItemIds.some((id) => {
               const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
               return !origin || origin.repository.toLowerCase() !== snapshot.repository || !snapshot.before.includes(origin.number);
-            })) return fail("The published follow-up's authorized origins were removed from scope", 409);
-            if (!await this.inspectPublishedScopeIssue(sessionId, grant, snapshot.additions[0]!)) return fail("Published issue does not match the exact authorized payload or its lineage was already consumed", 409);
+            })) return refuse("origin_outside_scope");
+            if (!await this.inspectPublishedScopeIssue(sessionId, grant, snapshot.additions[0]!, Boolean(approval))) return refuse("payload_mismatch");
             snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: snapshot.additions[0]! }];
-            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0] };
-          } else return fail("Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope", 403);
+            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0], ...(approval ? { approval } : {}) };
+            this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+              boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
+              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
+          }
         }
         snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
       }
@@ -9366,6 +10239,30 @@ export class SessionsService {
     return synchronized;
   }
 
+  /** Read the closure's candidate pull requests now; a fact that stays stale still fails the proof. */
+  private async refreshClosureForge(sessionId: string, issue: number): Promise<void> {
+    const root = this.db.getSession(sessionId);
+    if (!root || !issueBoundary(root) || !this.campaignForgeRefresh) return;
+    const refs = closureCandidateRefs(this.db, root, issue);
+    if (refs.length) await this.campaignForgeRefresh(sessionId, refs).catch(() => undefined);
+  }
+
+  /** The runner's authoritative read of every excluded pull request, past the observer's cache and
+   * rate limit: a pull request reopened since its last read must not stay excluded. Concurrent
+   * executes of one occurrence share a read in flight, and a settled answer is never reused. A
+   * read that cannot answer for every ref proves nothing. */
+  private excludedPullRequestsStillClosed(occurrenceId: string, root: SessionView, refs: CampaignPullRequestRef[]): Promise<boolean> {
+    if (!refs.length) return Promise.resolve(true);
+    const shared = this.excludedClosureReads.get(occurrenceId);
+    if (shared) return shared;
+    const read = (async () => {
+      const results = this.campaignForgeReadNow ? await this.campaignForgeReadNow(root.id, refs).catch(() => null) : null;
+      return Boolean(results && results.length === refs.length && results.every((result) => result.observation?.state === "closed"));
+    })().finally(() => this.excludedClosureReads.delete(occurrenceId));
+    this.excludedClosureReads.set(occurrenceId, read);
+    return read;
+  }
+
   async requestGithubIssueClosure(
     sessionId: string,
     request: GithubIssueClosureRequest,
@@ -9379,6 +10276,9 @@ export class SessionsService {
     }
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
+    // #3539: closing a GitLab issue needs a runner that reads and closes GitLab issues.
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, session.orchestratorPolicy.issueScope?.repository);
+    if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
       if (compatibility) return capabilityFail(compatibility);
@@ -9406,6 +10306,8 @@ export class SessionsService {
           ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
       }
       if (session.orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== session.orchestratorPolicy.issueScope.repository) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
+      const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
+      if (inspectedGitlab) return capabilityFail(inspectedGitlab);
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
       const { state: _state, ...inspection } = inspected.inspection;
@@ -9419,11 +10321,9 @@ export class SessionsService {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
         if (request.reason === "completed") {
-          const work = issueWork(this.db, this.db.getSession(sessionId)!, request.issue);
-          const delivery = work.flatMap((item) => (item.observed.pullRequests ?? []).flatMap((pr) =>
-            pr.fact.availability === "fresh" && pr.fact.value.state === "merged" && pr.fact.value.mergeCommitSha ?
-              [{ number: pr.ref.number, headSha: pr.fact.value.headSha, mergeCommitSha: pr.fact.value.mergeCommitSha }] : []));
-          if (closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
+          await this.refreshClosureForge(sessionId, request.issue);
+          const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, request.issue);
+          if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
             const verificationId = `issue_closure_delivery_${randomUUID()}`;
             const verified = await this.hub.requestFromRunner(session.runnerId, verificationId, {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
@@ -9466,7 +10366,7 @@ export class SessionsService {
     }
     // Consumption is a durable dispatch fence, not proof the forge operation succeeded.
     // A replay never dispatches again; read get_workflow_decision for its recorded result.
-    if (decision.status !== "approved") return fail(`issue closure cannot execute from ${decision.status} state`, 409);
+    if (decision.status !== "approved") return fail(issueClosureNotApprovedMessage(decision), 409);
     const session = this.db.getSession(sessionId);
     const snapshot = decision.resourceSnapshot;
     const now = Date.now();
@@ -9483,7 +10383,10 @@ export class SessionsService {
     }
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, snapshot.repository);
+    if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
+    if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
     // Guardrails and governance remain authoritative even though execution is provider-neutral.
     if (this.pendingPolicyAsk(session) || pendingRequests(session.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
@@ -9491,11 +10394,25 @@ export class SessionsService {
       return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
     }
     if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
+    // The uncached read is the last await: a pull request reopened during synchronization is seen,
+    // and only synchronous rechecks of every current-state condition separate it from consumption.
+    const synchronized = this.db.getSession(sessionId) ?? session;
+    if (decision.authority === "orchestrator" &&
+        !await this.excludedPullRequestsStillClosed(occurrenceId, synchronized, closureExcludedRefs(closureEvidence(this.db, synchronized, snapshot)))) {
+      return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
+    }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || (freshSession.orchestratorPolicy?.issueScope?.revision ?? 0) !== (snapshot.scopeRevision ?? 0) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
+    const settled = Date.now();
+    if (this.db.workflowDecisionByOccurrence(occurrenceId)?.status !== "approved" || settled - decision.resolvedAt > 30 * 60_000 ||
+        decision.policyRevision !== freshSession.parentControlPolicy?.revision || !this.hub.isRunnerOnline(session.runnerId) ||
+        this.pendingPolicyAsk(freshSession) || pendingRequests(freshSession.pendingApproval).some((request) => request.kind !== "workflow_decision") ||
+        this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, settled)) {
+      return fail("The closure approval, runner or guardrails changed while execution was being prepared; no closure was attempted", 409);
+    }
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
@@ -9523,11 +10440,72 @@ export class SessionsService {
     return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
   }
 
+  /** #3713: a GitHub merge is requested only after the child's runner reports the issues it would
+   * close, so a closure the snapshot does not declare is refused before anyone reviews it. A
+   * request the ordinary path refuses anyway, or one from a pre-v242 runner, is not checked. */
+  private async createGithubMergeDecision(
+    sessionId: string,
+    request: CreateWorkflowDecisionRequest,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+    canAccess: (sessionId: string) => boolean,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const child = this.db.getSession(sessionId);
+    if (!child || isTerminal(child.status) || !canAccess(sessionId) ||
+        !boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
+      return this.createWorkflowDecision(sessionId, request, canAccess);
+    }
+    const checked = await this.githubMergeClosures(child, snapshot);
+    if (!checked.ok) return fail(checked.message, 409);
+    return this.createWorkflowDecision(sessionId, request, canAccess,
+      checked.check ? { closingReferenceCheck: checked.check } : undefined);
+  }
+
+  /** What merging would close, read from GitHub through the child's runner and compared with the
+   * snapshot's `intendedClosures` (#3713). Without a check when the runner predates v242. `revoke`
+   * says the snapshot itself is wrong (a stale head or a different set of closures); otherwise
+   * GitHub could not be read and the same snapshot may be tried again. */
+  private async githubMergeClosures(
+    child: { id: string; runnerId: string },
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
+  ): Promise<{ ok: true; check?: PullRequestClosingReferenceCheck } | { ok: false; revoke: boolean; message: string }> {
+    const runner = this.db.getRunner(child.runnerId);
+    if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "githubMergeClosingReferences")) return { ok: true };
+    const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
+      message: `GitHub could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
+    const requestId = `github_merge_preflight_${randomUUID()}`;
+    let answer: unknown;
+    try {
+      answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+        type: "github_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
+      }, GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
+    } catch {
+      return unreadable("the runner did not answer.");
+    }
+    const result = answer as Partial<GithubMergePreflightResultMessage> | null;
+    const reason = typeof result?.reason === "string" && result.reason.length <= 300 ? result.reason : "GitHub could not be checked.";
+    if (result?.type !== "github_merge_preflight_result" || result.sessionId !== child.id) return unreadable("GitHub could not be checked.");
+    if (result.ok !== true) {
+      return result.refusal === "stale_head"
+        ? { ok: false, revoke: true, message: `This merge no longer matches the pull request: ${reason}` }
+        : unreadable(reason);
+    }
+    const check = validClosingReferenceCheck(result.check);
+    if (!check) return unreadable("the runner's answer was incomplete.");
+    const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures);
+    return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
+  }
+
   createWorkflowDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
-    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean },
+    internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
+      publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
+      /** The server's own request when a follow-up passes the campaign's approval limit (#2940). */
+      trustedFollowUpAdmission?: boolean;
+      /** #3713: the child runner's GitHub read, taken just before this request. */
+      closingReferenceCheck?: PullRequestClosingReferenceCheck },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -9556,8 +10534,25 @@ export class SessionsService {
     if (normalized.data.category === "campaign_issue_scope" && !internal?.trustedIssueScope) {
       return fail("use request_campaign_issue_scope_change for a repository-bound human scope proposal", 403);
     }
+    if (normalized.data.category === "campaign_follow_up_admission" && !internal?.trustedFollowUpAdmission) {
+      return fail("the server requests a follow-up admission itself when an accepted follow-up passes the campaign's approval limit", 403);
+    }
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
+    }
+    if (normalized.data.category === "review_round_extension") {
+      const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
+      if (refused) return fail(refused, 409);
+    }
+    if (normalized.data.category === "automation_creation" && !internal?.trustedAutomationCreation) {
+      return fail("use request_automation_creation for a server-validated automation proposal", 403);
+    }
+    if (normalized.data.category === "pr_merge") {
+      const snapshot = normalized.data;
+      const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
+      if (refused) return fail(refused, 409);
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) return fail("the current pull request head needs a valid review before merge", 409);
     }
     const controller = this.workflowDecisionController(child, normalized.data.category);
     if (!controller) {
@@ -9607,6 +10602,9 @@ export class SessionsService {
       authorityEvaluation.basis = "human_required";
       authorityEvaluation.reason = "evidence_review_unavailable";
     }
+    if (internal?.publicationAdmissionFailure && category === "follow_up_issue_publication" && authority === "human") {
+      authorityEvaluation.admissionFailure = internal.publicationAdmissionFailure;
+    }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
         controller.session.runnerId,
@@ -9630,12 +10628,13 @@ export class SessionsService {
       authority,
       authorityEvaluation,
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
+      ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
     if (created.replay) {
       if (created.decision.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
-      return ok(created.decision);
+      return ok(this.withMergeReviewEvidence(created.decision));
     }
     const decision = created.decision;
     const approval = this.workflowDecisionApproval(decision);
@@ -9662,21 +10661,23 @@ export class SessionsService {
     }
     this.publishCampaignAttentionTransition(controller.session);
     this.hub.sessionChangedById(sessionId);
-    return ok(decision, 201);
+    return ok(this.withMergeReviewEvidence(decision), 201);
   }
 
   workflowDecision(sessionId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
+    this.expireAutomationCreationDecisions(Date.now(), sessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
-    return decision?.sessionId === sessionId ? ok(decision) : fail("workflow decision not found", 404);
+    return decision?.sessionId === sessionId ? ok(this.withMergeReviewEvidence(decision)) : fail("workflow decision not found", 404);
   }
 
   workflowDecisions(sessionId: string, cursorId: string | undefined, limit: number): ServiceResult<{
     decisions: WorkflowDecisionView[]; nextCursor?: string;
   }> {
+    this.expireAutomationCreationDecisions(Date.now(), sessionId);
     const cursor = cursorId === undefined ? undefined : this.db.workflowDecisionByOccurrence(cursorId);
     if (cursorId !== undefined && cursor?.sessionId !== sessionId) return fail("invalid workflow decision cursor", 400);
     const rows = this.db.workflowDecisionPage(sessionId, cursor ?? undefined, limit + 1);
-    const decisions = rows.slice(0, limit);
+    const decisions = rows.slice(0, limit).map((decision) => this.withMergeReviewEvidence(decision));
     return ok({ decisions, ...(rows.length > limit ? { nextCursor: decisions.at(-1)!.occurrenceId } : {}) });
   }
 
@@ -9689,14 +10690,53 @@ export class SessionsService {
     actor: GovernanceActor,
     canAccess: (sessionId: string) => boolean,
   ): ServiceResult<WorkflowDecisionView> {
+    if (canAccess(childSessionId)) this.expireAutomationCreationDecisions(Date.now(), childSessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (decision?.category === "automation_creation") {
+      if (decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+          parentSessionId !== childSessionId || !canAccess(childSessionId)) return fail("workflow decision not found", 404);
+      const session = this.db.getSession(childSessionId);
+      const scope = this.db.sessionScope(childSessionId);
+      if (authority !== "human" || actor.kind !== "human" || !actor.id || !scope ||
+          !this.db.automationCreationHuman(actor.id, scope.organizationId) ||
+          !this.db.isSessionOwner({ userId: actor.id, organizationId: scope.organizationId }, childSessionId)) {
+        return fail("Automation creation requires the authenticated session owner to be an owner or admin of the personal control-plane organization", 403);
+      }
+      const snapshot = decision.resourceSnapshot;
+      if (!session || isTerminal(session.status) || session.archived || decision.status !== "pending" ||
+          snapshot.category !== "automation_creation" || resolution?.outcome === "approve" && Date.now() >= snapshot.expiresAt) {
+        return fail("Automation proposal has ended, expired, or was already resolved", 409);
+      }
+      const checked = this.validateWorkflowDecisionResolution(decision, resolution);
+      if (!checked.ok) return failAs(checked);
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(session);
+      const resolved = this.db.resolveAutomationCreationDecision(occurrenceId,
+        resolution.outcome === "approve" ? "approved" : "denied", actor.id, now, oweResume);
+      if (!resolved) return fail("Automation proposal was resolved concurrently", 409);
+      this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+      this.recordWorkflowDecisionAudit(resolved, resolution.outcome === "approve" ? "allowed" : "denied", actor, now);
+      this.hub.sessionChangedById(childSessionId);
+      return ok(this.withMergeReviewEvidence(resolved));
+    }
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
-        !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && parentSessionId === childSessionId ||
+        !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope" ||
+          decision.category === "campaign_follow_up_admission") && parentSessionId === childSessionId ||
+          // A standalone session's own extra review rounds, which only a person decides (#3369).
+          decision.category === "review_round_extension" && parentSessionId === childSessionId && decision.authority === "human" ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
     }
     if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    if (resolution?.outcome === "approve" && decision.resourceSnapshot.category === "pr_merge") {
+      const requester = this.db.getSession(childSessionId);
+      const refused = requester && this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, actor);
+        return fail(refused, 409);
+      }
+    }
     for (const sessionId of [childSessionId, parentSessionId]) {
       const owner = this.db.getSession(sessionId);
       const unsupported = owner && this.capabilityFailure(
@@ -9731,8 +10771,23 @@ export class SessionsService {
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
     }
+    if (decision.category === "campaign_follow_up_admission") {
+      // Only the campaign's owner admits a follow-up past its approval limit (#2940), never an agent.
+      const audience = this.db.sessionScope(childSessionId);
+      if (authority !== "human" || actor.kind !== "human" || !actor.id || !audience ||
+          !this.db.isSessionOwner({ userId: actor.id, organizationId: audience.organizationId }, childSessionId)) {
+        return fail("Only the campaign owner can admit a follow-up past the campaign's approval limit", 403);
+      }
+    }
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
+    }
+    if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
+      const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, actor);
+        return fail(refused, 409);
+      }
     }
     const checked = this.validateWorkflowDecisionResolution(decision, resolution);
     if (!checked.ok || !checked.data) return failAs(checked);
@@ -9795,7 +10850,7 @@ export class SessionsService {
       if (authority === "human" && (!actor.id || !audience || !this.db.isSessionOwner({ userId: actor.id, organizationId: audience.organizationId }, childSessionId))) {
         return fail("Only the campaign owner can approve changes to authorized issue scope", 403);
       }
-      const unsupported = scopeCompatibility(this.db, currentChild);
+      const unsupported = scopeCompatibility(this.db, currentChild, snapshot.repository);
       if (unsupported) return capabilityFail(unsupported);
       const request: CampaignIssueScopeRequest = { requestId: decision.requestId, expectedRevision: snapshot.expectedRevision,
         additions: snapshot.additions.map((number) => ({ repository: snapshot.repository, number })),
@@ -9807,7 +10862,21 @@ export class SessionsService {
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
-      if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved > boundary.issueAuthority!.maxIssues)) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved >
+          this.db.campaignIssueLimit(childSessionId, boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
+      // within the scope limit that boundary names, counting the slots consumed publications still
+      // hold other than those this change admits: only a fresh authorization can raise that limit.
+      const control = currentChild.orchestratorPolicy?.control;
+      const maxIssues = authority === "human" && control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+      const limit = maxIssues === undefined ? undefined : this.db.campaignIssueLimit(childSessionId, maxIssues);
+      const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
+      const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + held;
+      if (limit !== undefined && total > limit) {
+        return fail(`This change would give the campaign ${total} issues${held ? `, counting ${held} published follow-up${held === 1 ? "" : "s"} not yet in scope` : ""}, ` +
+          `more than the ${limit} its Full Control boundary allows. Deny it and propose fewer issues, or Revoke Full Control in ` +
+          "Orchestrator Controls, then Enable Full Control to authorize a larger scope.", 409);
+      }
       if (!latest || auditDigest(latest) !== decision.resourceDigest ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {
         this.revokeWorkflowDecision(decision, actor);
@@ -9863,7 +10932,7 @@ export class SessionsService {
     );
     this.hub.sessionChangedById(childSessionId);
     this.publishCampaignAttentionTransition(currentParent);
-    return ok(resolved);
+    return ok(this.withMergeReviewEvidence(resolved));
   }
 
   async consumeWorkflowDecision(
@@ -9875,7 +10944,11 @@ export class SessionsService {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
+    if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
+    if (decision.category === "campaign_follow_up_admission") {
+      return fail("accept the follow-up again: the approval is consumed when the campaign admits exactly that follow-up", 403);
+    }
     if (decision.status !== "approved") {
       return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
     }
@@ -9907,6 +10980,13 @@ export class SessionsService {
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
+    if (child && decision.resourceSnapshot.category === "pr_merge") {
+      const refused = this.mergeReviewEvidenceRefusal(child, decision.resourceSnapshot);
+      if (refused) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(refused, 409);
+      }
+    }
     for (const owner of [child, parent]) {
       const unsupported = owner && this.capabilityFailure(
         owner.runnerId,
@@ -9919,13 +10999,29 @@ export class SessionsService {
       }
     }
     const policy = parent?.parentControlPolicy;
+    // The same narrow self-control exception as creation/resolution: an ordinary standalone
+    // requester can consume its human-approved review extension, never another self-owned gate.
+    const standaloneReviewExtension = child && parent?.id === child.id && decision.category === "review_round_extension" &&
+      decision.authority === "human" && this.decisionControllerRoot(child) === "none";
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
+        !(standaloneReviewExtension || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
+    }
+    if (normalized.data.category === "pr_merge") {
+      const snapshot = normalized.data;
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("the current pull request head needs a valid review before merge", 409);
+      }
+    }
+    if (!this.reviewExtensionCurrent(child, decision)) {
+      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      return fail("the review extension no longer matches the current run", 409);
     }
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
     if (!action.ok) return failAs(action);
@@ -9938,6 +11034,7 @@ export class SessionsService {
         const result = await this.hub.requestFromRunner(parent.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect", requestId,
           sessionId: parent.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
         if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== parent.id || result.repository?.toLowerCase() !== snapshot.repository ||
+            result.duplicateSearch !== "subject" ||
             issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }) !== snapshot.issueAdmission!.evidenceDigest ||
             issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
             !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)) return fail("Fresh publication evidence changed; request a new exact grant", 409);
@@ -9958,6 +11055,49 @@ export class SessionsService {
           this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
           return unsupported;
         }
+      }
+    }
+    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod) {
+      // #3602: GitLab is read before arming, through the child's own glab login. A stale head or a
+      // snapshot that does not fit the project (a direct merge around an enabled train, among
+      // others) cannot be used, so it is revoked; GitLab being unreadable proves nothing either
+      // way, so nothing is armed and the child may try again.
+      const snapshot = normalized.data;
+      const unsupported = this.capabilityFailure(child.runnerId, "gitlabMergeDecisions", "GitLab merge decisions");
+      if (unsupported) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return unsupported;
+      }
+      const requestId = `gitlab_merge_preflight_${randomUUID()}`;
+      let checked: unknown;
+      try {
+        checked = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "gitlab_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+          pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, mergeMethod: snapshot.mergeMethod === "merge_train" ? "merge_train" : "merge",
+          squash: snapshot.squash === true, removeSourceBranch: snapshot.removeSourceBranch === true,
+        }, GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS);
+      } catch {
+        return fail("GitLab could not be checked before this merge, so nothing was armed. Try again.", 409);
+      }
+      const result = checked as Partial<GitLabMergePreflightResultMessage> | null;
+      if (result?.type !== "gitlab_merge_preflight_result" || result.sessionId !== child.id || result.ok !== true) {
+        if (result?.refusal === "stale_head" || result?.refusal === "mismatch") {
+          this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        }
+        const reason = typeof result?.reason === "string" ? result.reason : "GitLab could not be checked.";
+        return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
+      }
+    }
+    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
+      // #3713: the description can change after approval, so GitHub is read again before arming.
+      // A closure the approval does not describe revokes it; GitHub being unreadable proves
+      // nothing either way, so nothing is armed and the child may try again.
+      const checked = await this.githubMergeClosures(child, normalized.data);
+      if (!checked.ok) {
+        if (checked.revoke) this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(checked.revoke
+          ? `${checked.message} This approval was revoked, so nothing was armed; request a new merge decision.`
+          : checked.message, 409);
       }
     }
     const now = Date.now();
@@ -10030,6 +11170,15 @@ export class SessionsService {
           }
         }
       }
+      const evidenceRefusal = normalized.data.category === "pr_merge" ? this.mergeReviewEvidenceRefusal(child, normalized.data) : null;
+      if (evidenceRefusal) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail(evidenceRefusal, 409);
+      }
+      if (!this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
+      }
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
         ...action.data,
         commandDigest: auditDigest(action.data)!,
@@ -10039,7 +11188,7 @@ export class SessionsService {
       if (!armed) return fail("workflow decision action admission changed concurrently", 409);
       this.hub.sessionChangedById(sessionId);
       this.hub.sessionChangedById(parent.id);
-      return ok(armed);
+      return ok(this.withMergeReviewEvidence(armed));
     }
     const originalVideoApproval = decision.authority === "orchestrator" &&
       decision.resourceSnapshot.category === "ui_evidence_approval" && !decision.resourceSnapshot.videoReview &&
@@ -10060,7 +11209,7 @@ export class SessionsService {
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
-    return ok(consumed);
+    return ok(this.withMergeReviewEvidence(consumed));
   }
 
   /** Reconcile a command that already completed without replaying it. This exists for durable
@@ -10093,7 +11242,7 @@ export class SessionsService {
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
-        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision, { recordingCompletedMerge: true })) {
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
     }
     for (const owner of [child, parent]) {
@@ -10119,7 +11268,7 @@ export class SessionsService {
       if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
       const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
       if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
-      return ok(consumed);
+      return ok(this.withMergeReviewEvidence(consumed));
     }
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
@@ -10129,7 +11278,7 @@ export class SessionsService {
       occurrenceId,
       command,
       commandDigest: admission.commandDigest,
-      pullRequestUrl: `https://github.com/${normalized.data.repository}/pull/${normalized.data.pullRequest}`,
+      pullRequestUrl: prMergeChangeRequestUrl(normalized.data),
       expectedHeadSha: normalized.data.headSha,
       ...(admission.armedAfterEventSeq !== undefined
         ? { armedAfterEventSeq: admission.armedAfterEventSeq } : {}),
@@ -10182,7 +11331,7 @@ export class SessionsService {
         !canAccess(currentChild.id) || !canAccess(currentParent.id) ||
         !this.workflowDecisionRelationship(currentParent.id, currentChild.id) || !currentPolicy ||
         currentPolicy.revision !== decision.policyRevision ||
-        !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision)) {
+        !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision, { recordingCompletedMerge: true })) {
       return fail("workflow decision authority or ancestry changed during reconciliation", 409);
     }
     for (const owner of [currentChild, currentParent]) {
@@ -10249,7 +11398,7 @@ export class SessionsService {
     );
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
-    return ok(consumed);
+    return ok(this.withMergeReviewEvidence(consumed));
   }
 
   private workflowDecisionActionForPermission(
@@ -10346,15 +11495,65 @@ export class SessionsService {
     return { decision, commandDigest };
   }
 
+  /**
+   * Why a review_round_extension request does not match the requester's review run (#3369), or
+   * null. It must name the run's current epoch exactly as the control plane records it: every
+   * granted round used and the open blocking findings of its last valid round. After an upvote,
+   * both the upvoted head and the changed head must be bound (#3641). Its
+   * resource key is canonical, so a newer request for the same epoch and round count supersedes an
+   * older one and a later extension is a new resource.
+   */
+  private reviewRoundExtensionRefusal(
+    child: SessionView,
+    resourceKey: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "review_round_extension" }>,
+  ): string | null {
+    if (this.db.reviewSessions.isReviewSession(child.id)) return "a review session cannot request more review rounds";
+    const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.headSha);
+    if (run.epoch === 0 || !run.lastValid) return "this session has no valid review of that pull request to extend";
+    if (snapshot.epoch !== run.epoch) return `the review run is in epoch ${run.epoch}, not ${snapshot.epoch}`;
+    if (run.lastValid.vote === "UPVOTE") {
+      if (snapshot.headSha === run.lastValid.headSha) return "the pull request's last valid review is an upvote; it needs no more rounds";
+      if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "postUpvoteReviewExtensions")) {
+        return "post-upvote review extensions require a compatible runner; upgrade the runner before requesting one";
+      }
+      if (snapshot.upvotedHeadSha !== run.lastValid.headSha) return "the extension must bind the last valid upvoted head";
+    } else if (snapshot.upvotedHeadSha !== undefined) return "the last valid review is not the bound upvote";
+    if (run.validRounds < run.roundBudget) {
+      return `the epoch has used ${run.validRounds} of its ${run.roundBudget} rounds; request a review instead`;
+    }
+    if (snapshot.roundsUsed !== run.validRounds) return `the epoch has used ${run.validRounds} rounds, not ${snapshot.roundsUsed}`;
+    const blocking = run.lastValid.findings.filter((finding) => finding.blocking).length;
+    if (snapshot.blockingFindings !== blocking) {
+      return `the last valid round has ${blocking} open blocking finding(s), not ${snapshot.blockingFindings}`;
+    }
+    const key = `review_round_extension:${snapshot.repository}#${snapshot.pullRequest}:epoch-${snapshot.epoch}:rounds-${snapshot.roundsUsed}`;
+    if (resourceKey !== key) return `resourceKey must be ${key}`;
+    return null;
+  }
+
+  private reviewExtensionCurrent(child: SessionView, decision: WorkflowDecisionView): boolean {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "review_round_extension") return true;
+    if (snapshot.upvotedHeadSha && !runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "postUpvoteReviewExtensions")) return false;
+    const extensions = this.db.reviewSessions.extensions(child.id,
+      { repository: snapshot.repository, number: snapshot.pullRequest }, snapshot.epoch, snapshot.headSha);
+    return extensions.approved.includes(decision.occurrenceId);
+  }
+
   private workflowDecisionController(child: SessionView, category?: WorkflowDecisionCategory): {
     session: SessionView;
     policy: ParentControlPolicy;
   } | null {
+    if (category === "automation_creation") return {
+      session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+    };
     if (child.orchestratorPolicy?.control?.mode === "full_control" && child.parentControlPolicy &&
         this.workflowDecisionRelationship(child.id, child.id)) {
       return { session: child, policy: child.parentControlPolicy };
     }
-    if ((category === "issue_closure" || category === "campaign_issue_scope") && sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
+    if ((category === "issue_closure" || category === "campaign_issue_scope" || category === "campaign_follow_up_admission") &&
+        sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
     // The outermost Orchestrator above the child owns its gates, found by the same walk the
@@ -10362,6 +11561,11 @@ export class SessionsService {
     // owns them, human-only unless its Parent Control policy says otherwise, so no shape moves a
     // gate toward an agent; a refused ancestry has no controller at all.
     const root = this.decisionControllerRoot(child);
+    // A session with no Orchestrator above it still reviews its own pull requests (#3369): its
+    // extra review rounds are its own gate, always human-owned.
+    if (category === "review_round_extension" && root === "none") {
+      return { session: child, policy: { revision: 0, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } };
+    }
     const parent = typeof root === "object" ? this.db.getSession(root.id) : null;
     const controller = parent ? {
       session: parent,
@@ -10428,6 +11632,20 @@ export class SessionsService {
     return owner === "orchestrator" ? { effectiveOwner: "orchestrator", limitation: direct.fallback } : direct;
   }
 
+  /** The decision's owner by policy alone, before any evidence or review-client check: the saved
+   * owner under Custom, the current campaign boundary under Full Control. */
+  private campaignDecisionOwner(
+    controller: SessionView,
+    policy: ParentControlPolicy,
+    childSessionId: string,
+    snapshot: WorkflowDecisionResourceSnapshot,
+  ): WorkflowDecisionAuthority {
+    const requester = this.db.getSession(childSessionId);
+    return requester ? evaluateCampaignAuthority(controller, requester,
+      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
+      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+  }
+
   /** Whether the Orchestrator can inspect every evidence item itself, before Full Control routing. */
   private directWorkflowDecisionAuthority(
     controller: SessionView,
@@ -10435,10 +11653,7 @@ export class SessionsService {
     childSessionId: string,
     snapshot: WorkflowDecisionResourceSnapshot,
   ): UiEvidenceReviewEvaluation {
-    const requester = this.db.getSession(childSessionId);
-    const authority = requester ? evaluateCampaignAuthority(controller, requester,
-      this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
-      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+    const authority = this.campaignDecisionOwner(controller, policy, childSessionId, snapshot);
     if (snapshot.category !== "ui_evidence_approval") {
       return { effectiveOwner: authority };
     }
@@ -10536,6 +11751,28 @@ export class SessionsService {
       : fail("review receipt is unknown, replaced, expired, or no longer usable", 409);
   }
 
+  private mergeReviewEvidenceRefusal(child: SessionView,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): string | null {
+    if (snapshot.reviewSessionId === undefined) return null;
+    if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "mergeReviewEvidence")) {
+      return "Review-run merge evidence requires a compatible runner; upgrade and reconnect the runner, then cite a review session.";
+    }
+    const evidence = this.db.reviewSessions.mergeEvidence(child.id, snapshot);
+    return evidence?.status === "refused" ? evidence.reason : null;
+  }
+
+  /** The decision API exposes current server facts, never a child's asserted review result. */
+  private withMergeReviewEvidence(decision: WorkflowDecisionView): WorkflowDecisionView {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "pr_merge" || snapshot.reviewSessionId === undefined) return decision;
+    const child = this.db.getSession(decision.sessionId);
+    const reason = child ? this.mergeReviewEvidenceRefusal(child, snapshot) : "The review requester no longer exists.";
+    const reviewEvidence = reason
+      ? { status: "refused" as const, reviewSessionId: snapshot.reviewSessionId, reason }
+      : this.db.reviewSessions.mergeEvidence(decision.sessionId, snapshot);
+    return { ...decision, reviewEvidence };
+  }
+
   /** Whether a stored decision's owner still holds under the current policy and capabilities.
    * A human-owned UI evidence decision stays valid when capabilities later improve: human review
    * never broadens access, and a saved-owner change is caught by the policy revision instead. */
@@ -10543,13 +11780,18 @@ export class SessionsService {
     controller: SessionView,
     policy: ParentControlPolicy,
     decision: WorkflowDecisionView,
+    options: { recordingCompletedMerge?: boolean } = {},
   ): boolean {
+    if (decision.category === "automation_creation") return decision.authority === "human" &&
+      decision.controllingSessionId === decision.sessionId;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
-    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure"].includes(decision.category)) {
+    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
     const requester = this.db.getSession(decision.sessionId);
+    if (!options.recordingCompletedMerge && decision.status === "approved" && requester && decision.resourceSnapshot.category === "pr_merge" &&
+        this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot)) return false;
     if (decision.authorityEvaluation?.boundaryRevision !== undefined && (!requester ||
         evaluateCampaignAuthority(controller, requester, this.db.getRunner(requester.runnerId)?.protocolVersion,
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
@@ -10697,8 +11939,11 @@ export class SessionsService {
       merged_branch_deletion: "Merged Branch Deletion Approval Required",
       follow_up_issue_publication: "Follow-Up Issue Publication Approval Required",
       issue_closure: "Issue Closure Approval Required",
+      automation_creation: "Create Automation Approval Required",
       campaign_issue_scope: "Campaign Issue Scope Approval Required",
+      campaign_follow_up_admission: "Follow-Up Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
+      review_round_extension: "Review Round Extension Approval Required",
     };
     const options = snapshot.category === "implementation_question"
       ? [
@@ -10810,16 +12055,65 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controllerBefore);
   }
 
+  private expiringAutomationDecisions = false;
+
+  /** Control-plane lifecycle, independent of runner availability and safe to replay after restart. */
+  expireAutomationCreationDecisions(now = Date.now(), sessionId?: string): number {
+    // Some callers advance outbox scheduling to bypass fan-in. That is not an approval clock.
+    now = Math.min(now, Date.now());
+    if (this.expiringAutomationDecisions) return 0;
+    this.expiringAutomationDecisions = true;
+    let count = 0;
+    try {
+      for (const decision of this.db.expiredAutomationCreationDecisions(now, sessionId)) {
+        const controllerBefore = this.db.getSession(decision.controllingSessionId);
+        try {
+          const changed = this.db.expireAutomationCreationDecision(decision.occurrenceId, now, () => {
+            this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now, undefined,
+              (kind, previous) => this.db.queueAutomationExpirationEffect(decision.occurrenceId, previous, kind, now));
+            this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "system", id: "automation-approval-expiration" },
+              now, "automation proposal or approval execution deadline elapsed");
+          });
+          if (!changed) continue;
+          count++;
+          this.hub.sessionChangedById(decision.sessionId);
+          this.publishCampaignAttentionTransition(controllerBefore);
+        } catch (error) {
+          this.log.warn(`automation expiration ${decision.occurrenceId} deferred: ${(error as Error).message}`);
+        }
+      }
+      for (const effect of this.db.automationExpirationEffects(sessionId)) {
+        try {
+          const current = this.db.getSession(effect.previous.id);
+          if (current && !isTerminal(current.status)) {
+            if (effect.kind === "idle" && current.status === "idle") this.replayRestoredPolicyIdle(effect.previous, current.id, now);
+            else {
+              if (!current.pendingApproval) this.gateOnPolicy(current.id, now);
+              this.clearSettledPolicyResumeStatus(current.id);
+            }
+          }
+          this.db.completeAutomationExpirationEffect(effect.occurrenceId);
+        } catch (error) {
+          this.log.warn(`automation expiration ${effect.occurrenceId} lifecycle recovery deferred: ${(error as Error).message}`);
+        }
+      }
+      return count;
+    } finally { this.expiringAutomationDecisions = false; }
+  }
+
   /** Settle a server-owned workflow card against the provider state it temporarily covered.
    * `resume` delivers a turn that continues the child; it returns whether the turn was admitted.
    * It is told whether the child had settled idle behind the card, so its admission can say
    * `queued` until the runner starts the turn, rather than `running` for a turn that has not begun
-   * (#1651). A child still inside its turn queues the resume behind that turn and stays running. */
+   * (#1651). A child still inside its turn queues the resume behind that turn and stays running.
+   * Expiration can defer lifecycle effects: only card/status writes run in its transaction, while
+   * workflow/pod settlement and notifications are recorded as durable post-commit work. */
   private settleWorkflowDecisionPause(
     sessionId: string,
     occurrenceId: string,
     now: number,
     resume?: (childIdle: boolean) => boolean,
+    deferLifecycle?: (kind: "idle" | "active", previous: SessionView) => void,
   ): void {
     const current = this.db.getSession(sessionId);
     if (!current) return;
@@ -10856,13 +12150,17 @@ export class SessionsService {
     if (restoreIdle) {
       // No resume, a guardrail that would gate it (and parks the child here), or an open hook
       // approval: any message stays on the decision record.
-      this.replayRestoredPolicyIdle(current, sessionId, now);
+      if (deferLifecycle) deferLifecycle("idle", current);
+      else this.replayRestoredPolicyIdle(current, sessionId, now);
     } else {
       // Typed decisions do not suspend the provider turn. Usage can cross a soft checkpoint while
       // the card is present, so the last settlement must immediately surface any deferred gate.
-      if (!remaining) this.gateOnPolicy(sessionId, now);
-      this.clearSettledPolicyResumeStatus(sessionId);
-      resume?.(false);
+      if (deferLifecycle) deferLifecycle("active", current);
+      else {
+        if (!remaining) this.gateOnPolicy(sessionId, now);
+        this.clearSettledPolicyResumeStatus(sessionId);
+        resume?.(false);
+      }
     }
   }
 
@@ -11124,6 +12422,7 @@ export class SessionsService {
    * boundary that can see the hold clear calls this; staging is conditional on the resume still
    * being held, so only the first of them delivers it. */
   private deliverHeldWorkflowDecisionResumes(sessionId: string, now = Date.now()): void {
+    this.expireAutomationCreationDecisions(now, sessionId);
     const held = this.db.heldWorkflowDecisionResumes(sessionId);
     if (!held.length) return;
     const session = this.db.getSession(sessionId);
@@ -11215,7 +12514,10 @@ export class SessionsService {
     this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
     // A restart owes its child the notice it cannot yet deliver, and a later restart adds to that
     // notice rather than replacing it; every other end means no child is left to tell (#1861).
-    if (actorId !== "session-restarted") this.db.abandonRestartNotices(sessionId, Date.now());
+    if (actorId !== "session-restarted") {
+      this.db.abandonRestartNotices(sessionId, Date.now());
+      this.db.abandonReviewContinuations(sessionId, Date.now());
+    }
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
@@ -11268,7 +12570,7 @@ export class SessionsService {
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    const pullRequestUrl = `https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest}`;
+    const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
     const message: ReconcileWorkflowActionMessage = {
       type: "reconcile_workflow_action",
@@ -11317,7 +12619,7 @@ export class SessionsService {
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||
         policy.revision !== decision.policyRevision ||
-        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision, { recordingCompletedMerge: true })) {
       return false;
     }
     return [child, parent].every((owner) => !this.capabilityFailure(
@@ -11388,6 +12690,14 @@ export class SessionsService {
     const evidenceDigests = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, sha256: item.sha256 }))
       : undefined;
+    // A person's approval of a follow-up publication records the issue boundary it was made under
+    // (#2940), from the controller's current boundary, so a later same-author, same-objective
+    // re-mint can still prove that approval's objective when its issue is admitted to scope.
+    const controller = decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
+      outcome === "allowed" && stage === "resolution" && actor.kind === "human" ? this.db.getSession(decision.controllingSessionId) : null;
+    const approvalBoundary = controller ? issueBoundary(controller) : null;
+    const publicationAuthority = approvalBoundary
+      ? { authorizedByUserId: approvalBoundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(approvalBoundary.objective) } : undefined;
     this.db.appendGovernanceAudit({
       requestId: decision.occurrenceId,
       approvalKind: "workflow_decision",
@@ -11419,6 +12729,7 @@ export class SessionsService {
         ...(resolvingRecord && decision.childMessage
           ? { childMessageDigest: auditDigest(decision.childMessage)! }
           : {}),
+        ...(publicationAuthority ? { publicationAuthority } : {}),
       },
       timestamp: now,
     });
@@ -12003,8 +13314,10 @@ export class SessionsService {
         this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
-        // A restart notice this card kept back goes out now if nothing else holds it (#1861).
+        // A restart notice this card kept back goes out now if nothing else holds it (#1861), and
+        // so does a finished review's continuation (#3369).
         this.deliverHeldRestartNotices(sessionId, now);
+        this.deliverHeldReviewContinuations(sessionId, now);
       } else {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
@@ -12523,17 +13836,32 @@ export class SessionsService {
       if (media && !pending.archived && !this.db.sessionStopIntent(sessionId)?.archiveAfterStop) {
         return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
       }
+      this.archiveRequesterReviews(sessionId, now, refreshProject);
       return ok(pending, 202);
     }
-    if (session.archived) return ok(session);
+    if (session.archived) {
+      this.archiveRequesterReviews(sessionId, now, refreshProject);
+      return ok(session);
+    }
     // Archiving a terminal session needs no Stop, but it is an end all the same: a runner that
     // returns stops an archived session rather than restoring it, so a child a disconnect had
     // provisionally stopped can answer nothing and is owed no resume from here on (#1759).
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-archived");
     this.db.setSessionArchived(sessionId, true, now);
+    this.archiveRequesterReviews(sessionId, now, refreshProject);
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated, refreshProject);
     return ok(updated);
+  }
+
+  private archiveRequesterReviews(sessionId: string, now: number, refreshProject: boolean): void {
+    const reviews = this.db.reviewSessions.forRequester(sessionId);
+    if (!reviews.length) return;
+    this.db.abandonReviewContinuations(sessionId, now);
+    for (const id of reviews) {
+      this.cancelReviewSession(sessionId, id);
+      this.setArchived(id, true, refreshProject);
+    }
   }
 
   /** A verified child and its archived flag are the durable intent. Reconnect replays this
@@ -12611,9 +13939,8 @@ export class SessionsService {
 
   /** A new control-plane process replays an archive request that was not delivered before exit. */
   reconcileArchivedCampaignWorktrees(runnerId: string): void {
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (session.runnerId === runnerId && session.archived &&
-          (session.worktreePath || session.worktrees?.length)) {
+    for (const session of this.db.runnerSessionInventory(runnerId)) {
+      if (session.archived && (session.worktreePath || session.worktrees?.length)) {
         this.queueCampaignWorktreeRetirement(session.id, true);
       }
     }
@@ -14215,15 +15542,17 @@ export class SessionsService {
       // Clone per member so guardrail normalization never changes the shared request.
       const config = { ...admitted.data![memberIndex]! };
       const campaignBudgetUserLimits = { costUsd: config.costBudgetUsd, toolCalls: config.maxToolCalls };
-      const budgetRoot = parentSessionId ? this.db.campaignBudgets.root(parentSessionId) : null;
+      const budgetRoot = parentSessionId ? this.db.campaignBudgets.governingRoot(parentSessionId) : null;
       if (budgetRoot) {
         const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
         if (ceilingError) throw new Error(ceilingError);
         const view = this.db.campaignBudgets.view(budgetRoot)!;
         const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
-        if(parentError) throw new Error(parentError);
-        const peer = this.db.getRunner(req.runnerId)?.protocolVersion ?? 0;
-        if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) throw new Error("Campaign run workers require protocol v218");
+        if(parentError) throw typeof parentError === "string" ? new Error(parentError) : new RunnerCapabilityRefusal(parentError);
+        const peer = this.db.getRunner(req.runnerId)?.protocolVersion;
+        if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) {
+          throw new RunnerCapabilityRefusal(runnerCapabilityRequirementError(peer, "campaignBudgetAdmission", "campaign run workers"));
+        }
         const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
         if (accountingError) throw new Error(accountingError);
         const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
@@ -14287,7 +15616,10 @@ export class SessionsService {
     };
     let materialized: ReturnType<typeof materialize>;
     try { materialized = this.db.campaignBudgetTransaction(materialize); }
-    catch (error) { return fail((error as Error).message, 409); }
+    catch (error) {
+      if (error instanceof RunnerCapabilityRefusal) return capabilityFail(error.requirement);
+      return fail((error as Error).message, 409);
+    }
     for (const spec of launches) {
       this.hub.sessionChangedById(spec.sessionId);
       this.hub.sendToRunner(req.runnerId, { type: "start_session", spec, initialPrompt: req.task });
@@ -14408,9 +15740,9 @@ export class SessionsService {
   /** Materialize the decision for a runner-owned cancellation even when the control-plane rule
    * was changed or cleared before the trip arrived. Duplicate/reconnect notices retain one card,
    * and an unrelated unanswered request keeps ownership of the visible primary slot. */
-  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): void {
+  onGovernanceTripped(runnerId: string, message: GovernanceTrippedMessage): boolean {
     const session = this.db.getSession(message.sessionId);
-    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return;
+    if (!session || session.runnerId !== runnerId || session.archived || isTerminal(session.status)) return false;
     if (typeof message.tripId !== "string" || !message.tripId || message.tripId.length > 128 ||
         (message.kind !== "cost_budget" && message.kind !== "max_tool_calls") ||
         !Number.isFinite(message.threshold) || message.threshold <= 0 ||
@@ -14418,19 +15750,42 @@ export class SessionsService {
         (message.kind === "max_tool_calls" &&
           (!Number.isSafeInteger(message.threshold) || !Number.isSafeInteger(message.observed)))) {
       this.log.warn(`ignoring malformed governance trip for ${message.sessionId} from ${runnerId}`);
-      return;
+      return false;
+    }
+    if (message.commandId !== undefined) {
+      if (typeof message.commandId !== "string" || !message.commandId || message.commandId.length > 256) return false;
     }
     const requestId = `runner-${message.kind}:${message.tripId}`;
     const pending = pendingRequests(session.pendingApproval);
     if (pending.some((request) => request.runnerGuardrail?.tripId === message.tripId &&
-        request.runnerGuardrail.kind === message.kind)) return;
-    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return;
+        request.runnerGuardrail.kind === message.kind)) return false;
+    if (this.db.hasTerminalGovernanceResolution(message.sessionId, requestId)) return false;
     const alreadyAsked = this.db.hasGovernanceAuditEntry(
       message.sessionId,
       requestId,
       "policy_decision",
       "asked",
     );
+    // Never enrich an already recorded trip with a different command or crossing on replay.
+    let replayCommandId = message.commandId;
+    if (alreadyAsked &&
+        !this.db.hasRunnerGovernanceTripForCommand(session.id, message, message.commandId, 0, Date.now(), true)) {
+      // An older CP ignored optional command metadata when recording this trip. Restore its
+      // original uncorrelated card and timestamp bounds, without upgrading the legacy proof.
+      if (message.commandId === undefined || !this.db.hasRunnerGovernanceTripForCommand(session.id,
+        { ...message, commandId: undefined }, undefined, 0, Date.now())) return false;
+      replayCommandId = undefined;
+    }
+    // A matching immutable audit already proves ownership even after terminal command retention
+    // expires. A missing/superseded command cannot authorize automation attribution, but the
+    // authenticated runner crossing still needs its Continue/Stop card. Pin it as unverified.
+    let verifiedCommand = false;
+    if (!alreadyAsked && message.commandId !== undefined) {
+      const automationCommand = this.db.getAutomationCommand(message.commandId);
+      const command = automationCommand ?? this.db.getSessionPromptCommand(message.commandId);
+      if (command && (command.runnerId !== runnerId || command.sessionId !== session.id)) return false;
+      verifiedCommand = Boolean(command && !automationCommand?.supersededBy);
+    }
     const existing = pending.find((request) =>
       request.kind === message.kind && !request.runnerGuardrail);
     const title = message.kind === "cost_budget"
@@ -14441,6 +15796,7 @@ export class SessionsService {
       kind: message.kind,
       threshold: message.threshold,
       observed: message.observed,
+      ...(replayCommandId !== undefined ? { commandId: replayCommandId } : {}),
     };
     // Cost usage reaches the CP before the runner's following trip frame, so the CP may already
     // have parked the same crossing. Promote that card with the runner evidence instead of asking
@@ -14465,12 +15821,16 @@ export class SessionsService {
     if (!alreadyAsked) {
       this.recordGovernanceAudit(session, { ...approval, requestId }, "policy_decision", "asked",
         { kind: "system", id: "runner-governance" }, now, {
+          ...(message.commandId !== undefined
+            ? { content: [...(verifiedCommand ? [] : ["unverified-command"]),
+              message.commandId, message.kind, message.threshold, message.observed] } : {}),
           policyRule: message.kind === "cost_budget"
             ? { kind: "cost_budget", budgetUsd: message.threshold }
             : { kind: "max_tool_calls", maxCalls: message.threshold },
         });
     }
     this.hub.sessionChangedById(message.sessionId);
+    return true;
   }
 
   private reconcileWorkflowSessionStatus(sessionId: string, status: SessionStatus, now: number): void {
@@ -15576,6 +16936,8 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
       if (this.dedicatedMediaLifecycle(s)) continue;
+      // No provider of an absent session runs, so its campaign slot is free (#2940).
+      if (!liveSet.has(s.id)) this.db.campaignBudgets.noteProviderAbsent(s.id);
       if (this.db.hasSessionStopIntent(s.id)) {
         if (liveSet.has(s.id)) {
           this.sendStopCommand(runnerId, s.id);
@@ -15656,7 +17018,7 @@ export class SessionsService {
       }
     };
     return { defer, capture: (session) => {
-      if (!session?.parentSessionId) return null;
+      if (!session?.parentSessionId || session.kind === "review") return null;
       let before = parents.get(session.parentSessionId);
       if (before === undefined) {
         before = this.campaignAttentionController(session);
@@ -15786,7 +17148,7 @@ export class SessionsService {
     const campaigns = this.runnerAttentionBeforeViews(runnerId);
     const parents = new Map<string, SessionView | null>();
     const campaignBefore = (session: SessionView | null): SessionView | null => {
-      if (!session?.parentSessionId) return null;
+      if (!session?.parentSessionId || session.kind === "review") return null;
       let controller = parents.get(session.parentSessionId);
       if (controller === undefined) {
         controller = this.campaignAttentionController(session);
@@ -15823,6 +17185,7 @@ export class SessionsService {
             this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
             this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
             this.db.hasOpenRestartNotices(snap.id) ||
+            this.db.hasOpenReviewContinuations(snap.id) ||
             this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
             this.db.policyResumeStatus(snap.id) !== null) return [];
         campaignBefore(existing);
@@ -15923,6 +17286,7 @@ export class SessionsService {
         this.deliverHeldRestartNotices(snap.id, now);
         // A card the runner restores at registration gets its standing response, once (#2940).
         this.applyStandingCampaignResponses(snap.id);
+        this.deliverHeldReviewContinuations(snap.id, now);
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
@@ -15942,6 +17306,8 @@ export class SessionsService {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
         if (this.dedicatedMediaLifecycle(s)) continue;
         campaignBefore(s);
+        // An inventory without the session holds no provider of it, so its campaign slot is free (#2940).
+        this.db.campaignBudgets.noteProviderAbsent(s.id);
         if (this.db.hasSessionStopIntent(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         if (isTerminal(s.status)) this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
@@ -16011,14 +17377,7 @@ export class SessionsService {
     const runtimeSnapshot = snapshot.costUsd < existing.costUsd
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
-    const policyGateMayRunBeforeUpdate = runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
-      this.db.sessionCostUsd(snapshot.id) > existing.costUsd;
-    const repeated = this.db.isRepeatedRuntimeSnapshot(snapshot.id, runtimeSnapshot);
-    // A CP-owned budget can change between identical runner snapshots. Preserve the before-view
-    // when this snapshot may park a new policy card, so its campaign receives the transition.
-    const newPolicyAsk = repeated && existing.parentSessionId && policyGateMayRunBeforeUpdate &&
-      this.pendingPolicyAsk({ ...existing, status: runtimeSnapshot.status, costUsd: runtimeSnapshot.costUsd });
-    const campaignBefore = repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing, batch);
+    const campaignBefore = this.runtimeCampaignBefore(existing, runtimeSnapshot, batch);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
@@ -16053,26 +17412,149 @@ export class SessionsService {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
-    this.settleCampaignUsage(snapshot.id);
-    this.synchronizeCostReconciliation(snapshot.id, unacknowledgedRevision);
+    this.finishSessionRuntimeUpdate({ existing, runtimeSnapshot, unacknowledgedRevision, campaignBefore }, history, now, batch);
+  }
+
+  /** Apply consecutive live snapshots from one runner in arrival order (#2601). Each run of up to
+   * RUNTIME_UPDATE_RUN_LIMIT snapshots, for distinct sessions, whose reconciliation needs nothing
+   * beyond database writes shares one durable transaction, and nothing about the run is published
+   * or sent before it commits. Every other snapshot takes the exact single-snapshot path, in turn.
+   * `reconcileRoleConversion` can commit, broadcast and send, so it runs only on that path, after
+   * every earlier snapshot has committed. A snapshot whose session has an unapplied role
+   * conversion never joins a run; for the rest it has nothing to do. */
+  applySessionRuntimeUpdates(
+    runnerId: string,
+    snapshots: readonly SessionSnapshot[],
+    batch?: RunnerAttentionBatch,
+    reconcileRoleConversion?: (snapshot: SessionSnapshot) => void,
+  ): void {
+    let next = 0;
+    while (next < snapshots.length) {
+      const run: Array<CommittedRuntimeUpdate & { before: () => void }> = [];
+      const sessions = new Set<string>();
+      // Distinct sessions: each is classified against exactly the state it is applied to.
+      while (next < snapshots.length && run.length < RUNTIME_UPDATE_RUN_LIMIT && !sessions.has(snapshots[next]!.id)) {
+        const update = this.batchableRuntimeUpdate(runnerId, snapshots[next]!, batch);
+        if (!update) break;
+        run.push(update);
+        sessions.add(update.runtimeSnapshot.id);
+        next++;
+      }
+      if (run.length > 0) {
+        this.commitRuntimeUpdates(run, batch);
+        continue;
+      }
+      reconcileRoleConversion?.(snapshots[next]!);
+      this.applySessionRuntimeUpdate(runnerId, snapshots[next]!, batch);
+      next++;
+    }
+  }
+
+  /** A live snapshot that can share a run: the single-snapshot path would reach its update with
+   * only database writes before it, and none of them can publish. Null sends it down that path.
+   * These are the registration batch's criteria (#2125) plus the live path's own settle steps. */
+  private batchableRuntimeUpdate(
+    runnerId: string,
+    snapshot: SessionSnapshot,
+    batch?: RunnerAttentionBatch,
+  ): (CommittedRuntimeUpdate & { before: () => void }) | null {
+    const sessionId = snapshot.id;
+    const existing = this.db.getSession(sessionId);
+    if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(sessionId) ||
+        this.pendingMediaLifecycle(existing) || this.db.hasSessionStopIntent(sessionId) ||
+        (existing.archived && !isTerminal(snapshot.status))) return null;
+    // Role-conversion reconciliation acts only on an unapplied conversion, and it can publish.
+    const conversion = this.db.sessionRoleConversion(sessionId);
+    if (conversion && conversion.state !== "applied") return null;
+    // Cost reconciliation that can neither send a repair nor refuse the snapshot.
+    if (reconciliationRevision(this.db, sessionId) !== 0 || latestReconciliationRepair(this.db, sessionId) ||
+        !reconciliationSnapshotAvailable(this.db, snapshot)) return null;
+    const runtimeSnapshot = snapshot.costUsd < existing.costUsd ? { ...snapshot, costUsd: existing.costUsd } : snapshot;
+    const terminal = isTerminal(runtimeSnapshot.status);
+    if (terminal) {
+      // Ending for good already happened; nothing the end would revoke, abort or abandon remains.
+      if (!isTerminal(existing.status) || this.db.unconsumedWorkflowDecisionsForSession(sessionId).length > 0 ||
+          this.db.hasActiveSessionPromptCommands(sessionId) || this.db.heldWorkflowDecisionResumes(sessionId).length > 0 ||
+          this.db.hasOpenRestartNotices(sessionId) || this.db.hasOpenReviewContinuations(sessionId) ||
+          this.db.listOpenPolicyHookApprovals(sessionId).length > 0) return null;
+    } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
+      return null;
+    }
+    return {
+      existing,
+      runtimeSnapshot,
+      unacknowledgedRevision: snapshot.costReconciliationRevision ?? 0,
+      campaignBefore: this.runtimeCampaignBefore(existing, runtimeSnapshot, batch),
+      // The single-snapshot path's writes before its update, in its order; none publishes.
+      before: () => {
+        if (terminal && snapshot.campaignBudgetCheckpoint) {
+          this.db.campaignBudgets.recordCheckpoint(sessionId, snapshot.campaignBudgetCheckpoint);
+        }
+        observeReconciliationSnapshot(this.db, snapshot);
+        if (runtimeSnapshot.status === "idle") this.db.noteSpawnApprovalsSettled(sessionId);
+        else this.db.clearPolicyResumeStatus(sessionId);
+      },
+    };
+  }
+
+  /** One durable commit for the run; its publications follow only once that commit succeeds. */
+  private commitRuntimeUpdates(run: ReadonlyArray<CommittedRuntimeUpdate & { before: () => void }>, batch?: RunnerAttentionBatch): void {
+    const now = Date.now();
+    const histories = this.db.updateSessionsFromRuntimeSnapshots(
+      run.map(({ runtimeSnapshot, before }) => ({ snapshot: runtimeSnapshot, before })), now);
+    // Every committed session is published even if an earlier one's publication throws.
+    let failure: { error: unknown } | undefined;
+    for (const [index, update] of run.entries()) {
+      try {
+        this.finishSessionRuntimeUpdate(update, histories[index] ?? null, now, batch);
+      } catch (error) {
+        failure ??= { error };
+      }
+    }
+    if (failure) throw failure.error;
+  }
+
+  private runtimeCampaignBefore(existing: SessionView, runtimeSnapshot: SessionSnapshot, batch?: RunnerAttentionBatch): SessionView | null {
+    const policyGateMayRunBeforeUpdate = runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
+      this.db.sessionCostUsd(existing.id) > existing.costUsd;
+    const repeated = this.db.isRepeatedRuntimeSnapshot(existing.id, runtimeSnapshot);
+    // A CP-owned budget can change between identical runner snapshots. Preserve the before-view
+    // when this snapshot may park a new policy card, so its campaign receives the transition.
+    const newPolicyAsk = repeated && existing.parentSessionId && policyGateMayRunBeforeUpdate &&
+      this.pendingPolicyAsk({ ...existing, status: runtimeSnapshot.status, costUsd: runtimeSnapshot.costUsd });
+    return repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing, batch);
+  }
+
+  /** Everything a runtime update publishes or sends, after its update has committed. */
+  private finishSessionRuntimeUpdate(
+    update: CommittedRuntimeUpdate,
+    history: RunnerHistoryReconciliation | null,
+    now: number,
+    batch?: RunnerAttentionBatch,
+  ): void {
+    const { existing, runtimeSnapshot, unacknowledgedRevision, campaignBefore } = update;
+    const sessionId = runtimeSnapshot.id;
+    this.settleCampaignUsage(sessionId);
+    this.synchronizeCostReconciliation(sessionId, unacknowledgedRevision);
     if (history?.reset) {
-      const reset = this.db.getSession(snapshot.id)!;
-      this.hub.sessionEventsReset(snapshot.id, this.db.listEvents(snapshot.id), reset.eventEpoch ?? 0);
-      this.rehydrate.add(snapshot.id);
-      void this.hydrateHistory(snapshot.id);
+      const reset = this.db.getSession(sessionId)!;
+      this.hub.sessionEventsReset(sessionId, this.db.listEvents(sessionId), reset.eventEpoch ?? 0);
+      this.rehydrate.add(sessionId);
+      void this.hydrateHistory(sessionId);
     }
     // The ledger may price a token residual the runner reported at zero cost (Codex), so the
     // settled session total, not the runner's figure, decides whether a budget gate re-evaluates.
     if (runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
-        this.db.sessionCostUsd(snapshot.id) > existing.costUsd) {
-      this.gateOnPolicy(snapshot.id, now);
-      this.notifyTransition(existing, snapshot.id);
+        this.db.sessionCostUsd(sessionId) > existing.costUsd) {
+      this.gateOnPolicy(sessionId, now);
+      this.notifyTransition(existing, sessionId);
     }
-    this.restorePendingWorkflowDecisionCards(snapshot.id);
-    this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
-    this.deliverHeldRestartNotices(snapshot.id, now);
-    this.applyStandingCampaignResponses(snapshot.id);
-    this.hub.sessionChangedById(snapshot.id);
+    this.restorePendingWorkflowDecisionCards(sessionId);
+    this.deliverHeldWorkflowDecisionResumes(sessionId, now);
+    this.deliverHeldRestartNotices(sessionId, now);
+    this.applyStandingCampaignResponses(sessionId);
+    this.deliverHeldReviewContinuations(sessionId, now);
+    this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
   }
 

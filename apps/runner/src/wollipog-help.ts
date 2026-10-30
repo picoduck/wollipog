@@ -24,11 +24,12 @@ export function rootHelp(): string {
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
+    "  automation          Propose, inspect, and create an automation with human approval",
     "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  pr                  Wait for a pull request's required checks or merge-queue outcome",
-    "  review              Run the cross-model review of this session's own pull request through the runner",
+    "  review              Start or inspect a review session for your own pushed pull request",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -52,7 +53,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision, campaign, pr, review",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, automation, decision, campaign, pr, review",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -86,6 +87,7 @@ export function sessionHelp(): string {
     "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
     "  session stop <session-id> [--json]",
     "  session stop-job <session-id> <job-id> [--json]",
+    "  session release-hold <session-id> <hold-id> [--json]",
     "  session restart <session-id> [--json]",
     "  session archive <session-id> [--json]",
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",
@@ -152,11 +154,6 @@ Commands:
                                                  Record {disposition, reason, resultingWorkItemKey?,
                                                  resultingIssue?, publicationRequired?}
   allocate --input '<json>'                      Reserve a managed worker's allowance (protocol v218+)
-  review --input '<json>'                        Dispatch/read a bounded controlled native review job
-  review-job <job-id>                            Read a review receipt without new spending
-  review-jobs [--limit <n>] [--cursor <job-id>] [--item <work-item-id>]
-                                                 Read active and terminal recovery metadata
-  review-report <job-id>                         Read a validated report separately for adjudication
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
@@ -214,9 +211,14 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
+    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",
     "UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires.",
     "A failed merge-group check alone does not end the wait: GitHub may rebuild the group and merge it.",
+    "queue_ejected also covers an entry GitHub removed before the call started: when the latest",
+    "merge-queue event removed the current head and the pull request is still open, mergeQueueRemoval",
+    "gives GitHub's reason (for example checks_timed_out, failed_checks, manual) and time. It never re-enqueues.",
     "It then prints one bounded summary: head SHA, each required check, merge-queue position and state,",
     "failed jobs with run links, and whether it merged. Nothing calls a model while it waits.",
     "Required checks come from the base branch's rulesets and branch protection. One GitHub has not",
@@ -227,26 +229,31 @@ export function pullRequestHelp(): string {
     "--timeout defaults to 240000 (4 minutes), up to 10800000; a slow GitHub read can add at most 20 seconds.",
     "--interval defaults to 30000, 10000-600000.",
     "--any-failure also returns when a check outside the required set fails on the head.",
-    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, queue_failed,",
-    "queue_ejected, closed, or head_changed; 124 timeout; 1 GitHub could not be read; 2 usage.",
+    "A GitLab merge request (its URL, or <gitlab-host>/group/project!<iid>, or a bare IID with",
+    "--repo <gitlab-host>/group/project) is read with this machine's `glab` login instead. It returns when",
+    "the head pipeline or merge-train pipeline finishes, it leaves the train, merges, closes, or its head",
+    "moves. Only a successful pipeline passes; a skipped or manual one returns checks_blocked.",
+    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, checks_blocked,",
+    "queue_failed, queue_ejected, closed, or head_changed; 124 timeout; 1 the forge could not be read;",
+    "2 usage.",
+    "",
+    "pr closures lists every issue merging a GitHub pull request would close: a closing keyword (close,",
+    "fix or resolve, in any tense) directly before an issue reference in its description closes it even in",
+    "a negated or hyphenated phrase such as \"does not close #N\" or \"auto-close #N\", and so does an issue",
+    "linked on GitHub. Code spans, code blocks and HTML comments do not close. --file reads a draft",
+    "description instead, before it is published. Pass each issue the merge should close with --intended",
+    "(#N, owner/name#N, or an issue URL), and write \"Refs #N\" for one that must stay open. It reads locally",
+    "with this machine's `gh` login, like pr wait. A GitHub pr_merge decision makes the same read and is",
+    "refused unless its intendedClosures match.",
+    "Exit status: 0 the closures are exactly the intended ones; 3 they differ (see undeclared and unmade);",
+    "1 GitHub or the file could not be read; 2 usage.",
   ].join("\n");
 }
 
 export function reviewHelp(): string {
   return [
-    "Usage: wollipog review <command> [options]",
-    "  review run --repo <owner/name> --pr <number> --head <sha> [--brief-file <path>]",
-    "             [--scope delta|full] [--full-reason <text>] [--json]",
-    "  review get <job-id> [--json]",
-    "  review list [--limit <1-100>] [--cursor <job-id>] [--json]",
-    "  review cancel <job-id> [--json]",
-    "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "The runner runs the installed cross-model review controller for this session's own open pull request at its pushed head, outside the session's sandbox, with the other model family as a read-only reviewer. It reviews a runner-private snapshot and never writes to the session's worktree.",
-    "Push first: --head must be the pull request's current head. The first round of a pull request needs --brief-file (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round unless --scope full is given with --full-reason.",
-    "review run returns a job id at once. Poll review get until terminal is true; it then prints the controller's summary, report and the runner-owned ledger. One review runs per session at a time.",
-    "Sessions in a campaign with an allowance are refused; their Orchestrator runs the campaign's controlled review job. Tools: request_cross_model_review, get_cross_model_review, list_cross_model_reviews, cancel_cross_model_review.",
-    "",
-    "  review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path>",
+    "Usage: wollipog review session <command> [options]",
+    "  review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path>",
     "                     [--full-reason <text>] [--json]",
     "  review session get <review-session-id> [--json]",
     "  review session list [--limit <1-100>] [--cursor <review-session-id>] [--json]",
@@ -291,6 +298,8 @@ function helpForTopic(topic: string): string | null {
       return artifactHelp();
     case "issue-closure":
       return issueClosureHelp();
+    case "automation":
+      return "Usage: wollipog automation request --proposal '<json>' [--json]\n       wollipog automation get <occurrence-id> [--json]\n       wollipog automation execute <occurrence-id> --digest <resource-digest> [--json]\nNormal and Orchestrator sessions propose exact configurations for human approval. Request returns a pending decision; execute creates only the unchanged approved configuration. Reuse the same request/occurrence after an uncertain response. No automation administration or approval commands are exposed.";
     case "campaign":
       return campaignHelp();
     case "pr":
@@ -316,7 +325,7 @@ export function resolveHelp(args: string[]): HelpResponse | null {
   const helpAt = (index: number) => args[index] === "--help" || args[index] === "-h";
   const aliasHelpFlag = (["init", "update", "doctor"].includes(args[0] ?? "") && helpAt(1))
     || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))))
-    || (args[0] === "pr" && (helpAt(1) || (args[1] === "wait" && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
+    || (args[0] === "pr" && (helpAt(1) || (["wait", "closures"].includes(args[1] ?? "") && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
   if (!helpCommand && !rootHelpFlag && !aliasHelpFlag) return null;
 
   const topic = helpCommand

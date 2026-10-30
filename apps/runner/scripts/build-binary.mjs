@@ -61,6 +61,15 @@ await build({
   outfile: leaseWorker, legalComments: "none", logLevel: "info",
 });
 
+// The guard owns its listener as well as classification off the daemon's main event loop.
+const guardWorker = join(buildDir, "managed-worktree-guard-worker.cjs");
+await build({
+  entryPoints: [join(runner, "src", "managed-worktree-guard-worker.ts")],
+  bundle: true, platform: "node", format: "cjs", target: "node24",
+  define: { "import.meta.url": "undefined" },
+  outfile: guardWorker, legalComments: "none", logLevel: "info",
+});
+
 // Linux adoption moves files with a fixed renameat2(RENAME_NOREPLACE) helper. It is linked
 // statically so the SEA runs on any Linux libc, and it is compiled before the bundle-only exit so
 // CI's bundle check proves the exact release build.
@@ -89,6 +98,13 @@ if (process.platform === "linux") {
   console.log("compiled Claude provider pipe helper ->", claudePipeHelper);
 }
 
+// Native Linux providers join their cgroup before any provider code executes.
+const cgroupLaunchHelper = join(buildDir, "linux-cgroup-launch");
+if (process.platform === "linux") {
+  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+    join(runner, "native", "linux-cgroup-launch.c"), "-o", cgroupLaunchHelper], { stdio: "inherit" });
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -98,9 +114,13 @@ if (process.argv.includes("--bundle-only")) {
 // 2) Node SEA blob.
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
-const assets = { "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker };
+const assets = {
+  "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker,
+  "wollipog/managed-worktree-guard-worker-v1": guardWorker,
+};
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
+if (process.platform === "linux") assets["wollipog/linux-cgroup-launch"] = cgroupLaunchHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",

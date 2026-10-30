@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { adoptManagedDesktopPairing, desktopLocalPairingFailure } from "../desktop-local-pairing.js";
 import { DEVICE_TOKEN_CHANGED_EVENT, parsePairingInput, storeDeviceToken } from "../device-token.js";
 import { Notice } from "./Notice.js";
+import { useSecretInput } from "./ui/secret-input.js";
 
 export interface PairingBannerProps {
   /** A connection attempt is open right now. */
@@ -26,17 +27,21 @@ export function PairingBanner({
   nativePairingFailure = desktopLocalPairingFailure(),
   retryDesktopPairing = adoptManagedDesktopPairing,
 }: PairingBannerProps) {
-  const [value, setValue] = useState("");
+  // The token stays out of the DOM (#3814): Pair reads it once, and a token it stores is cleared.
+  const token = useSecretInput();
+  const [hasValue, setHasValue] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitted, setSubmitted] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const submit = () => {
-    const token = parsePairingInput(value);
-    if (!token) {
+    const parsed = parsePairingInput(token.read());
+    if (!parsed) {
       setError("that doesn't look like a pairing token or link");
       return;
     }
-    storeDeviceToken(token);
+    storeDeviceToken(parsed);
+    token.clear();
+    setHasValue(false);
     setSubmitted(true);
     // Reconnect IN-PROCESS (no reload): when localStorage is blocked the token lives only in
     // this page's memory — a reload would drop it and loop straight back to this card.
@@ -75,12 +80,12 @@ export function PairingBanner({
             </button>
           )}
           <input
+            ref={token.ref}
             type="password"
-            value={value}
             maxLength={2048}
             placeholder="#pair=… link or token"
             onChange={(e) => {
-              setValue(e.target.value);
+              setHasValue(token.remember(e).trim() !== "");
               setError(null);
               setSubmitted(false);
             }}
@@ -89,7 +94,7 @@ export function PairingBanner({
             }}
             aria-label="Pairing Token"
           />
-          <button type="button" className="btn primary sm" onClick={submit} disabled={!value.trim() || connecting}>
+          <button type="button" className="btn primary sm" onClick={submit} disabled={!hasValue || connecting}>
             {connecting ? "Pairing…" : "Pair"}
           </button>
         </span>

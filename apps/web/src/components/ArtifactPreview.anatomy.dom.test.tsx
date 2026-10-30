@@ -10,6 +10,7 @@ import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
 import {
   ArtifactPreviewBody,
   ArtifactPreviewDialog,
@@ -19,7 +20,7 @@ import {
   useArtifactPreview,
 } from "./ArtifactPreview.js";
 
-const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
+const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
   localStorage: domWindow.localStorage, Element: domWindow.Element, HTMLElement: domWindow.HTMLElement,
@@ -166,6 +167,90 @@ describe("the artifact preview's Download menu (#2855)", () => {
     await act(async () => { (items[1] as HTMLElement).click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
     assert.deepEqual(copied, [item.sha256]);
     assert.equal(copied[0]!.length, 64);
+  });
+});
+
+describe("a Copy Checksum write that settles late (#3582)", () => {
+  /** A Clipboard API whose writes stay pending until the test settles them. */
+  function deferredClipboard() {
+    const writes: Array<{ text: string; resolve: () => void }> = [];
+    const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+    });
+    return {
+      writes,
+      succeed: async () => {
+        await act(async () => { writes.at(-1)!.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      },
+      restore: () => {
+        if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+        else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+      },
+    };
+  }
+
+  let close: () => void = () => {};
+  /** The preview behind a recording toast, which `close` removes as closing its panel would. */
+  function Closable({ item, toasts }: { item: WorkflowArtifactView; toasts: string[] }) {
+    const [open, setOpen] = React.useState(true);
+    close = () => setOpen(false);
+    const feedback = {
+      confirm: async () => false,
+      showToast: (message: string) => toasts.push(message),
+      showUndo: () => -1,
+      dismissToast: () => undefined,
+    };
+    return <FeedbackContext.Provider value={feedback}>{open && <Preview item={item} />}</FeedbackContext.Provider>;
+  }
+
+  async function copyChecksum(item: WorkflowArtifactView, toasts: string[]): Promise<{ container: HTMLDivElement; trigger: HTMLButtonElement }> {
+    const container = await render(<Closable item={item} toasts={toasts} />, exporting(item, "built\n"));
+    await settle(ready(container), "the log");
+    const trigger = buttonNamed(container, "Download")!;
+    await act(async () => trigger.click());
+    const copy = [...document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')]
+      .find((entry) => entry.querySelector(".menu-text")?.textContent === "Copy Checksum")!;
+    await act(async () => copy.click());
+    return { container, trigger };
+  }
+
+  test("a write that succeeds after the preview closed shows no toast and moves no focus", async () => {
+    const item = artifact("test_log", "build.log", "built\n");
+    const clipboard = deferredClipboard();
+    const toasts: string[] = [];
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    try {
+      const { container } = await copyChecksum(item, toasts);
+      assert.deepEqual(clipboard.writes.map((write) => write.text), [item.sha256], "the copy started");
+      await act(async () => close());
+      assertNoDomNode(buttonNamed(container, "Download"), "the menu's owner has gone");
+      await act(async () => { elsewhere.focus(); });
+      await clipboard.succeed();
+      assert.deepEqual(toasts, [], "no toast for a preview that has gone");
+      assert.ok(document.activeElement === elsewhere, "focus stays where the person put it");
+    } finally {
+      elsewhere.remove();
+      clipboard.restore();
+    }
+  });
+
+  test("a write that succeeds while focus is still on Download shows the toast and keeps focus there", async () => {
+    const item = artifact("test_log", "build.log", "built\n");
+    const clipboard = deferredClipboard();
+    const toasts: string[] = [];
+    try {
+      const { trigger } = await copyChecksum(item, toasts);
+      assert.equal(clipboard.writes.length, 1, "the copy started");
+      assert.ok(document.activeElement === trigger, "the menu closed onto Download");
+      await clipboard.succeed();
+      assert.deepEqual(toasts, ["Copied the checksum."]);
+      assert.ok(document.activeElement === trigger, "focus stays on Download");
+    } finally {
+      clipboard.restore();
+    }
   });
 });
 

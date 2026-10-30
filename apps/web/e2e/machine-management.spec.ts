@@ -58,6 +58,10 @@ const agentRow = (page: import("@playwright/test").Page, name: string) =>
   page.locator("article.machine-detail button.row").filter({
     has: page.locator(".row-title", { hasText: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`) }),
   });
+
+/** Agent Details' Updates fact: the label, then the runner's release guidance (#3523). */
+const updatesFact = (details: import("@playwright/test").Locator) =>
+  details.locator("dt", { hasText: /^Updates$/ }).locator("+ dd");
 /** Machine Settings (#2991), one form whose description is the machine's name. */
 const settingsDialog = (page: import("@playwright/test").Page) => page.getByRole("dialog", { name: "Machine Settings" });
 /** One of Agent Installations' radio groups (#2991), by its label. */
@@ -87,6 +91,20 @@ test("each agent row shows one status, and an agent not installed folds away (#2
   await agentRow(page, "Missing ACP").click();
   const details = page.getByRole("dialog", { name: "Missing ACP" });
   await expect(details.locator(".notice")).toContainText("configured command was not found");
+});
+
+test("installed harnesses blocked by provider HOME ownership remain visible with the recovery reason", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("ownership-blocked"));
+  await expect(page.locator(".machine-agents-empty")).toContainText("Open an agent’s details to resolve its availability");
+  await expect(page.locator(".machine-agents-empty .code-well")).toHaveCount(0);
+  for (const name of ["Claude Code", "Codex App Server"]) {
+    await expect(agentRow(page, name).locator(".status")).toHaveText("Unavailable");
+    await agentRow(page, name).click();
+    const details = page.getByRole("dialog", { name, exact: true });
+    await expect(details.locator(".notice")).toContainText("Provider HOME ownership blocked discovery");
+    await details.getByRole("button", { name: "Close", exact: true }).last().click();
+  }
+  await expect(page.locator("article.machine-detail details.disclosure > summary").filter({ hasText: /Agents? Not Installed/ })).toHaveCount(0);
 });
 
 test("each agent row keeps one whole badge, and at 390px only its integration under the name (#2990)", async ({ page }) => {
@@ -191,7 +209,7 @@ test("Machine Settings lists competing installations as one radio group and save
   await expect(installationGroup(page, "Codex").getByRole("radio", { name: "/home/example/.local/bin/codex" })).toBeChecked();
 });
 
-test("Machine Settings states each installation's availability, and Agent Details keeps its release guidance", async ({ page }) => {
+test("Machine Settings states each installation's availability, and Agent Details gives its release guidance (#3523)", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states"));
   await openSettings(page);
   const codex = installationGroup(page, "Codex");
@@ -210,6 +228,44 @@ test("Machine Settings states each installation's availability, and Agent Detail
     "& 'C:\\Program Files\\Codex Tools\\codex.exe' '--profile' 'Team''s Profile'",
   );
   await expect(details.getByText("Pinned by Machine Policy", { exact: true })).toBeVisible();
+  // The release guidance Machine Settings gave before #2991 sits under each Updates label (#3523).
+  await expect(updatesFact(details)).toContainText("change the pin before planning an upgrade");
+  await details.getByRole("button", { name: "Done" }).click();
+  await agentRow(page, "Policy Claude").click();
+  const claude = page.getByRole("dialog", { name: "Policy Claude" });
+  await expect(updatesFact(claude)).toContainText("Checks Disabled by Machine Policy");
+  await expect(updatesFact(claude)).toContainText("whether manual upgrades are permitted");
+  await claude.getByRole("button", { name: "Done" }).click();
+  await agentRow(page, "Failed Pi").click();
+  const pi = page.getByRole("dialog", { name: "Failed Pi" });
+  await expect(updatesFact(pi)).toContainText("no current release status was established");
+  await expect(updatesFact(pi)).toContainText(
+    "Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish",
+  );
+  await pi.getByRole("button", { name: "Done" }).click();
+  // A Codex too old to run already gives the guidance in its notice, so the fact keeps only its label.
+  await agentRow(page, "Codex App Server (v0.140.0)").click();
+  const legacy = page.getByRole("dialog", { name: "Codex App Server (v0.140.0)" });
+  await expect(legacy.locator(".notice")).toContainText("Use the package or version manager that installed this exact copy");
+  await expect(updatesFact(legacy)).toHaveText("New Release Published");
+});
+
+test("Agent Details gives a Ready installation's release guidance, and on an offline machine as last reported (#3523)", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
+  await agentRow(page, "Codex App Server (v0.199.0)").click();
+  const system = page.getByRole("dialog", { name: "Codex App Server (v0.199.0)" });
+  await expect(system.locator(".notice")).toHaveCount(0);
+  await expect(updatesFact(system).locator("> div").first()).toHaveText("New Release Published");
+  await expect(updatesFact(system)).toContainText("compatibility with this Machine has not been verified");
+  await system.getByRole("button", { name: "Done" }).click();
+  await agentRow(page, "Codex App Server (v0.210.0)").click();
+  const local = page.getByRole("dialog", { name: "Codex App Server (v0.210.0)" });
+  await expect(updatesFact(local)).toContainText("Run `'/home/example/.local/bin/codex' 'update'` in a POSIX shell");
+  await local.getByRole("button", { name: "Done" }).click();
+  await setOffline(page);
+  await agentRow(page, "Codex App Server (v0.199.0)").click();
+  await expect(updatesFact(system).locator("> div").first()).toHaveText("Last Reported: New Release Published");
+  await expect(updatesFact(system)).toContainText("compatibility with this Machine has not been verified");
 });
 
 test("Agent Details treats Windows batch wrapper arguments as reference data", async ({ page }) => {
@@ -283,8 +339,10 @@ test("older Windows runner update instructions are suppressed in Agent Details a
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("older-interpreter-guidance"));
   await agentRow(page, "Codex App Server").click();
   const details = page.getByRole("dialog", { name: "Codex App Server" });
-  // A ready agent's details carry no update guidance at all (#2990), so never the unsafe command.
+  // A ready agent's details give its update guidance (#3523), but the safe replacement for the
+  // command an older runner quoted for a reference-only launch, never the unsafe command.
   await expect(details.getByText("Managed Externally", { exact: true })).toBeVisible();
+  await expect(updatesFact(details)).toContainText("No copyable update command is available for this launch");
   await expect(details).not.toContainText("Run `& 'C:\\Windows");
   await details.getByRole("button", { name: "Done" }).click();
   await openSettings(page);
@@ -308,7 +366,7 @@ test("an offline machine's settings say what saves now and what waits, and still
   await expect(settingsDialog(page).getByRole("button", { name: "Delete Machine…" })).toBeEnabled();
 });
 
-test("an SSH machine's failed release check reads Check Failed in Agent Details, and its menu offers Reconnect", async ({ page }) => {
+test("an SSH machine's failed release check reads Check Failed in Agent Details with Reconnect guidance, and its menu offers Reconnect", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states-ssh"));
   const detail = page.locator('article.machine-detail[data-kind="ssh"]');
   await detail.getByRole("button", { name: "Machine Actions" }).click();
@@ -316,8 +374,9 @@ test("an SSH machine's failed release check reads Check Failed in Agent Details,
   await expect(actions.getByRole("menuitem", { name: "Reconnect", exact: true })).toBeVisible();
   await page.keyboard.press("Escape");
   await agentRow(page, "Failed Pi").click();
-  await expect(page.getByRole("dialog", { name: "Failed Pi" }).locator("dt", { hasText: "Updates" }).locator("+ dd"))
-    .toHaveText("Check Failed");
+  const updates = updatesFact(page.getByRole("dialog", { name: "Failed Pi" }));
+  await expect(updates.locator("> div").first()).toHaveText("Check Failed");
+  await expect(updates).toContainText("Reconnect for an SSH Machine after active sessions finish");
 });
 
 test("Machine Settings keeps same-name container installations scoped to their targets (#2991)", async ({ page }) => {
@@ -515,23 +574,23 @@ test("Owners recover a stale provider HOME lease only where the machine can prov
   const sub = (label: string) => accountRow(page, label).locator(".row-sub");
   const recoverItem = async (label: string) => {
     const menu = await openAccountMenu(page, label);
-    return menu.getByRole("menuitem", { name: /^Recover Lease…/u });
+    return menu.getByRole("menuitem", { name: /^Recover Account…/u });
   };
-  await expect(sub("Personal")).toHaveText("ClaudeStale Lease");
-  await expect(sub("Codex Team")).toHaveText("CodexStale Lease");
+  await expect(sub("Personal")).toHaveText("ClaudeRecovery Needed");
+  await expect(sub("Codex Team")).toHaveText("CodexRecovery Needed");
   await expect(accountRow(page, "Codex Team").locator(".provider-account-lease"))
-    .toHaveAttribute("title", "This lease was recorded since the machine last started and has no process evidence. Restart the machine, then recover it.");
+    .toHaveAttribute("title", "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.");
   await expect(sub("Work")).toHaveText("Claude");
   await expect(await recoverItem("Codex Team")).toBeDisabled();
   await page.keyboard.press("Escape");
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/stale-leases.png" });
 
   await (await recoverItem("Personal")).click();
-  const recovery = page.getByRole("dialog", { name: "Recover Lease" });
-  await expect(recovery).toContainText("Another runner left this account's HOME leased and no longer holds it.");
+  const recovery = page.getByRole("dialog", { name: "Recover Account" });
+  await expect(recovery).toContainText("An earlier Wollipog runner left this account locked.");
   await page.screenshot({ path: "test-results/provider-accounts/recover-lease-confirm.png", fullPage: true });
-  await recovery.getByRole("button", { name: "Recover Lease" }).click();
-  await expect(page.getByText("Lease recovered.", { exact: true })).toBeVisible();
+  await recovery.getByRole("button", { name: "Recover Account" }).click();
+  await expect(page.getByText("Account unlocked.", { exact: true })).toBeVisible();
   await expect(sub("Personal")).toHaveText("Claude");
   await providerAccounts(page).screenshot({ path: "test-results/provider-accounts/lease-recovered.png" });
 
@@ -1398,4 +1457,50 @@ test("an SSH connection refused for its key says so and keeps ssh's words behind
   await notice.getByRole("button", { name: "Show Details" }).click();
   await expect(notice).toContainText("Permission denied (publickey).");
   await expect(notice.getByRole("button", { name: "Try Again" })).toBeVisible();
+});
+
+test("account recovery uses plain guidance with separate authorized process details", async ({ page }) => {
+  await page.goto(`/machine-management-e2e.html?leases&lease-cause=process_uninspectable&${DESIGN_WORKSTATION}`);
+  const row = accountRow(page, "Codex Team");
+  const badge = row.locator(".provider-account-lease");
+  await expect(badge).toHaveText("Recovery Needed");
+  await expect(badge).toHaveAttribute("title", /save your work and restart the machine/);
+  expect(await badge.getAttribute("title")).not.toMatch(/journal|fallback|boundary|PID|cgroup|delegat|inspectability/i);
+  await row.getByRole("button", { name: "More Actions for Codex Team", exact: true }).click();
+  await page.getByRole("menuitem", { name: "View Recovery Details…", exact: true }).click();
+  const details = page.getByRole("dialog", { name: "Account Recovery Details" });
+  await expect(details).toContainText("process_uninspectable");
+  await expect(details).toContainText("PID 4242");
+  await expect(details).toContainText("Keep the account's files and lease journal intact.");
+  await details.getByRole("button", { name: "Close", exact: true }).last().click();
+  await expect(details).toHaveCount(0);
+  await expect(badge).toHaveText("Recovery Needed");
+});
+
+/** #3525: All Machines' Reconnect and the machine detail's are one action, with one busy state. */
+test("a Reconnect started from All Machines is busy in the machine's detail, which sends no second request (#3525)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/machine-management-e2e.html?ssh=ended&reconnect=hold");
+  const fromOverview = page.locator(".machines-overview").getByRole("button", { name: "Reconnect Design Workstation" });
+  await fromOverview.click();
+  await expect(fromOverview).toHaveAttribute("aria-busy", "true");
+  await machineRow(page).click();
+  const fromDetail = page.locator("article.machine-detail .notice").getByRole("button", { name: /^Reconnect/ });
+  await expect(fromDetail).toHaveAttribute("aria-busy", "true");
+  // Busy is aria-disabled rather than disabled (BusyButton), so the press itself must do nothing.
+  await fromDetail.click({ force: true });
+  expect(await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.reconnectRequests())).toBe(1);
+});
+
+test("a Reconnect that fails from All Machines reads as it does from the machine's detail (#3525)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/machine-management-e2e.html?ssh=ended&reconnect=fail");
+  await page.locator(".machines-overview").getByRole("button", { name: "Reconnect Design Workstation" }).click();
+  const toast = page.locator(".toast").filter({ hasText: "Couldn't reconnect Design Workstation." });
+  await expect(toast.locator(".toast-detail")).toHaveText("Wollipog couldn't be reached. Check the connection, then try again.");
+  await toast.getByRole("button", { name: "Dismiss Notification" }).click();
+  await expect(toast).toHaveCount(0);
+  await machineRow(page).click();
+  await page.locator("article.machine-detail .notice").getByRole("button", { name: "Reconnect" }).click();
+  await expect(toast.locator(".toast-detail")).toHaveText("Wollipog couldn't be reached. Check the connection, then try again.");
 });

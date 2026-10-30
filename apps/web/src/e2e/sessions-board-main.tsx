@@ -381,6 +381,10 @@ if (lifecycle) {
 }
 
 if (empty) sessions.splice(0);
+// A title wider than a phone sheet, for dialogs that name the session in their description (#2982).
+if (new URLSearchParams(location.search).has("long-title")) {
+  sessions.push(session("s-long-title", "Migrate every API call site to the shared retry helper and restore the upload timeouts", "running"));
+}
 // Nothing waits for input, so the phone Board opens on the next column with a card (#2216).
 if (new URLSearchParams(location.search).has("no-input")) {
   for (let index = sessions.length - 1; index >= 0; index -= 1) {

@@ -47,6 +47,7 @@ interface IsolationDeps {
   /** A real file, directory, or socket at exactly this path — never a symlink, which a bind or a
    * Seatbelt allow would follow somewhere the runner did not choose. */
   isExposableEntryNative: (path: string) => Promise<boolean>;
+  isSymbolicLinkNative: (path: string) => Promise<boolean>;
   forkSizeNative: (location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   forkSizeWsl: (context: Extract<AgentContext, { kind: "wsl" }>, location: ProviderStateLocation, driver: AgentDriverKind, providerSessionId: string) => Promise<number | null>;
   wait: (ms: number) => Promise<void>;
@@ -112,6 +113,7 @@ const defaultDeps: IsolationDeps = {
     (value) => value.isFile() || value.isDirectory() || value.isSocket(),
     () => false,
   ),
+  isSymbolicLinkNative: async (path) => lstat(path).then((value) => value.isSymbolicLink(), () => false),
   forkSizeNative: async (location, driver, providerSessionId) => {
     return findProviderForkSizeNative(location.leaf, driver, providerSessionId, 0);
   },
@@ -156,6 +158,8 @@ export interface IsolationStateOptions {
   /** Session-private roots that may be populated after launch (for example an agent-requested
    * worktree). They are materialized before sandbox construction and never shared across sessions. */
   additionalWritableRoots?: string[];
+  /** Operator-approved shared project runtime roots; also present in additionalWritableRoots. */
+  projectSharedWritableRoots?: string[];
   /** Exact selected project-memory partition, including for scratch-only sessions. */
   projectMemoryDirectory?: string;
   /** Keep the provider's writable filesystem to its private cwd and transcript state. */
@@ -164,6 +168,13 @@ export interface IsolationStateOptions {
    * must stay read-only to the provider. Sandbox modes that can express a per-path rule apply it;
    * the modes that cannot are documented as unenforcing rather than silently assumed safe. */
   readOnlyPaths?: string[];
+  /** All configured Codex homes, including homes used by other harnesses. */
+  codexHomes?: readonly string[];
+  /** Canonical reviewer executable and interpreter installation directories. */
+  reviewerInstallationPaths?: readonly string[];
+  /** Link entries on reviewer resolution paths, with canonical parents. Never bind these paths:
+   * bwrap follows symlinks, so doing so would protect the target rather than the link entry. */
+  reviewerSymlinkPaths?: readonly string[];
   /** The runner's hook state directory, hidden from the provider and everything it spawns, and
    * the few entries inside it the provider must still read (#1336). Native bwrap and Seatbelt
    * express it; every other mode is documented as not enforcing it. */
@@ -227,6 +238,110 @@ function providerCredentialRoot(state: IsolationStateOptions, inherited: NodeJS.
   }
   if (state.driver === "pi") return posix.join(home, ".pi", "agent");
   return null;
+}
+
+/** Only overlay package directories inside existing identity write grants. Following an arbitrary
+ * packages alias into a fresh bind could undo /tmp or /dev/shm masks. An alias in a readonly
+ * home needs no overlay; one in a writable home cannot safely protect its replaceable link. */
+async function codexPackageDirectories(
+  state: IsolationStateOptions, runtime: IsolationDeps, writable: readonly string[], remapped: readonly string[] = [],
+): Promise<Array<{ path: string; writable: boolean }>> {
+  const inherited = runtime.nativeEnvironment();
+  const homes = new Set([
+    posix.join(state.env.HOME ?? runtime.nativeHome(), ".codex"),
+    state.env.CODEX_HOME, inherited.CODEX_HOME, ...(state.codexHomes ?? []),
+  ].filter((home): home is string => Boolean(home)));
+  const canonicalRoots = async (roots: readonly string[]) => Promise.all(roots.map(async (root) => {
+    try { return await runtime.realpathNative(root); } catch { return root; }
+  }));
+  const writableRoots = await canonicalRoots(writable);
+  const remappedRoots = await canonicalRoots(remapped);
+  const paths = new Map<string, { path: string; writable: boolean }>();
+  for (const home of homes) {
+    // These are installation hints from other agents/accounts, not writable grants. Do not fail
+    // unrelated launches on a foreign-platform or traversal-containing hint. Actual writable
+    // provider/transcript roots retain their own strict validation above.
+    if (!home.startsWith("/") || home.split("/").includes("..")) continue;
+    if (!await runtime.existsNative(posix.join(home, "packages"))) {
+      // Pin an empty package tree too. Otherwise a sandbox could create the installation that a
+      // later review would trust while this same sandbox still has a writable provider home.
+      if (!writableRoots.some((root) => pathsOverlap(root, posix.join(home, "packages")))) continue;
+      await runtime.mkdirNative([posix.join(home, "packages")]);
+    }
+    const path = posix.join(await runtime.realpathNative(home), "packages");
+    // A virtual transcript mount does not expose the original host directory at its target.
+    // Never bind host entries back through that replacement or claim a proof about its contents.
+    if (remappedRoots.some((root) => pathWithinOrEqual(root, path))) continue;
+    const writable = writableRoots.some((root) => pathsOverlap(root, path));
+    if (!await runtime.isExposableEntryNative(path)) {
+      const target = await runtime.realpathNative(path);
+      if (writable || writableRoots.some((root) => pathsOverlap(root, target))) {
+        throw new Error(`Codex packages exposed to writable roots must be a real directory: ${path} (target ${target})`);
+      }
+      continue;
+    }
+    paths.set(path, { path, writable });
+  }
+  return [...paths.values()];
+}
+
+async function reviewerInstallationDirectories(
+  state: IsolationStateOptions, runtime: IsolationDeps, writable: readonly string[],
+  remapped: readonly { source: string; target: string }[] = [],
+): Promise<Array<{ path: string; writable: boolean }>> {
+  const paths = await codexPackageDirectories(state, runtime, writable, remapped.map((bind) => bind.target));
+  const writableRoots = await Promise.all(writable.map(async (root) => {
+    try { return { root, canonical: await runtime.realpathNative(root) }; }
+    catch { return { root, canonical: root }; }
+  }));
+  for (const path of state.reviewerInstallationPaths ?? []) {
+    try {
+      if (!posix.isAbsolute(path) || await runtime.realpathNative(path) !== path || !await runtime.isExposableEntryNative(path)) {
+        throw new Error("directory is missing, aliased, or not a real installation directory");
+      }
+    } catch (error) { throw new Error(`Cannot protect reviewer installation ${path}: ${(error as Error).message}`); }
+    if (!paths.some((entry) => entry.path === path)) {
+      paths.push({ path, writable: writableRoots.some(({ canonical }) => pathsOverlap(canonical, path)) });
+    }
+  }
+  for (const { path } of paths) {
+    for (const { root, canonical } of writableRoots) {
+      if (pathWithinOrEqual(path, canonical)) {
+        throw new Error(`Cannot protect reviewer installation ${path}: it contains a writable root ${root}; use a dedicated installation directory`);
+      }
+    }
+    if (remapped.some((bind) => pathsOverlap(bind.source, path))) {
+      throw new Error(`Cannot protect reviewer installation ${path}: a writable remapped source exposes the installation`);
+    }
+  }
+  for (const link of state.reviewerSymlinkPaths ?? []) {
+    const parent = posix.dirname(link);
+    try {
+      if (!posix.isAbsolute(link) || posix.normalize(link) !== link ||
+          await runtime.realpathNative(parent) !== parent || !await runtime.isSymbolicLinkNative(link)) {
+        throw new Error("entry is missing, not a symlink, or its parent is aliased");
+      }
+    } catch (error) { throw new Error(`Cannot protect reviewer symlink ${link}: ${(error as Error).message}`); }
+    // The read-only root already pins entries outside writable mounts. Protected installations
+    // (notably Codex packages) also pin their own links after the containing writable grant.
+    // A writable child of HOME does not make HOME's directory entries writable.
+    const protectedParent = paths.some(({ path }) => pathWithinOrEqual(path, parent));
+    for (const { root, canonical } of writableRoots) {
+      if (pathWithinOrEqual(canonical, parent) && !protectedParent) {
+        throw new Error(`Cannot protect reviewer symlink ${link}: its parent is inside writable root ${root}`);
+      }
+    }
+    for (const bind of remapped) {
+      for (const root of [bind.source, bind.target]) {
+        let canonical: string;
+        try { canonical = await runtime.realpathNative(root); } catch { canonical = root; }
+        if (pathWithinOrEqual(canonical, parent)) {
+          throw new Error(`Cannot protect reviewer symlink ${link}: writable remapped root ${root} exposes its parent`);
+        }
+      }
+    }
+  }
+  return paths;
 }
 
 /** Common build caches whose writes previously worked in provider mode. Each is a directory below
@@ -489,6 +604,8 @@ function renderSeatbeltProfile(
   network: "inherit" | "deny",
   readOnlyPaths: readonly string[] = [],
   guardStateMask?: SeatbeltGuardStateMask,
+  pinnedPackageAncestors: readonly string[] = [],
+  readOnlyLinks: readonly string[] = [],
 ): string {
   const writeRules = writableRoots
     .map((path) => `    (subpath ${seatbeltLiteral(path)})`).join("\n");
@@ -522,6 +639,13 @@ function renderSeatbeltProfile(
         ")",
       ]
       : []),
+    // Exact link entries only: a subpath deny on HOME or another container would also deny
+    // writes to unrelated caches and worktrees. Ancestor entries are pinned separately below.
+    ...(readOnlyLinks.length ? [
+      "(deny file-write*",
+      ...readOnlyLinks.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+      ")",
+    ] : []),
     // The runner's hook state directory (#1336): unreadable and unwritable, although the data
     // directory that contains it is a writable root above. The later allows re-expose, read-only,
     // exactly the entries the provider needs: its own settings documents and its own verdict
@@ -568,6 +692,13 @@ function renderSeatbeltProfile(
           : []),
       ]
       : []),
+    // Denying package contents alone is insufficient if a writable ancestor can be renamed into
+    // another writable root. Pin every ancestor by pathname while retaining ordinary child writes.
+    ...(pinnedPackageAncestors.length ? [
+      "(deny file-write-unlink",
+      ...pinnedPackageAncestors.map((path) => `    (literal ${seatbeltLiteral(path)})`),
+      ")",
+    ] : []),
     ...(network === "inherit" ? ["(allow network*)"] : []),
     // With the network denied the verdict socket still has to be reachable; nothing else is.
     ...(network === "deny" && guardStateMask?.sockets.length
@@ -741,6 +872,17 @@ export async function resolveExecutionIsolation(
   state?: IsolationStateOptions,
 ): Promise<SpawnIsolation | undefined> {
   const runtime = { ...defaultDeps, ...deps };
+  if (state?.projectSharedWritableRoots?.length) {
+    if (policy.mode !== "bwrap" || context.kind !== "native" || runtime.platform !== "linux" || state.orchestratorScratchOnly) {
+      throw new Error("project shared writable directories require a native Linux provider bubblewrap boundary");
+    }
+    for (const root of state.projectSharedWritableRoots) {
+      if (!state.additionalWritableRoots?.includes(root) || !await runtime.existsNative(root) ||
+          await runtime.realpathNative(root) !== root) {
+        throw new Error("project shared writable directory changed before sandbox construction");
+      }
+    }
+  }
   if (state?.preserveProviderHome && !state.protectedWorktree) {
     throw new Error("provider home preservation requires a protected managed worktree");
   }
@@ -842,6 +984,19 @@ export async function resolveExecutionIsolation(
       runtime.isRunnerOwnedEntryNative,
       runtime.realpathNative,
     );
+    const packageAncestors = new Set<string>();
+    const packages = await reviewerInstallationDirectories(state, runtime, writableRoots);
+    for (const { path } of packages) {
+      if (!readOnlyPaths.includes(path)) readOnlyPaths.push(path);
+      for (let ancestor = posix.dirname(path); ancestor !== "/"; ancestor = posix.dirname(ancestor)) {
+        packageAncestors.add(ancestor);
+      }
+    }
+    for (const link of state.reviewerSymlinkPaths ?? []) {
+      for (let ancestor = link; ancestor !== "/"; ancestor = posix.dirname(ancestor)) {
+        packageAncestors.add(ancestor);
+      }
+    }
     const guardStateMask = await resolveGuardStateMask(state.guardStateMask, runtime);
     return {
       backend: "seatbelt",
@@ -853,8 +1008,11 @@ export async function resolveExecutionIsolation(
         policy.network,
         readOnlyPaths,
         guardStateMask ? await seatbeltGuardStateMask(guardStateMask, runtime) : undefined,
+        [...packageAncestors],
+        state.reviewerSymlinkPaths,
       ),
       writableRoots,
+      ...(packages.length ? { codexPackageReadOnlyPaths: packages.map(({ path }) => path) } : {}),
       ...(readOnlyPaths.length ? { readOnlyPaths } : {}),
       ...(guardStateMask ? { guardStateMask } : {}),
     };
@@ -969,6 +1127,13 @@ export async function resolveExecutionIsolation(
   // Resolved after the writable binds are materialized: the entries live inside those roots, and
   // the launcher renders them last so the narrower read-only rule wins over the containing mount.
   const readOnlyBinds = await bwrapReadOnlyBinds(state?.readOnlyPaths, runtime.isRunnerOwnedEntryNative);
+  const packages = state ? await reviewerInstallationDirectories(state, runtime, [
+    state.cwd, ...(protectedWorktree?.gitWritableRoots ?? []),
+    ...writableBinds.filter((bind) => bind.source === bind.target).map((bind) => bind.target),
+  ], writableBinds.filter((bind) => bind.source !== bind.target)) : [];
+  for (const { path, writable } of packages) {
+    if (writable && !readOnlyBinds.includes(path)) readOnlyBinds.push(path);
+  }
   if (state?.protectedWorktree?.requiredReadOnlyPaths.some((path) => !readOnlyBinds.includes(path))) {
     throw new Error("managed worktree Git registration changed before bubblewrap isolation");
   }
@@ -986,8 +1151,10 @@ export async function resolveExecutionIsolation(
     ...(state?.dataDir ? { claudePipeHelperDataDir: state.dataDir } : {}),
     ...(state?.preserveProviderHome ? { preservesProviderHome: true } : {}),
     ...(writableBinds.length ? { writableBinds } : {}),
+    ...(state?.projectSharedWritableRoots?.length ? { projectSharedWritableRoots: [...state.projectSharedWritableRoots] } : {}),
     ...(protectedWorktree ? { protectedWorktree } : {}),
     ...(readOnlyBinds.length ? { readOnlyBinds } : {}),
+    ...(packages.length ? { codexPackageReadOnlyPaths: packages.map(({ path }) => path) } : {}),
     ...(guardStateMask ? { guardStateMask } : {}),
   };
 }

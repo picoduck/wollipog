@@ -26,6 +26,7 @@ test("Settings › Storage confirms turning retention on before it saves, and li
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("more than 90 days ago is permanently removed from this control plane");
   await expect(dialog).toContainText("Prompts, the final response, usage and cost, and attachments are kept.");
+  await expect(dialog).toContainText("Capable machines also trim their session logs; Reprocess cannot restore full history afterward.");
   await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expect(toggle).toHaveAttribute("aria-checked", "false");

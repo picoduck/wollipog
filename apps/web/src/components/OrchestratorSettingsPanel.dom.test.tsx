@@ -81,6 +81,7 @@ function settings(drifted = false): OrchestratorSettingsView {
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         },
       },
       execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -355,7 +356,7 @@ test("the editor has control preparation and three settings groups, and a change
     await settle();
     assert.equal(writes.length, 1);
     assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
-    assert.equal(Object.keys(writes[0]!.defaults.delegation.decisions).length, 5);
+    assert.equal(Object.keys(writes[0]!.defaults.delegation.decisions).length, 6);
     assert.equal(writes[0]!.defaults.execution.strictProjectIsolation, false);
     assertNoDomNode(container.querySelector(".save-bar"), "a saved draft is clean again");
   } finally {
@@ -1261,4 +1262,42 @@ test("Video Evidence Review states availability, admin-only access and an older 
   try {
     assert.equal(videoGroup(view.container), undefined, "an older server shows no group");
   } finally { await view.cleanup(); }
+});
+
+
+test("a saved retired exec Child Harness remains visible as unavailable while defaults can be edited", async () => {
+  const current = settings();
+  const retired = { agentId: "retired-codex", driver: "codex" as const, context: { kind: "native" as const } };
+  current.defaults.behavior.childHarness = retired;
+  current.capabilities.harnesses!.push({
+    ...retired, name: "Codex Non-Interactive", models: [], effortLevels: [],
+    supportedPairs: [], installations: 0,
+  });
+  current.capabilities.compatibleInstallations = 0;
+  current.capabilities.status = "unavailable";
+  const { transport, writes } = server(current);
+  const view = await mount(panel(transport));
+  try {
+    const trigger = view.container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]');
+    assert.ok(trigger);
+    assert.match(trigger.getAttribute("aria-label") ?? "", /Codex Non-Interactive.*Unavailable/);
+    await act(async () => trigger.click());
+    const option = [...view.container.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((candidate) => candidate.textContent?.includes("Codex Non-Interactive"));
+    assert.ok(option, "the saved retired harness stays listed");
+    assert.match(option.textContent ?? "", /Unavailable/);
+    assert.match(option.textContent ?? "", /No current installation advertises this saved Agent Harness/);
+    await act(async () => trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
+    await act(async () => pill(view.container, "Completion", "Stop and Archive").click());
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    assert.equal(writes.length, 0, "the unavailable saved harness cannot be saved again");
+    assert.equal(fieldError(trigger)?.textContent, "Choose another Child Harness, or Automatic.");
+    await choose(view.container, "Child Harness", "Automatic");
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.behavior.childHarness, null);
+    assert.equal(writes[0]?.defaults.behavior.completion, "stop_and_archive");
+  } finally {
+    await view.cleanup();
+  }
 });

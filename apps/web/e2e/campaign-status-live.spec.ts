@@ -8,7 +8,6 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
 import { hashToken } from "../../control-plane/src/auth.js";
-import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import {
   defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken,
 } from "../../control-plane/src/local-device-credential.js";
@@ -16,6 +15,7 @@ import { CAMPAIGN_CONTINUATION_MAX_ATTEMPTS } from "../../control-plane/src/sess
 import { titleCaseLabel } from "../src/format.js";
 import { viewPath } from "../src/navigation.js";
 import { recordPlanOffline, restoreCampaignStatuses, seedCampaignStatus } from "./fixtures/campaign-status-seed.js";
+import { withLiveDb } from "./fixtures/live-database.js";
 
 /**
  * Campaign Status (#2417) in the real app against a real control plane and its Read API: the merged
@@ -70,23 +70,6 @@ async function stopChild(child: ChildProcess): Promise<void> {
   child.kill("SIGTERM");
   await Promise.race([new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise())), delay(5_000)]);
   if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-}
-
-/** Write to the live database beside the running control plane, retrying a momentary lock. */
-async function withLiveDb<T>(databasePath: string, write: (db: ControlPlaneDb) => T): Promise<T> {
-  for (let attempt = 0; ; attempt += 1) {
-    let db: ControlPlaneDb | null = null;
-    try {
-      // Opening writes too (schema checks), so it can meet the server's lock as well.
-      db = ControlPlaneDb.open(databasePath);
-      return write(db);
-    } catch (error) {
-      if (!(error instanceof Error) || !error.message.includes("database is locked") || attempt === 49) throw error;
-    } finally {
-      db?.close();
-    }
-    await delay(20);
-  }
 }
 
 /** One seeded control plane serving a production web build, restartable on the same port. */

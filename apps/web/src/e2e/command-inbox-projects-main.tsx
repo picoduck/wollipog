@@ -4,6 +4,7 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
+  inPlaceHandoffTurns,
   removePendingRequest,
   type AccessScopeChangePreview,
   type AgentCapabilities,
@@ -64,6 +65,7 @@ import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessio
 import { PodDetail } from "../components/PodsView.js";
 import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
+import type { WorkflowInstanceDetail } from "@wollipog/protocol";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { SessionTerminalsProvider } from "../session-terminals.js";
@@ -661,10 +663,13 @@ function initialModel(): FixtureModel {
   }
   if (SCENARIO === "conversation-handoff") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
-      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      status: FIXTURE_QUERY.has("busyTurn") ? "running" : FIXTURE_QUERY.has("interrupted") ? "stopped" : "idle",
+      activeTurnId: FIXTURE_QUERY.has("busyTurn") ? "turn-running" : null,
+      useWorktree: !FIXTURE_QUERY.has("inPlace"),
+      worktreePath: FIXTURE_QUERY.has("inPlace") ? null : "/repos/alpha/checkpoint",
       // A deliberate non-default tier that the destination model below does not advertise, so the
       // dialog must say so rather than substitute a default.
-      serviceTier: "flex",
+      serviceTier: FIXTURE_QUERY.has("inPlace") ? "priority" : "flex",
     });
   }
   if (SCENARIO === "edit-in-fork") {
@@ -1190,6 +1195,29 @@ if (SCENARIO === "conversation-handoff") {
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
+  if (FIXTURE_QUERY.has("inPlace") && !FIXTURE_QUERY.has("removedWorktree")) {
+    const history: SessionEvent[] = [
+      { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
+      { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The current files preserve the accessible layout.", final: true } },
+      { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: FIXTURE_QUERY.has("interrupted")
+        ? { kind: "turn_interrupted" } : FIXTURE_QUERY.has("guardrail")
+          ? { kind: "stderr", text: "Runner governance paused this turn at the cost threshold." }
+          : { kind: "agent_response_completed" } },
+    ];
+    if (FIXTURE_QUERY.has("unfinishedTurn") || FIXTURE_QUERY.has("busyTurn")) {
+      if (FIXTURE_QUERY.has("unfinishedTurn")) history.pop();
+      const next = history.length + 1;
+      history.push(
+        { id: next, sessionId: "session-alpha", seq: next, ts: next, payload: { kind: "user_message", text: "A later task", final: true } },
+        { id: next + 1, sessionId: "session-alpha", seq: next + 1, ts: next + 1, payload: { kind: "agent_message", text: "A later response", final: true } },
+      );
+      if (FIXTURE_QUERY.has("unfinishedTurn")) history.push(
+        { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "agent_response_completed" } },
+      );
+    }
+    sessionEvents.set("session-alpha", FIXTURE_QUERY.has("partialHistory")
+      ? history.map((event) => ({ ...event, id: event.id + 10, seq: event.seq + 10 })) : history);
+  }
 }
 if (SCENARIO === "edit-in-fork") {
   // Two completed turns, so the second message has a checkpoint to edit from and the first has none.
@@ -1450,12 +1478,67 @@ if (SCENARIO === "conversation-handoff") runner.agents.push({
     supportsImages: true, supportsApprovals: true, slashCommands: [] },
 });
 
+/**
+ * `?pod=members` (#2980): the pod has a lead, a worker and a reviewer on one machine and folder, and
+ * Recent Merges holding a conflict and a merge. `&podTurns=running` runs automatic turns at turn 3 of
+ * 12 with the worker up; `&podTurns=stopped` stopped them at the turn limit. Off by default, so the
+ * other cases see the empty pod they always have.
+ */
+const POD_FIXTURE = FIXTURE_QUERY.get("pod") === "members";
+const POD_TURNS = FIXTURE_QUERY.get("podTurns");
+
+function podMemberSession(id: string, title: string, agentName: string, driver: SessionView["driver"]): SessionView {
+  return {
+    ...session(id, title, "alpha", "alpha-workspace"),
+    agentId: agentName.toLowerCase().replaceAll(" ", "-"),
+    agentName,
+    driver,
+    useWorktree: true,
+    worktreePath: `/worktrees/${id}`,
+  };
+}
+
+const podMemberSessions: SessionView[] = POD_FIXTURE ? [
+  podMemberSession("pod-lead", "Lead: plan the call-site migration", "Claude Code", "claude-code"),
+  podMemberSession("pod-worker", "Worker: migrate call sites", "Codex", "codex-app-server"),
+  podMemberSession("pod-reviewer", "Reviewer: check the migrated sites", "Claude Code", "claude-code"),
+] : [];
+
+const podNow = Date.now();
 const activePod: PodView = {
   id: "pod-active",
   title: "Active Collaboration Pod",
-  objective: "Manual collaboration pod",
+  objective: "Migrate the API client's call sites to the shared retry helper.",
   status: "active",
-  members: [],
+  members: podMemberSessions.map((member, index) => ({
+    sessionId: member.id,
+    joinedAt: 1,
+    role: (["lead", "worker", "reviewer"] as const)[index]!,
+    contextTokenBudget: null,
+    lastContextSeq: 0,
+  })),
+  ...(POD_FIXTURE ? {
+    orchestration: {
+      policy: { mode: POD_TURNS ? "round_robin" : "manual", contextTokenBudget: 8_192, summaryTokenBudget: 512, maxTurns: 12, maxRepeatedOutputs: 2 },
+      state: POD_TURNS === "running"
+        ? { status: "running", runId: "pod-run-1", turnsUsed: 3, currentSessionId: "pod-worker", startedAt: podNow - 300_000, updatedAt: podNow - 20_000 }
+        : POD_TURNS === "stopped"
+          ? { status: "stopped", runId: "pod-run-1", turnsUsed: 12, stopReason: "max_turns", updatedAt: podNow - 60_000 }
+          : { status: "idle", turnsUsed: 0, updatedAt: 1 },
+    },
+    reconciliations: [
+      {
+        reconciliationId: "merge-2", podId: "pod-active", sourceSessionId: "pod-worker", targetSessionId: "pod-lead", actorId: "local",
+        status: "conflicted", sourceHead: "4f9c2a7e1b3d5c6a", targetHead: "9b81d0c4e2f7a3b5", mergeBase: "1a2b3c4d5e6f7a8b",
+        conflictPaths: ["src/api/client.ts", "src/api/retry.ts"], createdAt: podNow - 180_000, completedAt: podNow - 175_000,
+      },
+      {
+        reconciliationId: "merge-1", podId: "pod-active", sourceSessionId: "pod-reviewer", targetSessionId: "pod-lead", actorId: "local",
+        status: "applied", sourceHead: "c0ffee1234567890", targetHead: "deadbeef12345678", mergeBase: "1a2b3c4d5e6f7a8b",
+        resultHead: "5eed5eed5eed5eed", createdAt: podNow - 3_600_000, completedAt: podNow - 3_590_000,
+      },
+    ],
+  } : {}),
   createdAt: 1,
   updatedAt: 1,
 };
@@ -1552,6 +1635,19 @@ function rowColumnsReminder(): SessionReminderView {
   };
 }
 
+function prunedWorkflowFixture(): WorkflowInstanceDetail {
+  return {
+    instanceId: "workflow-pruned", workflowId: "workflow", workflowVersion: 1, runId: activeRun.id,
+    status: "succeeded", transitionCount: 3, createdBy: { kind: "system" }, createdAt: 1, updatedAt: 2, completedAt: 2,
+    eventHistoryPruned: { prunedAt: Date.UTC(2026, 9, 16), eventCount: 1_284, retentionDays: 90 },
+    nodeStates: [{ nodeId: "build", status: "succeeded", attemptCount: 1, outcome: "success", completedAt: 2 }],
+    definition: { workflowId: "workflow", version: 1, source: "custom", name: "Build and Review", maxTransitions: 20,
+      edges: [], createdBy: { kind: "system" }, createdAt: 1, nodes: [{ nodeId: "build", kind: "agent", role: "Builder",
+        agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }] },
+    attempts: [], events: [],
+  };
+}
+
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
@@ -1580,7 +1676,7 @@ function snapshot(): UiSnapshotMessage {
       lastError: null, createdAt: 1,
     }] : [],
     ...(LEGACY_WORKSPACES || SHELL_PROJECTS_MODE === "unsupported" ? {} : { projects: structuredClone(model.projects) }),
-    sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
+    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...podMemberSessions]),
     ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
     runs: [structuredClone(activeRun)],
     pods: [structuredClone(activePod)],
@@ -2624,6 +2720,30 @@ const client = {
     pushSession(value);
     return { sessionId: id, jobId, outcome: "stopped" as const, terminalStatus: "killed" as const };
   },
+  // #3752: Proceed Now ends every unfinished job as killed, then the handoff and the queued prompts run.
+  releaseQueueHold: async (id: string, holdId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new ApiError("Session not found", 404);
+    if (value.queueHold?.holdId !== holdId) {
+      throw new ApiError("This session is no longer held by that handoff, so nothing was ended.", 409);
+    }
+    const now = Date.now();
+    const jobIds: string[] = [];
+    for (const job of value.backgroundJobs ?? []) {
+      if (job.terminalStatus) continue;
+      Object.assign(job, {
+        terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now,
+        endedBy: { actor: { kind: "user" }, reason: "stop_request", endedAt: now },
+      });
+      jobIds.push(job.id);
+    }
+    delete value.queueHold;
+    value.holds = value.holds?.filter((hold) => hold.holdId !== holdId);
+    value.status = "running";
+    value.updatedAt += 1;
+    pushSession(value);
+    return { sessionId: id, holdId, outcome: "released" as const, jobIds };
+  },
   acknowledgeBackgroundBlockedResults: async (id, targets) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");
@@ -2690,10 +2810,18 @@ const client = {
   },
   handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
     handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
+    if (FIXTURE_QUERY.has("legacyHandoff")) throw new ApiError("Update the runner to support handoffs from in-place sessions.", 409);
+    if (FIXTURE_QUERY.has("unsupportedRepository")) throw new ApiError("Handoff needs a Git repository with at least one readable commit.", 409);
+    if (FIXTURE_QUERY.has("savedHistoryIncomplete")) throw new ApiError("This session's saved history is incomplete, so it can't be handed off.", 409);
     const source = model.sessions.find((candidate) => candidate.id === id)!;
     const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
-    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
-    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config, status: "idle" as const };
+    const history = sessionEvents.get(id) ?? [];
+    const point = source.worktreePath ? undefined
+      : inPlaceHandoffTurns(history, { status: source.status, throughSeq: history.at(-1)?.seq ?? 0 }).turns.find((point) => point.turn === turn);
+    if (!source.worktreePath && !point?.eventSeq) throw new Error(point?.reason ?? "This turn didn't finish, so it can't be handed off yet.");
+    const handoffDraft = buildConversationHandoff(history, point?.eventSeq ?? 3, agent, config, { inPlace: !source.worktreePath });
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config,
+      useWorktree: true, worktreePath: "/repos/alpha/handoff-child", status: "idle" as const };
     model.sessions.push(child);
     sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
       handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);
@@ -3018,7 +3146,8 @@ const client = {
       await waitSyntheticHistoryRead("forward", after);
       return page;
     }
-    const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after);
+    const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after &&
+      !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail") && event.seq === 3));
     // R1.2 deliberately exposes several incomplete renders. A restored logical row can be absent
     // from the first cache page but reappear later in this same authoritative recovery chain.
     if (READER_RECOVERY_SCENARIO && after > 0) {
@@ -3031,7 +3160,7 @@ const client = {
       eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
       nextAfter: events.at(-1)?.seq ?? after,
       hasMoreCached,
-      cacheComplete: !hasMoreCached,
+      cacheComplete: !hasMoreCached && !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
   getSessionEventTailPage: async (sessionId: string, before?: number) => {
@@ -3049,7 +3178,8 @@ const client = {
       return page;
     }
     const all = sessionEvents.get(sessionId) ?? [];
-    const available = before === undefined ? all : all.filter((event) => event.seq < before);
+    const available = (before === undefined ? all : all.filter((event) => event.seq < before))
+      .filter((event) => !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail") && event.seq === 3));
     // A bounded opening window over a much longer log: tall enough to scroll and pause inside,
     // with older turns still only reachable by paging below it.
     const windowed = READER_RECOVERY_SCENARIO
@@ -3066,7 +3196,7 @@ const client = {
       ...(windowed[0] ? { nextBefore: windowed[0].seq } : {}),
       hasMoreOlder: windowed.length < available.length,
       ...(SCENARIO === "preview-opening-fill" ? { turnAligned: true } : {}),
-      cacheComplete: true,
+      cacheComplete: !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
   podContext: async () => ({ entries: [] }),
@@ -3365,6 +3495,11 @@ const client = {
       return { locationId, status: structuredClone(LOCATION_SETUP[locationId]!), path: ".wollipog.json" as const, detected: ["pnpm"] };
     },
     dismissWorktreeSetupNotice: async () => undefined,
+  } : {}),
+  // Keep this scenario's complete read responses together, independent of the default run mocks.
+  ...(FIXTURE_QUERY.get("workflowPruned") === "1" ? {
+    workflowInstances: async () => [prunedWorkflowFixture()],
+    workflowInstance: async () => prunedWorkflowFixture(),
   } : {}),
 } as ApiClient;
 

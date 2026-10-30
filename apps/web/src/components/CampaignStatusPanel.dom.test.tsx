@@ -632,7 +632,7 @@ test("details without pull requests say none was reported, and a reader without 
     await settle();
     await click(panel.container.querySelectorAll(".campaign-work-row")[0]!);
     assert.ok(deliveryFacts(panel.container).includes(
-      "Review and Checks: No Pull Request ReportedGitHub status is observed for the pull requests the Orchestrator reports."));
+      "Review and Checks: No Pull Request ReportedGitHub and GitLab status is observed for the pull requests and merge requests the Orchestrator reports."));
     await click(panel.container.querySelector(".campaign-detail-back")!);
     await click(panel.container.querySelectorAll(".campaign-work-row")[1]!);
     const facts = deliveryFacts(panel.container);

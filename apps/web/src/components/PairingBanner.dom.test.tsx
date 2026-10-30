@@ -180,3 +180,27 @@ test("the pairing field, Pair and the error lines behave as before", async () =>
     await view.dispose();
   }
 });
+
+test("a typed pairing link never reaches the DOM, and a stored one is cleared from the field (#3814)", async () => {
+  const view = await mount({ connecting: false, nativePairingFailure: null });
+  const html = () => view.banner().outerHTML;
+  try {
+    await view.type("not a pairing-secret token");
+    assert.equal(view.input().value, "not a pairing-secret token", "the field still holds what was typed");
+    assert.doesNotMatch(html(), /pairing-secret/, "a typed token is not mirrored into a value attribute");
+    await view.click("Pair");
+    assert.deepEqual(view.errors(), ["that doesn't look like a pairing token or link"]);
+    assert.equal(view.input().value, "not a pairing-secret token", "a rejected token stays in the field to correct");
+    assert.doesNotMatch(html(), /pairing-secret/, "nor after a rejected Pair");
+
+    await view.type(`http://127.0.0.1:4317/#pair=${TOKEN}`);
+    assert.doesNotMatch(html(), new RegExp(TOKEN));
+    await view.click("Pair");
+    assert.equal(deviceToken(), TOKEN);
+    assert.equal(view.input().value, "", "a stored token is cleared from the field");
+    assert.equal(view.button("Pair")?.disabled, true, "and Pair waits for another");
+    assert.doesNotMatch(html(), new RegExp(TOKEN));
+  } finally {
+    await view.dispose();
+  }
+});

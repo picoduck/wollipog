@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { GhRunner } from "./campaign-forge-status.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
 import {
   attachWslAgentControlBroker,
   validateWslAgentControlCliArgs,
@@ -214,6 +215,42 @@ test("Direct WSL pull request waits read GitHub with the session's gh, through M
   assert.equal(JSON.parse(response.result.content[0].text).outcome, "merged");
   assert.equal(ghCalls.filter((args) => args.includes("graphql")).length, 2);
   assert.deepEqual(fetched, []);
+  dispose();
+});
+
+test("a bridged GitLab merge request wait reads with the distro's own glab through both CLI and MCP (#3602)", async () => {
+  const project = "gitlab.example.com/group/project";
+  const glabCalls: string[][] = [];
+  const glab: GlabRunner = async (args) => {
+    glabCalls.push(args);
+    return { stdout: JSON.stringify({ iid: 1, state: "merged", draft: false, sha: "44579c6c25235598f1a28f8ccb0449cb8dbbc810",
+      target_branch: "main", merge_commit_sha: "a".repeat(40), web_url: `https://${project}/-/merge_requests/1` }),
+    stderr: "", code: null, timedOut: false };
+  };
+  const gh: GhRunner = async () => { throw new Error("a GitLab merge request never reaches gh"); };
+  const f = fixture();
+  const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config, async () => {
+    throw new Error("a merge request wait never contacts the control plane");
+  }, gh, glab);
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "cli", v: 1, kind: "cli",
+    sessionId: f.config.sessionId, token: f.config.token, args: ["pr", "wait", `${project}!1`, "--json"] })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.some((line) => JSON.parse(line).exit !== undefined); attempt++) await tick();
+  const cli = f.lines.map((line) => JSON.parse(line));
+  assert.equal(cli.find((message) => message.exit !== undefined)?.exit, 0);
+  assert.equal(JSON.parse(cli.filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join("")).outcome, "merged");
+
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "mcp", v: 1, kind: "mcp", sessionId: f.config.sessionId, token: f.config.token })}\n`);
+  await tick();
+  const call = `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "wait_pull_request", arguments: { pullRequest: `https://${project}/-/merge_requests/1` } } })}\n`;
+  const before = f.lines.length;
+  f.fromHelper.write(`${JSON.stringify({ type: "data", id: "mcp", data: Buffer.from(call).toString("base64") })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.slice(before).some((line) => JSON.parse(line).data); attempt++) await tick();
+  const response = JSON.parse(f.lines.slice(before).map((line) => JSON.parse(line)).filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join("").trim());
+  assert.equal(JSON.parse(response.result.content[0].text).outcome, "merged");
+  assert.equal(glabCalls.length, 2, "both routes used the distro's glab");
   dispose();
 });
 

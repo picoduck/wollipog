@@ -49,7 +49,7 @@ export function nativeTuiUnavailableReason(input: {
     return "Orchestrator Native TUI uses the Orchestrator preset, which this agent installation cannot launch here.";
   }
   if (input.orchestrator && !input.orchestratorTuiHostContext) {
-    return "Orchestrator Native TUI is unavailable for WSL agents. Use a native host.";
+    return "Orchestrator Native TUI is unavailable for WSL agents. Choose an agent that runs directly on the machine.";
   }
   if (!input.runnerSupported) {
     return "Native TUI requires a supported Claude Code or Codex agent on a Windows or Linux runner.";

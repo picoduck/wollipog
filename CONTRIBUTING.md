@@ -31,6 +31,14 @@ Run `pnpm check:rust` when changing the Tauri application. Run the relevant Play
 - Explain security implications and compatibility behavior when a change crosses a process, network, credential, shell, Git, or filesystem boundary.
 - Confirm that generated files, snapshots, and fixtures contain no credentials or private data.
 
+## Supporting a Harness
+
+Wollipog relies on behaviour of the Codex, Claude Code and Pi CLIs that those CLIs do not promise to
+keep. Supporting a new harness includes adding its probe set: a credential-free suite that
+re-measures that behaviour against a scripted local model server, registered in the scheduled
+Harness Assumption Probes workflow. Follow [Harness Assumption Probes](docs/harness-assumption-probes.md)
+for the report contract and the steps.
+
 ## Commit and License Terms
 
 Use clear commit messages that describe the change. By submitting a contribution, you represent that you have the right to submit it and agree that it will be licensed under the Apache License 2.0.

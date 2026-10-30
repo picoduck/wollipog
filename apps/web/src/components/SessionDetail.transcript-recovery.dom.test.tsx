@@ -447,7 +447,7 @@ test("a rejected turn-start response never exposes a racing tail as initial cont
     await act(async () => reject(new Error("read failed")));
     await flushAsyncWork();
     assert.equal(fixture.container.textContent!.includes("Must not be first"), false);
-    assert.ok(fixture.container.querySelector(".transcript-history-notice"));
+    assert.ok(fixture.container.querySelector(".transcript-history-band > .notice"));
   } finally { await unmountFixture(fixture); }
 });
 
@@ -1326,7 +1326,7 @@ test("recovery over a long cached transcript shows at the reader's lower edge wh
     // Neither the old band nor the chip render, and the top-of-reader notice stays away.
     assertNoDomNode(fixture.container.querySelector(".transcript-recovery-slot"));
     assertNoDomNode(fixture.container.querySelector(".follow-tail-chip"));
-    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band > .notice"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -1346,7 +1346,7 @@ test("successful recovery leaves an idle tail with nothing below the last row an
       "the live region announces the check's completion");
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false");
     assert.equal(followState(fixture), "following");
-    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band > .notice"));
   } finally {
     await unmountFixture(fixture);
   }
@@ -1552,7 +1552,7 @@ test("recovery failure falls back to the existing error notice with its retry af
 
     assert.equal(recoveryActive(fixture), false, "the recovery pill yields to the failure state");
     assert.equal(recoveryStatusText(fixture), "");
-    const errorNotice = fixture.container.querySelector(".transcript-history-notice[data-state='error']");
+    const errorNotice = fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']");
     assert.ok(errorNotice, "the failure keeps its explanatory notice");
     const retry = errorNotice.querySelector(".notice-actions button");
     assert.ok(retry, "the failure keeps its retry affordance");
@@ -3422,7 +3422,7 @@ test("a failed acknowledged refresh can retry through REST while the next fleet 
       events: [], eventEpoch: 7, nextAfter: 24, hasMoreCached: false, cacheComplete: true,
     }));
     await flushAsyncWork();
-    assert.ok(fixture.container.querySelector(".transcript-history-notice[data-state='error']"));
+    assert.ok(fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']"));
     await act(async () => fixture.socket.push({
       type: "session_upsert", session: { ...session(`${fixture.sessionId}-busy`), status: "running" },
     }));
@@ -3431,7 +3431,7 @@ test("a failed acknowledged refresh can retry through REST while the next fleet 
     await act(async () => pages.rejectTail());
     await flushAsyncWork();
     const retry = fixture.container.querySelector<HTMLButtonElement>(
-      ".transcript-history-notice[data-state='error'] .notice-actions button");
+      ".transcript-history-band > .notice[data-state='error'] .notice-actions button");
     assert.ok(retry, "REST failure keeps a manual retry available despite the missing ack");
     await act(async () => retry.click());
     await flushAsyncWork();
@@ -3440,7 +3440,7 @@ test("a failed acknowledged refresh can retry through REST while the next fleet 
       events: fixture.events, eventEpoch: 0, hasMoreOlder: false, cacheComplete: true,
     }));
     await flushAsyncWork();
-    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']"));
     assert.equal(recoveryActive(fixture), false);
   } finally { await unmountFixture(fixture); }
 });
@@ -3545,7 +3545,7 @@ test("resuming a pause-skipped provisional tail settles history without an ackno
     await flushAsyncWork(30);
     assert.equal(fixture.readLoadedEvents()?.at(-1)?.seq, 2_024);
     assert.equal(fixture.scroller.getAttribute("aria-busy"), "false", "REST settles recovery while the acknowledgement remains withheld");
-    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"));
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']"));
     assert.equal(pages.forwardCalls(), 0);
     assert.equal(pages.tailCalls.length, 4, "a completed resume cannot form a polling loop");
   } finally { await unmountFixture(fixture); }
@@ -3694,7 +3694,7 @@ test("StrictMode and a source switch revoke a resumed provisional owner without 
       events: oldWindow, eventEpoch: 0, nextAfter: 1_024, hasMoreCached: false, cacheComplete: true,
     }));
     await flushAsyncWork();
-    assert.ok(fixture.container.querySelector(".transcript-history-notice[data-state='error']"),
+    assert.ok(fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']"),
       "the active source's unsupported backward read remains an honest retryable failure");
     await pauseMeasuredReader(fixture);
     await resumeMeasuredReader(fixture);
@@ -3721,7 +3721,7 @@ test("resume between a provisional response fence and its continuation retries o
     await flushAsyncWork();
     assert.equal(followState(fixture), "following");
     assert.equal(pages.tailCalls.length, reads + 1);
-    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"),
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']"),
       "the pause fence keeps its cancellation reason after the reader resumes");
     assert.equal(metadataCalls(), metadata);
     await act(async () => pages.releaseTail({
@@ -3783,7 +3783,7 @@ test("live activity after an empty opening can stage a bounded gap for a paused 
       events: laterRows, eventEpoch: 0, hasMoreOlder: true, cacheComplete: true, turnAligned: true,
     }));
     await flushAsyncWork(30);
-    assertNoDomNode(fixture.container.querySelector(".transcript-history-notice[data-state='error']"),
+    assertNoDomNode(fixture.container.querySelector(".transcript-history-band > .notice[data-state='error']"),
       "the empty opening's populated reader accepts its valid paused recovery owner");
     assert.ok(fixture.container.querySelector("[data-later-activity-gap='available']"),
       "the bounded tail is staged as later activity rather than discarded");

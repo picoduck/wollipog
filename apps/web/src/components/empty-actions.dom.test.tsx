@@ -15,6 +15,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
 import { AutomationEditor } from "./AutomationEditor.js";
+import { AutomationDetail } from "./AutomationDetail.js";
 import { Board } from "./Board.js";
 import { BoardFilterTools } from "./BoardFilters.js";
 import { RunnersView } from "./RunnersView.js";
@@ -173,17 +174,30 @@ const nextPoll = () => new Promise((resolve) => setTimeout(resolve, 5_100));
 const buttonLabelled = (container: HTMLElement, text: string) =>
   [...container.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === text);
 
-/**
- * Automation cards are collapsed disclosures (#793): Edit, Delete, and the rest of the management
- * actions only exist in the DOM once a card is open. These tests are about editor and deletion
- * behaviour rather than the disclosure, so they open every rendered card first.
- */
-const expandAllCards = async (container: HTMLElement) => {
-  for (const toggle of [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]) {
-    if (toggle.getAttribute("aria-expanded") === "false") {
-      await act(async () => { fireDomEvent.click(toggle); });
-    }
-  }
+const settleReads = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+
+/** A row's open target opens its automation's page (#2968, #2969), which holds Edit and, in ⋯, Delete. */
+const openAutomation = async (container: HTMLElement, name: string) => {
+  const card = [...container.querySelectorAll<HTMLButtonElement>(".automation-row-open")]
+    .find((toggle) => toggle.querySelector(".row-title")?.textContent === name);
+  assert.ok(card, `${name}'s row is rendered`);
+  await act(async () => { fireDomEvent.click(card); });
+  await settleReads();
+};
+
+/** Delete Automation… from the page's ⋯, confirmed. */
+const deleteFromPage = async (container: HTMLElement) => {
+  await act(async () => {
+    fireDomEvent.click(container.querySelector<HTMLButtonElement>('.detail-bar button[aria-label="More Actions"]')!);
+  });
+  const item = [...container.ownerDocument.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+    .find((candidate) => candidate.querySelector(".menu-text")?.textContent === "Delete Automation…");
+  assert.ok(item, "⋯ offers Delete Automation…");
+  await act(async () => { fireDomEvent.click(item); });
+  const confirmDelete = buttonLabelled(container, "Delete Automation");
+  assert.ok(confirmDelete, "deleting asks for confirmation first");
+  await act(async () => { fireDomEvent.click(confirmDelete); });
+  await settleReads();
 };
 
 const automation = (id: string, name: string): AutomationSchedule => ({
@@ -194,13 +208,21 @@ const automation = (id: string, name: string): AutomationSchedule => ({
   createdAt: 1, updatedAt: 1,
 } as unknown as AutomationSchedule);
 
-/** The Automations list, or the editor route its New Automation and Edit open, as App routes them. */
+/** The Automations list, an automation's page, or the editor, as App routes them. */
 function AutomationsRoute() {
   const view = useStoreSelector((state) => state.view);
+  if (view.name === "automation") return <AutomationDetail key={view.id} automationId={view.id} />;
   return view.name === "automations" && view.editor
     ? <AutomationEditor key={viewPath(view)} route={view.editor} />
     : <AutomationsView />;
 }
+
+/** The control plane's read of one automation: 404 once it is gone. */
+const automationRead = (items: () => AutomationSchedule[]) => async (id: string) => {
+  const found = items().find((item) => item.automationId === id);
+  if (!found) throw new ApiError("automation not found", 404);
+  return { automation: found, executions: [], events: [] };
+};
 
 const automationsNavigation: ViewNavigation = { current: () => ({ name: "automations" }), push() {}, listen: () => () => {} };
 
@@ -213,7 +235,7 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   const updated: string[] = [];
   const { container, socket, unmount } = await mount({
     automations: async () => ({ automations: items }),
-    automation: async (id: string) => ({ automation: items.find((item) => item.automationId === id), executions: [] }),
+    automation: automationRead(() => items),
     automationTriggers: async () => ({ triggers: [] }),
     workflowDefinitions: async () => [],
     createAutomation: async (spec: AutomationSpec) => { created.push(structuredClone(spec)); return {} as never; },
@@ -222,26 +244,21 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
   await act(async () => { socket.push(snapshot()); });
 
-  await act(async () => { await Promise.resolve(); });
-  await expandAllCards(container);
+  await settleReads();
+  await openAutomation(container, "Nightly");
   const edit = buttonLabelled(container, "Edit");
-  assert.ok(edit, "the seeded automation renders with an Edit button");
+  assert.ok(edit, "the seeded automation's page renders with an Edit button");
   await act(async () => { fireDomEvent.click(edit!); });
-  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 20)); });
+  await settleReads();
   assert.equal(container.querySelector(".detail-bar-title")?.textContent, "Edit Nightly");
 
-  await act(async () => { fireDomEvent.click(container.querySelector('button[aria-label="Back to Automations"]')!); });
-  await act(async () => { await Promise.resolve(); });
+  // Leave the edit: Back returns to the automation's page (#2968).
+  await act(async () => { fireDomEvent.click(container.querySelector('button[aria-label="Back to Nightly"]')!); });
+  await settleReads();
 
   // Delete it the way a user would, through the confirmation, so the refresh that empties the list
   // is the app's own rather than one the test staged.
-  await expandAllCards(container);
-  const remove = buttonLabelled(container, "Delete");
-  await act(async () => { fireDomEvent.click(remove!); });
-  const confirmDelete = buttonLabelled(container, "Delete Automation");
-  assert.ok(confirmDelete, "deleting asks for confirmation first");
-  await act(async () => { fireDomEvent.click(confirmDelete!); });
-  await act(async () => { await Promise.resolve(); });
+  await deleteFromPage(container);
 
   // This screen exposed its empty state as an `h3` before it moved to `State`, and heading
   // navigation is how a screen-reader user finds a section. A paragraph is not in that list.
@@ -385,7 +402,7 @@ test("serialized polling lists a newly discovered automation that Edit can then 
         if (calls === 1) await new Promise<void>((resolve) => held.push(resolve));
         return { automations: snapshot };
       },
-      automation: async (id: string) => ({ automation: items.find((item) => item.automationId === id), executions: [] }),
+      automation: automationRead(() => items),
       automationTriggers: async () => ({ triggers: [] }),
       workflowDefinitions: async () => [],
       outboundEventSubscriptions: async () => [],
@@ -396,19 +413,19 @@ test("serialized polling lists a newly discovered automation that Edit can then 
       await act(async () => { for (const poll of polls.values()) poll(); });
       assert.equal(calls, 1, "a slow initial list prevents the next interval from starting a newer read");
       await act(async () => { for (const release of held) release(); });
-      assert.equal(container.querySelectorAll(".automation-card").length, 1,
+      assert.equal(container.querySelectorAll(".automation-row").length, 1,
         "the older one-item list settles before another refresh can start");
 
       await act(async () => { for (const poll of polls.values()) poll(); });
       assert.equal(calls, 2, "the next interval reads the new authoritative list");
-      await expandAllCards(container);
-      const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
-      assert.equal(edits.length, 2, "both automations render after the serialized fresh read");
-      await act(async () => { fireDomEvent.click(edits[1]!); });
-      await act(async () => { await Promise.resolve(); });
+      assert.equal(container.querySelectorAll(".automation-row").length, 2,
+        "both automations render after the serialized fresh read");
+      await openAutomation(container, "Weekly");
+      await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
+      await settleReads();
       assert.equal(container.querySelector(".detail-bar-title")?.textContent, "Edit Weekly",
         "the newer automation is open for editing");
-      assert.equal(polls.size, 0, "the list stops polling while the editor has the page");
+      assert.equal(polls.size, 0, "neither the list nor the page polls while the editor has the page");
     } finally {
       for (const release of held) release();
       await unmount();
@@ -420,11 +437,17 @@ test("a workflow-definition failure cannot keep a deleted automation on screen",
   // The list and the workflow definitions used to share a `Promise.all`, so a rejected workflow
   // fetch discarded a successful list. The deleted automation stayed, the editor stayed open on it,
   // and Save sent `updateAutomation` for an ID the control plane no longer had.
-  let items = [automation("automation-1", "Nightly")];
+  // The automation page reads the workflows for a workflow action, independently of the automation
+  // itself (#2968): deleting it still leaves its page for the list, and the list drops it.
+  const workflowAutomation = automation("automation-1", "Nightly");
+  workflowAutomation.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "graph-1", task: "go",
+  } };
+  let items = [workflowAutomation];
   const updated: string[] = [];
-  const { container, unmount } = await mount({
+  const { container, socket, unmount } = await mount({
     automations: async () => ({ automations: items }),
-    automation: async () => ({ executions: [] }),
+    automation: automationRead(() => items),
     automationTriggers: async () => ({ triggers: [] }),
     workflowDefinitions: async () => { throw new Error("workflow service is down"); },
     updateAutomation: async (id: string) => { updated.push(id); return {} as never; },
@@ -432,47 +455,44 @@ test("a workflow-definition failure cannot keep a deleted automation on screen",
       items = items.filter((item) => item.automationId !== id);
       return {} as never;
     },
-  } as unknown as Partial<ApiClient>, <AutomationsView />);
+  } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
+  await act(async () => { socket.push(snapshot()); });
 
-  await act(async () => { await Promise.resolve(); });
-  await expandAllCards(container);
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Edit")!); });
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete")!); });
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
-  await act(async () => { await Promise.resolve(); });
+  await settleReads();
+  await openAutomation(container, "Nightly");
+  assert.match(container.textContent ?? "", /workflow service is down/, "the failed read is the page's notice");
+  await deleteFromPage(container);
 
-  assertNoDomNode(container.querySelector(".automation-editor"),
-    "an unrelated service being down must not keep an editor open on a deleted automation");
+  assertNoDomNode(container.querySelector(".automation-detail"),
+    "an unrelated service being down must not keep a deleted automation's page open");
+  assertNoDomNode(container.querySelector(".automation-row"), "and the list no longer holds it");
   assert.deepEqual(updated, []);
   await unmount();
 });
 
-test("deleting the edited automation leaves the others alone", async () => {
+test("deleting an automation from its page leaves the others alone", async () => {
   // With one automation, an implementation that closed whenever the list became EMPTY would pass
   // the earlier test while being wrong. Two automations tell them apart.
   let items = [automation("automation-1", "Nightly"), automation("automation-2", "Weekly")];
-  const { container, unmount } = await mount({
+  const { container, socket, unmount } = await mount({
     automations: async () => ({ automations: items }),
-    automation: async () => ({ executions: [] }),
+    automation: automationRead(() => items),
     automationTriggers: async () => ({ triggers: [] }),
     workflowDefinitions: async () => [],
     deleteAutomation: async (id: string) => {
       items = items.filter((item) => item.automationId !== id);
       return {} as never;
     },
-  } as unknown as Partial<ApiClient>, <AutomationsView />);
+  } as unknown as Partial<ApiClient>, <AutomationsRoute />, undefined, automationsNavigation);
+  await act(async () => { socket.push(snapshot()); });
 
-  await act(async () => { await Promise.resolve(); });
-  await expandAllCards(container);
-  const edits = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Edit");
-  await act(async () => { fireDomEvent.click(edits[1]!); });
-  const deletes = [...container.querySelectorAll("button")].filter((b) => (b.textContent ?? "").trim() === "Delete");
-  await act(async () => { fireDomEvent.click(deletes[1]!); });
-  await act(async () => { fireDomEvent.click(buttonLabelled(container, "Delete Automation")!); });
-  await act(async () => { await Promise.resolve(); });
+  await settleReads();
+  await openAutomation(container, "Weekly");
+  await deleteFromPage(container);
 
-  assertNoDomNode(container.querySelector(".automation-editor"), "the edited automation is gone");
-  assert.equal(container.querySelectorAll(".automation-card").length, 1, "the other one is not");
+  assertNoDomNode(container.querySelector(".automation-detail"), "the deleted automation's page is gone");
+  assert.deepEqual([...container.querySelectorAll(".automation-row .row-title")].map((name) => name.textContent), ["Nightly"],
+    "the other one is not");
   await unmount();
 });
 

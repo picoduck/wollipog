@@ -9,6 +9,7 @@ import type { ExecResult, ResolvedBinary, ResolvedLaunch } from "./resolve.js";
 import { run } from "./resolve.js";
 import { existsSync } from "node:fs";
 import { win32 } from "node:path";
+import type { CodexProbeObserver } from "../codex-probe.js";
 
 type ProbeExec = (args: string[], timeoutMs?: number) => Promise<ExecResult>;
 
@@ -16,6 +17,8 @@ const SAFE_LABEL = /^[a-zA-Z0-9._ -]{1,40}$/;
 const MAX_ACCOUNT_LABEL_LENGTH = 160;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"];
+/** Earliest release regression-verified for the stream-json stdio control and image-block contract. */
+export const CLAUDE_CONTROL_CONTRACT_MIN_VERSION = "2.1.205";
 export const CLAUDE_STEERING_MIN_VERSION = "2.1.241";
 /** Earliest release live-verified to show the model an image returned by an MCP tool (#1492):
  * `pnpm probe:claude-mcp-image` passed on 2.1.277, 2.1.278, 2.1.280, and 2.1.281. */
@@ -103,7 +106,7 @@ function parseVersion(s: string): string | undefined {
   return s.match(/\d+\.\d+\.\d+[\w.-]*/)?.[0];
 }
 
-function versionAtLeast(version: string, floor: string): boolean {
+export function claudeVersionAtLeast(version: string, floor: string): boolean {
   const parts = (value: string) => value.split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
   const prerelease = (value: string) => /^\d+\.\d+\.\d+-/.test(value);
   const a = parts(version);
@@ -269,7 +272,7 @@ export function claudeCapabilitiesFromProbe(
     supportsImages: probe.streamJsonImages,
     supportsApprovals: probe.controlProtocol,
     ...(probe.status === "ready" && probe.streamJsonInput && probe.replayUserMessages &&
-        probe.installedVersion && versionAtLeast(probe.installedVersion, CLAUDE_STEERING_MIN_VERSION)
+        probe.installedVersion && claudeVersionAtLeast(probe.installedVersion, CLAUDE_STEERING_MIN_VERSION)
       ? { supportsSteering: true as const }
       : {}),
     supportsConversationFork: probe.status === "ready" && probe.forkSession,
@@ -280,7 +283,7 @@ export function claudeCapabilitiesFromProbe(
     // CLI, so signing out does not withdraw it; a CLI that failed its core probe attests nothing.
     imageToolResults: (probe.status === "ready" || probe.status === "unauthenticated") &&
       probe.installedVersion !== undefined &&
-      versionAtLeast(probe.installedVersion, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION),
+      claudeVersionAtLeast(probe.installedVersion, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION),
     ...(permissionModes.length ? { elicitation } : { elicitation: undefined }),
   };
 }
@@ -322,7 +325,7 @@ export async function probeClaudeCode(
   // The stream-json stdio control and image-block contract is regression-verified against 2.1.205.
   // Help does not advertise --permission-prompt-tool, so fail closed on other versions until a
   // release is explicitly verified instead of treating undocumented behavior as universal.
-  const verifiedControlContract = versionAtLeast(installedVersion, "2.1.205") && parsed.streamJsonInput;
+  const verifiedControlContract = claudeVersionAtLeast(installedVersion, CLAUDE_CONTROL_CONTRACT_MIN_VERSION) && parsed.streamJsonInput;
   // A normal session with no explicit permission setting defaults to acceptEdits in the driver.
   // Do not advertise launch readiness unless that implicit first turn is known to be valid.
   const coreSupported = parsed.streamJsonInput && parsed.permissionModes.includes("acceptEdits");
@@ -347,9 +350,10 @@ export async function probeClaudeCode(
 export async function probeNativeClaudeCode(
   launch: ResolvedLaunch,
   via: ResolvedBinary["via"],
+  observer: CodexProbeObserver = {},
 ): Promise<ClaudeCodeCapabilities> {
   return probeClaudeCode(
-    (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs }),
+    (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs, trackDescendants: true, ...observer }),
     via,
   );
 }

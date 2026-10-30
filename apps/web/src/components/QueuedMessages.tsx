@@ -1,9 +1,10 @@
-import React, { useLayoutEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type QueuedPromptView,
 } from "@wollipog/protocol";
+import { useApi } from "../api-context.js";
 import {
   conversationSteeringAvailability,
   queuedPromptEditingAvailability,
@@ -11,12 +12,22 @@ import {
   STEERING_UNVERIFIED_REASON,
   type ConversationSteeringAvailabilityInput,
 } from "../conversation-steering.js";
+import {
+  QUEUE_HOLD_RELEASED,
+  queueHoldReleaseOutcome,
+  requestQueueHoldRelease,
+  type QueueHoldReleaseResult,
+  type QueueHoldTrayView,
+} from "../queue-hold-release.js";
 import { isTerminalDeliveryReceipt } from "../session-actions.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import { ArrowUpIcon, ChevronRightIcon, CloseIcon, EditIcon, MoreHorizontalIcon, PaperclipIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
+import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useRemovedFocus } from "./useRemovedFocus.js";
 
@@ -77,6 +88,8 @@ export interface QueuedMessagesProps {
   sessionId: string;
   prompts: readonly QueuedPromptView[];
   queueHeld: boolean;
+  /** The worktree or account handoff the queue waits behind (#3752), from `queueHoldTrayView`. */
+  queueHold?: QueueHoldTrayView | null;
   /** The agent's name, for the sentence that says why nothing can steer. */
   agent: string;
   /** The session's steering gates, evaluated once for the whole queue. */
@@ -132,12 +145,14 @@ function sentenceStart(text: string): string {
  * once what holds for every row: a held queue, a steering reason they share, a cancel they all lack,
  * a Viewer's refusal. A row carries a status only where it differs from "queued". On a phone each
  * row is its text and one ⋯ button that opens the shared menu sheet, every action listed with its
- * reason.
+ * reason. A queue held behind a worktree or account handoff (#3752) says why under the summary,
+ * collapsed or expanded, with Proceed Now… for a reader who may end the work it waits on.
  */
 export function QueuedMessages({
   sessionId,
   prompts,
   queueHeld,
+  queueHold = null,
   agent,
   steering,
   requestBusy,
@@ -301,6 +316,9 @@ export function QueuedMessages({
           <StatusBadge meta={statusMeta("queuedMessage", summaryStatus)} inline />
         )}
       </button>
+      {queueHold !== null && (
+        <QueueHoldLine key={`${sessionId}\n${queueHold.hold.holdId}`} sessionId={sessionId} view={queueHold} />
+      )}
       {(refusal !== null || held || steeringNote !== null || sharedCancelReason !== null) && (
         <div className="queue-notes" hidden={!expanded}>
           {refusal !== null && <p className="queue-note" id={refusalId}>{refusal}</p>}
@@ -404,6 +422,72 @@ export function QueuedMessages({
         })}
       </ul>
     </section>
+  );
+}
+
+/**
+ * Why a handoff holds the queue, and Proceed Now… (#3752). Shown under the summary whether the tray
+ * is collapsed or expanded, since the hold is what the person is waiting on. Proceed Now asks first,
+ * in the shared danger confirmation with Cancel focused, mirroring Stop Job…; the request names the
+ * hold that was on screen when the confirmation opened, and is sent only if that hold is still shown
+ * and still releasable when it is answered. The tray keys this line by session and hold, so a new hold
+ * starts with no outcome.
+ */
+function QueueHoldLine({ sessionId, view }: { sessionId: string; view: QueueHoldTrayView }) {
+  const api = useApi();
+  const { confirm } = useFeedback();
+  const reasonId = useId();
+  const unavailableId = useId();
+  const [outcome, setOutcome] = useState<"pending" | QueueHoldReleaseResult | null>(null);
+  const inFlight = useRef(false);
+  const shown = useRef({ mounted: false, available: false });
+  shown.current = { ...shown.current, available: view.release?.available === true };
+  useEffect(() => {
+    shown.current.mounted = true;
+    return () => { shown.current.mounted = false; };
+  }, []);
+  const { hold, release } = view;
+  const proceed = async () => {
+    if (inFlight.current) return;
+    const holdId = hold.holdId;
+    const confirmed = await confirm({
+      title: "Proceed Now",
+      message: queueHoldReleaseOutcome(hold),
+      confirmLabel: "Proceed Now",
+      tone: "danger",
+    });
+    if (!confirmed || inFlight.current || !shown.current.mounted || !shown.current.available) return;
+    inFlight.current = true;
+    setOutcome("pending");
+    const result = await requestQueueHoldRelease(api, sessionId, holdId);
+    inFlight.current = false;
+    if (shown.current.mounted) setOutcome(result);
+  };
+  const released = outcome !== null && outcome !== "pending" && outcome.state === "released";
+  return (
+    <div className="queue-hold">
+      <p className="queue-note" id={reasonId}>{view.reason}</p>
+      {release !== null && !released && (release.available ? (
+        <BusyButton
+          className="btn sm"
+          busy={outcome === "pending"}
+          progress="Proceeding…"
+          aria-describedby={reasonId}
+          onClick={() => void proceed()}
+        >
+          Proceed Now…
+        </BusyButton>
+      ) : (
+        <>
+          <button type="button" className="btn sm" disabled aria-describedby={unavailableId}>Proceed Now…</button>
+          <p className="queue-note" id={unavailableId}>{release.reason}</p>
+        </>
+      ))}
+      {released && <p className="queue-note" role="status">{QUEUE_HOLD_RELEASED}</p>}
+      {outcome !== null && outcome !== "pending" && outcome.state === "error" && (
+        <Notice tone="danger" compact role="alert">{outcome.message}</Notice>
+      )}
+    </div>
   );
 }
 

@@ -742,3 +742,151 @@ test("registration refreshes the deferred before-view after a publication yield"
       .get()?.n, 1);
   } finally { db.close(); }
 });
+
+/** Records each write transaction boundary the connection runs, in order, alongside `log`. */
+function recordTransactions(db: ControlPlaneDb, log: string[], fail?: (sql: string) => boolean) {
+  const raw = db.raw();
+  const exec = raw.exec.bind(raw);
+  raw.exec = (sql: string) => {
+    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) log.push(sql);
+    if (fail?.(sql)) throw new Error("Synthetic commit failure");
+    return exec(sql);
+  };
+  return () => { raw.exec = exec; };
+}
+
+const inTransaction = (db: ControlPlaneDb) =>
+  (db.raw() as ReturnType<ControlPlaneDb["raw"]> & { isTransaction: boolean }).isTransaction;
+
+test("a burst of live runtime snapshots commits once per bounded run, not once per snapshot (#2601)", () => {
+  const { db, svc, snapshots } = fixture(70);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    let perSnapshotCommits = 0;
+    const update = db.updateSessionFromSnapshot.bind(db);
+    db.updateSessionFromSnapshot = (...args) => { perSnapshotCommits++; return update(...args); };
+    const transactions: string[] = [];
+    recordTransactions(db, transactions);
+    svc.applySessionRuntimeUpdates("runner", snapshots.map((snap) => ({ ...snap, preview: "Negotiated" })),
+      svc.beginRunnerAttentionBatch("runner"));
+    assert.equal(perSnapshotCommits, 0);
+    assert.deepEqual(transactions, ["BEGIN IMMEDIATE", "COMMIT", "BEGIN IMMEDIATE", "COMMIT", "BEGIN IMMEDIATE", "COMMIT"],
+      "70 snapshots commit as runs of 32, 32 and 6");
+    for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, "Negotiated");
+  } finally { db.close(); }
+});
+
+test("runtime runs keep per-session order, and the newest snapshot wins", () => {
+  const { db, svc, snapshots } = fixture(4);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    const order: string[] = [];
+    const runs = db.updateSessionsFromRuntimeSnapshots.bind(db);
+    db.updateSessionsFromRuntimeSnapshots = (updates, now) => {
+      order.push(`run:${updates.map(({ snapshot }) => `${snapshot.id}=${snapshot.preview}`).join(",")}`);
+      return runs(updates, now);
+    };
+    const update = db.updateSessionFromSnapshot.bind(db);
+    db.updateSessionFromSnapshot = (id, snap, now) => { order.push(`single:${id}=${snap.preview}`); return update(id, snap, now); };
+    // A terminal snapshot for a session the control plane still thinks is live must revoke what the
+    // end owes, so it takes the exact single-snapshot path, in its place in the sequence.
+    db.updateSessionStatus("child-2", "running", 3);
+    const reconciled: string[] = [];
+    const newest = { ...snapshots[0]!, preview: "Newest", updatedAt: 5 };
+    svc.applySessionRuntimeUpdates("runner", [
+      { ...snapshots[0]!, preview: "Older" }, { ...snapshots[1]!, preview: "Older" }, newest,
+      { ...snapshots[2]!, preview: "Ended" }, { ...snapshots[3]!, preview: "After" },
+    ], svc.beginRunnerAttentionBatch("runner"), (snap) => reconciled.push(`${snap.id}=${snap.preview}`));
+    assert.deepEqual(order, [
+      "run:child-0=Older,child-1=Older", // a second snapshot for child-0 starts a new run
+      "run:child-0=Newest",
+      "single:child-2=Ended",
+      "run:child-3=After",
+    ]);
+    assert.deepEqual(reconciled, ["child-2=Ended"],
+      "only the single-snapshot path reconciles role conversions; none is unapplied in a run");
+    assert.equal(db.getSession("child-0")?.preview, "Newest");
+    assert.equal(db.isRepeatedRuntimeSnapshot("child-0", newest), true, "the stored fingerprint is the newest snapshot's");
+    assert.equal(db.getSession("child-2")?.status, "stopped");
+  } finally { db.close(); }
+});
+
+test("a runtime run publishes nothing until its commit has succeeded", () => {
+  const { db, hub, svc, snapshots } = fixture(3);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    const log: string[] = [];
+    recordTransactions(db, log);
+    const changed = hub.sessionChangedById.bind(hub);
+    hub.sessionChangedById = (sessionId, refreshProject) => {
+      assert.equal(inTransaction(db), false, "a broadcast inside the transaction could announce a rolled-back row");
+      log.push(`changed:${sessionId}=${db.getSession(sessionId)?.preview}`);
+      return changed(sessionId, refreshProject);
+    };
+    const send = hub.sendToRunner.bind(hub);
+    hub.sendToRunner = (...args) => { assert.equal(inTransaction(db), false); return send(...args); };
+    svc.applySessionRuntimeUpdates("runner", snapshots.map((snap) => ({ ...snap, preview: "Committed" })),
+      svc.beginRunnerAttentionBatch("runner"));
+    assert.deepEqual(log.filter((entry) => !entry.startsWith("changed:campaign-")), [
+      "BEGIN IMMEDIATE", "COMMIT",
+      "changed:child-0=Committed", "changed:child-1=Committed", "changed:child-2=Committed",
+    ]);
+  } finally { db.close(); }
+});
+
+for (const failure of ["commit", "write"] as const) {
+  test(`a failed runtime run ${failure} rolls back the whole run and publishes nothing`, async () => {
+    const { db, hub, svc, snapshots } = fixture(3);
+    try {
+      svc.hydrateRunnerSessions("runner", snapshots);
+      const changed: string[] = [];
+      const broadcast = hub.sessionChangedById.bind(hub);
+      hub.sessionChangedById = (sessionId, refreshProject) => { changed.push(sessionId); return broadcast(sessionId, refreshProject); };
+      const transactions: string[] = [];
+      const restoreExec = recordTransactions(db, transactions, (sql) => failure === "commit" && sql === "COMMIT");
+      const clear = db.clearPolicyResumeStatus.bind(db);
+      if (failure === "write") db.clearPolicyResumeStatus = (sessionId) => {
+        if (sessionId === "child-2") throw new Error("Synthetic write failure");
+        return clear(sessionId);
+      };
+      const batch = svc.beginRunnerAttentionBatch("runner");
+      assert.throws(() => svc.applySessionRuntimeUpdates("runner",
+        snapshots.map((snap) => ({ ...snap, preview: "Rolled back" })), batch), /Synthetic (commit|write) failure/);
+      assert.deepEqual(transactions, ["BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"].filter((sql) => failure === "commit" || sql !== "COMMIT"));
+      assert.equal(inTransaction(db), false);
+      assert.deepEqual(changed, [], "nothing about a failed run is broadcast");
+      for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, null, "no snapshot of the run was applied");
+      restoreExec();
+      db.clearPolicyResumeStatus = clear;
+      svc.applySessionRuntimeUpdates("runner", snapshots.map((snap) => ({ ...snap, preview: "Replayed" })), batch);
+      for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, "Replayed");
+      await svc.flushRunnerAttention("runner", () => true);
+    } finally { db.close(); }
+  });
+}
+
+test("a later snapshot's role conversion is reconciled only after the earlier run has committed", () => {
+  const { db, svc, snapshots } = fixture(2);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    db.beginSessionRoleConversion({ type: "prepare_session_role", sessionId: "child-1", conversionId: "conversion-1" } as
+      Parameters<ControlPlaneDb["beginSessionRoleConversion"]>[0], undefined, 3);
+    const log: string[] = [];
+    let failCommit = true;
+    recordTransactions(db, log, (sql) => failCommit && sql === "COMMIT");
+    const reconcile = (snap: SessionSnapshot) => {
+      assert.equal(inTransaction(db), false);
+      log.push(`reconcile:${snap.id}`);
+    };
+    const burst = snapshots.map((snap) => ({ ...snap, preview: "Converted" }));
+    assert.throws(() => svc.applySessionRuntimeUpdates("runner", burst, svc.beginRunnerAttentionBatch("runner"), reconcile),
+      /Synthetic commit failure/);
+    assert.deepEqual(log, ["BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"],
+      "the converting session's reconciliation, which can commit and publish, never ran ahead of the failed run");
+    log.length = 0;
+    failCommit = false;
+    svc.applySessionRuntimeUpdates("runner", burst, svc.beginRunnerAttentionBatch("runner"), reconcile);
+    assert.deepEqual(log.slice(0, 3), ["BEGIN IMMEDIATE", "COMMIT", "reconcile:child-1"]);
+    assert.equal(db.getSession("child-1")?.preview, "Converted");
+  } finally { db.close(); }
+});

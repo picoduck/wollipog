@@ -211,6 +211,9 @@ export function renderRunnerUnit(layout: ServiceLayout, options: { executable: s
     "",
     "[Service]",
     "Type=simple",
+    // Persist provider boundaries that a replacement runner can verify without scanning
+    // unrelated same-user processes after an upgrade or interrupted shutdown.
+    "Delegate=yes",
     ...(layout.mode === "system" ? [`User=${layout.account}`, `Group=${layout.account}`] : []),
     `WorkingDirectory=${unitPath(layout.runnerDataDir)}`,
     `Environment=RUNNER_TOKEN_FILE=${unitQuote(layout.runnerTokenFile)}`,

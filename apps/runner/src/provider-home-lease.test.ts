@@ -97,14 +97,17 @@ test("abandoned lease-only, next-only, and disconnected journals recover without
     const lock = writePartialJournal(home, shape);
     const evidence = readdirSync(lock).map((name) => ({ name, bytes: readFileSync(join(lock, name)) }));
     const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
-      pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+      pid: process.pid, hostname: "host-a", isProcessAlive: (pid) => pid === process.pid,
     });
     registry.acquire(request(home));
-    for (const item of evidence) assert.deepEqual(readFileSync(join(lock, item.name)), item.bytes);
+    for (const item of evidence) {
+      if (shape === "lease") assert.equal(existsSync(join(leasePaths(home).root, "mutable-home.recovery.json")), true, "a complete journal enters bounded storage");
+      else assert.deepEqual(readFileSync(join(lock, item.name)), item.bytes);
+    }
     const competitor = new ProviderHomeLeaseRegistry(OWNER_A, {
-      pid: 303, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+      pid: process.pid, hostname: "host-a", isProcessAlive: (pid) => pid === process.pid,
     });
-    assert.throws(() => competitor.acquire(request(home)), /already in use by process 202/);
+    assert.throws(() => competitor.acquire(request(home)), new RegExp(`already in use by process ${process.pid}`));
     registry.releaseAll();
     competitor.acquire(request(home));
     competitor.releaseAll();
@@ -535,13 +538,13 @@ test("a validated stale same-owner legacy lease is migrated and reclaimed withou
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const lock = writeLegacyLease(home);
   const replacement = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+    pid: process.pid, hostname: "host-a", isProcessAlive: () => false,
   });
   replacement.acquire(request(home));
   const entries = readdirSync(lock).sort();
   assert.equal(entries[0], "lease.json", "the legacy ownership evidence is never removed");
-  assert.match(entries[1]!, /^next-11111111-1111-4111-8111-111111111111\.json$/u);
-  assert.equal(journalRecords(home).at(-1)?.pid, 202);
+  assert.ok(entries.includes("protocol-v4.json"), "rollback readers must refuse the bounded format");
+  assert.equal(JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8")).pid, process.pid);
   replacement.releaseAll();
 });
 
@@ -711,13 +714,13 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
   t.after(() => rmSync(home, { recursive: true, force: true }));
   writeLegacyLease(home);
   const winner = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 202,
+    pid: process.pid, hostname: "host-a", isProcessAlive: (pid) => pid === process.pid,
   });
   let raced = false;
   const loser = new ProviderHomeLeaseRegistry(OWNER_A, {
     pid: 303,
     hostname: "host-a",
-    isProcessAlive: (pid) => pid === 202,
+    isProcessAlive: (pid) => pid === process.pid,
     beforeTransitionPublishForTest: () => {
       if (!raced) {
         raced = true;
@@ -726,8 +729,9 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
     },
   });
   assert.throws(() => loser.acquire(request(home)), /lease changed during recovery/);
-  assert.equal(journalRecords(home).filter((record) => record.state === "active").length, 1);
-  assert.equal(journalRecords(home).at(-1)?.pid, 202);
+  const selected = JSON.parse(readFileSync(join(leasePaths(home).root, "mutable-home.recovery.json"), "utf8"));
+  assert.equal(selected.state, "active");
+  assert.equal(selected.pid, process.pid);
   winner.releaseAll();
 });
 
@@ -741,7 +745,7 @@ type SuccessorRaceOptions = {
   signal?: AbortSignal;
   onReady?: () => void;
   beforeRemoveRoot?: (root: string) => void;
-  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse";
+  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse" | "transient-catch-up";
 };
 
 async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
@@ -757,7 +761,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     child: AgentProcess; name: string; phase: string; phaseAt: number; spawnedAt: number;
     ready: boolean; reported: boolean; closed: boolean; code: number | null;
     signal: NodeJS.Signals | null; stderr: string; error?: string;
-    timings: Record<string, number>; outcome?: string;
+    timings: Record<string, number>; outcome?: string; checkpointFailures: string[];
   }> = [];
   let failure: string | undefined;
   let cleanupProved = true;
@@ -774,6 +778,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     timings: state.timings, outcome: sanitize(state.outcome ?? outcomes[states.indexOf(state)] ?? "unreported"),
     exitCode: state.code, signal: state.signal, closed: state.closed,
     stderr: sanitize(state.stderr), error: state.error,
+    checkpointFailures: state.checkpointFailures.map(sanitize),
   }));
   async function waitUntil(predicate: () => boolean, ms: number, monitor = false): Promise<boolean> {
     const deadline = performance.now() + ms;
@@ -812,8 +817,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       import { ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
       const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
       const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+      const checkpointFailures = [];
       const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
-        process.send({ phase: name, timings, outcome }, (error) => error ? reject(error) : resolve());
+        process.send({ phase: name, timings, outcome, checkpointFailures }, (error) => error ? reject(error) : resolve());
       });
       const waitFor = (path) => {
         const deadline = performance.now() + 20_000;
@@ -835,28 +841,47 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         const initializedAt = performance.now();
         withLeaseIoOptions({ providerHome: home }, ensureLeaseIoAvailable);
         const initializationMs = performance.now() - initializedAt;
-        registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
+        registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, {
+          hostname: "host-a",
+          disableCompactionForTest: fault === "transient-catch-up",
+          onCheckpointFailureForTest: (error) => checkpointFailures.push(error instanceof Error ? error.message : String(error)),
+        });
         pause(${options.startupDelayMs ?? 0});
         await phase("ready", { initializationMs });
         waitFor(start);
         await phase("acquiring");
         const acquisitionAt = performance.now();
         let outcome;
-        try {
-          registry.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
-          outcome = "won";
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          const refusal = (error instanceof Error && typeof error.reason === "string") ||
-            (error instanceof LeaseIoError && error.kind === "busy");
-          if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
-          outcome = "lost:" + message;
+        let catchUpRetries = 0;
+        for (;;) {
+          try {
+            registry.acquire({ driver: "claude-code", command: "claude", context: { kind: "native" }, env: { HOME: home } });
+            outcome = "won";
+            break;
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            // Only the registry holding the published successor gets this refusal (#3801). The
+            // product keeps its reservation and asks the runner to retry with the same registry,
+            // as a runner does; the retry count and checkpoint failures stay in the diagnostics.
+            if (catchUpRetries < 3 && /bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry/.test(message)) {
+              catchUpRetries++;
+              // The fault fails only the first catch-up: re-enable the checkpoint this registry disabled.
+              if (fault === "transient-catch-up") registry.disableCompactionForTest = false;
+              pause(25);
+              continue;
+            }
+            const refusal = (error instanceof Error && typeof error.reason === "string") ||
+              (error instanceof LeaseIoError && error.kind === "busy");
+            if (!refusal && !/already in use by process|lease changed during recovery/.test(message)) throw error;
+            outcome = "lost:" + message;
+            break;
+          }
         }
         if (fault === "both-refuse") outcome = "lost:synthetic refusal after acquisition";
         const acquisitionMs = performance.now() - acquisitionAt;
         writeFileSync(result + ".claim.tmp", JSON.stringify({ outcome, pid: process.pid }));
         renameSync(result + ".claim.tmp", result + ".claim");
-        await phase("publishing", { acquisitionMs }, outcome);
+        await phase("publishing", { acquisitionMs, catchUpRetries }, outcome);
         if (fault === "hang-in-publication") await hang();
         const publicationAt = performance.now();
         pause(${options.publicationDelayMs ?? 0});
@@ -901,7 +926,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     const results = [join(root, "result-a"), join(root, "result-b")];
     for (const [index, result] of results.entries()) {
       const spawnedAt = performance.now();
-      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || options.fault === "both-refuse") ? options.fault ?? "" : "", results[1 - index]!], {
+      // Either contender may win, so faults that model the election itself reach both of them.
+      const bothFault = options.fault === "both-refuse" || options.fault === "transient-catch-up";
+      const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || bothFault) ? options.fault ?? "" : "", results[1 - index]!], {
         env: { ...process.env, TMPDIR: staging, TMP: staging, TEMP: staging },
         detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe", "ipc"],
       }) as AgentProcess;
@@ -910,15 +937,17 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         spawnedAt, ready: false, reported: false, closed: false,
         code: null as number | null, signal: null as NodeJS.Signals | null, stderr: "",
         error: undefined as string | undefined, outcome: undefined as string | undefined, timings: {} as Record<string, number>,
+        checkpointFailures: [] as string[],
       };
       states.push(state);
       child.stderr?.on("data", (chunk) => { state.stderr = (state.stderr + String(chunk)).slice(-8_192); });
       child.on("message", (message) => {
-        const report = message as { phase: string; timings: Record<string, number>; outcome?: string };
+        const report = message as { phase: string; timings: Record<string, number>; outcome?: string; checkpointFailures?: string[] };
         state.phase = report.phase;
         state.phaseAt = performance.now();
         Object.assign(state.timings, report.timings);
         if (report.outcome !== undefined) state.outcome = report.outcome;
+        if (Array.isArray(report.checkpointFailures)) state.checkpointFailures = report.checkpointFailures.slice(0, 8).map(String);
         if (report.phase === "ready") {
           state.ready = true;
           state.timings.startupMs = state.phaseAt - spawnedAt;
@@ -968,7 +997,12 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
   if (cleanupFailures.length) failure = [failure, ...cleanupFailures].filter(Boolean).join("; ");
   if (states.some((state) => state.code !== 0)) failure ??= "contenders must exit successfully";
   if (failure) throw new Error(`${failure}; ${JSON.stringify(details())}`);
-  t.diagnostic(`successor election phases: ${JSON.stringify(states.map((state) => ({ contender: state.name, ...state.timings })))}`);
+  const phases = states.map((state) => ({
+    contender: state.name, ...state.timings, catchUpRetries: state.timings.catchUpRetries ?? 0,
+    checkpointFailures: state.checkpointFailures.map(sanitize),
+  }));
+  t.diagnostic(`successor election phases: ${JSON.stringify(phases)}`);
+  return phases;
 }
 
 function assertSuccessorFailureClosed(error: unknown, expected: RegExp): boolean {
@@ -1051,6 +1085,16 @@ test("successor election diagnoses two refusals without a publication timeout", 
     assert.equal((error.message.match(/"outcome":"lost:/g) ?? []).length, 2);
     return assertSuccessorFailureClosed(error, /contender failed before publishing/);
   });
+});
+
+test("successor election lets the winning reservation finish a transient catch-up refusal", async (t) => {
+  // #3801: the contender that published the successor can still fail its first bounded catch-up.
+  // The product preserves that reservation and asks for a retry with the same registry; without
+  // the retry neither contender wins, and the forced-cleanup case above reports the wrong failure.
+  const phases = await runSuccessorElectionRace(t, { fault: "transient-catch-up" });
+  assert.equal(phases.reduce((sum, phase) => sum + phase.catchUpRetries, 0), 1, "exactly the winner retried once");
+  assert.deepEqual(phases.flatMap((phase) => phase.checkpointFailures), ["checkpoint disabled for unavailable-storage validation"],
+    "the failed first catch-up stays visible in the diagnostics");
 });
 
 test("successor election preserves removal errors after an earlier failure", async (t) => {
@@ -1270,7 +1314,7 @@ test("a predecessor modified after publication invalidates its hash-linked succe
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const lock = writeLegacyLease(home);
   const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+    pid: process.pid, hostname: "host-a", isProcessAlive: () => false,
   });
   registry.acquire(request(home));
   writeFileSync(join(lock, "lease.json"), `${readFileSync(join(lock, "lease.json"), "utf8")} `);
@@ -1293,7 +1337,7 @@ test("hard-linked record substitution is detected after the link target is modif
   const alias = join(home, "record-alias");
   linkSync(join(lock, "lease.json"), alias);
   const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
-    pid: 202, hostname: "host-a", isProcessAlive: () => false,
+    pid: process.pid, hostname: "host-a", isProcessAlive: () => false,
   });
   registry.acquire(request(home));
   writeFileSync(alias, `${readFileSync(alias, "utf8")} `);

@@ -4,8 +4,6 @@ import type { ControlPlaneToUi, ProjectView, SessionView } from "@wollipog/proto
 import {
   persistProjectAssignment,
   projectAssignmentAudienceConfirmation,
-  projectAudienceVisibilityLabel,
-  projectAudienceVisibilitySummary,
   projectMoveNotice,
   projectMovePlan,
   projectMoveRowDescription,
@@ -202,13 +200,6 @@ test("linking a missing Location remains actionable for the current Project", ()
 test("Project assignment copy identifies audiences and fails closed when sharing metadata is absent", () => {
   const team = { ...project("team-project", "runner-1", "workspace-1"), audience: "team" as const };
   const organization = { ...project("org-project", "runner-1", "workspace-1"), audience: "organization" as const };
-  assert.equal(projectAudienceVisibilityLabel("user"), "Only the Project Owner");
-  assert.equal(projectAudienceVisibilityLabel("team"), "Everyone on the Owning Team");
-  assert.equal(projectAudienceVisibilityLabel("organization"), "Everyone in Your Organization");
-  assert.equal(projectAudienceVisibilitySummary("user"), "Project Visibility: Only the Project Owner");
-  assert.equal(projectAudienceVisibilitySummary("team"), "Project Visibility: Everyone on the Owning Team");
-  assert.equal(projectAudienceVisibilitySummary("organization"), "Project Visibility: Everyone in Your Organization");
-  assert.equal(projectAudienceVisibilitySummary(undefined), null);
   assert.equal(projectAssignmentAudienceConfirmation(session({ audience: "user" }), team), "team");
   assert.equal(projectAssignmentAudienceConfirmation(session({ audience: "team" }), team), null);
   assert.equal(projectAssignmentAudienceConfirmation(session({ audience: "user" }), organization), null,

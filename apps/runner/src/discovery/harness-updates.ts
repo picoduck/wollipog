@@ -1,6 +1,7 @@
 import { existsSync, realpathSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type { AgentContext, HarnessUpdateAssessment } from "@wollipog/protocol";
+import type { CodexProbeObserver } from "../codex-probe.js";
 import { run, type ExecResult, type ResolvedBinary } from "./resolve.js";
 
 const PACKAGES = {
@@ -51,12 +52,14 @@ export async function codexOffersSelfUpdate(
   binary: ResolvedBinary,
   context: AgentContext,
   execute: typeof run = run,
+  observer: CodexProbeObserver = {},
 ): Promise<boolean> {
   const command = context.kind === "wsl" ? "wsl.exe" : binary.launch.command;
   const args = context.kind === "wsl"
     ? ["-d", context.distro, "--exec", binary.launch.command, ...binary.launch.args, "--help"]
     : [...binary.launch.args, "--help"];
-  const result = await execute(command, args, { timeoutMs: context.kind === "wsl" ? 8000 : 3000 });
+  const result = await execute(command, args, { timeoutMs: context.kind === "wsl" ? 8000 : 3000,
+    ...(context.kind === "native" ? { trackDescendants: true, ...observer } : {}) });
   return result.code === 0 && !result.timedOut &&
     /^\s*update\s+Update Codex to the latest version\b/im.test(`${result.stdout}\n${result.stderr}`);
 }
@@ -145,6 +148,7 @@ export async function checkHarnessUpdate(
   context: AgentContext,
   installedVersion: string | undefined,
   installedCompatible: boolean,
+  observer: CodexProbeObserver = {},
 ): Promise<HarnessUpdateAssessment> {
   const checkedAt = Date.now();
   const packageName = npmPackageForInstallation(harness, binary);
@@ -168,7 +172,7 @@ export async function checkHarnessUpdate(
     managedExternally: true,
     guidance: "Release checks are disabled by this Machine's policy, so no current release status was established. Ask the Machine operator whether manual upgrades are permitted. " + REDISCOVER,
   };
-  const selfUpdate = harness === "codex" && await codexOffersSelfUpdate(binary, context);
+  const selfUpdate = harness === "codex" && await codexOffersSelfUpdate(binary, context, run, observer);
   const managerGuidance = originalManagerGuidance(packageName, selfUpdate, binary, context);
   if (!packageName) return {
     status: !installedVersion ? "version_unknown" : installedVersion.includes("-")
@@ -202,7 +206,8 @@ export async function checkHarnessUpdate(
       try {
         const script = realpathSync(npm);
         if (/[\\/]node_modules[\\/]npm[\\/]bin[\\/]npm-cli\.js$/i.test(script)) {
-          result = await run(realpathSync(node), [script, ...args], { timeoutMs: 8000 });
+          result = await run(realpathSync(node), [script, ...args], { timeoutMs: 8000,
+            trackDescendants: true, ...observer });
         }
       } catch { /* The original installation manager cannot be verified. */ }
     }

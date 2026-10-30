@@ -37,13 +37,9 @@ const RIGHT_PANEL = "Right Panel and Code Review epic (#2870)";
 const APPROVALS = "Approvals, Questions and Governance epic (#2226)";
 const AUTOMATIONS = "Automations, Multi-Agent Runs and Pods epic (#3030)";
 const CONNECTIONS = "Connections epic (#3031)";
-const PODS = "Automations, Multi-Agent Runs and Pods epic (#3030)";
 
 /** The inventory, exact: [file, glyph, the enclosing literal's text, the owning area epic]. */
 const RECORDED: readonly (readonly [string, string, string, string])[] = [
-  ["components/AutomationsView.tsx", "▸", "▸", AUTOMATIONS],
-  ["components/PodsView.tsx", "→", "→", PODS],
-  ["components/PodsView.tsx", "→", "→", PODS],
 ];
 
 /**

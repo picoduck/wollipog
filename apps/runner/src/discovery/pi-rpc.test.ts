@@ -3,19 +3,22 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
-import { spawnAgent } from "../spawn.js";
+import { spawnAgent, provenProcessTreeExit, type AgentProcess } from "../spawn.js";
 import { probePiRpc } from "./pi-rpc.js";
 
 const fixture = fileURLToPath(new URL("../drivers/fixtures/fake-pi-rpc.mjs", import.meta.url));
 
 test("Pi discovery derives models, thinking levels, images, commands, and skills from RPC", async () => {
   let observedPrivateProbe = false;
+  let launched: AgentProcess | undefined;
+  const proofs: Promise<boolean>[] = [];
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },
     { kind: "native" },
     {
       cwd: process.cwd(),
       timeoutMs: 2_000,
+      onProcess: (proof) => proofs.push(proof),
       spawn: (options) => {
         assert.notEqual(options.cwd, process.cwd());
         assert.equal(existsSync(join(options.cwd, ".pi", "settings.json")), true);
@@ -23,11 +26,18 @@ test("Pi discovery derives models, thinking levels, images, commands, and skills
         assert.equal(options.args.includes("--no-approve"), false,
           "the trust hook must run so the probe can prove it declines project resources");
         observedPrivateProbe = true;
-        return spawnAgent(options);
+        launched = spawnAgent(options);
+        return launched;
       },
     },
   );
   assert.equal(observedPrivateProbe, true);
+  assert.equal(proofs.length, 1);
+  assert.deepEqual(await Promise.all(proofs), [process.platform !== "win32"], "discovery forwards its completed whole-tree proof");
+  if (process.platform !== "win32") {
+    assert.ok(launched?.posixBoundary, "Pi discovery must join the boundary recorded by its HOME lease");
+    assert.equal(await provenProcessTreeExit(launched), true, "the probe's complete tree can be reaped");
+  }
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.authStatus, "authenticated");
   assert.deepEqual(result.capabilities.models.map((model) => ({
@@ -80,6 +90,40 @@ test("Pi discovery does not advertise forks without authoritative entry cursors"
   );
   assert.equal(result.available, true, result.unavailableReason);
   assert.equal(result.capabilities.supportsConversationFork, false);
+});
+
+async function discoverScenario(scenario: string) {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    { cwd: process.cwd(), timeoutMs: 2_000, env: { WOLLIPOG_FAKE_PI_SCENARIO: scenario } },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  return result.capabilities;
+}
+
+test("Pi discovery advertises fork exactly when the entry cursor answers at the reported leaf", async () => {
+  // Pi 1.4.0 already records startup model and thinking-level entries under --no-session.
+  assert.equal((await discoverScenario("normal")).supportsConversationFork, true,
+    "startup entries with a string leaf and a working since-cursor advertise fork");
+  assert.equal((await discoverScenario("legacy-null-leaf")).supportsConversationFork, true,
+    "an older empty list with a null leaf still advertises fork");
+  assert.equal((await discoverScenario("entries-dangling-leaf")).supportsConversationFork, false,
+    "a leaf that is not one of the listed entries cannot bind a checkpoint");
+  assert.equal((await discoverScenario("entries-cursor-unsupported")).supportsConversationFork, false,
+    "a since-cursor that does not answer from the leaf cannot bind a checkpoint");
+});
+
+test("Pi discovery classifies commands by sourceInfo.scope and falls back to location", async () => {
+  const expected = [
+    { name: "skill:review", description: "Review code", source: "user" },
+    { name: "ship", description: "Ship it", source: "user" },
+    { name: "project-review", description: "Review this project", source: "project" },
+    { name: "skill:project-skill", description: "Project skill", source: "project" },
+  ];
+  assert.deepEqual((await discoverScenario("project-commands")).slashCommands, expected);
+  assert.deepEqual((await discoverScenario("legacy-location-project-commands")).slashCommands, expected,
+    "releases that still report location keep their classification");
 });
 
 test("Pi discovery keeps RPC available without advertising an unproved extension bridge", async () => {

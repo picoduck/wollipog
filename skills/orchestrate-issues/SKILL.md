@@ -69,9 +69,11 @@ requirements. A changed policy must pass its own explicitly authorized contribut
 
 Carry forward the user's actual campaign authorization and repository rules. Routine claims, isolated worktrees, testing, pushing, opening PRs, and required reviews need no repeated permission. Existing rules may still require per-PR merge authorization, UI evidence review, remote-branch deletion authorization, and approval of each exact sanitized issue payload. Do not silently convert a request for this workflow into a waiver of those gates.
 
-Read the authoritative current campaign state and server-derived policy with `get_campaign` before dispatch and again before resolving a workflow decision; do not rely on a prompt copy when the server state is available. For typed decisions such as `implementation_question`, `pr_merge`, `merged_branch_deletion`, `follow_up_issue_publication`, and `ui_evidence_approval`, the child must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for the exact occurrence immediately before the matching action. The parent must not create or consume a child's gate on its behalf. Discover pending occurrences with `list_descendant_requests` and resolve only a currently Orchestrator-owned exact occurrence with `resolve_descendant_workflow_decision`. Use `answer_descendant_question` and `resolve_descendant_approval` only for applicable non-workflow requests; they never substitute for a typed workflow gate. An ordinary prompt, a stale approval, or Parent Control availability is not authorization for a typed gate.
+Read the authoritative current campaign state and server-derived policy with `get_campaign` before dispatch and again before resolving a workflow decision; do not rely on a prompt copy when the server state is available. For typed decisions such as `implementation_question`, `pr_merge`, `merged_branch_deletion`, `follow_up_issue_publication`, `ui_evidence_approval`, and `review_round_extension`, the child must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for the exact occurrence immediately before the matching action. The parent must not create or consume a child's gate on its behalf. Discover pending occurrences with `list_descendant_requests` and resolve only a currently Orchestrator-owned exact occurrence with `resolve_descendant_workflow_decision`. Use `answer_descendant_question` and `resolve_descendant_approval` only for applicable non-workflow requests; they never substitute for a typed workflow gate. An ordinary prompt, a stale approval, or Parent Control availability is not authorization for a typed gate.
 
-Never change campaign control settings, approve a human-owned request, impersonate a human, or bypass a pending approval with a plain prompt. An eligible root Full Control occurrence may use server-recorded standing authorization through its exact typed resolution route; it cannot mint a new grant. UI evidence remains human-owned when the active policy says the Orchestrator cannot inspect the evidence bytes. For any human-owned or otherwise undelegated gate, relay the concrete decision through the harness's supported typed question mechanism and keep unrelated children progressing. Identify the exact policy requiring the gate. Do not imply that campaign ownership authorizes external effects beyond the active policy.
+Before approving a child's GitHub `pr_merge`, read what it closes: the decision's `closingReferenceCheck` lists every issue GitHub would close on merge, and the server created the decision only because they match the snapshot's `intendedClosures`. Approve a closure only when the campaign means that merge to close the issue; deny with a child message otherwise, so the child rewords the reference as "Refs #N". Where the check is absent (the child's runner predates it), run `wollipog pr closures <pr-url> --json` yourself before approving. Closing keywords bypass a typed `issue_closure` gate, so where the campaign closes issues through that route, a child's merge should normally close none.
+
+Never change campaign control settings, approve a human-owned request, impersonate a human, or bypass a pending approval with a plain prompt. An eligible root Full Control occurrence may use server-recorded standing authorization through its exact typed resolution route; it cannot mint a new grant. UI evidence remains human-owned when the active policy says the Orchestrator cannot inspect the evidence bytes. For any human-owned or otherwise undelegated gate, relay the concrete decision through the harness's supported typed question mechanism and keep unrelated children progressing. Under Full Control no person sees the root's questions: the server dismisses them unanswered, so resolve Orchestrator-owned occurrences yourself and report a human-owned gate, which stays visible in Campaign Status, instead of asking. Identify the exact policy requiring the gate. Do not imply that campaign ownership authorizes external effects beyond the active policy.
 
 For unattended campaigns, explain up front which gates still need the user. A user may explicitly delegate eligible decisions for a campaign, subject to higher-priority and platform restrictions; record the exact scope and exceptions. Do not modify standing policies as part of execution.
 
@@ -151,9 +153,19 @@ a prompt that mentions the issue does not bind an unassigned child by itself.
 Custom campaigns require a human-owned typed decision. Full Control delegates only when the server
 confirms a human-established issue boundary, verified delivered report and actual default-branch
 merges, or a supported recorded not-planned disposition. Never infer this authority from a prompt.
-Read the exact decision and effective owner with
-`get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
-`resourceDigest`. The CLI equivalents are:
+The closure is created `pending`, and `close_github_issue` refuses a pending closure. The exact
+sequence is:
+
+1. `request_github_issue_closure`.
+2. Read the exact decision and its effective owner (`authority`) with `get_workflow_decision`.
+3. Approve it. When `authority` is `orchestrator` (Full Control's standing authorization), the
+   root approves it itself: call `resolve_descendant_workflow_decision` with `sessionId` set to
+   its own session ID, the `occurrenceId`, and `outcome: "approve"`. No person will approve it,
+   so do not ask one. When `authority` is `human`, a person approves it in Wollipog; wait
+   for that, and never approve it yourself.
+4. Execute it with `close_github_issue` with its exact `occurrenceId` and `resourceDigest`.
+
+The CLI equivalents of steps 1, 2 and 4 are:
 
 ```text
 wollipog issue-closure request --proposal '<json>' --json
@@ -165,7 +177,9 @@ Approval expires 30 minutes after resolution. Changed issue evidence, policy, or
 work requires renewed review, as does a child moving into or out of the included set.
 Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
-its server-recorded standing authorization. Read `issueClosureResult`: `closed` and `already_closed`
+its server-recorded standing authorization; the server rechecks it when the root resolves. Under
+Full Control nobody sees the root's own questions: the server dismisses them unanswered and tells
+the root to decide with these typed tools. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
 accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
 Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
@@ -186,9 +200,14 @@ and exact `additions` and `removals`, each an array of `{ "repository": "owner/r
 Custom requires an authenticated human to approve the exact change. In Full Control with a separate
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
-The server refuses incidental references, foreign repositories and changes beyond human-set limits.
+A publication the boundary's author or a campaign owner approved as a person under the current
+objective also qualifies. The server
+refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
+failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
-only an eligible occurrence backed by its standing human authorization.
+only an eligible occurrence backed by its standing human authorization: when the effective owner is
+`orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as
+`sessionId`; nobody else will.
 Pending, denied, stale and replayed proposals leave scope unchanged. After approval, re-read the scope.
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 

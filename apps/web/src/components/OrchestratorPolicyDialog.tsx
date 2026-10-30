@@ -1,3 +1,5 @@
+import { OrchestratorReviewFields } from "./OrchestratorReviewFields.js";
+import { orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import { useId, useState, type ReactNode, type Ref } from "react";
 import {
   MAX_LIVE_CHILD_LIMIT,
@@ -12,6 +14,7 @@ import {
   AUTOMATIC_ORCHESTRATOR_VALUE,
   COMPLETION_OPTIONS,
   CONTROL_MODE_OPTIONS,
+  FULL_CONTROL_LINE,
   FOLLOW_UP_OPTIONS,
   HUMAN_ONLY_DECISIONS,
   INTEGRATION_ISOLATION_OPTIONS,
@@ -83,6 +86,7 @@ export function OrchestratorPolicySummary({
         {problem
           ? <FieldError as="span" id={problemId}>{problem.message}</FieldError>
           : <span>From your Orchestrator defaults in Settings.</span>}
+        {draft.controlMode === "full_control" && <span>{FULL_CONTROL_LINE}</span>}
       </>}
       control={(
         <button
@@ -223,6 +227,16 @@ export function OrchestratorPolicyDialog({
         error={problemFor("behavior.childEffort")}
         onChange={(value) => setBehavior("childEffort", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
       />
+      {view.reviewPolicySupported && <OrchestratorReviewFields value={draft.values.behavior} reviewers={view.capabilities.reviewers ?? []}
+        problem={orchestratorReviewPolicyProblem(draft.values.behavior, view.capabilities.reviewers ?? [])}
+        badge={key => {
+          const saved = defaults.behavior[key];
+          const label = saved == null ? "Automatic" : key === "reviewHarness" ? saved === "codex" ? "Codex" : "Claude Code"
+            : key === "reviewEffort" ? titleCaseLabel(String(saved)) : key === "reviewModel"
+              ? view.capabilities.reviewers?.flatMap(r => r.capabilities.models).find(m => m.id === saved)?.displayName ?? String(saved) : String(saved);
+          return mark(`behavior.${key}`, label);
+        }}
+        onChange={patch => setDraft(current => ({ ...current, values: { ...current.values, behavior: { ...current.values.behavior, ...patch } } }))} />}
       {/* The error replaces the description (§8.5), so the row says one thing at a time. */}
       <NumberRow
         title="Maximum Concurrent Children"
@@ -298,12 +312,13 @@ export function OrchestratorPolicyDialog({
     </SettingsGroup>
   );
 
+  // Full Control launches like any Orchestrator (#2940): its boundary owns every gate, so the Custom
+  // owners below would have no effect and are not shown. A row whose problem blocks the launch stays.
+  const fullControl = draft.controlMode === "full_control";
   const decisionsPanel = (
     <SettingsGroup
-      foot={<p className="orchestrator-human-only"><LockIcon size={14} aria-hidden="true" />{HUMAN_ONLY_DECISIONS}</p>}
+      foot={fullControl ? undefined : <p className="orchestrator-human-only"><LockIcon size={14} aria-hidden="true" />{HUMAN_ONLY_DECISIONS}</p>}
     >
-      {/* Choosing Full Control only shows its readiness in New Session; starting still takes one
-          explicit Authorize and Start there. */}
       <SegmentedRow
         title="Orchestrator Control"
         badge={mark("controlMode", resetLabels.controlMode)}
@@ -311,7 +326,7 @@ export function OrchestratorPolicyDialog({
         value={draft.controlMode}
         onChange={(value) => setDraft((current) => ({ ...current, controlMode: value as OrchestratorPolicyDraft["controlMode"] }))}
       />
-      <SelectRow
+      {(!fullControl || problemFor("delegation.parentControl") !== null) && <SelectRow
         title="Descendant Requests"
         description={PARENT_CONTROL_OPTIONS.find((option) => option.value === evaluation.parentControl.value)?.description}
         badge={mark("delegation.parentControl", resetLabels.parentControl)}
@@ -322,10 +337,11 @@ export function OrchestratorPolicyDialog({
           ...current,
           values: { ...current.values, delegation: { ...current.values.delegation, parentControl: value as typeof delegation.parentControl } },
         }))}
-      />
-      <h4 className="orchestrator-gates-label">Who Decides at Each Gate</h4>
+      />}
+      {!fullControl && <h4 className="orchestrator-gates-label">Who Decides at Each Gate</h4>}
       {WORKFLOW_DECISION_CATEGORIES.map((category) => {
         const path = `delegation.decisions.${category}` as const;
+        if (fullControl && problemFor(path) === null) return null;
         return (
           <SegmentedRow
             key={category}

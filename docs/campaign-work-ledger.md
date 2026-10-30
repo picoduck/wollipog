@@ -35,7 +35,7 @@ One unit of committed or proposed campaign work, with or without an issue or a s
 | Field | Meaning |
 | --- | --- |
 | `key` | Stable Orchestrator-chosen identity, unique per campaign, used for idempotent upsert (`picoduck/wollipog#2417`, `plan:read-api`). |
-| `issue` | Optional repository-qualified issue `{repository, number}`. |
+| `issue` | Optional repository-qualified issue `{repository, number}`. `repository` is a GitHub `owner/repo`, or a GitLab project with its host and full namespace, `<gitlab-host>/group[/subgroup…]/project` (#3539). A bare nested path is refused rather than guessed to be gitlab.com, and a GitHub repository is never host-qualified. Pull request refs use the same form; a GitLab merge request's `number` is its IID. |
 | `title` | Optional display title. |
 | `origin` | `original` (initial scope, issue or not) or `follow_up` (accepted from a recommendation). |
 | `generation` | `0` for original scope; for a follow-up, one more than the highest generation among its origin items, or `1` when the recommendation names no origin item (for example, one recorded before the ledger existed). |
@@ -483,8 +483,8 @@ Server-observed review, check, and merge-queue facts for the pull requests a cam
 name. The implementation is `apps/control-plane/src/campaign-forge-observations.ts` (storage,
 derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
 
-- **Supported forge:** GitHub (github.com) only. A repository that is not a GitHub `owner/name`
-  is `unavailable{forge_unsupported}` and is never put in a query.
+- **Supported forges:** GitHub (github.com) and, since #3600, GitLab. Any other repository is
+  `unavailable{forge_unsupported}` and is never put in a query. See GitLab Merge Requests below.
 - **Credentials:** the control plane stores no forge credential and never sees a token. It asks the
   runner hosting the **root campaign session** to read, and that runner runs `gh api graphql
   --hostname github.com` in the root Orchestrator's own repository context: its agent context,
@@ -552,6 +552,46 @@ does not make an item delivered.
 
 **Retention:** observations are keyed by the root campaign with `ON DELETE CASCADE` and hold status
 data only.
+
+### GitLab Merge Requests (#3600)
+
+A host-qualified GitLab ref (`<gitlab-host>/group[/subgroup…]/project`, see Work Item) is read
+through the same runner, in the same context and environment, with its `glab` login. The control
+plane marks each observe request `gitlab: true`; an older control plane omits it and would reject a
+GitLab answer, so the runner then keeps GitLab refs `forge_unsupported`, as an older runner does.
+
+- **Hosts:** gitlab.com, or a host global `glab` configuration names (`glab config get api_protocol
+  --host <host> --global`, the forge summary's own non-secret check). Any other host is
+  `forge_unsupported` and never contacted. Every API call names `--hostname`; a bare project path is
+  never given to `glab`.
+- **What is read, in GitLab's terms** (`CampaignForgeGitLabMergeRequestObservation`): state (`locked`
+  reads `open`), draft, head SHA, target branch, approvals (whether the project's rules are
+  satisfied, how many approved, how many more are needed), the head pipeline (its id and status,
+  which is the merged-results pipeline where the project runs them), the merge-train car (status and
+  1-based position for an open merge request; null when it is not on a train or the project has no
+  trains), and the merge or squash commit. GitHub's review decision, required checks, and merge queue
+  are not imitated.
+- **Calls and bounds:** per merge request, its detail and approvals, then for an open one its train
+  car and, when on a train, the train's order (100 cars). At most four merge requests are read at
+  once, each `glab` call has a 15-second timeout, and a host's first call runs alone: when it fails
+  as a whole (not signed in, unreachable, rate limited, or no `glab`), that host's other merge
+  requests take the same reason without another call. All GitLab reads of one runner request stop
+  after 35 seconds, inside the control plane's 45-second `requestTimeoutMs`; a merge request not
+  finished by then is `forge_unreachable`, and every other result still arrives.
+- **Approvals:** `left` is GitLab's remaining rule count (an Enterprise Edition field). Without it,
+  an unapproved merge request reads "Not Approved", never "Approval Required", because Community
+  Edition's `approved` only says whether anyone approved.
+- **Fail closed:** only a `success` pipeline reads as passed. Skipped, manual, canceled, running,
+  pending, and unknown statuses never do, and no pipeline at all is not passing.
+- **Isolation:** GitHub and GitLab refs in one request are read side by side, and a GitHub batch
+  failure then fails only the GitHub refs, so neither forge makes the other's refs unavailable.
+- **Recovery:** a fresh failed pipeline on an open merge request raises the same `repair_checks`
+  observation as failing GitHub checks. GitLab has no "changes requested" decision, so nothing maps to
+  `rereview`.
+- **Reasons** keep the table above, read for GitLab: `forge_cli_missing` is no `glab`,
+  `forge_unauthenticated` is `glab` not signed in to that host, `forge_unsupported` is a host `glab`
+  is not configured for (or a runner or control plane that predates GitLab status), and
+  `forge_not_found` is a merge request the login cannot see.
 
 ## Compatibility
 

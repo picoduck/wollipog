@@ -13,6 +13,7 @@ import type {
   OutboundEventDeliveryView,
   OutboundEventSubscriptionView,
   RunnerView,
+  SessionView,
   UiSnapshotMessage,
   WorkflowDefinition,
 } from "@wollipog/protocol";
@@ -28,11 +29,13 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
 import { AutomationEditor } from "./AutomationEditor.js";
+import { AutomationDetail } from "./AutomationDetail.js";
 import { agentOptions } from "./agent-options.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { withScopedClockOverrides } from "./test-clock-overrides.js";
+import { formatCalendarTime, titleCaseLabel } from "../format.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -138,6 +141,11 @@ class FakeSocket implements UiSocket {
 /** Confirmations and toasts for a fixture mounted while it is set; none otherwise (every confirm declines). */
 let feedback: FeedbackContextValue | null = null;
 
+/** Renders a fixture under React StrictMode while set, as the app does. */
+let strictMode = false;
+/** The sessions the fixture's snapshot carries. */
+let snapshotSessions: SessionView[] = [];
+
 /** The route a fixture opens on: the list, unless a test opens an editor route directly. */
 let initialView: View = { name: "automations" };
 const navigation: ViewNavigation = {
@@ -157,17 +165,18 @@ function snapshot(runnerViews = runners): UiSnapshotMessage {
     },
     runners: runnerViews,
     boxes: [],
-    sessions: [],
+    sessions: snapshotSessions,
     runs: [],
     pods: [],
   };
 }
 
-/** The list, or the editor its New Automation and Edit open, as App routes them. */
+/** The list, an automation's page, or the editor, as App routes them. */
 function AutomationsWhenReady() {
   const ready = useStoreSelector((state) => state.snapshotLoaded);
   const view = useStoreSelector((state) => state.view);
   if (!ready) return null;
+  if (view.name === "automation") return <AutomationDetail key={view.id} automationId={view.id} />;
   return view.name === "automations" && view.editor
     ? <AutomationEditor key={viewPath(view)} route={view.editor} />
     : <AutomationsView />;
@@ -179,8 +188,13 @@ interface Fixture {
   updates: Array<{ id: string; spec: AutomationSpec }>;
   triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }>;
   outboundCreates: CreateOutboundEventSubscriptionRequest[];
+  /** Every list, detail and trigger read, in order: "list", "automation:<id>", "triggers:<id>". */
+  requests: string[];
+  deletes: string[];
   replaceClient: (overrides: Partial<ApiClient>) => Promise<void>;
   pushRunners: (views: RunnerView[]) => Promise<void>;
+  /** Drops the live connection after the snapshot: the store shows it reconnecting. */
+  closeSocket: () => Promise<void>;
 }
 
 let fixtureSequence = 0;
@@ -217,6 +231,8 @@ async function mountFixture(
   const updates: Array<{ id: string; spec: AutomationSpec }> = [];
   const triggerCreates: Array<{ id: string; request: CreateAutomationTriggerRequest }> = [];
   const outboundCreates: CreateOutboundEventSubscriptionRequest[] = [];
+  const requests: string[] = [];
+  const deletes: string[] = [];
   fixtureSequence += 1;
   const connection: UiConnectionRuntime = {
     instanceId: `automations-${fixtureSequence}`,
@@ -229,13 +245,25 @@ async function mountFixture(
     // A NEW array on every poll, exactly like the control plane's response. Returning the same
     // reference would let expansion state survive for the wrong reason and pass a test the real
     // app fails; the caller mutates `items` in place to simulate creations and deletions.
-    automations: async () => ({ automations: [...items] }),
-    automation: async (id: string) => ({
-      automation: items.find((item) => item.automationId === id)!,
-      executions: executions[id] ?? [],
-      events: [],
-    }),
-    automationTriggers: async (id: string) => ({ triggers: triggerViews[id] ?? [] }),
+    automations: async () => {
+      requests.push("list");
+      return { automations: [...items] };
+    },
+    automation: async (id: string) => {
+      requests.push(`automation:${id}`);
+      const automation = items.find((item) => item.automationId === id);
+      if (!automation) throw new ApiError("automation not found", 404);
+      return { automation, executions: executions[id] ?? [], events: [] };
+    },
+    automationTriggers: async (id: string) => {
+      requests.push(`triggers:${id}`);
+      return { triggers: triggerViews[id] ?? [] };
+    },
+    deleteAutomation: async (id: string) => {
+      deletes.push(id);
+      items.splice(items.findIndex((item) => item.automationId === id), 1);
+      return { deleted: true };
+    },
     createAutomationTrigger: async (id: string, request: CreateAutomationTriggerRequest) => {
       triggerCreates.push({ id, request: structuredClone(request) });
       const trigger: AutomationTriggerView = {
@@ -279,16 +307,17 @@ async function mountFixture(
       <AutomationsWhenReady />
     </StoreProvider>
   );
-  const render = () => root.render(
+  const tree = () => (
     <ApiProvider client={client}>
       {feedback ? <FeedbackContext.Provider value={feedback}>{store}</FeedbackContext.Provider> : store}
-    </ApiProvider>,
+    </ApiProvider>
   );
+  const render = () => root.render(strictMode ? <React.StrictMode>{tree()}</React.StrictMode> : tree());
   await act(async () => { render(); });
   await act(async () => { socket.push(snapshot(runnerViews)); });
   await act(settle);
   return {
-    container, root, updates, triggerCreates, outboundCreates,
+    container, root, updates, triggerCreates, outboundCreates, requests, deletes,
     replaceClient: async (overrides) => {
       client = { ...client, ...overrides };
       await act(async () => { render(); });
@@ -296,6 +325,10 @@ async function mountFixture(
     },
     pushRunners: async (views) => {
       await act(async () => { socket.push(snapshot(views)); });
+      await act(settle);
+    },
+    closeSocket: async () => {
+      await act(async () => { socket.onclose?.({ code: 1006 }); });
       await act(settle);
     },
   };
@@ -364,19 +397,18 @@ async function openNew(fixture: Fixture): Promise<void> {
   await act(settle);
 }
 
-/** Edit on an expanded card opens the editor's route, which loads the stored automation. */
+/** Edit on the automation's page opens the editor's route, which loads the stored automation. */
 async function openEdit(fixture: Fixture): Promise<void> {
   await act(async () => { button(fixture.container, "Edit").click(); });
   await act(settle);
 }
 
-/** Back to the list and Edit again: the editor reloads the automation as it is stored. */
+/** Back to the automation's page and Edit again: the editor reloads the automation as it is stored. */
 async function reopenEdit(fixture: Fixture, name: string): Promise<void> {
-  const back = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Back to Automations"]');
-  assert.ok(back, "the editor's Back is rendered");
+  const back = fixture.container.querySelector<HTMLButtonElement>(`button[aria-label="Back to ${name}"]`);
+  assert.ok(back, "the editor's Back to the automation is rendered");
   await act(async () => { back.click(); });
   await act(settle);
-  await expandCard(fixture, name);
   await openEdit(fixture);
 }
 
@@ -401,33 +433,40 @@ async function setLabeledInput(container: HTMLDivElement, label: string, value: 
   });
 }
 
+/** A list row's one open target (#2969), found by the automation's name. */
 function cardToggle(container: HTMLDivElement, name: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
-    .find((candidate) => candidate.querySelector(".automation-card-name")?.textContent === name);
-  assert.ok(found, `${name} automation card is rendered`);
+  const found = maybeCardToggle(container, name);
+  assert.ok(found, `${name} automation row is rendered`);
   return found;
 }
 
-async function expandCard(fixture: Fixture, name: string): Promise<void> {
+/** A row's open target opens the automation's page (#2968, #2969). */
+async function openPage(fixture: Fixture, name: string): Promise<void> {
   await act(async () => { cardToggle(fixture.container, name).click(); });
   await act(settle);
 }
 
 function maybeCardToggle(container: HTMLDivElement, name: string): HTMLButtonElement | undefined {
-  return [...container.querySelectorAll<HTMLButtonElement>(".automation-card-toggle")]
-    .find((candidate) => candidate.querySelector(".automation-card-name")?.textContent === name);
+  return [...container.querySelectorAll<HTMLButtonElement>(".automation-row-open")]
+    .find((candidate) => candidate.querySelector(".row-title")?.textContent === name);
 }
 
-function expansionOf(container: HTMLDivElement, name: string): string | null {
-  return cardToggle(container, name).getAttribute("aria-expanded");
+/** The automation page's title, from its detail bar. */
+function pageTitle(container: HTMLDivElement): string | null {
+  return container.querySelector(".automation-detail .detail-bar-title")?.textContent ?? null;
 }
 
-/** Anything a keyboard or screen reader can land on inside the rendered cards. */
-function focusableInCards(container: HTMLDivElement): HTMLElement[] {
-  return [...container.querySelectorAll<HTMLElement>(
-    ".automation-card button, .automation-card a, .automation-card input, .automation-card select,"
-    + " .automation-card textarea, .automation-card summary, .automation-card [tabindex]",
-  )];
+/** Opens the detail bar's ⋯ and chooses `label` from it. */
+async function chooseMoreAction(fixture: Fixture, label: string): Promise<void> {
+  const more = fixture.container.querySelector<HTMLButtonElement>('.detail-bar button[aria-label="More Actions"]');
+  assert.ok(more, "the detail bar's ⋯ is rendered");
+  await act(async () => { more.click(); });
+  // The menu is portalled to the document, outside the fixture's container.
+  const items = [...fixture.container.ownerDocument.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+  const item = items.find((candidate) => candidate.querySelector(".menu-text")?.textContent?.trim() === label);
+  assert.ok(item, `${label} is in ⋯; found ${items.map((candidate) => candidate.textContent?.trim()).join(", ")}`);
+  await act(async () => { item.click(); });
+  await act(settle);
 }
 
 function schedule(automationId: string, name: string, enabled = true): AutomationSchedule {
@@ -499,23 +538,40 @@ test("Agent, Machine, and Model controls invoke their capability-transition help
 
 test("outbound event subscriptions expose privacy opt-ins and reveal the signing secret once", async () => {
   const automation = schedule("automation-events", "Event Source");
-  const fixture = await mountFixture([automation]);
+  const fixture = await mountAt({ name: "automations", tab: "outbound" }, [automation]);
+  const page = domWindow.document.body as unknown as HTMLDivElement;
   try {
+    // The empty tab's state owns New Subscription; the header offers none beside it (§12.1).
     await act(async () => { button(fixture.container, "New Subscription").click(); });
-    await choose(fixture.container, "Scope Type", "Automation");
-    await setLabeledInput(fixture.container, "Callback URL", "https://events.example.test/wollipog");
-    const sessionName = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
-      .find((candidate) => candidate.textContent?.trim() === "Include Session Name")
-      ?.querySelector("input") as HTMLInputElement | null;
-    const questionTitle = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
-      .find((candidate) => candidate.textContent?.trim() === "Include Question Title")
-      ?.querySelector("input") as HTMLInputElement | null;
+    const dialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLDivElement;
+    assert.ok(dialog, "New Subscription opens its dialog");
+    const scope = [...dialog.querySelectorAll<HTMLInputElement>('[role="radiogroup"] [role="radio"], [role="radiogroup"] input')]
+      .find((candidate) => candidate.closest("label, button")?.textContent?.trim() === "An Automation");
+    assert.ok(scope, "Send Events For offers An Automation");
+    await act(async () => { scope.click(); });
+    await act(settle);
+    assert.equal(shownValue(dialog, "Automation"), "Event Source");
+    const url = dialog.querySelector<HTMLInputElement>("input[type=url]")!;
+    const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!;
+    await act(async () => {
+      url.focus();
+      setter.call(url, "https://events.example.test/wollipog");
+      url.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as never);
+      url.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as never);
+    });
+    // Both extras are off until chosen, under one helper that says so.
+    assert.match(dialog.textContent ?? "", /Excluded unless selected\./);
+    const extra = (label: string) => [...dialog.querySelectorAll<HTMLLabelElement>("label.checkbox")]
+      .find((candidate) => candidate.textContent?.trim() === label)?.querySelector("input") as HTMLInputElement | null;
+    const sessionName = extra("Session Name");
+    const questionTitle = extra("Question Title");
     assert.ok(sessionName && questionTitle);
+    assert.equal(sessionName.checked || questionTitle.checked, false);
     await act(async () => {
       sessionName.click();
       questionTitle.click();
     });
-    await act(async () => { button(fixture.container, "Create Subscription").click(); });
+    await act(async () => { button(page, "Create Subscription").click(); });
     await act(settle);
     assert.deepEqual(fixture.outboundCreates, [{
       callbackUrl: "https://events.example.test/wollipog",
@@ -524,11 +580,14 @@ test("outbound event subscriptions expose privacy opt-ins and reveal the signing
       includeSessionName: true,
       includeQuestionTitle: true,
     }]);
-    assert.match(fixture.container.textContent ?? "", /Copy this signing secret now/);
-    assert.match(fixture.container.textContent ?? "", /wollipogwhsec_B+/);
-    assert.match(fixture.container.textContent ?? "", /Session Name Included/);
-    assert.match(fixture.container.textContent ?? "", /Question Title Included/);
-    await act(async () => { button(fixture.container, "Hide").click(); });
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "the dialog closes once created");
+    assert.match(fixture.container.textContent ?? "", /Copy the Signing Secret Now/);
+    assert.match(fixture.container.querySelector(".outbound-events-secret .code-well.one-line")?.textContent ?? "", /wollipogwhsec_B+/);
+    assert.ok(fixture.container.querySelector('.outbound-events-secret button[aria-label="Copy Secret"]'));
+    // The new row opens on what it sends, and names only what is included.
+    assert.match(fixture.container.textContent ?? "", /Also IncludesSession names and question titles/);
+    assert.doesNotMatch(fixture.container.textContent ?? "", /Included|Excluded/);
+    await act(async () => { button(fixture.container, "Done").click(); });
     assert.doesNotMatch(fixture.container.textContent ?? "", /wollipogwhsec_B+/);
   } finally {
     await unmountFixture(fixture);
@@ -592,7 +651,7 @@ test("editing and saving without changes sends the exact stored multi-alternate 
   };
   const fixture = await mountFixture([stored]);
   try {
-    await expandCard(fixture, "Nightly Sweep");
+    await openPage(fixture, "Nightly Sweep");
     await openEdit(fixture);
     const nameInput = [...fixture.container.querySelectorAll<HTMLLabelElement>("label")]
       .find((candidate) => candidate.childNodes[0]?.textContent?.trim() === "Name")
@@ -648,7 +707,7 @@ test("an unavailable automation installation stays visible until explicitly rebo
   };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
-    await expandCard(fixture, "Pinned Sweep");
+    await openPage(fixture, "Pinned Sweep");
     assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
     await openEdit(fixture);
     await act(async () => { button(fixture.container, "Use Current Installation").click(); });
@@ -682,7 +741,7 @@ test("saving a rebind whose installation disappeared names the machine it needs"
     const machines = [installed(runners[0]!, "selected"), installed(runners[1]!, "selected")];
     const fixture = await mountFixture([stored], {}, {}, [], {}, machines);
     try {
-      await expandCard(fixture, stored.name);
+      await openPage(fixture, stored.name);
       await openEdit(fixture);
       assert.match(fixture.container.textContent ?? "",
         alternate ? SAVED_ALTERNATE_INSTALLATION_WARNING : SAVED_INSTALLATION_WARNING);
@@ -723,9 +782,14 @@ test("editing a pinned automation shows its rediscovered installation instead of
   } } };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
-    await expandCard(fixture, "Pinned Sweep");
-    await openEdit(fixture);
+    await openPage(fixture, "Pinned Sweep");
     const agentLabel = (id: string) => agentDisplayName(machine.agents.find((agent) => agent.id === id)!, machine.agents);
+    // The page names the agent the scheduler will start: the rediscovered installation's, not the
+    // stored id's, which now names another agent (CR-1.2). A sentence never qualifies it by its
+    // path or id (#2970).
+    assert.equal(fixture.container.querySelector(".automation-sentence")?.textContent,
+      `Starts ${agentDisplayName(selected, machine.agents, { identifiers: false })} in runner-1-workspace on runner-1.`);
+    await openEdit(fixture);
     assert.equal(shownValue(fixture.container, "Agent"), agentLabel("system-new"));
     await setLabeledInput(fixture.container, "Name", "Pinned Sweep Renamed");
     await saveChanges(fixture);
@@ -733,7 +797,8 @@ test("editing a pinned automation shows its rediscovered installation instead of
     assert.equal(action?.kind === "create_session" && action.request.agentId, "system-new");
     assert.equal(action?.kind === "create_session" &&
       action.installationBindings?.agent?.installationId, "system");
-    await reopenEdit(fixture, "Pinned Sweep");
+    // The saved name, which the fixture does not store: the page reloads the original.
+    await reopenEdit(fixture, "Pinned Sweep Renamed");
     await choose(fixture.container, "Agent", agentLabel("manual"));
     await saveChanges(fixture);
     assert.equal(fixture.updates[1]?.spec.action.kind === "create_session" &&
@@ -772,7 +837,7 @@ test("a workflow role named orchestrator keeps a role binding separate from its 
   };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine], [workflow]);
   try {
-    await expandCard(fixture, "Workflow Sweep");
+    await openPage(fixture, "Workflow Sweep");
     await openEdit(fixture);
     await act(async () => { button(fixture.container, "Use Current Installation").click(); });
     await saveChanges(fixture);
@@ -814,7 +879,7 @@ test("switching workflows does not call a new discovered role's installation sav
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine],
     [workflow("old-graph"), workflow("new-graph")]);
   try {
-    await expandCard(fixture, "Workflow Switch");
+    await openPage(fixture, "Workflow Switch");
     await openEdit(fixture);
     await choose(fixture.container, "Workflow", "new-graph");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
@@ -850,7 +915,7 @@ test("switching workflow Machines stops displaying the old Machine's installatio
   };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [oldMachine, newMachine], [workflow]);
   try {
-    await expandCard(fixture, "Workflow Machine");
+    await openPage(fixture, "Workflow Machine");
     await openEdit(fixture);
     await choose(fixture.container, "Machine", "runner-2");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ROLE_WARNING);
@@ -899,7 +964,7 @@ test("switching alternate workflow Machines clears the old alternate installatio
   };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, oldAlternate, newAlternate], [workflow]);
   try {
-    await expandCard(fixture, "Alternate Workflow Machine");
+    await openPage(fixture, "Alternate Workflow Machine");
     await openEdit(fixture);
     await choose(fixture.container, "Other Machine", "runner-3");
     assert.doesNotMatch(fixture.container.textContent ?? "", SAVED_ALTERNATE_ROLE_WARNING);
@@ -939,7 +1004,7 @@ test("alternate workflow selectors follow the effective primary choice after a M
   };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate, newPrimary], [workflow]);
   try {
-    await expandCard(fixture, "Primary Switch Alternate");
+    await openPage(fixture, "Primary Switch Alternate");
     await openEdit(fixture);
     assert.match(choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "",
       /Other Worker Agent: Codex App Server/);
@@ -988,7 +1053,7 @@ test("inherited alternate installation pins display edited primary workflow iden
   };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [primary, alternate], [workflow]);
   try {
-    await expandCard(fixture, "Inherited Alternate Pins");
+    await openPage(fixture, "Inherited Alternate Pins");
     await openEdit(fixture);
     const alternateRole = () => choiceTrigger(fixture.container, "Other Worker Agent")?.getAttribute("aria-label") ?? "";
     const alternateOrchestrator = () => choiceTrigger(fixture.container, "Other Orchestrator Agent")?.getAttribute("aria-label") ?? "";
@@ -1016,7 +1081,7 @@ test("inherited alternate installation pins display edited primary workflow iden
   const missingAlternate = { ...alternate, agents: [installedAgents[0]!] };
   const unavailableFixture = await mountFixture([stored], {}, {}, [], {}, [primary, missingAlternate], [workflow]);
   try {
-    await expandCard(unavailableFixture, "Inherited Alternate Pins");
+    await openPage(unavailableFixture, "Inherited Alternate Pins");
     await openEdit(unavailableFixture);
     await choose(unavailableFixture.container, "Worker Agent", "Codex App Server");
     await choose(unavailableFixture.container, "Orchestrator Agent", "Codex App Server");
@@ -1045,7 +1110,7 @@ test("the automation card flags an unbound primary workflow orchestrator", async
   } };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
-    await expandCard(fixture, "Unbound Orchestrator");
+    await openPage(fixture, "Unbound Orchestrator");
     assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
   } finally {
     await unmountFixture(fixture);
@@ -1068,14 +1133,14 @@ test("an unavailable alternate installation is visible on the automation card", 
   }] };
   const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
   try {
-    await expandCard(fixture, "Alternate Missing");
+    await openPage(fixture, "Alternate Missing");
     assert.match(fixture.container.textContent ?? "", CARD_INSTALLATION_ALERT);
   } finally {
     await unmountFixture(fixture);
   }
 });
 
-test("a waiting target's resolution error is visible on its automation card", async () => {
+test("a waiting target's resolution error is the page's warning notice, Waiting for its machine", async () => {
   const stored = schedule("waiting-target", "Waiting Target");
   stored.targetHealth = {
     scheduledFor: 60_000, firstSeenAt: 60_001,
@@ -1085,9 +1150,12 @@ test("a waiting target's resolution error is visible on its automation card", as
   const fixture = await mountFixture([stored]);
   try {
     assert.match(cardToggle(fixture.container, "Waiting Target").textContent ?? "", /Target Unavailable/);
-    await expandCard(fixture, "Waiting Target");
-    assert.match(fixture.container.querySelector('[role="alert"]')?.textContent ?? "",
-      /Waiting for target: None of this automation's machines can run it now\./);
+    await openPage(fixture, "Waiting Target");
+    const notice = fixture.container.querySelector(".automation-notice-slot .notice.t-warning");
+    assert.equal(notice?.querySelector(".notice-title")?.textContent, "Waiting for runner-1");
+    assert.match(notice?.querySelector(".notice-body")?.textContent ?? "",
+      /^None of this automation's machines can run it now\./);
+    assertNoDomNode(fixture.container.querySelector('[role="alert"]'), "a warning is not an alert");
   } finally {
     await unmountFixture(fixture);
   }
@@ -1102,7 +1170,7 @@ test("a legacy create-session Agent with one installation is shown as available"
   const stored = schedule("legacy-installation", "Legacy Installation");
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
-    await expandCard(fixture, "Legacy Installation");
+    await openPage(fixture, "Legacy Installation");
     assert.doesNotMatch(fixture.container.textContent ?? "",
       CARD_INSTALLATION_ALERT);
     await openEdit(fixture);
@@ -1124,7 +1192,7 @@ test("an explicit empty installation binding remains visibly blocked", async () 
   stored.action.installationBindings = {};
   const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
   try {
-    await expandCard(fixture, "Explicit Unbound");
+    await openPage(fixture, "Explicit Unbound");
     assert.match(fixture.container.textContent ?? "",
       CARD_INSTALLATION_ALERT);
     await openEdit(fixture);
@@ -1149,7 +1217,7 @@ test("legacy alternate targets auto-pin while explicitly unbound alternates warn
     }] };
     const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
     try {
-      await expandCard(fixture, stored.name);
+      await openPage(fixture, stored.name);
       assert.equal(CARD_INSTALLATION_ALERT.test(
         fixture.container.textContent ?? ""), explicit);
       await openEdit(fixture);
@@ -1161,82 +1229,477 @@ test("legacy alternate targets auto-pin while explicitly unbound alternates warn
   }
 });
 
-test("automation cards are collapsed by default and render only their headers", async () => {
+/** The list's group headers and, under each, its rows' names, in order. */
+function listGroups(container: HTMLDivElement): Array<{ label: string; count: string; rows: string[] }> {
+  return [...container.querySelectorAll<HTMLElement>(".automation-list .automation-group")].map((group) => ({
+    label: group.querySelector(".group-label")?.firstChild?.textContent ?? "",
+    count: group.querySelector(".group-label > .count")?.textContent ?? "",
+    rows: [...group.querySelectorAll(".automation-row .row-title")].map((title) => title.textContent ?? ""),
+  }));
+}
+
+function rowOf(container: HTMLDivElement, name: string): HTMLElement {
+  const row = cardToggle(container, name).closest<HTMLElement>(".automation-row");
+  assert.ok(row, `${name} is a list row`);
+  return row;
+}
+
+function enabledSwitch(container: HTMLDivElement, name: string): HTMLButtonElement {
+  const control = rowOf(container, name).querySelector<HTMLButtonElement>('[role="switch"]');
+  assert.ok(control, `${name} has an Enabled switch`);
+  return control;
+}
+
+const DAY = 86_400_000;
+
+test("each row names the automation, one badge, its schedule in words, its next run and its target, with no ids", async () => {
+  const now = Date.now();
+  const agent = { ...schedule("automation-agent", "Nightly Sweep"), nextFireAt: now + DAY };
+  const failedAndWaiting = {
+    ...schedule("automation-failed", "Failed and Waiting"), nextFireAt: now + 2 * DAY,
+    latestExecution: { status: "failed" as const, at: now - DAY },
+    targetHealth: { scheduledFor: now + 2 * DAY, firstSeenAt: now, error: "runner-1 is offline" },
+  };
+  const waiting = {
+    ...schedule("automation-waiting", "Waiting"), nextFireAt: now + 3 * DAY,
+    latestExecution: { status: "succeeded" as const, at: now - DAY },
+    targetHealth: { scheduledFor: now + 3 * DAY, firstSeenAt: now, error: "runner-1 is offline" },
+  };
+  const workflow = { ...workflowAutomation("automation-workflow", "Build Graph"), enabled: false };
+  const prompt = { ...schedule("automation-prompt", "Triage Prompt"), enabled: false };
+  prompt.action = { kind: "prompt_session", sessionId: "session-xyz", request: { text: "Triage." } };
+  const unloaded = { ...schedule("automation-unloaded", "Unloaded Prompt"), enabled: false };
+  unloaded.action = { kind: "prompt_session", sessionId: "session-gone", request: { text: "Triage." } };
+  const graph = { workflowId: "graph-1", version: 1, name: "Build and Review", nodes: [] } as unknown as WorkflowDefinition;
+  snapshotSessions = [{
+    id: "session-xyz", title: "Nightly triage\nsecond line", preview: null, agentId: "rich-agent", agentName: "Rich Agent",
+    driver: "claude-code", status: "idle", pendingApproval: null, runnerId: "runner-1",
+  } as unknown as SessionView];
+  const fixture = await mountFixture([agent, failedAndWaiting, waiting, workflow, prompt, unloaded],
+    {}, {}, [], {}, runners, [graph]);
+  try {
+    const meta = (name: string) => [...rowOf(fixture.container, name).querySelectorAll(".automation-row-meta > span")]
+      .map((item) => item.textContent);
+    const badges = (name: string) => [...rowOf(fixture.container, name).querySelectorAll(".status")]
+      .map((badge) => badge.textContent);
+    assert.deepEqual(meta("Nightly Sweep"), [
+      "Every day at 2:00 AM", `Next ${formatCalendarTime(agent.nextFireAt, Date.now())}`, "Rich Agent",
+    ]);
+    assert.deepEqual(badges("Nightly Sweep"), [], "no badge while nothing needs attention");
+    assert.deepEqual(badges("Failed and Waiting"), ["Last Run Failed"], "a failed run outranks an unavailable target");
+    assert.deepEqual(badges("Waiting"), ["Target Unavailable"]);
+    assert.deepEqual(meta("Build Graph"), ["Every day at 2:00 AM", "Paused", "Build and Review"]);
+    assert.deepEqual(meta("Triage Prompt").at(-1), "Nightly triage", "a session reads by its display title");
+    assert.deepEqual(meta("Unloaded Prompt").at(-1), "Session", "a session that isn't loaded reads as its kind");
+    // Each row's one icon per meta item, 14px, and no middle dots.
+    for (const icon of rowOf(fixture.container, "Nightly Sweep").querySelectorAll(".automation-row-meta svg")) {
+      assert.equal(icon.getAttribute("width"), "14");
+    }
+    const listText = fixture.container.querySelector(".automation-list")?.textContent ?? "";
+    assert.doesNotMatch(listText, /·/);
+    for (const id of ["automation-", "runner-1", "runner-1-workspace", "rich-agent", "graph-1", "session-xyz", "session-gone"]) {
+      assert.ok(!listText.includes(id), `no row text contains the id ${id}: ${listText}`);
+    }
+  } finally {
+    snapshotSessions = [];
+    await unmountFixture(fixture);
+  }
+});
+
+test("an agent sharing its name with another on its machine reads by name, never by its id or path", async () => {
+  const namesake = (id: string, path: string) => ({
+    id, name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" as const, available: true,
+    context: { kind: "native" as const }, installation: { id, path, via: "path" as const, selection: "selected" as const },
+  });
+  const twins = runner("runner-1", [namesake("agent-one", "/opt/one/claude"), namesake("agent-two", "/opt/two/claude")]);
+  const stored = schedule("automation-a", "Alpha");
+  stored.action = { kind: "create_session", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "agent-one", prompt: "Sweep.", useWorktree: false,
+  } };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [twins]);
+  try {
+    const target = rowOf(fixture.container, "Alpha").querySelector(".automation-row-target")?.textContent ?? "";
+    assert.equal(target, "Claude Code");
+    for (const identifier of ["agent-one", "agent-two", "/opt/"]) assert.ok(!target.includes(identifier), target);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an older control plane's list without latestExecution shows no Last Run Failed badge", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {
+    "automation-a": [{ executionId: "e1", automationId: "automation-a", status: "failed" } as AutomationExecution],
+  });
+  try {
+    assertNoDomNode(rowOf(fixture.container, "Alpha").querySelector(".status"), "no badge");
+    assert.deepEqual(fixture.requests, ["list"], "the list never reads an automation's history for its badge");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("rows sit under Scheduled, soonest next run first, and Paused, each with its count; an empty group is omitted", async () => {
+  const now = Date.now();
+  const fixture = await mountFixture([
+    { ...schedule("automation-late", "Later"), nextFireAt: now + 3 * DAY },
+    { ...schedule("automation-paused", "Resting", false) },
+    { ...schedule("automation-soon", "Sooner"), nextFireAt: now + DAY },
+  ]);
+  try {
+    assert.deepEqual(listGroups(fixture.container), [
+      { label: "Scheduled", count: "2", rows: ["Sooner", "Later"] },
+      { label: "Paused", count: "1", rows: ["Resting"] },
+    ]);
+    assert.equal(fixture.container.querySelectorAll(".automation-group > .surface").length, 2, "one Surface per group");
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const onlyPaused = await mountFixture([schedule("automation-paused", "Resting", false)]);
+  try {
+    assert.deepEqual(listGroups(onlyPaused.container).map((group) => group.label), ["Paused"]);
+  } finally {
+    await unmountFixture(onlyPaused);
+  }
+});
+
+for (const strict of [false, true]) {
+  test(`toggling a row's Enabled switch sends the full spec, moves the row and keeps focus${strict ? " under StrictMode" : ""}`, async () => {
+    const now = Date.now();
+    const items = [
+      { ...schedule("automation-a", "Alpha"), nextFireAt: now + DAY },
+      { ...schedule("automation-b", "Beta", false) },
+    ];
+    const stored = structuredClone(items[0]!);
+    strictMode = strict;
+    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      updateAutomation: async (id: string, spec: AutomationSpec) => {
+        fixture.updates.push({ id, spec: structuredClone(spec) });
+        const index = items.findIndex((item) => item.automationId === id);
+        items[index] = { ...items[index]!, ...spec, nextFireAt: spec.enabled ? now + DAY : undefined };
+        return items[index]!;
+      },
+    });
+    try {
+      const control = enabledSwitch(fixture.container, "Alpha");
+      assert.equal(control.getAttribute("aria-label"), "Enabled");
+      assert.equal(control.getAttribute("aria-checked"), "true");
+      const titleId = control.getAttribute("aria-describedby")!;
+      assert.equal(fixture.container.ownerDocument.getElementById(titleId)?.textContent, "Alpha",
+        "the switch is described by its row's title");
+      assert.ok(!cardToggle(fixture.container, "Alpha").contains(control), "the switch is not inside the open target");
+      control.focus();
+      await act(async () => { control.click(); });
+      await act(settle);
+
+      const { automationId: _id, revision: _revision, nextFireAt: _next, createdBy: _by, createdAt: _at, updatedAt: _up, ...spec } = stored;
+      assert.deepEqual(fixture.updates, [{ id: "automation-a", spec: { ...spec, enabled: false } }],
+        "the full stored spec, with enabled flipped");
+      assert.deepEqual(listGroups(fixture.container).map((group) => [group.label, group.rows]), [["Paused", ["Alpha", "Beta"]]]);
+      assert.ok(fixture.container.querySelector(".automation-list"), "the switch does not open the automation");
+      assert.ok(!fixture.requests.some((request) => request.startsWith("automation:")), "nor read its page");
+      const moved = enabledSwitch(fixture.container, "Alpha");
+      assert.equal(moved.getAttribute("aria-checked"), "false");
+      assert.ok(fixture.container.ownerDocument.activeElement === moved, "focus follows the switch into its new group");
+
+      await act(async () => { moved.click(); });
+      await act(settle);
+      assert.deepEqual(fixture.updates.at(-1), { id: "automation-a", spec: { ...spec, enabled: true } });
+      assert.deepEqual(listGroups(fixture.container).map((group) => [group.label, group.rows]),
+        [["Scheduled", ["Alpha"]], ["Paused", ["Beta"]]]);
+    } finally {
+      strictMode = false;
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("a failed toggle keeps the row where it was and names what didn't happen", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+    updateAutomation: async () => { throw new Error("Pause refused"); },
+  });
+  try {
+    await act(async () => { enabledSwitch(fixture.container, "Alpha").click(); });
+    await act(settle);
+    assert.equal(pageError(fixture), "Automation Not Paused");
+    assert.match(fixture.container.querySelector(".automation-list > .notice")?.textContent ?? "", /Pause refused/);
+    assert.equal(enabledSwitch(fixture.container, "Alpha").getAttribute("aria-checked"), "true");
+    assert.equal(enabledSwitch(fixture.container, "Alpha").getAttribute("aria-busy"), null, "no longer busy");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a toggle that settles after the list unmounts changes nothing on screen", async () => {
+  let release: (() => void) | undefined;
+  const errors: unknown[] = [];
+  const consoleError = console.error;
+  console.error = (...args: unknown[]) => { errors.push(args); };
+  strictMode = true;
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+    updateAutomation: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      throw new Error("Late failure");
+    },
+  });
+  try {
+    await act(async () => { enabledSwitch(fixture.container, "Alpha").click(); });
+    assert.equal(enabledSwitch(fixture.container, "Alpha").getAttribute("aria-busy"), "true");
+    await unmountFixture(fixture);
+    await act(async () => { release?.(); });
+    await act(settle);
+    assert.equal(fixture.container.textContent, "");
+    assert.deepEqual(errors, []);
+  } finally {
+    console.error = consoleError;
+    strictMode = false;
+    release?.();
+  }
+});
+
+test("with the connection lost after a load, the rows stay dimmed under Reconnecting and no empty state renders", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")]);
+  try {
+    await fixture.closeSocket();
+    const list = fixture.container.querySelector(".automation-list")!;
+    const line = list.querySelector('.notice[role="status"]');
+    assert.equal(line?.textContent, "Reconnecting…");
+    const stale = list.querySelector(".is-stale");
+    assert.ok(stale?.classList.contains("automation-groups"), "the groups keep their one wrapper while stale");
+    assert.ok(stale?.contains(cardToggle(fixture.container, "Alpha")), "the last-known row is inside StaleContent");
+    assert.ok(!stale?.contains(line!), "the Reconnecting line is not dimmed");
+    assert.ok(!cardToggle(fixture.container, "Alpha").disabled, "the stale row still opens");
+    assertNoDomNode(fixture.container.querySelector(".state"), "never an empty state");
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const empty = await mountFixture([]);
+  try {
+    await empty.closeSocket();
+    assert.equal(empty.container.querySelector('.automation-list .notice[role="status"]')?.textContent, "Reconnecting…");
+    assertNoDomNode(empty.container.querySelector(".state"), "an empty list proves nothing while reconnecting");
+  } finally {
+    await unmountFixture(empty);
+  }
+});
+
+test("a failed list request shows Couldn't Load Automations with Retry and the raw error behind Show Details", async () => {
+  let fail = true;
+  const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+    automations: async () => {
+      if (fail) throw new Error("Synthetic list failure");
+      return { automations: [schedule("automation-a", "Alpha")] };
+    },
+  });
+  try {
+    assert.equal(pageError(fixture), "Couldn't Load Automations");
+    assertNoDomNode(fixture.container.querySelector(".state"), "no empty state beside the error");
+    assert.ok(fixture.container.querySelector('#page-title'), "the header stays");
+    assert.ok(fixture.container.querySelector('[role="tab"]'), "the tabs stay");
+    assert.ok(button(fixture.container, "New Automation"), "the primary stays");
+    await act(async () => { button(fixture.container, "Show Details").click(); });
+    assert.match(fixture.container.querySelector(".automation-list > .notice")?.textContent ?? "", /Synthetic list failure/);
+    fail = false;
+    await act(async () => { button(fixture.container, "Retry").click(); });
+    await act(settle);
+    assert.equal(pageError(fixture), null);
+    assert.ok(cardToggle(fixture.container, "Alpha"));
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("until the first response the list is five skeleton rows; an empty list has exactly one New Automation", async () => {
+  let release: (() => void) | undefined;
+  const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
+    automations: async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+      return { automations: [] };
+    },
+  });
+  try {
+    const skeleton = fixture.container.querySelector('.automation-list > .surface[role="status"]');
+    assert.equal(skeleton?.querySelectorAll(".row.row-2").length, 5);
+    assertNoDomNode(fixture.container.querySelector(".state"));
+    await act(async () => { release?.(); });
+    await act(settle);
+    const creates = [...fixture.container.querySelectorAll("button")]
+      .filter((candidate) => candidate.textContent?.trim() === "New Automation" ||
+        candidate.getAttribute("aria-label") === "New Automation");
+    assert.equal(creates.length, 1, "exactly one New Automation");
+    assert.ok(creates[0]!.closest(".state"), "and it is the empty state's");
+    assert.equal(fixture.container.querySelector(".state-title, .state h3")?.textContent, "No Automations Yet");
+    assert.match(fixture.container.querySelector(".state")?.textContent ?? "",
+      /Run an agent every weekday morning, or whenever a webhook fires\./);
+  } finally {
+    release?.();
+    await unmountFixture(fixture);
+  }
+});
+
+test("one list poll makes one request, however many automations it lists", async () => {
+  const intervals = new Set<() => void>();
+  const reads: string[] = [];
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture([
+      schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false), workflowAutomation("automation-c", "Gamma"),
+    ], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        reads.push("/api/automations");
+        return { automations: [schedule("automation-a", "Alpha"), schedule("automation-b", "Beta", false),
+          workflowAutomation("automation-c", "Gamma")] };
+      },
+      workflowDefinitions: async () => { reads.push("/api/workflows"); return []; },
+    });
+    try {
+      assert.deepEqual(reads.filter((read) => read === "/api/automations"), ["/api/automations"]);
+      reads.length = 0;
+      await invokePolls(intervals);
+      await invokePolls(intervals);
+      assert.deepEqual(reads, ["/api/automations", "/api/automations"],
+        "each poll is the list alone: no history, triggers or workflow reads per automation");
+      assert.deepEqual(fixture.requests, [], "nor any automation's detail or triggers");
+    } finally { await unmountFixture(fixture); }
+  });
+});
+
+test("the list's poll pauses while the tab is hidden and skips a poll while one is in flight", async () => {
+  const intervals = new Set<() => void>();
+  let reads = 0;
+  let hold: Promise<void> | null = null;
+  let release: (() => void) | undefined;
+  const visibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    strictMode = true;
+    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        reads += 1;
+        if (hold) await hold;
+        return { automations: [schedule("automation-a", "Alpha")] };
+      },
+    });
+    try {
+      const afterLoad = reads;
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
+      await invokePolls(intervals);
+      assert.equal(reads, afterLoad, "a hidden tab reads nothing");
+      Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
+      hold = new Promise<void>((resolve) => { release = resolve; });
+      await invokePolls(intervals);
+      assert.equal(reads, afterLoad + 1);
+      await invokePolls(intervals);
+      assert.equal(reads, afterLoad + 1, "a poll while one is in flight is skipped");
+      hold = null;
+      await act(async () => { release?.(); });
+      await act(settle);
+      assert.ok(cardToggle(fixture.container, "Alpha"));
+    } finally {
+      release?.();
+      strictMode = false;
+      if (visibility) Object.defineProperty(domWindow.document, "visibilityState", visibility);
+      else Reflect.deleteProperty(domWindow.document, "visibilityState");
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("the tabs are routes: Automations opens on the list, Outbound Events on its own tab", async () => {
+  const fixture = await mountFixture([schedule("automation-a", "Alpha")]);
+  try {
+    const tabs = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
+    assert.deepEqual(tabs.map((tab) => [tab.textContent, tab.getAttribute("aria-selected")]),
+      [["Automations", "true"], ["Outbound Events", "false"]]);
+    const panel = fixture.container.querySelector('[role="tabpanel"]')!;
+    assert.ok(panel.firstElementChild?.classList.contains("automation-groups"), "the list is the first content");
+    assertNoDomNode(fixture.container.querySelector(".outbound-events"), "Outbound Events is not on the list's tab");
+    await act(async () => { tabs[1]!.click(); });
+    await act(settle);
+    assert.ok(fixture.container.querySelector(".outbound-events"));
+    assertNoDomNode(fixture.container.querySelector(".automation-list"));
+    assert.equal(fixture.container.querySelector('[role="tab"][aria-selected="true"]')?.textContent, "Outbound Events");
+    assertNoDomNode(fixture.container.querySelector('.page-actions button.primary, .page-actions .btn.primary'),
+      "New Automation is the list tab's primary");
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const direct = await mountAt({ name: "automations", tab: "outbound" }, [schedule("automation-a", "Alpha")]);
+  try {
+    assert.equal(direct.container.querySelector('[role="tab"][aria-selected="true"]')?.textContent, "Outbound Events",
+      "/automations/outbound selects its tab on load");
+    assert.ok(direct.container.querySelector(".outbound-events"));
+  } finally {
+    await unmountFixture(direct);
+  }
+});
+
+test("Outbound Events' header primary is New Subscription, hidden while the tab is empty (#2973)", async () => {
+  const subscription: OutboundEventSubscriptionView = {
+    subscriptionId: "oes_hooks", callbackUrl: "https://hooks.example.com/wollipog",
+    scope: { kind: "automation", automationId: "automation-a" }, eventKinds: ["session.completed"],
+    includeSessionName: false, includeQuestionTitle: false, state: "active", generation: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, updatedAt: 1,
+  };
+  const page = domWindow.document.body as unknown as HTMLDivElement;
+  const newSubscriptionButtons = () => [...page.querySelectorAll<HTMLButtonElement>("button")]
+    .filter((candidate) => candidate.textContent?.trim() === "New Subscription" || candidate.getAttribute("aria-label") === "New Subscription");
+  const fixture = await mountAt({ name: "automations", tab: "outbound" }, [schedule("automation-a", "Alpha")], {}, {}, [subscription]);
+  try {
+    const primary = fixture.container.querySelector<HTMLButtonElement>(".page-actions .btn.primary");
+    assert.equal(primary?.textContent?.trim(), "New Subscription");
+    assert.equal(newSubscriptionButtons().length, 1, "the header's primary is the tab's one New Subscription");
+    assert.doesNotMatch(page.textContent ?? "", /Close Subscription Form/);
+    assert.match(fixture.container.querySelector('[data-subscription-id="oes_hooks"]')?.textContent ?? "", /Automation: Alpha/);
+    await act(async () => { primary!.click(); });
+    await act(settle);
+    assert.equal(domWindow.document.querySelector('[role="dialog"] h2, [role="dialog"] .modal-title')?.textContent, "New Subscription");
+    await act(async () => { button(page, "Cancel").click(); });
+    await act(settle);
+    assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'));
+    assert.doesNotMatch(page.textContent ?? "", /Close Subscription Form/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+  const empty = await mountAt({ name: "automations", tab: "outbound" }, [schedule("automation-a", "Alpha")]);
+  try {
+    assertNoDomNode(empty.container.querySelector(".page-actions .btn.primary"), "the empty state owns New Subscription");
+    assert.equal(newSubscriptionButtons().length, 1);
+    assert.match(empty.container.textContent ?? "", /No Outbound Events Yet/);
+  } finally {
+    await unmountFixture(empty);
+  }
+});
+
+test("a row's open target opens its automation's page, and the list reads the list alone", async () => {
   const fixture = await mountFixture([
     schedule("automation-a", "Alpha"),
     schedule("automation-b", "Beta", false),
   ]);
   try {
     const alpha = cardToggle(fixture.container, "Alpha");
-    const beta = cardToggle(fixture.container, "Beta");
-
-    // A native button is what makes pointer, touch, Enter, and Space activation work without any
-    // key handling of our own; the e2e spec drives the real keys in a real browser.
+    // A native button, so pointer, touch, Enter and Space all open it; it does not disclose.
     assert.equal(alpha.tagName, "BUTTON");
-    assert.equal(alpha.getAttribute("type"), "button");
-    assert.equal(expansionOf(fixture.container, "Alpha"), "false");
-    assert.equal(expansionOf(fixture.container, "Beta"), "false");
-    assert.equal(alpha.getAttribute("aria-controls"), "automation-body-automation-a");
-    assert.equal(beta.getAttribute("aria-controls"), "automation-body-automation-b");
+    assert.equal(alpha.getAttribute("aria-expanded"), null);
+    // Each row holds two controls: its open target and its Enabled switch.
+    assert.equal(rowOf(fixture.container, "Alpha").querySelectorAll("button").length, 2);
+    assert.equal(fixture.container.querySelectorAll(".automation-history, .automation-trigger").length, 0);
+    assert.deepEqual(fixture.requests, ["list"], "the list reads no automation's history or triggers");
 
-    // Name, action summary, and state — and nothing beyond them.
-    assert.equal(
-      alpha.querySelector(".automation-card-action")?.textContent,
-      "Create rich-agent session on runner-1",
-    );
-    assert.equal(alpha.querySelector(".status.t-success")?.textContent, "Enabled");
-    assert.equal(beta.querySelector(".status.t-neutral")?.textContent, "Paused");
-    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 0);
-    assert.equal(fixture.container.querySelectorAll(".automation-facts").length, 0);
-    assert.equal(fixture.container.querySelectorAll(".automation-card-actions").length, 0);
-    assert.equal(fixture.container.querySelectorAll(".automation-history").length, 0);
-
-    // Collapsed cards hold no reachable hidden controls: the two toggles are the only focus targets.
-    const focusable = focusableInCards(fixture.container);
-    assert.equal(focusable.length, 2);
-    assert.equal(focusable[0], alpha);
-    assert.equal(focusable[1], beta);
+    await openPage(fixture, "Alpha");
+    assert.equal(pageTitle(fixture.container), "Alpha");
+    assertNoDomNode(fixture.container.querySelector(".automation-list"));
+    assert.deepEqual(fixture.requests.slice(1).sort(), ["automation:automation-a", "triggers:automation-a"]);
   } finally {
     await unmountFixture(fixture);
   }
 });
 
-test("cards expand independently and collapse back to header-only", async () => {
-  const fixture = await mountFixture([
-    schedule("automation-a", "Alpha"),
-    schedule("automation-b", "Beta"),
-  ]);
-  try {
-    await expandCard(fixture, "Alpha");
-    await expandCard(fixture, "Beta");
-    assert.equal(expansionOf(fixture.container, "Alpha"), "true");
-    assert.equal(expansionOf(fixture.container, "Beta"), "true");
-    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 2);
-
-    // The expanded body carries the details and the management actions.
-    const body = fixture.container.querySelector("#automation-body-automation-a");
-    assert.ok(body);
-    assert.equal(body.getAttribute("aria-labelledby"), "automation-toggle-automation-a");
-    assert.match(body.textContent ?? "", /Schedule/);
-    assert.match(body.textContent ?? "", /Next Fire/);
-    assert.ok([...body.querySelectorAll("button")].some((item) => item.textContent?.trim() === "Edit"));
-    assert.ok([...body.querySelectorAll("button")].some((item) => item.textContent?.trim() === "Pause"));
-
-    // Collapsing one leaves the other open.
-    await expandCard(fixture, "Alpha");
-    assert.equal(expansionOf(fixture.container, "Alpha"), "false");
-    assert.equal(expansionOf(fixture.container, "Beta"), "true");
-    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 1);
-    assertNoDomNode(fixture.container.querySelector("#automation-body-automation-a"));
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("failed fan-out reads stay busy until every request settles and a mutation then refreshes", async () => {
+test("failed page reads stay busy until every request settles and a mutation then refreshes", async () => {
   const items = [schedule("automation-a", "Alpha")];
   const intervals = new Set<() => void>();
-  let listCalls = 0;
+  let detailCalls = 0;
   let failDetails = false;
   let release: (() => void) | undefined;
   let mutationFinished = false;
@@ -1244,19 +1707,15 @@ test("failed fan-out reads stay busy until every request settles and a mutation 
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
     clearInterval: () => {},
   }, async () => {
-    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
-      automations: async () => { listCalls += 1; return { automations: structuredClone(items) }; },
+    const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
       automation: async () => {
+        detailCalls += 1;
         if (failDetails) throw new Error("Detail unavailable");
         return { automation: items[0]!, executions: [], events: [] };
       },
       automationTriggers: async () => {
         if (failDetails) await new Promise<void>((resolve) => { release = resolve; });
         return { triggers: [] };
-      },
-      workflowDefinitions: async () => {
-        if (failDetails) throw new Error("Workflow unavailable");
-        return [];
       },
       updateAutomation: async (_id, spec) => {
         items[0] = { ...items[0]!, ...spec };
@@ -1265,20 +1724,19 @@ test("failed fan-out reads stay busy until every request settles and a mutation 
       },
     });
     try {
-      await expandCard(fixture, "Alpha");
-      assert.equal(listCalls, 1);
+      assert.equal(detailCalls, 1);
       failDetails = true;
       await act(async () => { for (const poll of intervals) poll(); });
-      assert.equal(listCalls, 2);
+      assert.equal(detailCalls, 2);
       await act(async () => { for (const poll of intervals) poll(); });
-      assert.equal(listCalls, 2, "a failed sibling cannot release the guard while another read is pending");
+      assert.equal(detailCalls, 2, "a failed sibling cannot release the guard while another read is pending");
       await act(async () => { button(fixture.container, "Pause").click(); });
       assert.equal(mutationFinished, true);
-      assert.equal(listCalls, 2, "the post-mutation refresh waits for the outstanding poll");
+      assert.equal(detailCalls, 2, "the post-mutation refresh waits for the outstanding poll");
       failDetails = false;
       await act(async () => { release?.(); });
-      assert.equal(listCalls, 3, "the mutation gets a fresh read after the earlier refresh settles");
-      assert.ok(button(fixture.container, "Enable"), "the authoritative post-mutation state is rendered");
+      assert.equal(detailCalls, 3, "the mutation gets a fresh read after the earlier refresh settles");
+      assert.ok(button(fixture.container, "Resume"), "the authoritative post-mutation state is rendered");
     } finally {
       release?.();
       await unmountFixture(fixture);
@@ -1286,82 +1744,19 @@ test("failed fan-out reads stay busy until every request settles and a mutation 
   });
 });
 
-test("a routine poll preserves expansion and leaves newly loaded cards collapsed", async () => {
-  const items = [schedule("automation-a", "Alpha"), schedule("automation-b", "Beta")];
-  const fixture = await mountFixture(items);
-  try {
-    await expandCard(fixture, "Alpha");
-    items.push(schedule("automation-c", "Gamma"));
-    await awaitPoll();
-
-    assert.ok(maybeCardToggle(fixture.container, "Gamma"), "the poll loaded the new automation");
-    assert.equal(expansionOf(fixture.container, "Alpha"), "true");
-    assert.equal(expansionOf(fixture.container, "Beta"), "false");
-    assert.equal(expansionOf(fixture.container, "Gamma"), "false");
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("deleting an automation does not move expansion onto another card", async () => {
-  const items = [
-    schedule("automation-a", "Alpha"),
-    schedule("automation-b", "Beta"),
-    schedule("automation-c", "Gamma"),
-  ];
-  const fixture = await mountFixture(items);
-  try {
-    // Expand the last card, then remove the first: position-keyed state would slide the open body
-    // onto a different automation, identity-keyed state stays on Gamma.
-    await expandCard(fixture, "Gamma");
-    items.splice(0, 1);
-    await awaitPoll();
-
-    assert.equal(maybeCardToggle(fixture.container, "Alpha"), undefined);
-    assert.equal(expansionOf(fixture.container, "Beta"), "false");
-    assert.equal(expansionOf(fixture.container, "Gamma"), "true");
-    assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 1);
-    assert.ok(fixture.container.querySelector("#automation-body-automation-c"));
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("Execution History defaults to collapsed inside an expanded card", async () => {
-  const execution: AutomationExecution = {
-    executionId: "execution-1",
-    automationId: "automation-a",
-    idempotencyKey: "automation-a:1",
-    scheduledFor: 1,
-    automationRevision: 1,
-    actionKind: "create_session",
-    status: "succeeded",
-    actor: { kind: "human", id: "test" },
-    createdAt: 1,
-    startedAt: 1,
-    completedAt: 2,
-  };
-  const fixture = await mountFixture([schedule("automation-a", "Alpha")], { "automation-a": [execution] });
-  try {
-    await expandCard(fixture, "Alpha");
-    const history = fixture.container.querySelector<HTMLDetailsElement>("details.automation-history");
-    assert.ok(history, "execution history is rendered inside the expanded card");
-    assert.equal(history.open, false);
-    assert.match(history.querySelector("summary")?.textContent ?? "", /Execution History \(1\)/);
-  } finally {
-    await unmountFixture(fixture);
-  }
-});
-
-test("signed trigger editor sends an explicit prompt, parameter, and selector allowlist", async () => {
+test("New Webhook Trigger sends an explicit prompt, parameter, and selector allowlist, as the inline form did", async () => {
   const item = schedule("automation-a", "Alpha");
   item.action = { kind: "prompt_session", sessionId: "s_default", request: { text: "{{delivery.prompt}}" } };
   const fixture = await mountFixture([item]);
   try {
-    await expandCard(fixture, "Alpha");
-    await act(async () => { button(fixture.container, "Add Webhook").click(); });
-    const editor = fixture.container.querySelector<HTMLElement>('[aria-label="New Signed Trigger"]');
-    assert.ok(editor);
+    await openPage(fixture, "Alpha");
+    await chooseMoreAction(fixture, "Add Webhook Trigger…");
+    // The dialog is portalled to the document, outside the fixture's container.
+    const editor = [...fixture.container.ownerDocument.querySelectorAll<HTMLElement>('[role="dialog"]')]
+      .find((dialog) => dialog.querySelector(".modal-title")?.textContent === "New Webhook Trigger");
+    assert.ok(editor, "New Webhook Trigger opens");
+    assertNoDomNode([...editor.querySelectorAll(".field-label")].find((label) => label.textContent === "Kind") ?? null,
+      "the kind is the title, not a field");
     const checkbox = (label: string) => {
       const wrapper = [...editor.querySelectorAll<HTMLLabelElement>("label")]
         .find((candidate) => candidate.textContent?.trim() === label);
@@ -1369,21 +1764,17 @@ test("signed trigger editor sends an explicit prompt, parameter, and selector al
       assert.ok(input, `${label} checkbox is rendered`);
       return input;
     };
-    await act(async () => { checkbox("Accept Delivery Fields").click(); });
-    await act(async () => { checkbox("Delivered Prompt").click(); });
+    const details = editor.querySelector<HTMLButtonElement>('[role="switch"]');
+    assert.equal(details?.textContent?.includes("Let Callers Add Details"), true);
+    await act(async () => { details!.click(); });
+    await act(async () => { checkbox("Prompt Text").click(); });
     await act(async () => { checkbox("Branch").click(); });
     const parameterInput = [...editor.querySelectorAll<HTMLInputElement>("input")]
-      .find((candidate) => candidate.closest("label")?.textContent?.includes("Parameter Names"));
+      .find((candidate) => candidate.closest(".field")?.querySelector(".field-label")?.textContent === "Named Values");
     assert.ok(parameterInput);
-    const inputSetter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
-    assert.ok(inputSetter);
-    await act(async () => {
-      inputSetter.call(parameterInput, "issue, run_id");
-      parameterInput.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: "issue, run_id" }) as never);
-      parameterInput.dispatchEvent(new domWindow.Event("change", { bubbles: true }) as never);
-    });
+    await typeInto(parameterInput, "issue, run_id");
     await act(settle);
-    await act(async () => { button(fixture.container, "Create Trigger").click(); });
+    await act(async () => { button(editor as HTMLDivElement, "Create Trigger").click(); });
     await act(settle);
     assert.deepEqual(fixture.triggerCreates, [{
       id: "automation-a",
@@ -1395,7 +1786,7 @@ test("signed trigger editor sends an explicit prompt, parameter, and selector al
         },
       },
     }]);
-    assert.match(fixture.container.textContent ?? "", /Accepts Prompt · Parameters issue, run_id · Selectors Branch/);
+    assert.match(fixture.container.textContent ?? "", /Accepts prompt text, issue, run_id and a session/);
   } finally {
     await unmountFixture(fixture);
   }
@@ -1421,19 +1812,35 @@ test("execution history shows content-free signed delivery provenance", async ()
   };
   const fixture = await mountFixture([schedule("automation-a", "Alpha")], { "automation-a": [execution] });
   try {
-    await expandCard(fixture, "Alpha");
-    const history = fixture.container.querySelector<HTMLDetailsElement>("details.automation-history")!;
-    history.open = true;
-    assert.match(history.textContent ?? "", /Delivered Fields: Prompt · Parameters issue/);
-    assert.match(history.textContent ?? "", /Prompt Digest aaaaaaaaaaaa…/);
-    assert.doesNotMatch(history.textContent ?? "", /delivered prompt text|parameter value/);
+    await openPage(fixture, "Alpha");
+    const row = fixture.container.querySelector<HTMLElement>("table.automation-runs tbody tr")!;
+    assert.equal(row.querySelectorAll("td")[1]?.textContent, "Signed Trigger");
+    // Run Details names what the delivery brought, never its content or its prompt digest (#2970).
+    await act(async () => row.querySelector<HTMLButtonElement>('.actions-cell button[aria-haspopup="menu"]')!.click());
+    const item = [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+      .find((candidate) => candidate.textContent === "Run Details…")!;
+    await act(async () => item.click());
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const facts = Object.fromEntries([...dialog.querySelectorAll(".facts > div")]
+      .map((pair) => [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]));
+    assert.equal(facts.Delivered, "Prompt text, Named values (issue)");
+    assert.equal(facts["Started By"], "Signed Trigger");
+    assert.doesNotMatch(dialog.textContent ?? "", /aaaaaaaaaaaa|Digest|delivered prompt text|parameter value/);
   } finally {
     await unmountFixture(fixture);
   }
 });
 
+/* ------------- Polling and actions (the list's read, and the automation page's) ------------- */
+
+/**
+ * The failed read or action as the surface says it: the list's error line, or the sentence of the
+ * automation page's one notice (#2968).
+ */
 function pageError(fixture: Fixture): string | null {
-  return fixture.container.querySelector('.page > .automation-error[role="alert"]')?.textContent ?? null;
+  const list = fixture.container.querySelector<HTMLElement>('.automation-list > .notice[role="alert"]');
+  if (list) return list.querySelector(".notice-title")?.textContent ?? null;
+  return fixture.container.querySelector(".automation-notice-slot .notice-body")?.textContent ?? null;
 }
 
 async function invokePolls(intervals: Set<() => void>): Promise<void> {
@@ -1441,14 +1848,19 @@ async function invokePolls(intervals: Set<() => void>): Promise<void> {
   await act(settle);
 }
 
-for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const) {
+/** The page's reads, with a workflow action where the workflow read is the one under test. */
+function pageItem(endpoint: "detail" | "trigger" | "workflow"): AutomationSchedule {
+  return endpoint === "workflow" ? workflowAutomation("automation-a", "Alpha") : schedule("automation-a", "Alpha");
+}
+
+for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
   test(`polling recovery clears a ${failedEndpoint} error only after the complete refresh`, async () => {
-    const items = [schedule("automation-a", "Alpha")];
+    const items = [pageItem(failedEndpoint)];
     const intervals = new Set<() => void>();
     let fail = false;
     let holdRecovery = false;
     let release: (() => void) | undefined;
-    let listCalls = 0;
+    let detailCalls = 0;
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
       clearInterval: () => {},
@@ -1456,14 +1868,10 @@ for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const)
       const reject = (endpoint: typeof failedEndpoint) => {
         if (fail && endpoint === failedEndpoint) throw new Error("Polling unavailable");
       };
-      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
-        automations: async () => {
-          listCalls++;
-          reject("list");
-          return { automations: structuredClone(items) };
-        },
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
         workflowDefinitions: async () => { reject("workflow"); return []; },
         automation: async (id) => {
+          detailCalls++;
           reject("detail");
           return { automation: items.find((item) => item.automationId === id)!, executions: [], events: [] };
         },
@@ -1481,16 +1889,16 @@ for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const)
         Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
         fail = false;
         await invokePolls(intervals);
-        assert.equal(listCalls, 2, "a hidden skip cannot read or report recovery");
+        assert.equal(detailCalls, 2, "a hidden skip cannot read or report recovery");
         assert.equal(pageError(fixture), "Polling unavailable");
         Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
         holdRecovery = true;
         items[0] = { ...items[0]!, name: "Recovered" };
         await invokePolls(intervals);
-        assert.ok(maybeCardToggle(fixture.container, "Recovered"));
-        assert.equal(pageError(fixture), "Polling unavailable", "list success alone is not recovery");
+        assert.equal(pageTitle(fixture.container), "Recovered");
+        assert.equal(pageError(fixture), "Polling unavailable", "the automation's own read alone is not recovery");
         await invokePolls(intervals);
-        assert.equal(listCalls, 3, "a pending fan-out read retains serialization");
+        assert.equal(detailCalls, 3, "a pending trigger read retains serialization");
         holdRecovery = false;
         await act(async () => { release?.(); });
         await act(settle);
@@ -1509,14 +1917,14 @@ for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const)
 
 test("partial polling recovery retains the remaining failure and a later complete poll clears it", async () => {
   const intervals = new Set<() => void>();
-  let failure: "list" | "workflow" | null = null;
+  let failure: "trigger" | "workflow" | null = null;
   await withScopedClockOverrides(domWindow, {
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
-    const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
-      automations: async () => {
-        if (failure === "list") throw new Error("List unavailable");
-        return { automations: [] };
+    const fixture = await mountAt(pageRoute("automation-a"), [pageItem("workflow")], {}, {}, [], {}, runners, [], {
+      automationTriggers: async () => {
+        if (failure === "trigger") throw new Error("Triggers unavailable");
+        return { triggers: [] };
       },
       workflowDefinitions: async () => {
         if (failure === "workflow") throw new Error("Workflow unavailable");
@@ -1524,13 +1932,37 @@ test("partial polling recovery retains the remaining failure and a later complet
       },
     });
     try {
-      failure = "list";
+      failure = "trigger";
       await invokePolls(intervals);
-      assert.equal(pageError(fixture), "List unavailable");
+      assert.equal(pageError(fixture), "Triggers unavailable");
       failure = "workflow";
       await invokePolls(intervals);
       assert.equal(pageError(fixture), "Workflow unavailable");
       failure = null;
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), null);
+    } finally { await unmountFixture(fixture); }
+  });
+});
+
+test("the list's failed read shows above it, and the next complete read clears it", async () => {
+  const intervals = new Set<() => void>();
+  let fail = false;
+  await withScopedClockOverrides(domWindow, {
+    setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
+  }, async () => {
+    const fixture = await mountFixture([schedule("automation-a", "Alpha")], {}, {}, [], {}, runners, [], {
+      automations: async () => {
+        if (fail) throw new Error("List unavailable");
+        return { automations: [schedule("automation-a", "Alpha")] };
+      },
+    });
+    try {
+      fail = true;
+      await invokePolls(intervals);
+      assert.equal(pageError(fixture), "Couldn't Load Automations");
+      assert.ok(maybeCardToggle(fixture.container, "Alpha"), "the last-known rows stay");
+      fail = false;
       await invokePolls(intervals);
       assert.equal(pageError(fixture), null);
     } finally { await unmountFixture(fixture); }
@@ -1546,7 +1978,7 @@ for (const pollFails of [false, true]) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountFixture([item], {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
         automationTriggers: async () => {
           if (holdPoll) {
             await new Promise<void>((resolve) => { release = resolve; });
@@ -1557,12 +1989,13 @@ for (const pollFails of [false, true]) {
         updateAutomation: async () => { throw new Error("Pause failed"); },
       });
       try {
-        await expandCard(fixture, "Alpha");
         holdPoll = true;
         await invokePolls(intervals);
         await act(async () => { button(fixture.container, "Pause").click(); });
         await act(settle);
         assert.equal(pageError(fixture), "Pause failed");
+        assert.equal(fixture.container.querySelector(".automation-notice-slot .notice-title")?.textContent,
+          "Automation Not Paused", "the notice names the action that failed");
         await act(async () => { release?.(); });
         await act(settle);
         assert.equal(pageError(fixture), "Pause failed");
@@ -1587,11 +2020,12 @@ for (const oldPollFails of [false, true]) {
     let release: (() => void) | undefined;
     let obsoleteQueuedReads = 0;
     let newReads = 0;
+    const detail = () => ({ automation: item, executions: [], events: [] });
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
       clearInterval: () => { intervals.clear(); },
     }, async () => {
-      const fixture = await mountFixture([item], {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
         automationTriggers: async () => {
           if (holdOld) {
             await new Promise<void>((resolve) => { release = resolve; });
@@ -1601,14 +2035,13 @@ for (const oldPollFails of [false, true]) {
         },
       });
       try {
-        await expandCard(fixture, "Alpha");
         holdOld = true;
         await invokePolls(intervals);
         await fixture.replaceClient({
-          automations: async () => { obsoleteQueuedReads++; return { automations: [item] }; },
+          automation: async () => { obsoleteQueuedReads++; return detail(); },
         });
         await fixture.replaceClient({
-          automations: async () => { newReads++; return { automations: [item] }; },
+          automation: async () => { newReads++; return detail(); },
           automationTriggers: async () => ({ triggers: [] }),
           updateAutomation: async () => { throw new Error("New client Pause failed"); },
         });
@@ -1628,35 +2061,42 @@ for (const oldPollFails of [false, true]) {
   });
 }
 
-test("unmount revokes a pending poll and removes its timer before its rejection settles", async () => {
-  const intervals = new Set<() => void>();
-  let hold = false;
-  let release: (() => void) | undefined;
-  let reads = 0;
-  await withScopedClockOverrides(domWindow, {
-    setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
-    clearInterval: () => { intervals.clear(); },
-  }, async () => {
-    const fixture = await mountFixture([], {}, {}, [], {}, runners, [], {
-      automations: async () => {
-        reads++;
-        if (hold) {
-          await new Promise<void>((resolve) => { release = resolve; });
-          throw new Error("Unmounted polling failure");
-        }
-        return { automations: [] };
-      },
+for (const surface of ["list", "page"] as const) {
+  test(`unmounting the ${surface} revokes a pending poll and removes its timer before its rejection settles`, async () => {
+    const intervals = new Set<() => void>();
+    let hold = false;
+    let release: (() => void) | undefined;
+    let reads = 0;
+    const item = schedule("automation-a", "Alpha");
+    const read = async () => {
+      reads++;
+      if (hold) {
+        await new Promise<void>((resolve) => { release = resolve; });
+        throw new Error("Unmounted polling failure");
+      }
+    };
+    await withScopedClockOverrides(domWindow, {
+      setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
+      clearInterval: () => { intervals.clear(); },
+    }, async () => {
+      const fixture = surface === "list"
+        ? await mountFixture([], {}, {}, [], {}, runners, [], {
+          automations: async () => { await read(); return { automations: [] }; },
+        })
+        : await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
+          automation: async () => { await read(); return { automation: item, executions: [], events: [] }; },
+        });
+      hold = true;
+      await invokePolls(intervals);
+      await unmountFixture(fixture);
+      assert.equal(intervals.size, 0);
+      await act(async () => { release?.(); });
+      await invokePolls(intervals);
+      assert.equal(reads, 2);
+      assert.equal(fixture.container.childNodes.length, 0);
     });
-    hold = true;
-    await invokePolls(intervals);
-    await unmountFixture(fixture);
-    assert.equal(intervals.size, 0);
-    await act(async () => { release?.(); });
-    await invokePolls(intervals);
-    assert.equal(reads, 2);
-    assert.equal(fixture.container.childNodes.length, 0);
   });
-});
+}
 
 for (const mutationFails of [false, true]) {
   test(`API replacement revokes an old action's ${mutationFails ? "failure" : "post-mutation read"}`, async () => {
@@ -1668,8 +2108,8 @@ for (const mutationFails of [false, true]) {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; },
       clearInterval: () => { intervals.clear(); },
     }, async () => {
-      const fixture = await mountFixture([item], {}, {}, [], {}, runners, [], {
-        automations: async () => { oldReads++; return { automations: [item] }; },
+      const fixture = await mountAt(pageRoute("automation-a"), [item], {}, {}, [], {}, runners, [], {
+        automation: async () => { oldReads++; return { automation: item, executions: [], events: [] }; },
         updateAutomation: async () => {
           await new Promise<void>((resolve) => { release = resolve; });
           if (mutationFails) throw new Error("Obsolete action failed");
@@ -1677,9 +2117,8 @@ for (const mutationFails of [false, true]) {
         },
       });
       try {
-        await expandCard(fixture, "Alpha");
         await act(async () => { button(fixture.container, "Pause").click(); });
-        await fixture.replaceClient({ automations: async () => { throw new Error("New client polling failed"); } });
+        await fixture.replaceClient({ automation: async () => { throw new Error("New client polling failed"); } });
         assert.equal(pageError(fixture), "New client polling failed");
         await act(async () => { release?.(); });
         await act(settle);
@@ -1690,23 +2129,22 @@ for (const mutationFails of [false, true]) {
   });
 }
 
-
-for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const) {
+for (const failedEndpoint of ["detail", "trigger", "workflow"] as const) {
   test(`accepted Pause recovers its post-mutation ${failedEndpoint} read error`, async () => {
-    const items = [schedule("automation-a", "Alpha")];
+    const items = [pageItem(failedEndpoint)];
     const intervals = new Set<() => void>();
     let fail = false;
     let writes = 0;
-    const reads = { list: 0, workflow: 0, detail: 0, trigger: 0 };
-    const read = (endpoint: keyof typeof reads) => {
-      reads[endpoint]++;
+    const reads: Record<string, number> = failedEndpoint === "workflow"
+      ? { workflow: 0, detail: 0, trigger: 0 } : { detail: 0, trigger: 0 };
+    const read = (endpoint: string) => {
+      reads[endpoint] = (reads[endpoint] ?? 0) + 1;
       if (fail && endpoint === failedEndpoint) throw new Error("Accepted Pause refresh failed");
     };
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
-        automations: async () => { read("list"); return { automations: structuredClone(items) }; },
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
         workflowDefinitions: async () => { read("workflow"); return []; },
         automation: async () => { read("detail"); return { automation: items[0]!, executions: [], events: [] }; },
         automationTriggers: async () => { read("trigger"); return { triggers: [] }; },
@@ -1716,26 +2154,23 @@ for (const failedEndpoint of ["list", "workflow", "detail", "trigger"] as const)
           fail = true;
           return items[0]!;
         },
-        outboundEventSubscriptions: async () => { throw new Error("Unrelated subscription warning"); },
       });
-      const subscriptionError = () => fixture.container.querySelector('.outbound-events .automation-error')?.textContent;
       try {
-        await expandCard(fixture, "Alpha");
         await act(async () => { button(fixture.container, "Pause").click(); });
         await act(settle);
         assert.equal(pageError(fixture), "Accepted Pause refresh failed");
+        assert.equal(fixture.container.querySelector(".automation-notice-slot .notice-title")?.textContent, "Couldn't Refresh");
         assert.equal(items[0]!.enabled, false);
         fail = false;
         items[0] = { ...items[0]!, name: "Recovered" };
         const before = { ...reads };
         await invokePolls(intervals);
-        for (const endpoint of Object.keys(reads) as Array<keyof typeof reads>) {
-          assert.equal(reads[endpoint], before[endpoint] + 1, `healthy ${endpoint} read completed`);
+        for (const endpoint of Object.keys(reads)) {
+          assert.equal(reads[endpoint], before[endpoint]! + 1, `healthy ${endpoint} read completed`);
         }
-        assert.ok(maybeCardToggle(fixture.container, "Recovered"));
-        assert.ok(button(fixture.container, "Enable"));
+        assert.equal(pageTitle(fixture.container), "Recovered");
+        assert.ok(button(fixture.container, "Resume"));
         assert.equal(pageError(fixture), null);
-        assert.equal(subscriptionError(), "Unrelated subscription warning", "automation recovery leaves subscription errors alone");
         await invokePolls(intervals);
         assert.equal(pageError(fixture), null);
         assert.equal(writes, 1, "recovery must never retry the mutation");
@@ -1752,7 +2187,7 @@ for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
         updateAutomation: async (_id, spec) => {
           writes++;
           // A transport failure after the server changes state still does not prove acceptance
@@ -1763,13 +2198,12 @@ for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
         },
       });
       try {
-        await expandCard(fixture, "Alpha");
         await act(async () => { button(fixture.container, "Pause").click(); });
         await act(settle);
         await invokePolls(intervals);
         assert.equal(pageError(fixture), outcome === "accepted" ? null : `Pause ${outcome}`);
         assert.equal(items[0]!.enabled, outcome === "rejected");
-        assert.ok(button(fixture.container, outcome === "rejected" ? "Pause" : "Enable"));
+        assert.ok(button(fixture.container, outcome === "rejected" ? "Pause" : "Resume"));
         assert.equal(writes, 1);
       } finally { await unmountFixture(fixture); }
     });
@@ -1777,18 +2211,18 @@ for (const outcome of ["accepted", "rejected", "unknown acceptance"] as const) {
 }
 
 test("post-mutation read recovery needs a complete visible refresh", async () => {
-  const items = [schedule("automation-a", "Alpha")];
+  const items = [pageItem("workflow")];
   const intervals = new Set<() => void>();
   let fail = false;
   let hold = false;
   let writes = 0;
-  let listReads = 0;
+  let detailReads = 0;
   let release: (() => void) | undefined;
   await withScopedClockOverrides(domWindow, {
     setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
   }, async () => {
-    const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
-      automations: async () => { listReads++; return { automations: structuredClone(items) }; },
+    const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
+      automation: async () => { detailReads++; return { automation: structuredClone(items[0]!), executions: [], events: [] }; },
       workflowDefinitions: async () => { if (fail) throw new Error("Post-action workflow unavailable"); return []; },
       automationTriggers: async () => {
         if (hold) await new Promise<void>((resolve) => { release = resolve; });
@@ -1798,27 +2232,26 @@ test("post-mutation read recovery needs a complete visible refresh", async () =>
     });
     const visibility = Object.getOwnPropertyDescriptor(domWindow.document, "visibilityState");
     try {
-      await expandCard(fixture, "Alpha");
       await act(async () => { button(fixture.container, "Pause").click(); });
       await act(settle);
       assert.equal(pageError(fixture), "Post-action workflow unavailable");
       await invokePolls(intervals);
       assert.equal(pageError(fixture), "Post-action workflow unavailable", "another failed refresh is not recovery");
       fail = false;
-      const beforeHidden = listReads;
+      const beforeHidden = detailReads;
       Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "hidden" });
       await invokePolls(intervals);
-      assert.equal(listReads, beforeHidden);
+      assert.equal(detailReads, beforeHidden);
       assert.equal(pageError(fixture), "Post-action workflow unavailable");
       Object.defineProperty(domWindow.document, "visibilityState", { configurable: true, value: "visible" });
       hold = true;
-      items[0] = { ...items[0]!, name: "Fresh List" };
+      items[0] = { ...items[0]!, name: "Fresh Name" };
       await invokePolls(intervals);
-      assert.ok(maybeCardToggle(fixture.container, "Fresh List"));
-      assert.equal(pageError(fixture), "Post-action workflow unavailable", "partial fan-out completion cannot clear it");
-      const beforeBusy = listReads;
+      assert.equal(pageTitle(fixture.container), "Fresh Name");
+      assert.equal(pageError(fixture), "Post-action workflow unavailable", "a partial read cannot clear it");
+      const beforeBusy = detailReads;
       await invokePolls(intervals);
-      assert.equal(listReads, beforeBusy, "busy polls preserve serialization");
+      assert.equal(detailReads, beforeBusy, "busy polls preserve serialization");
       hold = false;
       await act(async () => { release?.(); });
       await act(settle);
@@ -1835,7 +2268,7 @@ test("post-mutation read recovery needs a complete visible refresh", async () =>
 
 for (const recoveryFails of [false, true]) {
   test(`a ${recoveryFails ? "failed" : "healthy"} read recovery cannot overwrite a newer failed action`, async () => {
-    const items = [schedule("automation-a", "Alpha")];
+    const items = [pageItem("workflow")];
     const intervals = new Set<() => void>();
     let failAfterWrite = false;
     let holdRecovery = false;
@@ -1844,7 +2277,7 @@ for (const recoveryFails of [false, true]) {
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => {},
     }, async () => {
-      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
         workflowDefinitions: async () => { if (failAfterWrite) throw new Error("Old post-action read failed"); return []; },
         automationTriggers: async () => {
           if (holdRecovery) {
@@ -1855,26 +2288,25 @@ for (const recoveryFails of [false, true]) {
         },
         updateAutomation: async (_id, spec) => {
           writes++;
-          if (writes > 1) throw new Error("New Enable write failed");
+          if (writes > 1) throw new Error("New Resume write failed");
           items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!;
         },
       });
       try {
-        await expandCard(fixture, "Alpha");
         await act(async () => { button(fixture.container, "Pause").click(); });
         await act(settle);
         assert.equal(pageError(fixture), "Old post-action read failed");
         failAfterWrite = false; holdRecovery = true;
         await invokePolls(intervals);
-        await act(async () => { button(fixture.container, "Enable").click(); });
+        await act(async () => { button(fixture.container, "Resume").click(); });
         await act(settle);
-        assert.equal(pageError(fixture), "New Enable write failed");
+        assert.equal(pageError(fixture), "New Resume write failed");
         await act(async () => { release?.(); });
         await act(settle);
-        assert.equal(pageError(fixture), "New Enable write failed");
+        assert.equal(pageError(fixture), "New Resume write failed");
         holdRecovery = false;
         await invokePolls(intervals);
-        assert.equal(pageError(fixture), "New Enable write failed");
+        assert.equal(pageError(fixture), "New Resume write failed");
         assert.equal(writes, 2);
       } finally { release?.(); await unmountFixture(fixture); }
     });
@@ -1883,18 +2315,18 @@ for (const recoveryFails of [false, true]) {
 
 for (const obsoleteReadFails of [false, true]) {
   test(`API replacement revokes an accepted write's obsolete ${obsoleteReadFails ? "failed" : "healthy"} recovery`, async () => {
-    const items = [schedule("automation-a", "Alpha")];
+    const items = [pageItem("workflow")];
     const intervals = new Set<() => void>();
     let hold = false;
     let failAfterWrite = false;
     let release: (() => void) | undefined;
     let writes = 0;
-    let listReads = 0;
+    let detailReads = 0;
     await withScopedClockOverrides(domWindow, {
       setInterval: (poll: () => void) => { intervals.add(poll); return 1; }, clearInterval: () => { intervals.clear(); },
     }, async () => {
-      const fixture = await mountFixture(items, {}, {}, [], {}, runners, [], {
-        automations: async () => { listReads++; return { automations: structuredClone(items) }; },
+      const fixture = await mountAt(pageRoute("automation-a"), items, {}, {}, [], {}, runners, [], {
+        automation: async () => { detailReads++; return { automation: structuredClone(items[0]!), executions: [], events: [] }; },
         workflowDefinitions: async () => {
           if (failAfterWrite) throw new Error("Accepted-write refresh failed");
           if (hold) {
@@ -1906,7 +2338,6 @@ for (const obsoleteReadFails of [false, true]) {
         updateAutomation: async (_id, spec) => { writes++; items[0] = { ...items[0]!, ...spec }; failAfterWrite = true; return items[0]!; },
       });
       try {
-        await expandCard(fixture, "Alpha");
         await act(async () => { button(fixture.container, "Pause").click(); });
         await act(settle);
         assert.equal(pageError(fixture), "Accepted-write refresh failed");
@@ -1916,18 +2347,18 @@ for (const obsoleteReadFails of [false, true]) {
         assert.ok(release, "the old client's recovery is in flight");
         await fixture.replaceClient({
           workflowDefinitions: async () => [],
-          updateAutomation: async () => { throw new Error("Replacement Enable failed"); },
+          updateAutomation: async () => { throw new Error("Replacement Resume failed"); },
         });
-        await act(async () => { button(fixture.container, "Enable").click(); });
+        await act(async () => { button(fixture.container, "Resume").click(); });
         await act(settle);
-        assert.equal(pageError(fixture), "Replacement Enable failed");
+        assert.equal(pageError(fixture), "Replacement Resume failed");
         await act(async () => { release?.(); });
         await act(settle);
-        assert.equal(pageError(fixture), "Replacement Enable failed");
+        assert.equal(pageError(fixture), "Replacement Resume failed");
         await invokePolls(intervals);
-        assert.equal(pageError(fixture), "Replacement Enable failed");
+        assert.equal(pageError(fixture), "Replacement Resume failed");
         assert.equal(writes, 1);
-        assert.equal(listReads, 5, "initial, accepted-action, old recovery and two current-client reads only");
+        assert.equal(detailReads, 5, "initial, accepted-action, old recovery and two current-client reads only");
       } finally { release?.(); await unmountFixture(fixture); }
     });
   });
@@ -1964,6 +2395,7 @@ async function mountAt(view: View, ...args: Parameters<typeof mountFixture>): Pr
 
 const NEW_ROUTE: View = { name: "automations", editor: { kind: "new" } };
 const editRoute = (automationId: string): View => ({ name: "automations", editor: { kind: "edit", automationId } });
+const pageRoute = (id: string): View => ({ name: "automation", id });
 
 function workflowAutomation(id: string, name: string): AutomationSchedule {
   const stored = schedule(id, name);
@@ -1984,7 +2416,7 @@ const reviewGraph: WorkflowDefinition = {
   ],
 };
 
-test("New Automation and Edit open the editor's routes in the list's place, and Back returns to the list", async () => {
+test("New Automation opens the editor in the list's place and returns to the list; Edit returns to the automation's page", async () => {
   const fixture = await mountFixture([schedule("automation-1", "Nightly")]);
   try {
     assertNoDomNode(fixture.container.querySelector(".automation-editor"), "the list renders no editor");
@@ -1997,10 +2429,20 @@ test("New Automation and Edit open the editor's routes in the list's place, and 
     await goBack(fixture);
     assert.ok(fixture.container.querySelector(".automation-list"));
 
-    await expandCard(fixture, "Nightly");
+    await openPage(fixture, "Nightly");
     await openEdit(fixture);
     assert.equal(editorTitle(fixture.container), "Edit Nightly");
-    await goBack(fixture);
+    // #2968: the editor's Back names the automation and returns to its page.
+    const back = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Back to Nightly"]');
+    assert.ok(back, "Back to Nightly is rendered");
+    assertNoDomNode(fixture.container.querySelector('button[aria-label="Back to Automations"]'));
+    await act(async () => { back.click(); });
+    await act(settle);
+    assert.equal(pageTitle(fixture.container), "Nightly");
+    await act(async () => {
+      fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Back to Automations"]')!.click();
+    });
+    await act(settle);
     assert.ok(fixture.container.querySelector(".automation-list"));
   } finally {
     await unmountFixture(fixture);
@@ -2349,7 +2791,7 @@ test("a create that settles after the person left does not navigate away from wh
     assertNoDomNode(fixture.container.querySelector(".automation-editor"), "Back left the editor");
 
     // Another editor, with an unsaved change of its own.
-    await expandCard(fixture, "Nightly");
+    await openPage(fixture, "Nightly");
     await openEdit(fixture);
     await setLabeledInput(fixture.container, "Name", "Nightly Draft");
     assert.equal(editorTitle(fixture.container), "Edit Nightly");
@@ -2360,6 +2802,271 @@ test("a create that settles after the person left does not navigate away from wh
     assert.equal((editorRoot(fixture.container).querySelector("input") as HTMLInputElement).value, "Nightly Draft");
     assert.match(fixture.container.querySelector(".save-bar")?.textContent ?? "", /Unsaved changes/);
     assert.ok(toasts.includes("Automation created."), "the person still hears that it was created");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+/* ------------------------------------------------------------------------------------------------
+ * When to Run (#2971): Schedule's preview, Examples and checks, and the Time Zone list
+ * ---------------------------------------------------------------------------------------------- */
+
+// Friday, October 23, 2026 at 5:00 PM in Chicago (22:00 UTC): the next weekday 9:00 AM is Monday's.
+const FRIDAY_EVENING = Date.UTC(2026, 9, 23, 22);
+
+/** Run `body` with `Date.now()` pinned, so every time the editor words is fixed. */
+async function atFixedNow<T>(now: number, body: () => Promise<T>): Promise<T> {
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    return await body();
+  } finally {
+    Date.now = realNow;
+  }
+}
+
+function scheduleField(container: HTMLDivElement): HTMLInputElement {
+  const input = container.querySelector<HTMLInputElement>(".automation-cron-input");
+  assert.ok(input, "the Schedule field is rendered");
+  return input;
+}
+
+function schedulePreviewLine(container: HTMLDivElement): HTMLElement {
+  const preview = container.querySelector<HTMLElement>(".automation-schedule-preview");
+  assert.ok(preview, "the preview line is rendered");
+  return preview;
+}
+
+function timeZoneField(container: HTMLDivElement): HTMLInputElement {
+  const input = container.querySelector<HTMLInputElement>('input[role="combobox"][aria-label="Time Zone"]');
+  assert.ok(input, "the Time Zone field is rendered");
+  return input;
+}
+
+/** The ids a field's `aria-describedby` names, and the text of each. */
+function descriptions(container: HTMLDivElement, input: HTMLInputElement): string[] {
+  return (input.getAttribute("aria-describedby") ?? "").split(" ").filter(Boolean)
+    .map((id) => container.querySelector(`[id="${id}"]`)?.textContent ?? `missing #${id}`);
+}
+
+async function typeInto(input: HTMLInputElement, value: string): Promise<void> {
+  const setter = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")?.set;
+  assert.ok(setter);
+  await act(async () => {
+    input.focus();
+    setter.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: value }) as never);
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as never);
+  });
+}
+
+async function blurField(input: HTMLInputElement): Promise<void> {
+  await act(async () => { input.blur(); });
+}
+
+const PREVIEW_ZONE = "( \\(Central Time\\))?";
+
+test("typing \"0 9 * * 1-5\" previews Weekdays at 9:00 AM and the next weekday 9:00 in the chosen zone, politely", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")]);
+    try {
+      const input = scheduleField(fixture.container);
+      const preview = schedulePreviewLine(fixture.container);
+      assert.equal(preview.getAttribute("aria-live"), "polite");
+      assert.equal(fixture.container.querySelector(`label[for="${input.id}"]`)?.textContent, "Schedule");
+      assert.match(preview.textContent ?? "", new RegExp(`^Every day at 2:00 AM · Next Tomorrow, 2:00 AM${PREVIEW_ZONE}$`));
+
+      await typeInto(input, "0 9 * * 1-5");
+      // The automation's zone is Chicago: Monday 9:00 AM there, named when the viewer is elsewhere.
+      assert.match(preview.textContent ?? "", new RegExp(`^Weekdays at 9:00 AM · Next Mon, 9:00 AM${PREVIEW_ZONE}$`));
+      assert.deepEqual(descriptions(fixture.container, input),
+        ["Minute, hour, day of month, month, weekday.", preview.textContent]);
+
+      // A valid expression the words do not cover still gets the scheduler's next run.
+      await typeInto(input, "*/20 9-17 * * 1-5");
+      assert.match(preview.textContent ?? "", new RegExp(`^Custom schedule · Next Today, 5:20 PM${PREVIEW_ZONE}$`));
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("each Examples item fills Schedule with its expression, whose preview matches the item's label", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
+    try {
+      const input = scheduleField(fixture.container);
+      const examples = button(fixture.container, "Examples");
+      assert.equal(examples.getAttribute("aria-haspopup"), "menu");
+      const labels = [
+        "Every Hour", "Every Day at 9:00 AM", "Weekdays at 9:00 AM", "Every Monday at 9:00 AM",
+        "Monthly on the 1st at 9:00 AM", "Quarterly on the 1st at 9:00 AM",
+      ];
+      for (const label of labels) {
+        await act(async () => { examples.click(); });
+        const menu = document.querySelector('[role="menu"][aria-label="Schedule Examples"]');
+        assert.ok(menu, "the Examples menu opens");
+        const items = [...menu.querySelectorAll<HTMLElement>('[role="menuitem"]')];
+        assert.deepEqual(items.map((item) => item.querySelector(".menu-text")?.textContent), labels);
+        const item = items.find((candidate) => candidate.querySelector(".menu-text")?.textContent === label)!;
+        const cron = item.querySelector(".menu-desc")?.textContent;
+        await act(async () => { item.click(); });
+        await act(settle);
+        assertNoDomNode(document.querySelector('[role="menu"][aria-label="Schedule Examples"]'), "choosing closes the menu");
+        assert.equal(input.value, cron, `${label} fills its expression`);
+        assert.equal(document.activeElement, input, "focus returns to Schedule");
+        const words = schedulePreviewLine(fixture.container).textContent?.split(" · ")[0] ?? "";
+        assert.equal(titleCaseLabel(words), label, `${cron} previews as ${label}`);
+      }
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+for (const strict of [false, true]) {
+  test(`blurring "0 9 * *" shows the five-field error under Schedule; submitting focuses Schedule and sends nothing${strict ? " under StrictMode" : ""}`, async () => {
+    strictMode = strict;
+    const fixture = await mountAt(editRoute("automation-1"), [schedule("automation-1", "Nightly")]);
+    try {
+      const input = scheduleField(fixture.container);
+      const preview = schedulePreviewLine(fixture.container);
+      await typeInto(input, "0 9 * *");
+      // Not yet: an error waits for the blur that ends the edit (§8.5), and the preview has nothing to say.
+      assertNoDomNode(fixture.container.querySelector(".field-error"), "no error while typing");
+      assert.equal(preview.textContent, "");
+
+      await blurField(input);
+      const error = fixture.container.querySelector(".field-error");
+      assert.equal(error?.textContent, "Use five fields: minute, hour, day of month, month, weekday.");
+      assert.equal(input.getAttribute("aria-invalid"), "true");
+      assert.deepEqual(descriptions(fixture.container, input), [error?.textContent]);
+      assert.ok(![...fixture.container.querySelectorAll(".field-helper")]
+        .some((helper) => helper.textContent === "Minute, hour, day of month, month, weekday."), "the error replaces the helper");
+      assert.equal(preview.textContent, "", "the preview is hidden");
+      assertNoDomNode(error?.closest('[role="alert"]') ?? null, "the error is not an alert");
+
+      await act(async () => { (document.activeElement as HTMLElement | null)?.blur(); });
+      await saveChanges(fixture);
+      assert.equal(fixture.updates.length, 0, "no request is sent");
+      assert.equal(document.activeElement, input, "Schedule takes focus");
+
+      // The error clears as soon as the expression is valid again, and the preview returns.
+      await typeInto(input, "0 9 * * 1-5");
+      assertNoDomNode(fixture.container.querySelector(".field-error"));
+      assert.equal(input.getAttribute("aria-invalid"), null);
+      assert.match(preview.textContent ?? "", /^Weekdays at 9:00 AM · Next /);
+      await saveChanges(fixture);
+      assert.equal(fixture.updates.length, 1);
+      assert.equal(fixture.updates[0]!.spec.cron, "0 9 * * 1-5");
+    } finally {
+      strictMode = false;
+      await unmountFixture(fixture);
+    }
+  });
+}
+
+test("a field the scheduler refuses for one value names that field and its values", async () => {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
+  try {
+    const input = scheduleField(fixture.container);
+    await typeInto(input, "0 25 * * *");
+    await blurField(input);
+    assert.equal(fixture.container.querySelector(".field-error")?.textContent,
+      "Use 0–23 for the hour, or a range, list or step of them.");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("Time Zone finds New York by typing \"york\", and a stored zone the browser does not list stays chosen", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    // US/Eastern is an alias that Intl.supportedValuesOf("timeZone") does not list.
+    assert.ok(!Intl.supportedValuesOf("timeZone").includes("US/Eastern"));
+    const stored = { ...schedule("automation-1", "Nightly"), timezone: "US/Eastern" };
+    const fixture = await mountAt(editRoute("automation-1"), [stored]);
+    try {
+      const zone = timeZoneField(fixture.container);
+      assert.equal(zone.value, "Eastern (UTC−4)", "the stored zone shows as chosen");
+      await act(async () => { zone.click(); });
+      // Opened, the list marks the stored zone as the chosen one.
+      assert.deepEqual([...fixture.container.querySelectorAll<HTMLElement>('[role="option"].is-selected')]
+        .map((option) => option.textContent), ["Eastern (UTC\u22124)US/Eastern"]);
+
+      await typeInto(zone, "york");
+      const options = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')];
+      assert.deepEqual(options.map((option) => option.textContent), ["New York (UTC−4)America/New_York"]);
+      await act(async () => { options[0]!.click(); });
+      await act(settle);
+      assert.equal(timeZoneField(fixture.container).value, "New York (UTC−4)");
+      await saveChanges(fixture);
+      assert.equal(fixture.updates[0]?.spec.timezone, "America/New_York");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("an enabled automation whose stored zone has spaces around it previews its next run and stays editable (CR-1.1)", async () => {
+  await atFixedNow(FRIDAY_EVENING, async () => {
+    // The control plane trims a zone to check it and stores it as written, so this spec is valid.
+    const stored = { ...schedule("automation-1", "Nightly"), cron: "0 9 * * 1-5", timezone: " America/Chicago " };
+    const fixture = await mountAt(editRoute("automation-1"), [stored]);
+    try {
+      assert.equal(editorTitle(fixture.container), "Edit Nightly", "the editor renders");
+      assert.match(schedulePreviewLine(fixture.container).textContent ?? "",
+        new RegExp(`^Weekdays at 9:00 AM · Next Mon, 9:00 AM${PREVIEW_ZONE}$`));
+      assert.equal(timeZoneField(fixture.container).value, "Chicago (UTC−5)", "the stored zone shows as the zone it is");
+
+      await setLabeledInput(fixture.container, "Name", "Nightly Renamed");
+      await saveChanges(fixture);
+      assert.equal(fixture.updates.length, 1);
+      assert.equal(fixture.updates[0]!.spec.timezone, " America/Chicago ", "the stored zone saves as it was written");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("the daylight-saving rules appear only in the About Time Zones popover", async () => {
+  const fixture = await mountAt(NEW_ROUTE, [], {}, {}, [], {}, runners);
+  try {
+    const page = () => document.body.textContent ?? "";
+    assert.doesNotMatch(page(), /skip forward|spring-forward|fall back|fall-back/i);
+    const about = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="About Time Zones"]');
+    assert.ok(about, "About Time Zones is beside the Time Zone label");
+    assert.ok(about.classList.contains("icon-btn") && about.classList.contains("sm"));
+    assert.ok(about.closest(".automation-zone-label")?.textContent?.includes("Time Zone"));
+    await act(async () => { about.click(); });
+    const popover = document.querySelector('[role="dialog"][aria-label="About Time Zones"]');
+    assert.equal(popover?.querySelector(".info-popover-text")?.textContent,
+      "When clocks skip forward, a time that doesn't exist is skipped. When they fall back, a repeated time runs once.");
+    assert.equal(page().match(/When clocks skip forward/g)?.length, 1, "nowhere else");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+
+test("editing an automation keeps its retired exec agent unavailable with the configuration reason", async () => {
+  const stored = schedule("retired-exec", "Retired Exec");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.request.agentId = "retired-codex";
+  const machine = { ...runners[0]!, agents: [...runners[0]!.agents, {
+    id: "retired-codex", name: "Codex", command: "codex", args: [], env: {},
+    driver: "codex" as const, available: true,
+  }] };
+  const fixture = await mountAt(editRoute(stored.automationId), [stored], {}, {}, [], {}, [machine]);
+  try {
+    const trigger = choiceTrigger(fixture.container, "Agent");
+    assert.ok(trigger);
+    assert.match(trigger.getAttribute("aria-label") ?? "", /^Agent: Codex$/);
+    await act(async () => trigger.click());
+    const option = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((candidate) => candidate.getAttribute("aria-selected") === "true");
+    assert.ok(option, "the bound retired agent stays listed");
+    assert.equal(option.getAttribute("aria-disabled"), "true", "even an older runner's available=true cannot revive exec");
+    assert.match(option.textContent ?? "", /Change this agent's driver to codex-app-server in the runner configuration/);
   } finally {
     await unmountFixture(fixture);
   }

@@ -25,7 +25,7 @@
 #include <sys/mount.h>
 #endif
 
-#define MAX_ENTRIES 8192U
+#define MAX_ENTRIES 8208U
 #define MAX_BYTES (64U * 1024U * 1024U)
 #define MAX_FILE (2U * 1024U * 1024U)
 #define MAX_WORK (256U * 1024U * 1024U)
@@ -47,6 +47,7 @@ static uint32_t work_reads, allowed_reads;
 static uint64_t allowed_bytes;
 static pid_t parent;
 static int root_fd = -1, lock_fd = -1, guard_fd = -1, anchor_fd = -1;
+static int legacy_anchor_absent;
 static char *root_path, *barrier, *barrier_stage;
 static int ancestry_fds[1024];
 static char *ancestry_names[1024];
@@ -130,6 +131,7 @@ static void pinned(void) {
     S_ISDIR(info.st_mode) && same_identity(&info, &lock_identity), "lease lock identity changed");
   if (guard_fd >= 0) require(fstatat(lock_fd, GUARD, &info, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&info, &guard_identity), "permanent lease fence changed");
   if (anchor_fd >= 0) require(fstatat(root_fd, ANCHOR, &info, AT_SYMLINK_NOFOLLOW) == 0 && same_stamp(&info, &anchor_identity), "selected checkpoint changed");
+  if (legacy_anchor_absent) require(fstatat(root_fd, ANCHOR, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "legacy checkpoint appeared before selection");
 }
 static int open_root(const char *path) {
   require(path[0] == '/' && strlen(path) < 32768, "invalid lease root");
@@ -187,7 +189,7 @@ static uint32_t entries(unsigned dir, Entry *values, uint32_t offset) {
   errno = 0; struct dirent *item;
   while ((item = readdir(stream)) != NULL) {
     if (!strcmp(item->d_name, ".") || !strcmp(item->d_name, "..")) continue;
-    require(++raw_count <= 4096 && offset + count < MAX_ENTRIES, "lease directory scan limit exceeded");
+    require(++raw_count <= 4104 && offset + count < MAX_ENTRIES, "lease directory scan limit exceeded");
     if (!dir && !strcmp(item->d_name, "mutable-home.lock")) continue;
     values[offset + count] = read_entry(dir, item->d_name); if (values[offset + count].name) count++; errno = 0;
   }
@@ -287,12 +289,14 @@ static void verify_entry(const Entry *expected, int optional) {
 static void owned(const Entry *tip, const char *future, int copied) {
   pinned(); struct stat info;
   require(fstatat(root_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "acquired lease has a future successor");
+  if (tip->dir == 1) require(fstatat(lock_fd, future, &info, AT_SYMLINK_NOFOLLOW) != 0 && errno == ENOENT, "legacy acquired lease has a future successor");
   if (!copied) verify_entry(tip, 0);
 }
 static void select_checkpoint(const char *name) {
   pinned(); int fd = openat(root_fd, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC); require(fd >= 0, "checkpoint candidate unavailable");
   sync_fd(fd); close(fd); sync_fd(root_fd); boundary("before-selection");
   require(renameat(root_fd, name, root_fd, ANCHOR) == 0, "checkpoint selection failed");
+  legacy_anchor_absent = 0;
   if (anchor_fd >= 0) close(anchor_fd);
   anchor_fd = openat(root_fd, ANCHOR, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
   require(anchor_fd >= 0 && fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
@@ -345,8 +349,9 @@ int main(int argc, char **argv) {
   require(fgetc(stdin) == EOF, "extra lease I/O input");
   if (operation == 1) actor_pid(tip->raw, tip->size);
   if (operation == 2) { require(jobs_count == 1 && !strncmp(jobs[0].name, "next-", 5) && !strcmp(jobs[0].name, future) && !jobs[0].count && jobs[0].size <= 4096, "invalid canonical successor publication"); actor_pid(jobs[0].raw, jobs[0].size); }
-  if (operation == 3) require(jobs_count == 1 && !jobs[0].count && tip->dir == 0 &&
-    (!strcmp(jobs[0].name, tip->name) || !strcmp(jobs[0].name, "checkpoint.json") || !strncmp(jobs[0].name, "lease-", 6)), "invalid canonical mirror publication");
+  if (operation == 3) require(jobs_count == 1 && !jobs[0].count &&
+    (tip->dir == 0 ? (!strcmp(jobs[0].name, tip->name) || !strcmp(jobs[0].name, "checkpoint.json") || !strncmp(jobs[0].name, "lease-", 6)) :
+      !strcmp(jobs[0].name, tip->name) && !strncmp(tip->name, "next-", 5)), "invalid canonical mirror publication");
   struct stat guard_stat; int new_guard = fstatat(lock_fd, GUARD, &guard_stat, AT_SYMLINK_NOFOLLOW) != 0;
   if (new_guard) {
     coherent_filesystem();
@@ -369,12 +374,18 @@ int main(int argc, char **argv) {
     Entry *wanted = find_expected(sorted, count, e); require(wanted && entry_equal(e, wanted), "lease snapshot changed before publication"); seen[(size_t)(wanted - expected)] = 1; }
   for (uint32_t i = 0; i < count; i++) require(seen[i] || expected[i].optional, "verified lease snapshot evidence disappeared");
   anchor_fd = openat(root_fd, ANCHOR, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
-  require(anchor_fd >= 0 && fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
+  if (anchor_fd < 0) {
+    require(errno == ENOENT && (operation == 1 || operation == 3) && tip->dir == 1, "selected checkpoint unavailable");
+    legacy_anchor_absent = 1;
+  } else require(fstat(anchor_fd, &anchor_identity) == 0, "selected checkpoint unavailable");
   if (operation == 3) {
+    require(tip->dir == 0 || legacy_anchor_absent, "reverse mirror requires an unselected legacy journal");
     verify_entry(tip, 0); pinned();
-    if (linkat(root_fd, tip->name, lock_fd, jobs[0].name, 0) != 0) { require(errno == EEXIST, "canonical mirror publication failed"); Entry mirror = read_entry(1, jobs[0].name);
-      require(mirror.size == tip->size && !memcmp(mirror.raw, tip->raw, tip->size), "canonical mirror conflicts with immutable source"); free_entry(&mirror); }
-    sync_fd(lock_fd); out8('D'); out32(work_reads); out64(work_bytes); fflush(stdout); return 0;
+    unsigned target = 1 - tip->dir;
+    if (linkat(directory(tip->dir), tip->name, directory(target), jobs[0].name, 0) != 0) { require(errno == EEXIST, "canonical mirror publication failed"); Entry mirror = read_entry(target, jobs[0].name);
+      require(mirror.size == tip->size && !memcmp(mirror.raw, tip->raw, tip->size) &&
+        (tip->dir == 0 || (!strcmp(mirror.dev, tip->dev) && !strcmp(mirror.ino, tip->ino))), "canonical mirror conflicts with immutable source"); free_entry(&mirror); }
+    sync_fd(directory(target)); out8('D'); out32(work_reads); out64(work_bytes); fflush(stdout); return 0;
   }
   int copied = 0; owned(tip, future, copied);
   if (operation == 2) {

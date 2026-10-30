@@ -1,0 +1,672 @@
+import assert from "node:assert/strict";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { test } from "node:test";
+import {
+  baselineVersions, combinedExit, decide, detect, dispatchScope, executablePath, EXIT, fingerprint, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
+  newestRelease, paths, recordKey, RECORD_VERSION, runOutcome, sourceFiles, suiteArgv, suiteEnv, summarize, targetsFor, validRecord,
+} from "./harness-assumptions.mjs";
+import { CODEX_GUARD_TRUST_VERSION_RANGE } from "../apps/runner/src/codex-managed-worktree-guard.ts";
+import { CLAUDE_MEDIA_REVIEWER_CLI_VERSION } from "../apps/runner/src/claude-media-reviewer.ts";
+import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION } from "../apps/runner/src/discovery/claude-code.ts";
+
+const workflow = readFileSync(new URL("../.github/workflows/harness-assumptions.yml", import.meta.url), "utf8");
+const codex = harnessById("codex");
+
+function scratch(t) {
+  const dir = mkdtempSync(join(tmpdir(), "harness-assumptions-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  return dir;
+}
+function ciEnv(temp, extra = {}) {
+  return { RUNNER_TEMP: temp, PATH: process.env.PATH, GITHUB_OUTPUT: join(temp, "output"), GITHUB_STEP_SUMMARY: join(temp, "summary.md"),
+    GITHUB_EVENT_NAME: "schedule", GITHUB_SERVER_URL: "https://github.com", GITHUB_REPOSITORY: "picoduck/wollipog", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", ...extra };
+}
+function outputs(temp) {
+  if (!existsSync(join(temp, "output"))) return {};
+  return Object.fromEntries(readFileSync(join(temp, "output"), "utf8").trim().split("\n").map(l => l.split("=")));
+}
+function registry(version, { ok = true, status = 200, name = "@openai/codex" } = {}) {
+  return async () => ({ ok, status, json: async () => ({ name, version }) });
+}
+const silent = async () => { throw new Error("offline"); };
+
+test("the workflow matrix lists exactly the registered harnesses", () => {
+  const matrix = workflow.match(/^ {8}harness: \[([^\]]*)\]$/m)?.[1].split(",").map(s => s.trim());
+  assert.deepEqual(matrix, HARNESSES.map(h => h.id));
+  const options = workflow.match(/^ {8}type: choice\n(?: {8}#.*\n)* {8}options: \[([^\]]*)\]$/m)?.[1].split(",").map(s => s.trim());
+  assert.deepEqual(options, ["all", ...HARNESSES.map(h => h.id)], "a dispatch can choose exactly all or one registered harness");
+  assert.equal(new Set(HARNESSES.map(h => h.id)).size, HARNESSES.length);
+  for (const harness of HARNESSES) {
+    assert.match(harness.id, /^[a-z][a-z0-9-]*$/);
+    for (const field of ["name", "npmPackage", "bin", "binaryEnv", "reportDirArg", "documentation"]) assert.equal(typeof harness[field], "string", `${harness.id}.${field}`);
+    assert.ok(Array.isArray(harness.suite) && harness.suite.length > 0);
+    const targets = harness.baselines.length + 1;
+    assert.ok(harness.timeoutMinutes > 0 && harness.timeoutMinutes * targets + 30 <= 340, `${harness.id}: ${targets} targets must fit inside the job timeout`);
+    assert.ok(existsSync(new URL(`../${harness.documentation}`, import.meta.url)));
+    assert.ok(sourceFiles(harness).length > 1);
+  }
+});
+
+test("the workflow is scheduled outside 00:00-02:00 UTC, one job per harness at a time, read-only and secret-free", () => {
+  const crons = [...workflow.matchAll(/cron: "([^"]+)"/g)].map(m => m[1]);
+  assert.equal(crons.length, 1);
+  for (const cron of crons) {
+    const hours = cron.split(" ")[1];
+    assert.match(hours, /^\d+$/, "a single fixed hour keeps the window check exact");
+    assert.ok(Number(hours) >= 2 && Number(hours) <= 23, `${cron} must avoid 00:00-02:00 UTC`);
+  }
+  assert.match(workflow, /^ {2}workflow_dispatch:$/m);
+  assert.match(workflow, /^permissions:\n {2}contents: read\n\n/m);
+  assert.equal(workflow.match(/permissions:/g).length, 1, "no job widens the permissions");
+  // No workflow-wide group: GitHub would cancel a whole pending run, jobs and reports included.
+  assert.doesNotMatch(workflow, /^concurrency:/m);
+  // A measured harness shares its group with every other run's job of that harness; an excluded one
+  // is alone in its run's group. The condition mirrors dispatchScope for the choice input.
+  const groups = [...workflow.matchAll(/^ {4}concurrency:\n {6}group: (.+)\n {6}cancel-in-progress: (\w+)$/gm)];
+  assert.equal(groups.length, 1, "only the probe job takes a concurrency group");
+  assert.equal(groups[0][1], "${{ (github.event_name != 'workflow_dispatch' || inputs.harness == 'all' || inputs.harness == matrix.harness) && " +
+    "format('harness-assumption-probes-{0}', matrix.harness) || format('harness-assumption-probes-{0}-excluded-{1}', matrix.harness, github.run_id) }}");
+  assert.equal(groups[0][2], "false", "a waiting job never cancels a running measurement");
+  assert.ok(workflow.indexOf("    concurrency:") > workflow.indexOf("  probe:") && workflow.indexOf("    concurrency:") < workflow.indexOf("  summarize:"));
+  assert.doesNotMatch(workflow, /secrets\.|github\.token|GH_TOKEN|GITHUB_TOKEN/);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /runs-on: ubuntu-24\.04/);
+  assert.match(readFileSync(new URL("./harness-assumptions-isolate.sh", import.meta.url), "utf8"), /pnpm install --frozen-lockfile/);
+  for (const use of workflow.match(/uses: \S+/g)) assert.match(use, /@[0-9a-f]{40}$/, `${use} must be pinned`);
+  // Dispatch input only reaches the driver through the environment, never interpolated into a script.
+  assert.match(workflow, /DISPATCH_HARNESS: \$\{\{ inputs\.harness \}\}/);
+  assert.doesNotMatch(workflow, /run: .*inputs\./);
+});
+
+test("the workflow publishes every outcome and records only a matched measurement", () => {
+  const step = name => workflow.split(/\n(?= {6}- )/).find(s => s.includes(name));
+  assert.match(step("Upload Report"), /if: always\(\)/);
+  assert.match(step("Upload Report"), /if-no-files-found: error/);
+  assert.match(step("Save Measurement Record"), /if: steps\.measure\.outcome == 'success' && steps\.measure\.outputs\.exit == '0'/);
+  assert.doesNotMatch(step("Restore Measurement Record"), /restore-keys/, "only the exact key may count as measured");
+  assert.doesNotMatch(workflow, /continue-on-error/);
+  for (const name of ["Setup pnpm", "Setup Node 24 With pnpm Cache", "Measure Assumptions"]) assert.match(step(name), /if: steps\.decide\.outputs\.measure == 'true'/);
+  assert.ok(workflow.indexOf("Detect Releases") < workflow.indexOf("Setup pnpm"), "detection needs no dependency install");
+  assert.match(step("Measure Assumptions"), /HARNESS_PROBE_USER: harness-probe\n {10}HARNESS_PROBE_ROOT: \/opt\/harness-probe/);
+  // An excluded harness restores no record and never reaches decide; both steps see the dispatch.
+  for (const name of ["Detect Releases", "Decide Whether to Measure"]) assert.match(step(name), /DISPATCH_HARNESS: \$\{\{ inputs\.harness \}\}/);
+  for (const name of ["Restore Measurement Record", "Decide Whether to Measure"]) assert.match(step(name), /if: steps\.detect\.outputs\.excluded != 'true'/);
+});
+
+test("every run ends with a summary job that fails on a dropped or interrupted harness", () => {
+  const job = workflow.slice(workflow.indexOf("\n  summarize:"));
+  assert.match(job, /^ {4}needs: probe\n {4}if: always\(\)$/m, "the summary runs after cancelled and failed harness jobs too");
+  assert.match(job, /uses: actions\/download-artifact@[0-9a-f]{40} # v\S+\n {8}with:\n {10}pattern: harness-assumptions-\*\n {10}path: \$\{\{ runner\.temp \}\}\/harness-assumption-reports\n/);
+  assert.match(job, /- name: Summarize\n {8}if: always\(\)\n {8}run: node scripts\/harness-assumptions\.mjs summarize --reports "\$\{\{ runner\.temp \}\}\/harness-assumption-reports"/);
+  assert.doesNotMatch(job, /concurrency:/, "the summary never waits behind a measurement");
+});
+
+test("no harness ever runs a probe that needs real credentials or a real model", () => {
+  const prepareScripts = HARNESSES.filter(h => h.prepare).map(h => readFileSync(new URL(`../${h.prepare.command.at(-1)}`, import.meta.url), "utf8")).join("\n");
+  const text = JSON.stringify(HARNESSES.map(h => ({ ...h, baselines: [] }))) + workflow + prepareScripts;
+  assert.doesNotMatch(text, /inference-transport|ANTHROPIC_API_KEY|OPENAI_API_KEY|CLAUDE_CONFIG_DIR|\.codex\b|\.claude\b/);
+  const env = suiteEnv(codex, "/opt/codex", "/tmp/home", { PATH: "/bin", GITHUB_TOKEN: "x", ACTIONS_RUNTIME_TOKEN: "x", OPENAI_API_KEY: "x", CODEX_ASSUMPTION_ACKNOWLEDGED_UNAVAILABLE: "escalation", HOME: "/home/runner", RUNNER_TEMP: "/r" });
+  assert.deepEqual(Object.keys(env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
+  assert.equal(env.HOME, "/tmp/home");
+  assert.equal(env.CODEX_BIN, "/opt/codex");
+});
+
+test("Pi measures only the newest release, prepares bubblewrap network namespaces and hashes its whole probe set", () => {
+  const pi = harnessById("pi");
+  assert.equal(pi.npmPackage, "@earendil-works/pi-coding-agent");
+  assert.deepEqual(baselineVersions(pi), []);
+  assert.deepEqual(targetsFor("1.4.0", baselineVersions(pi)), [{ label: "newest release", version: "1.4.0" }]);
+  assert.deepEqual(suiteArgv(pi, "/r", "/n/node"), ["/n/node", "--import", "tsx", "scripts/pi-assumptions.mjs", "--report-dir", "/r"]);
+  const env = suiteEnv(pi, "/opt/pi", "/tmp/home", { PATH: "/bin", GITHUB_TOKEN: "x", ANTHROPIC_API_KEY: "x", HOME: "/home/runner" });
+  assert.deepEqual(Object.keys(env).sort(), ["CI", "HOME", "LANG", "PATH", "PI_BIN", "TMPDIR"]);
+  const prepare = readFileSync(new URL("./harness-assumptions-prepare-pi.sh", import.meta.url), "utf8");
+  assert.match(prepare, /bash scripts\/configure-ci-bubblewrap\.sh/);
+  assert.match(prepare, /--unshare-net/);
+  const files = sourceFiles(pi);
+  for (const file of ["scripts/pi-assumptions.mjs", "scripts/harness-assumptions-prepare-pi.sh", "apps/runner/scripts/pi-assumptions-probe.ts",
+    "apps/runner/scripts/pi-probe-support.ts", "apps/runner/scripts/pi-rpc-shape.ts", "apps/runner/scripts/pi-net-observer.mjs",
+    "apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs"]) assert.ok(files.includes(file), file);
+  assert.match(fingerprint(pi), /^[0-9a-f]{64}$/);
+  assert.match(readFileSync(new URL("../docs/harness-assumption-probes.md", import.meta.url), "utf8"), /pnpm probe:pi-assumptions/);
+});
+
+test("the Codex lower bound is read from CODEX_GUARD_TRUST_VERSION_RANGE and measured with the newest release", () => {
+  const [lower] = baselineVersions(codex);
+  assert.equal(lower.version, CODEX_GUARD_TRUST_VERSION_RANGE.match(/^>=(\S+) /)[1]);
+  assert.deepEqual(targetsFor("0.166.0", [lower]).map(t => t.version), ["0.166.0", lower.version]);
+  assert.deepEqual(targetsFor(lower.version, [lower]), [{ label: `newest release; ${lower.label}`, version: lower.version }]);
+});
+
+test("a baseline that cannot be read throws instead of silently measuring less", (t) => {
+  const root = scratch(t);
+  mkdirSync(join(root, "apps/runner/src"), { recursive: true });
+  writeFileSync(join(root, "apps/runner/src/codex-managed-worktree-guard.ts"), 'export const CODEX_GUARD_TRUST_VERSION_RANGE = "*";\n');
+  assert.throws(() => baselineVersions(codex, root), /Could not read/);
+});
+
+test("release detection accepts only a stable version of the expected package", async () => {
+  assert.equal(await newestRelease(codex, { fetchImpl: registry("0.166.0") }), "0.166.0");
+  for (const fetchImpl of [registry("0.167.0-alpha.1"), registry("latest"), registry("0.166.0", { name: "@evil/codex" }), registry("0.166.0", { ok: false, status: 503 }), silent]) {
+    await assert.rejects(newestRelease(codex, { fetchImpl, attempts: 2, delayMs: 1 }), /Could not read the newest @openai\/codex release/);
+  }
+});
+
+test("detection that cannot reach npm is could not run with a published report, never no new release", async (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp);
+  assert.equal(await detect(codex, { env, fetchImpl: silent, delayMs: 1 }), EXIT.couldNotRun);
+  const report = JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8"));
+  assert.equal(report.exitCode, EXIT.couldNotRun);
+  assert.equal(report.measured, false);
+  assert.match(report.reason, /Release detection could not run/);
+  assert.match(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /could not run/);
+  assert.equal(outputs(temp).key, undefined, "no cache key means nothing can be restored as measured");
+  assert.ok(!existsSync(paths(codex, temp).statePath));
+});
+
+test("the record key changes with each target version and with the probe set", () => {
+  const targets = [{ version: "0.166.0" }, { version: "0.155.1" }];
+  const key = recordKey(codex, targets, "a");
+  assert.match(key, new RegExp(`^harness-assumptions-v${RECORD_VERSION}-codex-0\\.166\\.0_0\\.155\\.1-[0-9a-f]{24}$`));
+  assert.notEqual(recordKey(codex, [{ version: "0.167.0" }, targets[1]], "a"), key);
+  assert.notEqual(recordKey(codex, [targets[0], { version: "0.156.0" }], "a"), key);
+  assert.notEqual(recordKey(codex, targets, "b"), key);
+  assert.match(fingerprint(codex), /^[0-9a-f]{64}$/);
+  assert.ok(sourceFiles(codex).includes("scripts/harness-assumptions.mjs"));
+  assert.ok(sourceFiles(codex).includes("apps/runner/scripts/codex-escalation-probe.ts"));
+});
+
+test("a dispatch forces only the requested harness, excludes the others and rejects an unknown one", () => {
+  assert.equal(dispatchScope(codex, "schedule", "codex"), "due");
+  assert.equal(dispatchScope(codex, "schedule", "pi"), "due", "a scheduled run never excludes a harness");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", "all"), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", ""), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", "codex"), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", " codex "), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", "pi"), "excluded");
+  assert.throws(() => dispatchScope(codex, "workflow_dispatch", "codx"), /Unknown harness/);
+});
+
+async function detected(t, extra = {}) {
+  const temp = scratch(t);
+  const env = ciEnv(temp, extra);
+  assert.equal(await detect(codex, { env, fetchImpl: registry("0.166.0") }), EXIT.matched);
+  return { temp, env, state: JSON.parse(readFileSync(paths(codex, temp).statePath, "utf8")) };
+}
+function writeRecord(temp, record) {
+  const dir = paths(codex, temp).recordDir;
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "record.json"), typeof record === "string" ? record : JSON.stringify(record));
+}
+function matchedRecord(state) {
+  return { recordVersion: RECORD_VERSION, harness: "codex", key: state.key, sourceHash: state.sourceHash, targets: state.targets, exitCode: 0, completedAt: "2026-10-29T09:00:00.000Z", runUrl: "https://github.com/picoduck/wollipog/actions/runs/0" };
+}
+
+test("only an exact matched record skips the suite; a lost, unreadable or mismatched record measures", async (t) => {
+  const { temp, env, state } = await detected(t);
+  assert.equal(outputs(temp).key, state.key);
+  assert.equal(decide(codex, { env }), EXIT.matched);
+  assert.equal(outputs(temp).measure, "true", "no record measures");
+  for (const bad of ["{not json", { ...matchedRecord(state), exitCode: 1 }, { ...matchedRecord(state), key: "other" }, { ...matchedRecord(state), sourceHash: "other" },
+    { ...matchedRecord(state), targets: [state.targets[0]] }, { ...matchedRecord(state), recordVersion: RECORD_VERSION + 1 }, { ...matchedRecord(state), completedAt: "never" },
+    { ...matchedRecord(state), targets: {} }, { ...matchedRecord(state), targets: [null, null] }, { ...matchedRecord(state), targets: null }, "[]", "null"]) {
+    writeRecord(temp, bad);
+    rmSync(join(temp, "output"));
+    assert.equal(decide(codex, { env }), EXIT.matched);
+    assert.equal(outputs(temp).measure, "true", `record ${JSON.stringify(bad)} must measure`);
+    assert.ok(!validRecord(typeof bad === "string" ? null : bad, state));
+  }
+  writeRecord(temp, matchedRecord(state));
+  rmSync(join(temp, "output"));
+  assert.equal(decide(codex, { env }), EXIT.matched);
+  assert.equal(outputs(temp).measure, "false");
+  const report = JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8"));
+  assert.equal(report.measured, false, "a skip is reported as not measured, never as a fresh pass");
+  assert.match(readFileSync(join(paths(codex, temp).reportDir, "latest.md"), "utf8"), /no new release[\s\S]*no suite ran today[\s\S]*Last matched measurement: 2026-10-29/);
+});
+
+test("a dispatch measures even with a matched record; an unknown dispatch harness is could not run", async (t) => {
+  const { temp, env, state } = await detected(t, { GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "codex" });
+  writeRecord(temp, matchedRecord(state));
+  assert.equal(decide(codex, { env }), EXIT.matched);
+  assert.equal(outputs(temp).measure, "true");
+  rmSync(join(temp, "output"));
+  assert.equal(decide(codex, { env: { ...env, DISPATCH_HARNESS: "codx" } }), EXIT.couldNotRun);
+  assert.equal(outputs(temp).measure, undefined);
+  rmSync(join(temp, "output"), { force: true });
+  assert.equal(await detect(codex, { env: { ...env, DISPATCH_HARNESS: "codx" }, fetchImpl: registry("0.166.0") }), EXIT.couldNotRun);
+  assert.equal(outputs(temp).key, undefined);
+  assert.match(readFileSync(join(paths(codex, temp).reportDir, "latest.md"), "utf8"), /: could not run$[\s\S]*Unknown harness "codx"/m);
+});
+
+function assertNotMeasured(temp, harness = codex) {
+  const report = JSON.parse(readFileSync(join(paths(harness, temp).reportDir, "latest.json"), "utf8"));
+  assert.equal(report.selected, false);
+  assert.equal(report.measured, false);
+  assert.equal(report.complete, true);
+  assert.equal(report.exitCode, null, "not measured has no exit code, so it can never read as matched");
+  assert.equal(report.record, undefined, "a matched record of an excluded harness is never reported");
+  assert.match(report.reason, /measures only pi; no suite ran and nothing was recorded/);
+  const md = readFileSync(join(paths(harness, temp).reportDir, "latest.md"), "utf8");
+  assert.match(md, /^# Codex Assumption Probes: not measured$/m);
+  assert.doesNotMatch(md, /matched|no new release|Last matched measurement/);
+  assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /^# Codex Assumption Probes: not measured$/m, "the job summary says not measured");
+  assert.deepEqual(runOutcome(harness, report, "1"), { verdict: "not measured", failed: false, detail: "this dispatch named another harness" });
+}
+
+test("a dispatch naming another harness never detects, measures, records or passes this one", async (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp, { GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "pi" });
+  // A stale state from an earlier step must not survive into decide or measure.
+  mkdirSync(dirname(paths(codex, temp).statePath), { recursive: true });
+  writeFileSync(paths(codex, temp).statePath, "{}");
+  const fetchImpl = async () => { throw new Error("an excluded harness must not query the registry"); };
+  assert.equal(await detect(codex, { env, fetchImpl }), EXIT.matched);
+  assert.deepEqual(outputs(temp), { excluded: "true", measure: "false" }, "no key, so no record is restored or saved");
+  assert.ok(!existsSync(paths(codex, temp).statePath));
+  assertNotMeasured(temp);
+});
+
+test("decide never measures or passes an excluded harness, even beside a matched record", async (t) => {
+  const { temp, env, state } = await detected(t);
+  writeRecord(temp, matchedRecord(state));
+  rmSync(join(temp, "output"));
+  const dispatch = { ...env, GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "pi" };
+  assert.equal(decide(codex, { env: dispatch }), EXIT.matched);
+  assert.deepEqual(outputs(temp), { excluded: "true", measure: "false" });
+  assertNotMeasured(temp);
+  // Even if a workflow condition broke and measure ran, detect left an excluded harness no state,
+  // so it is could not run and writes no record.
+  rmSync(paths(codex, temp).statePath);
+  rmSync(join(temp, "output"));
+  assert.equal(await measure(codex, { env: dispatch, exec: async () => { throw new Error("must not run"); } }), EXIT.couldNotRun);
+  assert.ok(!existsSync(join(paths(codex, temp).recordDir, "record.json")));
+  assert.equal(JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8")).exitCode, EXIT.couldNotRun);
+});
+
+function writeReport(dir, harness, report) {
+  mkdirSync(join(dir, `harness-assumptions-${harness}`), { recursive: true });
+  writeFileSync(join(dir, `harness-assumptions-${harness}`, "latest.json"), typeof report === "string" ? report : JSON.stringify({ runAttempt: "1", ...report }));
+}
+
+test("the run summary lists not measured harnesses and fails on a dropped or interrupted one", (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp);
+  const reports = join(temp, "reports");
+  writeReport(reports, "pi", { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0 });
+  writeReport(reports, "codex", { harness: "codex", complete: true, selected: false, measured: false, exitCode: null });
+  // claude: the job was cancelled while waiting for its group, so it uploaded nothing.
+  const lines = [];
+  t.mock.method(console, "log", line => lines.push(line));
+  assert.equal(summarize(reports, { env }), EXIT.couldNotRun);
+  const summary = readFileSync(join(temp, "summary.md"), "utf8");
+  assert.match(summary, /\| Pi \| matched \| measured in this run \|/);
+  assert.match(summary, /\| Codex \| not measured \| this dispatch named another harness \|/);
+  assert.match(summary, /\| Claude Code \| dropped \| no report: the job was cancelled while waiting/);
+  assert.ok(lines.some(line => /^::error title=Claude Code Assumptions dropped::/.test(line)), "a dropped harness is annotated");
+  assert.ok(!lines.some(line => /^::error title=(Pi|Codex)/.test(line)));
+
+  writeReport(reports, "claude", { harness: "claude", complete: false, selected: true, measured: true, exitCode: 2 });
+  assert.equal(summarize(reports, { env }), EXIT.couldNotRun, "an interrupted measurement fails the summary");
+  writeReport(reports, "claude", { harness: "claude", complete: true, selected: true, measured: false, exitCode: 0 });
+  assert.equal(summarize(reports, { env }), EXIT.matched, "only when every harness reported does the summary pass");
+  assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /\| Claude Code \| no new release \|/);
+});
+
+test("a re-run whose job was dropped never passes on an earlier attempt's matched report", (t) => {
+  const temp = scratch(t);
+  const reports = join(temp, "reports");
+  for (const harness of ["codex", "claude"]) writeReport(reports, harness, { harness, complete: true, selected: true, measured: false, exitCode: 0, runAttempt: "2" });
+  // Attempt 1 matched; attempt 2's Pi job was cancelled while waiting, so only attempt 1's artifact exists.
+  writeReport(reports, "pi", { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0, runAttempt: "1" });
+  const lines = [];
+  t.mock.method(console, "log", line => lines.push(line));
+  assert.equal(summarize(reports, { env: ciEnv(temp, { GITHUB_RUN_ATTEMPT: "2" }) }), EXIT.couldNotRun);
+  assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /\| Pi \| earlier attempt \| the only report is from another run attempt/);
+  assert.doesNotMatch(readFileSync(join(temp, "summary.md"), "utf8"), /\| Pi \| matched/);
+  assert.ok(lines.some(line => /^::error title=Pi Assumptions earlier attempt::/.test(line)));
+});
+
+test("every published harness report names its run attempt", async (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp, { GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "pi", GITHUB_RUN_ATTEMPT: "3" });
+  assert.equal(await detect(codex, { env, fetchImpl: silent }), EXIT.matched);
+  assert.equal(JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8")).runAttempt, "3");
+  assert.equal(await detect(codex, { env: { ...env, DISPATCH_HARNESS: "all" }, fetchImpl: silent, delayMs: 0 }), EXIT.couldNotRun);
+  assert.equal(JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8")).runAttempt, "3");
+});
+
+test("a run outcome is matched only for a complete, measured, matched report of that harness and attempt", () => {
+  const pi = harnessById("pi");
+  const base = { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0, runAttempt: "1" };
+  assert.equal(runOutcome(pi, base, "1").verdict, "matched");
+  for (const [report, verdict] of [[null, "dropped"], [{ ...base, harness: "codex" }, "interrupted"], [{ ...base, complete: false }, "interrupted"],
+    [{ ...base, runAttempt: "2" }, "earlier attempt"], [{ ...base, runAttempt: 1 }, "earlier attempt"], [{ ...base, runAttempt: undefined }, "earlier attempt"],
+    [{ ...base, selected: false, runAttempt: "0" }, "earlier attempt"],
+    [{ ...base, selected: false }, "not measured"], [{ ...base, selected: false, exitCode: 0 }, "not measured"], [{ ...base, measured: false }, "no new release"],
+    [{ ...base, exitCode: 1 }, "changed"], [{ ...base, exitCode: 2 }, "could not run"], [{ ...base, exitCode: null }, "could not run"], [{ ...base, exitCode: "0" }, "could not run"]]) {
+    assert.equal(runOutcome(pi, report, "1").verdict, verdict, JSON.stringify(report));
+    assert.equal(runOutcome(pi, report, "1").failed, !["matched", "not measured", "no new release"].includes(verdict));
+  }
+});
+
+test("decide without detection state is could not run", (t) => {
+  const temp = scratch(t);
+  assert.equal(decide(codex, { env: ciEnv(temp) }), EXIT.couldNotRun);
+  assert.equal(outputs(temp).measure, undefined);
+});
+
+const target = { label: "newest release", version: "0.166.0" };
+function suiteReport(statuses, extra = {}) {
+  const results = statuses.map((status, i) => ({ probe: `p${i}`, status }));
+  const exitCode = statuses.includes("changed") ? 1 : statuses.includes("could not run") ? 2 : 0;
+  return { version: "0.166.0", complete: true, exitCode, results, ...extra };
+}
+
+test("suite judgement never turns a missing, partial or inconsistent report into a pass", () => {
+  assert.equal(judgeSuite(target, { code: 0 }, suiteReport(["unchanged", "optional drift"])).status, "matched");
+  assert.equal(judgeSuite(target, { code: 1 }, suiteReport(["changed", "could not run"])).status, "changed");
+  assert.equal(judgeSuite(target, { code: 2 }, suiteReport(["unchanged", "could not run"])).status, "could not run");
+  const falsePasses = {
+    "no report": [{ code: 0 }, null],
+    "incomplete report": [{ code: 0 }, suiteReport(["unchanged"], { complete: false })],
+    "other version": [{ code: 0 }, suiteReport(["unchanged"], { version: "0.165.0" })],
+    "missing version": [{ code: 0 }, suiteReport(["unchanged"], { version: null })],
+    "no results": [{ code: 0 }, suiteReport([])],
+    "exit 0 with changed results": [{ code: 0 }, { ...suiteReport(["changed"]), exitCode: 0 }],
+    "exit 0 with could-not-run results": [{ code: 0 }, { ...suiteReport(["could not run"]), exitCode: 0 }],
+    "report exit disagrees": [{ code: 0 }, { ...suiteReport(["unchanged"]), exitCode: 2 }],
+    "operator acknowledgement": [{ code: 0 }, suiteReport(["unchanged", "acknowledged unavailable"])],
+    "unknown status": [{ code: 0 }, suiteReport(["fine"])],
+    "timeout": [{ code: 0, timedOut: true, timeoutMinutes: 150 }, suiteReport(["unchanged"])],
+    "spawn failure": [{ code: null, error: "ENOENT" }, null],
+    "signal": [{ code: null, signal: "SIGKILL" }, suiteReport(["unchanged"])],
+    "exit outside contract": [{ code: 3 }, suiteReport(["unchanged"])],
+    "exit 1 without changes": [{ code: 1 }, { ...suiteReport(["unchanged"]), exitCode: 1 }],
+  };
+  for (const [name, [execution, report]] of Object.entries(falsePasses)) {
+    const judged = judgeSuite(target, execution, report);
+    assert.equal(judged.exitCode, EXIT.couldNotRun, name);
+    assert.equal(judged.status, "could not run", name);
+    assert.ok(judged.reason, name);
+  }
+});
+
+test("combined exit: changed wins, any could not run or failed preparation fails, nothing measured is not a pass", () => {
+  const t = code => ({ exitCode: code });
+  assert.equal(combinedExit([t(0), t(0)]), 0);
+  assert.equal(combinedExit([t(0), t(1), t(2)]), 1);
+  assert.equal(combinedExit([t(0), t(2)]), 2);
+  assert.equal(combinedExit([t(0), {}]), 2, "an unmeasured target is could not run");
+  assert.equal(combinedExit([]), 2);
+  assert.equal(combinedExit([t(0)], { status: "failed" }), 2);
+  assert.equal(combinedExit([t(1)], { status: "failed" }), 1);
+});
+
+function fakeExec(temp, plan) {
+  const calls = [];
+  const suite = (argv, env) => {
+    const reportDir = argv.at(-1);
+    const version = reportDir.split("/").at(-2);
+    const outcome = plan.suite?.[version] ?? { code: 0, statuses: ["unchanged"] };
+    if (outcome.statuses) {
+      mkdirSync(reportDir, { recursive: true });
+      writeFileSync(join(reportDir, "latest.json"), JSON.stringify({ ...suiteReport(outcome.statuses, { version }), ...outcome.report }));
+      writeFileSync(join(reportDir, "latest.md"), `# Codex Assumption Report\n\nMeasured CLI: ${version}\n`);
+    }
+    if (outcome.symlink) { rmSync(join(reportDir, "latest.json")); symlinkSync(outcome.symlink, join(reportDir, "latest.json")); }
+    assert.ok(existsSync(env.HOME), "the suite receives a throwaway HOME");
+    plan.homes = [...(plan.homes ?? []), env.HOME];
+    plan.suites = [...(plan.suites ?? []), { argv, env }];
+    return { code: outcome.code, tail: "" };
+  };
+  const sudo = rest => {
+    if (rest[0] === "-u" && rest[3] === "cat") {
+      assert.equal(rest[1], "harness-probe", "reports are read as the probe user, never as root");
+      return { code: 0, stdout: readFileSync(rest.at(-1), "utf8") };
+    }
+    if (rest[0] === "-u") {
+      const command = rest.slice(rest.indexOf("-i") + 1);
+      const env = {};
+      while (/^[A-Z_]+=/.test(command[0])) { const [k, ...v] = command.shift().split("="); env[k] = v.join("="); }
+      return suite(command, env);
+    }
+    const [tool, ...args] = rest;
+    if (tool === "rm") { rmSync(args.at(-1), { recursive: true, force: true }); return { code: 0, stdout: "" }; }
+    if (tool === "install") { mkdirSync(args.at(-1), { recursive: true }); return { code: 0, stdout: "" }; }
+    if (tool === "pkill") return { code: 0, stdout: "" };
+    if (tool === "pgrep") return { code: plan.survivors ? 0 : 1, stdout: plan.survivors ? "4242\n" : "" };
+    if (tool === "crontab") return { code: 1, stdout: "" };
+    if (tool === "find" && args.includes("-delete")) { plan.cleaned = [...(plan.cleaned ?? []), args.slice(0, 3)]; return { code: 0, stdout: "" }; }
+    if (tool === "find") {
+      const path = join(args[0], args[args.indexOf("-name") + 1]);
+      let regular = false; try { regular = lstatSync(path).isFile(); } catch {}
+      return { code: 0, stdout: regular ? `${path}\n` : "" };
+    }
+    throw new Error(`unexpected sudo ${rest.join(" ")}`);
+  };
+  return { calls, exec: async (argv, options) => {
+    calls.push({ argv, options });
+    if (argv[0] === "sudo") { assert.equal(argv[1], "-n", "sudo never prompts"); return sudo(argv.slice(2)); }
+    if (argv[0] === "bash" && argv[1].endsWith("isolate.sh")) return { code: plan.stage ?? 0, tail: plan.stage ? "harness-probe can traverse /home/runner\n" : "" };
+    if (argv[0] === "bash") return { code: plan.prepare ?? 0, tail: plan.prepare ? "bwrap: setting up uid map: Permission denied\n" : "" };
+    if (argv[0] === "npm") {
+      const prefix = argv[argv.indexOf("--prefix") + 1];
+      const version = argv.at(-1).split("@").at(-1);
+      if (plan.install?.[version] === false) return { code: 1, tail: "" };
+      const pkg = argv.at(-1).slice(0, argv.at(-1).lastIndexOf("@"));
+      mkdirSync(join(prefix, "node_modules", pkg), { recursive: true });
+      mkdirSync(join(prefix, "node_modules/.bin"), { recursive: true });
+      writeFileSync(join(prefix, "node_modules", pkg, "package.json"), JSON.stringify({ version: plan.installedVersion ?? version }));
+      // Like the real packages: a .bin entry always; Claude's native binary only when its platform package installed.
+      writeFileSync(join(prefix, "node_modules/.bin", HARNESSES.find(h => h.npmPackage === pkg).bin), "");
+      if (pkg === "@anthropic-ai/claude-code" && plan.nativeBinary !== false) {
+        const native = executablePath(harnessById("claude"), prefix);
+        mkdirSync(dirname(native), { recursive: true }); writeFileSync(native, "");
+      }
+      return { code: 0, tail: "" };
+    }
+    return suite(argv, options.env);
+  } };
+}
+
+async function measured(t, plan, extra = {}) {
+  const { temp, env } = await detected(t, extra);
+  rmSync(join(temp, "output"));
+  assert.equal(decide(codex, { env }), EXIT.matched);
+  const fake = fakeExec(temp, plan);
+  const exit = await measure(codex, { env, exec: fake.exec });
+  const location = paths(codex, temp);
+  return { exit, temp, fake, env, report: JSON.parse(readFileSync(join(location.reportDir, "latest.json"), "utf8")),
+    md: readFileSync(join(location.reportDir, "latest.md"), "utf8"), recordPath: join(location.recordDir, "record.json") };
+}
+
+test("a fully matched measurement covers both targets, publishes the summary and writes the record", async (t) => {
+  const plan = {};
+  const { exit, temp, fake, env, report, md, recordPath } = await measured(t, plan);
+  assert.equal(exit, EXIT.matched);
+  assert.deepEqual(report.targets.map(t => [t.version, t.status]), [["0.166.0", "matched"], [baselineVersions(codex)[0].version, "matched"]]);
+  assert.equal(report.preparation.status, "ok");
+  assert.equal(report.isolation.status, "not isolated");
+  assert.equal(outputs(temp).exit, "0");
+  assert.match(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /# Codex Assumption Probes: matched/);
+  assert.match(md, /## 0\.166\.0 Suite Report[\s\S]*### Codex Assumption Report/);
+  const record = JSON.parse(readFileSync(recordPath, "utf8"));
+  assert.ok(validRecord(record, JSON.parse(readFileSync(paths(codex, temp).statePath, "utf8"))));
+  assert.ok(plan.homes.every(home => !existsSync(home)), "throwaway homes are removed");
+  assert.deepEqual(plan.suites[0].argv.slice(0, 4), [process.execPath, "--import", "tsx", "scripts/codex-assumptions.mjs"]);
+  assert.ok(fake.calls.filter(c => c.argv[0] === "npm").every(c => c.argv.includes("--ignore-scripts")));
+});
+
+test("changed, could-not-run, failed preparation and failed installs fail the run and never write a record", async (t) => {
+  const lower = baselineVersions(codex)[0].version;
+  const cases = [
+    [{ suite: { "0.166.0": { code: 1, statuses: ["changed"] } } }, EXIT.changed],
+    [{ suite: { [lower]: { code: 2, statuses: ["could not run"] } } }, EXIT.couldNotRun],
+    [{ suite: { [lower]: { code: 0 } } }, EXIT.couldNotRun],
+    [{ prepare: 1 }, EXIT.couldNotRun],
+    [{ install: { "0.166.0": false } }, EXIT.couldNotRun],
+    [{ installedVersion: "0.165.0" }, EXIT.couldNotRun],
+    [{ suite: { "0.166.0": { code: 0, statuses: ["unchanged"], report: { version: "0.165.0" } } } }, EXIT.couldNotRun],
+  ];
+  for (const [plan, expected] of cases) {
+    const { exit, report, recordPath, temp } = await measured(t, plan);
+    assert.equal(exit, expected, JSON.stringify(plan));
+    assert.equal(report.exitCode, expected);
+    assert.equal(outputs(temp).exit, String(expected));
+    assert.ok(!existsSync(recordPath), `${JSON.stringify(plan)} must not record a measurement`);
+  }
+  const { md, report } = await measured(t, { prepare: 1 });
+  assert.match(md, /Preparation: \*\*failed\*\*\. Escalation probe needs bubblewrap user namespaces[\s\S]*exited 1[\s\S]*Permission denied/);
+  assert.equal(report.preparation.status, "failed");
+});
+
+test("measure clears a previous record and report before running", async (t) => {
+  const { temp, env, state } = await detected(t);
+  writeRecord(temp, matchedRecord(state));
+  rmSync(join(temp, "output"));
+  mkdirSync(join(paths(codex, temp).reportDir), { recursive: true });
+  writeFileSync(join(paths(codex, temp).reportDir, "stale.md"), "old green");
+  writeFileSync(join(temp, "harness-assumption-state", "codex.json"), JSON.stringify({ ...state, why: "manual dispatch" }));
+  const exit = await measure(codex, { env, exec: fakeExec(temp, { suite: { "0.166.0": { code: 2 } } }).exec });
+  assert.equal(exit, EXIT.couldNotRun);
+  assert.ok(!existsSync(join(paths(codex, temp).recordDir, "record.json")));
+  assert.ok(!existsSync(join(paths(codex, temp).reportDir, "stale.md")));
+});
+
+test("CI never runs an unreviewed release without the unprivileged probe user", async (t) => {
+  assert.throws(() => isolationFrom({ GITHUB_ACTIONS: "true" }), /required in CI/);
+  assert.equal(isolationFrom({}), null);
+  const plan = {};
+  const { exit, report, recordPath } = await measured(t, plan, { GITHUB_ACTIONS: "true" });
+  assert.equal(exit, EXIT.couldNotRun);
+  assert.equal(plan.suites, undefined, "no suite ran");
+  assert.ok(report.targets.every(target => /required in CI/.test(target.reason)));
+  assert.ok(!existsSync(recordPath));
+});
+
+function isolatedEnv(temp) {
+  const root = join(temp, "opt");
+  for (const dir of ["repo", "install", "work"]) mkdirSync(join(root, dir), { recursive: true });
+  return { GITHUB_ACTIONS: "true", HARNESS_PROBE_USER: "harness-probe", HARNESS_PROBE_ROOT: root };
+}
+
+test("isolated suites run as the probe user with only the minimal environment, and are reaped before results are read", async (t) => {
+  const plan = {};
+  const temp0 = scratch(t);
+  const extra = isolatedEnv(temp0);
+  const logs = [];
+  t.mock.method(console, "log", line => logs.push(String(line)));
+  const { exit, report, fake, recordPath } = await measured(t, plan, extra);
+  assert.equal(exit, EXIT.matched);
+  assert.equal(report.isolation.status, "ok");
+  assert.ok(existsSync(recordPath));
+  const suiteCall = fake.calls.find(c => c.argv[0] === "sudo" && c.argv[2] === "-u" && c.argv[5] === "/usr/bin/env");
+  assert.deepEqual(plan.cleaned[0], ["/tmp", "/var/tmp", "/dev/shm"], "the user's temporary leftovers are removed after each suite");
+  assert.deepEqual(suiteCall.argv.slice(0, 7), ["sudo", "-n", "-u", "harness-probe", "--", "/usr/bin/env", "-i"]);
+  assert.equal(suiteCall.options.cwd, join(extra.HARNESS_PROBE_ROOT, "repo"), "suites run from the staged read-only copy");
+  assert.deepEqual(Object.keys(plan.suites[0].env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
+  assert.ok(plan.suites[0].env.HOME.startsWith(join(extra.HARNESS_PROBE_ROOT, "work", "codex")));
+  assert.equal(plan.suites[0].env.TMPDIR, join(dirname(plan.suites[0].env.HOME), "tmp"), "each suite gets a private TMPDIR beside its throwaway HOME");
+  assert.ok(plan.suites[0].env.CODEX_BIN.startsWith(join(extra.HARNESS_PROBE_ROOT, "install", "codex")));
+  const privateNode = join(extra.HARNESS_PROBE_ROOT, "node", "bin");
+  assert.equal(plan.suites[0].argv[0], join(privateNode, "node"), "suites use the private Node, not the world-writable tool cache");
+  assert.ok(plan.suites[0].env.PATH.startsWith(`${privateNode}:`), "npm shims resolve the private Node first");
+  const order = fake.calls.map(c => c.argv[0] === "sudo" ? c.argv[2] === "-u" ? c.argv[5] === "cat" ? "read" : "suite" : c.argv[2] : c.argv[0]);
+  const firstSuite = order.indexOf("suite");
+  assert.ok(order.indexOf("bash") < firstSuite, "staging and preparation happen before any release code runs");
+  assert.ok(order.indexOf("pkill", firstSuite) > firstSuite && order.indexOf("pkill", firstSuite) < order.indexOf("read", firstSuite), "processes are killed before reports are read");
+  const stop = logs.find(l => l.startsWith("::stop-commands::"));
+  assert.ok(stop, "workflow commands are stopped while release output can reach the log");
+  const resumeAt = logs.indexOf(`::${stop.slice("::stop-commands::".length)}::`);
+  assert.ok(resumeAt > logs.indexOf(stop));
+  assert.ok(logs.slice(resumeAt + 1).every(l => !l.includes("Suite Report")), "release-influenced markdown is not logged after commands resume");
+});
+
+test("an isolated run fails closed on staging failure, surviving processes or a planted symlink", async (t) => {
+  const cases = [
+    [{ stage: 1 }, /could not be prepared/],
+    [{ survivors: true }, /survived it and could not be killed/],
+    [{ suite: { "0.166.0": { code: 0, statuses: ["unchanged"], symlink: "/etc/passwd" } } }, /no readable latest\.json/],
+  ];
+  for (const [plan, reason] of cases) {
+    const extra = isolatedEnv(scratch(t));
+    const { exit, report, recordPath, md } = await measured(t, plan, extra);
+    assert.equal(exit, EXIT.couldNotRun, JSON.stringify(plan));
+    assert.ok(report.targets.some(target => reason.test(target.reason)), JSON.stringify(report.targets));
+    assert.ok(!existsSync(recordPath));
+    assert.doesNotMatch(md, /root:x:0/);
+  }
+  const { md } = await measured(t, { stage: 1 }, isolatedEnv(scratch(t)));
+  assert.match(md, /Isolation: \*\*failed\*\*[\s\S]*harness-probe can traverse/);
+});
+
+test("markdown labels a skip as not measured and truncates oversized reports", () => {
+  const skip = markdown({ name: "Codex", harness: "codex", npmPackage: "@openai/codex", exitCode: 0, measured: false, completedAt: "now", reason: "already measured" });
+  assert.match(skip, /^# Codex Assumption Probes: no new release$/m);
+  assert.match(skip, /\*\*Not measured:\*\* already measured/);
+  const large = markdown({ name: "Codex", harness: "codex", npmPackage: "@openai/codex", exitCode: 1, measured: true, completedAt: "now", targets: [target] }, { "0.166.0": "x".repeat(1_000_000) });
+  assert.ok(large.length < 1_000_000);
+  assert.match(large, /Truncated/);
+  assert.match(markdown({ name: "Codex", exitCode: 7, completedAt: "now" }), /: could not run$/m);
+});
+
+test("documentation states the shared contract and that a new harness adds its probe set", () => {
+  const doc = readFileSync(new URL("../docs/harness-assumption-probes.md", import.meta.url), "utf8");
+  for (const phrase of ["**Exit 0, matched**", "**Exit 1, changed**", "**Exit 2, could not run**", "`latest.json`", "`latest.md`", "job summary",
+    "Supporting a new harness includes adding its probe set", "never treats an unreachable registry as \"no new release\""]) assert.ok(doc.includes(phrase), phrase);
+  assert.match(readFileSync(new URL("../CONTRIBUTING.md", import.meta.url), "utf8"), /Supporting a new harness includes adding its probe set/);
+  const codexDoc = readFileSync(new URL("../docs/codex-assumption-probes.md", import.meta.url), "utf8");
+  assert.doesNotMatch(codexDoc, /must not run the real probe suite/);
+  assert.match(codexDoc, /## Optional Local Timer/);
+  assert.match(codexDoc, /## Hosted Measurement/);
+});
+
+test("documentation describes the implemented dispatch scope and queueing", () => {
+  const doc = readFileSync(new URL("../docs/harness-assumption-probes.md", import.meta.url), "utf8").replace(/\s+/g, " ");
+  assert.doesNotMatch(doc, /waits rather than cancelling|runs never overlap/, "the retired single-group promise is gone");
+  assert.doesNotMatch(workflow, /waits instead of cancelling/);
+  for (const phrase of ["Every other harness reports **not measured**", "`harness-assumption-probes-<harness>`", "GitHub keeps only one waiting job per group",
+    "**Summarize Measurements**", "**dropped**", "fails the summary job, so the run never concludes success", "the shared runner pool never holds more measurements than one run's matrix", "excluded jobs and each run's summary job are not bounded by any group", "**earlier attempt**"]) assert.ok(doc.includes(phrase), phrase);
+});
+
+test("Claude Code targets the newest release, the three floors and the reviewer pin, all read from source", () => {
+  const claude = harnessById("claude");
+  assert.deepEqual(baselineVersions(claude).map(b => b.version),
+    [CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_MEDIA_REVIEWER_CLI_VERSION]);
+  assert.deepEqual(targetsFor("2.1.314", baselineVersions(claude)).map(t => t.version), ["2.1.314", "2.1.205", "2.1.241", "2.1.277", "2.1.296"]);
+  assert.ok(sourceFiles(claude).includes("scripts/harness-assumptions-prepare-claude.sh"));
+  assert.ok(sourceFiles(claude).includes("apps/runner/scripts/claude-assumption-probes.ts"));
+});
+
+test("Claude Code runs the native platform binary, never the placeholder .bin entry --ignore-scripts leaves", () => {
+  assert.equal(executablePath(harnessById("claude"), "/p", "linux", "x64"), "/p/node_modules/@anthropic-ai/claude-code-linux-x64/claude");
+  assert.equal(executablePath(harnessById("claude"), "/p", "linux", "arm64"), "/p/node_modules/@anthropic-ai/claude-code-linux-arm64/claude");
+  assert.equal(executablePath(codex, "/p"), "/p/node_modules/.bin/codex");
+});
+
+test("a Claude Code target without its native binary is could not run, never measured through the placeholder", async (t) => {
+  const claude = harnessById("claude");
+  const run = async plan => {
+    const temp = scratch(t);
+    const env = ciEnv(temp);
+    assert.equal(await detect(claude, { env, fetchImpl: registry("2.1.314", { name: "@anthropic-ai/claude-code" }) }), EXIT.matched);
+    rmSync(join(temp, "output"));
+    assert.equal(decide(claude, { env }), EXIT.matched);
+    const exit = await measure(claude, { env, exec: fakeExec(temp, plan).exec });
+    return { exit, report: JSON.parse(readFileSync(join(paths(claude, temp).reportDir, "latest.json"), "utf8")) };
+  };
+  const matched = {};
+  const ok = await run(matched);
+  assert.equal(ok.exit, EXIT.matched);
+  assert.equal(ok.report.targets.length, 5);
+  assert.ok(matched.suites.every(s => s.env.CLAUDE_BIN === executablePath(claude, dirname(dirname(dirname(dirname(s.env.CLAUDE_BIN))))) &&
+    s.env.CLAUDE_BIN.endsWith(`/node_modules/@anthropic-ai/claude-code-${process.platform}-${process.arch}/claude`)));
+  assert.deepEqual(matched.suites[0].argv.slice(0, 4), [process.execPath, "--import", "tsx", "scripts/claude-assumptions.mjs"]);
+  const missing = await run({ nativeBinary: false });
+  assert.equal(missing.exit, EXIT.couldNotRun);
+  assert.ok(missing.report.targets.every(target => target.status === "could not run" &&
+    target.reason === `the installed release has no executable at node_modules/@anthropic-ai/claude-code-${process.platform}-${process.arch}/claude`));
+});

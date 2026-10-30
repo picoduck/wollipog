@@ -89,9 +89,7 @@ type Pattern = keyof typeof PATTERNS;
  * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.
  */
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
-  ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
-  ["components/PodsView.tsx", "native-select", 8],
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 2],
@@ -164,7 +162,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/ReviewToolbar.tsx", "raw-radiogroup", 4],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
-  ["components/PodsView.tsx", "raw-radiogroup", 1],
   /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards (now ChoiceRows),
      retiring the durable Project chip's bespoke menuitemradio popover. Down from 4 with #2163,
      which moved the workspace form out of the menu. Two of the three are the Move to Workspace

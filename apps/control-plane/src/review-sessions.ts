@@ -1,9 +1,10 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
   REVIEW_ATTEMPTS_PER_ROUND, REVIEW_ROUND_BUDGET, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, validateReviewReport,
-  type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
-  type ReviewRunHistory, type ReviewSessionLink, type ReviewSessionState, type ReviewSessionUpdate, type ReviewSessionView,
+  type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewContinuationState, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
+  type ReviewRunHistory, type ReviewSessionAdmission, type ReviewSessionLink, type ReviewSessionState, type ReviewSessionUpdate, type ReviewSessionView,
   type ReviewRunsSummary, type ReviewSessionsPage, type SessionReviewHarness,
+  type MergeReviewEvidence, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 
 type Row = {
@@ -11,6 +12,8 @@ type Row = {
   head_sha: string; reviewer: SessionReviewHarness; state: ReviewSessionState; output: string | null;
   output_truncated: number; reason: string | null; cancel_requested: number; created_at: number; updated_at: number;
   round_json: string | null; verdict_json: string | null; findings_json: string | null;
+  admission_json: string | null;
+  continuation_state: string | null;
 };
 
 const TERMINAL = new Set<string>(["completed", "failed", "cancelled"]);
@@ -25,6 +28,16 @@ const FAILURE_CLASSES = new Set<string>([
 const MAX_SCOPE_FILES = 5000;
 const MAX_VALIDATION_ERRORS = 8;
 const VALIDATION_ERROR_LIMIT = 300;
+
+function parsedAdmission(value: unknown): ReviewSessionAdmission | null {
+  if (!value || typeof value !== "object") return null;
+  const { observedAt, unsandboxedSessions } = value as ReviewSessionAdmission;
+  if (!Number.isSafeInteger(observedAt) || observedAt < 0 || !Array.isArray(unsandboxedSessions) ||
+      !unsandboxedSessions.every((entry) => entry &&
+        typeof entry.sessionId === "string" && /^[A-Za-z0-9_-]{1,128}$/u.test(entry.sessionId) &&
+        (entry.kind === "provider" || entry.kind === "agent_tui"))) return null;
+  return { observedAt, unsandboxedSessions: unsandboxedSessions.map(({ sessionId, kind }) => ({ sessionId, kind })) };
+}
 
 const isCount = (value: unknown, max: number): value is number => Number.isSafeInteger(value) && (value as number) >= 1 && (value as number) <= max;
 const isPath = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 4096;
@@ -106,6 +119,7 @@ function boundedText(text: string, limit: number): { text: string; truncated: bo
 }
 
 export interface NewReviewSession {
+  roundBudget?: number;
   reviewSessionId: string;
   requesterSessionId: string;
   runnerId: string;
@@ -136,14 +150,33 @@ export class ReviewSessions {
       WHERE state IN ${ACTIVE};`);
     // v228 (#3369): each attempt's planned round, its contract verdict and a valid report's findings.
     const columns = new Set((sql.prepare("PRAGMA table_info(review_sessions)").all() as Array<{ name: string }>).map((c) => c.name));
-    for (const column of ["round_json", "verdict_json", "findings_json"]) {
+    if (!columns.has("round_budget")) sql.exec("ALTER TABLE review_sessions ADD COLUMN round_budget INTEGER NOT NULL DEFAULT 4");
+    // #3369: the one continuation each finished review owes its requester, and the durable prompt
+    // command that carries it: held -> delivering -> delivered | uncertain | failed, or abandoned.
+    for (const column of ["round_json", "verdict_json", "findings_json", "continuation_state", "continuation_command_id", "admission_json"]) {
       if (!columns.has(column)) sql.exec(`ALTER TABLE review_sessions ADD COLUMN ${column} TEXT`);
     }
-    sql.exec("CREATE INDEX IF NOT EXISTS review_sessions_run ON review_sessions(requester_session_id,repository,pr_number)");
+    if (!columns.has("continuation_updated_at")) sql.exec("ALTER TABLE review_sessions ADD COLUMN continuation_updated_at INTEGER");
+    sql.exec(`CREATE INDEX IF NOT EXISTS review_sessions_run ON review_sessions(requester_session_id,repository,pr_number);
+      CREATE INDEX IF NOT EXISTS review_sessions_continuation_held ON review_sessions(requester_session_id)
+        WHERE continuation_state='held';
+      CREATE INDEX IF NOT EXISTS review_sessions_continuation_command ON review_sessions(continuation_command_id)
+        WHERE continuation_state='delivering';`);
   }
 
   private row(reviewSessionId: string): Row | undefined {
     return this.sql.prepare("SELECT * FROM review_sessions WHERE review_session_id=?").get(reviewSessionId) as Row | undefined;
+  }
+
+  sessionIds(runnerId?: string, includeArchived = false): string[] {
+    return (this.sql.prepare(`SELECT r.review_session_id FROM review_sessions r JOIN sessions s ON s.id=r.review_session_id
+      WHERE ${includeArchived ? "1" : "s.archived=0"} ${runnerId ? "AND r.runner_id=?" : ""}`)
+      .all(...(runnerId ? [runnerId] : [])) as Array<{ review_session_id: string }>).map(row => row.review_session_id);
+  }
+
+  forRequester(requesterSessionId: string): string[] {
+    return (this.sql.prepare("SELECT review_session_id FROM review_sessions WHERE requester_session_id=?")
+      .all(requesterSessionId) as Array<{ review_session_id: string }>).map(row => row.review_session_id);
   }
 
   /** The requester's active review session, if any. */
@@ -159,6 +192,8 @@ export class ReviewSessions {
       input.reviewSessionId, input.requesterSessionId, input.runnerId, input.pullRequest.repository, input.pullRequest.number,
       input.headSha, input.reviewer, now, now,
     );
+    this.sql.prepare("UPDATE review_sessions SET round_budget=? WHERE review_session_id=?")
+      .run(input.roundBudget ?? REVIEW_ROUND_BUDGET, input.reviewSessionId);
   }
 
   /** What every review session of a requester has cost so far, settled usage only. */
@@ -171,7 +206,7 @@ export class ReviewSessions {
   /** The requester's reviews summarized for its own view, or null when it has none. */
   summaryFor(requesterSessionId: string): ReviewRunsSummary | null {
     const row = this.sql.prepare(`SELECT COUNT(*) AS count, COALESCE(SUM(state IN ${ACTIVE}), 0) AS active,
-      MAX(updated_at) AS updated_at FROM review_sessions WHERE requester_session_id=?`)
+      MAX(MAX(updated_at, COALESCE(continuation_updated_at, 0))) AS updated_at FROM review_sessions WHERE requester_session_id=?`)
       .get(requesterSessionId) as { count: number; active: number; updated_at: number | null };
     return row.count > 0 ? { count: row.count, active: row.active, updatedAt: row.updated_at ?? 0 } : null;
   }
@@ -200,6 +235,7 @@ export class ReviewSessions {
       .get(row.requester_session_id, row.repository, row.pr_number, row.review_session_id, row.head_sha);
     return {
       reviewSessionId: row.review_session_id,
+      ...(row.admission_json ? { admission: json<ReviewSessionAdmission>(row.admission_json)! } : {}),
       requesterSessionId: row.requester_session_id,
       pullRequest: { repository: row.repository, number: row.pr_number },
       headSha: row.head_sha,
@@ -211,6 +247,9 @@ export class ReviewSessions {
       verdict,
       findings: verdict?.valid ? json<ReviewReportFinding[]>(row.findings_json) ?? [] : [],
       stale,
+      continuation: row.continuation_state === null ? null
+        : row.continuation_state === "held" || row.continuation_state === "delivering" ? "pending"
+        : row.continuation_state as ReviewContinuationState,
       output: row.output,
       outputTruncated: row.output_truncated === 1,
       reason: row.reason,
@@ -220,14 +259,115 @@ export class ReviewSessions {
     };
   }
 
+  /** Immutable attempt citation, verified from server-owned records. Only a newer valid vote
+   * supersedes it: a failed or cancelled retry cannot erase an upvote. Row order survives
+   * reconnects/restarts and does not trust runner clocks or caller-supplied verdicts. */
+  mergeEvidence(requesterSessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): MergeReviewEvidence | undefined {
+    const reviewSessionId = snapshot.reviewSessionId;
+    if (reviewSessionId === undefined) return undefined;
+    const refused = (reason: string): MergeReviewEvidence => ({ status: "refused", reviewSessionId,
+      reason: `${reason} Request a review session for the exact PR head and cite its valid upvote.` });
+    const row = this.row(reviewSessionId);
+    if (!row) return refused("The cited review session does not exist.");
+    if (row.requester_session_id !== requesterSessionId) return refused("The cited review belongs to another requester, outside this requester's review run.");
+    if (row.repository.toLowerCase() !== snapshot.repository.toLowerCase() || row.pr_number !== snapshot.pullRequest) {
+      return refused("The cited review belongs to another pull request.");
+    }
+    if (row.head_sha !== snapshot.headSha) return refused(`The cited review is for head ${row.head_sha}, not decision head ${snapshot.headSha}.`);
+    const view = this.view(reviewSessionId)!;
+    if (view.state !== "completed" || !view.round || !view.verdict?.valid || view.verdict.effectiveVote !== "UPVOTE") {
+      return refused(`The cited review is ${view.state} and has no valid UPVOTE.`);
+    }
+    const newer = this.sql.prepare(`SELECT * FROM review_sessions WHERE requester_session_id=? AND repository=? COLLATE NOCASE
+      AND pr_number=? AND rowid>(SELECT rowid FROM review_sessions WHERE review_session_id=?) ORDER BY rowid DESC`)
+      .all(requesterSessionId, snapshot.repository, snapshot.pullRequest, reviewSessionId) as Row[];
+    const superseding = newer.find((candidate) => {
+      const verdict = json<ReviewAttemptVerdictView>(candidate.verdict_json);
+      return candidate.state === "completed" && verdict?.valid &&
+        (verdict.effectiveVote === "UPVOTE" || verdict.effectiveVote === "DOWNVOTE");
+    });
+    if (superseding) return refused(`The cited review was superseded by valid review ${superseding.review_session_id} at head ${superseding.head_sha}.`);
+    return { status: "verified", reviewSessionId, requesterSessionId, repository: row.repository,
+      pullRequest: row.pr_number, headSha: row.head_sha, vote: "UPVOTE", reviewer: row.reviewer,
+      epoch: view.round.epoch, round: view.round.round, attempt: view.round.attempt, completedAt: row.updated_at };
+  }
+
   /**
    * The current epoch of a requester's review run on one pull request, from its attempts that
    * reached the reviewer (those with a planned round). An attempt without a verdict (cancelled, or
    * lost with its runner) is neither valid nor consumed.
    */
-  history(requesterSessionId: string, pullRequest: { repository: string; number: number }): ReviewRunHistory {
+  /**
+   * The extra rounds granted to one epoch of a requester's run (#3369): every approved or consumed
+   * review_round_extension decision for exactly that pull request and epoch. `approved` names the
+   * ones not yet consumed, which a review request consumes, so a session restart cannot revoke a
+   * grant the run already counts. With a requested head, an unused grant applies only to that exact
+   * head. A newer occurrence for the canonical resource replaces even a consumed but unused grant.
+   */
+  extensions(requesterSessionId: string, pullRequest: { repository: string; number: number }, epoch: number, headSha?: string): {
+    rounds: number; approved: string[]; postUpvoteExtension?: ReviewRunHistory["postUpvoteExtension"];
+  } {
+    let rows: Array<{ occurrence_id: string; status: string; resource_snapshot: string }>;
+    try {
+      rows = this.sql.prepare(`SELECT d.occurrence_id, d.status, d.resource_snapshot FROM workflow_decisions d
+        WHERE d.session_id=? AND d.category='review_round_extension' AND d.status IN ('approved','consumed')
+          AND NOT EXISTS (SELECT 1 FROM workflow_decisions newer WHERE newer.session_id=d.session_id
+            AND newer.category=d.category AND newer.resource_key=d.resource_key AND newer.rowid>d.rowid)
+        ORDER BY d.rowid`)
+        .all(requesterSessionId) as typeof rows;
+    } catch {
+      // A database without workflow decisions grants none.
+      return { rounds: 0, approved: [] };
+    }
+    let rounds = 0;
+    let postUpvoteExtension: ReviewRunHistory["postUpvoteExtension"];
+    const run = this.history(requesterSessionId, pullRequest, undefined, false);
+    const approved: string[] = [];
+    for (const row of rows) {
+      const snapshot = json<{ repository?: unknown; pullRequest?: unknown; epoch?: unknown; extraRounds?: unknown; headSha?: unknown; roundsUsed?: unknown; upvotedHeadSha?: unknown }>(row.resource_snapshot);
+      if (!snapshot || typeof snapshot.repository !== "string" ||
+          snapshot.repository.toLowerCase() !== pullRequest.repository.toLowerCase() ||
+          snapshot.pullRequest !== pullRequest.number || snapshot.epoch !== epoch ||
+          typeof snapshot.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(snapshot.headSha) ||
+          !Number.isSafeInteger(snapshot.roundsUsed) || (snapshot.roundsUsed as number) < 1 ||
+          !Number.isSafeInteger(snapshot.extraRounds) || (snapshot.extraRounds as number) < 1 || (snapshot.extraRounds as number) > 4) continue;
+      // A consumed decision may have been consumed explicitly before its review request. Until
+      // its exact head has started a planned extra round, it grants no budget to any other head.
+      // Afterwards its remaining rounds belong to the epoch, including subsequent fixed heads.
+      const activated = row.status === "consumed" && this.sql.prepare(`SELECT 1 FROM review_sessions
+        WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND head_sha=?
+          AND json_extract(round_json, '$.epoch')=? AND json_extract(round_json, '$.round')>? LIMIT 1`)
+        .get(requesterSessionId, pullRequest.repository, pullRequest.number, snapshot.headSha, epoch, snapshot.roundsUsed as number);
+      if (!activated) {
+        // An unused grant is valid only for the exact review state it described. This also fences
+        // explicit consumption followed by a newer round/epoch before the approved head launches.
+        if (run.epoch !== epoch || run.validRounds !== snapshot.roundsUsed || !run.lastValid ||
+            (headSha !== undefined && snapshot.headSha !== headSha)) continue;
+        if (snapshot.upvotedHeadSha !== undefined) {
+          if (run.lastValid.vote !== "UPVOTE" || snapshot.upvotedHeadSha !== run.lastValid.headSha ||
+              snapshot.headSha === snapshot.upvotedHeadSha) continue;
+        } else if (run.lastValid.vote === "UPVOTE") continue;
+      }
+      // Keep retries of the first granted round scoped to the same post-upvote delta too.
+      if (snapshot.upvotedHeadSha === run.lastValid?.headSha && run.lastValid?.vote === "UPVOTE" &&
+          run.validRounds === snapshot.roundsUsed) {
+        postUpvoteExtension = { headSha: snapshot.headSha, upvotedHeadSha: run.lastValid.headSha };
+      }
+      rounds += snapshot.extraRounds as number;
+      if (row.status === "approved") approved.push(row.occurrence_id);
+    }
+    return { rounds, approved, ...(postUpvoteExtension ? { postUpvoteExtension } : {}) };
+  }
+
+  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true,
+    initialBudget = REVIEW_ROUND_BUDGET): ReviewRunHistory {
+    // A setting change never expands an ongoing run. Only typed extensions grant more rounds.
+    const saved = this.sql.prepare(`SELECT round_budget FROM review_sessions WHERE requester_session_id=?
+      AND repository=? COLLATE NOCASE AND pr_number=? ORDER BY rowid LIMIT 1`)
+      .get(requesterSessionId, pullRequest.repository, pullRequest.number) as { round_budget: number } | undefined;
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
-      WHERE requester_session_id=? AND repository=? AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
+      WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
       .all(requesterSessionId, pullRequest.repository, pullRequest.number) as Array<Pick<Row, "head_sha" | "round_json" | "verdict_json" | "findings_json">>;
     const attempts = rows.flatMap((row) => {
       const round = json<ReviewAttemptRound>(row.round_json);
@@ -235,13 +375,18 @@ export class ReviewSessions {
     });
     const history: ReviewRunHistory = {
       epoch: 0, lastValid: null, lastAttempt: null, validRounds: 0, consumedInLastRound: 0,
-      roundBudget: REVIEW_ROUND_BUDGET, attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
+      roundBudget: saved?.round_budget ?? initialBudget, attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
     };
     const epoch = Math.max(0, ...attempts.map((attempt) => attempt.round.epoch));
     if (!epoch) return history;
     const current = attempts.filter((attempt) => attempt.round.epoch === epoch);
     const last = current.at(-1)!;
     history.epoch = epoch;
+    if (includeExtensions) {
+      const extensions = this.extensions(requesterSessionId, pullRequest, epoch, headSha);
+      history.roundBudget += extensions.rounds;
+      if (extensions.postUpvoteExtension) history.postUpvoteExtension = extensions.postUpvoteExtension;
+    }
     history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid };
     const validVote = (attempt: typeof attempts[number]) => {
       const vote = attempt.verdict?.effectiveVote;
@@ -299,13 +444,18 @@ export class ReviewSessions {
   accept(runnerId: string, update: ReviewSessionUpdate, now: number): boolean {
     const row = this.row(update.sessionId);
     if (!row || row.runner_id !== runnerId || TERMINAL.has(row.state) || !UPDATE_STATES.has(update.state)) return false;
+    // First exact admission wins. Terminal delivery repeats it to survive a lost running frame.
+    const admission = row.reviewer === "codex" && row.admission_json === null ? parsedAdmission(update.admission) : null;
+    const observed = admission !== null && this.sql.prepare(
+      "UPDATE review_sessions SET admission_json=?, updated_at=? WHERE review_session_id=? AND admission_json IS NULL",
+    ).run(JSON.stringify(admission), now, row.review_session_id).changes > 0;
     // The round is planned once; a later report cannot move the attempt to another round.
     const round = json<ReviewAttemptRound>(row.round_json) ?? (update.round === undefined ? null : parsedRound(update.round));
     if (update.state === "running") {
       const planned = row.round_json === null && round !== null && this.sql.prepare(
         "UPDATE review_sessions SET round_json=?, updated_at=? WHERE review_session_id=? AND round_json IS NULL",
       ).run(JSON.stringify(round), now, row.review_session_id).changes > 0;
-      return this.markRunning(row.review_session_id, now) || planned;
+      return this.markRunning(row.review_session_id, now) || planned || observed;
     }
     const output = update.state === "completed" && typeof update.output === "string"
       ? boundedText(update.output, REVIEW_SESSION_OUTPUT_LIMIT_BYTES) : null;
@@ -320,20 +470,30 @@ export class ReviewSessions {
       ? invalidVerdict("evidence_contract", ["the runner's verdict was malformed"]) : reported;
     const { verdict, findings } = settledVerdict(row, state, round,
       judged, state === "completed" ? { text: output!.text, truncated } : null);
+    // The requester is owed one continuation, recorded with the outcome so a crash cannot lose it.
+    // A cancellation is the requester's own, so it is owed nothing.
     this.sql.prepare(`UPDATE review_sessions SET state=?, output=?, output_truncated=?, reason=?, round_json=?, verdict_json=?,
-      findings_json=?, updated_at=? WHERE review_session_id=?`).run(
+      findings_json=?, continuation_state=?, continuation_updated_at=?, updated_at=? WHERE review_session_id=?`).run(
       state, state === "completed" ? output!.text : null, truncated ? 1 : 0, reason,
       round ? JSON.stringify(round) : null, verdict ? JSON.stringify(verdict) : null, findings.length ? JSON.stringify(findings) : null,
-      now, row.review_session_id,
+      state === "cancelled" ? null : "held", now, now, row.review_session_id,
     );
     return true;
   }
 
-  /** Settle an unfinished review the runner can no longer report. */
-  abandon(reviewSessionId: string, reason: string, now: number): boolean {
-    return this.sql.prepare(`UPDATE review_sessions SET state='failed', reason=?, updated_at=?
-      WHERE review_session_id=? AND state IN ${ACTIVE}`)
-      .run(sanitizedReviewSessionReason(reason), now, reviewSessionId).changes > 0;
+  /** Settle an unfinished review the runner can no longer report. Its requester is owed a
+   * continuation unless the requester ended it (`owed` false). */
+  abandon(reviewSessionId: string, reason: string, now: number, owed = true): boolean {
+    return this.sql.prepare(`UPDATE review_sessions SET state='failed', reason=?, continuation_state=?, continuation_updated_at=?,
+      updated_at=? WHERE review_session_id=? AND state IN ${ACTIVE}`)
+      .run(sanitizedReviewSessionReason(reason), owed ? "held" : null, now, now, reviewSessionId).changes > 0;
+  }
+
+  /** The finished reviews still owed to this requester as a continuation, oldest first. */
+  heldContinuations(requesterSessionId: string): ReviewSessionView[] {
+    return (this.sql.prepare(`SELECT review_session_id FROM review_sessions WHERE requester_session_id=? AND continuation_state='held'
+      ORDER BY rowid`).all(requesterSessionId) as Array<{ review_session_id: string }>)
+      .map((row) => this.view(row.review_session_id)!);
   }
 
   /** Unfinished reviews on a runner, oldest first. */

@@ -1,5 +1,9 @@
 # Releasing
 
+For resumable preparation and supervision, including release-stage timing reports, see
+[Resumable Releases and Scheduling Evidence](release-automation.md). The review and release gates
+below still apply.
+
 Desktop bundles are built by CI, not by hand. The [`Release`](../.github/workflows/release.yml)
 workflow builds the per-platform control-plane and local-runner **sidecars** plus the **Tauri bundle** on a native
 runner for each OS/arch, then uploads them all to a single **draft** GitHub release.
@@ -307,17 +311,31 @@ including the unique tag used by a manual test release.
 
 ## Cut a release
 
+Stable releases require [exact full-regression certification](release-automation.md#exact-full-regression-certification)
+of the actual merged release commit. A green PR, merge group or ancestor is insufficient. This
+stays true if the disabled fast merge-group gate is ever activated
+([proposal](fast-gate-activation-proposal.md)): a reduced group never certifies a release. Use
+resumable supervision for checkpoint recovery and fresh certification immediately before
+publication. An intermediate candidate skipped by rolling main can request the bounded candidate
+lane; wait for that exact SHA's complete compatible suite before tagging.
+
 ```bash
 # 1. Bump the six version fields above to the new X.Y.Z, commit, merge to main.
-# 2. Tag the release commit and push the tag:
-git tag vX.Y.Z
+# 2. Verify the actual merged release SHA, with explicit tagging/publication authority:
+node scripts/release-certification.mjs --repository picoduck/wollipog --target-sha FULL_MERGED_RELEASE_SHA
+# 3. Tag that exact commit and push the tag:
+git tag vX.Y.Z FULL_MERGED_RELEASE_SHA
 git push origin vX.Y.Z
 ```
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and
-**Publish**. Publishing is also what makes the release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
+limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and reconcile
+fresh exact-candidate certification immediately before an authorized **Publish**. Prefer
+`pnpm release resume` for this final gate and accepted-publication recovery. A pending rerun,
+failed/incomplete validation, incompatible suite or expired evidence blocks stable publication;
+a previously green workflow or checkpoint does not waive it. Publishing is also what makes the
+release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
 After publishing, reconcile the repository's security advisories with the release. For every
@@ -394,3 +412,14 @@ Before merging, verify that every required check applies to the pull request's c
 Configure the `main` ruleset to require those checks, resolved review conversations, and a pull
 request while blocking force pushes and branch deletion. A skipped workflow result does not prove
 that the current head was tested.
+
+## Runner History Retention Upgrade Note
+
+Releases containing protocol v231 must call out the runner-log retention change in their upgrade
+and rollback guidance. Organizations with archived-history retention already enabled automatically
+trim capable runners after completed control-plane pruning, including sessions pruned before the
+upgrade, without a new switch or another 24-hour arming delay. Off remains off. Preserve a runner
+data backup or disable the organization policy before upgrading if full logs must be retained.
+Reprocess cannot restore a trimmed full log. Manifest format 2 is intentionally refused by older
+runners; rollback requires stopping the runner and restoring pre-upgrade runner data with the old
+binaries. See [archived-history retention](./archived-history-retention.md#runner-logs-and-upgrades).

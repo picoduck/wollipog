@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
 import { PROTOCOL_VERSION, type ProjectView, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
@@ -115,10 +115,14 @@ function ProjectsRoute() {
     onNewSession={(preset) => { newSessionPresets.push(preset); }} />;
 }
 
+/** The root `render` mounted last, so a test can leave the page. */
+let lastRoot: Root | undefined;
+
 async function render(snapshot: Partial<UiSnapshotMessage> | null, client: ApiClient = api) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
   const root = createRoot(mountPoint);
+  lastRoot = root;
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "projects-1", runtimeKey: "projects-1:1", createSocket: () => socket, close() {},
@@ -769,6 +773,76 @@ test("Copy Project ID copies the id and confirms it", async () => {
     assert.deepEqual(toasts.at(-1), { message: "Project ID copied.", detail: "project-1" });
   } finally {
     feedback.showToast = prior;
+  }
+});
+
+/** Swaps in a Clipboard API whose writes settle only when the test says so; `restore` puts it back. */
+function deferredClipboard() {
+  const pending: Array<() => void> = [];
+  const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: () => new Promise<void>((resolve) => { pending.push(resolve); }) },
+  });
+  return {
+    resolve: async () => {
+      await act(async () => { pending.at(-1)!(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+    },
+    restore: () => {
+      if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+      else Reflect.deleteProperty(domWindow.navigator, "clipboard");
+    },
+  };
+}
+
+/** Clicks Copy Project ID in the selected project's ⋯, leaving its write pending. */
+async function startCopyProjectId(body: HTMLElement) {
+  const menu = await openProjectActions(body.querySelector(".project-detail-title-row")!);
+  const copy = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")].find((item) => text(item) === "Copy Project ID")!;
+  await act(async () => { copy.click(); });
+}
+
+test("a Copy Project ID write that succeeds after the page was left shows no toast and moves no focus (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  const elsewhere = domWindow.document.createElement("button");
+  try {
+    await startCopyProjectId(await renderSelected([busyProject()], "Project 1"));
+    await act(async () => lastRoot!.unmount());
+    elsewhere.textContent = "Elsewhere";
+    domWindow.document.body.append(elsewhere);
+    elsewhere.focus();
+    toasts.length = 0;
+    await clipboard.resolve();
+    assert.deepEqual(toasts, [], "nothing is reported");
+    assert.ok(domWindow.document.activeElement === elsewhere, "focus stays where it went");
+
+    // Focus left nowhere in particular: only the unmount makes this copy stale.
+    elsewhere.remove();
+    await startCopyProjectId(await renderSelected([busyProject()], "Project 1"));
+    await act(async () => lastRoot!.unmount());
+    assert.ok(domWindow.document.activeElement === domWindow.document.body, "focus fell to the page");
+    await clipboard.resolve();
+    assert.deepEqual(toasts, [], "unmounted: nothing is reported");
+  } finally {
+    elsewhere.remove();
+    clipboard.restore();
+  }
+});
+
+test("a Copy Project ID write that succeeds while still current confirms it and keeps focus on ⋯ (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  try {
+    const body = await renderSelected([busyProject()], "Project 1");
+    await startCopyProjectId(body);
+    const trigger: unknown = body.querySelector('.project-detail-title-row button[aria-label="Project Actions"]');
+    assert.ok(trigger, "the ⋯ trigger");
+    assert.ok(domWindow.document.activeElement === trigger, "⋯ hands focus back to its trigger");
+    toasts.length = 0;
+    await clipboard.resolve();
+    assert.deepEqual(toasts, ["Project ID copied."]);
+    assert.ok(domWindow.document.activeElement === trigger, "focus stays on the ⋯ trigger");
+  } finally {
+    clipboard.restore();
   }
 });
 

@@ -19,10 +19,10 @@ three times: `pnpm test:e2e`, from the repository root (the config and baseURL l
 historical flake in this repository has been e2e/browser, so a unit-only pass is structurally
 blind to the layer that actually flakes. Before each e2e run, check that port 4174 is free —
 concurrent worktree sessions run their own e2e servers; if the port is held, wait and retry
-rather than killing the other server, and stagger subsequent runs. Budget about 3.5 hours of wall
-clock for the unit runs and three e2e passes: the 2026-10-06 suite collected 2,153 browser cases
-and each complete pass took 55–56 minutes. Record current collection counts and actual durations
-rather than treating this estimate as fixed. A window that long is also why HEAD moves under the
+rather than killing the other server, and stagger subsequent runs. Budget about 6 hours of wall
+clock for the unit runs and three e2e passes: the 2026-10-27 suite collected 3,693 browser cases
+and each complete pass took 97–108 minutes; the complete sweep took about 5 hours 30 minutes. Record current
+collection counts and actual durations rather than treating this estimate as fixed. A window that long is also why HEAD moves under the
 sweep, so the baseline-pinning rule below matters most for the e2e passes.
 
 Launch each full-suite pass as its own command and await its completion before starting the next.
@@ -60,14 +60,20 @@ dependency, a filesystem or port race, a shared-state or ordering dependency bet
 genuine bug that surfaces nondeterministically. Name the mechanism; do not guess a fix.
 
 Check history with `git log -1 --format='%h %ad' -- <test-file>`, and read CI history across all
-events, not only pushes to `main`: list every failed run of the CI workflow since the previous
-sweep (`gh run list --workflow ci.yml --status failure --created '>=<previous sweep date>' --limit 500`)
-and pull the log of every failed job other than the aggregator. A fixed run count does not cover a
+events: list every failed run of both CI and Main Rolling Validation since the previous sweep
+(`gh run list --workflow ci.yml --status failure --created '>=<previous sweep date>' --limit 500`
+and `gh run list --workflow main-rolling-validation.yml --status failure --created '>=<previous sweep date>' --limit 500`).
+After the rolling cutover, current main regressions belong to the rolling caller, while CI retains
+PR/merge-group and historical or restored main-push runs. Pull the log of every failed job other
+than the aggregator. A fixed run count does not cover a
 week: on 2026-09-29 the last 200 runs reached back only 36 hours and held 15 of the week's 41
 failed runs, missing the ejection that carried the #1819 evidence. In this repository flakes rarely show up as a red push. They surface as merge-queue
 ejections and as browser jobs that failed once and passed on retry, which still fail the run
 because `playwright.config.ts` sets `failOnFlakyTests` under CI. A 20-run window missed the
 2026-09-22 phone-viewport flake and four merge-queue ejections entirely.
+Merge groups still run the full suite today. The fast merge-group gate (`CI_MERGE_GROUP_GATE`) is
+disabled; if it is ever activated, ordinary groups run a reduced suite and a flake in skipped work
+surfaces only in Main Rolling Validation (see `docs/fast-gate-activation-proposal.md`).
 
 ## Gate
 

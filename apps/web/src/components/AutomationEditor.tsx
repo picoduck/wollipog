@@ -11,7 +11,7 @@ import {
   AUTOMATION_SAVED_ALTERNATE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ALTERNATE_ORCHESTRATOR_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ALTERNATE_ROLE_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_INSTALLATION_UNAVAILABLE,
   AUTOMATION_SAVED_ORCHESTRATOR_INSTALLATION_UNAVAILABLE, AUTOMATION_SAVED_ROLE_INSTALLATION_UNAVAILABLE,
-  automationChooseWorkflowInstallation,
+  automationChooseWorkflowInstallation, CODEX_EXEC_RETIRED_CONFIG_REASON, isRetiredCodexExec,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -19,11 +19,14 @@ import {
   bindableAgents, bindingAvailable, defaultAgentId, installationFor, offeredAgents,
   resolvedInstallationAgentId, unboundInstallationUnavailable,
 } from "../automation-installations.js";
-import { buildSpec, defaults, formFrom, specOf, withAgent, withModel, type FormState } from "../automation-form.js";
+import {
+  buildSpec, defaults, formFrom, scheduleError, specOf, validTimeZone, withAgent, withModel, type FormState,
+} from "../automation-form.js";
 import { agentDisplayName } from "../agent-presentation.js";
 import { titleCaseLabel } from "../format.js";
 import { useLeaveGuard } from "../leave-guard.js";
-import { backLabel, type AutomationEditorRoute } from "../navigation.js";
+import { useReportEntityTitle } from "../entity-title.js";
+import { backLabel, ENTITY_FALLBACK_TITLES, type AutomationEditorRoute } from "../navigation.js";
 import { machineOptionLabels } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -31,6 +34,7 @@ import { useExperiments } from "../use-experiments.js";
 import { agentOptions } from "./agent-options.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
+import { AutomationScheduleFields } from "./AutomationScheduleFields.js";
 import { AutomationsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { DetailBar } from "./PageHeader.js";
@@ -65,8 +69,11 @@ export class AutomationFieldError extends Error {
  * The fields a save error can belong to. Roles are keyed as the request binds them: `role:<agent
  * id>` and `orchestrator`, with `alternate:` in front for the other machine's.
  */
-type FieldKey = "agent" | "fallbackRunner" | "fallbackAgent" | `role:${string}` | "orchestrator"
-  | `alternate:role:${string}` | "alternate:orchestrator";
+type FieldKey = "cron" | "timezone" | "agent" | "fallbackRunner" | "fallbackAgent" | `role:${string}`
+  | "orchestrator" | `alternate:role:${string}` | "alternate:orchestrator";
+
+/** Time Zone's error (§8.5), for a stored zone the scheduler does not know. */
+const TIMEZONE_ERROR = "Choose a time zone from the list.";
 
 /**
  * Whether a save error is about the other machine. The client's own checks (the alternate's
@@ -199,11 +206,15 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
     return () => { active = false; };
   }, [api, workflowsAttempt]);
 
-  const back = () => navigate({ name: "automations" });
+  // An edit returns to the automation's page (#2968); a new automation, and one that is gone, to
+  // the list.
+  const toList = () => navigate({ name: "automations" });
+  const back = automationId === null ? toList : () => navigate({ name: "automation", id: automationId });
   const fallbackTitle = automationId === null ? "New Automation" : "Edit Automation";
-  const frame = (title: string, body: ReactNode) => (
+  const fallbackBack = automationId === null ? backLabel("automations") : `Back to ${ENTITY_FALLBACK_TITLES.automation}`;
+  const frame = (title: string, body: ReactNode, onBack = back, label = fallbackBack) => (
     <div className="automation-editor">
-      <DetailBar title={title} backLabel={backLabel("automations")} onBack={back} />
+      <DetailBar title={title} backLabel={label} onBack={onBack} />
       <div className="page form">{body}</div>
     </div>
   );
@@ -213,11 +224,11 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
       <State
         icon={<AutomationsIcon />}
         title="Automation Not Found"
-        actions={<button type="button" className="btn primary" onClick={back}>{backLabel("automations")}</button>}
+        actions={<button type="button" className="btn primary" onClick={toList}>{backLabel("automations")}</button>}
       >
         It may have been deleted.
       </State>
-    ));
+    ), toList, backLabel("automations"));
   }
   if (automationId !== null && stored.state === "failed") {
     return frame(fallbackTitle, (
@@ -285,6 +296,11 @@ function AutomationEditorForm({
   // builder needs it to carry across every field this form does not render.
   const [editingSpec, setEditingSpec] = useState<AutomationSpec | null>(() => automation ? specOf(automation) : null);
   const [savedName, setSavedName] = useState(automation?.name ?? "");
+  // The window title reads "Edit <Name>" as the bar does (#2968).
+  useReportEntityTitle(
+    automation ? { name: "automations", editor: { kind: "edit", automationId: automation.automationId } } : { name: "automations", editor: { kind: "new" } },
+    automation ? savedName : null,
+  );
   const [baseline, setBaseline] = useState<Draft>(() => automation
     ? editDraft(specOf(automation), runners)
     : draftOf(withMachine(defaults(), firstMachine(runners))));
@@ -292,6 +308,9 @@ function AutomationEditorForm({
   const { form } = draft;
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ field: FieldKey | null; message: string } | null>(null);
+  // Whether Schedule's error shows (§8.5): after a blur that followed an edit, and after a submit,
+  // until the expression is valid again.
+  const [cronChecked, setCronChecked] = useState(false);
   const dirty = !sameValue(draft, baseline);
 
   // A new automation opened before any machine reported starts on the first one that does.
@@ -514,6 +533,17 @@ function AutomationEditorForm({
   const save = async () => {
     let spec: AutomationSpec;
     setFailure(null);
+    // The scheduler's own checks (#2971) run before anything is sent; the field takes focus instead.
+    const problem = scheduleError(form.cron, { timezone: form.timezone, enabled: form.enabled, now: Date.now() });
+    if (problem) {
+      setCronChecked(true);
+      setFailure({ field: "cron", message: problem });
+      return;
+    }
+    if (!validTimeZone(form.timezone)) {
+      setFailure({ field: "timezone", message: TIMEZONE_ERROR });
+      return;
+    }
     try {
       spec = currentSpec();
     } catch (cause) {
@@ -561,7 +591,11 @@ function AutomationEditorForm({
     }
     setDraft(baseline);
     setFailure(null);
+    setCronChecked(false);
   };
+
+  const scheduleCheck = { timezone: form.timezone, enabled: form.enabled, now: Date.now() };
+  const cronProblem = scheduleError(form.cron, scheduleCheck);
 
   const ids = useId();
   const fieldId = (key: string) => `${ids}-${key.replace(/[^A-Za-z0-9_-]/g, "_")}`;
@@ -591,7 +625,9 @@ function AutomationEditorForm({
     return offeredAgents(runner?.agents, current).map((agent) => ({
       value: agent.id,
       label: agentDisplayName(agent, runner?.agents),
-      ...(disabled.has(agent.id) ? { disabled: true, disabledReason: "Unavailable on this machine." } : {}),
+      ...(isRetiredCodexExec(agent)
+        ? { disabled: true, disabledReason: CODEX_EXEC_RETIRED_CONFIG_REASON }
+        : disabled.has(agent.id) ? { disabled: true, disabledReason: "Unavailable on this machine." } : {}),
     }));
   };
   const roleOptions = (runner: Runner, boundId: string): SelectOption<string>[] => [
@@ -821,6 +857,8 @@ function AutomationEditorForm({
 
   const pushEvents = ["started", "succeeded", "failed", "expired"] as const;
   const editorTitle = isNew ? "New Automation" : `Edit ${savedName}`;
+  // An edit's Back returns to the automation's page, by its name (#2968).
+  const editorBack = isNew ? backLabel("automations") : `Back to ${savedName}`;
   const workflowHelperId = fieldId("workflow-off");
   const workflowOptions: SelectOption<string>[] = [
     ...(form.workflowId && !workflows.some((workflow) => workflow.workflowId === form.workflowId)
@@ -833,7 +871,7 @@ function AutomationEditorForm({
 
   return (
     <div className="automation-editor" ref={rootRef}>
-      <DetailBar title={editorTitle} backLabel={backLabel("automations")} onBack={onBack} />
+      <DetailBar title={editorTitle} backLabel={editorBack} onBack={onBack} />
       <div className="page form">
         <form className="automation-editor-form" noValidate onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <section className="section" aria-labelledby={fieldId("what")}>
@@ -992,22 +1030,21 @@ function AutomationEditorForm({
 
           <section className="section" aria-labelledby={fieldId("when")}>
             <div className="section-head"><h2 className="section-title" id={fieldId("when")}>When to Run</h2></div>
-            <div className="field-row">
-              <label className="field">
-                <span>Schedule</span>
-                <input value={form.cron} maxLength={128} aria-describedby={fieldId("cron-help")}
-                  onChange={(event) => patch("cron", event.target.value)} />
-                <p className="field-helper" id={fieldId("cron-help")}>Five-field cron: minute, hour, day, month and weekday.</p>
-              </label>
-              <label className="field">
-                <span>Time Zone</span>
-                <input value={form.timezone} maxLength={128} aria-describedby={fieldId("timezone-help")}
-                  onChange={(event) => patch("timezone", event.target.value)} />
-                <p className="field-helper" id={fieldId("timezone-help")}>
-                  An IANA time zone. A skipped spring-forward time doesn't run; a repeated fall-back time runs once.
-                </p>
-              </label>
-            </div>
+            <AutomationScheduleFields
+              idPrefix={fieldId("schedule")}
+              cron={form.cron}
+              timezone={form.timezone}
+              enabled={form.enabled}
+              cronError={cronChecked ? cronProblem : null}
+              timezoneError={errorFor("timezone")}
+              onCronChange={(cron) => {
+                patch("cron", cron);
+                // A valid expression clears the error; an invalid one shows again on the next blur.
+                if (!scheduleError(cron, scheduleCheck)) setCronChecked(false);
+              }}
+              onCronBlur={() => setCronChecked(true)}
+              onTimezoneChange={(timezone) => patch("timezone", timezone)}
+            />
             <Checkbox label="Enabled" checked={form.enabled} onChange={(checked) => patch("enabled", checked)} />
           </section>
 
@@ -1168,7 +1205,7 @@ function AutomationEditorForm({
           </section>
 
           {failure && !failure.field && (
-            <Notice tone="danger" className="automation-editor-failure" details={failure.message}>
+            <Notice tone="danger" details={failure.message}>
               {isNew ? "This automation wasn't created." : "These changes weren't saved."} Fix what the details
               below describe, then try again.
             </Notice>

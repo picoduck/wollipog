@@ -358,10 +358,11 @@ export function ProjectsView({
   };
   /** Copies `text` from a ⋯ item and confirms it with a toast that shows what was copied. */
   const copyFromMenu = async (text: string, copiedMessage: string, failedMessage: string) => {
-    // ⋯ has handed focus back to its trigger; a refused write falls back only while it still has it.
+    // ⋯ has handed focus back to its trigger; a write reports, and a refused one falls back, only
+    // while the page is mounted and focus is still there or nowhere.
     const from = document.activeElement;
-    const current = () => document.activeElement === null || document.activeElement === document.body ||
-      document.activeElement === from;
+    const current = () => mounted.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === from);
     const copied = await writeClipboardText(text, current);
     if (copied === null) return;
     if (from instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) from.focus();

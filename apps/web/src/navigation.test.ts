@@ -21,6 +21,7 @@ import {
   viewFromPath,
   viewFromNotificationMessage,
   viewPath,
+  viewSubjectName,
   type View,
   GLOBAL_VIEW_ITEMS,
   SETTINGS_SECTIONS,
@@ -37,6 +38,7 @@ const routes: Array<[View, string]> = [
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
+  [{ name: "automations", tab: "outbound" }, "/automations/outbound"],
   [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
   [{ name: "automations", editor: { kind: "edit", automationId: "automation / ✅" } },
     `/automations/~${encodeResourceId("automation / ✅")}/edit`],
@@ -84,6 +86,27 @@ test("a run's phone member is in its URL, so a reload and a shared link keep it 
   // A query that is not one member keeps the run open, without a member.
   for (const query of ["", "?member=", "?member=%20", "?member=a&member=b", "?member=a&tab=b", "?tab=a", `?member=${"x".repeat(5000)}`]) {
     assert.deepEqual(viewFromPath(path, query), { name: "run", id: "run_abc" }, query);
+  }
+});
+
+test("a pod's phone tab is in its URL, so a reload and a shared link keep it (#2981)", () => {
+  const path = `/pods/~${encodeResourceId("pod_abc")}`;
+  for (const view of [
+    { name: "pod", id: "pod_abc", tab: "huddle" },
+    { name: "pod", id: "pod_abc", member: "s_codex" },
+    { name: "pod", id: "pod_abc", member: "member / ✅ &?#" },
+  ] satisfies View[]) {
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.equal(url.pathname, path);
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+  assert.equal(viewPath({ name: "pod", id: "pod_abc", tab: "huddle" }), `${path}?tab=huddle`);
+  assert.equal(viewPath({ name: "pod", id: "pod_abc", member: "s_codex" }), `${path}?member=s_codex`);
+  assert.equal(viewPath({ name: "pod", id: "pod_abc" }), path);
+  assert.equal(sameView({ name: "pod", id: "pod_abc", member: "a" }, { name: "pod", id: "pod_abc", tab: "huddle" }), false);
+  // A query that names no tab keeps the pod open on its default tab.
+  for (const query of ["", "?tab=", "?tab=members", "?tab=huddle&member=a", "?member=", "?member=a&member=b", `?member=${"x".repeat(5000)}`]) {
+    assert.deepEqual(viewFromPath(path, query), { name: "pod", id: "pod_abc" }, query);
   }
 });
 
@@ -217,7 +240,25 @@ test("an entity page is titled by its entity once it has loaded", () => {
   assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }, "Nightly"), "Edit Nightly");
   assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }), "Edit Automation");
   assert.equal(viewFromPath("/automations/~!/edit"), null);
-  assert.equal(viewFromPath(`/automations/~${encodeResourceId("a")}`), null, "the automation page itself is #2968's");
+  // The automation page (#2968) is titled by its automation, "Automation" while it loads.
+  assert.equal(viewTitle({ name: "automation", id: "a" }, "Nightly"), "Nightly");
+  assert.equal(viewTitle({ name: "automation", id: "a" }), "Automation");
+});
+
+test("an automation's page has its own address, which survives a reload (#2968)", () => {
+  for (const id of ["automation-1", "a/b?c#d", "名前"]) {
+    const view = { name: "automation" as const, id };
+    const path = viewPath(view);
+    assert.equal(path, `/automations/~${encodeResourceId(id)}`);
+    assert.deepEqual(viewFromPath(path), view);
+    assert.deepEqual(viewFromPath(`${path}/`), view);
+  }
+  assert.equal(viewFromPath("/automations/~!"), null, "a malformed id is not a route");
+  assert.equal(viewFromPath("/automations/~"), null);
+  // The editor's route is not mistaken for the page, nor the page for the editor.
+  assert.deepEqual(viewFromPath(`/automations/~${encodeResourceId("a")}/edit`),
+    { name: "automations", editor: { kind: "edit", automationId: "a" } });
+  assert.equal(viewSubjectName({ name: "automation", id: "a" }), "This Automation");
 });
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
@@ -603,7 +644,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
   assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
-    ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
   const view = viewFromPath("/settings/keyboard");
   assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");

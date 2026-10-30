@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  campaignAuthorityPreflight, campaignCodeOperationTargets, resolveCampaignAuthority, validCampaignControl,
+  campaignAuthorityPreflight, campaignCodeOperationTargets, campaignWorkflowOwner, completeParentControlDecisions,
+  resolveCampaignAuthority, validCampaignControl,
   fullControlStandingHumanRequired, humanRequiredRulesExist, FULL_CONTROL_DECLINED_CLASSES, type GovernancePolicy,
-  HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type PendingApproval,
+  HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type ParentControlDecisionPolicy, type PendingApproval, type WorkflowDecisionResourceSnapshot,
 } from "./index.js";
 
 const control: CampaignControl = { mode: "full_control", boundary: {
@@ -12,6 +13,17 @@ const control: CampaignControl = { mode: "full_control", boundary: {
   operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge"], delegatablePolicyIds: ["review-tools"],
 } };
 const base = { control, parentControl: "off" as const, decisions: HUMAN_ONLY_PARENT_CONTROL_POLICY, root: false, supported: true };
+test("automation creation always stays human-owned even under Full Control or an unsupported peer", () => {
+  for (const root of [true, false]) for (const supported of [true, false]) {
+    const result = resolveCampaignAuthority({ ...base, root, supported, snapshot: {
+      category: "automation_creation", spec: {} as never, targetDigest: "a".repeat(64), requestedSpecDigest: "b".repeat(64),
+      effectiveTargets: [],
+      nextFireAt: 1, expiresAt: 2,
+    }, trustedSource: "workflow_route" });
+    assert.equal(result.owner, "human");
+    assert.equal(result.basis, "human_required");
+  }
+});
 const question = (text: string, extra: Partial<PendingApproval> = {}): PendingApproval => ({
   requestId: "q", kind: "question", title: text, options: [], requestSource: "provider_question",
   questions: [{ id: "choice", question: text, options: [{ label: "A" }, { label: "B" }] }], ...extra,
@@ -55,6 +67,23 @@ test("exact private metadata is only a compatibility condition and ordinary auth
   assert.equal(campaignAuthorityPreflight({ mode: "custom" }, "acp", 1).supported, true);
 });
 
+test("older-runner preflight refusals use the shared sentence and return the versions beside it (#3803)", () => {
+  const older = (error: string, requiredRunnerProtocolVersion: number, runnerProtocolVersion: number | null) =>
+    ({ supported: false, reason: error, requirement: { error, requiredRunnerProtocolVersion, runnerProtocolVersion } });
+  const evidence = "This machine needs a newer runner for production evidence authority. Update and restart the runner.";
+  assert.deepEqual(campaignAuthorityPreflight(mediaControl, "codex-app-server", 222), older(evidence, 223, 222));
+  assert.deepEqual(campaignAuthorityPreflight(mediaControl, "codex-app-server", null), older(evidence, 223, null));
+  assert.deepEqual(campaignAuthorityPreflight(mediaControl, "codex-app-server", 223), { supported: false,
+    reason: "Production evidence authority requires the exact private media contract; compatibility metadata does not establish runtime readiness." },
+  "a current runner without the private contract is not told to update");
+  const budgetControl: CampaignControl = { ...control, boundary: { ...control.boundary, budgetAuthority: { version: 1,
+    accounting: "managed_workers_only", unpriced: "stop", toolCalls: 10, concurrency: 1 } } };
+  assert.ok(validCampaignControl(budgetControl));
+  assert.deepEqual(campaignAuthorityPreflight(budgetControl, "codex-app-server", 217),
+    older("This machine needs a newer runner for campaign limits. Update and restart the runner.", 218, 217));
+  assert.deepEqual(campaignAuthorityPreflight(budgetControl, "codex-app-server", 218), { supported: true });
+});
+
 test("Full Control planning uses trusted provenance; Custom preserves keyword-based protection", () => {
   for (const text of ["Which authentication library should we implement?", "Should the OAuth flow use PKCE?",
     "Which validation test should use sample@example.com?", "Which approach should the login component use?",
@@ -68,7 +97,7 @@ test("Full Control planning uses trusted provenance; Custom preserves keyword-ba
   }).owner, "human");
   assert.equal(evaluate(question("Which architecture?"), { control: undefined, parentControl: "questions" }).owner, "orchestrator");
   assert.equal(evaluate(question("Which architecture?"), { root: true, control: undefined, parentControl: "questions" }).owner, "human");
-  assert.equal(evaluate(question("Which architecture?"), { root: true }).basis, "standing_authorization");
+  assert.equal(evaluate(question("Which architecture?"), { root: true }).basis, "standing_decline");
 });
 
 const declined = (result: ReturnType<typeof evaluate>, requestClass: string, label = requestClass) => {
@@ -132,8 +161,10 @@ test("the Orchestrator decides elicitations, unverified provenance, escalations 
   declined(evaluate(escalated, { root: true }), "unverified_tool_effects");
   const free = question("Which design?", { questions: [{ id: "q", question: "Which design?", options: [] }] });
   decided(evaluate(free), undefined);
-  declined(evaluate(free, { root: true }), "root_forms_without_suggested_answers");
-  assert.equal(evaluate(question("Which architecture?"), { root: true }).basis, "standing_authorization", "a suggested answer is still applied");
+  declined(evaluate(free, { root: true }), "root_questions");
+  // A root's own question is dismissed even when it offers a choice: nobody else can answer it, and
+  // applying an option would claim a decision no person made (#2940).
+  declined(evaluate(question("Which architecture?"), { root: true }), "root_questions", "no option is applied for a root");
 });
 
 test("ordinary ask rules left undelegated go to the Orchestrator; Human Required and built-in rules and guardrails stay human", () => {
@@ -297,4 +328,38 @@ test("bounded issue authority requires v217 while the foundation stays compatibl
       "live usage v216 does not prove bounded issue-write support");
     assert.equal(campaignAuthorityPreflight(bounded, driver, 217).supported, true);
   }
+});
+
+test("a policy stored before a later category reads it as human-owned; anything else malformed fails closed", () => {
+  const { review_round_extension: _later, ...older } = { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const };
+  assert.deepEqual(completeParentControlDecisions(older), { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" });
+  assert.deepEqual(completeParentControlDecisions({ ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" }),
+    { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" });
+  const { pr_merge: _missing, ...incomplete } = HUMAN_ONLY_PARENT_CONTROL_POLICY;
+  for (const malformed of [incomplete, { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, unknown: "human" },
+    { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "anyone" }, [], null, "human"]) {
+    assert.equal(completeParentControlDecisions(malformed), null, JSON.stringify(malformed));
+  }
+});
+
+test("extra review rounds follow only an explicit Parent Control grant, never Full Control's own boundary", () => {
+  const granted = { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" as const };
+  const everything: CampaignControl = { ...control, boundary: { ...control.boundary, operations: [
+    "implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval",
+    "question", "tool_approval", "policy_ask"] } };
+  assert.equal(campaignWorkflowOwner(everything, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true), "human");
+  assert.equal(campaignWorkflowOwner(everything, granted, "review_round_extension", true), "orchestrator");
+  assert.equal(campaignWorkflowOwner(undefined, granted, "review_round_extension", true), "orchestrator");
+  assert.equal(campaignWorkflowOwner(everything, granted, "review_round_extension", false), "human", "an unsupported provider stays human");
+  const snapshot: WorkflowDecisionResourceSnapshot = {
+    category: "review_round_extension", repository: "picoduck/wollipog", pullRequest: 7, epoch: 1, headSha: "a".repeat(40),
+    roundsUsed: 4, blockingFindings: 2, extraRounds: 2, reason: "Two blockers left, both small.",
+  };
+  const resolve = (decisions: ParentControlDecisionPolicy, root = false) => resolveCampaignAuthority({
+    control: everything, parentControl: "questions_and_approvals", decisions, root, supported: true, snapshot,
+    trustedSource: "workflow_route",
+  }).owner;
+  assert.equal(resolve(HUMAN_ONLY_PARENT_CONTROL_POLICY), "human", "Full Control does not take it on its own");
+  assert.equal(resolve(granted), "orchestrator", "an explicit grant delegates it");
+  assert.equal(resolve(granted, true), "human", "a root's own request stays with a person");
 });

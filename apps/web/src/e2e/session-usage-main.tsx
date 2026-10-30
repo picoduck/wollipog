@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { campaignWorkflowOwner, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
+import { campaignWorkflowOwner, PERSONAL_ORGANIZATION_ID, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
   type RunnerView, type SessionConfig, type SessionEvent, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -293,6 +293,7 @@ if (composerFixture) {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "orchestrator",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     };
     session.orchestratorPolicy = {
@@ -327,13 +328,19 @@ if (composerFixture) {
             merged_branch_deletion: "user_default",
             follow_up_issue_publication: "session_override",
             ui_evidence_approval: "user_default",
+            review_round_extension: "user_default",
           },
         },
         execution: { strictProjectIsolation: "user_default", integrationIsolation: "user_default" },
       },
     };
     if (params.get("campaign-state") !== "off") {
-      session.orchestratorCampaign = {
+      if (params.get("reviewPolicy") === "1") {
+      session.orchestratorPolicy.reviewPolicySnapshotVersion = 1;
+      Object.assign(session.orchestratorPolicy.behavior, { reviewHarness: "codex", reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2 });
+      Object.assign(session.orchestratorPolicy.sources.behavior, { reviewHarness: "session_override", reviewModel: "session_override", reviewEffort: "session_override", reviewRoundBudget: "session_override" });
+    }
+    session.orchestratorCampaign = {
         status: "waiting_human",
         policyRevision: 4,
         decisionOwners: { ...session.parentControlPolicy.decisions },
@@ -451,6 +458,60 @@ if (params.get("account-switch-failure") === "1") {
     detectedAt: 5,
   };
 }
+// A launch refused at the provider HOME's lease (#3240): `lease-refusal=<code>`, on the session's
+// account, or with `lease-refusal-account=none` on the Machine's own provider HOME.
+const leaseRefusal = params.get("lease-refusal");
+// Before-evidence replay for worker codes v233 left text-only: no typed refusal is invented.
+if (params.has("lease-legacy-error")) {
+  session.status = "failed";
+  session.providerAccountId = "work-account";
+  session.providerAccountLabel = "Work Account";
+}
+if (leaseRefusal) {
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 233);
+  session.status = "failed";
+  const ownHome = params.get("lease-refusal-account") === "none";
+  if (!ownHome) {
+    session.providerAccountId = "work-account";
+    session.providerAccountLabel = "Work Account";
+  }
+  session.providerHomeRefusal = {
+    code: leaseRefusal as NonNullable<SessionView["providerHomeRefusal"]>["code"],
+    provider: session.driver === "claude-code" ? "claude" : "codex",
+    ...(ownHome ? {} : { providerAccountId: "work-account", providerAccountLabel: "Work Account" }),
+    detectedAt: 5,
+    ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
+  };
+}
+// A v248 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
+if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
+// A starting session waiting for its busy account (#3240): `lease-wait=<cause>` (or `busy`).
+const leaseWait = params.get("lease-wait");
+if (leaseWait) {
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
+  session.status = "starting";
+  session.providerAccountId = "work-account";
+  session.providerAccountLabel = "Work Account";
+  session.providerHomeWait = {
+    provider: session.driver === "claude-code" ? "claude" : "codex",
+    ...(leaseWait === "busy" ? {} : { cause: leaseWait as NonNullable<NonNullable<SessionView["providerHomeWait"]>["cause"]> }),
+    providerAccountId: "work-account", providerAccountLabel: "Work Account",
+    waitingSince: Date.now() - 60_000, waitUntil: Date.now() - 60_000 + 8 * 3_600_000,
+  };
+}
+// A session relaunching in the worktree it switched to (#3810): `worktree-switch=pending` (the turn
+// ended and the relaunch is next) or `relaunching`.
+const worktreeSwitch = params.get("worktree-switch");
+if (worktreeSwitch === "pending" || worktreeSwitch === "relaunching") {
+  session.status = worktreeSwitch === "pending" ? "idle" : "starting";
+  session.worktreeSwitch = { phase: worktreeSwitch, branch: "fix/issue-3810-switching-worktree-status", since: Date.now() - 5_000 };
+  session.updatedAt = Date.now() - 5_000;
+}
+// `lease-viewer=owner` or `member` (#3240): a viewer who manages the Machine, as an Owner of the
+// personal organization (Set Up Managed Profile and Recover Existing Profile) or a member (Set Up
+// Managed Profile only).
+const leaseViewer = params.get("lease-viewer");
+if (leaseViewer === "owner" || leaseViewer === "member") runner.canManage = true;
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];
@@ -616,6 +677,9 @@ function fixtureEffectiveOwners(control: CampaignControl) {
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  ...(leaseViewer === "owner" || leaseViewer === "member" ? {
+    getIdentity: async () => ({ context: { organizationId: PERSONAL_ORGANIZATION_ID, role: leaseViewer } }) as never,
+  } : {}),
   enableFullControl: async (id: string, input: Parameters<typeof api.enableFullControl>[1]) => {
     if (params.get("fullControlFixture") !== "enable") return api.enableFullControl(id, input);
     if (input.expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
@@ -667,6 +731,11 @@ const client = {
   },
   prompt: async () => {
     document.body.dataset.composerAction = "send";
+    // A Full Control campaign whose authority is stale refuses the person's message (#2940).
+    if (params.get("prompt-refusal") === "campaign-authority") {
+      throw new ApiError("This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+        "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.", 409, "campaign_authority_stale");
+    }
     return { ...session, status: "running" as const };
   },
   cancelTurn: async () => {
@@ -799,6 +868,7 @@ for (let turn = 0; turn < 4; turn += 1) {
     model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
   });
 }
+if (params.has("lease-legacy-error")) payloads.push({ kind: "error", message: params.get("lease-legacy-error")! });
 const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
   id: index + 1,
   sessionId: SESSION_ID,

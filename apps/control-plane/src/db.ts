@@ -1,3 +1,5 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
@@ -6,18 +8,28 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
   installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable, validProviderPublicationInput,
   type PublicationDispatchKind, type PublicationObservation,
 } from "./provider-profile-publication-store.js";
-import { CampaignBudgetLedger } from "./campaign-budget.js";
+import { CampaignBudgetLedger, FollowUpApprovalRequired, campaignFollowUpAdmissionKey, campaignFollowUpAdmissionTitle,
+  campaignFollowUpIdentity, type CampaignFollowUpIdentityContent } from "./campaign-budget.js";
+import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef } from "@wollipog/protocol";
+
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
-import { ReviewSessions } from "./review-sessions.js";
+import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
+import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
+import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { PROJECT_CREATION_REQUEST_WINDOW_MS } from "@wollipog/protocol";
+import {
+  isProviderLoginFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait,
+  validWorktreeSwitch,
+} from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -47,6 +59,9 @@ import {
   EVENT_PAYLOAD_CHUNK_BYTES,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
+  completeParentControlDecisions,
+  completeWorkflowDecisionRecord,
+  type DelegatableWorkflowDecisionCategory,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
   DEFAULT_LIVE_CHILD_LIMIT,
@@ -62,6 +77,7 @@ import {
   canonicalAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
+  normalizeBackgroundFollowUp,
   scopeAudienceContained,
   validatePromptImageInputs,
   type AutomationAuditEvent,
@@ -74,6 +90,7 @@ import {
   type AutomationCommandView,
   type AutomationExecution,
   type AutomationExecutionStatus,
+  type AutomationLatestExecution,
   type AutomationSchedule,
   type AutomationSpec,
   type AutomationTriggerDeliveryMetadata,
@@ -99,11 +116,13 @@ import {
   type BackgroundWorkState,
   type BackgroundWorkTracking,
   type ProviderAccountSwitchFailureView,
+  type ProviderHomeLaunchRefusalView,
   type ProviderHistoryQuarantineView,
   type WorktreeRecoveryView,
   type HeldSessionResumeView,
   type HoldAdviceReader,
   type SessionHoldView,
+  type QueueHoldUnlistedJob,
   type SessionQueueHoldView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobEnd,
@@ -268,6 +287,7 @@ import {
   AGENT_SPAWN_OBSERVATION_CAP,
   SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   TERMINAL_STATUSES,
+  campaignRepositoryLocation,
 } from "@wollipog/protocol";
 
 function harnessInstallationFamily(driver: AgentDriverKind | undefined): HarnessInstallationSelection["family"] | null {
@@ -313,6 +333,7 @@ import {
 import type { DurableBackgroundPushDelivery, PushAudience, PushServiceOutcome } from "./web-push.js";
 import { matchWorkspaceId, matchWorkspaceIds, workspacePathsEqual } from "./workspace-match.js";
 import { installMaintenanceIndexes } from "./maintenance-indexes.js";
+import { WORKFLOW_EVENT_RETENTION_SCHEMA } from "./workflow-event-retention-store.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { CAMPAIGN_RECOVERY_SCHEMA, CampaignRecoveryStore, type CampaignRecoveryVerifiedReport } from "./campaign-recovery-store.js";
 import {
@@ -330,6 +351,18 @@ import {
   validateRunnerCloudTargets,
   validateRunnerContainerTargets,
 } from "./execution-targets.js";
+
+/** The machine-readable refusal for a follow-up that needs the Human's approval (#2940), from which
+ * the service requests the exact decision: its subject, bounded display titles, issue and identity
+ * digest. No limit is omitted. */
+function followUpApprovalDetails(subject: CampaignFollowUpSubject, content: CampaignFollowUpIdentityContent,
+  acceptedFollowUps: number, limit: number | null): Record<string, string | number> {
+  return { code: "follow_up_approval_required", acceptedFollowUps, ...(limit === null ? {} : { limit }),
+    subjectKind: subject.kind, subjectId: subject.kind === "recommendation" ? subject.recommendationId : subject.key,
+    title: campaignFollowUpAdmissionTitle(content.title, subject), identityDigest: campaignFollowUpIdentity(subject, content),
+    ...(content.recommendationTitle === null ? {} : { recommendationTitle: campaignFollowUpAdmissionTitle(content.recommendationTitle, subject) }),
+    ...(content.issue ? { issueRepository: content.issue.repository, issueNumber: content.issue.number } : {}) };
+}
 
 export const GOVERNANCE_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
@@ -427,8 +460,20 @@ function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginV
       ...(login.userCode === undefined ? {} : { userCode: login.userCode }),
       ...(login.sessionId === undefined ? {} : { sessionId: login.sessionId }),
       ...(login.error === undefined ? {} : { error: login.error }),
+      ...providerLoginFailureCodeField(login),
     };
   });
+}
+
+/** v253 (#3519): a failed sign-in's code from the closed set. The runner's value never passes unless
+ * it is in that set: any other is replaced by `unrecognized` rather than refusing the whole
+ * inventory. It is not simply dropped, because a dashboard reads a missing code as an older runner's
+ * and falls back to matching the `error` sentence, which could turn a newer runner's plain failure
+ * into Already on This Machine. Only a failed sign-in carries one. */
+function providerLoginFailureCodeField(login: ProviderLoginView): Pick<ProviderLoginView, "failureCode"> {
+  const value: unknown = login.failureCode;
+  if (login.status !== "failed" || value === undefined || value === null) return {};
+  return { failureCode: isProviderLoginFailureCode(value) ? value : "unrecognized" };
 }
 
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
@@ -730,11 +775,15 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
   provider_profile_id TEXT,
+  provider_home_refusal TEXT,
+  provider_home_wait TEXT,
+  worktree_switch TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
   provider_updated_at TEXT,
   background_work_state TEXT,
+  background_follow_up TEXT,
   background_work_tracking TEXT,
   history_quarantine TEXT,
   worktree_recovery TEXT,
@@ -846,6 +895,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_workflow_decisions_session_request
   ON workflow_decisions(session_id, request_id);
 CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resource
   ON workflow_decisions(session_id, category, resource_key, created_at);
+CREATE INDEX IF NOT EXISTS idx_workflow_decisions_automation_expiry
+  ON workflow_decisions(category, status) WHERE category='automation_creation' AND status IN ('pending','approved');
+-- Durable post-commit work: lifecycle callbacks can send prompts and open their own transactions.
+CREATE TABLE IF NOT EXISTS automation_expiration_effects (
+  occurrence_id TEXT PRIMARY KEY,
+  session_before TEXT NOT NULL,
+  effect_kind TEXT NOT NULL CHECK (effect_kind IN ('idle','active')),
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES workflow_decisions(occurrence_id) ON DELETE CASCADE
+);
 -- The restart notice a child is owed for each decision its restart revoked (#1779, #1861). A
 -- guardrail that refuses the notice leaves it held rather than forcing it through; the first
 -- boundary that finds the guardrail cleared delivers every held row in one notice. See
@@ -1873,6 +1932,8 @@ CREATE TABLE IF NOT EXISTS workflow_events (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_events_instance ON workflow_events(instance_id, seq);
 
+${WORKFLOW_EVENT_RETENTION_SCHEMA}
+
 -- Durable schedules are soft-deleted so actor-attributed audit and execution history survives.
 -- Action/config JSON is secret-free and validated at the service boundary before insertion.
 CREATE TABLE IF NOT EXISTS automations (
@@ -2744,6 +2805,7 @@ CREATE TABLE IF NOT EXISTS orchestrator_settings (
   user_id                     TEXT PRIMARY KEY,
   control_mode                TEXT CHECK (control_mode IN ('custom','full_control')),
   campaign_budget             TEXT,
+  review_policy               TEXT,
   child_harness               TEXT,
   child_model                 TEXT,
   child_effort                TEXT,
@@ -3122,11 +3184,15 @@ interface SessionRow {
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
   provider_profile_id: string | null;
+  provider_home_refusal: string | null;
+  provider_home_wait: string | null;
+  worktree_switch: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
   provider_updated_at: string | null;
   background_work_state: string | null;
+  background_follow_up: string | null;
   background_work_tracking: string | null;
   history_quarantine: string | null;
   worktree_recovery: string | null;
@@ -4073,6 +4139,7 @@ interface AutomationExecutionRow {
   execution_id: string; automation_id: string; idempotency_key: string; scheduled_for: number;
   automation_revision: number; spec_json: string | null; delivery_mode: string; delivery_plan_json: string | null;
   trigger_delivery_json: string | null;
+  governance_pause_json: string | null;
   action_kind: AutomationExecution["actionKind"]; status: AutomationExecutionStatus;
   actor_kind: AutomationExecution["actor"]["kind"]; actor_id: string | null; runner_id: string | null;
   session_id: string | null; run_id: string | null; workflow_instance_id: string | null; error: string | null;
@@ -4519,8 +4586,14 @@ export class HourlyUsageUnavailableError extends RangeError {
 }
 
 export interface NewSessionInput {
+  /** Server-owned campaign fields and the actual implementing harness, captured atomically. */
+  reviewPolicyCapture?: ReviewPolicyCapture;
+  /** Authenticated launching user for personal review settings, including shared Projects. */
+  reviewSettingsUserId?: string;
   /** Trusted pre-allocation session ceilings, never from request JSON. */
   campaignBudgetUserLimits?: { costUsd?: number; toolCalls?: number };
+  /** Internal review attribution: share an allowance without granting child-session authority. */
+  reviewRequesterSessionId?: string;
   id: string;
   /** Trusted creator attribution, derived from the authenticated session credential. */
   parentSessionId?: string;
@@ -5069,6 +5142,7 @@ DROP TRIGGER IF EXISTS sessions_settle_child_charge;
 CREATE TRIGGER sessions_settle_child_charge
 AFTER UPDATE OF status ON sessions
 WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id)
   AND (OLD.status IN ${TERMINAL_STATUS_SQL}) IS NOT (NEW.status IN ${TERMINAL_STATUS_SQL})
 BEGIN
   UPDATE sessions SET usage_peak_cost_usd=MAX(usage_peak_cost_usd, cost_usd),
@@ -5087,7 +5161,8 @@ END;
 DROP TRIGGER IF EXISTS sessions_raise_child_cost_charge;
 CREATE TRIGGER sessions_raise_child_cost_charge
 AFTER UPDATE OF cost_usd ON sessions
-WHEN NEW.parent_session_id IS NOT NULL AND NEW.cost_usd > NEW.usage_peak_cost_usd
+WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id) AND NEW.cost_usd > NEW.usage_peak_cost_usd
 BEGIN
   UPDATE sessions SET usage_peak_cost_usd=cost_usd WHERE id=NEW.id AND cost_usd > usage_peak_cost_usd;
   UPDATE sessions SET child_cost_reserved_usd=child_cost_reserved_usd+(
@@ -5100,7 +5175,8 @@ END;
 DROP TRIGGER IF EXISTS sessions_settle_grandchild_cost_charge;
 CREATE TRIGGER sessions_settle_grandchild_cost_charge
 AFTER UPDATE OF child_cost_reserved_usd ON sessions
-WHEN NEW.parent_session_id IS NOT NULL AND ${childCostChargeSql("NEW")}<>NEW.parent_charged_cost_usd
+WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id) AND ${childCostChargeSql("NEW")}<>NEW.parent_charged_cost_usd
 BEGIN
   UPDATE sessions SET child_cost_reserved_usd=child_cost_reserved_usd+(
     SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=NEW.id)
@@ -5110,7 +5186,8 @@ END;
 DROP TRIGGER IF EXISTS sessions_settle_grandchild_tool_call_charge;
 CREATE TRIGGER sessions_settle_grandchild_tool_call_charge
 AFTER UPDATE OF child_tool_calls_reserved ON sessions
-WHEN NEW.parent_session_id IS NOT NULL AND ${childToolCallChargeSql("NEW")}<>NEW.parent_charged_tool_calls
+WHEN NEW.parent_session_id IS NOT NULL
+  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=NEW.id) AND ${childToolCallChargeSql("NEW")}<>NEW.parent_charged_tool_calls
 BEGIN
   UPDATE sessions SET child_tool_calls_reserved=child_tool_calls_reserved+(
     SELECT ${childToolCallChargeSql("child")}-child.parent_charged_tool_calls FROM sessions child WHERE child.id=NEW.id)
@@ -5375,7 +5452,8 @@ const FOLD_LAST_EVENT_AT = `last_event_at=CASE WHEN COALESCE(message_count,0)=0
 const CLEAR_HISTORY_PRUNE_SQL = `history_pruned_at=NULL, history_pruned_retention_days=NULL,
   history_pruned_events=0, history_pruned_tool_calls=0, history_prune_through_seq=NULL, history_prune_removed_seq=NULL,
   history_prune_run_events=NULL, history_prune_run_days=NULL, history_prune_run_seq=NULL,
-  history_prune_run_response_seq=NULL`;
+  history_prune_run_response_seq=NULL, runner_trim_epoch=NULL, runner_trim_through_seq=NULL,
+  runner_trim_event_epoch=NULL, runner_trimmed_at=NULL`;
 
 function sessionHistoryRetentionView(
   row: Pick<SessionRow, "archived" | "archived_at" | "history_pruned_at" | "history_pruned_retention_days" | "history_pruned_events">,
@@ -5398,13 +5476,15 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
+  readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
    * reviews, their summary (#3369); nothing else for ordinary sessions. */
-  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns"> {
+  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy"> {
     const review = this.reviewSessions.link(sessionId);
     if (review) return { kind: "review", review };
     const reviewRuns = this.reviewSessions.summaryFor(sessionId);
-    return reviewRuns ? { reviewRuns } : {};
+    const reviewPolicy = this.reviewSettings.sessionPolicy(sessionId);
+    return { ...(reviewRuns ? { reviewRuns } : {}), ...(reviewPolicy ? { reviewPolicy } : {}) };
   }
 
   private constructor(
@@ -5423,6 +5503,7 @@ export class ControlPlaneDb {
     });
     this.sessionReviewJobs = new SessionReviewJobs(db);
     this.reviewSessions = new ReviewSessions(db);
+    this.reviewSettings = new ReviewSettingsStore(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
       : null;
@@ -5674,7 +5755,7 @@ export class ControlPlaneDb {
         full && !campaignAuthorityPreflight(policy.control, row.driver, runner?.protocolVersion).supported) {
       return { state: "unsupported_capability", reason: "The current provider cannot enforce authorized recovery." };
     }
-    const budget = this.campaignBudgets.view(campaignId);
+    const budget = this.campaignBudgets.governingRoot(campaignId) ? this.campaignBudgets.view(campaignId) : undefined;
     const profile = budget?.authority.controlledReview;
     if (profile && (!runner?.runtime?.campaignReview ||
         controlledReviewCapabilityKey(profile) !== controlledReviewCapabilityKey(runner.runtime.campaignReview)) ||
@@ -5774,8 +5855,11 @@ export class ControlPlaneDb {
             if (record.resource.kind === "pull_request" && record.resource.sessionId === campaignId &&
                 record.resource.occurrenceId === fact.value.headSha &&
                 (record.action === "repair_checks" && record.reason === "failed_checks" &&
-                  (fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
-                 record.action === "rereview" && record.reason === "reviewer_objection" && fact.value.reviewDecision === "changes_requested")) {
+                  (fact.value.forge === "gitlab"
+                    ? fact.value.pipeline?.status === "failed"
+                    : fact.value.checks.state === "failing" || fact.value.requiredChecks.state === "failing") ||
+                 record.action === "rereview" && record.reason === "reviewer_objection" &&
+                  fact.value.forge !== "gitlab" && fact.value.reviewDecision === "changes_requested")) {
               recoveryIds.add(record.id);
             } else if (record.resource.kind === "review_job" && record.action === "rereview") {
               const job = this.campaignReviewJobs.view(record.resource.occurrenceId);
@@ -5836,9 +5920,33 @@ export class ControlPlaneDb {
       observeCleanup: (sessionId) => this.campaignAttemptCleanupObservation(sessionId),
       boundary: (sessionId) => this.campaignAttemptBoundary(sessionId),
       atomic: (work) => this.atomic(work),
-      acceptFollowUp: (campaignId, workItemId) => {
-        try { this.campaignBudgets.acceptFollowUp(campaignId, workItemId, () => null); return null; }
-        catch (error) { return (error as Error).message; }
+      acceptFollowUp: (campaignId, workItemId, subject, content) => {
+        // A follow-up admitted past the limit stays bound to the approval that admitted it: another
+        // recommendation accepted into it is a change to what it is, not a duplicate (#2940).
+        if (this.campaignBudgets.followUpAdmission(workItemId)) return this.bindCampaignFollowUp(campaignId, workItemId, subject, content);
+        const identified = this.campaignFollowUpIdentityContent(campaignId, subject, content);
+        const identity = campaignFollowUpIdentity(subject, identified);
+        try {
+          // Past the approval limit, the Human's approval of exactly this follow-up admits it, and is
+          // consumed in the same write. A work item's key is the Orchestrator's own, so the approval
+          // binds the follow-up's complete identity, full title and issue included: the same key with
+          // other content is not it. The item stays bound to that approval (`reviseFollowUp`).
+          this.campaignBudgets.acceptFollowUp(campaignId, workItemId, () => null, () => {
+            const approved = this.approvedFollowUpAdmission(campaignId, subject, identity);
+            if (!approved || this.consumeWorkflowDecision(approved, Date.now()) === null) return false;
+            this.campaignBudgets.noteFollowUpAdmission(campaignId, workItemId, approved);
+            return true;
+          });
+          return null;
+        } catch (error) {
+          if (!(error instanceof FollowUpApprovalRequired)) return { error: (error as Error).message };
+          return { error: error.message, details: followUpApprovalDetails(subject, identified, error.acceptedFollowUps, error.limit) };
+        }
+      },
+      reviseFollowUp: (campaignId, workItemId, content) => {
+        const admission = this.campaignBudgets.followUpAdmission(workItemId);
+        const bound = admission && this.workflowDecisionByOccurrence(admission.occurrenceId)?.resourceSnapshot;
+        return bound?.category === "campaign_follow_up_admission" ? this.bindCampaignFollowUp(campaignId, workItemId, bound.subject, content) : null;
       },
       forgePullRequests: (campaignId, refs, now) => this.campaignForgeObservations.facts(campaignId, refs, now),
     });
@@ -5882,7 +5990,7 @@ export class ControlPlaneDb {
   /** `SessionView.campaignMembership` (#2417): every descendant of a campaign, including a nested
    * Orchestrator, names the root and its own open attempt there. The root itself has none. */
   campaignMembership(sessionId: string, parentSessionId: string | null): CampaignMembershipView | undefined {
-    if (!parentSessionId) return undefined;
+    if (!parentSessionId || this.reviewSessions.isReviewSession(sessionId)) return undefined;
     const campaignSessionId = this.campaignRootForMember(sessionId);
     if (!campaignSessionId || campaignSessionId === sessionId) return undefined;
     const assignment = this.campaignWorkLedger.currentAssignment(sessionId);
@@ -5972,7 +6080,7 @@ export class ControlPlaneDb {
   /** Server-only wrapper: insert a campaign child and open its work-item attempt together (#3106). */
   campaignChildCreationTransaction<T>(work: () => T): T { return this.atomic(work); }
 
-  static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string } = {}): ControlPlaneDb {
+  static open(location: string, options: { artifactBlobDir?: string; hostBootId?: string; incrementalVacuum?: boolean } = {}): ControlPlaneDb {
     if (location !== ":memory:") mkdirSync(dirname(location), { recursive: true });
     const artifactBlobs = location === ":memory:" && !options.artifactBlobDir
       ? new MemoryArtifactBlobStore()
@@ -5985,6 +6093,11 @@ export class ControlPlaneDb {
     try {
       publicationNewDatabase = !db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1").get();
     } catch (error) { db.close(); throw error; }
+    // Only empty databases can opt in without a full rewrite. Existing files are converted by
+    // the explicit offline CLI, never by startup. Turning maintenance off preserves file mode.
+    if (options.incrementalVacuum && !db.prepare("SELECT 1 FROM sqlite_schema LIMIT 1").get()) {
+      db.exec("PRAGMA auto_vacuum = INCREMENTAL;");
+    }
     const journalMode = (db.prepare("PRAGMA journal_mode = WAL;").get() as { journal_mode: string })
       .journal_mode;
     // FULL flushes the WAL at every commit, so control-plane decisions are durable once
@@ -6543,6 +6656,7 @@ export class ControlPlaneDb {
       ["automation_executions", "delivery_mode TEXT NOT NULL DEFAULT 'legacy_at_most_once'"],
       ["automation_executions", "delivery_plan_json TEXT"],
       ["automation_executions", "trigger_delivery_json TEXT"],
+      ["automation_executions", "governance_pause_json TEXT"],
       ["automation_commands", "superseded_by TEXT"],
       ["automation_commands", "delivery_deadline_at INTEGER"],
       ["automation_triggers", "delivery_policy_json TEXT"],
@@ -6821,6 +6935,10 @@ export class ControlPlaneDb {
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
+      "automation_creation_result TEXT",
+      // #3713: the child runner's GitHub closing-reference read for a GitHub merge request.
+      "closing_reference_check TEXT",
+      "automation_creation_approved_by TEXT",
       "resume_state TEXT",
       "resume_command_id TEXT",
       "resume_updated_at INTEGER",
@@ -6992,6 +7110,12 @@ export class ControlPlaneDb {
       "provider_account_switch_failure TEXT",
       // Provider profiles (#3239): the profile the session's account binding recorded.
       "provider_profile_id TEXT",
+      // The provider-HOME lease refusal that stopped the session's last launch (#3240).
+      "provider_home_refusal TEXT",
+      // The busy provider HOME a starting session's launch is waiting for (#3240).
+      "provider_home_wait TEXT",
+      // The worktree relaunch a session is waiting for or running (#3810).
+      "worktree_switch TEXT",
     ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
@@ -7080,6 +7204,7 @@ export class ControlPlaneDb {
       "semantic_title INTEGER NOT NULL DEFAULT 0",
       "provider_updated_at TEXT",
       "background_work_state TEXT",
+      "background_follow_up TEXT",
       "background_work_tracking TEXT",
       // Protocol v126: bounded, content-free projection of a runner-owned provider-history
       // quarantine. Runner-authoritative, so it is overwritten on every snapshot.
@@ -7127,6 +7252,11 @@ export class ControlPlaneDb {
       "history_prune_run_days INTEGER",
       "history_prune_run_seq INTEGER",
       "history_prune_run_response_seq INTEGER",
+      // Complete runner cleanup receipts (#3534), invalidated by a log/cache replacement.
+      "runner_trim_epoch INTEGER",
+      "runner_trim_through_seq INTEGER",
+      "runner_trim_event_epoch INTEGER",
+      "runner_trimmed_at INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`);
@@ -7160,6 +7290,9 @@ export class ControlPlaneDb {
     }
     if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "campaign_budget")) {
       db.exec("ALTER TABLE orchestrator_settings ADD COLUMN campaign_budget TEXT");
+    }
+    if (!(db.prepare("PRAGMA table_info(orchestrator_settings)").all() as Array<{ name: string }>).some((column) => column.name === "review_policy")) {
+      db.exec("ALTER TABLE orchestrator_settings ADD COLUMN review_policy TEXT");
     }
     if (needsCreationActorBackfill) {
       // Parent attribution is durable CP-owned proof of agent creation. Existing top-level
@@ -7339,6 +7472,7 @@ export class ControlPlaneDb {
           /* column already present */
         }
       }
+      new ReviewSessions(db);
       if (addedChildCharges) settleLegacyChildCharges(db);
       db.exec(CHILD_CHARGE_TRIGGERS_SQL);
       db.exec("COMMIT");
@@ -7721,7 +7855,9 @@ export class ControlPlaneDb {
       }
 
       const editors = meta.editors ? JSON.stringify(meta.editors) : null;
-      const runtime = meta.runtime ? JSON.stringify(meta.runtime) : null;
+      const runtime = meta.runtime ? JSON.stringify({ ...meta.runtime,
+        reviewSession: safeReviewSessionCapability(meta.runtime.reviewSession),
+      }) : null;
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
         ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
         : null;
@@ -7908,22 +8044,18 @@ export class ControlPlaneDb {
 
   /**
    * Replace a runner's review-session capability (#3369) from a discovery result: the registration
-   * frame's was derived before discovery and can name no reviewer. A malformed value is dropped
-   * rather than stored, so a review is refused as unavailable instead of launched on a bad entry.
+   * frame's was derived before discovery and can name no reviewer. Invalid reviewer identities
+   * fail closed. Diagnostic reasons are normalized independently: a bad or overlong Codex reason
+   * must never remove an otherwise valid Claude reviewer (or vice versa).
    */
   updateRunnerReviewSessionCapability(runnerId: string, capability: ReviewSessionCapability | null): void {
     const row = this.stmt("SELECT runtime FROM runners WHERE runner_id=?").get(runnerId) as { runtime: string | null } | undefined;
     if (!row?.runtime) return;
     let runtime: Record<string, unknown>;
     try { runtime = JSON.parse(row.runtime) as Record<string, unknown>; } catch { return; }
-    const valid = capability !== null && typeof capability === "object" && Array.isArray(capability.reviewers) &&
-      capability.reviewers.length <= 2 && capability.reviewers.every((reviewer) =>
-        (reviewer?.harness === "codex" || reviewer?.harness === "claude-code") &&
-        typeof reviewer.agentId === "string" && reviewer.agentId.length > 0 && reviewer.agentId.length <= 128) &&
-      (capability.unavailable === undefined || (typeof capability.unavailable === "object" && capability.unavailable !== null &&
-        Object.values(capability.unavailable).every((reason) => typeof reason === "string" && reason.length <= 500)));
     const { reviewSession: _previous, ...rest } = runtime;
-    const next = valid ? { ...rest, reviewSession: capability } : rest;
+    const safe = safeReviewSessionCapability(capability);
+    const next = safe ? { ...rest, reviewSession: safe } : rest;
     this.stmt("UPDATE runners SET runtime=? WHERE runner_id=?").run(JSON.stringify(next), runnerId);
   }
 
@@ -11184,6 +11316,16 @@ export class ControlPlaneDb {
     return row?.preference ?? "manual";
   }
 
+  /** Whose Artifact Uploads preference governs a session: its user owner, else the local owner when
+   * the personal organization owns it, as sessions inherit from the default runner (#3811). Teams and
+   * other organizations record no launching user, so they resolve to none and stay Manual. */
+  artifactUploadPreferenceUser(sessionId: string): string | undefined {
+    const row = this.stmt("SELECT owner_kind, owner_id FROM session_ownership WHERE session_id=?").get(sessionId) as
+      { owner_kind: string; owner_id: string } | undefined;
+    if (row?.owner_kind === "user") return row.owner_id;
+    return row?.owner_kind === "organization" && row.owner_id === PERSONAL_ORGANIZATION_ID ? LOCAL_OWNER_USER_ID : undefined;
+  }
+
   setArtifactUploadPreference(userId: string, preference: import("@wollipog/protocol").ArtifactUploadPreference): void {
     if (!["manual", "wollipog_automatic", "external_hosting"].includes(preference)) throw new Error("invalid artifact upload preference");
     this.stmt(`INSERT INTO artifact_upload_settings (user_id, preference) VALUES (?, ?)
@@ -11192,12 +11334,13 @@ export class ControlPlaneDb {
 
   getOrchestratorDefaults(userId: string): OrchestratorDefaultsRecord | null {
     const row = this.stmt(
-      `SELECT control_mode, campaign_budget, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
+      `SELECT control_mode, campaign_budget, review_policy, child_harness, child_model, child_effort, maximum_concurrent_children, follow_ups, completion,
               strict_project_isolation, integration_isolation, parent_control, decision_policy, updated_at
        FROM orchestrator_settings WHERE user_id=?`,
     ).get(userId) as {
       control_mode: OrchestratorDefaults["controlMode"] | null;
       campaign_budget: string | null;
+      review_policy: string | null;
       child_harness: string | null;
       child_model: string | null;
       child_effort: string | null;
@@ -11219,6 +11362,7 @@ export class ControlPlaneDb {
         ...(row.control_mode == null ? {} : { controlMode: row.control_mode }),
         ...(validOrchestratorCampaignBudgetDefault(campaignBudget) ? { campaignBudget } : {}),
         behavior: {
+          ...(parseOrchestratorReviewPolicy(parseJson<unknown>(row.review_policy)) ?? DEFAULT_ORCHESTRATOR_REVIEW_POLICY),
           // Saved before #3247 under a Machine-local agent id; read as the harness it names.
           childHarness: canonicalChildHarness(parseJson<unknown>(row.child_harness)),
           childModel: row.child_model,
@@ -11271,6 +11415,11 @@ export class ControlPlaneDb {
     if (defaults.campaignBudget !== undefined) {
       this.stmt("UPDATE orchestrator_settings SET campaign_budget=? WHERE user_id=?")
         .run(defaults.campaignBudget === null ? null : JSON.stringify(defaults.campaignBudget), userId);
+    }
+    // Older clients omit every review field; that preserves this user's saved review policy.
+    if (ORCHESTRATOR_REVIEW_POLICY_KEYS.some(key => Object.hasOwn(defaults.behavior, key))) {
+      this.stmt("UPDATE orchestrator_settings SET review_policy=? WHERE user_id=?")
+        .run(JSON.stringify(parseOrchestratorReviewPolicy(defaults.behavior)), userId);
     }
   }
 
@@ -11508,9 +11657,49 @@ export class ControlPlaneDb {
     ).get(scope.owner.teamId, principal.organizationId, principal.userId) !== undefined;
   }
 
+  /** Runner-family access: the Machines, workspaces and agent installations a principal may list,
+   * inspect and launch on. A session credential delegated as one user acts for that user (#2940):
+   * a Full Control root and its children are user-owned so the campaign allowance and controlled
+   * review charge the authorizing Human, yet they must reach the runners that Human can use. Such
+   * an agent therefore gets that user's member access while the user is an active, non-viewer
+   * member: the organization's runners, the user's own, and those of the user's teams. It never
+   * gets the owner/admin bypass, another user's runner or another team's. Every other resource
+   * kind keeps the exact delegated-owner rule in principalCanAccessScope. */
+  private principalCanUseRunnerScope(principal: AuthPrincipal, scope: ResourceScope): boolean {
+    if (principal.kind !== "agent" || principal.delegatedScope.owner.kind !== "user") {
+      return this.principalCanAccessScope(principal, scope);
+    }
+    const organizationId = principal.delegatedScope.organizationId;
+    if (principal.organizationId !== organizationId || scope.organizationId !== organizationId) return false;
+    const userId = principal.delegatedScope.owner.userId;
+    if (scope.owner.kind === "user") return scope.owner.userId === userId;
+    const member = this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role<>'viewer'`,
+    ).get(organizationId, userId) !== undefined;
+    if (!member) return false;
+    if (scope.owner.kind === "organization") return scope.owner.organizationId === organizationId;
+    return this.stmt(
+      `SELECT 1 FROM identity_teams team
+       JOIN identity_team_members member ON member.team_id=team.team_id
+       WHERE team.team_id=? AND team.organization_id=? AND member.user_id=?`,
+    ).get(scope.owner.teamId, organizationId, userId) !== undefined;
+  }
+
+  /** Whether the user is an active owner or admin of the organization: the role a Human's own
+   * device principal would carry there. */
+  userAdministersOrganization(organizationId: string, userId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM identity_memberships membership
+       JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+       WHERE membership.organization_id=? AND membership.user_id=? AND membership.role IN ('owner','admin')`,
+    ).get(organizationId, userId) !== undefined;
+  }
+
   canAccessRunner(principal: AuthPrincipal, runnerId: string): boolean {
     const scope = this.runnerScope(runnerId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
   }
 
   canManageRunner(principal: AuthPrincipal, runnerId: string): boolean {
@@ -11525,7 +11714,7 @@ export class ControlPlaneDb {
 
   canAccessWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
     const scope = this.workspaceScope(runnerId, workspaceId);
-    return scope ? this.principalCanAccessScope(principal, scope) : false;
+    return scope ? this.principalCanUseRunnerScope(principal, scope) : false;
   }
 
   canManageWorkspace(principal: AuthPrincipal, runnerId: string, workspaceId: string): boolean {
@@ -11644,7 +11833,8 @@ export class ControlPlaneDb {
       FROM descendants descendant JOIN sessions session ON session.id=descendant.id
       JOIN session_ownership ownership ON ownership.session_id=session.id
       LEFT JOIN runners runner ON runner.runner_id=session.runner_id
-      WHERE (session.id!=? OR ?=1) AND session.pending_approval IS NOT NULL AND ${authorization.sql}
+      WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=session.id)
+        AND (session.id!=? OR ?=1) AND session.pending_approval IS NOT NULL AND ${authorization.sql}
       UNION ALL SELECT 'typed',decision.session_id,NULL,NULL,NULL,NULL,decision.controlling_session_id,
         decision.authority,decision.occurrence_id,NULL
       FROM workflow_decisions decision JOIN session_ownership ownership ON ownership.session_id=decision.session_id
@@ -11755,7 +11945,7 @@ export class ControlPlaneDb {
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
       provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
-      title title_source provider_updated_at background_work_state background_work_tracking
+      provider_home_wait worktree_switch title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
       parent_control_policy parent_control_policy_revision orchestrator_policy session_role
@@ -11803,7 +11993,8 @@ export class ControlPlaneDb {
       LEFT JOIN session_tool_call_counts tool ON tool.session_id=session.id
       LEFT JOIN session_role_conversions conversion ON conversion.session_id=session.id
       LEFT JOIN (SELECT parent_session_id, COUNT(*) AS occupied FROM sessions
-        WHERE parent_session_id IS NOT NULL AND archived=0 AND status NOT IN ('completed','failed','stopped')
+        WHERE parent_session_id IS NOT NULL AND archived=0
+         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id) AND status NOT IN ('completed','failed','stopped')
         GROUP BY parent_session_id) children ON children.parent_session_id=session.id
       WHERE ${authorization.sql} ${includeArchived ? "" : "AND session.archived=0"}
       ORDER BY session.created_at DESC,session.id`;
@@ -11840,6 +12031,7 @@ export class ControlPlaneDb {
     // 64-row/cycle/missing-parent refusal. No per-session ancestry SQL is needed.
     const campaignRoots = new Map<string,string | null>();
     const campaignRoot = (sessionId: string): string | null => {
+      if (this.reviewSessions.isReviewSession(sessionId)) return null;
       if (campaignRoots.has(sessionId)) return campaignRoots.get(sessionId)!;
       let current=context.rows.get(sessionId);
       let root: SessionRow | undefined;
@@ -13054,6 +13246,33 @@ export class ControlPlaneDb {
   /** A runner snapshot's `providerProfileId` (#3239) is three-valued: undefined carries no
    * information (an older runner, or a pre-negotiation registration snapshot) and keeps the stored
    * value; null clears it; a well-formed id records it. Anything else is ignored. */
+  /** Undefined (an older runner) keeps the stored refusal; null clears it; a malformed one is
+   * dropped, so the session falls back to the failure text. */
+  private writeSessionProviderHomeRefusal(sessionId: string, value: unknown): void {
+    if (value === undefined) return;
+    const refusal = value === null ? null : validProviderHomeLaunchRefusal(value);
+    this.stmt("UPDATE sessions SET provider_home_refusal=? WHERE id=?")
+      .run(refusal ? JSON.stringify(refusal) : null, sessionId);
+  }
+
+  /** Undefined (an older runner) keeps the stored wait; null clears it; a malformed one is
+   * dropped, so the session shows only that it is starting. */
+  private writeSessionProviderHomeWait(sessionId: string, value: unknown): void {
+    if (value === undefined) return;
+    const wait = value === null ? null : validProviderHomeWait(value);
+    this.stmt("UPDATE sessions SET provider_home_wait=? WHERE id=?")
+      .run(wait ? JSON.stringify(wait) : null, sessionId);
+  }
+
+  /** Undefined (a pre-v256 runner) keeps the stored switch; null clears it; a malformed one is
+   * dropped, so the session shows only its lifecycle (#3810). */
+  private writeSessionWorktreeSwitch(sessionId: string, value: unknown): void {
+    if (value === undefined) return;
+    const worktreeSwitch = value === null ? null : validWorktreeSwitch(value);
+    this.stmt("UPDATE sessions SET worktree_switch=? WHERE id=?")
+      .run(worktreeSwitch ? JSON.stringify(worktreeSwitch) : null, sessionId);
+  }
+
   private writeSessionProviderProfileId(sessionId: string, value: string | null | undefined): void {
     if (value === undefined) return;
     if (value !== null && (typeof value !== "string" || !PROVIDER_PROFILE_ID.test(value))) return;
@@ -15399,6 +15618,22 @@ export class ControlPlaneDb {
     return row ? JSON.stringify(row) : null;
   }
 
+  /** Display ancestry only: reviewer launch and ordinary child admission stay independent. */
+  linkReviewSession(reviewSessionId: string): void {
+    const link = this.reviewSessions.link(reviewSessionId);
+    if (!link) return;
+    const requester = this.getSession(link.requesterSessionId);
+    const review = this.getSession(reviewSessionId);
+    if (!requester || !review) return;
+    const scope = this.sessionScope(reviewSessionId);
+    const projectScope = requester.projectId ? this.projectScope(requester.projectId) : null;
+    const keepProject = !!(scope && projectScope && this.scopeAudienceContainedWithMembership(scope, projectScope));
+    this.stmt(`UPDATE sessions SET parent_session_id=?, project_id=?, project_location_id=?
+      WHERE id=? AND (parent_session_id IS NOT ? OR project_id IS NOT ? OR project_location_id IS NOT ?)`)
+      .run(requester.id, keepProject ? requester.projectId ?? null : null, keepProject ? requester.projectLocationId ?? null : null,
+        reviewSessionId, requester.id, keepProject ? requester.projectId ?? null : null, keepProject ? requester.projectLocationId ?? null : null);
+  }
+
   /** The scope a new session will carry: the explicit one, else what the workspace or runner
    * confers. Exposed so admission checks can look at the owner BEFORE the session exists. */
   effectiveSessionScope(runnerId: string, workspaceId: string | null, explicit?: ResourceScope): ResourceScope | null {
@@ -15429,7 +15664,8 @@ export class ControlPlaneDb {
 
   /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
   isSessionDescendant(ancestorId: string, targetId: string): boolean {
-    if (ancestorId === targetId) return false;
+    // Reviewer parentage is for display/history and grants no descendant mutation authority.
+    if (ancestorId === targetId || this.reviewSessions.isReviewSession(targetId)) return false;
     return Boolean(this.stmt(`
       WITH RECURSIVE ancestry(id) AS (
         SELECT parent_session_id FROM sessions WHERE id=? AND parent_session_id IS NOT NULL
@@ -15486,7 +15722,7 @@ export class ControlPlaneDb {
               )
           ) AS request_created_at_by_id
         FROM descendants d JOIN sessions s ON s.id=d.id
-        WHERE s.id<>? ORDER BY s.created_at DESC, s.id ASC
+        WHERE s.id<>? AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id) ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
       id: string;
       title: string;
@@ -15535,6 +15771,7 @@ export class ControlPlaneDb {
               MAX(0, child_tool_calls_reserved) AS maxToolCalls,
               (SELECT COUNT(*) FROM sessions child
                 WHERE child.parent_session_id=? AND child.archived=0
+                  AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=child.id)
                   AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
        FROM sessions WHERE id=?`,
     ).get(parentSessionId, parentSessionId) as unknown as {
@@ -15610,6 +15847,8 @@ export class ControlPlaneDb {
     if (policy.issueScope || policy.issueNumbers?.length) return [...(policy.issueNumbers ?? [])];
     const previous = JSON.stringify(policy);
     policy.issueNumbers = unique;
+    // Transcript-derived: never the Human launch request provenance Full Control enable trusts (#2940).
+    delete policy.issueNumbersSource;
     const result = this.stmt(
       "UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?",
     ).run(JSON.stringify(policy), now, id, previous);
@@ -15633,6 +15872,20 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Issue slots consumed publications still hold, by recommendation, until a consumed scope decision
+   * admits their issue; `settling` names publications the scope change being decided admits. A
+   * pending grant is not counted: a boundary change revokes it in the same transaction. */
+  unsettledPublicationSlots(rootId: string, settling: readonly string[] = []): number {
+    const slots = new Set<string>();
+    for (const decision of this.campaignPublicationReservations(rootId)) {
+      const snapshot = decision.resourceSnapshot;
+      if (decision.status !== "consumed" || settling.includes(decision.occurrenceId) || snapshot.category !== "follow_up_issue_publication" ||
+          this.admittedCampaignPublicationIssue(rootId, decision.occurrenceId) !== null) continue;
+      slots.add(snapshot.recommendationId ?? decision.occurrenceId);
+    }
+    return slots.size;
+  }
+
   admittedCampaignPublicationIssue(rootId: string, publicationOccurrenceId: string): number | null {
     const row = this.stmt(`SELECT json_extract(proof.value, '$.issue') AS issue FROM workflow_decisions decision,
         json_each(decision.resource_snapshot, '$.verifiedPublications') proof
@@ -15648,10 +15901,186 @@ export class ControlPlaneDb {
     return row?.issue ?? null;
   }
 
+  /** The Human whose recorded approval allowed this human-owned decision: its single resolving
+   * `allowed` governance audit, bound to the decision's occurrence, category and payload digest.
+   * A missing, pruned, ambiguous or non-human record proves no approval (#2940). `publicationAuthority`
+   * is the issue boundary the server recorded with that approval, when it recorded one. */
+  workflowDecisionHumanApprover(decision: WorkflowDecisionView): { userId: string; approvedAt: number;
+    publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string } } | null {
+    if (decision.authority !== "human") return null;
+    const rows = this.stmt(`SELECT actor_kind, actor_id, content_digest, workflow_decision, created_at FROM governance_audit
+      WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision' AND stage='resolution' AND outcome='allowed' LIMIT 2`)
+      .all(decision.sessionId, decision.occurrenceId) as Array<{ actor_kind: string; actor_id: string | null; content_digest: string | null; workflow_decision: string | null; created_at: number }>;
+    const row = rows.length === 1 ? rows[0]! : null;
+    if (!row || row.actor_kind !== "human" || !row.actor_id || row.content_digest !== decision.resourceDigest) return null;
+    let recorded: { occurrenceId?: unknown; category?: unknown; publicationAuthority?: { authorizedByUserId?: unknown; objectiveDigest?: unknown } } | null;
+    try { recorded = JSON.parse(row.workflow_decision ?? "null") as typeof recorded; } catch { return null; }
+    if (recorded?.occurrenceId !== decision.occurrenceId || recorded.category !== decision.category) return null;
+    const authority = recorded.publicationAuthority;
+    return { userId: row.actor_id, approvedAt: row.created_at,
+      ...(typeof authority?.authorizedByUserId === "string" && authority.authorizedByUserId && typeof authority.objectiveDigest === "string" &&
+        /^[0-9a-f]{64}$/u.test(authority.objectiveDigest)
+        ? { publicationAuthority: { authorizedByUserId: authority.authorizedByUserId, objectiveDigest: authority.objectiveDigest } } : {}) };
+  }
+
+  /** Whether the user owns this campaign for scope authority (#2940), as an active, non-viewer member
+   * of its organization: its owning user, a member of its owning team or, because every member owns
+   * an organization-owned session, only an owner or admin of that organization. */
+  campaignOwnerUser(rootId: string, userId: string): boolean {
+    const scope = this.sessionScope(rootId);
+    if (!scope) return false;
+    const role = (this.stmt(`SELECT membership.role FROM identity_memberships membership
+      JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+      WHERE membership.organization_id=? AND membership.user_id=?`).get(scope.organizationId, userId) as { role: string } | undefined)?.role;
+    if (!role || role === "viewer") return false;
+    if (scope.owner.kind === "organization") return role === "owner" || role === "admin";
+    return this.isSessionOwner({ userId, organizationId: scope.organizationId }, rootId);
+  }
+
   campaignSharesRepositoryWorkspace(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): boolean {
     const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
       (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);
     return root.runnerId === member.runnerId && root.workspaceId === member.workspaceId && path(root) === path(member);
+  }
+
+  /** The newest Human decision on admitting this follow-up past the campaign's approval limit (#2940). */
+  campaignFollowUpAdmission(rootId: string, subject: CampaignFollowUpSubject): WorkflowDecisionView | null {
+    return workflowDecisionFromRow(this.stmt(`SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+        AND category='campaign_follow_up_admission' AND resource_key=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(rootId, rootId, campaignFollowUpAdmissionKey(rootId, subject)));
+  }
+
+  /** The current, approved and unconsumed admission of exactly this follow-up identity (#2940), if
+   * any: at the current policy revision, and replacing `revises` when given. */
+  private approvedFollowUpAdmission(rootId: string, subject: CampaignFollowUpSubject, identity: string, revises?: string): string | null {
+    const approved = this.campaignFollowUpAdmission(rootId, subject);
+    const snapshot = approved?.resourceSnapshot;
+    return approved?.status === "approved" && approved.policyRevision === this.parentControlPolicy(rootId)?.revision &&
+      snapshot?.category === "campaign_follow_up_admission" && snapshot.revises === revises &&
+      snapshot.identityDigest === identity ? approved.occurrenceId : null;
+  }
+
+  /** Keeps a follow-up admitted past the limit bound to what the Human approved (#2940): its
+   * recommendation or key, full title and issue. Any other identity, whether a new title or issue or
+   * another recommendation accepted into it, needs the Human's approval of exactly that change,
+   * consumed here, after which the item is bound to it. Unbound items, and campaigns whose allowance
+   * no longer governs, change freely. */
+  private bindCampaignFollowUp(rootId: string, workItemId: string, subject: CampaignFollowUpSubject,
+    content: { title: string | null; issue: CampaignIssueRef | null }): { error: string; details?: Record<string, string | number> } | null {
+    const admission = this.campaignBudgets.followUpAdmission(workItemId);
+    const bound = admission && this.workflowDecisionByOccurrence(admission.occurrenceId)?.resourceSnapshot;
+    if (!admission || bound?.category !== "campaign_follow_up_admission" || this.campaignBudgets.governingRoot(rootId) !== rootId) return null;
+    const identified = this.campaignFollowUpIdentityContent(rootId, subject, content);
+    const identity = campaignFollowUpIdentity(subject, identified);
+    if (bound.identityDigest === identity) return null;
+    const approved = this.approvedFollowUpAdmission(rootId, subject, identity, admission.occurrenceId);
+    if (approved && this.consumeWorkflowDecision(approved, Date.now()) !== null) {
+      this.campaignBudgets.noteFollowUpAdmission(rootId, workItemId, approved);
+      return null;
+    }
+    const view = this.campaignBudgets.view(rootId);
+    // Another recommendation accepted into the admitted item replaces what the Human approved it as.
+    const rebinds = JSON.stringify(subject) !== JSON.stringify(bound.subject);
+    return { error: rebinds
+      ? `This follow-up was admitted past the campaign's follow-up limit as "${bound.title}"; accepting recommendation "${campaignFollowUpAdmissionTitle(identified.recommendationTitle, subject)}" into it needs the person's approval.`
+      : `This follow-up was admitted past the campaign's follow-up limit as "${bound.title}"; changing its title or issue needs the person's approval.`,
+    details: { ...followUpApprovalDetails(subject, identified, view?.acceptedFollowUps ?? 0, view?.authority.acceptedFollowUps ?? null),
+      revises: admission.occurrenceId, ...(rebinds ? { rebinds: 1 } : {}) } };
+  }
+
+  /** A follow-up's identity content (#2940): the item's title and issue and, for a recommendation,
+   * the title the campaign recorded for it, read here rather than taken from the caller. */
+  private campaignFollowUpIdentityContent(rootId: string, subject: CampaignFollowUpSubject,
+    content: { title: string | null; issue: CampaignIssueRef | null }): CampaignFollowUpIdentityContent {
+    return { ...content, recommendationTitle: subject.kind === "recommendation"
+      ? this.campaignWorkLedger.recommendation(rootId, subject.recommendationId)?.title ?? null : null };
+  }
+
+  /** Approved, not yet consumed follow-up admissions (#2940), so a ledger write can tell which it consumed. */
+  campaignFollowUpApprovedOccurrences(rootId: string): string[] {
+    return (this.stmt(`SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+        AND category='campaign_follow_up_admission' AND status='approved'`).all(rootId, rootId) as Array<{ occurrence_id: string }>)
+      .map((row) => row.occurrence_id);
+  }
+
+  /** Follow-ups past the approval limit (#2940): those awaiting the Human, and how many they admitted. */
+  campaignFollowUpApprovals(rootId: string): NonNullable<CampaignBudgetView["followUpApprovals"]> {
+    const rows = this.stmt(`SELECT occurrence_id, status, json_extract(resource_snapshot, '$.title') AS title FROM workflow_decisions
+        WHERE controlling_session_id=? AND session_id=? AND category='campaign_follow_up_admission'
+        AND (status='pending' OR status='consumed' AND json_extract(resource_snapshot, '$.revises') IS NULL)
+        ORDER BY created_at, rowid`).all(rootId, rootId) as Array<{ occurrence_id: string; status: string; title: string }>;
+    // An approved change to an admitted follow-up is not another follow-up, so it adds no issue slot.
+    return { pending: rows.filter((row) => row.status === "pending").map((row) => ({ occurrenceId: row.occurrence_id, title: row.title })),
+      approved: rows.filter((row) => row.status === "consumed").length };
+  }
+
+  /** The issue limit a campaign's boundary enforces (#2940): its Maximum Issues, plus one slot for
+   * each follow-up the Human admitted past the approval limit, so that follow-up's issue is not then
+   * refused by a limit derived from the follow-ups it exceeded. */
+  campaignIssueLimit(rootId: string, maxIssues: number): number {
+    return Math.min(100, maxIssues + this.campaignFollowUpApprovals(rootId).approved);
+  }
+
+  /** A Human's new follow-up approval limit for a live Full Control campaign (#2940), `null` for none.
+   * Only the Human who authorized the current boundary changes it, compare-and-set on the policy
+   * revision: the boundary is re-minted around the new limit in the same transaction as the
+   * allowance, as a Human scope approval re-mints it, so the campaign never runs under a boundary
+   * that does not name its limit. Raising the limit raises Maximum Issues by as much, and clearing
+   * it lifts Maximum Issues to its ceiling, so the follow-ups it admits can hold issues; lowering
+   * changes neither and revokes nothing already accepted. Like any boundary change, it revokes every
+   * unconsumed decision, which it returns. */
+  setCampaignFollowUpLimit(rootId: string, limit: number | null, userId: string, expectedRevision: number, now: number):
+    { ok: true; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.budgetAuthority || !this.campaignBudgets.view(rootId)) {
+        return refuse(409, "Only a Full Control campaign with a campaign allowance has a follow-up limit.");
+      }
+      const boundary = control.boundary;
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (parentControlPolicy?.revision !== expectedRevision) return refuse(409, "Campaign authority changed; refresh and try again.");
+      if (!campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date. Revoke Full Control in Orchestrator Controls, then Enable Full Control.");
+      }
+      if (boundary.authorizedByUserId !== userId) return refuse(403, "Only the person who authorized this campaign's Full Control can change its follow-up limit.");
+      const previous = boundary.budgetAuthority!.acceptedFollowUps;
+      const { acceptedFollowUps: _previous, ...budget } = boundary.budgetAuthority!;
+      const issues = boundary.issueAuthority;
+      const maxIssues = !issues ? undefined : limit === null ? 100
+        : Math.min(100, issues.maxIssues + Math.max(0, limit - (previous ?? limit)));
+      const reminted = remintCampaignBoundary({ ...boundary,
+        budgetAuthority: { ...budget, ...(limit === null ? {} : { acceptedFollowUps: limit }) },
+        ...(issues ? { issueAuthority: { ...issues, maxIssues: maxIssues! } } : {}) }, { revision: boundary.issueScopeRevision }, userId, now);
+      if (reminted?.mode !== "full_control") return refuse(400, "Enter a whole number of follow-ups, or choose no limit.");
+      this.campaignBudgets.setFollowUpLimit(rootId, limit ?? undefined);
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        // The person set this limit, so a first message still to come keeps it, No Limit included,
+        // rather than deriving one from the issues it names.
+        const waiting = memberPolicy.firstMessageScope;
+        if (id === rootId && waiting && "derivedLimits" in waiting && waiting.derivedLimits) {
+          waiting.derivedLimits = { ...waiting.derivedLimits, acceptedFollowUps: false };
+        }
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
+        return refuse(409, "Campaign authority changed; refresh and try again.");
+      }
+      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return { ok: true, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope. */
@@ -15671,7 +16100,7 @@ export class ControlPlaneDb {
       if (agentSessionId && (!boundary?.issueAuthority || !snapshot.issueAdmission || agentSessionId !== root.id ||
           snapshot.issueAdmission.boundaryRevision !== boundary.revision || decision.policyRevision !== boundary.revision ||
           boundary.issueScopeRevision !== snapshot.expectedRevision || userId !== boundary.authorizedByUserId ||
-          snapshot.before.length + snapshot.additions.length - snapshot.removals.length > boundary.issueAuthority.maxIssues)) {
+          snapshot.before.length + snapshot.additions.length - snapshot.removals.length > this.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues))) {
         this.db.exec("ROLLBACK"); return null;
       }
       const scope: import("@wollipog/protocol").CampaignIssueScope = { repository: snapshot.repository,
@@ -15679,6 +16108,17 @@ export class ControlPlaneDb {
         revision: snapshot.expectedRevision + 1, authorizedByUserId: userId,
         authorizedAt: agentSessionId ? policy.issueScope!.authorizedAt : now,
         ...(agentSessionId ? { disposition: { bySessionId: agentSessionId, at: now, occurrenceId, boundaryRevision: boundary!.revision } } : {}) };
+      // A Human's approval is the authority for the scope it establishes (#2940): under Full Control
+      // the boundary is re-minted from that Human in this transaction, so the campaign never holds a
+      // scope its boundary does not name. A boundary stale for any other reason is not extended.
+      const reminted = !agentSessionId && boundary && this.boundaryTrailsHumanScope(root.id, policy)
+        ? remintCampaignBoundary(boundary, scope, userId, now) : null;
+      // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
+      // still reserves, as an explicit authorization's does.
+      if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
+          this.unsettledPublicationSlots(root.id, scopeSettlements(snapshot)) > this.campaignIssueLimit(root.id, reminted.boundary.issueAuthority.maxIssues)) {
+        this.db.exec("ROLLBACK"); return null;
+      }
       for (const id of [root.id, ...this.campaignDescendantIds(root.id)]) {
         const memberPolicy = this.sessionOrchestratorPolicy(id);
         if (!memberPolicy) continue;
@@ -15688,8 +16128,17 @@ export class ControlPlaneDb {
         const memberScope = this.campaignSharesRepositoryWorkspace(root, member) ? scope : { ...scope, issueNumbers: [] };
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;
-        if (agentSessionId && memberPolicy.control?.mode === "full_control") memberPolicy.control.boundary.issueScopeRevision = scope.revision;
+        if (reminted && memberPolicy.control?.mode === "full_control") memberPolicy.control = structuredClone(reminted);
+        else if (agentSessionId && memberPolicy.control?.mode === "full_control") {
+          memberPolicy.control.boundary.issueScopeRevision = scope.revision;
+          // Evidence authority names the scope revision too; a stale copy invalidates the boundary.
+          if (memberPolicy.control.boundary.evidenceAuthority) memberPolicy.control.boundary.evidenceAuthority.issueScopeRevision = scope.revision;
+        }
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (reminted?.mode === "full_control" && Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(root.id, boundary!.revision).changes) !== 1) {
+        throw new Error("Campaign authority changed concurrently");
       }
       if (!this.resolveWorkflowDecision(occurrenceId, decision.authority, "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {
         throw new Error("Scope approval was resolved concurrently");
@@ -15701,6 +16150,81 @@ export class ControlPlaneDb {
       }
       this.db.exec("COMMIT");
       return this.workflowDecisionByOccurrence(occurrenceId);
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** Whether a Full Control campaign's boundary names its issue scope, or trails it only by scope
+   * revisions authenticated Humans approved (#2940): one consumed Human scope decision for each
+   * revision in order, the newest being the approval that wrote the current scope. A boundary stale
+   * for any other reason (a revoked or superseded policy, another repository, an Orchestrator
+   * disposition it never named) is not on this trail. */
+  private boundaryTrailsHumanScope(rootId: string, policy: OrchestratorCampaignPolicy): boolean {
+    const control = policy.control, scope = policy.issueScope;
+    if (control?.mode !== "full_control" || !scope || !validCampaignControl(control)) return false;
+    const boundary = control.boundary;
+    const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+    if (scope.revision === boundary.issueScopeRevision) return campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy });
+    if (scope.revision < boundary.issueScopeRevision || scope.disposition || parentControlPolicy?.revision !== boundary.revision ||
+        scope.repository.toLowerCase() !== boundary.repository.toLowerCase() || scope.authorizedAt < boundary.authorizedAt) return false;
+    for (let revision = boundary.issueScopeRevision; revision < scope.revision; revision++) {
+      const approval = this.stmt(`SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+          AND category='campaign_issue_scope' AND authority='human' AND status='consumed'
+          AND json_extract(resource_snapshot, '$.expectedRevision')=?`).all(rootId, rootId, revision) as Array<{ occurrence_id: string }>;
+      if (approval.length !== 1) return false;
+      if (revision !== scope.revision - 1) continue;
+      const newest = this.workflowDecisionByOccurrence(approval[0]!.occurrence_id);
+      const snapshot = newest?.resourceSnapshot;
+      if (snapshot?.category !== "campaign_issue_scope" || newest!.resolvedAt !== scope.authorizedAt ||
+          snapshot.repository.toLowerCase() !== scope.repository.toLowerCase() ||
+          JSON.stringify([...snapshot.before.filter((n) => !snapshot.removals.includes(n)), ...snapshot.additions].sort((a, b) => a - b)) !==
+            JSON.stringify(scope.issueNumbers)) return false;
+    }
+    return true;
+  }
+
+  /** The Human who can repair a boundary trailing their approved issue scope, if it is on that trail. */
+  humanScopeBoundaryRepairUser(rootId: string): string | null {
+    const policy = this.sessionOrchestratorPolicy(rootId);
+    const control = policy?.control, scope = policy?.issueScope;
+    return policy && control?.mode === "full_control" && scope && scope.revision !== control.boundary.issueScopeRevision &&
+      this.boundaryTrailsHumanScope(rootId, policy) ? scope.authorizedByUserId : null;
+  }
+
+  /** Repairs a campaign whose Human-approved issue scope its Full Control boundary does not name,
+   * as approvals made before #2940 left it. Only the Human whose approval wrote the current scope
+   * can repair it, and only from those approval records: the boundary is re-minted at that approval's
+   * own time, granting exactly the scope that Human approved. Like any boundary change, it revokes
+   * every unconsumed decision, which it returns. Idempotent: a current boundary is left alone. */
+  repairHumanScopeBoundary(rootId: string, userId: string, now: number): WorkflowDecisionView[] | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control, scope = policy?.issueScope;
+      const reminted = policy && control?.mode === "full_control" && scope && scope.revision !== control.boundary.issueScopeRevision &&
+        scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
+        ? remintCampaignBoundary(control.boundary, scope, userId, scope.authorizedAt) : null;
+      if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
+          scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
+        this.db.exec("ROLLBACK"); return null;
+      }
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, (control as Extract<CampaignControl, { mode: "full_control" }>).boundary.revision).changes) !== 1) {
+        throw new Error("Campaign authority changed concurrently");
+      }
+      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return revoked;
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
@@ -15765,8 +16289,19 @@ export class ControlPlaneDb {
       .run(sent ? "sent" : "unsent", sessionId);
   }
 
+  /** Commit the immutable review identity and its display parent before any observer sees it. */
+  createReviewSession(input: NewSessionInput, review: Omit<NewReviewSession, "reviewSessionId" | "runnerId">): SessionView {
+    return this.atomic(() => {
+      this.reviewSessions.record({ ...review, reviewSessionId: input.id, runnerId: input.runnerId }, input.now);
+      this.createSession(input);
+      this.linkReviewSession(input.id);
+      return this.getSession(input.id)!;
+    });
+  }
+
   createSession(input: NewSessionInput): SessionView {
-    const budgetRoot = input.parentSessionId ? this.campaignBudgets.root(input.parentSessionId) : null;
+    const budgetSource = input.reviewRequesterSessionId ?? input.parentSessionId;
+    const budgetRoot = budgetSource ? this.campaignBudgets.governingRoot(budgetSource) : null;
     const budgetView = budgetRoot ? this.campaignBudgets.view(budgetRoot) : undefined;
     const userLimits = input.campaignBudgetUserLimits ?? { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls };
     const allocation = budgetRoot ? this.campaignBudgets.prepare(budgetRoot, input.id, { costUsd: input.config.costBudgetUsd, toolCalls: input.config.maxToolCalls }) : null;
@@ -15920,6 +16455,10 @@ export class ControlPlaneDb {
         ).run(input.id, input.automationOrigin.automationId, input.automationOrigin.executionId,
           triggerId, invocationId, parametersJson, input.now);
       }
+      const reviewUserId = input.reviewSettingsUserId ?? (input.parentSessionId ? this.reviewSettings.sessionUser(input.parentSessionId) : null)
+        ?? (scope.owner.kind === "user" ? scope.owner.userId : null);
+      if (reviewUserId) this.reviewSettings.attributeSession(input.id, reviewUserId);
+      if (input.reviewPolicyCapture) this.reviewSettings.captureSessionPolicy(input.id, reviewUserId, projectId, input.reviewPolicyCapture);
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${input.id}`,
         kind: "session.created",
@@ -15987,11 +16526,11 @@ export class ControlPlaneDb {
     try {
       this.stmt(
          `INSERT INTO sessions
-           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
+           (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_follow_up, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq,
               runner_snapshot_fingerprint, runner_registration_snapshot_fingerprint, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -16004,6 +16543,7 @@ export class ControlPlaneDb {
         snap.titleSource ?? "generated",
         snap.providerUpdatedAt ?? null,
         backgroundWorkStateForStorage(snap.backgroundWorkState),
+        JSON.stringify(normalizeBackgroundFollowUp(snap.backgroundFollowUp)) ?? null,
         snap.backgroundWorkTracking ?? null,
         snap.historyQuarantine ? JSON.stringify(snap.historyQuarantine) : null,
         capacityWaitForStorage(
@@ -16055,6 +16595,9 @@ export class ControlPlaneDb {
             : null, snap.id);
       }
       this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
+      this.writeSessionProviderHomeRefusal(snap.id, snap.providerHomeRefusal);
+      this.writeSessionProviderHomeWait(snap.id, snap.providerHomeWait);
+      this.writeSessionWorktreeSwitch(snap.id, snap.worktreeSwitch);
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -16134,6 +16677,26 @@ export class ControlPlaneDb {
     }
     const histories = this.atomic(() => snapshots.map((snap) =>
       this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
+    this.maybeMaintainUsageAggregation();
+    return histories;
+  }
+
+  /** Apply a run of live runtime snapshots in one durable transaction (#2601), in order. `before`
+   * runs each snapshot's own control-plane writes inside the same transaction and must not
+   * publish anything; a failure rolls the whole run back. */
+  updateSessionsFromRuntimeSnapshots(
+    updates: ReadonlyArray<{ snapshot: SessionSnapshot; before?: () => void }>,
+    now: number,
+  ): Array<RunnerHistoryReconciliation | null> {
+    if (updates.length === 0) return [];
+    if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("updateSessionsFromRuntimeSnapshots requires an autocommit connection");
+    }
+    const histories = this.atomic(() => updates.map(({ snapshot, before }) => {
+      before?.();
+      return this.updateSessionFromSnapshotInTransaction(snapshot.id, snapshot, now, "runtime");
+    }));
     if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
@@ -16298,7 +16861,7 @@ export class ControlPlaneDb {
       );
     }
     this.stmt(
-      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), queue_hold=NULLIF(COALESCE(?, queue_hold), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_follow_up=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), queue_hold=NULLIF(COALESCE(?, queue_hold), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
           model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
           acp_session_context=COALESCE(?, acp_session_context), runner_snapshot_fingerprint=?,
           runner_registration_snapshot_fingerprint=COALESCE(?, runner_registration_snapshot_fingerprint),
@@ -16311,6 +16874,7 @@ export class ControlPlaneDb {
       semanticTitle,
       snap.providerUpdatedAt ?? null,
       backgroundWorkStateForStorage(snap.backgroundWorkState),
+      JSON.stringify(normalizeBackgroundFollowUp(snap.backgroundFollowUp)) ?? null,
       snap.backgroundWorkTracking ?? null,
       // Three-valued, matching the snapshot field: SQL NULL carries no information and preserves
       // whatever is stored; the empty-string sentinel is a supporting runner saying the
@@ -16365,6 +16929,9 @@ export class ControlPlaneDb {
           snap.providerAccountAutomaticallySelected ? 1 : 0, id);
     }
     this.writeSessionProviderProfileId(id, snap.providerProfileId);
+    this.writeSessionProviderHomeRefusal(id, snap.providerHomeRefusal);
+    this.writeSessionProviderHomeWait(id, snap.providerHomeWait);
+    this.writeSessionWorktreeSwitch(id, snap.worktreeSwitch);
     if (snap.providerAccountSwitchFailure !== undefined) {
       this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
         .run(snap.providerAccountSwitchFailure
@@ -17402,6 +17969,10 @@ export class ControlPlaneDb {
 
   // Archived-history retention (#2777). See docs/archived-history-retention.md.
 
+  /** Retention removal and its marker are atomic and safely repeatable after an OS rollback.
+   * The pass's final FULL commit flushes them, like archived-history retention batches. */
+  workflowEventRetentionCommit<T>(work: () => T): T { return this.relaxedCommit(work); }
+
   getArchivedHistoryRetentionPolicy(organizationId: string): {
     retentionDays: number | null; prunesFrom: number | null;
   } | null {
@@ -17423,6 +17994,47 @@ export class ControlPlaneDb {
        ON CONFLICT(organization_id) DO UPDATE SET retention_days=excluded.retention_days,
          prunes_from=excluded.prunes_from, updated_at=excluded.updated_at, updated_by=excluded.updated_by`,
     ).run(organizationId, policy.retentionDays, policy.prunesFrom, now, updatedBy);
+  }
+
+  getIncrementalVacuumPolicy(): { enabled: boolean; armedAt: number | null } | null {
+    const row = this.stmt("SELECT value FROM control_plane_metadata WHERE key='incremental_vacuum_policy'")
+      .get() as { value: string } | undefined;
+    if (!row) return null;
+    try {
+      const parsed = JSON.parse(row.value) as { enabled?: unknown; armedAt?: unknown } | null;
+      if (!parsed || typeof parsed.enabled !== "boolean" || !(parsed.armedAt === null ||
+        typeof parsed.armedAt === "number" && Number.isSafeInteger(parsed.armedAt) && parsed.armedAt >= 0)) return null;
+      return { enabled: parsed.enabled, armedAt: parsed.armedAt };
+    } catch { return null; } // Malformed restored state re-arms, never silently enables maintenance.
+  }
+
+  saveIncrementalVacuumPolicy(policy: { enabled: boolean; armedAt: number | null }): void {
+    this.stmt("INSERT OR REPLACE INTO control_plane_metadata(key,value) VALUES ('incremental_vacuum_policy',?)")
+      .run(JSON.stringify(policy));
+  }
+
+  incrementalVacuumStats(): { mode: number; freePages: number; pageSize: number; pages: number } {
+    return {
+      mode: (this.stmt("PRAGMA auto_vacuum").get() as { auto_vacuum: number }).auto_vacuum,
+      freePages: (this.stmt("PRAGMA freelist_count").get() as { freelist_count: number }).freelist_count,
+      pageSize: (this.stmt("PRAGMA page_size").get() as { page_size: number }).page_size,
+      pages: (this.stmt("PRAGMA page_count").get() as { page_count: number }).page_count,
+    };
+  }
+
+  incrementalVacuumStep(pages: number): { reclaimedPages: number; freePages: number } {
+    if (!Number.isSafeInteger(pages) || pages < 1 || pages > 32) throw new Error("incremental vacuum step must be 1–32 pages");
+    if (this.db.isTransaction) throw new Error("incremental vacuum cannot run inside a transaction");
+    const initial = this.incrementalVacuumStats();
+    if (initial.mode !== 2) return { reclaimedPages: 0, freePages: initial.freePages };
+    const timeout = (this.stmt("PRAGMA busy_timeout").get() as { timeout: number }).timeout;
+    // A contended maintenance tick must defer, not spend the request path's 250 ms lock budget.
+    // No asynchronous gap exists while this connection setting differs.
+    this.db.exec("PRAGMA busy_timeout=0");
+    try { this.db.exec(`PRAGMA incremental_vacuum(${pages})`); }
+    finally { this.db.exec(`PRAGMA busy_timeout=${timeout}`); }
+    const after = this.incrementalVacuumStats();
+    return { reclaimedPages: Math.max(0, initial.pages - after.pages), freePages: after.freePages };
   }
 
   /** The environment default's own arming state, kept across restarts. */
@@ -17483,6 +18095,41 @@ export class ControlPlaneDb {
     return (this.stmt(
       `SELECT s.id ${ARCHIVED_HISTORY_PRUNE_CANDIDATES_SQL} ORDER BY s.archived_at, s.id LIMIT ?`,
     ).all(organizationId, cutoff, limit) as unknown as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Completed, still-eligible prunes with a fully cached runner boundary. Keyset paging also
+   * revisits old prunes after an upgrade or an offline runner reconnects. */
+  runnerHistoryTrimCandidates(organizationId: string, cutoff: number, afterId: string, limit: number, sessionId: string | null = null, runnerId: string | null = null): Array<{
+    id: string; runnerId: string; logEpoch: number; throughSeq: number; eventEpoch: number;
+  }> {
+    return this.stmt(`SELECT s.id, s.runner_id AS runnerId, s.runner_history_epoch AS logEpoch,
+        s.runner_history_tail_seq AS throughSeq, s.event_epoch AS eventEpoch
+      FROM sessions s JOIN session_ownership ownership ON ownership.session_id=s.id
+      WHERE ownership.organization_id=? AND s.id>? AND s.archived=1 AND s.archived_at<=?
+        AND (? IS NULL OR s.id=?) AND (? IS NULL OR s.runner_id=?)
+        AND s.status IN ('completed','failed','stopped') AND s.history_pruned_at IS NOT NULL
+        AND s.history_prune_run_events IS NULL AND s.runner_history_epoch IS NOT NULL
+        AND s.runner_history_tail_seq>0 AND s.hydrated_seq>=s.runner_history_tail_seq
+        AND NOT (s.runner_trim_epoch IS s.runner_history_epoch
+          AND s.runner_trim_through_seq IS s.runner_history_tail_seq
+          AND s.runner_trim_event_epoch IS s.event_epoch)
+        AND NOT EXISTS (SELECT 1 FROM session_stop_intents intent WHERE intent.session_id=s.id)
+        AND NOT EXISTS (SELECT 1 FROM session_events e WHERE e.session_id=s.id AND e.seq>s.history_prune_through_seq)
+      ORDER BY s.id LIMIT ?`).all(organizationId, afterId, cutoff, sessionId, sessionId, runnerId, runnerId, limit) as unknown as Array<{
+        id: string; runnerId: string; logEpoch: number; throughSeq: number; eventEpoch: number;
+      }>;
+  }
+
+  /** A late reply must never acknowledge replacement history, even at identical runner coordinates. */
+  recordRunnerHistoryTrim(candidate: {
+    id: string; runnerId: string; logEpoch: number; throughSeq: number; eventEpoch: number;
+  }, now: number): boolean {
+    return this.stmt(`UPDATE sessions SET runner_trim_epoch=?, runner_trim_through_seq=?,
+        runner_trim_event_epoch=?, runner_trimmed_at=?
+      WHERE id=? AND runner_id=? AND runner_history_epoch=? AND runner_history_tail_seq=?
+        AND event_epoch=? AND history_pruned_at IS NOT NULL AND history_prune_run_events IS NULL`)
+      .run(candidate.logEpoch, candidate.throughSeq, candidate.eventEpoch, now,
+        candidate.id, candidate.runnerId, candidate.logEpoch, candidate.throughSeq, candidate.eventEpoch).changes > 0;
   }
 
   /** Whether search rows without their event's row id remain to be mapped before any prune. */
@@ -17785,8 +18432,9 @@ export class ControlPlaneDb {
       INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)
       ON CONFLICT(session_id) DO UPDATE SET meaningful_at=MAX(meaningful_at,excluded.meaningful_at)`).run(id, now);
     if (current && current.status !== effectiveStatus) this.advanceSessionAttentionRevision(id);
-    this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
-      .run(effectiveStatus, now, id);
+    this.stmt(`UPDATE sessions SET status=?, capacity_wait=NULL,
+      provider_home_wait=CASE WHEN ?='starting' THEN provider_home_wait ELSE NULL END, updated_at=? WHERE id=?`)
+      .run(effectiveStatus, effectiveStatus, now, id);
     // The overloads require provenance for `stopped`; an untyped caller still records a stop that
     // nothing has confirmed rather than one that claims runner evidence it never had.
     const stopWrite = stop ?? { cause: "unrecorded" };
@@ -18474,11 +19122,36 @@ export class ControlPlaneDb {
   /** Internal human-admission persistence. Mode and boundary changes share the workflow policy
    * revision and revoke every unconsumed occurrence atomically. The service verifies principal,
    * scope and provider compatibility before calling; agent-facing APIs expose no such mutation. */
-  updateSessionCampaignControl(id: string, control: CampaignControl, expectedRevision: number, now: number): boolean {
+  updateSessionCampaignControl(id: string, control: CampaignControl, expectedRevision: number, now: number,
+    /** Enabling a campaign with no issue scope establishes the first one with the boundary (#2940). */
+    established?: { issueScope: import("@wollipog/protocol").CampaignIssueScope; firstMessage: boolean },
+    /** This authorization's own limit provenance (#2940): a waiting campaign keeps only the limits
+     * this request left to the server, never an earlier authorization's. */
+    derivedLimits?: import("@wollipog/protocol").FullControlDerivedLimits): boolean {
     const campaign = this.sessionOrchestratorPolicy(id);
     const policy = this.parentControlPolicy(id);
     if (!campaign || !policy || policy.revision !== expectedRevision || !validCampaignControl(control) ||
         (control.mode === "full_control" && control.boundary.revision !== expectedRevision + 1)) return false;
+    if (established) {
+      const scope = established.issueScope;
+      if (campaign.issueScope || control.mode !== "full_control" || scope.revision !== 1 ||
+          control.boundary.issueScopeRevision !== 1 || scope.repository !== control.boundary.repository ||
+          scope.authorizedByUserId !== control.boundary.authorizedByUserId || scope.authorizedAt > control.boundary.authorizedAt) return false;
+      campaign.issueScope = structuredClone(scope);
+      campaign.issueNumbers = [...scope.issueNumbers];
+      if (established.firstMessage) {
+        if (this.sessionHasConversationHistory(id)) return false;
+        campaign.firstMessageScope = { state: "pending" };
+      }
+    }
+    // An authorization never ends an existing wait (only a revoke to Custom lifts its fence): it
+    // records its own limit provenance, and the queue keeps holding any retained work until the
+    // owner's first message.
+    const waiting = campaign.firstMessageScope;
+    if (control.mode === "full_control" && (waiting?.state === "pending" || waiting?.state === "delivering")) {
+      const { derivedLimits: _stale, ...rest } = waiting;
+      campaign.firstMessageScope = { ...rest, ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) } as typeof waiting;
+    }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
     try {
@@ -18498,13 +19171,92 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** The owner's first message establishes a pending Full Control campaign's objective and issue
+   * scope (#2940): the next scope revision, the boundary that names it and the message digest
+   * commit together, compare-and-set on the policy revision. The campaign stays durably fenced as
+   * `delivering` until `settleFirstMessageDelivery` records the delivery, so a restart in between
+   * never lets another message reach it first. Only the service's authenticated Human
+   * first-message path calls this; the boundary's own author is the only accepted Human. */
+  establishFirstMessageScope(id: string, input: { control: CampaignControl; scope: import("@wollipog/protocol").CampaignIssueScope; messageDigest: string;
+    deliveryId: string; expectedRevision: number; now: number }): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    const previous = policy?.control?.mode === "full_control" ? policy.control.boundary : null;
+    const { control, scope } = input;
+    const boundary = control.mode === "full_control" ? control.boundary : null;
+    if (!policy || !previous || !boundary || policy.firstMessageScope?.state !== "pending" || !policy.issueScope ||
+        !validCampaignControl(control) || this.parentControlPolicy(id)?.revision !== input.expectedRevision ||
+        boundary.revision !== input.expectedRevision + 1 || boundary.authorizedByUserId !== previous.authorizedByUserId ||
+        scope.authorizedByUserId !== previous.authorizedByUserId || scope.repository !== previous.repository ||
+        boundary.repository !== previous.repository || scope.revision !== policy.issueScope.revision + 1 ||
+        boundary.issueScopeRevision !== scope.revision || scope.authorizedAt > boundary.authorizedAt ||
+        JSON.stringify(boundary.issueAuthority?.epics ?? []) !== JSON.stringify(scope.issueNumbers) ||
+        !/^[a-f0-9]{64}$/.test(input.messageDigest) || !/^first_message_[a-f0-9-]{36}$/.test(input.deliveryId)) return false;
+    policy.control = structuredClone(control);
+    policy.issueScope = structuredClone(scope);
+    policy.issueNumbers = [...scope.issueNumbers];
+    const derivedLimits = policy.firstMessageScope.derivedLimits;
+    policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, deliveryId: input.deliveryId,
+      ...(derivedLimits ? { derivedLimits } : {}) };
+    return this.atomic(() => {
+      const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
+        updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(policy), input.now, id, input.expectedRevision);
+      if (Number(changed.changes) !== 1) return false;
+      if (boundary.budgetAuthority) this.campaignBudgets.authorize(id, boundary.budgetAuthority);
+      return true;
+    });
+  }
+
+  /** Ends the exact `delivering` first message: admitted becomes `established`; otherwise the
+   * campaign waits for its first message again, still fenced, and the next one establishes a newer
+   * revision. Only the exact digest being delivered settles. */
+  settleFirstMessageDelivery(id: string, messageDigest: string, delivered: boolean, now: number): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    const first = policy?.firstMessageScope;
+    if (!policy || first?.state !== "delivering" || first.messageDigest !== messageDigest) return false;
+    policy.firstMessageScope = delivered ? { state: "established", messageDigest, establishedAt: now }
+      : { state: "pending", ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) };
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
+      .run(JSON.stringify(policy), now, id).changes) === 1;
+  }
+
+  /** Roots whose first message was being delivered when this control plane last stopped. */
+  firstMessageDeliveries(): Array<{ sessionId: string; messageDigest: string; deliveryId: string }> {
+    const rows = this.stmt(`SELECT id FROM sessions WHERE CASE WHEN json_valid(orchestrator_policy)
+      THEN json_extract(orchestrator_policy, '$.firstMessageScope.state') ELSE NULL END='delivering'`).all() as unknown as Array<{ id: string }>;
+    return rows.flatMap((row) => {
+      const first = this.sessionOrchestratorPolicy(row.id)?.firstMessageScope;
+      return first?.state === "delivering" ? [{ sessionId: row.id, messageDigest: first.messageDigest, deliveryId: first.deliveryId }] : [];
+    });
+  }
+
+  /** This exact delivery's progress, by its identity alone: the durable prompt command with its
+   * delivery id for this session (whose payload a completed receipt clears), or the user message
+   * the runner recorded for it after that row was pruned. The digest is already bound to the id in
+   * the delivering state, so no text is re-read, and no other row or text, however identical,
+   * ever counts. */
+  firstMessageDeliveryState(sessionId: string, deliveryId: string): SessionPromptCommandState | "recorded" | null {
+    const row = this.stmt("SELECT state FROM session_prompt_commands WHERE command_id=? AND session_id=?")
+      .get(deliveryId, sessionId) as { state: SessionPromptCommandState } | undefined;
+    if (row) return row.state;
+    return this.stmt(`SELECT 1 FROM session_events WHERE session_id=? AND kind='user_message'
+      AND json_extract(payload, '$.commandId')=? LIMIT 1`).get(sessionId, deliveryId) ? "recorded" : null;
+  }
+
+  /** Any conversation the session already has: a user message, a durable prompt or a provider
+   * command. A Full Control campaign waits for its first message only without any (#2940). */
+  sessionHasConversationHistory(sessionId: string): boolean {
+    return Boolean(this.stmt(`SELECT 1 FROM session_events WHERE session_id=? AND kind='user_message'
+      UNION ALL SELECT 1 FROM session_prompt_commands WHERE session_id=?
+      UNION ALL SELECT 1 FROM session_command_invocations WHERE session_id=? LIMIT 1`).get(sessionId, sessionId, sessionId));
+  }
+
   campaignDescendantIds(campaignSessionId: string): string[] {
     return (this.stmt(`
       WITH RECURSIVE descendants(id) AS (
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT child.id FROM sessions child JOIN descendants parent ON child.parent_session_id=parent.id
-      ) SELECT id FROM descendants ORDER BY id
+      ) SELECT id FROM descendants WHERE NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=descendants.id) ORDER BY id
     `).all(campaignSessionId) as unknown as Array<{ id: string }>).map((row) => row.id);
   }
 
@@ -19270,6 +20022,7 @@ export class ControlPlaneDb {
    * `hasPolicy` is false only for a legacy or unreadable campaign policy: that root still owns its
    * typed gates (human-only by default) but has no campaign to project. */
   campaignAncestryRoot(sessionId: string): { id: string; hasPolicy: boolean } | "none" | "refused" {
+    if (this.reviewSessions.isReviewSession(sessionId)) return "none";
     const read = (id: string) => this.stmt(
       "SELECT id, parent_session_id, session_role, permission_mode, orchestrator_policy FROM sessions WHERE id=?",
     ).get(id) as {
@@ -19571,20 +20324,12 @@ export class ControlPlaneDb {
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     const budget=this.campaignBudgets.view(resolvedCampaignId);
-    if(budget) {
-      const runner=this.getRunner(campaign.runner_id),profile=budget.authority.controlledReview,capability=runner?.runtime?.campaignReview;
-      const scope=this.sessionScope(resolvedCampaignId);
-      const tighter=this.campaignBudgets.members(resolvedCampaignId).some((id)=>{
-        const original=this.campaignBudgets.userLimits(id);return original?.costBudgetUsd!=null || original?.maxToolCalls!=null;
-      });
-      const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=218 &&
-        controlledReviewCapabilityKey(profile)===controlledReviewCapabilityKey(capability)) && !tighter &&
-        scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
-      budget.requiredNativeReview={supported,reason:supported?
-        "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
-        !profile?"Controlled review is not part of this campaign; it uses the regular cross-model review workflow.":
-        "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
-    }
+    if (budget && this.campaignBudgets.governingRoot(resolvedCampaignId)) budget.followUpApprovals = this.campaignFollowUpApprovals(resolvedCampaignId);
+    if (budget) budget.requiredNativeReview = {
+      supported: false,
+      reason: budget.authority.controlledReview ? REVIEW_JOBS_RETIRED_REASON
+        : "Use review sessions for each member's own pushed PR; native campaign review jobs are retired.",
+    };
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
     if (recovery) {
       recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
@@ -19777,14 +20522,16 @@ export class ControlPlaneDb {
       this.stmt(
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
-          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)`,
+          resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation,
+          closing_reference_check, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
         input.policyRevision, input.authority,
         input.humanFallback ? JSON.stringify(input.humanFallback) : null,
-        input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null, input.createdAt,
+        input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null,
+        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -19843,6 +20590,61 @@ export class ControlPlaneDb {
       `SELECT * FROM workflow_decisions WHERE session_id=? AND status IN ('pending','approved')
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(sessionId) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
+  }
+
+  /** Only outstanding grants are swept; consumed creation receipts never expire. */
+  expiredAutomationCreationDecisions(now: number, sessionId?: string): WorkflowDecisionView[] {
+    return (this.stmt(`SELECT * FROM workflow_decisions
+      WHERE category='automation_creation' AND status IN ('pending','approved')
+        ${sessionId ? "AND session_id=?" : ""}
+        AND (json_extract(resource_snapshot, '$.expiresAt')<=?
+          OR (status='approved' AND resolved_at<=?))
+      ORDER BY created_at, occurrence_id`)
+      .all(...(sessionId ? [sessionId] : []), now, now - AUTOMATION_APPROVAL_TTL_MS) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null);
+  }
+
+  /** Expiration, resume retirement, card settlement and its audit either all commit or all retry. */
+  expireAutomationCreationDecision(occurrenceId: string, now: number, settle: () => void): boolean {
+    return this.atomic(() => {
+      const eligible = this.stmt(`SELECT 1 FROM workflow_decisions
+        WHERE occurrence_id=? AND category='automation_creation' AND status IN ('pending','approved')
+          AND (json_extract(resource_snapshot, '$.expiresAt')<=? OR (status='approved' AND resolved_at<=?))`)
+        .get(occurrenceId, now, now - AUTOMATION_APPROVAL_TTL_MS);
+      if (!eligible) return false;
+      this.markWorkflowDecisionRevoked(occurrenceId, now, false, true);
+      settle();
+      return true;
+    });
+  }
+
+  queueAutomationExpirationEffect(occurrenceId: string, previous: SessionView, kind: "idle" | "active", now: number): void {
+    this.stmt(`INSERT INTO automation_expiration_effects (occurrence_id,session_before,effect_kind,created_at)
+      VALUES (?,?,?,?)`).run(occurrenceId, JSON.stringify(previous), kind, now);
+  }
+
+  automationExpirationEffects(sessionId?: string): Array<{ occurrenceId: string; previous: SessionView; kind: "idle" | "active" }> {
+    return (this.stmt(`SELECT effect.* FROM automation_expiration_effects effect
+      JOIN workflow_decisions decision ON decision.occurrence_id=effect.occurrence_id
+      ${sessionId ? "WHERE decision.session_id=?" : ""} ORDER BY effect.created_at,effect.occurrence_id`)
+      .all(...(sessionId ? [sessionId] : [])) as Array<{ occurrence_id: string; session_before: string; effect_kind: "idle" | "active" }>)
+      .map((row) => ({ occurrenceId: row.occurrence_id, previous: JSON.parse(row.session_before) as SessionView, kind: row.effect_kind }));
+  }
+
+  completeAutomationExpirationEffect(occurrenceId: string): void {
+    this.stmt("DELETE FROM automation_expiration_effects WHERE occurrence_id=?").run(occurrenceId);
+  }
+
+  /** Consumed pull-request merge gates these sessions passed: completed-closure delivery candidates (#2940). */
+  consumedPullRequestMerges(sessionIds: readonly string[]): WorkflowDecisionView[] {
+    if (!sessionIds.length) return [];
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE category='pr_merge' AND status='consumed'
+         AND session_id IN (SELECT value FROM json_each(?))
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(JSON.stringify([...new Set(sessionIds)])) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
     );
   }
@@ -20168,6 +20970,145 @@ export class ControlPlaneDb {
     ).all(...(runnerId ? [runnerId, limit] : [limit])) as Array<{ id: string }>).map((row) => row.id);
   }
 
+  // Review continuations (#3369): each finished review owes its requester one prompt, carried by
+  // a durable command exactly as a restart notice is (#1861). The owed state is written with the
+  // review's outcome (ReviewSessions.accept / abandon); these move it. Each transition advances
+  // the requester-wide summary clock, even in the same millisecond or after a newer review, so
+  // ReviewPanel reloads continuation-only changes without waiting for another review outcome.
+
+  /** Whether this requester is owed a review continuation, held or in flight. */
+  hasOpenReviewContinuations(requesterSessionId: string): boolean {
+    return this.stmt(
+      "SELECT 1 FROM review_sessions WHERE requester_session_id=? AND continuation_state IN ('held','delivering') LIMIT 1",
+    ).get(requesterSessionId) !== undefined;
+  }
+
+  /** Stage the command that carries these held continuations and bind each to it in one
+   * transaction. Throws, staging nothing, unless every one is still held. */
+  stageReviewContinuation(input: {
+    reviewSessionIds: readonly string[];
+    command: Parameters<ControlPlaneDb["stageSessionPromptCommand"]>[0];
+  }): SessionPromptCommandRecord {
+    this.db.exec("BEGIN");
+    try {
+      const update = this.stmt(
+        `UPDATE review_sessions SET continuation_state='delivering', continuation_command_id=?, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
+         WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
+      );
+      const staged = this.stageSessionPromptCommand(input.command);
+      for (const id of input.reviewSessionIds) {
+        if (Number(update.run(staged.commandId, input.command.now, id, input.command.sessionId).changes) !== 1) {
+          throw new Error("review continuation changed before it could be staged");
+        }
+      }
+      this.db.exec("COMMIT");
+      return staged;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Record held continuations delivered just before they go out on the immediate lane, which has
+   * no receipt to follow. All or nothing: false, claiming none, unless every one is still held. */
+  claimHeldReviewContinuations(requesterSessionId: string, reviewSessionIds: readonly string[], now: number): boolean {
+    try {
+      return this.atomic(() => {
+        const update = this.stmt(
+          `UPDATE review_sessions SET continuation_state='delivered', continuation_command_id=NULL, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
+           WHERE review_session_id=? AND requester_session_id=? AND continuation_state='held'`,
+        );
+        for (const id of reviewSessionIds) {
+          if (Number(update.run(now, id, requesterSessionId).changes) !== 1) throw new Error("review continuation changed");
+        }
+        return true;
+      });
+    } catch {
+      return false;
+    }
+  }
+
+  /** The immediate send that followed a claim failed synchronously: owe the continuations again. */
+  releaseReviewContinuationClaim(requesterSessionId: string, reviewSessionIds: readonly string[], now: number): void {
+    const update = this.stmt(
+      `UPDATE review_sessions SET continuation_state='held', continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
+       WHERE review_session_id=? AND requester_session_id=? AND continuation_state='delivered' AND continuation_command_id IS NULL`,
+    );
+    for (const id of reviewSessionIds) update.run(now, id, requesterSessionId);
+  }
+
+  /** The requester whose continuation this command carries, if it is still in flight. */
+  reviewContinuationRequesterForCommand(commandId: string): string | null {
+    const row = this.stmt(
+      "SELECT requester_session_id FROM review_sessions WHERE continuation_command_id=? AND continuation_state='delivering' LIMIT 1",
+    ).get(commandId) as { requester_session_id: string } | undefined;
+    return row?.requester_session_id ?? null;
+  }
+
+  setReviewContinuationCommandState(commandId: string, state: "delivered" | "uncertain" | "failed", now: number): number {
+    return Number(this.stmt(
+      `UPDATE review_sessions SET continuation_state=?, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
+       WHERE continuation_command_id=? AND continuation_state='delivering'`,
+    ).run(state, now, commandId).changes);
+  }
+
+  /** The runner reported the command not sent because the requester's worktree needs recovery:
+   * owe the continuation again and retire the not-sent row in one transaction. */
+  holdReviewContinuationCommand(requesterSessionId: string, commandId: string, now: number): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const held = Number(this.stmt(
+        `UPDATE review_sessions SET continuation_state='held', continuation_command_id=NULL, continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
+         WHERE requester_session_id=? AND continuation_command_id=? AND continuation_state='delivering'`,
+      ).run(now, requesterSessionId, commandId).changes) > 0;
+      if (held) this.dismissTerminalSessionPromptCommand(requesterSessionId, commandId, now);
+      this.db.exec("COMMIT");
+      return held;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** A requester that ended for good is owed no continuation any more; one in flight is abandoned
+   * too, so a late not-sent receipt cannot hold it again. */
+  abandonReviewContinuations(requesterSessionId: string, now: number): number {
+    return Number(this.stmt(
+      `UPDATE review_sessions SET continuation_state='abandoned', continuation_updated_at=MAX(?,
+         (SELECT MAX(MAX(r.updated_at, COALESCE(r.continuation_updated_at, 0)))+1
+          FROM review_sessions r WHERE r.requester_session_id=review_sessions.requester_session_id))
+       WHERE requester_session_id=? AND continuation_state IN ('held','delivering')`,
+    ).run(now, requesterSessionId).changes);
+  }
+
+  sessionsWithHeldReviewContinuations(runnerId?: string): string[] {
+    return (this.stmt(
+      `SELECT DISTINCT r.requester_session_id AS id FROM review_sessions r JOIN sessions s ON s.id=r.requester_session_id
+       WHERE r.continuation_state='held' ${runnerId ? "AND s.runner_id=?" : ""}`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Commands carrying an in-flight continuation whose outcome is recorded but never applied to it. */
+  settledReviewContinuationCommands(runnerId?: string, limit = 100): string[] {
+    return (this.stmt(
+      `SELECT DISTINCT r.continuation_command_id AS id FROM review_sessions r
+       JOIN session_prompt_commands c ON c.command_id=r.continuation_command_id
+       WHERE r.continuation_state='delivering' AND c.state IN ('started','completed','failed','uncertain')
+         ${runnerId ? "AND c.runner_id=?" : ""}
+       LIMIT ?`,
+    ).all(...(runnerId ? [runnerId, limit] : [limit])) as Array<{ id: string }>).map((row) => row.id);
+  }
+
   /** Descendants held from starting their next turn (#1650), without hydrating full views. Only a
    * live session is held: a terminal one has nothing left to start. `readerFor` writes each
    * session's hold advice for the principal reading it (#1863). */
@@ -20191,6 +21132,7 @@ export class ControlPlaneDb {
                s.queue_hold
         FROM descendants d JOIN sessions s ON s.id=d.id
         WHERE s.id<>?
+          AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=s.id)
           AND ((s.worktree_recovery IS NOT NULL AND s.worktree_recovery<>'')
             OR (s.queue_hold IS NOT NULL AND s.queue_hold<>''))
           AND s.status NOT IN ('completed','failed','stopped')
@@ -20276,7 +21218,7 @@ export class ControlPlaneDb {
    * already handed to the runner cannot be recalled: at-least-once transport leaves that to the
    * resume's own text, which defers to the decision record, and the record now says revoked.
    */
-  private retireWorkflowDecisionResume(occurrenceId: string, now: number): void {
+  private retireWorkflowDecisionResume(occurrenceId: string, now: number, stopDelivery = false): void {
     const row = this.stmt(
       "SELECT session_id, resume_state, resume_command_id FROM workflow_decisions WHERE occurrence_id=?",
     ).get(occurrenceId) as {
@@ -20286,6 +21228,16 @@ export class ControlPlaneDb {
     const withdrawn = row.resume_state === "delivering" && row.resume_command_id !== null &&
       this.cancelPendingSessionPromptCommand(row.session_id, row.resume_command_id, now) === "cancelled";
     if (withdrawn) this.dismissTerminalSessionPromptCommand(row.session_id, row.resume_command_id!, now);
+    if (stopDelivery && row.resume_state === "delivering" && !withdrawn) {
+      // A sent command may already have reached the provider. Fence further retries and retain
+      // uncertainty, rather than claiming it was recalled or allowing a late receipt to re-hold it.
+      this.stmt(`UPDATE session_prompt_commands SET state='uncertain',revision=revision+1,
+        error='automation approval expired after delivery may have begun',next_attempt_at=NULL,
+        expires_at=?,updated_at=? WHERE command_id=? AND state IN ('sent','accepted','queued','started')`)
+        .run(now + SESSION_PROMPT_TERMINAL_RETENTION_MS, now, row.resume_command_id);
+      this.setWorkflowDecisionResume(occurrenceId, "uncertain", row.resume_command_id, now);
+      return;
+    }
     if (row.resume_state !== "held" && !withdrawn) return;
     this.stmt(
       `UPDATE workflow_decisions SET resume_state='abandoned', resume_command_id=NULL, resume_updated_at=?
@@ -20296,11 +21248,10 @@ export class ControlPlaneDb {
   /** `oweRestartNotice` records, in the revocation's own transaction, the notice a restart owes
    * the child for this occurrence (#1861): no crash can leave the revocation without it, and it
    * stays owed whatever the decision's status becomes later (a forge-settled merge, say). */
-  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false): WorkflowDecisionView | null {
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number, oweRestartNotice = false, stopResumeDelivery = false): WorkflowDecisionView | null {
     // One transaction, so a restart can never leave a revoked decision with its resume still
     // waiting to be sent.
-    this.db.exec("BEGIN");
-    try {
+    return this.atomic(() => {
       const prior = this.stmt(
         "SELECT status FROM workflow_decisions WHERE occurrence_id=? AND status IN ('pending','approved')",
       ).get(occurrenceId) as { status: "pending" | "approved" } | undefined;
@@ -20308,7 +21259,7 @@ export class ControlPlaneDb {
         `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
          WHERE occurrence_id=? AND status IN ('pending','approved')`,
       ).run(now, occurrenceId).changes) === 1;
-      if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now);
+      if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now, stopResumeDelivery);
       if (revoked && prior && oweRestartNotice) {
         this.stmt(
           `INSERT OR IGNORE INTO session_restart_notices
@@ -20318,12 +21269,8 @@ export class ControlPlaneDb {
         ).run(prior.status, now, now, occurrenceId);
       }
       this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    return this.workflowDecisionByOccurrence(occurrenceId);
+      return this.workflowDecisionByOccurrence(occurrenceId);
+    });
   }
 
   /** Record one delivery. Redelivering the same item replaces its receipt and restarts its expiry. */
@@ -20452,6 +21399,38 @@ export class ControlPlaneDb {
       ),
       modelId: controller.model,
     };
+  }
+
+  /** Commit the authenticated approver and durable resume with the human decision. */
+  resolveAutomationCreationDecision(occurrenceId: string, outcome: "approved" | "denied", userId: string, now: number, oweResume: boolean): WorkflowDecisionView | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const decision = this.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.category !== "automation_creation" || decision.authority !== "human") {
+        this.db.exec("ROLLBACK");
+        return null;
+      }
+      const resolved = this.resolveWorkflowDecision(occurrenceId, "human", outcome, now, undefined, undefined, undefined, undefined, oweResume);
+      if (resolved) this.stmt("UPDATE workflow_decisions SET automation_creation_approved_by=? WHERE occurrence_id=?").run(userId, occurrenceId);
+      this.db.exec("COMMIT");
+      return resolved;
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  automationCreationApprover(occurrenceId: string): string | null {
+    return (this.stmt("SELECT automation_creation_approved_by AS id FROM workflow_decisions WHERE occurrence_id=? AND category='automation_creation'")
+      .get(occurrenceId) as { id: string | null } | undefined)?.id ?? null;
+  }
+
+  /** Match the existing global automation API: active personal-organization owner/admin only. */
+  automationCreationHuman(userId: string, organizationId: string): HumanPrincipal | null {
+    if (organizationId !== PERSONAL_ORGANIZATION_ID) return null;
+    const row = this.stmt(`SELECT user.display_name AS userName, organization.name AS organizationName, membership.role
+      FROM identity_memberships membership JOIN identity_users user ON user.user_id=membership.user_id
+      JOIN identity_organizations organization ON organization.organization_id=membership.organization_id
+      WHERE membership.user_id=? AND membership.organization_id=? AND user.status='active' AND membership.role IN ('owner','admin')`)
+      .get(userId, organizationId) as { userName: string; organizationName: string; role: HumanPrincipal["role"] } | undefined;
+    return row ? { kind: "human", actorId: userId, userId, organizationId, ...row, deviceId: null, localBootstrap: false } : null;
   }
 
   recordGithubIssueClosureResult(occurrenceId: string, result: NonNullable<WorkflowDecisionView["issueClosureResult"]>): void {
@@ -20735,6 +21714,7 @@ export class ControlPlaneDb {
    * replay) raise its charge against its parent. A live child is already held at its limit and is
    * recounted at its next status transition, so only settled children pay for a recount. */
   private raiseSettledChildToolCallCharge(sessionId: string): void {
+    if (this.reviewSessions.isReviewSession(sessionId)) return;
     this.stmt(
       `UPDATE sessions SET usage_peak_tool_calls=MAX(usage_peak_tool_calls, ${toolCallCountSql("sessions.id")})
        WHERE id=? AND parent_session_id IS NOT NULL AND status IN ${TERMINAL_STATUS_SQL}`,
@@ -21431,6 +22411,44 @@ export class ControlPlaneDb {
          AND outcome IN ('allowed', 'denied', 'dismissed', 'answered', 'timed_out', 'aborted')
        LIMIT 1`,
     ).get(sessionId, requestId));
+  }
+
+  hasRunnerGovernanceTripInWindow(
+    sessionId: string,
+    trip: Pick<NonNullable<AutomationExecution["governancePause"]>, "kind" | "tripId">,
+    since: number,
+    until: number,
+  ): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit WHERE session_id=? AND request_id=?
+       AND stage='policy_decision' AND outcome='asked'
+       AND actor_kind='system' AND actor_id='runner-governance'
+       AND created_at BETWEEN ? AND ? LIMIT 1`,
+    ).get(sessionId, `runner-${trip.kind}:${trip.tripId}`, since, until));
+  }
+
+  /** Same-command evidence survives receipt-time reconstruction on reconnect. Its digest pins
+   * the authenticated crossing, so restoring a displaced card cannot change its owner or bounds.
+   * Only card restoration may opt into unverified command evidence; attribution never does. */
+  hasRunnerGovernanceTripForCommand(
+    sessionId: string,
+    trip: Omit<NonNullable<AutomationExecution["governancePause"]>, "sessionId">,
+    commandId: string | undefined,
+    since: number,
+    until: number,
+    allowUnverifiedCommand = false,
+  ): boolean {
+    if (trip.commandId !== commandId) return false;
+    const crossing = [commandId, trip.kind, trip.threshold, trip.observed];
+    const digest = commandId === undefined ? null : createHash("sha256").update(JSON.stringify(crossing)).digest("hex");
+    const unverifiedDigest = allowUnverifiedCommand && commandId !== undefined
+      ? createHash("sha256").update(JSON.stringify(["unverified-command", ...crossing])).digest("hex") : digest;
+    return Boolean(this.stmt(
+      `SELECT 1 FROM governance_audit WHERE session_id=? AND request_id=?
+       AND stage='policy_decision' AND outcome='asked'
+       AND actor_kind='system' AND actor_id='runner-governance' AND (content_digest IS ? OR content_digest IS ?)
+       AND created_at BETWEEN ? AND ? LIMIT 1`,
+    ).get(sessionId, `runner-${trip.kind}:${trip.tripId}`, digest, unverifiedDigest, since, until));
   }
 
   pruneGovernanceAudit(createdBefore: number, limit = 1_000): number {
@@ -23161,12 +24179,19 @@ export class ControlPlaneDb {
 
   dueSessionPromptCommands(now: number, runnerId?: string, limit = 100): SessionPromptCommandRecord[] {
     const runner = runnerId ? "AND command.runner_id=?" : "";
-    const params = runnerId ? [now, now, runnerId, limit] : [now, now, limit];
+    const approvalNow = Math.min(now, Date.now());
+    const params = [now, now, approvalNow, approvalNow - AUTOMATION_APPROVAL_TTL_MS, ...(runnerId ? [runnerId] : []), limit];
     const rows = this.stmt(
       `SELECT command.* FROM session_prompt_commands command
        JOIN sessions session ON session.id=command.session_id
        WHERE command.state IN ('pending','sent','accepted','queued','started')
          AND command.next_attempt_at IS NOT NULL AND command.next_attempt_at<=? AND command.expires_at>?
+         AND NOT EXISTS (SELECT 1 FROM workflow_decisions decision
+           WHERE decision.resume_command_id=command.command_id AND decision.resume_state='delivering'
+             AND decision.category='automation_creation'
+             AND (decision.status IN ('revoked','superseded') OR (decision.status IN ('pending','approved')
+               AND (json_extract(decision.resource_snapshot, '$.expiresAt')<=?
+                 OR (decision.status='approved' AND decision.resolved_at<=?)))))
          AND session.status NOT IN ('completed','failed','stopped') ${runner}
        ORDER BY command.created_at,command.rowid LIMIT ?`,
     ).all(...params) as unknown as SessionPromptCommandRow[];
@@ -23320,6 +24345,14 @@ export class ControlPlaneDb {
     return [...sessions];
   }
 
+  /** Whether cancelSessionPromptCommands would find anything of this session's to end. */
+  hasActiveSessionPromptCommands(sessionId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM session_prompt_commands
+       WHERE session_id=? AND state IN ('pending','sent','accepted','queued','started') LIMIT 1`,
+    ).get(sessionId) !== undefined;
+  }
+
   /**
    * Fence a session's unfinished durable prompts: its stop means none of them may be delivered.
    *
@@ -23344,7 +24377,9 @@ export class ControlPlaneDb {
       const rows = this.stmt(
         `SELECT c.command_id, c.state, d.occurrence_id,
            EXISTS (SELECT 1 FROM session_restart_notices n
-             WHERE n.command_id=c.command_id AND n.state='delivering') AS restart_notice
+             WHERE n.command_id=c.command_id AND n.state='delivering') OR
+           EXISTS (SELECT 1 FROM review_sessions r
+             WHERE r.continuation_command_id=c.command_id AND r.continuation_state='delivering') AS restart_notice
          FROM session_prompt_commands c
          LEFT JOIN workflow_decisions d ON d.resume_command_id=c.command_id AND d.resume_state='delivering'
          WHERE c.session_id=? AND c.state IN ('pending','sent','accepted','queued','started')`,
@@ -24017,6 +25052,7 @@ export class ControlPlaneDb {
 
   /** The outermost durable Orchestrator owns descendant results, including nested helpers. */
   sessionResultOrchestrator(sessionId: string, summary?: SessionSummaryContext): string | null {
+    if (this.reviewSessions.isReviewSession(sessionId)) return null;
     const seen = new Set<string>([sessionId]);
     let parentId = (summary ? summary.rows.get(sessionId) : this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(sessionId) as
       { parent_session_id: string | null } | undefined)?.parent_session_id;
@@ -24131,6 +25167,22 @@ export class ControlPlaneDb {
     ).get(targetSessionId, ancestorSessionId));
   }
 
+  /** The fields runner registration fans out over, for every session this runner owns, archived
+   * included, in `listSessions` order. A full view per retained session costs a synchronous scan
+   * of every runner's history; registration did three of them in one event-loop turn (#2601). */
+  runnerSessionInventory(runnerId: string): Array<Pick<SessionView,
+    "id" | "runnerId" | "projectId" | "status" | "archived" | "worktreePath" | "worktrees">> {
+    const rows = this.stmt(`SELECT id, runner_id, project_id, status, archived, worktree_path, worktrees
+      FROM sessions WHERE runner_id=? ORDER BY created_at DESC`).all(runnerId) as unknown as Array<Pick<SessionRow,
+      "id" | "runner_id" | "project_id" | "status" | "archived" | "worktree_path" | "worktrees">>;
+    return rows.map((row) => {
+      const worktrees = parseJson<SessionWorktreeView[]>(row.worktrees);
+      return { id: row.id, runnerId: row.runner_id, projectId: row.project_id, status: row.status as SessionStatus,
+        archived: row.archived === 1, worktreePath: row.worktree_path,
+        worktrees: Array.isArray(worktrees) ? worktrees : undefined };
+    });
+  }
+
   listSessions(opts: { includeArchived?: boolean } = {}): SessionView[] {
     const where = opts.includeArchived ? "" : "WHERE archived=0";
     const rows = this.stmt(`SELECT * FROM sessions ${where} ORDER BY created_at DESC`)
@@ -24141,6 +25193,7 @@ export class ControlPlaneDb {
       `SELECT parent_session_id AS parentSessionId, COUNT(*) AS occupied
        FROM sessions
        WHERE parent_session_id IS NOT NULL AND archived=0
+         AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=sessions.id)
          AND status NOT IN ('completed','failed','stopped')
        GROUP BY parent_session_id`,
     ).all() as unknown as Array<{ parentSessionId: string; occupied: number }>).map((entry) =>
@@ -24196,9 +25249,12 @@ export class ControlPlaneDb {
       providerAccountId: row.provider_account_id ?? undefined, providerAccountLabel: row.provider_account_label ?? undefined,
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
+      ...providerHomeWaitField(status, row.provider_home_wait),
+      ...worktreeSwitchField(status, row.worktree_switch),
       title: row.title, titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: row.background_work_state ? parseBackgroundWorkState(row.background_work_state) : undefined,
+      backgroundFollowUp: normalizeBackgroundFollowUp(parseJson(row.background_follow_up)),
       backgroundWorkTracking: row.background_work_tracking ? parseBackgroundWorkTracking(row.background_work_tracking) : undefined,
       historyQuarantine: row.history_quarantine ? parseHistoryQuarantine(row.history_quarantine) : undefined,
       worktreeRecovery, queueHold,
@@ -24351,10 +25407,14 @@ export class ControlPlaneDb {
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
+      ...providerHomeRefusalField(row.provider_home_refusal),
+      ...providerHomeWaitField(status, row.provider_home_wait),
+      ...worktreeSwitchField(status, row.worktree_switch),
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: parseBackgroundWorkState(row.background_work_state),
+      backgroundFollowUp: normalizeBackgroundFollowUp(parseJson(row.background_follow_up)),
       backgroundWorkTracking: parseBackgroundWorkTracking(row.background_work_tracking),
       ...(() => {
         const historyQuarantine = parseHistoryQuarantine(row.history_quarantine);
@@ -24605,6 +25665,7 @@ export class ControlPlaneDb {
     request: PendingApproval,
     summary?: SessionSummaryContext,
   ): CampaignAuthorityEvaluation | undefined {
+    if (this.reviewSessions.isReviewSession(row.id)) return undefined;
     if (!row.parent_session_id && orchestratorCampaignPolicyFromJson(row.orchestrator_policy)?.control?.mode === "full_control") {
       if (request.kind === "workflow_decision") return request.workflowDecision?.authorityEvaluation ?? {
         owner: request.workflowDecision?.authority ?? "human", basis: "custom_policy", reason: "custom_owner",
@@ -27121,11 +28182,14 @@ export class ControlPlaneDb {
   }
 
   private workflowInstanceView(row: WorkflowInstanceRow): WorkflowInstanceView {
+    const pruned = this.stmt("SELECT pruned_at,event_count,retention_days FROM workflow_event_prunes WHERE instance_id=?")
+      .get(row.instance_id) as { pruned_at: number; event_count: number; retention_days: number } | undefined;
     const states = this.stmt("SELECT * FROM workflow_node_states WHERE instance_id=? ORDER BY rowid")
       .all(row.instance_id) as unknown as WorkflowNodeStateRow[];
     return {
       instanceId: row.instance_id,
       workflowId: row.workflow_id,
+      ...(pruned ? { eventHistoryPruned: { prunedAt: pruned.pruned_at, eventCount: pruned.event_count, retentionDays: pruned.retention_days } } : {}),
       workflowVersion: row.workflow_version,
       runId: row.run_id,
       status: row.status,
@@ -27508,8 +28572,10 @@ export class ControlPlaneDb {
   }
 
   private insertWorkflowEvent(event: Omit<WorkflowEventView, "eventId" | "seq">): WorkflowEventView {
-    const seq = ((this.stmt("SELECT MAX(seq) AS seq FROM workflow_events WHERE instance_id=?")
-      .get(event.instanceId) as unknown as { seq: number | null }).seq ?? 0) + 1;
+    const seq = (this.stmt(`SELECT MAX(
+      COALESCE((SELECT MAX(seq) FROM workflow_events WHERE instance_id=?),0),
+      COALESCE((SELECT through_seq FROM workflow_event_prunes WHERE instance_id=?),0)) AS seq`)
+      .get(event.instanceId, event.instanceId) as { seq: number }).seq + 1;
     const info = this.stmt(
       `INSERT INTO workflow_events
        (instance_id, seq, kind, node_id, attempt_id, actor_kind, actor_id, detail, created_at)
@@ -28292,6 +29358,7 @@ export class ControlPlaneDb {
   /* -------------------------- Durable automations ------------------------- */
 
   createAutomation(input: {
+    approval?: { occurrenceId: string; resourceDigest: string; result: NonNullable<WorkflowDecisionView["automationCreationResult"]> };
     automationId: string;
     spec: AutomationSpec;
     nextFireAt: number | null;
@@ -28301,6 +29368,13 @@ export class ControlPlaneDb {
     const { spec } = input;
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (input.approval) {
+        const changed = this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, automation_creation_result=?
+          WHERE occurrence_id=? AND category='automation_creation' AND authority='human' AND status='approved'
+          AND resource_digest=? AND automation_creation_approved_by IS NOT NULL`)
+          .run(input.now, JSON.stringify(input.approval.result), input.approval.occurrenceId, input.approval.resourceDigest);
+        if (Number(changed.changes) !== 1) throw new Error("Automation creation approval is no longer available");
+      }
       this.stmt(
         `INSERT INTO automations
          (automation_id, name, cron_expression, timezone, enabled, next_fire_at, misfire_policy,
@@ -28315,7 +29389,8 @@ export class ControlPlaneDb {
       );
       this.insertAutomationEvent({
         automationId: input.automationId, kind: "created", actor: input.actor,
-        detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt }, now: input.now,
+        detail: { enabled: spec.enabled, nextFireAt: input.nextFireAt,
+          ...(input.approval ? { occurrenceId: input.approval.occurrenceId, resourceDigest: input.approval.resourceDigest } : {}) }, now: input.now,
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -29650,7 +30725,7 @@ export class ControlPlaneDb {
       const row = this.stmt(
         `SELECT command.*, execution.automation_id FROM automation_commands command
          JOIN automation_executions execution ON execution.execution_id=command.execution_id
-         WHERE command.command_id=?`,
+         WHERE command.command_id=? AND execution.status IN ('dispatching','running')`,
       ).get(input.commandId) as unknown as (AutomationCommandRow & { automation_id: string }) | undefined;
       if (!row || row.runner_id !== input.runnerId ||
           (input.sessionId !== undefined && row.session_id !== input.sessionId) ||
@@ -29794,7 +30869,8 @@ export class ControlPlaneDb {
 
   settleAutomationExecution(input: {
     executionId: string;
-    status: "running" | "succeeded" | "failed";
+    status: "running" | "succeeded" | "failed" | "ceiling_paused";
+    governancePause?: AutomationExecution["governancePause"];
     actor: GovernanceActor;
     runnerId?: string;
     sessionId?: string;
@@ -29803,6 +30879,12 @@ export class ControlPlaneDb {
     error?: string;
     now: number;
   }): AutomationExecution | null {
+    if ((input.status === "ceiling_paused") !== Boolean(input.governancePause)) {
+      throw new Error("a ceiling-paused execution requires runner governance evidence");
+    }
+    // Preserve the original CHECK constraint and rollback-readable terminal slot. New readers
+    // project the structured detail as ceiling_paused; historical failures remain failed.
+    const storedStatus = input.status === "ceiling_paused" ? "failed" : input.status;
     const allowed = input.status === "running" ? "status='dispatching'" : "status IN ('dispatching','running')";
     const terminal = input.status === "running" ? null : input.now;
     const started = input.status === "running" ? input.now : null;
@@ -29811,13 +30893,15 @@ export class ControlPlaneDb {
       const changed = this.stmt(
         `UPDATE automation_executions SET status=?, runner_id=COALESCE(?,runner_id),
           session_id=COALESCE(?,session_id), run_id=COALESCE(?,run_id),
-          workflow_instance_id=COALESCE(?,workflow_instance_id), error=?,
+          workflow_instance_id=COALESCE(?,workflow_instance_id), error=?, governance_pause_json=?,
           started_at=COALESCE(started_at,?), completed_at=?,
           spec_json=CASE WHEN ? IS NOT NULL AND trigger_delivery_json IS NOT NULL THEN NULL ELSE spec_json END
           WHERE execution_id=? AND ${allowed}`,
       ).run(
-        input.status, input.runnerId ?? null, input.sessionId ?? null, input.runId ?? null,
-        input.workflowInstanceId ?? null, input.error ?? null, started, terminal, terminal, input.executionId,
+        storedStatus, input.runnerId ?? null, input.sessionId ?? null, input.runId ?? null,
+        input.workflowInstanceId ?? null, input.error ?? null,
+        input.governancePause ? JSON.stringify(input.governancePause) : null,
+        started, terminal, terminal, input.executionId,
       );
       if (Number(changed.changes) !== 1) {
         this.db.exec("ROLLBACK");
@@ -29827,7 +30911,8 @@ export class ControlPlaneDb {
         .get(input.executionId) as { automation_id: string };
       this.insertAutomationEvent({
         automationId: row.automation_id, executionId: input.executionId, kind: "execution_status_changed",
-        actor: input.actor, detail: { status: input.status, error: input.error ?? null }, now: input.now,
+        actor: input.actor, detail: { status: input.status, error: input.error ?? null,
+          ...(input.governancePause ? { entryPoint: "runner_governance", ...input.governancePause } : {}) }, now: input.now,
       });
       this.db.exec("COMMIT");
     } catch (error) {
@@ -29855,6 +30940,26 @@ export class ControlPlaneDb {
     const row = this.stmt("SELECT * FROM automation_executions WHERE execution_id=?")
       .get(executionId) as unknown as AutomationExecutionRow | undefined;
     return row ? this.automationExecution(row) : null;
+  }
+
+  /**
+   * Each live automation's newest execution, in the history's own order (`scheduled_for`, then
+   * `execution_id`, both descending), as its status and time alone (#2969). One indexed lookup per
+   * automation, so the list never reads anyone's history or error text.
+   */
+  latestAutomationExecutions(): Map<string, AutomationLatestExecution> {
+    const rows = this.stmt(
+      `SELECT e.automation_id, e.status, e.created_at, e.started_at, e.completed_at, e.governance_pause_json
+       FROM automations a JOIN automation_executions e ON e.execution_id = (
+         SELECT x.execution_id FROM automation_executions x WHERE x.automation_id = a.automation_id
+         ORDER BY x.scheduled_for DESC, x.execution_id DESC LIMIT 1)
+       WHERE a.deleted_at IS NULL`,
+    ).all() as unknown as Array<Pick<AutomationExecutionRow,
+      "automation_id" | "status" | "created_at" | "started_at" | "completed_at" | "governance_pause_json">>;
+    return new Map(rows.map((row) => [row.automation_id, {
+      status: row.governance_pause_json ? "ceiling_paused" : row.status,
+      at: row.completed_at ?? row.started_at ?? row.created_at,
+    }]));
   }
 
   listAutomationExecutions(automationId: string, limit = 50): AutomationExecution[] {
@@ -29925,7 +31030,10 @@ export class ControlPlaneDb {
       executionId: row.execution_id, automationId: row.automation_id, idempotencyKey: row.idempotency_key,
       scheduledFor: row.scheduled_for, automationRevision: row.automation_revision,
       ...(row.spec_json ? { specSnapshot: JSON.parse(row.spec_json) as AutomationSpec } : {}),
-      actionKind: row.action_kind, status: row.status,
+      actionKind: row.action_kind, status: row.governance_pause_json ? "ceiling_paused" : row.status,
+      ...(row.governance_pause_json ? {
+        governancePause: JSON.parse(row.governance_pause_json) as AutomationExecution["governancePause"],
+      } : {}),
       deliveryMode: row.delivery_mode as NonNullable<AutomationExecution["deliveryMode"]>,
       actor: { kind: row.actor_kind, ...(row.actor_id ? { id: row.actor_id } : {}) },
       ...(row.runner_id ? { runnerId: row.runner_id } : {}),
@@ -30420,13 +31528,9 @@ function parseJson<T>(raw: string | null): T | null {
   }
 }
 
+/** A stored decision policy; one stored before a later category existed reads it as human-owned. */
 function parentControlDecisionPolicyFromJson(raw: string | null): ParentControlDecisionPolicy | null {
-  const candidate = parseJson<Record<string, unknown>>(raw);
-  if (!candidate || Array.isArray(candidate) ||
-      Object.keys(candidate).length !== WORKFLOW_DECISION_CATEGORIES.length ||
-      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
-        candidate[category] === "human" || candidate[category] === "orchestrator")) return null;
-  return candidate as ParentControlDecisionPolicy;
+  return completeParentControlDecisions(parseJson<unknown>(raw));
 }
 
 function canonicalChildHarness(value: unknown): AgentHarnessIdentity | null {
@@ -30470,6 +31574,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
     value.sources.execution.integrationIsolation = "legacy_session";
   }
   const behavior = value.behavior;
+  if (!parseOrchestratorReviewPolicy(behavior)) return null;
   const childHarness = behavior.childHarness === null ? null : normalizeAgentHarnessIdentity(behavior.childHarness);
   if ((behavior.childHarness !== null && !childHarness) ||
       (value.issueNumbers !== undefined && (!Array.isArray(value.issueNumbers) ||
@@ -30483,11 +31588,13 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       (behavior.completion !== "retain" && behavior.completion !== "stop_and_archive") ||
       !["off", "questions", "questions_and_approvals"].includes(value.delegation.parentControl) ||
       typeof value.execution?.strictProjectIsolation !== "boolean" ||
-      typeof value.execution?.integrationIsolation !== "boolean" ||
-      !parentControlDecisionPolicyFromJson(JSON.stringify(value.delegation.decisions))) return null;
+      typeof value.execution?.integrationIsolation !== "boolean") return null;
+  const decisions = completeParentControlDecisions(value.delegation.decisions);
+  if (!decisions) return null;
+  value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
-  if (value.issueScope && (typeof value.issueScope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(value.issueScope.repository) ||
+  if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
       value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||
       !Number.isSafeInteger(value.issueScope.revision) || value.issueScope.revision < 1 ||
@@ -30495,22 +31602,36 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
       !Number.isSafeInteger(value.issueScope.authorizedAt) || value.issueScope.authorizedAt < 1 ||
       JSON.stringify(value.issueScope.issueNumbers) !== JSON.stringify(value.issueNumbers ?? []))) return null;
   if (value.issueNumbers) value.issueNumbers = [...new Set(value.issueNumbers)];
+  const first = value.firstMessageScope as unknown as Record<string, unknown> | undefined;
+  const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
+  const limits = (v: unknown) => v === undefined || Boolean(v && typeof v === "object" && Object.keys(v).length === 2 &&
+    typeof (v as Record<string, unknown>).acceptedFollowUps === "boolean" && typeof (v as Record<string, unknown>).maxIssues === "boolean");
+  if (first !== undefined && !(first && (first.state === "pending" && limits(first.derivedLimits) ||
+      first.state === "delivering" && digest(first.messageDigest) && typeof first.deliveryId === "string" &&
+        /^first_message_[a-f0-9-]{36}$/.test(first.deliveryId) && limits(first.derivedLimits) ||
+      first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt)))) return null;
+  if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);
   const behaviorSourceKeys = [
     "childHarness", "childModel", "childEffort", "maximumConcurrentChildren", "followUps", "completion",
+    ...ORCHESTRATOR_REVIEW_POLICY_KEYS.filter(key => value.reviewPolicySnapshotVersion === 1 || Object.hasOwn(value.sources.behavior, key)),
   ] as const;
+  if (value.reviewPolicySnapshotVersion !== undefined && value.reviewPolicySnapshotVersion !== 1) return null;
   if (!value.sources.behavior || !value.sources.delegation || !value.sources.delegation.decisions ||
       !value.sources.execution ||
       Object.keys(value.sources.behavior).length !== behaviorSourceKeys.length ||
-      !behaviorSourceKeys.every((key) => validSources.has(value.sources.behavior[key])) ||
-      Object.keys(value.sources.delegation.decisions).length !== WORKFLOW_DECISION_CATEGORIES.length ||
+      !behaviorSourceKeys.every((key) => typeof value.sources.behavior[key] === "string" && validSources.has(value.sources.behavior[key]!)) ||
       !validSources.has(value.sources.delegation.parentControl) ||
       !validSources.has(value.sources.execution.strictProjectIsolation) ||
-      !validSources.has(value.sources.execution.integrationIsolation) ||
-      !WORKFLOW_DECISION_CATEGORIES.every((category) =>
-        validSources.has(value.sources.delegation.decisions[category]))) return null;
+      !validSources.has(value.sources.execution.integrationIsolation)) return null;
+  // A policy stored before a later category existed took that category's built-in default.
+  const decisionSources = completeWorkflowDecisionRecord(value.sources.delegation.decisions, "system_default" as const,
+    (entry): entry is typeof value.sources.delegation.decisions[DelegatableWorkflowDecisionCategory] =>
+      typeof entry === "string" && validSources.has(entry));
+  if (!decisionSources) return null;
+  value.sources.delegation.decisions = decisionSources;
   return value;
 }
 
@@ -30546,6 +31667,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
     issue_closure_result?: string | null;
+    automation_creation_result?: string | null;
+    closing_reference_check?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -30556,6 +31679,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
   const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
+  const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   return {
     requestId: row.request_id,
     occurrenceId: row.occurrence_id,
@@ -30571,6 +31695,8 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(humanFallback ? { humanFallback } : {}),
     status: row.status,
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
+    ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
+    ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
@@ -30742,6 +31868,12 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
       !BACKGROUND_LAUNCH_TYPES.has(oldest.launchType) ||
       !Number.isSafeInteger(oldest.startedAt) || oldest.startedAt < 0)) return undefined;
   if (value.endsAt !== undefined && (!Number.isSafeInteger(value.endsAt) || value.endsAt < value.since!)) return undefined;
+  // Display only (#3752): a malformed entry is dropped, not the hold that still holds the queue.
+  const unlistedJobs = (Array.isArray(value.unlistedJobs) ? value.unlistedJobs : [])
+    .filter((job): job is QueueHoldUnlistedJob => !!job && typeof job === "object" &&
+      validBackgroundIdentity(job.id) && (job.kind === "provisional" || job.kind === "unregistered"))
+    .slice(0, 20)
+    .map((job) => ({ id: job.id, kind: job.kind }));
   return {
     kind: value.kind,
     holdId: value.holdId,
@@ -30752,6 +31884,8 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.startedAt } } : {}),
     ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
     ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
+    ...(value.canRelease === true ? { canRelease: true as const } : {}),
+    ...(unlistedJobs.length > 0 ? { unlistedJobs } : {}),
     ...(value.restartKeepsQueue === true ? { restartKeepsQueue: true as const } : {}),
   };
 }
@@ -30828,4 +31962,31 @@ function validBackgroundTerminalStatus(
   value: unknown,
 ): value is ManagedBackgroundJobSnapshot["terminalStatus"] {
   return value === undefined || value === "completed" || value === "failed" || value === "killed";
+}
+
+/** The stored launch refusal (#3240), re-validated as it is projected. */
+/** Only a starting session waits for its account: a stale wait never outlives the launch. */
+/** A finished session is switching nothing, whatever a lost clearing snapshot left stored (#3810). */
+function worktreeSwitchField(status: SessionStatus, value: string | null): Pick<SessionView, "worktreeSwitch"> {
+  if (isTerminal(status) || !value) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return {}; }
+  const worktreeSwitch = validWorktreeSwitch(parsed);
+  return worktreeSwitch ? { worktreeSwitch } : {};
+}
+
+function providerHomeWaitField(status: SessionStatus, value: string | null): Pick<SessionView, "providerHomeWait"> {
+  if (status !== "starting" || !value) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return {}; }
+  const wait = validProviderHomeWait(parsed);
+  return wait ? { providerHomeWait: wait } : {};
+}
+
+function providerHomeRefusalField(value: string | null): { providerHomeRefusal?: ProviderHomeLaunchRefusalView } {
+  if (!value) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return {}; }
+  const refusal = validProviderHomeLaunchRefusal(parsed);
+  return refusal ? { providerHomeRefusal: refusal } : {};
 }

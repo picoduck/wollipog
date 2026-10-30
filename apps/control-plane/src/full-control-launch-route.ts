@@ -13,7 +13,7 @@ import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { authorizeFullControl } from "./campaign-authority.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
-import { campaignLaunchDigest, campaignLaunchPreflight, launchSessionRequest, parseFullControlEnableRequest,
+import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, launchSessionRequest, parseFullControlEnableRequest,
   parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
 
 export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
@@ -67,8 +67,8 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const body = parseFullControlLaunchRequest(request.body, admit);
     if (!body) {
       return reply.code(400).send({ error: admit
-        ? "a workspace, a task or issue numbers, a request identity and the exact preflight digest are required"
-        : "a workspace and a task or issue numbers are required" });
+        ? "a workspace, a request identity and the exact preflight digest are required"
+        : "a workspace is required" });
     }
     reply.header("cache-control", "private, no-store");
     if (admit) {
@@ -183,6 +183,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const created = sessions.createSession(ownership.body, undefined, scope, false, false, false, {
       ...creationContext,
       humanCampaignLaunch: { principal, requestId: body.requestId!, digest: preflight.digest, control, issueScope,
+        ...(firstMessageLaunch(body) ? { firstMessage: { derivedLimits: derivedLaunchLimits(body.overrides) } } : {}),
         ...(evidence.envelope && evidence.provider?.reviewer.model ? { evidenceAuthority: {
           destinationConfigurationId: evidence.destination.configurationId,
           destinationDisclosureRevision: evidence.destination.disclosureRevision,
@@ -218,13 +219,20 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
     const session = db.getSession(id);
     if (!session || !db.isSessionOwner(principal, id)) return reply.code(404).send({ error: "campaign not found" });
     const policy = session.orchestratorPolicy;
-    if (!policy || session.parentSessionId || !session.workspaceId || !session.agentId ||
-        ["completed", "failed", "stopped"].includes(session.status)) return reply.code(409).send({ error: "only a live root campaign can enable Full Control" });
+    if (!policy || session.parentSessionId || !session.workspaceId || !session.agentId) return reply.code(409).send({ error: "only a live root campaign can enable Full Control" });
+    // A stopped campaign, including one revoked to Custom, restarts under Custom first (#2940).
+    if (["completed", "failed", "stopped"].includes(session.status)) {
+      return reply.code(409).send({ error: session.archived ? "only a live root campaign can enable Full Control"
+        : "This campaign isn't running. Restart it, then enable Full Control." });
+    }
     const runner = db.listRunnersForPrincipal(principal).find((candidate) => candidate.runnerId === session.runnerId);
     const scope = db.sessionScope(id);
     if (!runner || !scope) return reply.code(409).send({ error: "the campaign's runner or ownership is unavailable" });
     const limits = (sessionId: string) => {
-      const member = db.campaignBudgets.userLimits(sessionId), view = db.getSession(sessionId);
+      const view = db.getSession(sessionId);
+      // A revoked allowance's personal ceilings include limits the person lowered since (#2940).
+      const member = db.campaignBudgets.governingRoot(sessionId) ? db.campaignBudgets.userLimits(sessionId)
+        : db.campaignBudgets.personalLimits(sessionId, { costBudgetUsd: view?.costBudgetUsd ?? null, maxToolCalls: view?.maxToolCalls ?? null });
       return member ?? { costBudgetUsd: view?.costBudgetUsd ?? null, maxToolCalls: view?.maxToolCalls ?? null };
     };
     const ceiling = (value: { costBudgetUsd: number | null; maxToolCalls: number | null }) => (value.costBudgetUsd ?? 0) > 0 || (value.maxToolCalls ?? 0) > 0;
@@ -239,13 +247,18 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         ...(rootLimits.maxToolCalls != null ? { maxToolCalls: rootLimits.maxToolCalls } : {}) },
       useWorktree: session.useWorktree, executionTarget: (session.executionTarget ?? { adapter: "host" }) as PreparedCampaignLaunch["executionTarget"], policy, scope };
     const issueScope = policy.issueScope;
+    // A campaign with no issue scope yet gets the one a launch would derive: its repository and the
+    // issues its first message names. With no message yet, the next one is the task.
+    const derived = issueScope ? null : await sessions.campaignScopeFromFirstMessage(id);
     const agent = runner.agents.find((candidate) => candidate.id === session.agentId);
     const revision = session.parentControlPolicy?.revision ?? 0;
     const { preflight: evaluated, proposal } = campaignLaunchPreflight({
-      request: { runnerId: session.runnerId, workspaceId: session.workspaceId, task: session.title, overrides: body.overrides },
+      request: { runnerId: session.runnerId, workspaceId: session.workspaceId, ...(derived?.firstMessage ? {} : { task: session.title }),
+        overrides: body.overrides },
       plan, runner, organizationId: principal.organizationId,
       campaignScope: issueScope ? { repository: issueScope.repository, issueNumbers: issueScope.issueNumbers,
-        authorizedByCaller: issueScope.authorizedByUserId === principal.userId } : { repository: "", issueNumbers: [], authorizedByCaller: true },
+        authorizedByCaller: issueScope.authorizedByUserId === principal.userId }
+        : { repository: derived?.repository ?? "", issueNumbers: derived?.issueNumbers ?? [], authorizedByCaller: true },
       participantCeiling: db.campaignDescendantIds(id).some((childId) => {
         const child = db.getSession(childId);
         return Boolean(child && !["completed", "failed", "stopped"].includes(child.status) && ceiling(limits(childId)));
@@ -285,7 +298,7 @@ function registerFullControlEnableRoutes(app: FastifyInstance, dependencies: Par
         destinationDisclosureRevision: evidence.destination.disclosureRevision,
         providers: [{ providerId: evidence.provider.providerId, disclosureRevision: evidence.provider.disclosureRevision,
           reviewers: [{ driver: evidence.provider.reviewer.driver as "claude-code" | "codex-app-server", modelId: evidence.provider.reviewer.model }] }],
-      } } : {}) }, revision, principal);
+      } } : {}) }, revision, principal, derived ?? undefined, derivedLaunchLimits(body.overrides));
     if (!result.ok || !result.data) return reply.code(result.status).send({ error: result.error ?? "Full Control was not enabled" });
     return result.data;
   });

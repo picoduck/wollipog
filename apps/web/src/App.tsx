@@ -24,6 +24,7 @@ import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type
 import { pickTopmost } from "./layers.js";
 import { useIsMobile } from "./components/useIsMobile.js";
 import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
+import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "./entity-title.js";
 import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
 import { parseStoredDockVisible } from "./dock.js";
@@ -124,12 +125,14 @@ const NewPodDialog = lazy(() => import("./components/NewPodDialog.js").then((mod
 const PodDetail = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodDetail })));
 const PodsView = lazy(() => import("./components/PodsView.js").then((module) => ({ default: module.PodsView })));
 const AutomationsView = lazy(() => import("./components/AutomationsView.js").then((module) => ({ default: module.AutomationsView })));
+const AutomationDetail = lazy(() => import("./components/AutomationDetail.js").then((module) => ({ default: module.AutomationDetail })));
 const AutomationEditor = lazy(() => import("./components/AutomationEditor.js").then((module) => ({ default: module.AutomationEditor })));
 const SkillsView = lazy(() => import("./components/SkillsView.js").then((module) => ({ default: module.SkillsView })));
 const UsageView = lazy(() => import("./components/UsageView.js").then((module) => ({ default: module.UsageView })));
 const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
 const ProjectsView = lazy(() => import("./components/ProjectsView.js").then((module) => ({ default: module.ProjectsView })));
 const OrchestratorSettingsPanel = lazy(() => import("./components/OrchestratorSettingsPanel.js").then((module) => ({ default: module.OrchestratorSettingsPanel })));
+const ReviewSettingsPanel = lazy(() => import("./components/ReviewSettingsPanel.js").then((module) => ({ default: module.ReviewSettingsPanel })));
 const ShortcutReference = lazy(() => import("./components/ShortcutReference.js").then((module) => ({ default: module.ShortcutReference })));
 const CommandPalette = lazy(() => import("./components/CommandPalette.js").then((module) => ({ default: module.CommandPalette })));
 const AboutPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AboutPanel })));
@@ -142,6 +145,8 @@ const NetworkPanel = lazy(() => import("./components/SettingsView.js").then((mod
 const NotificationsPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.NotificationsPanel })));
 const SettingsView = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.SettingsView })));
 const SessionTitlesPanel = lazy(() => import("./components/SessionTitlesPanel.js").then((module) => ({ default: module.SessionTitlesPanel })));
+const WorkflowEventRetentionPanel = lazy(() => import("./components/WorkflowEventRetentionPanel.js")
+  .then((module) => ({ default: module.WorkflowEventRetentionPanel })));
 const ArchivedHistoryRetentionPanel = lazy(() => import("./components/ArchivedHistoryRetentionPanel.js")
   .then((module) => ({ default: module.ArchivedHistoryRetentionPanel })));
 
@@ -310,11 +315,14 @@ export function Shell() {
   const theme = useTheme();
   const { navigate, reconnectNow } = useStoreActions();
   const view = useStoreSelector((s) => s.view);
-  // A loaded run or pod titles its page by name; the generic noun is only the loading fallback.
-  const entityTitle = useStoreSelector((s) =>
+  // A loaded run or pod titles its page by name; the generic noun is only the loading fallback. An
+  // automation is not in the store: its page and its editor report its name (#2968).
+  const storeEntityTitle = useStoreSelector((s) =>
     s.view.name === "run" ? s.runs.get(s.view.id)?.title
       : s.view.name === "pod" ? s.pods.get(s.view.id)?.title
         : undefined);
+  const [reportedEntityTitle, reportEntityTitle] = useEntityTitleState();
+  const entityTitle = storeEntityTitle ?? reportedTitleFor(reportedEntityTitle, view);
   const viewRef = useRef(view);
   viewRef.current = view;
   const settingsReturnView = useStoreSelector((s) => s.settingsReturnView);
@@ -895,6 +903,7 @@ export function Shell() {
           tabIndex={-1}
         >
           <ViewerIdentityProvider>
+          <EntityTitleProvider report={reportEntityTitle}>
           <GovernancePolicyNamesProvider>
           <SearchPaletteContext.Provider value={openPalette}>
           <AppBarSearchProvider onSearch={isMobile ? openPalette : undefined}>
@@ -943,10 +952,11 @@ export function Shell() {
           )}
           {(view.name === "pods" || view.name === "pod") && (
             <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
-              {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} />}
+              {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} member={view.member} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />}
             </ExperimentGate>
           )}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
+          {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}
@@ -994,8 +1004,9 @@ export function Shell() {
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
+                reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
-                storage: <ArchivedHistoryRetentionPanel />,
+                storage: <><ArchivedHistoryRetentionPanel /><WorkflowEventRetentionPanel /></>,
                 experimental: (
                   <ExperimentalPanel
                     flags={experiments.flags}
@@ -1018,6 +1029,7 @@ export function Shell() {
           </AppBarSearchProvider>
           </SearchPaletteContext.Provider>
           </GovernancePolicyNamesProvider>
+          </EntityTitleProvider>
           </ViewerIdentityProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
@@ -1050,7 +1062,9 @@ export function Shell() {
         />
       )}
       {dialog?.kind === "run" && <NewRunDialog onClose={() => setDialog(null)} />}
-      {dialog?.kind === "pod" && <NewPodDialog onClose={() => setDialog(null)} />}
+      {dialog?.kind === "pod" && (
+        <NewPodDialog onClose={() => setDialog(null)} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />
+      )}
       {palette !== null && (
         <CommandPalette initialQuery={palette} onClose={() => setPalette(null)} onOpenShortcuts={openShortcutReference} />
       )}

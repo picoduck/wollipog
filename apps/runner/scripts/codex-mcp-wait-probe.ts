@@ -22,7 +22,7 @@
  *   - "the model" is a scripted OpenAI Responses-API server this script starts, selected through a
  *     throwaway `CODEX_HOME`. Its first answer calls `wait_pull_request`; every later answer is a
  *     final message. It records the time of every request, including Codex's own Guardian
- *     (`codex-auto-review`) requests, so "no model request while the call blocks" is counted, not
+ *     requests (`isGuardianRequest`), so "no model request while the call blocks" is counted, not
  *     inferred.
  *   - `wait_pull_request` is a stub stdio MCP server that sleeps for `--seconds` and answers. The
  *     entry that launches it is built by `sessionCodexMcpServerArg`, the function the runner uses,
@@ -36,6 +36,8 @@ import { createServer, type Server } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
   ORCHESTRATOR_ENV_KEY,
@@ -43,8 +45,17 @@ import {
   additiveCodexMcpServerArg,
   sessionCodexMcpServerArg,
 } from "../src/orchestrator-preset.js";
+import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput, probeResult, ownProbeProcess } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
+
+export function withoutMcpApproval(entry: string): string {
+  const unapproved = entry
+    .replace(/, "tools" = \{ "wait_pull_request" = \{ "approval_mode" = "approve" \} \}/u, "")
+    .replace(/, "default_tools_approval_mode" = "approve"/u, "");
+  if (unapproved === entry) throw new Error("MCP approval control could not remove the grant");
+  return unapproved;
+}
 
 type Json = Record<string, unknown>;
 
@@ -99,7 +110,7 @@ function modelServer(state: ModelState, seconds: number): Server {
     request.on("end", () => {
       let body: Json = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Json; } catch { /* keep {} */ }
-      const guardian = String(body.model ?? "").startsWith("codex-auto-review");
+      const guardian = isGuardianRequest(request.headers, body);
       state.requests.push({ at: Date.now(), guardian });
       if (!guardian && state.toolCall === null) state.toolCall = waitToolCall(body);
       const step = guardian ? -1 : state.agentCalls++;
@@ -152,12 +163,12 @@ function runTurn(entry: string, root: string, timeoutMs: number): Promise<Measur
     toolStarted: null, toolCompleted: null, toolStatus: "never started", toolOutput: "",
     approvalRequests: 0, turnEnded: "no turn",
   };
-  const child = spawn(CODEX, ["-c", entry, "app-server"], {
+  const child = ownProbeProcess(spawn(CODEX, ["-c", entry, "app-server"], {
     cwd: join(root, "repo"),
-    env: { ...process.env, CODEX_HOME: join(root, "codex-home"), PROBE_KEY: "x" },
+    env: isolatedProbeEnv(join(root, "codex-home")),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-  });
+  }));
   return new Promise<Measurement>((resolve) => {
     let settled = false;
     const finish = (ended: string) => {
@@ -242,6 +253,10 @@ async function measure(name: string, entry: string, seconds: number, root: strin
   const guardian = state.requests.filter((request) => request.guardian).length;
   const ok = state.toolCall !== null && result.approvalRequests === 0 && completed === expect.completed &&
     (expect.reviewed ? guardian > 0 : guardian === 0 && during.length === 0);
+  probeResult(`MCP wait: ${name}`, unavailableProbeOutput(result.turnEnded) || result.toolStarted === null
+    ? "could not run" : ok ? "unchanged" : "changed",
+    `blocked=${blocked ?? "unknown"}s; completed=${completed}; modelRequestsDuringWait=${during.length}; guardianRequests=${guardian}; clientApprovals=${result.approvalRequests}`,
+    "docs/DRIVERS.md; skills/using-wollipog/SKILL.md");
   process.stdout.write([
     `${ok ? "ok  " : "FAIL"}  ${name}`,
     `      tool called as: ${state.toolCall ? JSON.stringify(state.toolCall) : "(not offered in the model request)"}`,
@@ -287,7 +302,7 @@ async function main(): Promise<number> {
     if (process.argv.includes("--without-approval")) {
       // Measured on codex-cli 0.162.1: without the per-tool approval, Guardian reviews the call
       // with one model request before it starts (and `on-request` without Guardian asks the human).
-      const unapproved = entry.replace(/, "tools" = \{ "wait_pull_request" = \{ "approval_mode" = "approve" \} \}/u, "");
+      const unapproved = withoutMcpApproval(entry);
       cases.push([`same entry without the per-tool approval · ${seconds}s wait`, unapproved,
         { completed: true, reviewed: true }]);
     }
@@ -311,7 +326,7 @@ async function main(): Promise<number> {
   return failures === 0 ? 0 : 1;
 }
 
-main().then((code) => { process.exitCode = code; }, (error: unknown) => {
-  process.stderr.write(`${String(error)}\n`);
-  process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().then((code) => { process.exitCode = code; }, (error: unknown) => {
+  probeResult("MCP wait matrix", "could not run", "fixture or compatible app-server unavailable", "docs/DRIVERS.md; skills/using-wollipog/SKILL.md");
+  process.exitCode = 2;
 });

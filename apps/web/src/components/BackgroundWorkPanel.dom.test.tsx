@@ -779,7 +779,7 @@ test("receipt-only turns list one Result Receipt row per receipt with its stage 
     assert.deepEqual(receipts.map((row) => [row.tagName, row.querySelector(".row-title")?.textContent,
       row.querySelector(".status")?.textContent, row.querySelector(".row-sub")?.textContent]), [
       ["DIV", "Result Receipt", "Result Returned", "3 of 3 jobs finished"],
-      ["DIV", "Result Receipt", "Returning Result", "1 of 1 job finished"],
+      ["DIV", "Result Receipt", "Follow-Up Pending", "1 of 1 job finished"],
     ], "a receipt is not a job, so it opens no page");
     assert.doesNotMatch(panel.container.textContent ?? "", /Running|Completed|Failed|Killed|Lost|private-continuation|retained-parent/u);
   } finally {
@@ -1199,7 +1199,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${paren
     assert.match(notice.textContent!, /will not resubmit them automatically/);
     assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
     assert.doesNotMatch(notice.textContent!, /Returning .* to this conversation/);
-    assert.doesNotMatch(panel.container.textContent!, /Returning Result/,
+    assert.doesNotMatch(panel.container.textContent!, /Follow-Up Pending/,
       "the group badge must not contradict its explicit historical recovery notice");
   } finally { await panel.dispose(); }
 });
@@ -1798,6 +1798,54 @@ test("after a blocked result's Acknowledge, its Acknowledged entry takes the slo
     const active = domWindow.document.activeElement as unknown as HTMLElement | null;
     assert.equal(active?.tagName, "H3", "not the Acknowledged entry's Dismiss");
     assert.equal(active?.textContent, "Earlier Turn");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("a handoff hold waiting on work no row shows is named in a notice, with Proceed Now only for whoever may take it (#3752)", async () => {
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:1", since: Date.now() - 41 * MINUTE, target: "/w/issue-3752",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 2, canRelease: true as const,
+    unlistedJobs: [{ id: "b5p3g2lyb", kind: "unregistered" as const }, { id: "tool:toolu_watch", kind: "provisional" as const }],
+  };
+  const owner = { stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true } };
+  const viewer = { ...owner, stopBackgroundJob: { allowed: false, reason: "Only the session owner can do this." } };
+  const unlistedNotice = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>(".notice")]
+    .find((notice) => notice.querySelector(".notice-title")?.textContent === "Handoff Waiting on Unlisted Work");
+  const panel = await mountBackgroundWork({
+    session: managedSession({ status: "queued", queueHold, commandPermissions: owner } as Partial<SessionView>),
+  });
+  try {
+    const notice = unlistedNotice(panel.container)!;
+    assert.ok(notice.classList.contains("t-warning"));
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "The move to worktree /w/issue-3752 waits for 2 tasks that have no job in this list. " +
+      "Proceed Now in the queued messages ends it with the rest of this session's background work.");
+    await act(async () => notice.querySelector<HTMLButtonElement>(".notice-details-toggle")!.click());
+    assert.deepEqual([...notice.querySelectorAll(".facts > div")].map((pair) =>
+      [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]),
+    [["Unregistered Task", "b5p3g2lyb"], ["Unconfirmed Launch", "tool:toolu_watch"]]);
+
+    await panel.render({ session: managedSession({ status: "queued", queueHold: { ...queueHold, endsAt: Date.now() + 19 * MINUTE },
+      commandPermissions: viewer } as Partial<SessionView>) });
+    assert.match(unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "",
+      /It ends when the provider reports it finished, or when the hold's deadline passes\.$/u);
+    // A hold with no deadline (its bound disabled, or an older runner) promises none.
+    await panel.render({ session: managedSession({ status: "queued", queueHold, commandPermissions: viewer } as Partial<SessionView>) });
+    const noDeadline = unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(noDeadline, /It ends when the provider reports it finished\.$/u);
+    assert.doesNotMatch(noDeadline, /deadline/u);
+
+    const account = { ...queueHold, kind: "provider_account_switch" as const, holdId: "provider-account-switch:1",
+      target: "dev@example.com", unlistedJobs: [queueHold.unlistedJobs[1]!] };
+    await panel.render({ session: managedSession({ status: "queued", queueHold: account, commandPermissions: owner } as Partial<SessionView>) });
+    const accountBody = unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(accountBody, /^The switch to the selected provider account waits for a task that has no job in this list\./u);
+    assert.doesNotMatch(panel.container.textContent ?? "", /dev@example\.com/u);
+
+    await panel.render({ session: managedSession({ status: "running", queueHold: undefined, commandPermissions: owner } as Partial<SessionView>) });
+    assert.equal(unlistedNotice(panel.container), undefined, "no notice once the hold clears");
   } finally {
     await panel.dispose();
   }

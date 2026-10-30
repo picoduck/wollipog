@@ -1,6 +1,6 @@
 import {
   campaignAuthorityPreflight, resolveCampaignAuthority, runnerSupportsProtocol, validCampaignControl,
-  type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl,
+  type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope,
   type ParentControlPolicy, type PendingApproval, type SessionView, type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import type { HumanPrincipal } from "./identity.js";
@@ -25,6 +25,22 @@ export function authorizeFullControl(
   return validCampaignControl(control) ? structuredClone(control) : null;
 }
 
+/** The boundary a Human's own approval of an issue scope establishes (#2940): the same grants,
+ * naming the scope revision that approval created, authorized by that Human at that time. Evidence
+ * authority is that boundary author's own disclosure consent, so it carries over only to the same
+ * Human; another approver's boundary routes evidence to a person until they authorize it. */
+export function remintCampaignBoundary(boundary: CampaignAuthorityBoundary, scope: Pick<CampaignIssueScope, "revision">,
+  userId: string, authorizedAt: number): CampaignControl | null {
+  const { evidenceAuthority, ...rest } = structuredClone(boundary);
+  const next: CampaignAuthorityBoundary = { ...rest, revision: boundary.revision + 1, issueScopeRevision: scope.revision,
+    authorizedByUserId: userId, authorizedAt };
+  if (evidenceAuthority && userId === boundary.authorizedByUserId) {
+    next.evidenceAuthority = { ...evidenceAuthority, revision: next.revision, authorizedAt, issueScopeRevision: scope.revision };
+  }
+  const control: CampaignControl = { mode: "full_control", boundary: next };
+  return validCampaignControl(control) ? control : null;
+}
+
 export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestratorPolicy" | "parentControlPolicy">): boolean {
   const control = controller.orchestratorPolicy?.control;
   if (!control || control.mode === "custom") return true;
@@ -44,7 +60,7 @@ export function evaluateCampaignAuthority(
   request: PendingApproval | WorkflowDecisionResourceSnapshot,
   policy: ParentControlPolicy = controller.parentControlPolicy ?? { revision: 0, decisions: {
     implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-    follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
   } },
   controllerProtocol: number | null | undefined = protocol,
   peerContracts?: { requester?: unknown; controller?: unknown },

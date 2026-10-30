@@ -202,3 +202,34 @@ for (const theme of ["dark", "light"] as const) {
     });
   });
 }
+
+test.describe("at 390×844 with a session title wider than the sheet", () => {
+  test.use({ viewport: { width: 390, height: 844 } });
+
+  test("the description ellipsizes on its own row and never widens the header past the sheet (#2982)", async ({ page }) => {
+    const title = "Migrate every API call site to the shared retry helper and restore the upload timeouts";
+    const dialog = await openSnooze(page, "dark", { row: title, query: "?long-title" });
+    await expect(dialog.locator(".modal-desc")).toHaveText(title);
+    await dialogMotionSettled(page);
+    const geometry = await dialog.evaluate((element) => {
+      const rect = (node: Element) => node.getBoundingClientRect();
+      const head = element.querySelector(".modal-head")!;
+      const name = element.querySelector(".snooze-session-title")!;
+      const close = rect(element.querySelector(".modal-close")!);
+      const heading = rect(element.querySelector(".modal-title")!);
+      return {
+        panel: rect(element), head: rect(head), description: rect(element.querySelector(".modal-desc")!),
+        headOverflow: head.scrollWidth - head.clientWidth,
+        truncated: name.scrollWidth > name.clientWidth,
+        closeCentre: close.top + close.height / 2, titleCentre: heading.top + heading.height / 2,
+        titleBottom: heading.bottom,
+      };
+    });
+    expect(geometry.headOverflow, "the header does not scroll sideways").toBeLessThanOrEqual(0);
+    expect(geometry.description.right, "the description ends inside the header").toBeLessThanOrEqual(geometry.head.right + 0.5);
+    expect(geometry.description.width).toBeLessThanOrEqual(geometry.panel.width);
+    expect(geometry.truncated, "the session title is ellipsized, not clipped by the sheet").toBe(true);
+    expect(Math.abs(geometry.closeCentre - geometry.titleCentre), "Close stays on the title's row").toBeLessThan(2);
+    expect(geometry.description.top).toBeGreaterThanOrEqual(geometry.titleBottom - 1);
+  });
+});

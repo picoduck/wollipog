@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { ArchivedHistoryRetention } from "./archived-history-retention.js";
 import { ControlPlaneDb } from "./db.js";
 
 const paths = ["deleteSession", "clearSessionEvents", "reconcileRunnerHistory", "deleteRunner", "deleteBox"] as const;
 for (const path of paths) {
   for (const pending of [false, true]) {
-    test(`${path} removes keyed, legacy and collision-fallback search rows (mapping pending: ${pending})`, () => {
+    test(`${path} removes keyed, legacy and collision-fallback search rows (mapping pending: ${pending})`, async () => {
       const db = ControlPlaneDb.open(":memory:");
       try {
         db.createBox({ boxId: "box", runnerId: "runner", sshTarget: "synthetic", sshPort: 22,
@@ -39,7 +40,11 @@ for (const path of paths) {
         db.appendEvent("sibling", { kind: "user_message", text: "siblingword" }, 7);
         db.reconcileRunnerHistory("target", 1, 4);
         if (!pending) {
-          while (db.mapLegacySearchRows(2).pending) { /* complete the real legacy mapping */ }
+          const retention = new ArchivedHistoryRetention(db, {
+            env: {}, log: { info() {}, warn() {} }, sleep: async () => {},
+          });
+          const result = await retention.runPass();
+          assert.equal(result.events, 0, "the background pass maps search rows with retention off");
           assert.equal(sql.prepare("SELECT fts_rowid FROM session_events_fts_legacy_rowids WHERE event_id=?").get(legacy.id)!.fts_rowid, 900001);
         }
         assert.equal(db.legacySearchRowsPending(), pending);

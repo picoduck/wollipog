@@ -26,17 +26,18 @@ import { isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
 import {
   compactReviewFinding, evaluateReviewAttempt, planReviewRound, REVIEW_ATTEMPTS_PER_ROUND, REVIEW_CONTRACT,
+  sameReviewFamily, reviewModelSupported,
   REVIEW_FULL_REASON_LIMIT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_BUDGET, REVIEW_ROUND_REFUSALS, reviewerHarnessFor,
   type AgentDefinition, type ReviewAttemptEvidence, type ReviewAttemptRound, type ReviewAttemptVerdictView,
   type ReviewLaunchPolicy, type ReviewReportFinding, type ReviewRunHistory, type ReviewSessionCapability,
   type ReviewSessionUpdate, type SessionReviewHarness,
 } from "@wollipog/protocol";
 import {
-  bindPullRequestScope, GITHUB_REPOSITORY, PUSHED_HEAD, refuseReview, ReviewScopeRefusal, SAFE_GIT, SESSION_IDENTITY,
+  bindPullRequestScope, PUSHED_HEAD, refuseReview, reviewRepository, ReviewScopeRefusal, SAFE_GIT, SESSION_IDENTITY,
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
 } from "./review-snapshot.js";
 import {
-  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools,
+  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools, type CodexReviewerProtection,
 } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
 
@@ -65,6 +66,12 @@ const CLAUDE_REVIEW_TOOLS = ["Read", "Grep", "Glob"] as const;
 export interface ReviewSessionDependencies {
   exec: ReviewExec;
   pullRequest(gh: string, repository: string, number: number, env?: NodeJS.ProcessEnv): Promise<PullRequestFacts>;
+  /** v244 (#3539): a GitLab merge request's facts, read with the verified glab. Without it, a GitLab
+   * review is refused. */
+  mergeRequest?(glab: string, host: string, project: string, iid: number, env?: NodeJS.ProcessEnv): Promise<PullRequestFacts>;
+  /** Whether the user's global glab configuration names `host`. Without it, only gitlab.com
+   * merge requests can be reviewed. */
+  gitlabHostConfigured?(glab: string, host: string, env?: NodeJS.ProcessEnv): Promise<boolean>;
   tools(): ReviewTools | { unavailable: string };
   /** Throw unless `command`, as spawn would resolve it on `pathEnv`, and its interpreter are trusted. */
   verifyCommand(command: string, pathEnv?: string): void;
@@ -82,6 +89,7 @@ export function defaultReviewSessionDependencies(
   sessionWritablePaths: () => readonly string[] = () => [],
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
+  codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
   const extraRoots = () => [
@@ -113,12 +121,64 @@ export function defaultReviewSessionDependencies(
         baseSha: String(pr.base?.sha ?? ""),
       };
     },
+    mergeRequest: async (glab, host, project, iid, env) => {
+      if (!isAbsolute(glab)) throw new Error("the GitLab CLI path is not verified");
+      const raw = (await execFileAsync(glab, [
+        "api", `projects/${encodeURIComponent(project)}/merge_requests/${iid}`, "--hostname", host,
+      ], { encoding: "utf8", timeout: 30_000, maxBuffer: 2_000_000, env: env ?? { ...process.env, NO_PROMPT: "1" } })).stdout;
+      return gitlabMergeRequestFacts(JSON.parse(raw), `${host}/${project}`, iid);
+    },
+    gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
     verifyCommand: (command, pathEnv = process.env.PATH) =>
-      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid),
+      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid, undefined, codexProtection()),
     agents,
     agentPath,
     log,
+  };
+}
+
+/**
+ * Whether the user's global glab configuration names `host` (v244, #3539): the same local,
+ * unauthenticated `api_protocol` read every other GitLab reader makes before it contacts a
+ * self-managed host, so a session-written origin cannot send glab's credentials elsewhere.
+ */
+export async function gitlabHostConfigured(glab: string, host: string, env?: NodeJS.ProcessEnv): Promise<boolean> {
+  if (!isAbsolute(glab)) return false;
+  try {
+    const { stdout } = await execFileAsync(glab, ["config", "get", "api_protocol", "--host", host, "--global"], {
+      encoding: "utf8", timeout: 15_000, maxBuffer: 64 * 1024, env: env ?? { ...process.env, NO_PROMPT: "1" },
+    });
+    return ["http", "https"].includes(stdout.trim().toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * A GitLab merge request in the shape the scope proof checks (v244, #3539). `repository` is the
+ * project it was read from. Only an `opened` merge request is open (a `locked` one is not), and only
+ * one whose source and target project are the same is from this repository. The base is GitLab's
+ * merge base (`diff_refs.base_sha`), an ancestor of the head, so it comes from the session's own
+ * branch; it counts only while the diff was computed for the current head.
+ */
+export function gitlabMergeRequestFacts(value: unknown, repository: string, iid: number): PullRequestFacts {
+  const mr = (value && typeof value === "object" && !Array.isArray(value) ? value : {}) as {
+    iid?: unknown; state?: unknown; sha?: unknown; source_branch?: unknown;
+    source_project_id?: unknown; target_project_id?: unknown;
+    diff_refs?: { base_sha?: unknown; head_sha?: unknown } | null;
+  };
+  const sameProject = Number.isSafeInteger(mr.source_project_id) && mr.source_project_id === mr.target_project_id;
+  const headSha = typeof mr.sha === "string" ? mr.sha.toLowerCase() : "";
+  const diffHead = typeof mr.diff_refs?.head_sha === "string" ? mr.diff_refs.head_sha.toLowerCase() : "";
+  const base = typeof mr.diff_refs?.base_sha === "string" ? mr.diff_refs.base_sha.toLowerCase() : "";
+  return {
+    state: mr.iid === iid && mr.state === "opened" ? "open" : String(mr.state ?? ""),
+    baseRepository: mr.iid === iid ? repository : "",
+    headRepository: mr.iid === iid && sameProject ? repository : "",
+    headRef: typeof mr.source_branch === "string" ? mr.source_branch : "",
+    headSha,
+    baseSha: diffHead && diffHead === headSha && PUSHED_HEAD.test(base) ? base : "",
   };
 }
 
@@ -127,7 +187,8 @@ export function defaultReviewSessionDependencies(
  * `trustedPath`, and so must the interpreter its script names. An untrusted earlier PATH entry is
  * a refusal, not something to skip: it is exactly what would run.
  */
-export function verifySpawnedCommand(command: string, pathEnv: string | undefined, roots: readonly string[], uid: number, rootUid?: number): string {
+export function verifySpawnedCommand(command: string, pathEnv: string | undefined, roots: readonly string[], uid: number,
+  rootUid?: number, codex?: CodexReviewerProtection): string {
   let candidate: string | undefined;
   if (isAbsolute(command)) {
     candidate = command;
@@ -144,7 +205,7 @@ export function verifySpawnedCommand(command: string, pathEnv: string | undefine
     }
   }
   if (!candidate) throw new Error(`${command} is not installed`);
-  const resolved = trustedPath(candidate, roots, uid, rootUid);
+  const resolved = trustedPath(candidate, roots, uid, rootUid, codex);
   const interpreter = reviewerInterpreter(resolved, pathEnv, roots, uid, rootUid);
   // An `env <program>` interpreter is found on PATH at spawn too: its first match must be trusted.
   if (interpreter) verifySpawnedCommand(interpreter.name, pathEnv, roots, uid, rootUid);
@@ -241,7 +302,9 @@ export function reviewPrompt(input: ReviewPromptInput): string {
     "",
     "# Review Scope",
     "",
-    `- Pull request: ${input.repository}#${input.number}`,
+    reviewRepository(input.repository)?.forge === "gitlab"
+      ? `- Merge request: ${input.repository}!${input.number}`
+      : `- Pull request: ${input.repository}#${input.number}`,
     `- Mode: ${reviewModeText(input)}`,
     ...(input.fullReason ? [`- Reason for a full review (untrusted data): ${input.fullReason.replace(/\s+/gu, " ").slice(0, REVIEW_FULL_REASON_LIMIT)}`] : []),
     `- Base: ${input.baseSha}`,
@@ -283,15 +346,34 @@ export type ReviewObservation = Omit<ReviewAttemptEvidence, "snapshotChanged">;
 
 /** The exact launch the runner authorized for a review session. */
 export interface ReviewLaunch {
+  model?: string;
+  effort?: string;
   driver: AgentDefinition["driver"];
   agentId: string;
   command: string;
 }
 
+/** Capability reasons travel through agents_updated, whose control-plane validator caps each
+ * at 500 characters. Keep the useful prefix; callers log the complete diagnostic locally. */
+export function reviewSessionDiscoveryReason(error: unknown): string {
+  const reason = (error instanceof Error ? error.message : String(error)) || "review-session discovery failed";
+  if (reason.length > 500 && reason.startsWith("Codex packages are unprotected")) {
+    const ids = [...new Set([...reason.matchAll(/\bsession (s_[A-Za-z0-9_-]+)/gu)].map((match) => match[1]!))];
+    if (ids.length) {
+      const first = ids.slice(0, 3).map((id) => id.slice(0, 64)).join(", ");
+      return `Codex packages are unprotected from ${ids.length} retaining sessions: ${first}${ids.length > 3 ? ` (+${ids.length - 3} more)` : ""}. Run --state-doctor review-writers inspect for full writer details.`;
+    }
+  }
+  return reason.length <= 500
+    ? reason
+    : `${reason.slice(0, 450)}… (+${reason.length - 450} more characters; see runner log)`;
+}
+
 /** The agent a harness's reviews launch through: the first available native agent using its driver. */
 function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionReviewHarness): AgentDefinition | undefined {
   return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
-    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true);
+    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true &&
+    candidate.installation?.selection !== "other" && candidate.harnessSelectionBlocked !== true);
 }
 
 /** What the session manager needs to launch and retire a review session. */
@@ -333,6 +415,16 @@ export class ReviewSessionLauncher {
   /** Each prepared review's evaluation context, until it is released. A runner restart fails
    * every unsettled review, so nothing here needs to outlive the process. */
   private readonly contexts = new Map<string, EvaluationContext>();
+  /** Keep complete local diagnostics without repeating a steady unavailable state on every
+   * inventory publication. A successful probe clears its key, so a recurrence is logged anew. */
+  private readonly discoveryFailures = new Map<SessionReviewHarness | "tools", string>();
+
+  private logDiscoveryFailure(component: SessionReviewHarness | "tools", error: unknown): void {
+    const reason = String(error);
+    if (this.discoveryFailures.get(component) === reason) return;
+    this.discoveryFailures.set(component, reason);
+    this.deps.log(JSON.stringify({ event: "review_session_discovery_failed", component, reason }));
+  }
 
   constructor(
     private readonly root: string,
@@ -343,23 +435,39 @@ export class ReviewSessionLauncher {
 
   /** The reviewer harnesses this runner can launch, each through its first available native agent
    * whose CLI passes the trust checks. Linux only, like the protected sessions it serves. */
-  capability(agents: readonly AgentDefinition[] = this.deps.agents(), platform: NodeJS.Platform = process.platform): ReviewSessionCapability | undefined {
+  capability(agents: readonly AgentDefinition[] | undefined = undefined, platform: NodeJS.Platform = process.platform): ReviewSessionCapability | undefined {
     if (platform !== "linux") return undefined;
     const unavailable: NonNullable<ReviewSessionCapability["unavailable"]> = {};
-    const tools = this.deps.tools();
-    if ("unavailable" in tools) return { reviewers: [], unavailable: { tools: tools.unavailable } };
+    try {
+      const tools = this.deps.tools();
+      agents ??= this.deps.agents();
+      if ("unavailable" in tools) {
+        this.logDiscoveryFailure("tools", tools.unavailable);
+        return { reviewers: [], configuration: true, unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
+      }
+      this.discoveryFailures.delete("tools");
+    } catch (error) {
+      this.logDiscoveryFailure("tools", error);
+      return { reviewers: [], configuration: true, unavailable: { tools: reviewSessionDiscoveryReason(error) } };
+    }
     const reviewers: ReviewSessionCapability["reviewers"] = [];
     for (const harness of ["claude-code", "codex"] as const) {
       const agent = reviewerAgent(agents, harness);
-      if (!agent) { unavailable[harness] = "no available native agent uses this harness"; continue; }
+      if (!agent) {
+        this.discoveryFailures.delete(harness);
+        unavailable[harness] = "no available native agent uses this harness";
+        continue;
+      }
       try {
         this.deps.verifyCommand(agent.command, this.deps.agentPath(agent.id, agent.driver));
         reviewers.push({ harness, agentId: agent.id });
+        this.discoveryFailures.delete(harness);
       } catch (error) {
-        unavailable[harness] = (error as Error).message;
+        this.logDiscoveryFailure(harness, error);
+        unavailable[harness] = reviewSessionDiscoveryReason(error);
       }
     }
-    return { reviewers, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
+    return { reviewers, configuration: true, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
   }
 
   checkoutPath(sessionId: string): string {
@@ -377,19 +485,26 @@ export class ReviewSessionLauncher {
         policy.requesterSessionId === sessionId) {
       refuseReview("the review must cover the session's own native managed worktree");
     }
-    if (!GITHUB_REPOSITORY.test(policy.pullRequest.repository) || !PUSHED_HEAD.test(policy.headSha)) {
+    if (!reviewRepository(policy.pullRequest.repository) || !PUSHED_HEAD.test(policy.headSha)) {
       refuseReview("the pull request is not this session's open, same-repository pull request");
     }
     const requester = this.store.readMeta(policy.requesterSessionId);
     if (!requester || requester.review) refuseReview("the review must cover the session's own native managed worktree");
     // The reviewer is always the other model family, and it launches through its own driver.
-    if (reviewerHarnessFor(requester!.driver) !== policy.harness || REVIEWER_DRIVERS[policy.harness] !== driver) {
+    if ((!policy.configuration && reviewerHarnessFor(requester!.driver) !== policy.harness) || REVIEWER_DRIVERS[policy.harness] !== driver) {
       refuseReview("the runner cannot launch this reviewer");
     }
     // Only the advertised reviewer agent, and only while the exact command spawn will run (on the
     // PATH that agent's provider gets) still passes the trust checks.
     const agent = reviewerAgent(this.deps.agents(), policy.harness);
     if (!agent || agent.id !== launch.agentId || agent.command !== launch.command) refuseReview("the runner cannot launch this reviewer");
+    const configured = policy.configuration;
+    if (configured && (typeof configured.allowSameFamily !== "boolean" || !Number.isSafeInteger(configured.roundBudget) ||
+        configured.roundBudget < 1 || configured.roundBudget > 32 || configured.model !== launch.model || configured.effort !== launch.effort ||
+        !reviewModelSupported(agent!.capabilities, configured.model, configured.effort) ||
+        !configured.allowSameFamily && sameReviewFamily(requester!.driver, requester!.config?.model, policy.harness, configured.model))) {
+      refuseReview("the configured reviewer is unavailable or belongs to the implementer's model family without explicit permission");
+    }
     try {
       this.deps.verifyCommand(launch.command, this.deps.agentPath(launch.agentId, driver));
     } catch (error) {
@@ -402,6 +517,8 @@ export class ReviewSessionLauncher {
     const env = this.snapshots.helperEnvironment(verified);
     const scope = await bindPullRequestScope({
       meta: requester, tools: verified, env, exec: this.deps.exec, pullRequest: this.deps.pullRequest,
+      mergeRequest: this.deps.mergeRequest,
+      gitlabHostConfigured: this.deps.gitlabHostConfigured,
       request: { repository: policy.pullRequest.repository, number: policy.pullRequest.number, headSha: policy.headSha },
     });
     try {
@@ -420,7 +537,7 @@ export class ReviewSessionLauncher {
         (await diff(["--name-only", "-z", "--diff-filter=ACDMRTUXB"], ...revisions)).split("\0").filter(Boolean);
 
       // Plan the attempt from the run's history; ancestry is proven here, from the mirror.
-      const history = policy.history ?? EMPTY_HISTORY;
+      const history = policy.history ?? { ...EMPTY_HISTORY, roundBudget: configured?.roundBudget ?? EMPTY_HISTORY.roundBudget };
       const reference = history.lastValid ?? history.lastAttempt;
       let descends: boolean | null = null;
       if (reference && reference.headSha !== policy.headSha && PUSHED_HEAD.test(reference.headSha) && await has(reference.headSha)) {

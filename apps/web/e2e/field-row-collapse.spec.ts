@@ -15,7 +15,9 @@ const dialogs: Array<{ name: string; rows?: number; open: (page: Page) => Promis
     open: async (page) => {
       await page.goto("/new-session-choices-e2e.html?dialog=run");
       const dialog = page.getByRole("dialog");
-      await dialog.getByLabel("Project", { exact: true }).selectOption({ label: "No Project" });
+      // No Project places the run by Machine and Folder, the row measured here (#2978).
+      await dialog.getByRole("button", { name: /^Project:/ }).click();
+      await page.getByRole("option", { name: "No Project" }).click();
       return dialog;
     },
   },

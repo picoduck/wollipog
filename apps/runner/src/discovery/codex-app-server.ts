@@ -1,5 +1,6 @@
 import type { CodexAppServerCapabilities } from "@wollipog/protocol";
 import { run, type ResolvedLaunch } from "./resolve.js";
+import type { CodexProbeObserver } from "../codex-probe.js";
 
 /** Oldest Codex build whose generated v2 schema is pinned in this repository. Official docs do
  * not publish a CLI minimum, so older builds remain an explicit exec fallback until verified. */
@@ -146,9 +147,10 @@ export function wslCodexAppServerProbeArgs(distro: string, launch: ResolvedLaunc
 export async function probeNativeCodexAppServer(
   launch: ResolvedLaunch,
   version: string | undefined,
+  observer: CodexProbeObserver = {},
 ): Promise<CodexAppServerCapabilities> {
   const probe = nativeCodexAppServerProbeArgs(launch);
-  const result = await run(probe.command, probe.args, { timeoutMs: 8000, maxBuffer: 256 * 1024 });
+  const result = await run(probe.command, probe.args, { timeoutMs: 8000, maxBuffer: 256 * 1024, trackDescendants: true, ...observer });
   return interpretCodexAppServerProbe(version, result);
 }
 

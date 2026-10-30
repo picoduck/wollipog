@@ -33,11 +33,15 @@ import {
   NO_PROJECT_SELECTION,
   isLaunchableProjectLocation,
   initialProjectSelectionForPreset,
+  liveLocationAvailability,
+  primaryProjectLocation,
   projectForSessionPreset,
+  projectNameQualifiers,
   projectFallbacksAwaitingStore,
   projectLocationForSessionPreset,
   projectInventoryWithFallbacks,
   projectSessionPlacement,
+  startTruncatedPath,
   suggestedProjectLocation,
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
@@ -72,7 +76,7 @@ import { FieldError } from "./FieldError.js";
 import { FieldWarning } from "./FieldWarning.js";
 import { statusMeta } from "../status-meta.js";
 import { Notice } from "./Notice.js";
-import { FullControlLaunchPanel, type FullControlAuthorization } from "./FullControlPreparation.js";
+import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
 import {
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -97,34 +101,12 @@ import {
 } from "./ui/ChoiceControls.js";
 
 /**
- * A location's availability as the live runner catalog sees it. The stored availability can still
- * read Available while its machine is offline or no longer advertises the folder, and the Location
- * field names what is actually in the way.
- */
-function liveLocationAvailability(
-  location: ProjectLocationView,
-  runners: ReadonlyMap<string, RunnerView>,
-): ProjectLocationAvailability {
-  if (location.availability !== "available") return location.availability;
-  const runner = runners.get(location.runnerId);
-  if (runner?.status !== "online") return "runner_offline";
-  return runner.workspaces.some((workspace) => workspace.id === location.workspaceId) ? "available" : "workspace_missing";
-}
-
-/**
  * A dollar amount as people write it, "$1", "$0.40", without rounding away precision a policy limit
  * has: a minimum of $1.004 reads "$1.004", because "$1.00" would name a value the field refuses.
  */
 function usd(amount: number): string {
   return `$${Number.isInteger(amount) ? amount
     : amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 20, useGrouping: false })}`;
-}
-
-/** A path cut at its start, so the folder name and its parent stay whole: "…/repos/wollipog". */
-function startTruncatedPath(path: string): string {
-  const separator = path.includes("\\") ? "\\" : "/";
-  const segments = path.split(/[\\/]+/u).filter(Boolean);
-  return segments.length <= 2 ? path : `…${separator}${segments.slice(-2).join(separator)}`;
 }
 
 /** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
@@ -166,11 +148,11 @@ type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "r
 type ProblemControl =
   | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
   | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
-  | "full-control" | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
+  | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
 
 /** The controls that live inside Options, which a submit problem opens before focusing. */
 const OPTIONS_CONTROLS: ReadonlySet<ProblemControl> = new Set<ProblemControl>([
-  "role", "defaults", "orchestrator-retry", "orchestrator", "full-control",
+  "role", "defaults", "orchestrator-retry", "orchestrator",
   "harness", "mode", "execution-target", "cloud-budget",
 ]);
 
@@ -238,34 +220,8 @@ export function NewSessionDialog({
   // one name keep that name in the list, and the closed field adds the machine to tell them apart.
   const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
     const nameOf = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
-    const primaryOf = (project: ProjectView) => project.locations.find((location) => location.isDefault) ?? project.locations[0];
-    // Where each project runs, said no more precisely than its same-named projects need: the machine,
-    // then the machine and folder, then a longer path, and the project's id when nothing else differs.
-    const qualifiers = new Map<string, string>();
-    const sameName = new Map<string, ProjectView[]>();
-    for (const project of projectList) sameName.set(project.name, [...(sameName.get(project.name) ?? []), project]);
-    for (const group of sameName.values()) {
-      if (group.length < 2) continue;
-      const levels: Array<(project: ProjectView) => string> = [
-        (project) => { const primary = primaryOf(project); return primary ? nameOf(primary.runnerId) : ""; },
-        (project) => {
-          const primary = primaryOf(project);
-          return primary ? `${nameOf(primary.runnerId)} · ${primary.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? primary.path}` : "";
-        },
-        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${startTruncatedPath(primary.path)}` : ""; },
-        (project) => { const primary = primaryOf(project); return primary ? `${nameOf(primary.runnerId)} · ${primary.path}` : ""; },
-      ];
-      const level = levels.find((qualify) => {
-        const values = group.map(qualify);
-        return values.every(Boolean) && new Set(values).size === group.length;
-      });
-      for (const project of group) {
-        const primary = primaryOf(project);
-        qualifiers.set(project.id, level
-          ? level(project)
-          : `${primary ? `${nameOf(primary.runnerId)} · ` : ""}Project ${project.id.slice(-6)}`);
-      }
-    }
+    const primaryOf = primaryProjectLocation;
+    const qualifiers = projectNameQualifiers(projectList, nameOf);
     return [
       ...projectList.map((project) => {
         const primary = primaryOf(project);
@@ -372,7 +328,6 @@ export function NewSessionDialog({
   // The tab the Orchestrator Policy dialog opens on, while it is open.
   const [editingPolicy, setEditingPolicy] = useState<OrchestratorPolicyTab | null>(null);
   const customizeRef = useRef<HTMLButtonElement>(null);
-  const [fullControlAuthorization, setFullControlAuthorization] = useState<FullControlAuthorization | null>(null);
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
   } | null>(null);
@@ -606,8 +561,10 @@ export function NewSessionDialog({
     if (accountChosenByUser.current && providerAccounts.some((account) => account.id === providerAccountId)) return;
     accountChosenByUser.current = false;
     const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
+    // Like the control plane's implicit choice, never a profile only other control planes may use (#3240).
     setProviderAccountId(savedProviderAccountMissing ? "" :
-      providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
+      providerAccounts.find((account) => account.id === preferred)?.id ??
+      providerAccounts.find((account) => account.profile?.access !== "not_granted")?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
     savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
@@ -1004,8 +961,9 @@ export function NewSessionDialog({
     (!orchestrator || (orchestratorSupported && orchestratorSettingsReady && !policyProblem)) &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
   const controlPreview = policyDraft.controlMode;
-  const valid = launchSelectionValid && (!orchestrator || controlPreview !== "full_control");
-  // Full Control never falls back to ordinary creation: its one action authorizes the reviewed preflight.
+  const valid = launchSelectionValid;
+  // Full Control starts like any Orchestrator (#2940); only the server's launch route admits it,
+  // never ordinary creation, and the person's first message in the session is its task.
   const fullControlLaunch = orchestrator && orchestratorSettingsReady && controlPreview === "full_control";
   // The chosen location, as the Location field reports it: why it can't host the session, if it can't.
   const selectedLocationProblem = selectedProjectLocation && !projectLocationLaunchable
@@ -1088,7 +1046,6 @@ export function NewSessionDialog({
     defaults: '[data-validation-target="defaults"]',
     "orchestrator-retry": 'button[data-validation-target="orchestrator-retry"]',
     orchestrator: 'button[data-validation-target="orchestrator-policy"]',
-    "full-control": 'section[aria-label="Full Control Launch"] textarea',
     harness: '.seg[aria-label="Harness"] > .seg-option:not([aria-disabled="true"])',
     mode: '.seg[aria-label="Working Copy"] > .seg-option[aria-checked="true"]',
     "execution-target": 'button[aria-label^="Run On:"]',
@@ -1192,25 +1149,8 @@ export function NewSessionDialog({
       const control = focusValidationProblem(...controls);
       setFieldProblem(message ? { field, message, control } : null);
     };
-    if (fullControlLaunch) {
-      if (!fullControlAuthorization?.ready) {
-        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom in Orchestrator Policy.",
-          "full-control", "orchestrator");
-        return;
-      }
-      // The panel inside Options says why a launch did not start, so it must be on screen first.
-      if (!optionsOpen) flushSync(() => setOptionsOpen(true));
-      busyRef.current = true;
-      setBusy(true);
-      try { await fullControlAuthorization.authorize(); } catch { /* The panel shows why it did not start. */ }
-      finally { busyRef.current = false; setBusy(false); }
-      return;
-    }
     if (!valid) {
-      if (orchestrator && controlPreview === "full_control") {
-        report("role", "Full Control isn't ready yet. Resolve what the summary lists, or choose Custom in Orchestrator Policy.",
-          "full-control", "orchestrator", "orchestrator-retry", "role");
-      } else if (retainedSessionId) {
+      if (retainedSessionId) {
         // The failure notice above the footer already says a session was kept; Open Session is next.
         report("form", null, "retained-session");
       } else if (online.length === 0) {
@@ -1278,7 +1218,9 @@ export function NewSessionDialog({
     busyRef.current = true;
     setBusy(true);
     try {
-      const session = await api.createSession(buildSessionRequest());
+      const session = fullControlLaunch
+        ? await launchFullControlCampaign(api, buildSessionRequest())
+        : await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
@@ -1291,7 +1233,8 @@ export function NewSessionDialog({
         : null;
       if (keptSessionId) setRetainedSessionId(keptSessionId);
       setRequestFailure({
-        sentence: createFailureSentence(e, keptSessionId !== null),
+        // Only a genuine impossibility stops Full Control, and its reason is the sentence (#2940).
+        sentence: e instanceof FullControlBlockedError ? e.message : createFailureSentence(e, keptSessionId !== null),
         detail: e instanceof Error ? e.message : String(e),
       });
     } finally {
@@ -1311,7 +1254,7 @@ export function NewSessionDialog({
 
   const openConnections = () => {
     onClose();
-    navigate({ name: "runners", section: "machines" });
+    navigate({ name: "runners", section: "machines", ...(runner ? { machineId: runner.runnerId } : {}) });
   };
   // Machines in Connections lists each machine with its agents (#2953).
   const setUpAgentsAction: PickerFooterAction = { label: "Set Up Agents in Connections", onSelect: openConnections };
@@ -1383,7 +1326,6 @@ export function NewSessionDialog({
         <Notice
           tone="neutral"
           compact
-          className="new-session-no-locations"
           actions={cannotAddLocation ? undefined : (
             <button
               type="button"
@@ -1577,9 +1519,6 @@ export function NewSessionDialog({
       ? [{ key: "policy-error", label: "Policy Not Loaded" }] : []),
     ...(orchestrator && orchestratorSettingsReady && policyProblem
       ? [{ key: "policy-invalid", label: "Policy Needs a Change" }] : []),
-    // Full Control's footer action is disabled until its preparation inside Options is ready, and
-    // only that preparation says what is missing.
-    ...(fullControlLaunch && !fullControlAuthorization?.ready ? [{ key: "full-control", label: "Full Control Not Ready" }] : []),
     ...(!cloudBudgetValid ? [{ key: "cloud-budget", label: "Budget Out of Range" }] : []),
   ];
 
@@ -1593,16 +1532,13 @@ export function NewSessionDialog({
       onKeyDown={submitOnModifiedEnter}
       footer={
         <>
-          {blockedReason && !fullControlLaunch && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
+          {blockedReason && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          {fullControlLaunch
-            ? <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Starting the campaign…"
-              disabled={!fullControlAuthorization?.ready}>Authorize and Start</BusyButton>
-            : <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
-              disabled={!!blockedReason} data-validation-target="create"
-              aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>}
+          <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
+            disabled={!!blockedReason} data-validation-target="create"
+            aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>
         </>
       }
     >
@@ -1798,17 +1734,6 @@ export function NewSessionDialog({
                   customizeRef={customizeRef}
                   onCustomize={() => setEditingPolicy(policyProblem?.tab ?? "behavior")}
                 />
-              )}
-              {/* Full Control's readiness and its one authorization stay in New Session, under the
-                  policy that chose it. */}
-              {fullControlLaunch && (
-                <div className="session-options-inset">
-                  <FullControlLaunchPanel request={buildSessionRequest} selectionValid={launchSelectionValid} disabled={busy}
-                    savedDefaults={orchestratorSettings?.view?.defaults ?? null}
-                    onAuthorization={setFullControlAuthorization}
-                    onCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
-                    onActivity={() => setFieldProblem(null)} />
-                </div>
               )}
               {orchestrator && orchestratorSettingsReady && fieldProblem?.field === "role" && (
                 <div className="session-options-inset">{problemFor("role")}</div>

@@ -194,6 +194,65 @@ test("Copy Path copies the whole path and says so", async () => {
   assert.deepEqual(toasts, [{ message: "Copied the path.", tone: "success" }]);
 });
 
+/** A Clipboard API whose writes stay pending until the test settles them. */
+function deferredClipboard() {
+  const writes: Array<{ text: string; resolve: () => void }> = [];
+  const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+  });
+  return {
+    writes,
+    succeed: async () => { await act(async () => { writes.at(-1)!.resolve(); await Promise.resolve(); }); },
+    restore: () => {
+      if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+      else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+    },
+  };
+}
+
+test("a Copy Path write that succeeds after its file left the diff shows no toast and moves no focus (#3582)", async () => {
+  const { container, render } = await mount();
+  const clipboard = deferredClipboard();
+  const elsewhere = doc.createElement("button");
+  doc.body.append(elsewhere);
+  try {
+    toasts.length = 0;
+    await render(<GitDiffViewer diff={diffOf([file("src/app.ts"), file("src/other.ts")])} />);
+    const menu = await openActions(container, "src/app.ts");
+    await act(async () => { fireDomEvent.click(menu.item("Copy Path")); await Promise.resolve(); });
+    assert.deepEqual(clipboard.writes.map((write) => write.text), ["src/app.ts"], "the copy started");
+    await render(<GitDiffViewer diff={diffOf([file("src/other.ts")])} />);
+    assertNoDomNode(container.querySelector('button[aria-label="src/app.ts Actions"]'), "the file's actions have gone");
+    await act(async () => { elsewhere.focus(); });
+    await clipboard.succeed();
+    assert.deepEqual(toasts, [], "no toast for a file that has gone");
+    assert.ok(doc.activeElement === elsewhere, "focus stays where the person put it");
+  } finally {
+    elsewhere.remove();
+    clipboard.restore();
+  }
+});
+
+test("a Copy Path write that succeeds while its file is still shown says so and leaves focus on the trigger (#3582)", async () => {
+  const { container, render } = await mount();
+  const clipboard = deferredClipboard();
+  try {
+    toasts.length = 0;
+    await render(<GitDiffViewer diff={diffOf([file("src/app.ts")])} />);
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="src/app.ts Actions"]')!;
+    const menu = await openActions(container, "src/app.ts");
+    await act(async () => { fireDomEvent.click(menu.item("Copy Path")); await Promise.resolve(); });
+    assert.ok(doc.activeElement === trigger, "the copy left focus on the trigger");
+    await clipboard.succeed();
+    assert.deepEqual(toasts, [{ message: "Copied the path.", tone: "success" }]);
+    assert.ok(doc.activeElement === trigger, "focus is still on the trigger");
+  } finally {
+    clipboard.restore();
+  }
+});
+
 /** The collapsed state lifted to a host, as Review holds it. */
 function Host({ diff, onPaths }: { diff: GitDiffInfo; onPaths?: (paths: ReadonlySet<string>) => void }) {
   const [paths, setPaths] = useState<ReadonlySet<string>>(new Set(["src/b.ts", "src/c.ts"]));

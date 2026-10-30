@@ -91,13 +91,20 @@ test("injected POSIX CLI launcher carries Node and single-executable re-entry ar
         executionIsolationMode: "bwrap",
       }, () => {}, { ...host, configDir: root, platform: "linux" });
       assert.equal(launch.env.WOLLIPOG_CLI, agentControlCliPath(root, launch.sessionId));
-      assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "[]");
+      assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "");
       assert.equal(statSync(launch.env.WOLLIPOG_CLI!).mode & 0o777, 0o700);
       const result = spawnSync(launch.env.WOLLIPOG_CLI!, ["session", "list", "with spaces", "quote'"],
         { encoding: "utf8", cwd: tmpdir() });
       assert.equal(result.status, 0, result.stderr);
       assert.notEqual(result.stdout, "", `${name}: ${result.stderr}`);
       assert.deepEqual(JSON.parse(result.stdout), ["--wollipog-cli", "session", "list", "with spaces", "quote'"]);
+      // Appending the variable unquoted, as a shell user would, must add no argument (#3527).
+      const appended = spawnSync("/bin/sh", ["-c", '"$WOLLIPOG_CLI" $WOLLIPOG_CLI_ARGS session list --json'], {
+        encoding: "utf8", cwd: tmpdir(),
+        env: { ...process.env, WOLLIPOG_CLI: launch.env.WOLLIPOG_CLI!, WOLLIPOG_CLI_ARGS: launch.env.WOLLIPOG_CLI_ARGS! },
+      });
+      assert.equal(appended.status, 0, appended.stderr);
+      assert.deepEqual(JSON.parse(appended.stdout), ["--wollipog-cli", "session", "list", "--json"]);
       removeAgentControlFiles(launch.sessionId, root);
       assert.equal(existsSync(launch.env.WOLLIPOG_CLI!), false);
     }
@@ -491,7 +498,7 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     assert.equal(first.tokenFile, agentControlTokenPath(root, launch.sessionId));
     assert.equal(JSON.stringify(launch).includes(first.token), false, "credential stays out of launch metadata");
     assert.equal(launch.env.WOLLIPOG_CLI, `${WSL_AGENT_CONTROL_PRIVATE_DIR}/cli`);
-    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "[]");
+    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "");
     assert.ok(launch.args.some((arg) => arg.includes('"WOLLIPOG_AGENT_CONTROL_SOCKET" = "/tmp/wollipog-agent-control/control.sock"')),
       "Codex MCP receives the private socket explicitly instead of relying on ambient inheritance");
     assert.ok(launch.args.includes("--strict-config"));
@@ -558,7 +565,7 @@ test("native sessions receive a purpose-bound token file and CLI environment wit
     assert.equal(launch.env.WOLLIPOG_SESSION_ID, launch.sessionId);
     assert.equal(launch.env.WOLLIPOG_CLI, process.platform === "win32"
       ? "/opt/wollipog-runner" : agentControlCliPath(root, launch.sessionId));
-    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, process.platform === "win32" ? '["--wollipog-cli"]' : "[]");
+    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, process.platform === "win32" ? '["--wollipog-cli"]' : "");
     assert.equal(JSON.stringify(launch).includes(token), false, "plaintext token never enters launch metadata");
     assert.equal(registrations.length, 1);
     assert.equal(registrations[0]![0], launch.sessionId);
@@ -1297,7 +1304,9 @@ test("a Codex session without the Orchestrator role gains the wollipog MCP serve
         launch.args = [...userArgs];
         launch.config = { permissionMode: "on-request" };
         const logs: string[] = [];
-        await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+        const proofs: Promise<boolean>[] = [];
+        await provisionAgentControl(launch, { ...control, onProcess: proof => proofs.push(proof) }, (line) => logs.push(line), host);
+        assert.deepEqual(await Promise.all(proofs), [false, false], "both injected inventory reads retain HOME ownership");
 
         const added = launch.args.slice(userArgs.length);
         assert.deepEqual(launch.args.slice(0, userArgs.length), userArgs, "the user's arguments are untouched");

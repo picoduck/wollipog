@@ -235,8 +235,10 @@ export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workf
       case "merged_branch_deletion": return "a branch deletion";
       case "issue_closure": return "an issue closure";
       case "campaign_issue_scope": return "a campaign scope change";
+      case "campaign_follow_up_admission": return "a follow-up past the limit";
       case "follow_up_issue_publication": return "an issue publication";
       case "implementation_question": return "an implementation decision";
+      case "review_round_extension": return "more review rounds";
       default: return "a workflow decision";
     }
   }

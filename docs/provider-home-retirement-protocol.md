@@ -360,7 +360,16 @@ and coordinate the external #3228/#3239 owner before any lifecycle integration. 
 runs only its focused synthetic/property tests and runner source/test typecheck. No dependencies,
 worker clock/SEA asset, deadline, bounds, native ownership or poison/no-replacement behavior change.
 
-Required review uses runner-owned request_cross_model_review on the own pushed PR/exact head, latest Claude Opus/high and read-only snapshot, with at most four valid rounds/two launched attempts per round. Independently adjudicate findings and preserve actual admission/cost/refusal receipts. No alternate native reviewer. Required exact-head CI, human per-PR merge consent, exact typed parent merge decision, actual merge-group MERGED and separate human/typed branch-deletion consent remain. Use Refs #3157; closure stays parent-owned. No stack operations, settings/auth/grant expansion or real-credential retirement.
+Required review uses `request_review_session` (`wollipog review session run`) on the own pushed
+PR/exact head, latest Claude Opus/high and read-only snapshot. Follow `using-wollipog`: provide the
+brief, receive the continuation when idle, read the validated verdict and report, and independently
+adjudicate findings before pushing fixes and requesting delta rounds. Preserve the four-valid-round
+epoch/two-counted-attempt-per-round limits and actual admission/cost/refusal receipts; extra rounds
+need the exact `review_round_extension` decision. The older bridge and campaign review jobs are retired; upgrade unsupported peers and use review
+sessions, never an admission or budget workaround. No alternate native reviewer.
+Required exact-head CI, human per-PR merge consent, exact typed parent merge decision, actual
+merge-group MERGED and separate human/typed branch-deletion consent remain. Use Refs #3157; closure
+stays parent-owned. No stack operations, settings/auth/grant expansion or real-credential retirement.
 
 ## Minimum Remaining Path to Full Configured-Account Retirement
 

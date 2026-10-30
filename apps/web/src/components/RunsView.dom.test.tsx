@@ -150,14 +150,14 @@ test("a direct run-to-run route change drops the previous run's error banners wh
   } as Partial<ApiClient>);
   try {
     assert.equal(title(fixture.container), "Run A");
-    assert.match(section(fixture.container, "Workflow Progress")?.textContent ?? "", /Run A workflow failed/u);
+    assert.match(fixture.container.querySelector(".run-workflow-error")?.textContent ?? "", /Run A workflow failed/u);
     assert.match(section(fixture.container, "Workflow Artifacts")?.textContent ?? "", /Run A artifacts failed/u);
 
     await fixture.jumpTo(runB.id);
 
     assert.equal(title(fixture.container), "Run B");
     assert.deepEqual(workflowRequests, [runA.id, runB.id], "run B's workflow request is still pending");
-    assert.equal(Boolean(section(fixture.container, "Workflow Progress")), false, "Workflow Progress is not shown");
+    assert.equal(Boolean(fixture.container.querySelector(".run-workflow-error")), false, "run A's workflow error is not shown");
     assert.equal(Boolean(section(fixture.container, "Workflow Artifacts")), false, "Workflow Artifacts is not shown");
     assert.doesNotMatch(fixture.container.textContent ?? "", /Run A/u);
   } finally {
@@ -330,7 +330,7 @@ describe("Runs list rows (#2974)", () => {
 
   const rowNamed = (container: HTMLDivElement, title: string) =>
     [...container.querySelectorAll<HTMLButtonElement>(".surface > .row.row-2")].find((row) => row.querySelector(".row-title")?.textContent === title)!;
-  const meta = (row: Element) => [...row.querySelectorAll(".run-row-meta > span")].map((span) => span.textContent);
+  const meta = (row: Element) => [...row.querySelectorAll(".list-row-meta > span")].map((span) => span.textContent);
 
   const loaded = (client: Partial<ApiClient> = {}) => mountRunsList(
     (socket) => socket.push(snapshotWithRuns([comparison, finished, gated], [claude, codex, opencode, gemini, builder])),
@@ -359,7 +359,7 @@ describe("Runs list rows (#2974)", () => {
       assert.equal(compare.querySelector(".row-title")?.getAttribute("title"), comparison.title, "the full title is its tooltip");
       assert.deepEqual(meta(compare), ["Comparison", "Alpha", "Claude Code, Codex App Server, OpenCode +1"]);
       assert.equal(compare.querySelector(".row-trail time")?.textContent, "5m ago");
-      assert.doesNotMatch(compare.querySelector(".run-row-meta")?.textContent ?? "", /·/u, "meta is spaced, not dotted");
+      assert.doesNotMatch(compare.querySelector(".list-row-meta")?.textContent ?? "", /·/u, "meta is spaced, not dotted");
 
       const workflow = rowNamed(fixture.container, gated.title);
       assert.deepEqual(meta(workflow), ["Build and Review", "Alpha", "Claude Code"]);
@@ -478,6 +478,19 @@ describe("Runs list rows (#2974)", () => {
   });
 });
 
+test("a pruned workflow explains missing events while retaining node outcomes", async () => {
+  const workflow: WorkflowInstanceDetail = { ...workflowA, events: [],
+    eventHistoryPruned: { prunedAt: 1, eventCount: 1200, retentionDays: 90 } };
+  const fixture = await mountRunDetail({ workflowInstances: async () => [workflow], workflowInstance: async () => workflow,
+    runWorkflowArtifacts: async () => ({ artifacts: [] }) } as Partial<ApiClient>);
+  try {
+    const progress = section(fixture.container, "Workflow Progress")?.textContent ?? "";
+    assert.match(progress, /Event History Pruned[\s\S]*1,200 workflow events were removed[\s\S]*90-day/);
+    assert.match(progress, /node outcomes, attempts, artifacts, decisions and action receipts are kept/);
+    assert.equal(fixture.container.querySelectorAll(".wf-step").length, workflow.nodeStates.length);
+  } finally { await unmount(fixture); }
+});
+
 test("a canceled workflow attempt reads Canceled, while its wire status stays cancelled", async () => {
   const workflow = {
     ...workflowA,
@@ -493,7 +506,7 @@ test("a canceled workflow attempt reads Canceled, while its wire status stays ca
   } as Partial<ApiClient>);
   try {
     const progress = section(fixture.container, "Workflow Progress")?.textContent ?? "";
-    assert.match(progress, /Latest Attempt: Canceled/u);
+    assert.match(progress, /Last Attempt\s*Canceled/u);
     assert.doesNotMatch(progress, /Cancelled/u);
   } finally {
     await unmount(fixture);

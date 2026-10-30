@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -220,6 +220,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   let maxHealthMs = 0;
   let maxPongMs = 0;
   let maxHandshakeMs = 0;
+  let maxConvergenceMs = 0;
   const failureContext = (pass: number, started: number) => JSON.stringify({
     pass, elapsedMs: Math.round(performance.now() - started),
     maxHandshakeMs: Math.round(maxHandshakeMs), maxHealthMs: Math.round(maxHealthMs), maxPongMs: Math.round(maxPongMs),
@@ -286,15 +287,29 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: liveSnapshot }));
     const probe = async () => {
       const start = performance.now();
+      const answered: { HTTP?: number; pong?: number } = {};
       const pong = new Promise<void>((resolvePromise, reject) => {
-        const timer = setTimeout(() => reject(new Error(`pong exceeded 2s during reconciliation\n${failureContext(pass, start)}\n${output}`)), 2000);
-        socket.once("pong", () => { clearTimeout(timer); maxPongMs = Math.max(maxPongMs, performance.now() - start); resolvePromise(); });
+        const timer = setTimeout(() => reject(new Error("pong exceeded 2s")), 2000);
+        socket.once("pong", () => {
+          clearTimeout(timer);
+          answered.pong = performance.now() - start;
+          maxPongMs = Math.max(maxPongMs, answered.pong);
+          resolvePromise();
+        });
       });
       socket.ping();
       socket.send(JSON.stringify({ type: "heartbeat" }));
-      const [response] = await Promise.all([
-        fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) }), pong,
-      ]).catch((error: unknown) => { throw new Error(`HTTP/pong probe failed during inventory\n${failureContext(pass, start)}\n${output}`, { cause: error }); });
+      const http = fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) })
+        .then((response) => { answered.HTTP = performance.now() - start; return response; });
+      // Name each starved path with its own latency; a shared failure hides which one stalled.
+      const [response] = await Promise.all([http, pong]).catch((error: unknown) => {
+        const elapsed = Math.round(performance.now() - start);
+        const paths = (["HTTP", "pong"] as const).map((path) => answered[path] === undefined
+          ? `${path} unanswered after ${elapsed}ms` : `${path} answered in ${Math.round(answered[path])}ms`);
+        const starved = (["HTTP", "pong"] as const).filter((path) => answered[path] === undefined).join(" and ");
+        throw new Error(`${starved} probe starved during inventory (${paths.join(", ")})\n${failureContext(pass, start)}\n${output}`,
+          { cause: error });
+      });
       assert.equal(response.status, 200);
       maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
     };
@@ -313,6 +328,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     }
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${failureContext(pass, convergenceStarted)}\n${output}`);
+    maxConvergenceMs = Math.max(maxConvergenceMs, performance.now() - convergenceStarted);
     if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
   }
   // Shell output bypasses the runner outbox and legitimately exceeds the queue's byte ceiling
@@ -335,7 +351,7 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
     `the bounded shell tail did not reach the end of the burst\n${output}`);
   assert.ok(maxHealthMs < 2000, `health latency ${maxHealthMs}ms`);
   assert.ok(maxPongMs < 2000, `heartbeat latency ${maxPongMs}ms`);
-  t.diagnostic(`Three registrations: max handshake ${Math.round(maxHandshakeMs)}ms, max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms`);
+  t.diagnostic(`Three registrations: max handshake ${Math.round(maxHandshakeMs)}ms, max HTTP ${Math.round(maxHealthMs)}ms, max pong ${Math.round(maxPongMs)}ms, max convergence ${Math.round(maxConvergenceMs)}ms`);
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
@@ -480,6 +496,52 @@ function waitForClose(socket: StrictSocket, timeoutMs = 5_000): Promise<{ code: 
   });
 }
 
+// Upgrades a raw TCP socket to /runner, sends only the header of a masked binary frame declaring
+// `payloadBytes`, and returns the code of the close frame the server sent before dropping it.
+async function closeCodeForDeclaredFrame(port: number, payloadBytes: number, timeoutMs = 5_000): Promise<number> {
+  const key = randomBytes(16).toString("base64");
+  const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+  const socket = connect(port, "127.0.0.1");
+  try {
+    const received = await new Promise<Buffer>((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for the server to drop the socket")), timeoutMs);
+      let buffered = Buffer.alloc(0);
+      let upgraded = false;
+      socket.on("data", (chunk: Buffer) => {
+        buffered = Buffer.concat([buffered, chunk]);
+        if (upgraded) return;
+        const end = buffered.indexOf("\r\n\r\n");
+        if (end < 0) return;
+        const head = buffered.subarray(0, end).toString("latin1");
+        if (!head.startsWith("HTTP/1.1 101 ") || !head.includes(`\r\nSec-WebSocket-Accept: ${accept}`)) {
+          reject(new Error(`unexpected upgrade response\n${head}`));
+          return;
+        }
+        upgraded = true;
+        buffered = buffered.subarray(end + 4);
+        const header = Buffer.alloc(14);
+        header[0] = 0x82; // FIN, binary
+        header[1] = 0x80 | 127; // masked, 64-bit length
+        header.writeBigUInt64BE(BigInt(payloadBytes), 2);
+        randomBytes(4).copy(header, 10); // masking key; no payload follows
+        socket.write(header);
+      });
+      socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      socket.once("close", () => {
+        clearTimeout(timer);
+        if (upgraded) resolvePromise(buffered);
+        else reject(new Error("socket closed before the upgrade completed"));
+      });
+      socket.write(`GET /runner HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    });
+    assert.ok(received.length >= 4 && received[0] === 0x88, `expected a close frame, received ${received.toString("hex")}`);
+    return received.readUInt16BE(2);
+  } finally {
+    socket.destroy();
+  }
+}
+
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
@@ -575,12 +637,13 @@ test("the real /runner route bounds unauthenticated sockets and payloads", { tim
   sockets.clear();
   await delay(100);
 
-  const oversized = await openSocket(runnerUrl);
-  sockets.add(oversized);
-  const oversizedClosed = waitForClose(oversized);
-  oversized.send(Buffer.alloc(MAX_RUNNER_CLIENT_MESSAGE_BYTES + 1));
-  assert.equal((await oversizedClosed).code, 1009, "ws rejects an oversized frame while assembling it");
-  sockets.delete(oversized);
+  // ws rejects an oversized frame from its header and queues a 1009 close, then @fastify/websocket's
+  // default error handler terminates the socket. Streaming the real payload left unread bytes in the
+  // server's receive buffer, so that terminate could reset the connection and discard the close
+  // frame (#3774: 1006, not 1009). Declaring the length without sending a payload byte makes the drop
+  // a clean FIN behind the close frame, and a 1009 then proves the declared length alone was refused.
+  assert.equal(await closeCodeForDeclaredFrame(port, MAX_RUNNER_CLIENT_MESSAGE_BYTES + 1), 1009,
+    "ws rejects an oversized frame from its declared length");
 
   const idle = await openSocket(runnerUrl);
   sockets.add(idle);

@@ -39,6 +39,29 @@ active participant synchronize? Workflow audit plus `campaign_issue_scope_approv
 `campaign_issue_scope_synchronized`, and `campaign_issue_scope_sync_pending` answer these with session,
 occurrence, and revision identifiers, without logging prompts, credentials, or issue bodies.
 
+## GitLab Repositories
+
+Protocol v249 (`gitlabCampaignIssues`, #3539) extends issue scope and issue closure to a GitLab origin.
+The campaign repository is the host-qualified project in lower case, `<host>/group[/subgroup…]/project`,
+and the runner reads it with the session's own `glab` login, always naming the host. The control plane
+refuses GitLab scope inspection, proposals, approval and closure while any participating Orchestrator
+runner is older than v249.
+
+- **Epics are checklists.** A GitLab umbrella is an ordinary issue of the same project; its members are
+  the leading checklist entries under the named member headings, written as `#N` or as
+  `http(s)://<host>/<project>/-/issues/N` of the same project. GitLab epics, issue links and work-item
+  children are never read, so GitLab candidates have no `sub_issue` source.
+- **Closure evidence.** Open merge requests of the project that GitLab relates to the issue, that close
+  it on merge, or that mention it (`#N` or the issue address) are conflict evidence. Any list that
+  reaches its 100-row read is a refusal. Delivery proof requires each merge request merged at the
+  verified head into the default branch, with its merge (or squash) commit contained in that branch.
+- **Closing.** A `completed` closure posts the supplied comment as a note, if any, then closes the
+  issue. A `not_planned` closure first posts `Closed as not planned: <explanation>`, followed by the
+  comment when one was supplied, then closes the issue; the decision still records `not_planned`.
+  Neither mutation is retried; a failure after either is reported as uncertain.
+- **Publication stays GitHub-only.** Follow-up issue publication refuses a GitLab repository with
+  "Campaign issue publication supports GitHub repositories only".
+
 ## Bounded Full Control Issue Authority
 
 The authenticated human admission may additionally establish `control.boundary.issueAuthority`:
@@ -69,6 +92,25 @@ proof, produces a human-owned exact decision instead of silently authorizing an 
 Scope proposals carry `lineage: {kind: "epic", epic}` for freshly inspected native/checklist members
 of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
 published issue. Dependencies, incidental references and cross-repository links remain excluded.
+A follow-up publication is either a bounded grant, which carries its own `issueAdmission`, or one a
+person approved as a human-owned decision. The second kind counts only when that person's recorded
+approval of the exact payload names the boundary's author or a campaign owner: the root session's
+owning user, a member of its owning team or, for an organization-owned campaign, an active owner or
+admin of that organization. It must also be tied to the current objective: either it was made at or
+after the current boundary's `authorizedAt`, or the boundary the server recorded with that approval
+(its author and objective digest, written into the resolving audit, never taken from a request)
+matches the current boundary's, so a Human scope approval that re-mints the boundary with the same
+author and objective keeps it valid. A changed objective or author, or an approval from before this
+record existed that precedes the current authorization, is refused as
+`publication_approved_under_earlier_boundary` and leaves the change to fresh human scope review.
+Such a publication carries no recommendation claim, so the server binds
+it to the one accepted, non-duplicate recommendation in this campaign that records the published
+issue as its result and has the payload's title subject. Every other check applies to both kinds:
+consumed, controlled by the root, in its repository, never used to admit an issue before, origins
+still in scope, published payload matching exactly, and scope plus reservations within `maxIssues`.
+The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
+and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
+`lineage_missing`. A campaign owner can still propose any change from Campaign Status.
 The server binds lineage evidence, rationale, expected revision, affected assignments, active
 children and outstanding grants into the snapshot. Root standing authorization resolves and
 consumes that exact occurrence atomically; all incompatible grants and evidence receipts are revoked
@@ -79,7 +121,14 @@ establishes new human provenance and invalidates an older Full Control boundary.
 
 For related publication, record and adjudicate a unique recommendation with authorized origin work
 items. Submit its `recommendationId` with the exact sanitized repository/title/body/labels through
-the usual workflow request. The server verifies accepted lineage and scope capacity; the runner
+the usual workflow request. The root or a member whose gates the root controls, usually the child
+that drafted it, may request it; inspection and consumption run as the root. Titles compare without
+one leading issue-form type tag such as `[Bug]: `, and the duplicate search uses that subject, so
+an older untagged issue is still found. Every bounded publication is admitted and consumed only
+through a runner that reports this subject search and comparison. The server verifies accepted lineage and scope
+capacity. When it cannot admit the request, the decision goes to the person, and its
+`authorityEvaluation.admissionFailure` names the failed condition (for example `title_mismatch`,
+`capacity_exhausted` or `inspection_failed`), which the server also logs. The runner
 screens public content against the issue-reporting format and inspects both open and closed search
 results plus the newest issues. Incomplete or duplicate evidence refuses admission. This supplements
 the exact payload review; it never rewrites content or proves arbitrary prose is free of private data.
@@ -107,6 +156,12 @@ branch and containment of every merge commit there. An enqueued PR, a reported s
 stale forge fact, feature-branch merge or open related PR refuses closure. Not-planned closure requires
 a recorded cancellation/scope-removal rationale with no active attempt; an optional rejected/duplicate
 recommendation must reference the affected work. Both reasons must be in the human-established contract.
+A delegated closure is still created `pending`: the root approves it itself with
+`resolve_descendant_workflow_decision` and its own session ID (the server rechecks the standing
+authorization there), then executes it with `close_github_issue`. Executing it while pending refuses
+with that exact step; a pending human-owned closure refuses with a statement that a person must
+approve it. Approval at creation was considered and rejected, because it would bypass the
+resolution-time authority recheck and start the 30-minute expiry before the root acts.
 Existing issue/PR inspection, audience, assignment digests, exact snapshot, expiry, scope synchronization,
 guardrails, durable dispatch fence and uncertain-result reconciliation continue to apply. Changed
 delivery/disposition invalidates execution. Inspect uncertain outcomes; never replay a close or comment.

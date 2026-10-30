@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PERSONAL_ORGANIZATION_ID,
   PROTOCOL_VERSION,
+  isProviderHomeRecoveryCause,
   type AddBoxRequest,
   type BoxView,
   type ControlPlaneToUi,
@@ -15,7 +16,7 @@ import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { RunnersView } from "../components/RunnersView.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import type { MachineAccountsIntent, View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
@@ -164,11 +165,15 @@ if (signInFixture && runner.providerAccounts) {
       operationId: "login_fixture_duplicate", accountId: "work-2-1a2b3c4d", label: emailLabels ? "work.two@example.com" : "Work 2",
       provider: "claude", status: "failed", startedAt: Date.now(),
       error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+      failureCode: "account_already_on_machine",
     },
   ];
 }
 // Provider profiles (#3239): one account in each access state, and Codex Solo left a legacy HOME.
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
+  // A Windows runner refuses every adoption, so the Machine that adopts is a Linux one (#3240).
+  runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
   const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
   for (const account of runner.providerAccounts) {
     const state = access[account.id as keyof typeof access];
@@ -181,6 +186,13 @@ const leases: Record<string, ProviderHomeLeaseInspection> = new URLSearchParams(
   "claude-personal": { state: "stale", tipHash: "c".repeat(64), createdAt: "2026-10-14T16:20:00.000Z", sameHost: true, hasEvidence: false, refusal: null },
   "codex-team": { state: "stale", tipHash: "d".repeat(64), createdAt: "2026-10-18T09:05:00.000Z", sameHost: true, hasEvidence: false, refusal: "NO_REBOOT_PROOF" },
 } : {};
+const recoveryCause = new URLSearchParams(window.location.search).get("lease-cause");
+if (isProviderHomeRecoveryCause(recoveryCause) && leases["codex-team"]) {
+  Object.assign(leases["codex-team"], {
+    cause: recoveryCause,
+    blockingProcess: { pid: 4242, startTime: "987654", kind: "uninspectable", cgroupMembership: "unavailable" },
+  });
+}
 // A Windows runner answers no lease inspection, so the lease scenario is a Linux Machine.
 if (Object.keys(leases).length && runner) {
   runner.os = "linux";
@@ -264,7 +276,10 @@ if (fixtureParams.get("workspaces") === "long" && runner) {
     { id: "notes", name: "Research Notes With a Long Name for a Narrow Row", path: "D:\\archive\\2026\\research\\notes" },
   );
 }
-/** `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989). */
+/**
+ * `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989).
+ * `skills=long` adds a name that fits a phone row once the agent gives way, and one that never fits (#3526).
+ */
 const skillsScenario = fixtureParams.get("skills");
 let skillsFailures = skillsScenario === "fail" ? 1 : 0;
 /**
@@ -288,6 +303,9 @@ if (sshState && runner) {
 let failingSettingsSave: "capacity" | null = null;
 /** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */
 const busyMachine = fixtureParams.has("busy");
+/** `reconnect=hold` leaves Reconnect's request unanswered; `reconnect=fail` never reaches the server (#3525). */
+const reconnectOutcome = fixtureParams.get("reconnect");
+let reconnectRequests = 0;
 const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
   activeSessions: [
     { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
@@ -357,8 +375,16 @@ const connection: UiConnectionRuntime = {
 
 // `machine=<runnerId>` opens that machine's route, as a link or a reload does (#2985).
 const initialMachine = fixtureParams.get("machine");
+// Set Up Managed Profile and Recover Existing Profile from a refused session (#3240), with
+// `accounts=add-<provider>` or `accounts=recover-<accountId>`: the intent the session notice sends.
+const accountsParam = fixtureParams.get("accounts");
+const accountsIntent: MachineAccountsIntent | undefined = accountsParam?.startsWith("add-")
+  ? { kind: "add_account", provider: accountsParam.slice(4) === "codex" ? "codex" : "claude", activationId: 1 }
+  : accountsParam?.startsWith("recover-")
+    ? { kind: "recover_profile", accountId: accountsParam.slice(8), activationId: 1 }
+    : undefined;
 const initialView: View = initialMachine
-  ? { name: "runners", section: "machines", machineId: initialMachine }
+  ? { name: "runners", section: "machines", machineId: initialMachine, ...(accountsIntent ? { accounts: accountsIntent } : {}) }
   : { name: "runners", section: "machines" };
 const navigation: ViewNavigation = {
   current: () => initialView,
@@ -372,7 +398,11 @@ const skillsReport = () => ({
   desired: [],
   reported: {
     unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog",
-      providerAccountId: "claude-work" }],
+      providerAccountId: "claude-work" },
+    ...(skillsScenario === "long" ? [
+      { agentId: "custom-acp", name: "design-review", providerAccountId: "claude-work" },
+      { agentId: "custom-acp", name: "frontend-design-review-for-every-storefront-page", providerAccountId: "claude-work" },
+    ] : [])],
     removals: [
       { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
       { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
@@ -594,6 +624,13 @@ const client = {
     if (!login) throw new Error("login not found");
     const completed = { ...login, status: "succeeded" as const, expectsCode: false };
     runner.providerLogins = [completed];
+    // The runner records a new account when its sign-in succeeds; Add Account's is a managed profile.
+    if (!runner.providerAccounts?.some((account) => account.id === login.accountId)) {
+      runner.providerAccounts = [...(runner.providerAccounts ?? []), {
+        id: login.accountId, label: login.label, provider: login.provider, authStatus: "authenticated",
+        profile: { id: `profile-${login.accountId}`, access: "granted" },
+      }];
+    }
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: completed };
   },
@@ -670,6 +707,9 @@ const client = {
   rediscover: async () => ({ ok: true as const }),
   reconnectBox: async (_boxId: string, force = false) => {
     if (busyMachine && !force) throw activeSessionsConflict();
+    reconnectRequests += 1;
+    if (reconnectOutcome === "fail") throw new TypeError("Failed to fetch");
+    if (reconnectOutcome === "hold") await new Promise(() => {});
     return { ok: true as const };
   },
   updateBoxRunner: async (_boxId: string, force = false) => {
@@ -688,12 +728,14 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
+      /** How many Reconnect requests reached the fixture's API (#3525). */
+      reconnectRequests(): number;
       /** status 0 is a request that never reached the server (the browser's TypeError). */
       setAddBoxOutcome(outcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" }): void;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
-        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" |
+        "explicit-interpreter" | "older-interpreter-guidance" | "agent-states" | "ownership-before" | "ownership-blocked" |
         "selected-installation-unavailable" | "ssh-installations"): void;
       /** Fails every save of this Machine Settings field until called with null (#2991). */
       setSettingsSaveFailure(field: "capacity" | null): void;
@@ -710,10 +752,30 @@ declare global {
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
+  reconnectRequests: () => reconnectRequests,
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },
   setAgentAvailabilityScenario: (scenario) => {
     if (!runner) return;
-    if (scenario === "legacy-unverified") {
+    if (scenario === "ownership-before" || scenario === "ownership-blocked") {
+      runner.os = "linux";
+      const before = scenario === "ownership-before";
+      const failure = { code: "probe_failed" as const, retryable: true,
+        message: "Provider HOME ownership blocked discovery. The previous provider process cannot be inspected safely. Preserve the lease and retry after the previous owner exits." };
+      runner.harnessSelections = [];
+      runner.agents = [
+        { id: "claude", name: "Claude Code", command: "/opt/claude", args: [], env: {}, available: false,
+          driver: "claude-code", context: { kind: "native" }, source: "discovered", unavailableReason: failure.message,
+          installation: { id: "claude", path: "/opt/claude", via: "path", selection: "selected" },
+          claudeCode: { status: before ? "unavailable" : "unsupported", failure: before ? { code: "claude_unavailable", message: "Claude Code was not found." } : failure,
+            effortLevels: [], permissionModes: [], streamJsonInput: false, streamJsonImages: false,
+            controlProtocol: false, forkSession: false, replayUserMessages: false, auth: { status: "unknown", billingSource: "unknown" } } },
+        { id: "codex", name: "Codex App Server", command: "/opt/codex", args: [], env: {}, available: false,
+          driver: "codex-app-server", context: { kind: "native" }, source: "discovered", unavailableReason: failure.message,
+          installation: { id: "codex", path: "/opt/codex", via: "path", selection: "selected" },
+          codexAppServer: { status: before ? "unavailable" : "unsupported", appServerAvailable: false,
+            failure: before ? { code: "codex_unavailable", message: "Codex was not found." } : failure } },
+      ];
+    } else if (scenario === "legacy-unverified") {
       runner.protocolVersion = 153;
       runner.agents = [{
         id: "legacy-acp",

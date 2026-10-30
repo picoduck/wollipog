@@ -67,15 +67,18 @@ test("an executable is npm-owned only when its exact launch resolves inside the 
 test("built-in update support is probed on the exact discovered launch", async () => {
   const binary = { path: "/first/codex", via: "path" as const,
     launch: { command: "/first/node", args: ["/first/codex.js"] } };
-  const observed: Array<{ command: string; args: string[]; timeoutMs: number | undefined }> = [];
-  const execute = async (command: string, args: string[], options: { timeoutMs?: number } = {}) => {
-    observed.push({ command, args, timeoutMs: options.timeoutMs });
+  const observed: Array<{ command: string; args: string[]; timeoutMs: number | undefined; tracked: boolean | undefined }> = [];
+  const execute: typeof import("./resolve.js").run = async (command, args, options = {}) => {
+    observed.push({ command, args, timeoutMs: options.timeoutMs, tracked: options.trackDescendants });
+    options.onProcess?.(Promise.resolve(false));
     return result("Commands:\n  update  Update Codex to the latest version\n");
   };
-  assert.equal(await codexOffersSelfUpdate(binary, { kind: "native" }, execute), true);
-  assert.deepEqual(observed.pop(), { command: "/first/node", args: ["/first/codex.js", "--help"], timeoutMs: 3000 });
+  const proofs: Promise<boolean>[] = [];
+  assert.equal(await codexOffersSelfUpdate(binary, { kind: "native" }, execute, { onProcess: (proof) => proofs.push(proof) }), true);
+  assert.deepEqual(await Promise.all(proofs), [false], "an unproven tree reaches the owning discovery reference");
+  assert.deepEqual(observed.pop(), { command: "/first/node", args: ["/first/codex.js", "--help"], timeoutMs: 3000, tracked: true });
   assert.equal(await codexOffersSelfUpdate(binary, { kind: "wsl", distro: "Ubuntu" }, execute), true);
-  assert.deepEqual(observed.pop(), { command: "wsl.exe", args: ["-d", "Ubuntu", "--exec", "/first/node", "/first/codex.js", "--help"], timeoutMs: 8000 });
+  assert.deepEqual(observed.pop(), { command: "wsl.exe", args: ["-d", "Ubuntu", "--exec", "/first/node", "/first/codex.js", "--help"], timeoutMs: 8000, tracked: undefined });
   assert.equal(await codexOffersSelfUpdate(binary, { kind: "native" }, async () => result("unknown command")), false);
 });
 

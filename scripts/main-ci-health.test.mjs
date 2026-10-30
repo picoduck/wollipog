@@ -1,13 +1,58 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import test from "node:test";
 import {
-  ALERT_LABEL, ALERT_TITLE, alertBody, decide, githubApi, latestDecisiveRun, reconcile, REQUEST_MS, targetFromEvent,
+  ALERT_LABEL, ALERT_TITLE, alertBody, budgetApi, githubApi, reconcile as reconcileActual, REQUEST_MS, targetFromEvent,
+  API_BUDGET, API_MAX_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
 } from "./main-ci-health.mjs";
 
 const repository = "example/project";
 const sha = "a".repeat(40);
 const otherSha = "b".repeat(40);
+
+test("actual CLI settles its worker back-import and emits bounded unknown evidence", () => {
+  const directory = mkdtempSync(join(tmpdir(), "main-health-cli-"));
+  // Exercise the real entry point and module graph, with every network request
+  // intercepted. Imported main() tests cannot expose an entry-point TLA cycle.
+  const preload = `globalThis.fetch = async (url) => {
+    const path = new URL(url).pathname;
+    let status = 200, body;
+    if (path === "/rate_limit") body = {};
+    else if (path.endsWith("/issues")) body = [];
+    else if (path.endsWith("/git/ref/heads/ci/main-health-state")) { status = 404; body = {}; }
+    else if (path.endsWith("/git/ref/heads/main")) { status = 503; body = {}; }
+    else if (path.endsWith("/git/trees") || path.endsWith("/git/commits")) body = { sha: "${otherSha}" };
+    else if (path === "/repos/${repository}") body = { node_id: "repo" };
+    else if (path === "/graphql") body = { data: { updateRefs: {} } };
+    else throw new Error("Unexpected fixture request");
+    return new Response(JSON.stringify(body), { status, headers: {
+      "x-ratelimit-limit": "1000", "x-ratelimit-remaining": "900" } });
+  };`;
+  try {
+    for (const mode of ["report", "reconcile"]) {
+      const output = join(directory, mode + ".json");
+      const child = spawnSync(process.execPath, ["--import", "data:text/javascript," + encodeURIComponent(preload),
+        new URL("./main-ci-health.mjs", import.meta.url).pathname, mode], {
+        encoding: "utf8", timeout: 10_000,
+        env: { ...process.env, GITHUB_REPOSITORY: repository, GITHUB_REF: "refs/heads/main",
+          GITHUB_TOKEN: "test-token", GITHUB_EVENT_NAME: "schedule", MAIN_CI_HEALTH_OUTPUT: output },
+      });
+      assert.ifError(child.error); assert.equal(child.signal, null);
+      assert.equal(child.status, mode === "report" ? 1 : 0, child.stderr);
+      assert.doesNotMatch(child.stderr, /unsettled top-level await/);
+      const health = JSON.parse(mode === "report" ? child.stdout : readFileSync(output, "utf8"));
+      assert.equal(health.status, "unknown"); assert.equal(health.fullCertification, null);
+      assert.deepEqual(health.reasons, ["forge-api-unavailable"]);
+      const usage = (child.stdout + child.stderr).split("\n").filter(Boolean)
+        .filter((line) => line.startsWith("{")).map((line) => JSON.parse(line))
+        .find((entry) => entry.event === "main_ci_health_api_usage");
+      assert.ok(usage); assert.ok(usage.calls <= API_BUDGET); assert.equal(usage.rateLimit, 1000);
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 const ciRun = (overrides = {}) => ({
   id: 123, run_attempt: 1, status: "completed", conclusion: "failure", event: "push",
   path: ".github/workflows/ci.yml", head_branch: "main", head_sha: sha,
@@ -16,6 +61,16 @@ const ciRun = (overrides = {}) => ({
   ...overrides,
 });
 const event = (overrides = {}) => ({ action: "completed", workflow_run: ciRun(overrides) });
+// These fixtures isolate issue transport from forge observation (covered separately).
+const reconcile = (target, options) => reconcileActual(target, { ...options, persist: false,
+  collect: async () => {
+    const run = (await options.api(`/repos/${repository}/actions/workflows/ci.yml/runs?fixture`)).workflow_runs[0];
+    const record = run && { runId: run.id, attempt: 1, testedSha: run.head_sha, url: run.html_url,
+      certification: run.conclusion === "success" ? "full" : "none",
+      inventory: (await options.api(`/repos/${repository}/actions/runs/${run.id}/jobs?fixture`)).jobs };
+    return { status: run?.conclusion === "success" ? "passing" : "failing", evidence: record ? [record] : [], legacyEvidence: [], resolvedRunIds: [123],
+      unresolvedFailures: run?.conclusion === "failure" ? [record] : [], latestPassingSnapshot: run?.conclusion === "success" ? record : null };
+  } });
 const alert = (latest = 123, overrides = {}) => ({
   number: 7, state: "open", title: ALERT_TITLE, labels: [{ name: ALERT_LABEL }],
   user: { login: "github-actions[bot]", type: "Bot" },
@@ -48,36 +103,8 @@ test("only a completed same-repository CI run for a main push is eligible", () =
     { path: ".github/workflows/platform-isolation.yml" }, { repository: { full_name: "other/repo" } },
     { head_repository: { full_name: "fork/repo" } }, { head_sha: "bad" },
   ]) assert.throws(() => targetFromEvent(event(changes), repository));
-  assert.throws(() => targetFromEvent({ ...event(), action: "in_progress" }, repository));
+  assert.deepEqual(targetFromEvent({ ...event(), action: "in_progress" }, repository), { repository });
   assert.throws(() => targetFromEvent(event(), "not a repository"));
-});
-
-test("the latest decisive run decides, skipping cancelled and other non-verdict runs", () => {
-  const runs = [
-    ciRun({ id: 130, conclusion: "cancelled" }),
-    ciRun({ id: 129, conclusion: "skipped" }),
-    ciRun({ id: 128, conclusion: "success", head_sha: otherSha }),
-    ciRun({ id: 127, conclusion: "failure" }),
-  ];
-  assert.equal(latestDecisiveRun({ workflow_runs: runs }, repository)?.id, 128);
-  assert.equal(latestDecisiveRun({ workflow_runs: runs.slice(0, 2) }, repository), null, "no verdict, no decision");
-  for (const conclusion of ["failure", "timed_out", "startup_failure"])
-    assert.equal(latestDecisiveRun({ workflow_runs: [ciRun({ conclusion })] }, repository)?.conclusion, conclusion);
-  // A run that is not this repository's main push CI never decides, even when listed first.
-  assert.equal(latestDecisiveRun({ workflow_runs: [ciRun({ id: 140, event: "pull_request" }), ciRun({ id: 1, conclusion: "success" })] }, repository)?.id, 1);
-  assert.equal(latestDecisiveRun({ workflow_runs: [ciRun({ html_url: "https://evil.example/runs/123" })] }, repository), null);
-  assert.equal(latestDecisiveRun(null, repository), null);
-});
-
-test("a red main opens one alert, a new red run comments once, and a green main closes it", () => {
-  const red = ciRun();
-  const green = ciRun({ id: 200, conclusion: "success" });
-  assert.deepEqual(decide(red, null), { action: "open" });
-  assert.deepEqual(decide(red, alert(123)), { action: "none", reason: "already-reported" });
-  assert.deepEqual(decide(ciRun({ id: 150 }), alert(123)), { action: "update" });
-  assert.deepEqual(decide(green, alert(123)), { action: "close" });
-  assert.deepEqual(decide(green, null), { action: "none", reason: "main-green" });
-  assert.deepEqual(decide(null, alert(123)), { action: "none", reason: "no-decisive-run" });
 });
 
 test("the alert names the run, the commit, the failing jobs and what to do, and records the latest run", () => {
@@ -180,9 +207,126 @@ test("the transport is bounded, refuses redirects and never echoes the token or 
   assert.ok(REQUEST_MS <= 10_000);
 });
 
-test("the workflow runs trusted default-branch code on main push CI only, serialized, with issue access", () => {
+test("the invocation budget includes failed and concurrent requests and reserves writes", async () => {
+  let calls = 0;
+  const api = budgetApi(async () => { calls++; throw new Error("upstream failed"); });
+  const outcomes = await Promise.allSettled(Array.from({ length: 100 }, () => api("/test")));
+  assert.equal(calls, API_BUDGET - API_WRITE_RESERVE);
+  assert.ok(outcomes.every((outcome) => outcome.status === "rejected"));
+  api.beginWrites();
+  await assert.rejects(api("/test", { method: "POST" }), /api-budget-exhausted/);
+  assert.equal(calls, API_BUDGET - API_WRITE_RESERVE, "an exhausted observation cannot unlock mutations");
+
+  let successful = 0;
+  const writes = budgetApi(async () => { successful++; });
+  await Promise.all(Array.from({ length: API_BUDGET - API_WRITE_RESERVE }, () => writes("/read")));
+  writes.beginWrites();
+  await Promise.all(Array.from({ length: API_WRITE_RESERVE }, () => writes("/write", { method: "POST" })));
+  await assert.rejects(writes("/overflow"), /api-budget-exhausted/);
+  assert.equal(successful, API_BUDGET);
+});
+
+test("quota headers retain counts only and stop further calls at the reserved floor", async () => {
+  let calls = 0;
+  const transport = githubApi("secret-token", async () => {
+    calls++;
+    return { ok: true, status: 200, headers: new Headers({
+      "x-ratelimit-limit": "1000", "x-ratelimit-remaining": String(API_REMAINING_FLOOR),
+      "x-ratelimit-reset": "private-reset", authorization: "secret-token",
+    }), json: async () => ({}) };
+  });
+  const api = budgetApi(transport, { requireHeaders: true });
+  await api("/initial-read");
+  await assert.rejects(api("/write", { method: "POST" }), /api-quota-reserved/);
+  assert.equal(calls, 1);
+  assert.equal(api.budget.rateLimit, 1000);
+  assert.equal(api.budget.rateRemaining, API_REMAINING_FLOOR);
+  assert.doesNotMatch(JSON.stringify(api.budget), /secret-token|private-reset/);
+  const absent = budgetApi(githubApi("secret", async () => ({ ok: true, status: 200, json: async () => ({}) })), { requireHeaders: true });
+  await assert.rejects(absent("/missing-headers"), /rate-limit-unavailable/);
+  let deniedCalls = 0;
+  const denied = budgetApi(async () => {
+    deniedCalls++; const error = new Error("private response"); error.status = 429; throw error;
+  });
+  await assert.rejects(denied("/secondary-limit"), /api-rate-limited/);
+  denied.beginWrites();
+  await assert.rejects(denied("/never-retry", { method: "POST" }), /api-rate-limited/);
+  assert.equal(deniedCalls, 1);
+});
+
+test("the shared REST quota floor does not mix in the separate GraphQL bucket", async () => {
+  let calls = 0;
+  const transport = githubApi("test", async (url) => {
+    calls++; const graphql = new URL(url).pathname === "/graphql";
+    return { ok: true, status: 200, headers: new Headers({
+      "x-ratelimit-limit": graphql ? "5000" : "1000", "x-ratelimit-remaining": graphql ? "550" : "900",
+    }), json: async () => ({}) };
+  });
+  const api = budgetApi(transport, { requireHeaders: true });
+  await api("/rate_limit"); api.beginWrites();
+  await api("/graphql", { method: "POST" });
+  await api("/repos/example/project/issues", { method: "POST" });
+  assert.equal(calls, 3); assert.equal(api.budget.rateLimit, 1000); assert.equal(api.budget.rateRemaining, 900);
+  assert.equal(api.budget.graphqlLimit, 5000); assert.equal(api.budget.graphqlRemaining, 550);
+  assert.equal(api.budget.reason, null);
+});
+
+test("runtime REST limits size bounded observations while preserving shared headroom", async () => {
+  for (const [limit, remaining, cap, floor] of [[500, 500, 24, 600], [1000, 900, 48, 600],
+    [1500, 1400, 72, 900], [2000, 1900, 96, 1200], [5000, 4800, 96, 3000], [15000, 14000, 96, 9000]]) {
+    const transport = githubApi("test", async () => ({ ok: true, status: 200,
+      headers: new Headers({ "x-ratelimit-limit": String(limit), "x-ratelimit-remaining": String(remaining) }),
+      json: async () => ({}) }));
+    const api = budgetApi(transport, { requireHeaders: true });
+    if (remaining < floor) await assert.rejects(api("/rate_limit"), /api-quota-reserved/);
+    else {
+      await api("/rate_limit");
+      for (let i = 1; i < cap - API_WRITE_RESERVE; i++) await api("/read");
+      await assert.rejects(api("/overflow"), /api-budget-exhausted/);
+      api.beginWrites();
+      await assert.rejects(api("/cannot-unlock", { method: "POST" }), /api-budget-exhausted/);
+    }
+    assert.equal(api.budget.limit, cap); assert.ok(cap <= API_MAX_BUDGET);
+    assert.equal(api.budget.remainingFloor, floor);
+    assert.equal(api.budget.mutationCalls, 0);
+    assert.equal(api.budget.calls, api.budget.readCalls);
+    const recovery = budgetApi(transport, { limit: RECOVERY_API_BUDGET, reserve: 0 });
+    await recovery("/read").catch(() => {});
+    assert.equal(recovery.budget.limit, RECOVERY_API_BUDGET, "nested recovery never scales up");
+  }
+});
+
+test("missing, invalid or changing quotas cannot enlarge a budget or permit mutations", async () => {
+  for (const quotas of [[null], [["0", "0"]], [["5000", "5001"]], [["5000", "4800"], ["1000", "900"]],
+    [["5000", "4800"], ["5000", "5001"]],
+    [["5000", "4800"], null], [["5000", "4800"], ["5000", "2999"]]]) {
+    let calls = 0;
+    const transport = githubApi("test", async () => {
+      const pair = quotas[Math.min(calls++, quotas.length - 1)];
+      return { ok: true, status: 200, headers: new Headers(pair ? {
+        "x-ratelimit-limit": pair[0], "x-ratelimit-remaining": pair[1] } : {}), json: async () => ({}) };
+    });
+    const api = budgetApi(transport, { requireHeaders: true });
+    if (quotas.length > 1) await api("/rate_limit");
+    await assert.rejects(api("/read"), /rate-limit-unavailable|api-quota-reserved/);
+    api.beginWrites();
+    await assert.rejects(api("/never-write", { method: "POST" }), /rate-limit-unavailable|api-quota-reserved/);
+    assert.equal(calls, quotas.length); assert.equal(api.budget.mutationCalls, 0);
+  }
+  const missingGraphql = budgetApi(githubApi("test", async (url) => ({ ok: true, status: 200,
+    headers: new Headers(new URL(url).pathname === "/graphql" ? {} : {
+      "x-ratelimit-limit": "5000", "x-ratelimit-remaining": "4800" }), json: async () => ({}) })), { requireHeaders: true });
+  await missingGraphql("/rate_limit"); missingGraphql.beginWrites();
+  await assert.rejects(missingGraphql("/graphql", { method: "POST" }), /rate-limit-unavailable/);
+  await assert.rejects(missingGraphql("/no-incident", { method: "POST" }), /rate-limit-unavailable/);
+  assert.equal(missingGraphql.budget.restCalls, 1); assert.equal(missingGraphql.budget.graphqlCalls, 1);
+});
+
+test("the workflow observes only main completions and scheduled/manual recovery, with trusted serialized writes", () => {
   const text = readFileSync(".github/workflows/main-ci-health.yml", "utf8");
-  assert.match(text, /workflows: \[CI\]\s+types: \[completed\]/);
+  assert.match(text, /workflows: \[CI, Main Rolling Validation\]\s+types: \[completed\]/);
+  assert.doesNotMatch(text, /\n {2}push:|in_progress/);
+  assert.match(text, /cron: '3,23,43 \* \* \* \*'/);
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha)|download-artifact|pull_request_target|pnpm install/);
@@ -190,7 +334,7 @@ test("the workflow runs trusted default-branch code on main push CI only, serial
   // level, a skipped pull-request invocation could replace a pending main reconciliation.
   assert.doesNotMatch(text, /^concurrency:/m);
   assert.match(text, /\n {4}concurrency:\n {6}group: main-ci-health\n {6}cancel-in-progress: false/);
-  assert.match(text, /contents: read\s+actions: read\s+issues: write/);
+  assert.match(text, /contents: write\s+actions: read\s+issues: write/);
   assert.match(text, /workflow_run.event == 'push'/);
   assert.match(text, /workflow_run.head_branch == 'main'/);
   assert.match(text, /node scripts\/main-ci-health.mjs/);

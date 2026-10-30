@@ -9,7 +9,8 @@ const shell = (path: string) => `/command-inbox-projects-e2e.html?fullShell=1&pa
 const DESTINATIONS = [
   // Sessions puts its group tabs in the header's tab slot (#2180).
   { path: "/inbox", title: "Sessions", tabs: true },
-  { path: "/automations", title: "Automations", description: true, max: 960 },
+  // Automations puts Automations and Outbound Events in the header's tab slot (#2969).
+  { path: "/automations", title: "Automations", description: true, tabs: true, max: 960 },
   { path: "/projects", title: "Projects", description: true },
   { path: "/runs", title: "Multi-Agent Runs", description: true, max: 960 },
   { path: "/pods", title: "Pods", description: true, max: 960 },

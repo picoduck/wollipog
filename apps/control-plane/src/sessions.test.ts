@@ -5,6 +5,7 @@ import { test } from "node:test";
 import fc from "fast-check";
 import type {
   ControlPlaneToRunner,
+  CreateSessionRequest,
   DurableSessionCommand,
   GitSummaryInfo,
   PodContextEntry,
@@ -22,6 +23,7 @@ import type {
   SessionEventPayload,
   SessionStatus,
   OrchestratorSettingsView,
+  PendingApproval,
   SetSessionReminderRequest,
   SessionSnapshot,
   SessionView,
@@ -71,6 +73,7 @@ import {
   SESSION_STOP_TIMEOUT_MS,
   capabilityConfigError,
   canonicalPrMergeEnqueueCommand,
+  prMergeChangeRequestUrl,
   claudeModelConfigForValidation,
   defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
@@ -101,7 +104,11 @@ function assertRunnerRefusal(
 test("session refusals name no runner protocol numbers", () => {
   // docs/design-system.md §17.2: capability refusals use the shared runner sentence and return the
   // versions as `requiredRunnerProtocolVersion` and `runnerProtocolVersion` (#3219).
-  assert.doesNotMatch(readFileSync(new URL("./sessions.ts", import.meta.url), "utf8"), /protocol-v\d/);
+  // Matches `protocol-v218`, `protocol v218` (#3457) and an interpolated `protocol v${…}`; reports only
+  // the offending lines. The campaign authority and launch-check texts reach these refusals too (#3803).
+  for (const source of ["./sessions.ts", "./campaign-launch-admission.ts", "../../../packages/protocol/src/campaign-authority.ts"]) {
+    assert.deepEqual(readFileSync(new URL(source, import.meta.url), "utf8").match(/^.*protocol[- ]v(\d|\$\{).*$/gm) ?? [], [], source);
+  }
 });
 
 for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {
@@ -350,6 +357,7 @@ class FakeHub {
   runnerChangedCalls: string[] = [];
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
   requestHandler?: (msg: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult>;
+  githubMergePreflight?: (msg: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
   activeTurnIds = new Map<string, string>();
   queuedPrompts = new Map<string, QueuedPromptView[]>();
 
@@ -397,6 +405,13 @@ class FakeHub {
         historyEpoch: 0,
         eventSeq: 1,
       };
+    }
+    if (msg.type === "github_merge_preflight") {
+      // A pull request that closes no issue, unless a test answers otherwise (#3713).
+      return this.githubMergePreflight
+        ? await this.githubMergePreflight(msg)
+        : { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId,
+            ok: true, check: { checkedAt: 1, closures: [] } };
     }
     if (!this.requestHandler) throw new Error("runner did not respond in time");
     return await this.requestHandler(msg);
@@ -752,6 +767,7 @@ test("orchestrator separates default provider execution from the negotiated stri
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         execution: { strictProjectIsolation: true },
@@ -932,6 +948,7 @@ test("a fixed Child Harness admits the same harness under another Machine's agen
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -1010,6 +1027,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
             merged_branch_deletion: "human",
             follow_up_issue_publication: "human",
             ui_evidence_approval: "human",
+            review_round_extension: "human",
           },
         },
         execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -1482,6 +1500,7 @@ test("approved UI evidence and implementation-question decisions do not block ca
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     } as const;
     const created = svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
@@ -1616,6 +1635,27 @@ test("approved UI evidence and implementation-question decisions do not block ca
     const deletionVerified = verify(deletionChild);
     assert.ok(deletionVerified.ok, deletionVerified.error);
 
+    // A GitLab project in a nested namespace requests, reads, and consumes the same gate (#3601).
+    const gitlabChild = spawn();
+    const gitlabSnapshot = { ...deletionSnapshot, repository: "gitlab.example.com/group/subgroup/project", branch: "fix/gitlab" };
+    const gitlab = svc.createWorkflowDecision(gitlabChild, {
+      requestId: "gitlab-deletion", resourceKey: "gitlab-deletion", resourceSnapshot: gitlabSnapshot,
+    });
+    assert.ok(gitlab.ok && gitlab.data, gitlab.error);
+    approveAsHuman(gitlabChild, gitlab.data.occurrenceId, {});
+    assert.equal((svc.workflowDecision(gitlabChild, gitlab.data.occurrenceId).data?.resourceSnapshot as { repository?: string })
+      ?.repository, "gitlab.example.com/group/subgroup/project");
+    db.updateSessionStatus(gitlabChild, "running", Date.now());
+    const gitlabConsumed = await svc.consumeWorkflowDecision(gitlabChild, gitlab.data.occurrenceId,
+      { resourceSnapshot: gitlabSnapshot });
+    assert.ok(gitlabConsumed.ok, gitlabConsumed.error);
+    for (const repository of ["group/subgroup/project", "github.com/picoduck/wollipog", "gitlab.example.com/group/project.git"]) {
+      assert.equal(svc.createWorkflowDecision(gitlabChild, {
+        requestId: `refused-${repository}`, resourceKey: repository,
+        resourceSnapshot: { ...deletionSnapshot, repository },
+      }).status, 400, `${repository} is not a repository the gate accepts`);
+    }
+
     // A revoked grant is terminal too, whatever revoked it.
     const revokedChild = spawn();
     const revoked = svc.createWorkflowDecision(revokedChild, {
@@ -1647,6 +1687,7 @@ function stopAndArchiveCampaignFixture(completion: "retain" | "stop_and_archive"
     merged_branch_deletion: "human",
     follow_up_issue_publication: "human",
     ui_evidence_approval: "human",
+    review_round_extension: "human",
   } as const;
   const created = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
@@ -2297,7 +2338,7 @@ test("resolving a child's typed decision with resolve_descendant_workflow_decisi
   try {
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "human", pr_merge: "orchestrator", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+      follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
     }, 0).ok);
     const merge = svc.createWorkflowDecision(child.id, {
       requestId: "merge-1", resourceKey: "picoduck/wollipog#123", resourceSnapshot: {
@@ -3192,11 +3233,11 @@ for (const kind of ["session", "run", "workflow"] as const) {
     const { db, svc, hub, parent, create, requestId, approval, sessionRequest, children } = pendingSpawnFixture(kind);
     try {
       if (kind === "session") {
-        assert.equal(requestId, `spawn_${createHash("sha256").update(JSON.stringify({
+        assert.equal(requestId, `spawn_${createHash("sha256").update(canonicalAutomationCommandJson({
           request: sessionRequest,
           parentSessionId: parent.id,
           ordinal: 0,
-        })).digest("hex")}`, "the request fingerprint is unchanged");
+        })).digest("hex")}`, "the request fingerprint is the canonical form of the request");
       }
       const returnedAt = approval().lastPolledAt;
       assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
@@ -3222,6 +3263,203 @@ for (const kind of ["session", "run", "workflow"] as const) {
     } finally { db.close(); }
   });
 }
+
+/** One child request as a REST client orders it and as the MCP `create_session` tool orders it,
+ * with a nested object whose keys are reordered too. */
+function spawnRequestInTwoKeyOrders() {
+  const rest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt: "Build it",
+    useWorktree: false, title: "Requested Child", config: { model: "opus", effort: "high" } };
+  const tool = { config: { effort: "high", model: "opus" }, title: "Requested Child", runnerId: RUNNER_ID,
+    agentId: AGENT_ID, workspaceId: WORKSPACE_ID, prompt: "Build it", useWorktree: false };
+  assert.notEqual(JSON.stringify(rest), JSON.stringify(tool));
+  assert.deepEqual(rest, tool);
+  return { rest, tool };
+}
+
+test("a spawn approval is honored when the same request arrives with its keys in another order", () => {
+  const { db, svc, hub } = makeHarness();
+  try {
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "wollipog.create_session" },
+    }).ok);
+    const { rest, tool } = spawnRequestInTwoKeyOrders();
+    const create = (request: typeof rest) =>
+      svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+
+    const asked = create(rest);
+    assert.equal(asked.status, 428, asked.error);
+    const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
+    const reordered = create(tool);
+    assert.equal(reordered.status, 428, reordered.error);
+    assert.match(reordered.error!, new RegExp(`\\(request ${requestId}\\)`), "both orders name one approval");
+    assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+
+    const launched = hub.sentOfType("start_session").length;
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    const created = create(tool);
+    assert.ok(created.ok, created.error);
+    assert.equal(created.data!.parentSessionId, parent.id);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "exactly one child is created");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+    assert.equal(create(rest).status, 428, "the approval authorized one creation only");
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
+test("spawn approvals still separate requests that differ in any field or value", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    assert.ok(svc.upsertGovernancePolicy({
+      policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+      enabled: true, scope: { toolName: "wollipog.create_session" },
+    }).ok);
+    const { rest, tool } = spawnRequestInTwoKeyOrders();
+    const requestIdFor = (request: CreateSessionRequest) => {
+      const result = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      assert.equal(result.status, 428, result.error);
+      return /\(request (spawn_[0-9a-f]{64})\)/.exec(result.error!)![1]!;
+    };
+    const base = requestIdFor(rest);
+    assert.equal(requestIdFor(tool), base);
+    const variants: CreateSessionRequest[] = [
+      { ...tool, prompt: "Build something else" },
+      { ...tool, title: "Another Child" },
+      { ...tool, useWorktree: true },
+      { ...tool, config: { effort: "low", model: "opus" } },
+      { ...tool, config: { effort: "high", model: "opus", permissionMode: "plan" } },
+      { ...tool, images: [] },
+    ];
+    const ids = variants.map(requestIdFor);
+    assert.equal(new Set([base, ...ids]).size, variants.length + 1, "each different request gets its own fingerprint");
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+for (const outcome of ["rejected", "expired"] as const) {
+  test(`a ${outcome} spawn approval answers 403 for the same request in any key order`, () => {
+    const { db, svc } = makeHarness();
+    try {
+      const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+      db.updateSessionStatus(parent.id, "running", Date.now());
+      assert.ok(svc.upsertGovernancePolicy({
+        policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+        enabled: true, scope: { toolName: "wollipog.create_session" },
+      }).ok);
+      const { rest, tool } = spawnRequestInTwoKeyOrders();
+      const create = (request: typeof rest) =>
+        svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+      assert.equal(create(tool).status, 428);
+      const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
+      if (outcome === "rejected") assert.ok(svc.approve(parent.id, requestId, "deny").ok);
+      else {
+        const returnedAt = db.getPolicyHookApproval(parent.id, requestId)!.lastPolledAt;
+        assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + SPAWN_APPROVAL_ABANDONMENT_MS), 1);
+      }
+      for (const request of [rest, tool]) {
+        const refused = create(request);
+        assert.equal(refused.status, 403, refused.error);
+        assert.equal(refused.error, "child session creation was rejected or its approval expired");
+      }
+      assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    } finally { db.close(); }
+  });
+}
+
+/** A parent holding a spawn approval that an older control plane recorded for `rest`, keyed to
+ * that body's own key order. */
+function legacySpawnApprovalFixture() {
+  const harness = makeHarness();
+  const { db, svc } = harness;
+  const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+  db.updateSessionStatus(parent.id, "running", Date.now());
+  assert.ok(svc.upsertGovernancePolicy({
+    policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+    enabled: true, scope: { toolName: "wollipog.create_session" },
+  }).ok);
+  const { rest, tool } = spawnRequestInTwoKeyOrders();
+  const legacyFingerprint = createHash("sha256").update(JSON.stringify({
+    request: rest, parentSessionId: parent.id, ordinal: 0,
+  })).digest("hex");
+  const legacyRequestId = `spawn_${legacyFingerprint}`;
+  const approval: PendingApproval = {
+    requestId: legacyRequestId, kind: "policy_hook", title: `${parent.title} requests a child: Requested Child`,
+    context: { toolName: "wollipog.create_session" }, governancePolicyId: "ask-child-spawn",
+    options: [
+      { optionId: "allow", name: "Create Child", kind: "allow_once" },
+      { optionId: "deny", name: "Reject", kind: "reject_once" },
+    ],
+  };
+  assert.equal(db.beginPolicyHookApproval({
+    sessionId: parent.id, requestId: legacyRequestId, requestFingerprint: legacyFingerprint,
+    governancePolicyId: "ask-child-spawn", approval, now: Date.now(),
+  }).kind, "created");
+  const create = (request: typeof rest) =>
+    svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.id });
+  return { ...harness, parent, rest, tool, legacyRequestId, create };
+}
+
+test("a spawn approval pending under the pre-canonical fingerprint still resolves for its request", () => {
+  const { db, svc, hub, parent, rest, legacyRequestId, create } = legacySpawnApprovalFixture();
+  try {
+    const retried = create(rest);
+    assert.equal(retried.status, 428, retried.error);
+    assert.match(retried.error!, new RegExp(`\\(request ${legacyRequestId}\\)`), "the retry finds the upgraded approval");
+    assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, legacyRequestId);
+    const launched = hub.sentOfType("start_session").length;
+    assert.ok(svc.approve(parent.id, legacyRequestId, "allow").ok);
+    const created = create(rest);
+    assert.ok(created.ok, created.error);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+  } finally { db.close(); }
+});
+
+test("a pre-canonical spawn approval outranks the canonical card a reordered retry queued behind it", () => {
+  const { db, svc, hub, parent, rest, tool, legacyRequestId, create } = legacySpawnApprovalFixture();
+  try {
+    // The old fingerprint cannot be derived from a reordered body, so that retry parks its own card.
+    const reordered = create(tool);
+    assert.equal(reordered.status, 428, reordered.error);
+    const canonicalRequestId = /\(request (spawn_[0-9a-f]{64})\)/.exec(reordered.error!)![1]!;
+    assert.notEqual(canonicalRequestId, legacyRequestId);
+    assert.equal(db.getPolicyHookApproval(parent.id, canonicalRequestId)!.status, "queued");
+
+    const launched = hub.sentOfType("start_session").length;
+    assert.ok(svc.approve(parent.id, legacyRequestId, "allow").ok);
+    const created = create(rest);
+    assert.ok(created.ok, created.error);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "the exact original body creates exactly one child");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+
+    // The created child advanced the ordinal, so the canonical card can no longer authorize anything.
+    const canonical = db.getPolicyHookApproval(parent.id, canonicalRequestId)!;
+    if (canonical.status === "pending") assert.ok(svc.approve(parent.id, canonicalRequestId, "allow").ok);
+    for (const request of [tool, rest]) {
+      const again = create(request);
+      assert.equal(again.status, 428, again.error);
+      assert.doesNotMatch(again.error!, new RegExp(`${legacyRequestId}|${canonicalRequestId}`));
+    }
+    assert.equal(db.childSessionAllocations(parent.id).count, 1, "neither card creates a second child");
+    assert.equal(hub.sentOfType("start_session").length, launched + 1);
+  } finally { db.close(); }
+});
+
+test("a rejected pre-canonical spawn approval keeps its 403 even with a canonical card queued", () => {
+  const { db, svc, parent, rest, tool, legacyRequestId, create } = legacySpawnApprovalFixture();
+  try {
+    assert.equal(create(tool).status, 428);
+    assert.ok(svc.approve(parent.id, legacyRequestId, "deny").ok);
+    const refused = create(rest);
+    assert.equal(refused.status, 403, refused.error);
+    assert.equal(refused.error, "child session creation was rejected or its approval expired");
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
 
 test("an older runner's within-30 s identical retries still hold a spawn approval and create once", (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
@@ -4313,6 +4551,308 @@ test("PR merge action admission accepts only the canonical enqueue command", () 
   }).status, 400, "extra action fields fail closed");
 });
 
+const GITLAB_MERGE = {
+  category: "pr_merge" as const,
+  repository: "gitlab.example.com/platform/agents/wollipog",
+  pullRequest: 7,
+  headSha: "c".repeat(40),
+  reviewResult: "merge" as const,
+  requiredChecks: { headSha: "c".repeat(40), status: "passed" as const, checkedAt: 10,
+    checks: [{ name: "Pipeline #901", state: "passed" as const }] },
+  mergeMethod: "merge_train" as const,
+  squash: false,
+  removeSourceBranch: false,
+};
+
+test("a GitLab merge snapshot pins its merge method and a canonical glab call to the approved head (#3602)", () => {
+  const normalized = normalizeWorkflowDecisionSnapshot(GITLAB_MERGE);
+  assert.ok(normalized.ok);
+  assert.deepEqual(normalized.data, GITLAB_MERGE);
+  const github = { ...GITLAB_MERGE, repository: "picoduck/wollipog" } as Record<string, unknown>;
+  delete github.mergeMethod; delete github.squash; delete github.removeSourceBranch;
+  const githubNormalized = normalizeWorkflowDecisionSnapshot(github);
+  assert.ok(githubNormalized.ok);
+  assert.equal("mergeMethod" in githubNormalized.data!, false, "a GitHub snapshot (and its digest) gains no field");
+  for (const bad of [
+    { ...GITLAB_MERGE, mergeMethod: undefined },
+    { ...GITLAB_MERGE, mergeMethod: "rebase" },
+    { ...GITLAB_MERGE, squash: "no" },
+    { ...GITLAB_MERGE, removeSourceBranch: undefined },
+    { ...GITLAB_MERGE, repository: "group/sub/project" },
+    { ...github, mergeMethod: "merge" },
+  ]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot(bad).status, 400, JSON.stringify(bad));
+  }
+  const project = encodeURIComponent("platform/agents/wollipog");
+  assert.equal(canonicalPrMergeEnqueueCommand(GITLAB_MERGE),
+    `glab api --method POST projects/${project}/merge_trains/merge_requests/7 --hostname gitlab.example.com ` +
+    `-f sha=${"c".repeat(40)} -F squash=false`, "a train merge omits when_pipeline_succeeds and pins the head");
+  assert.equal(canonicalPrMergeEnqueueCommand({ ...GITLAB_MERGE, mergeMethod: "merge", squash: true, removeSourceBranch: true }),
+    `glab api --method PUT projects/${project}/merge_requests/7/merge --hostname gitlab.example.com ` +
+    `-f sha=${"c".repeat(40)} -F squash=true -F should_remove_source_branch=true`);
+  assert.equal(prMergeChangeRequestUrl(GITLAB_MERGE),
+    "https://gitlab.example.com/platform/agents/wollipog/-/merge_requests/7", "the forge proof reads the merge request");
+  const canonical = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
+  assert.equal(normalizeWorkflowDecisionAction(GITLAB_MERGE, { kind: "pr_merge_enqueue", command: canonical }).ok, true);
+  for (const command of [
+    canonical.replace("sha=c", "sha=d"),
+    canonical.replace("--method POST", "--method PUT"),
+    canonical.replace("gitlab.example.com", "gitlab.com"),
+    `${canonical} -F when_pipeline_succeeds=true`,
+    canonicalPrMergeEnqueueCommand({ ...GITLAB_MERGE, mergeMethod: "merge" }),
+  ]) {
+    assert.equal(normalizeWorkflowDecisionAction(GITLAB_MERGE, { kind: "pr_merge_enqueue", command }).status, 409, command);
+  }
+});
+
+test("consuming a GitLab merge first checks GitLab on the child's runner, revoking a stale or mismatched approval (#3602)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitLab Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+    const approved = (key: string) => {
+      const decision = svc.createWorkflowDecision(child.id, { requestId: key, resourceKey: key, resourceSnapshot: GITLAB_MERGE });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const command = canonicalPrMergeEnqueueCommand(GITLAB_MERGE);
+    const preflights: ControlPlaneToRunner[] = [];
+    let answer: Partial<RunnerRequestResult> | Error = { ok: true };
+    hub.requestHandler = async (msg) => {
+      if (msg.type !== "gitlab_merge_preflight") throw new Error(`unexpected ${msg.type}`);
+      preflights.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: GITLAB_MERGE, action: { kind: "pr_merge_enqueue", command } });
+
+    const armed = approved("gitlab-ok");
+    const result = await consume(armed);
+    assert.ok(result.ok, result.error);
+    assert.equal(db.workflowDecisionByOccurrence(armed)?.actionAdmission?.command, command, "the exact glab call is armed");
+    assert.deepEqual(preflights[0], {
+      type: "gitlab_merge_preflight", requestId: (preflights[0] as { requestId: string }).requestId, sessionId: child.id,
+      repository: GITLAB_MERGE.repository, pullRequest: 7, headSha: GITLAB_MERGE.headSha,
+      mergeMethod: "merge_train", squash: false, removeSourceBranch: false,
+    });
+
+    for (const [refusal, revoked] of [["stale_head", true], ["mismatch", true], ["unavailable", false]] as const) {
+      answer = { ok: false, refusal, reason: `GitLab said ${refusal}.` };
+      const occurrence = approved(`gitlab-${refusal}`);
+      const refused = await consume(occurrence);
+      assert.equal(refused.status, 409);
+      assert.match(refused.error ?? "", new RegExp(`GitLab said ${refusal}`));
+      assert.equal(db.workflowDecisionByOccurrence(occurrence)?.status, revoked ? "revoked" : "approved",
+        `${refusal} ${revoked ? "revokes the stale or unusable approval" : "arms nothing and stays retryable"}`);
+      assert.equal(db.workflowDecisionByOccurrence(occurrence)?.actionAdmission, undefined);
+    }
+    answer = new Error("runner did not respond in time");
+    const silent = approved("gitlab-silent");
+    assert.equal((await consume(silent)).status, 409);
+    assert.equal(db.workflowDecisionByOccurrence(silent)?.status, "approved", "an unanswered preflight proves nothing");
+
+    answer = { ok: true };
+    const old = approved("gitlab-old-runner");
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeDecisions - 1);
+    const refusedOld = await consume(old);
+    assert.equal(refusedOld.status, 409, "a runner that cannot answer the preflight cannot arm a GitLab merge");
+    assert.equal(db.workflowDecisionByOccurrence(old)?.status, "revoked");
+  } finally {
+    db.close();
+  }
+});
+
+const GITHUB_MERGE = {
+  category: "pr_merge" as const,
+  repository: "picoduck/wollipog",
+  pullRequest: 3729,
+  headSha: "d".repeat(40),
+  reviewResult: "merge" as const,
+  requiredChecks: { headSha: "d".repeat(40), status: "passed" as const, checkedAt: 10,
+    checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+};
+
+test("a GitHub merge snapshot's intendedClosures normalize to sorted unique issues and leave other digests unchanged (#3713)", () => {
+  const plain = normalizeWorkflowDecisionSnapshot(GITHUB_MERGE);
+  assert.ok(plain.ok && plain.data);
+  assert.equal("intendedClosures" in plain.data, false, "a merge that declares none keeps its pre-v242 digest");
+  const empty = normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures: [] });
+  assert.deepEqual(empty.data, plain.data, "an empty list is the same snapshot as none");
+  const declared = normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE,
+    intendedClosures: ["#3713", "https://github.com/Picoduck/Wollipog/issues/12", "other/repo#4", "picoduck/wollipog#3713"] });
+  assert.deepEqual(declared.data && "intendedClosures" in declared.data && declared.data.intendedClosures,
+    ["other/repo#4", "picoduck/wollipog#12", "picoduck/wollipog#3713"]);
+  for (const intendedClosures of [["3713"], ["closes #1"], "#1", [1], Array.from({ length: 101 }, (_, i) => `#${i + 1}`)]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures).slice(0, 60));
+  }
+  assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: ["#1"] }).status, 400,
+    "GitLab closes issues by its own rules, which this check does not read");
+});
+
+test("a GitHub merge is requested and armed only while GitHub would close exactly its intendedClosures (#3713)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitHub Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const preflights: Array<Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>> = [];
+    let answer: Record<string, unknown> | Error = { ok: true, check: { checkedAt: 5, closures: [] } };
+    hub.githubMergePreflight = async (msg) => {
+      preflights.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const negated = { issue: "picoduck/wollipog#3635", sources: ["description"], excerpt: "This PR does not close #3635." };
+    const delivered = { issue: "picoduck/wollipog#3713", sources: ["description", "linked"], excerpt: "Closes #3713." };
+    const ask = (key: string, snapshot: Record<string, unknown> = GITHUB_MERGE) =>
+      svc.createWorkflowDecisionWithVideo(child.id, { requestId: key, resourceKey: key,
+        resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+
+    // The incident: a negated closing phrase the snapshot does not declare never reaches review.
+    answer = { ok: true, check: { checkedAt: 5, closures: [negated] } };
+    const refused = await ask("negated");
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /would close an issue that intendedClosures does not list: picoduck\/wollipog#3635, from the description: “This PR does not close #3635\.”/u);
+    assert.match(refused.error ?? "", /Write “Refs #N” for an issue that must stay open/u);
+    assert.deepEqual(preflights[0], { type: "github_merge_preflight", requestId: preflights[0]!.requestId, sessionId: child.id,
+      repository: "picoduck/wollipog", pullRequest: 3729, headSha: GITHUB_MERGE.headSha });
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "no decision was created");
+
+    // An issue linked by hand is a closure too.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "picoduck/wollipog#9", sources: ["linked"] }] } };
+    assert.match((await ask("linked")).error ?? "", /picoduck\/wollipog#9, which GitHub links to the pull request/u);
+
+    // A declared closure GitHub would not make leaves the snapshot describing another merge.
+    answer = { ok: true, check: { checkedAt: 5, closures: [] } };
+    const unmade = await ask("unmade", { ...GITHUB_MERGE, intendedClosures: ["#3713"] });
+    assert.equal(unmade.status, 409);
+    assert.match(unmade.error ?? "", /intendedClosures lists picoduck\/wollipog#3713, but merging this pull request would not close it/u);
+
+    for (const [refusal, pattern] of [["stale_head", /no longer matches the pull request: GitHub said stale_head/u],
+      ["unavailable", /could not be read .*GitHub said unavailable Try again/u]] as const) {
+      answer = { ok: false, refusal, reason: `GitHub said ${refusal}` };
+      const failed = await ask(`refused-${refusal}`);
+      assert.equal(failed.status, 409);
+      assert.match(failed.error ?? "", pattern);
+    }
+    answer = new Error("runner did not respond in time");
+    assert.match((await ask("silent")).error ?? "", /the runner did not answer/u);
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "not a reference", sources: ["linked"] }] } };
+    assert.match((await ask("malformed")).error ?? "", /the runner's answer was incomplete/u);
+
+    // A merge that closes exactly what it declares is created, and records what was read.
+    answer = { ok: true, check: { checkedAt: 5, closures: [delivered] } };
+    const intended = await ask("intended", { ...GITHUB_MERGE, intendedClosures: ["https://github.com/picoduck/wollipog/issues/3713"] });
+    assert.ok(intended.ok && intended.data, intended.error);
+    assert.deepEqual(intended.data.resourceSnapshot, { ...GITHUB_MERGE, intendedClosures: ["picoduck/wollipog#3713"] });
+    assert.deepEqual(intended.data.closingReferenceCheck, { checkedAt: 5, closures: [delivered] });
+    assert.deepEqual(db.workflowDecisionByOccurrence(intended.data.occurrenceId)?.closingReferenceCheck,
+      { checkedAt: 5, closures: [delivered] }, "the check is stored with the decision");
+
+    // Arming reads GitHub again: the description may have changed since approval.
+    const snapshot = intended.data.resourceSnapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>;
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    const approve = async (key: string) => {
+      const decision = await ask(key, snapshot);
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
+    const edited = await approve("edited-after-approval");
+    answer = { ok: true, check: { checkedAt: 6, closures: [negated, delivered] } };
+    const revoked = await consume(edited);
+    assert.equal(revoked.status, 409);
+    assert.match(revoked.error ?? "", /picoduck\/wollipog#3635.*This approval was revoked, so nothing was armed/u);
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.status, "revoked");
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.actionAdmission, undefined);
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const moved = await approve("moved-head");
+    answer = { ok: false, refusal: "stale_head", reason: "The pull request's head is no longer the decision's head." };
+    assert.equal((await consume(moved)).status, 409);
+    assert.equal(db.workflowDecisionByOccurrence(moved)?.status, "revoked", "a stale head cannot be armed");
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const retried = await approve("unreadable-then-armed");
+    answer = { ok: false, refusal: "unavailable", reason: "github.com could not be reached." };
+    const unreadable = await consume(retried);
+    assert.equal(unreadable.status, 409);
+    assert.match(unreadable.error ?? "", /github\.com could not be reached\. Try again\./u);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.status, "approved", "an unreadable GitHub proves nothing; retry is allowed");
+    answer = { ok: true, check: { checkedAt: 7, closures: [delivered] } };
+    const armed = await consume(retried);
+    assert.ok(armed.ok, armed.error);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.actionAdmission?.command, command);
+
+    // A runner that predates the check is not asked; its decision says nothing was read.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences - 1);
+    const asked = preflights.length;
+    answer = { ok: true, check: { checkedAt: 8, closures: [negated] } };
+    const legacy = await ask("legacy-runner");
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    assert.equal(legacy.data.closingReferenceCheck, undefined);
+    assert.equal(preflights.length, asked, "a pre-v242 runner receives no github_merge_preflight");
+  } finally {
+    db.close();
+  }
+});
+
 test("a nested Orchestrator's verification counts toward the root campaign (#1462)", () => {
   const { db, svc, hub } = makeHarness();
   try {
@@ -4719,6 +5259,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "orchestrator",
+      review_round_extension: "orchestrator",
     } as const;
     const configured = svc.setParentControlPolicy(parent.data.id, decisions, 0);
     assert.ok(configured.ok && configured.data, configured.error);
@@ -5251,6 +5792,7 @@ test("a resolver's child-facing message reaches the child's decision view and re
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 0).ok);
     const mergeSnapshot = (pullRequest: number) => ({
       category: "pr_merge" as const,
@@ -5437,6 +5979,7 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
       merged_branch_deletion: "orchestrator",
       follow_up_issue_publication: "orchestrator",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 0).ok);
     const snapshots = {
       implementation_question: {
@@ -5511,6 +6054,7 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
       merged_branch_deletion: "orchestrator",
       follow_up_issue_publication: "orchestrator",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 1).ok);
     const human = svc.createWorkflowDecision(child.id, {
       requestId: "wake-human", resourceKey: "wake:human", resourceSnapshot: snapshots.implementation_question,
@@ -5587,6 +6131,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     }, 0).ok);
     let sequence = 0;
     let runnerSeq = 0;
@@ -6571,6 +7116,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
               merged_branch_deletion: "human",
               follow_up_issue_publication: "human",
               ui_evidence_approval: "human",
+              review_round_extension: "human",
             }, 1).ok);
           } else {
             db.registerRunner(runnerMeta(), Date.now(),
@@ -6812,6 +7358,7 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       merged_branch_deletion: "human",
       follow_up_issue_publication: "human",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     } as const;
     assert.ok(svc.setParentControlPolicy(parent.data.id, policy, 0).ok);
     const implementationSnapshot = {
@@ -8170,6 +8717,45 @@ test("saved per-provider defaults govern new sessions but explicit choices and e
   assert.equal(override.data.providerAccountId, "personal");
 });
 
+test("a session without a chosen account never takes a profile only other control planes may use (#3240)", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
+    { id: "ours", label: "Ours", provider: "claude", authStatus: "authenticated", profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "granted" } },
+  ];
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, "ours", "the first account this control plane may use");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "ours");
+
+  // Only the implicit choice skips it: naming the account is still the person's decision.
+  const explicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "theirs" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountId, "theirs");
+});
+
+test("with only profiles of other control planes, a session without a chosen account is refused before the runner (#3240)", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
+  ];
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+  const before = hub.sentOfType("start_session").length;
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.equal(created.ok, false);
+  assert.equal(created.status, 409);
+  assert.match(created.error ?? "", /Every account for this provider on this Machine is a profile of another control plane\. Set up a managed profile/u);
+  assert.equal(hub.sentOfType("start_session").length, before, "the runner, which would fall back to that account, is never asked");
+
+  // Naming it is still the person's decision; the runner then refuses it at its lease with its code.
+  const explicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "theirs" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+});
+
 test("a WSL agent does not implicitly inherit a runner-host provider account", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();
@@ -9151,6 +9737,87 @@ test("createSession resolves cloud artifact provenance and enforces the target c
   const restarted = svc.restart(created.data.id);
   assert.ok(restarted.ok, restarted.error);
   assert.deepEqual(hub.sentOfType("start_session").at(-1)!.spec.executionHandoff, spec.executionHandoff);
+});
+
+for (const durable of [false, true]) test(`createSession preserves ${durable ? "staged" : "direct"} launch fields and late dispatch`, (t) => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.providerAccounts = [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }];
+    meta.runtime = { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+      admission: { agentLimits: {}, agentWeights: {} }, executionIsolation: { mode: "bwrap", network: "inherit" } };
+    meta.agents.find((agent) => agent.id === AGENT_ID)!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const dispatch = { rootSessionId: "root", generation: "generation" };
+    let staged: Extract<DurableSessionCommand, { type: "start_session" }> | undefined;
+    let stagedJson: string | undefined;
+    let dispatchCalls = 0;
+    let imageStored = false;
+    const storeImage = db.createWorkflowArtifactBytes.bind(db);
+    t.mock.method(db, "createWorkflowArtifactBytes", (...args: Parameters<ControlPlaneDb["createWorkflowArtifactBytes"]>) => {
+      const result = storeImage(...args);
+      imageStored = true;
+      return result;
+    });
+    t.mock.method(db.campaignBudgets, "dispatch", (id: string) => {
+      dispatchCalls += 1;
+      assert.ok(db.getSession(id), "dispatch follows materialization");
+      assert.ok(hub.sessionChangedCalls.some((session) => session.id === id), "dispatch follows sessionChanged");
+      if (!durable) assert.equal(imageStored, true, "dispatch follows prompt image externalization");
+      if (durable) {
+        assert.ok(staged, "dispatch follows staging");
+        assert.equal(JSON.stringify(staged), stagedJson, "late dispatch leaves the durable snapshot unchanged");
+      }
+      return dispatch;
+    });
+    const created = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workspacePath: "/repos/ad-hoc",
+      agentId: AGENT_ID, providerAccountId: "work", title: "Launch Contract", prompt: "hello",
+      ...(!durable ? { images: [{ mimeType: "image/png",
+        data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=" }] } : {}),
+      config: { permissionMode: "orchestrator", maxToolCalls: 3.9 },
+      orchestrator: { execution: { strictProjectIsolation: true } },
+    }, durable ? {
+      sessionId: "s_launch_contract",
+      stage(plan) {
+        const command = plan.commands[0]!;
+        assert.equal(command.type, "start_session");
+        staged = command;
+        stagedJson = JSON.stringify(command);
+        assert.equal(dispatchCalls, 0, "staging precedes dispatch evaluation");
+      },
+      activate() {
+        assert.equal(dispatchCalls, 1);
+        assert.equal(JSON.stringify(staged), stagedJson, "the staged object gains no direct-only fields");
+      },
+    } : undefined);
+    assert.ok(created.ok && created.data, created.error);
+    assert.equal(dispatchCalls, 1);
+    const frame = durable ? staged! : hub.sentOfType("start_session").at(-1)!;
+    const fields = [
+      "sessionId", "workspaceId", "workspacePath", "agentId", "providerAccountId", "providerAccountLabel",
+      "agentVersion", "capabilities", "title", "titleSource", "command", "args", "env", "useWorktree",
+      "executionTarget", "executionHandoff", "driver", "context", "config", "orchestrator", "acpSessionContext",
+    ];
+    if (!durable) fields.splice(1, 0, "campaignBudgetDispatch");
+    assert.deepEqual(Object.keys(frame.spec), fields, "pin optional fields and their serialization order too");
+    assert.equal(frame.spec.campaignBudgetDispatch, durable ? undefined : dispatch);
+    assert.equal(frame.spec.sessionId, created.data.id);
+    assert.equal(frame.spec.workspaceId, null);
+    assert.equal(frame.spec.workspacePath, "/repos/ad-hoc");
+    assert.equal(frame.spec.providerAccountId, "work");
+    assert.equal(frame.spec.providerAccountLabel, "Work");
+    assert.equal(frame.spec.command, "claude");
+    assert.deepEqual(frame.spec.args, ["--flag"]);
+    assert.deepEqual(frame.spec.env, {}, "profiled accounts use the existing sanitized environment");
+    assert.equal(frame.spec.config.maxToolCalls, 3);
+    assert.equal(frame.spec.orchestrator?.strictProjectIsolation, true);
+    assert.equal(frame.initialPrompt, "hello");
+    assert.equal(hub.sentOfType("start_session").length, durable ? 0 : 1);
+  } finally { db.close(); }
 });
 
 test("createSession stages an exact deterministic launch before materialization and activates after it", () => {
@@ -20267,8 +20934,10 @@ test("runner trip reports create one replay-safe card and Continue honors change
     threshold: 100,
     observed: 100,
   };
-  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
-  svc.onGovernanceTripped(RUNNER_ID, clearedTrip);
+  assert.equal(svc.onGovernanceTripped("wrong-runner", clearedTrip), false);
+  assert.equal(svc.onGovernanceTripped(RUNNER_ID, { ...clearedTrip, threshold: -1 }), false);
+  assert.equal(svc.onGovernanceTripped(RUNNER_ID, clearedTrip), true);
+  assert.equal(svc.onGovernanceTripped(RUNNER_ID, clearedTrip), false);
   let requests = pendingRequests(db.getSession(cleared)!.pendingApproval);
   assert.equal(requests.length, 2, "duplicate/reconnect reports retain one runner card");
   assert.equal(requests[0]!.requestId, "permission-1", "an unrelated request keeps the primary slot");
@@ -22583,7 +23252,7 @@ function uiEvidenceReviewHarness(
   };
   const decisions = {
     implementation_question: "human", pr_merge: "orchestrator", merged_branch_deletion: "human",
-    follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator",
+    follow_up_issue_publication: "human", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
   } as const;
   assert.ok(svc.setParentControlPolicy(parent.data.id, decisions, 0).ok);
   const screenshot = (sessionId: string, label: string) => {
@@ -23838,6 +24507,7 @@ function worktreeRecoveryCampaign(protocolVersion = PROTOCOL_VERSION) {
     merged_branch_deletion: "orchestrator",
     follow_up_issue_publication: "orchestrator",
     ui_evidence_approval: "human",
+    review_round_extension: "human",
   }, 0).ok);
   const worktreePath = `/repos/demo/.agent-worktrees/${child.id}`;
   const recovery = {
@@ -24153,7 +24823,7 @@ test("a revoked or superseded decision withdraws a resume still waiting in the o
     pendingAgain(staged.commandId);
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "orchestrator", pr_merge: "human", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     }, 1).ok);
     assert.equal(db.workflowDecisionByOccurrence(revoked.occurrenceId)?.status, "revoked");
     assert.equal(f.resumeState(revoked.occurrenceId), "abandoned");
@@ -24165,7 +24835,7 @@ test("a revoked or superseded decision withdraws a resume still waiting in the o
     // Superseded by the child's own newer request for the same resource.
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     }, 2).ok);
     const superseded = f.requestMerge(1657);
     svc.onSessionStatus(child.id, "idle");
@@ -24190,7 +24860,7 @@ test("a revoked or superseded decision withdraws a resume still waiting in the o
     f.approve(sent.occurrenceId);
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "orchestrator", pr_merge: "human", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     }, 3).ok);
     assert.equal(f.resumeState(sent.occurrenceId), "delivering");
   } finally {
@@ -24254,7 +24924,7 @@ test("a held child is reported to its Orchestrator even with Parent Control off 
   try {
     assert.ok(svc.setParentControlPolicy(root.id, {
       implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
     }, 1).ok);
     const quiet = svc.descendantRequests(root.id, () => true);
     assert.equal(quiet.status, 403, "with nothing held, Parent Control off still refuses");
@@ -24894,7 +25564,7 @@ test("a decision revoked or superseded while its resume is owed to an offline ru
   const { db, svc, root, child } = f;
   const policy = (prMerge: "orchestrator" | "human", revision: number) => assert.ok(svc.setParentControlPolicy(root.id, {
     implementation_question: "orchestrator", pr_merge: prMerge, merged_branch_deletion: "orchestrator",
-    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
   }, revision).ok);
   try {
     // Revoked by a policy change while the runner is away.
@@ -25759,6 +26429,81 @@ test("stopBackgroundJob is refused for a runner older than v190 without contacti
   assert.equal(hub.sentOfType("stop_background_job").length, 0);
 });
 
+test("releaseQueueHold asks the runner to release the hold the requester saw and returns the ended jobs (#3752)", async () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const actor = { kind: "orchestrator" as const, sessionId: "s_parent" };
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "release_queue_hold");
+    if (msg.type !== "release_queue_hold") throw new Error("unexpected");
+    return {
+      type: "release_queue_hold_result", requestId: msg.requestId, sessionId: msg.sessionId, holdId: msg.holdId,
+      outcome: "released", jobIds: ["monitor-1", "agent-1"],
+    };
+  };
+  const result = await svc.releaseQueueHold(id, "worktree-rebind:5000", actor);
+  assert.deepEqual(result, { ok: true, status: 200, data: {
+    sessionId: id, holdId: "worktree-rebind:5000", outcome: "released", jobIds: ["monitor-1", "agent-1"],
+  } });
+  const sent = hub.sentOfType("release_queue_hold").at(-1)!;
+  assert.deepEqual({ ...sent, requestId: undefined }, {
+    type: "release_queue_hold", requestId: undefined, sessionId: id, holdId: "worktree-rebind:5000", actor,
+  });
+  assert.equal(hub.sentOfType("stop_session").length + hub.sentOfType("cancel_session").length, 0,
+    "the session itself is not stopped");
+});
+
+test("releaseQueueHold maps refusals and transport failures to actionable errors (#3752)", async () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const actor = { kind: "user" as const, userId: "usr_owner" };
+  const holdId = "provider-account-switch:5000";
+  const answer = (outcome: string, extra: Record<string, unknown> = {}) => {
+    hub.requestHandler = (msg) => msg.type === "release_queue_hold"
+      ? { type: "release_queue_hold_result", requestId: msg.requestId, sessionId: msg.sessionId, holdId: msg.holdId,
+          outcome, ...extra } as never
+      : assert.fail("unexpected request");
+  };
+  for (const [reason, pattern] of [
+    ["session_not_found", /^The runner has no record of this session\.$/],
+    ["no_hold", /no longer held/],
+    ["hold_changed", /^The hold changed before it could be released; reload the session and try again\.$/],
+    ["unsupported", /harness cannot end its background work/],
+    ["turn_active", /A turn started/],
+    ["in_progress", /try again shortly/],
+    ["no_live_process", /No running provider process owns the work/],
+    ["nothing_to_end", /no unfinished background work/],
+  ] as const) {
+    answer("refused", { reason });
+    const result = await svc.releaseQueueHold(id, holdId, actor);
+    assert.equal(result.status, 409, reason);
+    assert.match(result.error ?? "", pattern, reason);
+  }
+  answer("released", { jobIds: "monitor-1" });
+  assert.equal((await svc.releaseQueueHold(id, holdId, actor)).status, 502, "a malformed job list is rejected");
+  hub.requestHandler = (msg) => msg.type === "release_queue_hold"
+    ? { type: "release_queue_hold_result", requestId: msg.requestId, sessionId: msg.sessionId, holdId: "other",
+        outcome: "released", jobIds: [] }
+    : assert.fail("unexpected request");
+  assert.equal((await svc.releaseQueueHold(id, holdId, actor)).status, 502, "a result for another hold is rejected");
+  hub.requestHandler = undefined;
+  assert.equal((await svc.releaseQueueHold(id, holdId, actor)).status, 504);
+  hub.deliver = false;
+  assert.deepEqual(await svc.releaseQueueHold(id, holdId, actor), { ok: false, status: 409, error: "runner is offline" });
+  assert.equal((await svc.releaseQueueHold("s_missing", holdId, actor)).status, 404);
+});
+
+test("releaseQueueHold is refused for a runner older than v247 without contacting it (#3752)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.registerRunner(runnerMeta(), Date.now(), 246);
+  const result = await svc.releaseQueueHold(id, "worktree-rebind:5000", { kind: "user", userId: "usr_owner" });
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /needs a newer runner for releasing a queue hold\./);
+  assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, 247);
+  assert.equal(hub.sentOfType("release_queue_hold").length, 0);
+});
+
 test("issue closure requires an exact human decision and executes one durable action", async () => {
   const successes = new Set(["success", "human_approve", "recovered", "unchanged_child", "multi_pending"]);
   const uncertain = new Set(["uncertain", "invalid_result"]);
@@ -26531,6 +27276,43 @@ test("campaign work ledger operations are Orchestrator-only, root-keyed, and bou
     svc.updateCampaignWorkItem(parent.id, { workItemId: nestedPlan.data!.items[0]!.workItemId, nextAction: "Dispatch" });
     const stale = svc.campaignWorkItems(parent.id, { limit: 2, cursor });
     assert.equal(stale.status, 409, "a write invalidates older cursors");
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign work ledger accepts host-qualified GitLab issue and merge request refs in nested namespaces (#3539)", () => {
+  const { db, svc, parent } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const project = "gitlab.example.com/group/subgroup/project";
+    const plan = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: `${project}#4`, issue: { repository: project, number: 4 } }], planComplete: true,
+    });
+    assert.ok(plan.ok && plan.data, plan.error);
+    const workItemId = plan.data.items[0]!.workItemId;
+    const merged = svc.updateCampaignWorkItem(parent.id, {
+      workItemId,
+      stage: { stage: "merge_queued", pullRequests: [{ repository: project, number: 9 }, { repository: "picoduck/wollipog", number: 3 }] },
+    });
+    assert.ok(merged.ok, merged.error);
+    const item = ledgerItem(svc, parent.id, `${project}#4`);
+    assert.deepEqual(item.issue, { repository: project, number: 4 });
+    assert.deepEqual(item.stage?.pullRequests, [{ repository: project, number: 9 }, { repository: "picoduck/wollipog", number: 3 }]);
+
+    // A bare nested path is refused with the accepted shape, not a misleading count.
+    const bare = svc.updateCampaignWorkItem(parent.id, {
+      workItemId, stage: { stage: "merge_queued", pullRequests: [{ repository: "group/subgroup/project", number: 9 }] },
+    });
+    assert.equal(bare.status, 400);
+    assert.match(bare.error ?? "", /each \{repository: "owner\/repo" or "<gitlab-host>\/group\/project", number\}/u);
+    const bareIssue = svc.recordCampaignPlan(parent.id, {
+      items: [{ key: "bare", issue: { repository: "group/subgroup/project", number: 4 } }], planComplete: true,
+    });
+    assert.equal(bareIssue.status, 400);
+    assert.match(bareIssue.error ?? "", /items\[0\]\.issue must be \{repository: "owner\/repo" or "<gitlab-host>\/group\/project"/u);
+    assert.equal(svc.updateCampaignWorkItem(parent.id, {
+      workItemId, issue: { repository: "github.com/picoduck/wollipog", number: 4 },
+    }).status, 400, "a GitHub ref is never host-qualified");
   } finally {
     db.close();
   }
@@ -27376,5 +28158,108 @@ for (const protocol of [199, 209, PROTOCOL_VERSION]) test(`fenced Claude usage i
     assert.equal(hub.sentOfType("priced_session_cost").length, 0, "an unavailable correction prefix never sends an unbound fallback price");
     assert.ok(logs.map((line) => { try { return JSON.parse(line); } catch { return {}; } }).some((event) =>
       event.event === "cost_reconciliation_price_deferred" && event.sessionId === id && event.entryPoint === "runner"));
+  } finally { db.close(); }
+});
+
+test("Wait for Account restarts the session with the runner told to wait, only on a v248 runner (#3240)", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "failed", Date.now());
+  const restarted = svc.restart(id, { waitForProviderHome: true });
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.waitForProviderHome, true);
+
+  db.updateSessionStatus(id, "failed", Date.now());
+  assert.ok(svc.restart(id).ok);
+  assert.equal("waitForProviderHome" in hub.sentOfType("start_session").at(-1)!.spec, false,
+    "an ordinary restart does not wait");
+
+  db.updateSessionStatus(id, "failed", Date.now());
+  const sent = hub.sentOfType("start_session").length;
+  db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeWait - 1);
+  const refused = svc.restart(id, { waitForProviderHome: true });
+  assert.equal(refused.ok, false);
+  assertRunnerRefusal(refused, refused.error!, RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeWait,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.providerHomeWait - 1);
+  assert.match(refused.error ?? "", /waiting for a busy account/);
+  assert.equal(hub.sentOfType("start_session").length, sent, "an older runner is never asked, so it can't fail the launch again");
+  assert.equal(db.getSession(id)?.status, "failed");
+});
+
+test("GitLab campaign scope and issue closure require a v249 runner and then reach it (#3539)", async () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
+    };
+    const register = (version: number) => db.registerRunner(meta, Date.now(), version);
+    const previous = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabCampaignIssues - 1;
+    register(PROTOCOL_VERSION);
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+    assert.ok(created.ok && created.data, created.error);
+    const id = created.data.id;
+    db.updateSessionStatus(id, "running", Date.now());
+    const repository = "gitlab.example.com/platform/backend/service";
+    const web = "https://gitlab.example.com/Platform/Backend/Service";
+    const requests: string[] = [];
+    hub.requestHandler = (message) => {
+      requests.push(`${message.type}:${"operation" in message ? message.operation : ""}`);
+      if (message.type === "campaign_issue_scope") return { type: "campaign_issue_scope_result", requestId: message.requestId, sessionId: message.sessionId,
+        ok: true, repository, ...(message.operation === "synchronize" ? { revision: message.scope.revision } :
+          { candidates: (message.issues ?? [123]).map((number) => ({ issue: { repository, number }, title: `Issue ${number}`, source: "member_checklist" as const })) }) };
+      if (message.type === "github_issue_closure" && message.operation === "inspect") {
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ok: true,
+          inspection: { repository: "gitlab.example.com/Platform/Backend/Service", issue: message.issue, title: "Member", url: `${web}/-/issues/${message.issue}`,
+            state: "OPEN", forgeDigest: "a".repeat(64), openPullRequests: [{ number: 7, title: "Work", url: `${web}/-/merge_requests/7`, headSha: "b".repeat(40) }] } };
+      }
+      throw new Error("unexpected fixture command");
+    };
+    const current = await svc.campaignIssueScope(id);
+    assert.ok(current.ok && current.data, current.error);
+    assert.equal(current.data.repository, repository);
+    assert.equal(current.data.supported, true);
+
+    register(previous);
+    const outdatedView = await svc.campaignIssueScope(id);
+    assert.ok(outdatedView.ok && outdatedView.data, outdatedView.error);
+    assert.equal(outdatedView.data.supported, false);
+    assert.equal(outdatedView.data.compatibilityMessage, "This machine needs a newer runner for GitLab campaign issues. Update and restart the runner.");
+    const proposal = { requestId: "gitlab-scope", expectedRevision: 0, additions: [{ repository, number: 123 }], removals: [], explanation: "Include the umbrella" };
+    const refusedProposal = await svc.proposeCampaignIssueScope(id, proposal);
+    assert.equal(refusedProposal.status, 409);
+    assert.equal(refusedProposal.capabilityRequirement?.requiredRunnerProtocolVersion, 249);
+    assert.equal(refusedProposal.capabilityRequirement?.runnerProtocolVersion, previous);
+
+    register(PROTOCOL_VERSION);
+    const proposed = await svc.proposeCampaignIssueScope(id, proposal);
+    assert.ok(proposed.ok && proposed.data, proposed.error);
+    const approved = svc.resolveWorkflowDecision(id, id, proposed.data.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true);
+    assert.ok(approved.ok, approved.error);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScope!.repository, repository);
+
+    register(previous);
+    const before = requests.length;
+    const closureRequest = { requestId: "gitlab-closure", issue: 123, reason: "not_planned" as const, explanation: "Superseded.", evidence: ["Replaced by #200"] };
+    const refusedClosure = await svc.requestGithubIssueClosure(id, closureRequest);
+    assert.equal(refusedClosure.status, 409);
+    assert.equal(refusedClosure.error, "This machine needs a newer runner for GitLab campaign issues. Update and restart the runner.");
+    assert.equal(refusedClosure.capabilityRequirement?.requiredRunnerProtocolVersion, 249);
+    const storedView = await svc.campaignIssueScope(id);
+    assert.equal(storedView.data?.supported, false, "a stored GitLab scope is unsupported on an older runner");
+    assert.deepEqual(requests.slice(before), [], "nothing reaches an older runner");
+
+    register(PROTOCOL_VERSION);
+    const requested = await svc.requestGithubIssueClosure(id, closureRequest);
+    assert.ok(requested.ok && requested.data?.decision, requested.error);
+    assert.ok(requests.slice(before).includes("github_issue_closure:inspect"));
+    const snapshot = requested.data.decision.resourceSnapshot;
+    assert.equal(snapshot.category, "issue_closure");
+    if (snapshot.category !== "issue_closure") return;
+    assert.equal(snapshot.repository, "gitlab.example.com/Platform/Backend/Service");
+    assert.equal(snapshot.url, `${web}/-/issues/123`);
+    assert.equal(snapshot.reason, "not_planned");
+    assert.deepEqual(snapshot.openPullRequests.map((mr) => mr.url), [`${web}/-/merge_requests/7`]);
   } finally { db.close(); }
 });

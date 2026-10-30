@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
 import Fastify from "fastify";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AuthPrincipal } from "./identity.js";
@@ -63,7 +64,7 @@ test("creation, restart and durable turns use the owner's current preference wit
   let protocolVersion = 201;
   let preference = "manual";
   const db = { getRunner: () => ({ protocolVersion }), getSession: () => ({ runnerId: "r", projectId: null }),
-    projectMemorySharing: () => "separate", sessionOwnerUser: () => ({ userId: "owner" }),
+    projectMemorySharing: () => "separate", artifactUploadPreferenceUser: () => "owner",
     artifactUploadPreference: (userId: string) => { assert.equal(userId, "owner"); return preference; } } as unknown as ControlPlaneDb;
   const sent: string[] = [];
   const hub = new Hub(db); hub.attachRunner("r", { send: (data) => sent.push(data) });
@@ -92,11 +93,13 @@ test("reconnect shares one retained-session scan and preserves both metadata str
     { id: "older", runnerId: "older", projectId: null, status: "idle", archived: false },
   ];
   let scans = 0;
+  let fullScans = 0;
   let automatic = "wollipog_automatic";
   const db = {
-    listSessions: (options: { includeArchived?: boolean }) => { assert.equal(options.includeArchived, true); scans++; return sessions; },
+    listSessions: (options: { includeArchived?: boolean }) => { assert.equal(options.includeArchived, true); fullScans++; return sessions; },
+    runnerSessionInventory: (runnerId: string) => { scans++; return sessions.filter((session) => session.runnerId === runnerId); },
     getRunner: (id: string) => ({ protocolVersion: id === "older" ? 200 : 201 }),
-    sessionOwnerUser: (id: string) => id === "unowned" ? null : { userId: id === "external" ? "second" : "first" },
+    artifactUploadPreferenceUser: (id: string) => id === "unowned" ? undefined : id === "external" ? "second" : "first",
     artifactUploadPreference: (id?: string) => id === "first" ? automatic : id === "second" ? "external_hosting" : "manual",
     projectMemorySharing: () => "shared",
   } as unknown as ControlPlaneDb;
@@ -105,8 +108,10 @@ test("reconnect shares one retained-session scan and preserves both metadata str
   hub.attachRunner("current", { send: (data) => sent.push(data) });
   hub.attachRunner("older", { send: (data) => sent.push(data) });
   scans = 0;
+  fullScans = 0;
   hub.syncProjectMemory(undefined, "current");
   assert.equal(scans, 1, "reconnect must hydrate retained sessions only once");
+  assert.equal(fullScans, 0, "reconnect must not materialize every runner's retained sessions");
   const frames = sent.map((data) => JSON.parse(data));
   assert.deepEqual(frames.filter((m) => m.type === "set_session_artifact_uploads").map((m) => [m.sessionId, m.preference]),
     [["automatic", "wollipog_automatic"], ["external", "external_hosting"], ["unowned", "manual"]]);
@@ -133,4 +138,39 @@ test("reconnect shares one retained-session scan and preserves both metadata str
   hub.syncProjectMemory(undefined, "older");
   assert.deepEqual(sent.map((data) => JSON.parse(data)),
     [{ type: "set_session_project_memory", sessionId: "older", projectMemory: { projectId: null, sharing: "separate" } }]);
+});
+
+test("sessions owned by the personal organization follow the local owner's preference (#3811)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const local = db.localIdentityContext().userId;
+  db.registerRunner({ runnerId: "r", hostname: "h", os: "linux", version: "1", agents: [],
+    workspaces: [{ id: "ws", name: "Repo", path: "/repo" }] }, 500, PROTOCOL_VERSION);
+  const owners = { inherited: null, mine: ["user", local], other: ["user", "usr_other"], team: ["team", "team_1"] } as const;
+  for (const [id, owner] of Object.entries(owners)) {
+    db.createSession({ id, runnerId: "r", workspaceId: "ws", agentId: "a", title: id, useWorktree: false, driver: "claude-code", config: {}, now: 1000 });
+    if (owner) db.raw().prepare("UPDATE session_ownership SET owner_kind=?, owner_id=? WHERE session_id=?").run(owner[0], owner[1], id);
+  }
+  assert.deepEqual(Object.keys(owners).map((id) => db.artifactUploadPreferenceUser(id)), [local, local, "usr_other", undefined],
+    "the default runner confers personal-organization ownership, which resolves to the local owner");
+  assert.equal(db.artifactUploadPreferenceUser("missing"), undefined);
+  db.raw().prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES ('usr_other','Other',1,1)").run();
+  db.setArtifactUploadPreference(local, "wollipog_automatic");
+  db.setArtifactUploadPreference("usr_other", "external_hosting");
+  const sent: string[] = [];
+  const hub = new Hub(db);
+  hub.attachRunner("r", { send: (data) => sent.push(data) });
+  try {
+    const launched = Object.keys(owners).map((sessionId) => {
+      hub.sendToRunner("r", { type: "start_session", spec: { sessionId, workspaceId: "ws", workspacePath: "/repo", agentId: "a",
+        command: "claude", args: [], env: {}, useWorktree: false } });
+      return JSON.parse(sent.at(-1)!).spec.artifactUploads;
+    });
+    assert.deepEqual(launched, ["wollipog_automatic", "wollipog_automatic", "external_hosting", "manual"]);
+    db.setArtifactUploadPreference(local, "external_hosting");
+    sent.length = 0;
+    hub.syncArtifactUploads(local);
+    assert.deepEqual(sent.map((data) => JSON.parse(data)).map((m) => [m.type, m.sessionId, m.preference]),
+      [["set_session_artifact_uploads", "inherited", "external_hosting"], ["set_session_artifact_uploads", "mine", "external_hosting"]],
+      "a saved change reaches personal-organization sessions and no one else's");
+  } finally { db.close(); }
 });

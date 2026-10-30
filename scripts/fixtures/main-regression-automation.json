@@ -1,0 +1,16 @@
+{
+  "repository": "example/project",
+  "status": "failing",
+  "unresolvedFailures": [{
+    "source": "rolling-full", "result": "failing", "runId": 10, "attempt": 1,
+    "testedSha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "suiteVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "workflowPath": ".github/workflows/main-rolling-validation.yml",
+    "workflowAncestryVerified": true, "targetAncestryVerified": true
+  }],
+  "evidence": [{
+    "runId": 9, "attempt": 1, "testedSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "result": "passing", "certification": "full",
+    "suiteVersion": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  }]
+}

@@ -2,20 +2,18 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
-  PERSONAL_ORGANIZATION_ID,
   type AgentDefinition,
   type IdentityAdministrationView,
-  type IdentityContextView,
   type RunnerView,
 } from "@wollipog/protocol";
-import { ApiError } from "../api.js";
+import { canManageProviderProfiles } from "../provider-profile-access.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { activeSessionCounts } from "../rail-attention.js";
 import { machineListEntries } from "../runners.js";
 
 import { DetailSkeleton } from "./common.js";
-import { lifecycleConflictPresentation, MachineDetail, phoneMachineMenu, useMachineActions } from "./MachineDetail.js";
+import { MachineDetail, phoneMachineMenu, useMachineActions, useMachineOperations } from "./MachineDetail.js";
 import { MachineSettingsDialog } from "./MachineSettingsDialog.js";
 import { MachineList } from "./MachineList.js";
 import { MachinesOverview } from "./MachinesOverview.js";
@@ -25,7 +23,6 @@ import { InstallManuallyDialog } from "./InstallManuallyDialog.js";
 import { RepairConnectionDialog } from "./RepairConnectionDialog.js";
 import { SetUpThisMachineDialog } from "./SetUpThisMachineDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
-import { useFeedback } from "./FeedbackProvider.js";
 import { MachineAgentsSection } from "./MachineAgentsSection.js";
 import {
   CommandLineIcon,
@@ -43,7 +40,7 @@ import { DetailBar, PageHeader, type PageHeaderActions } from "./PageHeader.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInstances } from "../instances-context.js";
 import type { MachineSettingsTarget } from "../machine-settings.js";
-import { backLabel, destination, type ConnectionSection } from "../navigation.js";
+import { backLabel, destination, type ConnectionSection, type MachineAccountsIntent } from "../navigation.js";
 import {
   hasBundledLocalRunner,
   isManagedLocalRunnerRepair,
@@ -62,6 +59,7 @@ export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "U
  */
 function MachineSections({
   runner, name, online, canFindSessions, onChooseInstallation, canManageProfiles = false, canManageMachines, onChangeLimit,
+  accountsIntent, profileAccessKnown = true,
 }: {
   runner: RunnerView;
   name: string;
@@ -73,28 +71,25 @@ function MachineSections({
   /** An organization owner or admin. */
   canManageMachines: boolean;
   onChangeLimit: () => void;
+  /** An Add Account or Recover Existing Profile the route asks the accounts section to open (#3240). */
+  accountsIntent?: MachineAccountsIntent;
+  /** The viewer's identity has answered (or failed), so `canManageProfiles` is final. */
+  profileAccessKnown?: boolean;
 }) {
   return (
     <div className="machine-detail-sections">
       <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
       <MachineAgentsSection runner={runner} online={online} machineName={name}
         canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
-      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles} />
+      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles}
+        profileAccessKnown={profileAccessKnown} intent={accountsIntent} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
     </div>
   );
 }
 
-/** Provider profile routes (#3239) are neither member-scoped nor organization-admin routes, so the
- * control plane confines them to Owners and Admins of its personal organization; an Owner or Admin
- * of any other organization would be refused, so the actions are not offered there. */
-export function canManageProviderProfiles(
-  context: Pick<IdentityContextView, "organizationId" | "role"> | null | undefined,
-): boolean {
-  return !!context && (context.role === "owner" || context.role === "admin") &&
-    context.organizationId === PERSONAL_ORGANIZATION_ID;
-}
+export { canManageProviderProfiles };
 
 /** One way to connect a machine: an item of the Add Machine menu and a row of the empty Machines tab. */
 export interface AddMachineMethod {
@@ -201,7 +196,6 @@ export function RunnersView() {
   const api = useApi();
   const { runners, boxes, sessions, view, navigate } = useStore();
   const snapshot = useSnapshotState();
-  const { confirm } = useFeedback();
   const instances = useInstances();
   const bundledLocalRunner = hasBundledLocalRunner();
   const [onboarding, setOnboarding] = useState<"local" | "manual" | null>(null);
@@ -297,25 +291,6 @@ export function RunnersView() {
     if (!machineId && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
   }, [machineId]);
 
-  // The overview's Reconnect (#2986), confirming first when it would interrupt sessions, as the
-  // machine's own Reconnect does.
-  const reconnectFromOverview = async (boxId: string) => {
-    try {
-      await api.reconnectBox(boxId, false);
-    } catch (cause) {
-      if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
-      const conflict = lifecycleConflictPresentation(cause, "reconnect");
-      const approved = await confirm({
-        title: "Interrupt Sessions and Reconnect",
-        message: conflict.message,
-        detailRows: conflict.detailRows,
-        detailRowsOverflow: conflict.detailRowsOverflow,
-        confirmLabel: "Interrupt Sessions and Reconnect",
-        tone: "danger",
-      });
-      if (approved) await api.reconnectBox(boxId, true);
-    }
-  };
   // Settings… opens on the machine it was chosen for, while that machine is still listed.
   const settingsMachine = settings ? machines.find((machine) => machine.runnerId === settings.runnerId) ?? null : null;
   const dialogs = (
@@ -366,11 +341,13 @@ export function RunnersView() {
     setRepairRunnerId(runnerId);
   };
   const canFindSessions = identityRole !== null && identityRole !== "viewer";
+  // One set of requests in flight for the overview and the detail, so they agree on each machine (#3525).
+  const machineOperations = useMachineOperations();
   const selectedActions = useMachineActions(selectedMachine, {
     canManage: canManageMachines,
     canOpenSettings: canManageMachines || selectedMachine?.runner?.canManage === true,
     canFindSessions,
-  }, { onSettings: (runnerId) => openSettings(runnerId), onRepair: repairRunner });
+  }, { onSettings: (runnerId) => openSettings(runnerId), onRepair: repairRunner }, machineOperations);
   // "local" onboarding drives the desktop bridge, whose runner credential and socket work is
   // hard-coded to the loopback control plane, so on a remote instance it would set up a machine the
   // page in front of you does not show, and could overwrite the local runner while doing it.
@@ -434,6 +411,8 @@ export function RunnersView() {
           canManageProfiles={canManageProfiles}
           canManageMachines={canManageMachines}
           onChangeLimit={() => openSettings(selectedMachine.runnerId, "capacity")}
+          accountsIntent={view.name === "runners" ? view.accounts : undefined}
+          profileAccessKnown={identity !== null || identityError !== null}
         />
       )}
     </MachineDetail>
@@ -455,7 +434,7 @@ export function RunnersView() {
           canManage={canManageMachines}
           onOpen={selectMachine}
           onRepair={repairRunner}
-          onReconnect={reconnectFromOverview}
+          machines={machineOperations}
         />
       </StaleContent>
     )

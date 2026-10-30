@@ -27,6 +27,7 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
  * the runner is offline in this fixture, so an admitted request stops there. */
 const TOOLS = {
   stop_background_job: { named: /stop_background_job/u, path: (id: string) => `/api/sessions/${id}/background-jobs/job-1/stop` },
+  release_queue_hold: { named: /release_queue_hold/u, path: (id: string) => `/api/sessions/${id}/queue-hold/release`, body: { holdId: "qh-stoppable" } },
   select_worktree: { named: /select_worktree/u, path: (id: string) => `/api/sessions/${id}/worktrees/select`, body: { path: "/w/any" } },
   create_worktree: { named: /create_worktree/u, path: (id: string) => `/api/sessions/${id}/worktrees`, body: { branch: "fix/any" } },
   // Restarting is named by the recommendation (restart_session) and by the warning against it.
@@ -36,7 +37,7 @@ type Tool = keyof typeof TOOLS;
 
 const QUEUE_HOLD_STOPPABLE: SessionQueueHoldView = {
   kind: "worktree_rebind", holdId: "qh-stoppable", since: 10, target: "/w/next", queuedPrompts: 1,
-  unfinishedBackgroundJobs: 1, canStopJobs: true, restartKeepsQueue: true,
+  unfinishedBackgroundJobs: 1, canStopJobs: true, canRelease: true, restartKeepsQueue: true,
 };
 /** No bound and no single-job stop, so restarting is the recommended way out. */
 const QUEUE_HOLD_RESTART_ONLY: SessionQueueHoldView = {
@@ -138,12 +139,12 @@ test("hold advice an agent credential reads names exactly the tools its routes a
 
     // [reader, target, tools the advice may name for that hold]
     const cases: Array<[string, string, Tool[]]> = [
-      ["worker", "worker-queue", ["stop_background_job", "restart_session"]],
-      ["worker-queue", "worker-queue", ["stop_background_job", "restart_session"]],
-      ["orch", "orch-queue", ["stop_background_job", "restart_session"]],
-      ["orch", "orch-grand", ["stop_background_job", "restart_session"]],
-      ["orch-mid", "orch-grand", ["stop_background_job", "restart_session"]],
-      ["orch-grand", "orch-grand", ["stop_background_job", "restart_session"]],
+      ["worker", "worker-queue", ["stop_background_job", "release_queue_hold", "restart_session"]],
+      ["worker-queue", "worker-queue", ["stop_background_job", "release_queue_hold", "restart_session"]],
+      ["orch", "orch-queue", ["stop_background_job", "release_queue_hold", "restart_session"]],
+      ["orch", "orch-grand", ["stop_background_job", "release_queue_hold", "restart_session"]],
+      ["orch-mid", "orch-grand", ["stop_background_job", "release_queue_hold", "restart_session"]],
+      ["orch-grand", "orch-grand", ["stop_background_job", "release_queue_hold", "restart_session"]],
       ["worker", "worker-wt", ["select_worktree", "create_worktree"]],
       ["worker-wt", "worker-wt", ["select_worktree", "create_worktree"]],
       ["orch", "orch-wt", ["select_worktree", "create_worktree"]],
@@ -220,6 +221,8 @@ test("hold advice an agent credential reads names exactly the tools its routes a
     // The cases above cover both outcomes for every tool.
     assert.match(advice.get("orch>orch-queue")!, /stop_background_job/u);
     assert.doesNotMatch(advice.get("orch>orch-grand")!, /stop_background_job/u);
+    assert.match(advice.get("orch>orch-queue")!, /release_queue_hold \(hold qh-stoppable\)/u);
+    assert.doesNotMatch(advice.get("orch>orch-grand")!, /release_queue_hold/u);
     assert.match(advice.get("worker>worker-queue")!, /restart_session/u);
     assert.doesNotMatch(advice.get("worker-queue>worker-queue")!, /restart/iu);
     assert.doesNotMatch(advice.get("orch-grand>orch-grand")!, /restart/iu);

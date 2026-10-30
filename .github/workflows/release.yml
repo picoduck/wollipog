@@ -37,6 +37,9 @@ jobs:
     name: Resolve tag & check version
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
@@ -127,6 +130,17 @@ jobs:
             exit 1
           fi
           echo "All release version fields match $ver"
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        if: github.ref_type == 'tag' && steps.resolve.outputs.prerelease == 'false'
+        with:
+          node-version: '24'
+      - name: Verify Exact Full-Regression Certification
+        if: github.ref_type == 'tag' && steps.resolve.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: node scripts/release-certification.mjs --repository "$GITHUB_REPOSITORY" --target-sha "$CANDIDATE_SHA"
 
   build:
     name: ${{ matrix.label }}
@@ -651,7 +665,11 @@ jobs:
   verify-runner-release:
     name: Verify runner release assets
     needs: [preflight, build]
-    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      actions: read
+    # Activation requires a separately provisioned, trusted release-only runner pool.
+    runs-on: ${{ vars.RELEASE_FINALIZER_USE_DEDICATED == 'true' && 'wollipog-release-finalizer' || 'ubuntu-24.04' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -751,3 +769,10 @@ jobs:
             "$RELEASE_TAG" \
             SHA256SUMS \
             "$@"
+
+      - name: Verify Exact Full-Regression Certification
+        if: github.ref_type == 'tag' && needs.preflight.outputs.prerelease == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ github.sha }}
+        run: node scripts/release-certification.mjs --repository "$GITHUB_REPOSITORY" --target-sha "$CANDIDATE_SHA"

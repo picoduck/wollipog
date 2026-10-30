@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
@@ -16,6 +16,23 @@ function worker(data: Record<string, unknown>): Worker {
   return new Worker(`require(${JSON.stringify(createRequire(import.meta.url).resolve("tsx/cjs"))});require(${JSON.stringify(fileURLToPath(new URL("./provider-home-lease-worker.ts", import.meta.url)))});`,
     { eval: true, execArgv: [], workerData: data });
 }
+
+test("an invalid journal refuses only its account and crosses the real worker without private text", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-refusal-"));
+  const refused = join(root, "refused"), usable = join(root, "usable");
+  const journal = join(refused, ".agent-manager/provider-home-leases-v1/mutable-home.lock");
+  mkdirSync(journal, { recursive: true });
+  const record = join(journal, "unexpected.json");
+  const bytes = Buffer.from('{"private":"credential-and-path-must-not-cross"}');
+  writeFileSync(record, bytes);
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64));
+  t.after(async () => { await registry.close(); rmSync(root, { recursive: true, force: true }); });
+  await assert.rejects(registry.acquireHome(refused, "claude"), error =>
+    error instanceof ProviderHomeLeaseError && error.code === "invalid_journal" && error.message === LEASE_WORKER_ERRORS.invalid_journal);
+  assert.deepEqual(readFileSync(record), bytes, "refusal preserves the journal bytes");
+  assert.equal(await registry.acquireHome(usable, "claude"), true, "another account remains usable in the same worker");
+  assert.equal(await registry.releaseHome(usable), true);
+});
 
 test("cold worker acquisition and exact reference release leave the heartbeat timer responsive", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-async-lease-"));

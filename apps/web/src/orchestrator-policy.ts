@@ -1,3 +1,4 @@
+import { ORCHESTRATOR_REVIEW_POLICY_KEYS, orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import {
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
@@ -37,6 +38,7 @@ export const ORCHESTRATOR_DECISION_LABELS: Record<DelegatableWorkflowDecisionCat
   merged_branch_deletion: "Merged Branch Deletion",
   follow_up_issue_publication: "Follow-Up Issue Publication",
   ui_evidence_approval: "UI Evidence Approval",
+  review_round_extension: "Review Round Extensions",
 };
 
 /*
@@ -87,9 +89,11 @@ export const INTEGRATION_ISOLATION_OPTIONS = [
   { value: "on", label: "On", description: "The Orchestrator gets Wollipog's management tools and no other integration." },
 ] as const;
 
+/** Full Control's one line wherever it is chosen (#2940): it adds nothing to fill in. */
+export const FULL_CONTROL_LINE = "The Orchestrator runs this campaign end to end.";
 export const CONTROL_MODE_OPTIONS: ReadonlyArray<{ value: CampaignControlMode; label: string; description: string }> = [
   { value: "custom", label: "Custom", description: "Choose who decides at each gate below." },
-  { value: "full_control", label: "Full Control", description: "Let the Orchestrator finish this campaign within the limits you authorize." },
+  { value: "full_control", label: "Full Control", description: FULL_CONTROL_LINE },
 ];
 
 /** The line every Decisions surface ends with: what delegation can never reach. */
@@ -145,6 +149,9 @@ export function policyOverrides(draft: OrchestratorPolicyDraft, defaults: Orches
   const overrides = new Set<OrchestratorPolicyPath>();
   const { behavior, delegation, execution } = draft.values;
   if (harnessKey(behavior.childHarness) !== harnessKey(defaults.behavior.childHarness)) overrides.add("behavior.childHarness");
+  for (const key of ORCHESTRATOR_REVIEW_POLICY_KEYS) {
+    if ((behavior[key] ?? null) !== (defaults.behavior[key] ?? null)) overrides.add(`behavior.${key}`);
+  }
   if (behavior.childModel !== defaults.behavior.childModel) overrides.add("behavior.childModel");
   if (behavior.childEffort !== defaults.behavior.childEffort) overrides.add("behavior.childEffort");
   // An unreadable entry is a change too: it can never equal the default, and it blocks the launch.
@@ -446,6 +453,8 @@ export function evaluateOrchestratorPolicy(context: OrchestratorPolicyContext, d
 
   // Problems, in the order Create Session reports them.
   const problems: PolicyProblem[] = [];
+  const reviewProblem = context.view.reviewPolicySupported ? orchestratorReviewPolicyProblem(behavior, capabilities?.reviewers ?? []) : null;
+  if (reviewProblem) problems.push({ tab: "behavior", path: "behavior.reviewHarness", message: reviewProblem });
   if (fixedChildHarness && !fixedHarnessSupported) {
     problems.push({ tab: "behavior", path: "behavior.childHarness", message: update("choose a fixed Child Harness") });
   } else if (!fixedHarnessAvailable) {

@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -83,7 +84,7 @@ const accounts: ProviderAuthenticationAccountOption[] = [
 
 function client(options: {
   identity?: ProviderAuthenticationCurrentIdentity;
-  select?: (input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string }) => Promise<void>;
+  select?: (input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null }) => Promise<void>;
 } = {}) {
   const calls = { identity: 0, accounts: 0, selections: [] as unknown[], signIns: [] as unknown[] };
   const value = {
@@ -102,7 +103,7 @@ function client(options: {
     },
     selectAuthenticationAccount: async (
       _id: string,
-      input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+      input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string | null },
     ) => {
       calls.selections.push(input);
       await options.select?.(input);
@@ -343,6 +344,73 @@ test("while a sign-in runs only the session's account is a fact, and the sign-in
   }
 });
 
+test("a device-code sign-in in the recovery panel copies exactly its code with Copy Device Code (#3521)", async () => {
+  const copied: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  const api = client();
+  const signingIn = { ...approval, title: "Signing In — Codex",
+    options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" }] } as PendingApproval;
+  const login = { operationId: "op-1", accountId: "codex-work", label: "Codex Work", provider: "codex",
+    status: "waiting_for_provider", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-EFGH",
+    expectsCode: false, sessionId: "session-auth", startedAt: 1 };
+  const view = await render(
+    <AuthenticationRecoveryPanel session={session()} approval={signingIn}
+      runner={runner({ providerLogins: [login] } as unknown as Partial<RunnerView>)} runnerOnline />,
+    api.value,
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    assert.equal(card.querySelector(".provider-login-device-code > .code-well > code")?.textContent, "ABCD-EFGH");
+    assertNoDomNode(card.querySelector("input"), "a device-code sign-in has nothing to paste");
+    const copy = card.querySelector<HTMLButtonElement>('.code-well > button[aria-label="Copy Device Code"]');
+    assert.ok(copy?.matches(".icon-btn.sm"));
+    const buttons = card.querySelectorAll("button");
+    assert.ok(buttons.length === 1 && buttons[0] === copy, "Copy Device Code is the sign-in's only button");
+    await act(async () => { copy.click(); await tick(); await tick(); });
+    assert.deepEqual(copied, ["ABCD-EFGH"]);
+    assert.ok(copy.classList.contains("copy-status-copied"));
+  } finally {
+    await view.cleanup();
+    Reflect.deleteProperty(domWindow.navigator, "clipboard");
+  }
+});
+
+test("a code pasted into the recovery panel's sign-in is never in the DOM, before or after a failed request (#3529)", async () => {
+  const submitted: string[] = [];
+  const api = client();
+  const signingIn = { ...approval, title: "Signing In — Claude Code",
+    options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" }] } as PendingApproval;
+  const login = { operationId: "op-1", accountId: "claude-work", label: "Claude Work", provider: "claude",
+    status: "awaiting_code", expectsCode: true, sessionId: "session-auth", startedAt: 1 };
+  const view = await render(
+    <AuthenticationRecoveryPanel session={session()} approval={signingIn}
+      runner={runner({ providerLogins: [login] } as unknown as Partial<RunnerView>)} runnerOnline />,
+    {
+      ...api.value,
+      submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+        submitted.push(code);
+        throw new TypeError("Failed to fetch");
+      },
+    } as ApiClient,
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    const input = card.querySelector<HTMLInputElement>('input[type="password"]')!;
+    await act(async () => { fireDomEvent.change(input, { target: { value: "recovery-secret" } }); });
+    assert.equal(view.button("Submit Code")?.disabled, false);
+    assert.doesNotMatch(view.container.innerHTML, /recovery-secret/, "a typed code is not in the DOM");
+    await act(async () => { fireDomEvent.submit(card.querySelector("form")!); await tick(); await tick(); });
+    assert.deepEqual(submitted, ["recovery-secret"]);
+    assert.equal(card.querySelector(".form-error")?.textContent, "Failed to fetch");
+    assert.doesNotMatch(view.container.innerHTML, /recovery-secret/, "a code whose request failed is not in the DOM");
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("a refused account choice elsewhere reads the identity again", async () => {
   const api = client();
   const view = await render(
@@ -430,8 +498,8 @@ test("the account panel applies only to open provider recovery, not to retained-
 
 test("Choose Another Account… applies only where the session can switch accounts", () => {
   assert.equal(authenticationAccountChoiceApplies(session(), approval, runner()), true);
-  assert.equal(authenticationAccountChoiceApplies(session({ providerAccountId: undefined }), approval, runner()), false,
-    "a session on the machine's default sign-in has no account to switch from (#1743)");
+  assert.equal(authenticationAccountChoiceApplies(session({ providerAccountId: undefined }), approval, runner()), true,
+    "a session on the machine's default sign-in can choose an added account (#1743)");
   assert.equal(authenticationAccountChoiceApplies(session(), {
     ...approval,
     options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" }],

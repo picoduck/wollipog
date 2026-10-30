@@ -63,7 +63,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
   const hub = new Hub(db), messages: unknown[] = [];
   hub.isRunnerOnline = () => true; hub.sendToRunner = (_, message) => { messages.push(message); return true; };
   hub.sessionChanged = () => {}; hub.sessionChangedById = () => {};
-  const log = { info() {}, warn() {}, error() {} };
+  const log = { info(_message: string) {}, warn() {}, error() {} };
   const bootstrap = new SessionsService(db, hub, log);
   assert.ok(bootstrap.setCampaignControl("root", { mode: "full_control", objective: "Review #1321", operations: ["ui_evidence_approval"],
     delegatablePolicyIds: [], budgetAuthority: { version: 1, accounting: "managed_workers_only", unpriced: "stop",
@@ -390,16 +390,22 @@ for (const phase of ["preflight", "materialize"] as const) {
 }
 test("media preparation announces its actual committed record once and refuses an external commit boundary", (t) => {
   const h = harness(); t.after(() => h.db.close());
-  let broadcasts = 0, createdLogs = 0;
+  let broadcasts = 0;
+  const logs: string[] = [];
   h.hub.sessionChanged = (session) => {
     assert.equal(h.db.raw().isTransaction, false);
     assert.equal(h.prepared.get(h.identity)?.sessionId, session.id);
     broadcasts++;
   };
-  h.log.info = () => { assert.equal(h.db.raw().isTransaction, false); createdLogs++; };
+  h.log.info = (message) => { assert.equal(h.db.raw().isTransaction, false); logs.push(message); };
   const actual = h.prepared.prepare(h.identity);
   assert.equal(h.prepared.prepare(h.identity).sessionId, actual.sessionId);
-  assert.equal(broadcasts, 1); assert.equal(createdLogs, 1);
+  assert.equal(broadcasts, 1);
+  assert.equal(logs.filter(message => message.startsWith("session created ")).length, 1);
+  const snapshots = logs.filter(message => message.startsWith("{")).map(message => JSON.parse(message));
+  assert.deepEqual(snapshots, [{ event: "campaign_child_review_policy_snapshot", entryPoint: "prepared_media",
+    sessionId: actual.sessionId, parentSessionId: "root", ...h.db.getSession(actual.sessionId)!.reviewPolicy }]);
+  assert.equal(logs.length, 2, "creation and snapshot audits publish once, after the owning commit");
   h.db.raw().exec("BEGIN");
   try { assert.throws(() => h.prepared.prepare(h.identity), /own its commit boundary/); }
   finally { h.db.raw().exec("ROLLBACK"); }
@@ -607,7 +613,10 @@ test("purpose-bound HTTP routes allow only exact media operations while parent s
   }
   for (const route of ["/api/sessions/:id/prompt", "/api/sessions/:id/config", "/api/sessions/:id/restart",
     "/api/sessions/:id/fork", "/api/sessions/:id/shells"]) assert.equal(mediaSessionMutationAllowed("POST", route), false);
-  for (const route of ["/api/sessions/:id/stop", "/api/sessions/:id/archive"]) assert.equal(mediaSessionMutationAllowed("POST", route), true);
+  for (const route of ["/api/sessions/:id/stop", "/api/sessions/:id/archive",
+    "/api/sessions/:id/background-jobs/:jobId/stop", "/api/sessions/:id/queue-hold/release"]) {
+    assert.equal(mediaSessionMutationAllowed("POST", route), true, route);
+  }
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions", "normal"), true);
 });
 

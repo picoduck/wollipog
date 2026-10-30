@@ -7,6 +7,28 @@ import {
   EXPECTED_RELEASE_ASSET_COUNT,
 } from "./verify-runner-release-assets.mjs";
 
+test("stable releases check fresh exact-SHA certification before builds and after hosted assets", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const preflight = workflow.slice(workflow.indexOf("  preflight:"), workflow.indexOf("  build:"));
+  const finalizer = workflow.slice(workflow.indexOf("  verify-runner-release:"));
+  for (const job of [preflight, finalizer]) {
+    assert.match(job, /actions: read/);
+    assert.match(job, /CANDIDATE_SHA: \$\{\{ github.sha \}\}/);
+    assert.match(job, /node scripts\/release-certification.mjs --repository "\$GITHUB_REPOSITORY" --target-sha "\$CANDIDATE_SHA"/);
+    assert.doesNotMatch(job, /candidate_sha=.*main\b|--report/);
+  }
+  assert.match(preflight, /if: github.ref_type == 'tag' && steps.resolve.outputs.prerelease == 'false'/);
+  assert.match(finalizer, /if: github.ref_type == 'tag' && needs.preflight.outputs.prerelease == 'false'/);
+  assert.ok(finalizer.indexOf("Verify Exact Full-Regression Certification") > finalizer.indexOf("Gate exact hosted release inventory"));
+});
+
+test("only the finalizer can opt into the fixed trusted runner label and defaults to Ubuntu", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const boundary = workflow.indexOf("  verify-runner-release:");
+  assert.doesNotMatch(workflow.slice(0, boundary), /RELEASE_FINALIZER_USE_DEDICATED|wollipog-release-finalizer/);
+  assert.ok(workflow.slice(boundary).includes("runs-on: ${{ vars.RELEASE_FINALIZER_USE_DEDICATED == 'true' && 'wollipog-release-finalizer' || 'ubuntu-24.04' }}"));
+});
+
 test("release workflow natively verifies dual runner assets and gates the final hosted inventory", () => {
   const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
   const sidecar = readFileSync(new URL("../apps/desktop/scripts/build-sidecar.mjs", import.meta.url), "utf8");

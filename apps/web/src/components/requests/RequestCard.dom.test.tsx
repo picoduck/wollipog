@@ -1,3 +1,4 @@
+import { fireDomEvent } from "../test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act, useRef, useState } from "react";
@@ -553,7 +554,7 @@ test("each sign-in state has exactly one primary, or only Cancel Sign-In while a
       ["Dismiss Recovery", "Choose Another Account…", "Start Sign-In (primary)"], true],
     ["signed out on the machine's default sign-in", recovery([AUTH.login, AUTH.revalidate, AUTH.dismiss]),
       { providerAccountId: undefined, providerAccountLabel: undefined },
-      ["Dismiss Recovery", "Start Sign-In (primary)"], true],
+      ["Dismiss Recovery", "Choose Another Account…", "Start Sign-In (primary)"], true],
     ["read-only", recovery([AUTH.revalidate, AUTH.dismiss]), {},
       ["Dismiss Recovery", "Choose Another Account…", "Retry (primary)"], false],
     ["sign-in methods", methods, { driver: "acp" }, ["Cancel Sign-In", "Start Sign-In (primary)"], false],
@@ -602,6 +603,84 @@ test("a device-code sign-in in the Request Card shows the provider's link and it
     assert.equal(code?.querySelector("code")?.textContent, "WOLL-IPOGS", "the whole code is in the DOM to read and select");
     assert.equal(card.querySelector("input")?.outerHTML ?? null, null, "a device-code sign-in has nothing to paste");
     assert.deepEqual(footer(view.container), ["Cancel Sign-In"]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a device-code sign-in in the Request Card copies exactly its code with Copy Device Code (#3521)", async () => {
+  const copied: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  const request = recovery([AUTH.cancel], "Signing In — Claude Code");
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />,
+    {
+      providerLogins: [{
+        operationId: "login_device", accountId: "claude-work", label: "Claude Work", provider: "codex",
+        status: "waiting_for_provider", verificationUrl: "https://auth.example.com/device", userCode: "WOLL-IPOGS",
+        expectsCode: false, sessionId: "session-dock", startedAt: 1,
+      }],
+    },
+  );
+  try {
+    const well = view.container.querySelector(".provider-login-card .provider-login-device-code > .code-well");
+    assert.ok(well, "the device code is a code well beside its label");
+    assert.equal(well.querySelector("code")?.textContent, "WOLL-IPOGS");
+    const copy = well.querySelector<HTMLButtonElement>("button");
+    assert.ok(copy, "the code's copy button trails it in the well");
+    assert.equal(copy.getAttribute("aria-label"), "Copy Device Code");
+    assert.equal(copy.type, "button");
+    assert.ok(copy.matches(".icon-btn.sm"), "the 28px icon button that borrows a 44px hit area on a coarse pointer");
+    assert.equal(copy.getAttribute("title"), null, "untitled like the card's other controls");
+    assert.equal(copy.tabIndex, 0, "reachable by keyboard");
+    await act(async () => { copy.click(); await tick(); await tick(); });
+    assert.deepEqual(copied, ["WOLL-IPOGS"], "copies exactly the code");
+    assert.ok(copy.classList.contains("copy-status-copied"), "the shared copy confirmation");
+    assert.ok(copy.querySelector("svg.copy-status-icon-copied"));
+    assert.equal(well.querySelector("[aria-live=polite]")?.textContent, "Copied to clipboard");
+    assert.equal(copy.getAttribute("aria-label"), "Copy Device Code", "the name stays the action");
+    assert.deepEqual(footer(view.container), ["Cancel Sign-In"], "the footer is unchanged");
+  } finally {
+    await view.unmount();
+    Reflect.deleteProperty(domWindow.navigator, "clipboard");
+  }
+});
+
+test("a code pasted into the Request Card's sign-in is never in the DOM, before or after a rejected submit (#3529)", async () => {
+  const request = recovery([AUTH.cancel], "Signing In — Claude Code");
+  const submitted: string[] = [];
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />,
+    {
+      providerLogins: [{
+        operationId: "login_code", accountId: "claude-work", label: "Claude Work", provider: "claude",
+        status: "awaiting_code", verificationUrl: "https://claude.ai/oauth/authorize", expectsCode: true,
+        sessionId: "session-dock", startedAt: 1,
+      }],
+    },
+    {
+      submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+        submitted.push(code);
+        throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409);
+      },
+    },
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    assertNoDomNode(card.querySelector(".provider-login-device-code"), "no device code, so no Copy Device Code (#3521)");
+    assert.deepEqual([...card.querySelectorAll("button")].map((button) => button.textContent), ["Submit Code"]);
+    const input = card.querySelector<HTMLInputElement>('input[type="password"]')!;
+    const submit = [...card.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Submit Code")!;
+    await act(async () => { fireDomEvent.change(input, { target: { value: "request-card-secret" } }); });
+    assert.equal(submit.disabled, false);
+    assert.doesNotMatch(view.container.innerHTML, /request-card-secret/, "a typed code is not in the DOM");
+    await act(async () => { fireDomEvent.submit(card.querySelector("form")!); await tick(); await tick(); });
+    assert.deepEqual(submitted, ["request-card-secret"]);
+    assert.equal(card.querySelector(".form-error")?.textContent, "The provider rejected this code. Paste the code the page shows.");
+    assert.doesNotMatch(view.container.innerHTML, /request-card-secret/, "a rejected code is not in the DOM");
   } finally {
     await view.unmount();
   }
@@ -703,16 +782,27 @@ test("a child's sign-in in the Requests panel reads the child's harness and acco
   }
 });
 
-test("a child on the machine default reads Machine Default Sign-In under a parent bound to an account (#2714)", async () => {
+test("a child on the machine default chooses with its own unbound state, never the parent binding (#1743, #2714)", async () => {
+  const selections: unknown[] = [];
   const view = await childSignIn(
     { driver: "claude-code", providerAccountId: "claude-parent", providerAccountLabel: "Claude Parent" },
     { driver: "claude-code" },
+    { selectAuthenticationAccount: async (sessionId, input) => {
+      selections.push({ sessionId, input });
+      return { accepted: true as const };
+    } },
   );
   try {
     assert.match(factValue(view.container, "This Session Uses") ?? "", /^Machine Default Sign-In/);
     assert.doesNotMatch(view.container.textContent ?? "", /Claude Parent/);
-    assert.equal([...view.container.querySelectorAll(".request-card-foot button")]
-      .some((button) => button.textContent === "Choose Another Account…"), false, "an unbound child has no account to switch from");
+    const choose = [...view.container.querySelectorAll<HTMLButtonElement>(".request-card-foot button")]
+      .find((button) => button.textContent === "Choose Another Account…");
+    assert.ok(choose);
+    await act(async () => { choose.click(); await tick(); await tick(); });
+    await act(async () => { dialogButton("Use Account")!.click(); await tick(); await tick(); });
+    assert.deepEqual(selections, [{ sessionId: "session-child", input: {
+      requestId: "provider-auth:card", providerAccountId: "claude-personal", expectedProviderAccountId: null,
+    } }]);
   } finally {
     await view.unmount();
   }

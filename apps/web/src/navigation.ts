@@ -12,10 +12,11 @@ export type AttentionTarget = { eventEpoch: number; requestId?: string; activati
 export type View =
   | { name: "inbox"; split?: SessionsTab }
   | { name: "board"; split?: SessionsTab }
-  | { name: "runners"; section?: ConnectionSection; machineId?: string }
+  | { name: "runners"; section?: ConnectionSection; machineId?: string; accounts?: MachineAccountsIntent }
   | { name: "runs" }
   | { name: "pods" }
-  | { name: "automations"; editor?: AutomationEditorRoute }
+  | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
+  | { name: "automation"; id: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
   | { name: "archived" }
@@ -24,7 +25,9 @@ export type View =
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
   | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
-  | { name: "pod"; id: string };
+  /** The tab a phone shows (#2981): the Huddle (`tab: "huddle"`, also the default) or one
+   * `member`; wider layouts show the huddle beside every member. */
+  | { name: "pod"; id: string; tab?: "huddle"; member?: string };
 
 /**
  * Settings sections, as ROUTES rather than dialog tabs.
@@ -34,7 +37,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "storage" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "network" | "storage" | "experimental" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -42,6 +45,15 @@ export type SettingsSection = "appearance" | "notifications" | "behavior" | "app
  * `AttentionTarget.activationId`: `viewPath` omits it, so the replaced address is the section's.
  * The store gives each arrival its own `activationId`, so arriving again focuses it again.
  */
+/**
+ * What a Machine's Provider Accounts section opens on arrival (#3240): Add Account for a provider,
+ * or Recover Existing Profile for one account. Ephemeral like `SettingsFocus`: `viewPath` omits it,
+ * and the store gives each arrival its own `activationId`, so arriving again opens it again.
+ */
+export type MachineAccountsIntent =
+  | { kind: "add_account"; provider: "claude" | "codex"; activationId?: number }
+  | { kind: "recover_profile"; accountId: string; activationId?: number };
+
 export type SettingsFocusTarget = "keyboard-shortcuts";
 export type SettingsFocus = { target: SettingsFocusTarget; activationId?: number };
 
@@ -95,6 +107,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   },
   { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
   { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
+  { id: "reviews", title: "Reviews", description: "Reviewers, rounds and project rules.", scope: "Your Account" },
   // No scope: the panel names where its defaults come from instead, "Your Defaults" or "Wollipog
   // Defaults", once it has loaded them (#3026).
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
@@ -102,8 +115,8 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   {
     id: "storage",
     title: "Storage",
-    description: "History kept for archived sessions.",
-    panelDescription: "How long archived sessions keep their full history in this control plane.",
+    description: "Session and workflow history.",
+    panelDescription: "How long archived sessions and completed workflows keep their full history in this control plane. Capable machines also trim archived session logs.",
     scope: "Your Organization",
   },
   {
@@ -139,6 +152,12 @@ export type ConnectionSection = "instances" | "machines" | "people";
  * leaves it.
  */
 export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automationId: string };
+
+/**
+ * The Automations page's tabs (#2969): the list at `/automations`, and Outbound Events at
+ * `/automations/outbound`. Absent is the list; the editor routes have no tab.
+ */
+export type AutomationsTab = "outbound";
 
 /**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
@@ -242,6 +261,7 @@ export const ENTITY_FALLBACK_TITLES = {
   session: "Session",
   run: "Multi-Agent Run",
   pod: "Pod",
+  automation: "Automation",
 } as const;
 
 /**
@@ -279,6 +299,7 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     case "session":
     case "run":
     case "pod":
+    case "automation":
       return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
     case "settings": return "Settings";
@@ -294,7 +315,9 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
  * names a type rather than the thing on screen.
  */
 export function viewSubjectName(view: View): string {
-  if (view.name === "session" || view.name === "run" || view.name === "pod") return `This ${viewTitle(view)}`;
+  if (view.name === "session" || view.name === "run" || view.name === "pod" || view.name === "automation") {
+    return `This ${viewTitle(view)}`;
+  }
   return viewTitle(view);
 }
 
@@ -413,7 +436,8 @@ export function viewPath(view: View): string {
     case "pods": return "/pods";
     case "automations": return view.editor?.kind === "new" ? "/automations/new"
       : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
-        : "/automations";
+        : view.tab === "outbound" ? "/automations/outbound" : "/automations";
+    case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
@@ -427,7 +451,7 @@ export function viewPath(view: View): string {
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
-    case "pod": return `/pods/~${encodeResourceId(view.id)}`;
+    case "pod": return `/pods/~${encodeResourceId(view.id)}${podTabSearch(view)}`;
   }
 }
 
@@ -469,6 +493,25 @@ function runMemberFromSearch(search: string): string | undefined {
   return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
 }
 
+const POD_TAB_PARAM = "tab";
+const POD_TAB_HUDDLE = "huddle";
+
+function podTabSearch(view: { tab?: "huddle"; member?: string }): string {
+  if (view.member !== undefined) return runMemberSearch(view.member);
+  return view.tab === POD_TAB_HUDDLE ? `?${new URLSearchParams({ [POD_TAB_PARAM]: POD_TAB_HUDDLE }).toString()}` : "";
+}
+
+/** The tab a pod URL names: the Huddle, one member, or neither when its query is anything else. */
+function podTabFromSearch(search: string): { tab: "huddle" } | { member: string } | Record<string, never> {
+  const member = runMemberFromSearch(search);
+  if (member !== undefined) return { member };
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  return keys.length === 1 && keys[0] === POD_TAB_PARAM && params.get(POD_TAB_PARAM) === POD_TAB_HUDDLE
+    ? { tab: POD_TAB_HUDDLE }
+    : {};
+}
+
 function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, search: string): View | null {
   const id = decodeResourceId(encodedId);
   if (id === null) return null;
@@ -478,7 +521,8 @@ function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, sea
     const member = runMemberFromSearch(search);
     return member === undefined ? { name: "run", id } : { name: "run", id, member };
   }
-  return { name: "pod", id };
+  // As for a run, a query that names no tab keeps the pod open on its default tab.
+  return { name: "pod", id, ...podTabFromSearch(search) };
 }
 
 /** Parse only the dashboard's explicit route vocabulary. Unknown and malformed paths are not
@@ -503,10 +547,16 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
+  if (path === "/automations/outbound") return { name: "automations", tab: "outbound" };
   const automationEditMatch = /^\/automations\/~([^/]+)\/edit$/.exec(path);
   if (automationEditMatch) {
     const automationId = decodeResourceId(automationEditMatch[1]!);
     return automationId === null ? null : { name: "automations", editor: { kind: "edit", automationId } };
+  }
+  const automationMatch = /^\/automations\/~([^/]+)$/.exec(path);
+  if (automationMatch) {
+    const id = decodeResourceId(automationMatch[1]!);
+    return id === null ? null : { name: "automation", id };
   }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);
@@ -522,7 +572,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isSettingsAlias(path)) return structuredClone(SETTINGS_ALIASES[path]!);
-  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|storage|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|reviews|orchestrator|network|storage|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {

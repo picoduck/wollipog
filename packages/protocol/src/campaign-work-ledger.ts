@@ -41,15 +41,48 @@ export const CAMPAIGN_WORK_LEDGER_LIMITS = {
   pageSizeMax: 100,
 } as const;
 
-/** `owner/repo` plus issue number. The repository is compared case-insensitively. */
+/** A repository (see `campaignRepositoryLocation`) plus issue number. The repository is compared
+ * case-insensitively. */
 export interface CampaignIssueRef {
   repository: string;
   number: number;
 }
 
+/** A pull request, or a GitLab merge request by its project-scoped IID. */
 export interface CampaignPullRequestRef {
   repository: string;
   number: number;
+}
+
+/** Where a ref's `repository` lives (#3539): a github.com `owner/repo`, or a GitLab project named by
+ * its host and full namespace path, `<gitlab-host>/group[/subgroup…]/project`. */
+export type CampaignRepositoryLocation =
+  | { forge: "github"; repository: string }
+  | { forge: "gitlab"; host: string; project: string };
+
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+const HOST_LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
+const GITLAB_HOST = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})+(?::([0-9]{1,5}))?$`, "u");
+const GITLAB_PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/u;
+/** A top-level group, at most 20 nested subgroups, and the project. */
+const GITLAB_MAX_PATH_SEGMENTS = 22;
+
+/**
+ * Classifies a ref's repository, or returns null for one the ledger does not accept. Two segments
+ * are a GitHub slug, as before. A GitLab project must name its host: a bare `group/sub/project`
+ * cannot be told apart from other paths, and `glab -R` would resolve it against gitlab.com.
+ */
+export function campaignRepositoryLocation(repository: unknown): CampaignRepositoryLocation | null {
+  if (typeof repository !== "string" || repository.length > 256) return null;
+  if (GITHUB_REPOSITORY.test(repository)) return { forge: "github", repository };
+  const [host = "", ...path] = repository.split("/");
+  const hostMatch = GITLAB_HOST.exec(host);
+  if (!hostMatch || path.length < 2 || path.length > GITLAB_MAX_PATH_SEGMENTS) return null;
+  if (hostMatch[1] !== undefined && (Number(hostMatch[1]) < 1 || Number(hostMatch[1]) > 65_535)) return null;
+  // GitHub repositories are never host-qualified, so one ref has one spelling.
+  if (/^(?:www\.)?github\.com(?::|$)/iu.test(host)) return null;
+  if (!path.every((segment) => GITLAB_PATH_SEGMENT.test(segment) && !/\.(?:git|atom)$/iu.test(segment))) return null;
+  return { forge: "gitlab", host, project: path.join("/") };
 }
 
 /* ------------------------------ Work items ------------------------------ */
@@ -229,6 +262,8 @@ export type CampaignForgeMergeQueueState =
 /** Slice 8: GitHub pull-request observation read on a runner through its existing `gh` login.
  * Status data only: no token, account, or raw `gh` output crosses. */
 export interface CampaignForgePullRequestObservation {
+  /** Absent on a GitHub observation, which predates the GitLab variant (#3600). */
+  forge?: undefined;
   state: "open" | "closed" | "merged";
   draft: boolean;
   headSha: string;
@@ -242,6 +277,42 @@ export interface CampaignForgePullRequestObservation {
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
 }
+
+/** A GitLab pipeline status, collapsed: `pending` covers created, waiting_for_resource, preparing,
+ * pending, and scheduled; `unknown` is a status this server does not know. Only `success` passes. */
+export type CampaignGitLabPipelineStatus =
+  "success" | "failed" | "running" | "pending" | "canceled" | "skipped" | "manual" | "unknown";
+
+/** A merge-train car's status as GitLab reports it; `unknown` is one this server does not know. */
+export type CampaignGitLabMergeTrainStatus =
+  "idle" | "stale" | "fresh" | "merging" | "merged" | "skip_merged" | "unknown";
+
+/** #3600: a GitLab merge request read on a runner through its existing `glab` login, in GitLab's
+ * own terms rather than GitHub's. Status data only: no token, account, or raw `glab` output. */
+export interface CampaignForgeGitLabMergeRequestObservation {
+  forge: "gitlab";
+  /** GitLab's `locked` (a merge in progress) reads `open`. */
+  state: "open" | "closed" | "merged";
+  draft: boolean;
+  headSha: string;
+  /** The target branch. */
+  baseRef: string;
+  /** `approved`: the project's approval rules are satisfied (with `approvedBy` 0 when none are
+   * required). `left` is null when GitLab does not report it. */
+  approvals: { approved: boolean; approvedBy: number; left: number | null };
+  /** The merge request's head pipeline (its merged-results pipeline where the project runs them),
+   * or null when it has none. */
+  pipeline: { id: number; status: CampaignGitLabPipelineStatus } | null;
+  /** The merge request's merge-train car, or null when it is not on a train. `position` counts
+   * from 1 and is null when the train could not be read far enough. */
+  mergeTrain: { status: CampaignGitLabMergeTrainStatus; position: number | null } | null;
+  /** The merge commit, or the squash commit of a squash merge without one. */
+  mergeCommitSha: string | null;
+}
+
+/** A pull request or merge request observation. A GitHub one carries no `forge`, as before #3600. */
+export type CampaignForgeChangeRequestObservation =
+  CampaignForgePullRequestObservation | CampaignForgeGitLabMergeRequestObservation;
 
 /** Slice 8 bounds and timings, documented in docs/campaign-work-ledger.md "Forge Status". */
 export const CAMPAIGN_FORGE_OBSERVATION = {
@@ -267,7 +338,7 @@ export const CAMPAIGN_FORGE_OBSERVATION = {
  * pull requests now, subject to the rate limit, and returns their facts afterwards. */
 export interface CampaignForgeRefreshResponse {
   revision: number;
-  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> }>;
+  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgeChangeRequestObservation> }>;
 }
 
 /* ------------------------------ Attempts and verification ------------------------------ */
@@ -535,7 +606,7 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
      * when it names none). Omitted means not collected. */
     pullRequests?: Array<{
       ref: CampaignPullRequestRef;
-      fact: CampaignObservedFact<CampaignForgePullRequestObservation>;
+      fact: CampaignObservedFact<CampaignForgeChangeRequestObservation>;
     }>;
   };
   /** Slice 6. Omitted means not collected. */

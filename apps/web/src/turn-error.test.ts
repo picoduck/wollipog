@@ -14,6 +14,14 @@ test("describeTurnError says known failures in plain words", () => {
     ["prompt failed: read ECONNRESET", "The connection to the provider was lost."],
     ["fetch failed", "The connection to the provider was lost."],
     ["Your request was flagged as potentially violating our usage policy", "The provider rejected the content of this turn."],
+    ["agent process could not be created: Provider HOME is already in use; retry after the current owner or publication finishes.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
+    ["Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
+    ["agent process could not be created: This provider HOME no longer holds the profile that this account or session recorded, so it was not used. Restore the original directory or adopt the replacement explicitly.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
+    ["provider account unavailable: This provider profile is not granted to this control plane. An Owner or Admin must grant access on this Machine before it can be used.",
+      "The runner couldn't use this session's provider account, so the agent didn't start."],
   ];
   for (const [message, sentence] of cases) assert.equal(describeTurnError(message), sentence, message);
 });
@@ -35,4 +43,13 @@ test("describeTurnError never guesses at an unknown message", () => {
     "Tool budget limit reached",
     "",
   ]) assert.equal(describeTurnError(message), TURN_ERROR_FALLBACK, message);
+});
+
+test("plain-language account recovery errors retain their account-specific transcript explanation", () => {
+  for (const message of [
+    "Wollipog can't check whether another program is still using this account. Choose another account for now, or save your work and restart the machine before trying again.",
+    "A program from an earlier session is still using this account. Wait for that work to finish, then try again, or choose another account.",
+    "Wollipog can't read or verify this account's recovery records. Choose another account and ask the person who manages this machine to check the recovery details.",
+  ]) assert.equal(describeTurnError(`provider account unavailable: ${message}`),
+    "The runner couldn't use this session's provider account, so the agent didn't start.");
 });

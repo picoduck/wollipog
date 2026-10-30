@@ -283,6 +283,7 @@ export function buildCodexTurnParams(
    * from `managedWorktreeProtections`, which for an Orchestrator names every session's worktrees.
    */
   ownedWorktrees: readonly { path: string; gitAdmin: string }[] = [],
+  projectSharedWritableRoots: readonly string[] = [],
 ): Json {
   const protectManagedWorktrees = managedWorktreeProtections.length > 0;
   const selectedGitRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
@@ -321,14 +322,14 @@ export function buildCodexTurnParams(
   // The profile carries this mode already, and its legacy projection is exactly the policy below,
   // so omitting the policy changes nothing except that the hook state directory stays denied. A
   // mode the running profile does NOT express keeps its policy and is documented as unenforced.
-  const carriedByProfile = gitWritableRoots.length === 0 && activeProfileBase !== null &&
+  const carriedByProfile = gitWritableRoots.length === 0 && projectSharedWritableRoots.length === 0 && activeProfileBase !== null &&
     codexPermissionProfileBase(mode) === activeProfileBase;
   const sandboxPolicy = {
     type: sandboxType,
-    ...(sandboxType === "workspaceWrite" && gitWritableRoots.length > 0
+    ...(sandboxType === "workspaceWrite" && (gitWritableRoots.length > 0 || projectSharedWritableRoots.length > 0)
       // An explicit root list is a complete workspace declaration at the App Server boundary.
       // Keep the selected worktree alongside its narrowly selected Git admin descendants.
-      ? { writableRoots: [cwd, ...gitWritableRoots] }
+      ? { writableRoots: [cwd, ...gitWritableRoots, ...projectSharedWritableRoots] }
       : {}),
   };
   const params: Json = {
@@ -596,7 +597,7 @@ export class CodexAppServerDriver implements Driver {
   private readonly kill: typeof killTree;
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
   /** Every process this instance starts; its owner is each spawn's descendantOwner. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
   private readonly initializationRequestTimeoutMs: number;
   private readonly forkRequestTimeoutMs: number;
@@ -640,12 +641,16 @@ export class CodexAppServerDriver implements Driver {
       archiveRequestTimeoutMs: number;
     }> = {},
   ) {
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.cwd = opts.cwd;
     this.config = opts.config;
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
     this.readRolloutProof = deps.readRolloutProof ?? readCodexRolloutCompletedCommand;
-    this.deps = { permissionProfile: deps.permissionProfile ?? decideCodexPermissionProfile };
+    this.deps = { permissionProfile: deps.permissionProfile ? (launch) => {
+      launch.onProcess?.(Promise.resolve(false));
+      return deps.permissionProfile!(launch);
+    } : decideCodexPermissionProfile };
     this.initializationRequestTimeoutMs = deps.initializationRequestTimeoutMs ?? CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS;
     this.forkRequestTimeoutMs = deps.forkRequestTimeoutMs ?? CODEX_THREAD_FORK_REQUEST_TIMEOUT_MS;
     this.archiveRequestTimeoutMs = deps.archiveRequestTimeoutMs ?? CODEX_THREAD_ARCHIVE_REQUEST_TIMEOUT_MS;
@@ -878,11 +883,10 @@ export class CodexAppServerDriver implements Driver {
     // shape exempts servers the agent definition's own launch arguments declare (ADR 0011); the
     // preset's audited boundary keeps nothing but Wollipog's entry.
     const presetPermissions = this.config.permissionMode === "orchestrator";
-    // MCP inventory probing starts provider processes outside any boundary: no proof while it runs.
     // A review session (#3368) isolates every server, with no exemption: an empty `mcp_servers`
     // table does not remove servers from the user's or the checkout's configuration.
     const isolationArgs = presetPermissions || this.opts.orchestrator?.integrationIsolation === true || this.opts.review
-      ? await this.processes.untracked(() => codexOrchestratorMcpArgs(this.opts, this.cwd, {}, !presetPermissions && !this.opts.review,
+      ? await this.processes.observe((observer) => codexOrchestratorMcpArgs({ ...this.opts, ...observer }, this.cwd, {}, !presetPermissions && !this.opts.review,
         this.opts.review === true)) : [];
     if (this.disposed) throw new Error("session disposed before provider launch");
     // #1336: bind the permission profile to the mode this app-server starts under. A profile is
@@ -897,8 +901,8 @@ export class CodexAppServerDriver implements Driver {
     // `cancel()` advances `promptGeneration`; the per-prompt `cancelled` flag is NOT used, because
     // it can still be set from an earlier turn.
     const generationBeforeProof = this.promptGeneration;
-    // The probe runs outside any process boundary, so no proof can succeed while it runs.
-    const profile = !this.opts.hookStateDir ? null : await this.processes.untracked(() => this.deps.permissionProfile({
+    const profile = !this.opts.hookStateDir ? null : await this.processes.observe((observer) => this.deps.permissionProfile({
+      ...observer,
       command: this.opts.command,
       args: [...this.opts.args, ...isolationArgs],
       // Every turn sends its policy explicitly, so that is the legacy launch to reproduce.
@@ -915,7 +919,7 @@ export class CodexAppServerDriver implements Driver {
     const launchArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
     this.managedWorktreeGuardActive = codexGuardActiveInArgs(launchArgs);
     this.processes.assertOpen();
-    const child = this.processes.record(this.spawn({
+    const child = this.processes.launch(this.spawn, {
       command: this.opts.command,
       args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
       cwd: this.cwd,
@@ -929,7 +933,7 @@ export class CodexAppServerDriver implements Driver {
       cloudAgentLaunch: true,
       descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    }));
+    });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;
@@ -1406,6 +1410,7 @@ export class CodexAppServerDriver implements Driver {
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
         this.managedWorktreeGuardActive,
         this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.protectedWorktree?.ownedWorktrees : undefined,
+        this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.projectSharedWritableRoots : undefined,
       );
       if (this.opts.review) {
         // A review turn is read-only with network access off, never asks, and must return the
@@ -1532,6 +1537,36 @@ export class CodexAppServerDriver implements Driver {
       this.releaseDefiniteSteer(submissionId);
       return { outcome: "rejected", reason: rpc.message ?? String(error) };
     }
+  }
+
+  /** A rejected async question is not a failed turn (#3806): the turn runs on, so report it as a
+   * non-fatal problem. A root agent whose turn is still open is told through a steer, because it
+   * otherwise believes its card is showing; a subagent's turn is not this driver's to steer. The
+   * notice waits for the steer's outcome so it only says the agent was told when Codex accepted it. */
+  private async reportRejectedAsyncQuestion(itemId: string, reason: string, rootThread: boolean): Promise<void> {
+    let told = false;
+    if (rootThread && this.promptBusy && this.turnId) {
+      const result = await this.steer({
+        submissionId: `wollipog-async-question-rejected:${itemId}`,
+        text: "Wollipog could not show your async question to the user as an answer card " +
+          `(reason: ${reason}), so the user has not seen it as a question. If you still need an answer, ` +
+          "ask it again in a normal message.",
+        deadlineAt: Date.now() + ASYNC_QUESTION_REJECTION_STEER_MS,
+      });
+      told = result.outcome === "accepted";
+      if (!told) {
+        this.cb.onStderr(`could not tell Codex its async question was not shown item=${diagnosticValue(itemId)} ` +
+          `outcome=${result.outcome}`);
+      }
+    }
+    if (this.disposed) return;
+    this.cb.onEvent({
+      kind: "error",
+      nonFatal: true,
+      message: told
+        ? "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message."
+        : "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message.",
+    });
   }
 
   /** A definitely-refused steer will never be echoed or settled by Codex, so drop its echo filter
@@ -2499,12 +2534,14 @@ export class CodexAppServerDriver implements Driver {
           if (this.seenAsyncQuestionItems.size > 256) {
             this.seenAsyncQuestionItems.delete(this.seenAsyncQuestionItems.values().next().value!);
           }
-          const questions = item.delivery === "async" && !parentToolUseId
-            ? normalizeCodexAsyncQuestions(item.questions) : null;
-          if (questions) {
-            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions, async: true });
+          const normalized: CodexAsyncQuestions = parentToolUseId ? { rejected: "subagent" }
+            : item.delivery !== "async" ? { rejected: `delivery=${diagnosticValue(item.delivery)}` }
+            : normalizeCodexAsyncQuestions(item.questions);
+          if ("questions" in normalized) {
+            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions: normalized.questions, async: true });
           } else {
-            this.cb.onEvent({ kind: "error", message: "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message." });
+            this.cb.onStderr(`unsupported Codex async question item=${diagnosticValue(id)} reason=${normalized.rejected} — reporting a compatibility error`);
+            void this.reportRejectedAsyncQuestion(id, normalized.rejected, !parentToolUseId);
           }
         }
         break;
@@ -3018,6 +3055,9 @@ interface NormalizedQuestionRequest {
 
 type McpElicitationAction = "accept" | "decline" | "cancel";
 const MAX_STRUCTURED_QUESTIONS = 20;
+/** How long the rejected-async-question steer may wait for Codex before the notice asks the user to
+ * prompt the agent instead. */
+const ASYNC_QUESTION_REJECTION_STEER_MS = 5_000;
 const MAX_QUESTION_OPTIONS = 20;
 const MAX_QUESTION_ID = 256;
 const MAX_QUESTION_HEADER = 80;
@@ -3067,25 +3107,36 @@ function normalizedOptions(raw: unknown): AgentQuestion["options"] | null {
   return new Set(valid.map((option) => option.label)).size === valid.length ? valid : null;
 }
 
+/** A rejection names the failing rule with bounded values so the runner log explains the
+ * compatibility error without recording provider-controlled text. */
+export type CodexAsyncQuestions = { questions: AgentQuestion[] } | { rejected: string };
+
 /** App Server agentMessage.questions uses titles and plain string choices, not the blocking
- * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response. */
-export function normalizeCodexAsyncQuestions(raw: unknown): AgentQuestion[] | null {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 3) return null;
+ * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response.
+ * Codex documents no upper bound on the count ("one or more questions"), unlike requestUserInput's
+ * three (#3724); MAX_STRUCTURED_QUESTIONS is only a defensive cap on one event's size. */
+export function normalizeCodexAsyncQuestions(raw: unknown): CodexAsyncQuestions {
+  if (!Array.isArray(raw)) return { rejected: "questions_shape" };
+  if (raw.length === 0 || raw.length > MAX_STRUCTURED_QUESTIONS) return { rejected: `question_count count=${raw.length}` };
   const questions: AgentQuestion[] = [];
   for (let index = 0; index < raw.length; index++) {
     const entry = raw[index];
     const title = boundedString(entry?.title, MAX_ASYNC_QUESTION_TEXT);
-    if (!title || (entry.options != null && !Array.isArray(entry.options))) return null;
+    if (!title) {
+      return { rejected: `${typeof entry?.title === "string" ? "title_length" : "title_shape"} index=${index}` };
+    }
+    if (entry.options != null && !Array.isArray(entry.options)) return { rejected: `option_shape index=${index}` };
     const options = entry.options == null ? [] : entry.options.map((value: unknown) => boundedString(value, MAX_QUESTION_ID));
-    if (options.length > MAX_QUESTION_OPTIONS || options.some((value: string | null) => !value) ||
-        new Set(options).size !== options.length) return null;
+    if (options.length > MAX_QUESTION_OPTIONS) return { rejected: `option_count index=${index} count=${options.length}` };
+    if (options.some((value: string | null) => !value)) return { rejected: `option_shape index=${index}` };
+    if (new Set(options).size !== options.length) return { rejected: `duplicate_options index=${index}` };
     questions.push({
       id: String(index), question: title,
       options: options.map((label: string) => ({ label })),
       allowOther: true, inputFormat: "text", maxLength: MAX_FREE_TEXT,
     });
   }
-  return questions;
+  return { questions };
 }
 
 /** Normalize Codex's item/tool/requestUserInput request without synthesizing a user message. */

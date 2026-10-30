@@ -1,4 +1,9 @@
-import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
+import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
+import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
+export * from "./orchestrator-review-policy.js";
+export * from "./provider-home-recovery.js";
+export * from "./review-settings.js";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
  * Shared protocol types for Wollipog.
  *
@@ -712,15 +717,80 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      evidence from an older runner is unresolved and gets the standing decline. A v230 runner also
 //      keeps an accepted Dismiss Recovery durable until the provider turn settles, so only then does
 //      the control plane fence its standing sign-in dismissal permanently.
-export const PROTOCOL_VERSION = 230;
+// 231: runner archived-history retention: bounded trim request/result, gated by capability.
+// 232: campaign review sessions (#3371): review launches preserve campaignBudgetDispatch and
+//      report final usage checkpoints. Older runners drop it, so campaign reviews require v232.
+// 233: typed provider-HOME launch refusals (#3240): session snapshots carry
+//      `providerHomeRefusal`, the code of the lease refusal that stopped the session's last launch,
+//      so clients offer a recovery action per code. Older peers omit it and show only the text.
+// 235: extend v233 providerHomeRefusal with specific recovery causes and authorized, path-free
+//      lease-inspection process observations (#3585). Older peers retain the original shapes.
+// 236: human-approved automation creation proposals, exact execution and durable creation receipts.
+// 237: post-upvote review extensions (#3641): bind upvotedHeadSha and require delta scope.
+//      Older peers cannot admit these extensions or receive their review history marker.
+// 239: GitLab typed merges (#3602): a `pr_merge` snapshot for a host-qualified GitLab project pins
+//      its merge method, squash and source-branch settings; consuming it first asks the child's
+//      runner for `gitlab_merge_preflight`, which an older runner cannot answer, so the control
+//      plane refuses a GitLab merge decision for a pre-v239 child runner.
+// 240: display-only background follow-up execution, queue timing and blocker facts (#3682).
+// 242: closing references in GitHub merges (#3713): a GitHub `pr_merge` snapshot may declare
+//      `intendedClosures`, and requesting or arming it first asks the child's runner for
+//      `github_merge_preflight`, which reports every issue the merge would close. The control plane
+//      refuses an undeclared closure and records the check on the decision. A pre-v242 child runner
+//      is not asked; its decisions carry no `closingReferenceCheck`.
+// 243: optional server-verified review-session citations on merge decisions (#3371).
+// 244: GitLab review sessions (#3539): a review session's `pullRequest.repository` may name a
+//      host-qualified GitLab project and `number` a merge request IID. An older runner cannot read
+//      a merge request, so the control plane refuses a GitLab review for a pre-v244 runner.
+// 247: release a queue hold now (#3752). A worktree or provider-account handoff hold reports
+//      `canRelease` when its live provider can end the work it waits on, and `release_queue_hold`
+//      runs the hold's deadline path at once for the session owner or its controlling Orchestrator.
+//      An older runner reports no `canRelease`, and the control plane refuses the request for it.
+// 248: waiting for a busy provider account (#3240): a `start_session` may set
+//      `waitForProviderHome`, and the runner then retries a busy provider-HOME lease, reporting
+//      `providerHomeWait` on the starting session, instead of failing the launch. A refused
+//      conversation fork's `fork_result` carries the typed `providerHomeRefusal`. The control plane
+//      sends the wait request only to a v248+ runner; older peers keep failing busy launches.
+// 249: GitLab campaign issues (#3539): issue closure and campaign issue scope accept a host-qualified
+//      GitLab project. The runner reads and closes the issue with `glab` (a not-planned closure
+//      states its reason in a note), and a GitLab epic is its member checklist only. The control
+//      plane refuses GitLab closure or scope work on a pre-v249 runner. Publication stays GitHub-only.
+// 250: a queue hold names the work it waits on that Background Work does not list (#3752):
+//      `unlistedJobs`, each a provisional launch or an unregistered task id, and the runner no
+//      longer counts a pending id whose job this conversation already ended. Display only; an
+//      older peer omits or ignores the field.
+// 253: provider sign-in failure codes (#3519): a failed `ProviderLoginView` may carry
+//      `failureCode` from the closed `PROVIDER_LOGIN_FAILURE_CODES`, first
+//      `account_already_on_machine` for a duplicate account the runner discarded. Its `error`
+//      sentence is unchanged. The control plane passes only a known code through and puts
+//      `unrecognized` in place of any other, and dashboards fall back to matching the sentence only
+//      when the code is absent (an older runner or control plane).
+// 254: retire native review jobs; new runners require the retirement-aware control plane (#3371).
+// 255: a worktree switch a session made itself continues automatically (#3810). The control plane
+//      marks a create/attach/select that the session's own agent credential requested with
+//      `requestedBySession`, and the runner then submits one continuation turn once the relaunch the
+//      switch needs has run in the selected worktree. Every isolation notice says whether that
+//      continuation will follow (`continuesAfterRelaunch`), and create and select now return the
+//      notice as attach always has. An older runner gets no flag and goes idle after the relaunch.
+// 256: a session switching worktrees says so (#3810). A snapshot may carry `worktreeSwitch` while the
+//      runner is about to relaunch the provider in the selected worktree, or is relaunching it, so
+//      the session reads Switching Worktree instead of Idle. Display only; an older runner never
+//      reports it, and an older control plane or dashboard ignores it.
+// 258: a refused Agent TUI open is typed like a refused session launch (#3338). When the TUI's
+//      provider-HOME lease refuses it, `shell_open_result` carries the same `providerHomeRefusal` a
+//      session or fork reports, and the control plane passes a valid one to the client with its
+//      error. The runner sends it only to a v258+ control plane; older peers keep the text alone.
+export const PROTOCOL_VERSION = 258;
 
 export * from "./campaign-authority.js";
+export * from "./closing-references.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
+export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
 export * from "./review-run.js";
@@ -734,12 +804,12 @@ export type {
 } from "./campaign-control-launch.js";
 export {
   CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION,
-  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId,
+  CAMPAIGN_SESSION_ARTIFACT_DISCLOSURE_REVISION, campaignSessionArtifactDestinationId, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE,
 } from "./campaign-control-launch.js";
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
-export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
+export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -804,7 +874,7 @@ export const SESSION_NAMING_CLEANUP_BUDGET_MS = 1_000;
 export const SESSION_NAMING_TRANSPORT_MARGIN_MS = SESSION_NAMING_CLEANUP_BUDGET_MS + 1_000;
 /** Extra time the control plane's own abort timer allows beyond that runner request deadline. */
 export const SESSION_NAMING_SUPERVISION_MARGIN_MS = SESSION_NAMING_TRANSPORT_MARGIN_MS + 1_000;
-export { buildConversationHandoff, handoffDestinationError } from "./conversation-handoff.js";
+export { buildConversationHandoff, handoffDestinationError, inPlaceHandoffTurns } from "./conversation-handoff.js";
 export * from "./automation-messages.js";
 export { PROMPT_TITLE_MAX, titleFromPrompt } from "./session-title.js";
 export { plainTextPreview } from "./plain-text-preview.js";
@@ -815,6 +885,7 @@ export {
   isSlashCommandNameCharacter,
 } from "./slash-command-name.js";
 import type {
+  CampaignForgeChangeRequestObservation,
   CampaignForgePullRequestObservation,
   CampaignMembershipView,
   CampaignObservationUnavailableReason,
@@ -824,7 +895,7 @@ import type {
   CampaignWorkSummary,
   VerifyCampaignWorkItemInput,
 } from "./campaign-work-ledger.js";
-export type { ConversationHandoffDraft } from "./conversation-handoff.js";
+export type { ConversationHandoffDraft, InPlaceHandoffTurn } from "./conversation-handoff.js";
 import { pendingRequests, prioritizedPendingRequests } from "./worker-attention.js";
 export {
   attentionRequestRank,
@@ -937,6 +1008,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * current runners revalidate native Codex/Claude descriptors as well as ACP descriptors. */
   authoritativeExternalAdoption: 35,
   sessionReprocess: 8,
+  runnerHistoryRetention: 231,
   directoryListing: 10,
   richDiff: 12,
   hunkStaging: 13,
@@ -953,6 +1025,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
    * tools check the same floor against the connected control plane. */
   sessionReviewJob: 223,
+  /** Runner peer for Full Control production evidence authority; the exact private media contract
+   * is checked separately (supportsPacedVideoReviewPeer). */
+  pacedVideoReview: PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   /** v225 provider profile adoption and per-control-plane grants (#3239). */
   providerProfiles: 225,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
@@ -963,9 +1038,30 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeRefDeletion: 227,
   /** v228 runner plans review rounds and validates review attempts (#3369). */
   reviewRuns: 228,
+  /** v237 binds post-upvote extensions and enforces their delta scope (#3641). */
+  postUpvoteReviewExtensions: 237,
+  /** Review sessions preserve admitted campaign accounting through final usage settlement. */
+  campaignReviewSessions: 232,
   /** v229 runner inspects a provider HOME's lease and recovers one exact stale lease on an Owner or
    * Admin's authorization (#3241). */
   providerHomeLeaseRecovery: 229,
+  /** v233 runner reports the typed provider-HOME lease refusal that stopped a session's launch
+   * (#3240). */
+  providerHomeLaunchRefusals: 233,
+  /** Specific recovery causes and authorized process diagnostics (#3585). */
+  providerHomeRecoveryDetails: 235,
+  /** v248 runner waits for a busy provider HOME when a launch asks it to, reporting the wait on
+   * the session (#3240). */
+  providerHomeWait: 248,
+  /** v248 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
+  providerHomeForkRefusals: 248,
+  /** v258 runner reports a refused Agent TUI open's typed provider-HOME refusal in
+   * `shell_open_result` (#3338). */
+  providerHomeAgentTuiRefusals: 258,
+  /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
+  worktreeSwitchContinuation: 255,
+  /** v256 runner reports `worktreeSwitch` while it relaunches a session in another worktree (#3810). */
+  worktreeSwitchStatus: 256,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -1003,11 +1099,15 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAuthenticationReceipts: 79,
   subscriptionUsage: 80,
   managedBackgroundDelivery: 82,
+  backgroundFollowUp: 240,
   managedBackgroundInventory: 82,
   backgroundMissingResultRecovery: 134,
   backgroundRetryExhaustion: 221,
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
+  mergeReviewEvidence: 243,
+  reviewSessionOnly: 254,
+  agentAutomationCreation: 236,
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
   fullControlIssueAuthority: 217,
@@ -1019,6 +1119,14 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
+  /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
+  gitlabMergeDecisions: 239,
+  /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
+  githubMergeClosingReferences: 242,
+  /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
+  gitlabReviewSessions: 244,
+  /** v249 runner inspects, closes and scopes GitLab issues with `glab` (#3539). */
+  gitlabCampaignIssues: 249,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
@@ -1121,7 +1229,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   claudeLiveUsage: 216,
   /** v219 control planes price a snapshot's `ratePricedUsage` residual per cache bucket. */
   ratePricedSnapshotUsage: 219,
-  costReconciliation: 199,
   costReconciliationIdentity: 210,
   /** v129 runners report the exact threshold that cancelled a turn. */
   governanceTripReporting: 129,
@@ -1144,6 +1251,12 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   restartKeepsQueuedWork: 191,
   /** v192 projects who ended a managed background job, and why, as `endedBy` (#1849). */
   backgroundJobEndedBy: 192,
+  /** v247 releases a worktree or account handoff hold at once (`release_queue_hold`, #3752). */
+  queueHoldRelease: 247,
+  /** v250 names a queue hold's work that Background Work does not list (`unlistedJobs`, #3752). */
+  queueHoldUnlistedJobs: 250,
+  /** v253 reports a failed provider sign-in's stable `failureCode` beside its `error` (#3519). */
+  providerLoginFailureCode: 253,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -1577,6 +1690,11 @@ export function sessionRoleConversionRequirement(protocolVersion: number | null 
 /** Changing a campaign's authorized issue scope; every participating Orchestrator's runner needs it. */
 export function campaignIssueScopeChangesRequirement(protocolVersion: number | null | undefined) {
   return runnerCapabilityRequirementError(protocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes");
+}
+
+/** Issue closure and campaign issue scope for a GitLab repository (#3539). */
+export function gitlabCampaignIssuesRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementError(protocolVersion, "gitlabCampaignIssues", "GitLab campaign issues");
 }
 
 /** Full Control issue writes within a human-set issue limit. */
@@ -2514,10 +2632,17 @@ export const WORKFLOW_DECISION_CATEGORIES = [
   "merged_branch_deletion",
   "follow_up_issue_publication",
   "ui_evidence_approval",
+  /** #3369: more cross-model review rounds for a pull request whose epoch used its round budget
+   * including after an upvote when the head changed. Human-owned unless a Parent Control grant
+   * delegates it; Full Control never takes it on its own. */
+  "review_round_extension",
 ] as const;
 export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEGORIES[number];
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
-export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope";
+/** `campaign_follow_up_admission` (#2940): one follow-up past the campaign's approval limit. The server
+ * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
+export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
+  "campaign_follow_up_admission";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -2528,17 +2653,52 @@ export interface ParentControlPolicy {
   decisions: ParentControlDecisionPolicy;
 }
 
+/** Categories added after policies were already stored and sent: a policy that predates one has no
+ * key for it, and it reads as human-owned there. Any other missing or unknown key fails closed. */
+export const LATER_WORKFLOW_DECISION_CATEGORIES: readonly DelegatableWorkflowDecisionCategory[] = ["review_round_extension"];
+
+/** A complete per-category policy from `value`, or null when it is malformed (see
+ * LATER_WORKFLOW_DECISION_CATEGORIES). `fill` is the value an older policy's missing category takes;
+ * `valid` checks each present value. */
+export function completeWorkflowDecisionRecord<T>(
+  value: unknown, fill: T, valid: (entry: unknown) => entry is T,
+): Record<DelegatableWorkflowDecisionCategory, T> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const known = WORKFLOW_DECISION_CATEGORIES as readonly string[];
+  if (Object.keys(record).some((key) => !known.includes(key))) return null;
+  const complete = {} as Record<DelegatableWorkflowDecisionCategory, T>;
+  for (const category of WORKFLOW_DECISION_CATEGORIES) {
+    const entry = record[category];
+    if (entry === undefined && LATER_WORKFLOW_DECISION_CATEGORIES.includes(category)) {
+      complete[category] = fill;
+    } else if (valid(entry)) {
+      complete[category] = entry;
+    } else {
+      return null;
+    }
+  }
+  return complete;
+}
+
+/** A complete decision policy, an older one's later categories human-owned; null when malformed. */
+export function completeParentControlDecisions(value: unknown): ParentControlDecisionPolicy | null {
+  return completeWorkflowDecisionRecord<WorkflowDecisionAuthority>(value, "human",
+    (entry): entry is WorkflowDecisionAuthority => entry === "human" || entry === "orchestrator");
+}
+
 export const HUMAN_ONLY_PARENT_CONTROL_POLICY: ParentControlDecisionPolicy = {
   implementation_question: "human",
   pr_merge: "human",
   merged_branch_deletion: "human",
   follow_up_issue_publication: "human",
   ui_evidence_approval: "human",
+  review_round_extension: "human",
 };
 
 /** User-owned defaults for how a newly created Orchestrator campaign manages children. `null`
  * means capability-driven automatic selection within the preceding fixed level, if any. */
-export interface OrchestratorBehaviorDefaults {
+export interface OrchestratorBehaviorDefaults extends Partial<OrchestratorReviewPolicy> {
   childHarness: AgentHarnessIdentity | null;
   childModel: string | null;
   childEffort: string | null;
@@ -2604,6 +2764,7 @@ export function validOrchestratorCampaignBudgetDefault(value: unknown): value is
 
 export const DEFAULT_ORCHESTRATOR_DEFAULTS: OrchestratorDefaults = {
   behavior: {
+    ...DEFAULT_ORCHESTRATOR_REVIEW_POLICY,
     childHarness: null,
     childModel: null,
     childEffort: null,
@@ -2627,7 +2788,7 @@ export type OrchestratorPolicySource =
   | "active_campaign";
 
 export interface OrchestratorPolicySources {
-  behavior: Record<keyof OrchestratorBehaviorDefaults, OrchestratorPolicySource>;
+  behavior: { [K in keyof OrchestratorBehaviorDefaults]: OrchestratorPolicySource };
   delegation: {
     parentControl: OrchestratorPolicySource;
     decisions: Record<DelegatableWorkflowDecisionCategory, OrchestratorPolicySource>;
@@ -2638,6 +2799,8 @@ export interface OrchestratorPolicySources {
 /** Immutable-at-creation campaign snapshot. Active human changes replace only the affected field
  * and source; editing user defaults never reaches an existing session. */
 export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
+  /** Capability-gated child review snapshots. Older policies omit it and retain legacy resolution. */
+  reviewPolicySnapshotVersion?: 1;
   version: 1;
   /** `harness`: a fixed Child Harness admits any row of the same harness on every Machine (#3247).
    * Absent on campaigns created earlier, which keep enforcing the exact Machine-local agent id. */
@@ -2649,8 +2812,27 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
+  /** Set only when `issueNumbers` came from the authenticated Human's own launch request at
+   * creation. A restart backfill, a child or a transcript never sets it (#2940). */
+  issueNumbersSource?: "human_launch_request";
+  /** A Full Control boundary whose objective and issue scope come from its owner's first message
+   * (#2940). `pending` until that message arrives, `delivering` (durably fenced) while it is being
+   * delivered, then `established`, keeping the digest of the exact message. Server-owned: never
+   * accepted from a request, a child or an agent. */
+  firstMessageScope?: FullControlFirstMessageScope;
   sources: OrchestratorPolicySources;
 }
+
+/** Which launch limits were derived defaults rather than explicit Human ceilings. Only a derived
+ * limit grows to fit the first message's issues; an explicit ceiling never changes. */
+export interface FullControlDerivedLimits { acceptedFollowUps: boolean; maxIssues: boolean }
+
+export type FullControlFirstMessageScope =
+  | { state: "pending"; derivedLimits?: FullControlDerivedLimits }
+  /** `deliveryId` is the durable prompt command the message is admitted as, chosen before
+   * admission: only that exact command, carrying the digest, can settle this delivery. */
+  | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits }
+  | { state: "established"; messageDigest: string; establishedAt: number };
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see
@@ -2890,6 +3072,8 @@ export interface OrchestratorCampaignOverrides {
 }
 
 export interface OrchestratorSettingsCapabilities {
+  /** Only trusted native reviewers advertised by connected machines with configuration support. */
+  reviewers?: import("./review-settings.js").ReviewSettingsView["reviewers"];
   /** Harness-scoped catalogs are authoritative. Identical model ids in separate harnesses remain
    * separate choices and never share effort metadata. */
   harnesses?: OrchestratorHarnessCapability[];
@@ -2974,6 +3158,8 @@ export interface OrchestratorHarnessCapability extends AgentHarnessIdentity {
 }
 
 export interface OrchestratorSettingsView {
+  /** Older control planes omit it; clients hide the new policy fields in that case. */
+  reviewPolicySupported?: true;
   defaults: OrchestratorDefaults;
   source: "system_default" | "user_default";
   capabilities: OrchestratorSettingsCapabilities;
@@ -3191,6 +3377,103 @@ export interface ProviderAccountSwitchFailureView {
   detectedAt: number;
 }
 
+/** Protocol v233 (#3240): why the runner's provider-HOME lease refused a session's launch.
+ * - `busy`: another runner process holds the HOME now.
+ * - `foreign_owner`: another runner or control plane left a stale lease it does not take over.
+ * - `foreign_host`: a runner on another host holds the lease.
+ * - `unavailable`: the runner's lease helper is unavailable.
+ * - `unverifiable`: the lease records cannot be verified.
+ * - `profile_not_granted`: the HOME's provider profile does not grant this control plane.
+ * - `profile_changed`: the HOME no longer holds the profile the account or session recorded.
+ * - `profile_unverifiable`: the HOME's profile marker is unreadable or uses a newer format. */
+export type ProviderHomeLaunchRefusalCode =
+  | "busy" | "foreign_owner" | "foreign_host" | "unavailable" | "unverifiable"
+  | "profile_not_granted" | "profile_changed" | "profile_unverifiable";
+
+export const PROVIDER_HOME_LAUNCH_REFUSAL_CODES: readonly ProviderHomeLaunchRefusalCode[] = [
+  "busy", "foreign_owner", "foreign_host", "unavailable", "unverifiable",
+  "profile_not_granted", "profile_changed", "profile_unverifiable",
+];
+
+/** Protocol v233 (#3240): the lease refusal that stopped a session's last launch. Content-free: it
+ * names the account, never a path. Cleared when the session launches again. */
+export interface ProviderHomeLaunchRefusalView {
+  code: ProviderHomeLaunchRefusalCode;
+  /** v235: more specific than the backwards-compatible v233 code. */
+  cause?: ProviderHomeRecoveryCause;
+  provider: "claude" | "codex";
+  /** The session's bound account; absent when the refused HOME is the runner's own provider HOME. */
+  providerAccountId?: string;
+  providerAccountLabel?: string;
+  detectedAt: number;
+}
+
+/** A peer's `providerHomeRefusal` when it is well formed and content-free, else null. */
+export function validProviderHomeLaunchRefusal(value: unknown): ProviderHomeLaunchRefusalView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const allowed = new Set(["code", "provider", "providerAccountId", "providerAccountLabel", "detectedAt", "cause"]);
+  if (Object.keys(candidate).some((key) => !allowed.has(key))) return null;
+  const { code, provider, providerAccountId, providerAccountLabel, detectedAt, cause } = candidate;
+  if (Object.hasOwn(candidate, "cause") && (!isProviderHomeRecoveryCause(cause) || PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause] !== code)) return null;
+  const details = isProviderHomeRecoveryCause(cause) ? { cause } : {};
+  if (!PROVIDER_HOME_LAUNCH_REFUSAL_CODES.includes(code as ProviderHomeLaunchRefusalCode)) return null;
+  if (provider !== "claude" && provider !== "codex") return null;
+  if (typeof detectedAt !== "number" || !Number.isFinite(detectedAt) || detectedAt < 0) return null;
+  if (providerAccountId === undefined) {
+    if (providerAccountLabel !== undefined) return null;
+    return { code: code as ProviderHomeLaunchRefusalCode, provider, ...details, detectedAt };
+  }
+  if (typeof providerAccountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerAccountId)) return null;
+  if (typeof providerAccountLabel !== "string" || !providerAccountLabel.trim() || providerAccountLabel.length > 200) return null;
+  return { code: code as ProviderHomeLaunchRefusalCode, provider, ...details, providerAccountId, providerAccountLabel, detectedAt };
+}
+
+/** The recovery causes a busy HOME can report: each clears once the other holder finishes. */
+export type ProviderHomeWaitCause = "holder_alive" | "boundary_survivor" | "process_survivor";
+const PROVIDER_HOME_WAIT_CAUSES: readonly ProviderHomeWaitCause[] = ["holder_alive", "boundary_survivor", "process_survivor"];
+
+/** Protocol v248 (#3240): a starting session whose launch is waiting for a busy provider HOME's
+ * lease. Content-free like `ProviderHomeLaunchRefusalView`: it names the account, never a path. */
+export interface ProviderHomeWaitView {
+  provider: "claude" | "codex";
+  cause?: ProviderHomeWaitCause;
+  /** The session's bound account; absent when the busy HOME is the runner's own provider HOME. */
+  providerAccountId?: string;
+  providerAccountLabel?: string;
+  /** When this launch first found the HOME busy. */
+  waitingSince: number;
+  /** When the runner stops waiting and fails the launch with the busy refusal. */
+  waitUntil: number;
+}
+
+/** A peer's `providerHomeWait` when it is well formed and content-free, else null. */
+export function validProviderHomeWait(value: unknown): ProviderHomeWaitView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  const allowed = new Set(["provider", "cause", "providerAccountId", "providerAccountLabel", "waitingSince", "waitUntil"]);
+  if (Object.keys(candidate).some((key) => !allowed.has(key))) return null;
+  const { provider, cause, waitingSince, waitUntil } = candidate;
+  if (provider !== "claude" && provider !== "codex") return null;
+  if (Object.hasOwn(candidate, "cause") && !PROVIDER_HOME_WAIT_CAUSES.includes(cause as ProviderHomeWaitCause)) return null;
+  if (typeof waitingSince !== "number" || !Number.isFinite(waitingSince) || waitingSince < 0) return null;
+  if (typeof waitUntil !== "number" || !Number.isFinite(waitUntil) || waitUntil < waitingSince) return null;
+  // The account fields follow the refusal's rules exactly.
+  const account = validProviderHomeLaunchRefusal({
+    code: "busy", provider, detectedAt: waitingSince,
+    ...(Object.hasOwn(candidate, "providerAccountId") ? { providerAccountId: candidate.providerAccountId } : {}),
+    ...(Object.hasOwn(candidate, "providerAccountLabel") ? { providerAccountLabel: candidate.providerAccountLabel } : {}),
+  });
+  if (!account) return null;
+  return {
+    provider,
+    ...(cause ? { cause: cause as ProviderHomeWaitCause } : {}),
+    ...(account.providerAccountId ? { providerAccountId: account.providerAccountId, providerAccountLabel: account.providerAccountLabel } : {}),
+    waitingSince,
+    waitUntil,
+  };
+}
+
 export type ProviderLoginStatus =
   | "starting"
   | "awaiting_code"
@@ -3199,6 +3482,22 @@ export type ProviderLoginStatus =
   | "failed"
   | "cancelled"
   | "timed_out";
+
+/** Protocol v253 (#3519): why a provider sign-in failed, as a stable code beside its `error`
+ * sentence, so clients decide what to offer without matching copy.
+ * - `account_already_on_machine`: the new account's identity matches an account already on the
+ *   Machine, so the runner discarded the sign-in.
+ * - `unrecognized`: the runner sent a code outside this set (a newer runner). The control plane puts
+ *   it in that code's place, so a code it does not know still reads as a plain failure rather than
+ *   as no code, which a client would read from the `error` sentence instead.
+ * A closed set that may grow: a client treats a code it does not know as a plain failure. */
+export type ProviderLoginFailureCode = "account_already_on_machine" | "unrecognized";
+
+export const PROVIDER_LOGIN_FAILURE_CODES: readonly ProviderLoginFailureCode[] = ["account_already_on_machine", "unrecognized"];
+
+export function isProviderLoginFailureCode(value: unknown): value is ProviderLoginFailureCode {
+  return PROVIDER_LOGIN_FAILURE_CODES.includes(value as ProviderLoginFailureCode);
+}
 
 /** Secret-minimized progress for one runner-owned provider login. Provider output, credential
  * paths, authorization responses, and tokens never enter this projection. */
@@ -3218,6 +3517,9 @@ export interface ProviderLoginView {
   sessionId?: string;
   /** Bounded operator-facing reason from Wollipog's closed failure vocabulary. */
   error?: string;
+  /** Protocol v253 (#3519): a failed sign-in's stable reason, sent with `error`, which stays
+   * unchanged for older clients. Absent from older runners and from endings stored before v253. */
+  failureCode?: ProviderLoginFailureCode;
   startedAt: number;
 }
 
@@ -3716,7 +4018,16 @@ export interface HostAdminStatusView {
   artifactStore: { path: string; ready: boolean };
   /** Protected local bootstrap credential file audit; `issues` is empty when it is safe. */
   localCredential: { path: string; safe: boolean; issues: string[] };
-  runners: { registered: number; online: number; items: Array<{ runnerId: string; status: string; version: string; protocolVersion: number | null }> };
+  runners: { registered: number; online: number; items: Array<{
+    runnerId: string; status: string; version: string; protocolVersion: number | null;
+    /** Optional additive host-admin projection. No provider paths, accounts, or credentials. */
+    harnessReadiness?: {
+      connectedAt: number | null;
+      refreshed: boolean;
+      agents: Array<{ id: string; available: boolean; ownershipBlocked: boolean }>;
+      accounts?: Array<{ id: string; authStatus: ProviderAccountDefinition["authStatus"] }>;
+    };
+  }> };
   devices: { paired: number };
   warnings: string[];
 }
@@ -4542,6 +4853,47 @@ export interface CampaignIssueScopeSnapshot {
   verifiedPublications?: Array<{ publicationOccurrenceId: string; issue: number }>;
 }
 
+/** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
+ * Orchestrator accepts, or a follow-up work item it plans by key. */
+export type CampaignFollowUpSubject =
+  | { kind: "recommendation"; recommendationId: string }
+  | { kind: "work_item"; key: string };
+
+/** A follow-up past the campaign's approval limit (#2940). Server-created from the campaign's own
+ * records; approving it admits exactly this follow-up, with this title and issue, once. A follow-up
+ * admitted this way keeps that binding: changing its title or issue is a new decision (`revises`). */
+export interface CampaignFollowUpAdmissionSnapshot {
+  category: "campaign_follow_up_admission";
+  subject: CampaignFollowUpSubject;
+  /** The follow-up work item's title, bounded for display. */
+  title: string;
+  /** The issue the follow-up work item tracks, if any. */
+  issue: CampaignIssueRef | null;
+  /** For a recommendation, its server-recorded title, bounded for display. It can differ from the
+   * work item's title, as when a recommendation is accepted into an existing follow-up. */
+  recommendationTitle?: string;
+  /** SHA-256 of the follow-up's complete identity: its subject, the recommendation's full recorded
+   * title, the item's full title and its issue. The approval binds this, not the display titles. */
+  identityDigest: string;
+  /** Follow-ups the campaign had accepted when this was requested. */
+  acceptedFollowUps: number;
+  /** How many follow-ups need no approval; `null` when there is no limit, which only a change to an
+   * admitted follow-up can meet. */
+  limit: number | null;
+  /** A change to a follow-up already admitted past the limit: the approval it replaces. */
+  revises?: string;
+  /** With `revises`: the change accepts this recommendation into the admitted follow-up in place of
+   * what it was approved as, rather than changing its title or issue. */
+  rebinds?: true;
+}
+
+/** A Human change to how many follow-ups a Full Control campaign accepts without approval (#2940).
+ * `null` clears the limit. Compare-and-set on the campaign's policy revision. */
+export interface SetCampaignFollowUpLimitRequest {
+  acceptedFollowUps: number | null;
+  expectedRevision: number;
+}
+
 export interface CampaignIssueScopeView {
   campaignSessionId: string;
   repository: string;
@@ -4590,6 +4942,10 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
+  /** Duplicate inspection searched and compared titles by their subject, without a type tag
+   * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an
+   * existing issue that differs only by it, and no bounded publication is admitted through them. */
+  duplicateSearch?: "subject";
 }
 
 export interface GithubIssueClosureInspection {
@@ -4631,9 +4987,38 @@ export interface GithubIssueClosureResult {
   completedAt: number;
 }
 
+export interface AutomationCreationRequest {
+  requestId: string;
+  /** Stable identity for revisions of one intended automation. */
+  resourceKey: string;
+  spec: AutomationSpec;
+}
+
+export interface AutomationCreationSnapshot {
+  category: "automation_creation";
+  spec: AutomationSpec;
+  /** Server-calculated preview, including for a paused automation. */
+  nextFireAt: number;
+  /** Binds target identity, capabilities and ownership without retaining credentials. */
+  targetDigest: string;
+  requestedSpecDigest: string;
+  /** Observed defaults, not persisted overrides. Omitted settings inherit at each normal run. */
+  effectiveTargets: Array<{ runnerId: string; workspaceId: string; agentId: string; role: string; config: SessionConfig }>;
+  expiresAt: number;
+}
+
+export interface AutomationCreationResult {
+  automationId: string;
+  navigationPath: string;
+  spec: AutomationSpec;
+  createdAt: number;
+}
+
 export type WorkflowDecisionResourceSnapshot =
+  | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
   | CampaignIssueScopeSnapshot
+  | CampaignFollowUpAdmissionSnapshot
   | {
       category: "implementation_question";
       question: string;
@@ -4642,16 +5027,52 @@ export type WorkflowDecisionResourceSnapshot =
     }
   | {
       category: "pr_merge";
+      /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
       repository: string;
+      /** The pull request number, or a GitLab merge request's IID. */
       pullRequest: number;
       headSha: string;
       reviewResult: "merge" | "merge_with_acknowledged_risk";
+      /** Optional immutable upvoting attempt in this requester's review run (#3371).
+       * Evidence is verified by the server; it grants no merge or human approval. */
+      reviewSessionId?: string;
       requiredChecks: {
         headSha: string;
         status: "passed";
         checkedAt: number;
         checks: Array<{ name: string; state: "passed"; url?: string }>;
       };
+      /** GitLab only, and then required (#3602): through the project's merge train, or a direct
+       * merge where the project has no train. Absent on GitHub, so GitHub digests are unchanged. */
+      mergeMethod?: "merge_train" | "merge";
+      /** GitLab only: squash on merge, within the project's squash option. */
+      squash?: boolean;
+      /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
+      removeSourceBranch?: boolean;
+      /** GitHub only (v242, #3713): every issue this merge is meant to close, as sorted unique
+       * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
+       * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
+      intendedClosures?: string[];
+    }
+  | {
+      /** #3369: more review rounds for one epoch of the requester's review run on this pull
+       * request. Bound to the run's exact state when requested; the control plane checks it. */
+      category: "review_round_extension";
+      repository: string;
+      pullRequest: number;
+      epoch: number;
+      /** The pull request head the next round would review. */
+      headSha: string;
+      /** v237: required after an upvote; the exact last valid upvoted head. */
+      upvotedHeadSha?: string;
+      /** Valid rounds the epoch has used, which is its current budget. */
+      roundsUsed: number;
+      /** Blocking findings of the epoch's last valid round, still open. */
+      blockingFindings: number;
+      /** Rounds asked for, 1 to 4. */
+      extraRounds: number;
+      /** Why more rounds are worth it (at most 1000 characters). */
+      reason: string;
     }
   | {
       category: "merged_branch_deletion";
@@ -4739,10 +5160,20 @@ export interface WorkflowDecisionActionAdmission extends WorkflowDecisionAction 
 /** Longest child-facing message a resolver may attach to a typed workflow decision. */
 export const WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS = 2000;
 
+/** Current server-verified review citation. Review approval grants no merge authority or CI result. */
+export type MergeReviewEvidence =
+  | { status: "refused"; reviewSessionId: string; reason: string }
+  | { status: "verified"; reviewSessionId: string; requesterSessionId: string;
+      repository: string; pullRequest: number; headSha: string; vote: "UPVOTE";
+      reviewer: import("./session-review-job.js").SessionReviewHarness;
+      epoch: number; round: number; attempt: number; completedAt: number };
+
 /** One exact workflow gate. Raw rationale is never retained; only its digest reaches audit. The
  * child-facing message is the exception by design: its audience is the child, so it is retained
  * on the decision and delivered, while audit still records only its digest. */
 export interface WorkflowDecisionView {
+  /** Server-derived current verification of the optional merge citation. Never caller supplied. */
+  reviewEvidence?: MergeReviewEvidence;
   requestId: string;
   occurrenceId: string;
   sessionId: string;
@@ -4767,6 +5198,10 @@ export interface WorkflowDecisionView {
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
   issueClosureResult?: GithubIssueClosureResult;
+  automationCreationResult?: AutomationCreationResult;
+  /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
+   * Absent when the runner predates the check, so the closures it would make are unknown. */
+  closingReferenceCheck?: PullRequestClosingReferenceCheck;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
 }
@@ -4859,6 +5294,8 @@ export interface PendingApproval {
     kind: RunnerGuardrailKind;
     threshold: number;
     observed: number;
+    /** Optional owning durable command, pinned at the runner crossing. */
+    commandId?: string;
   };
   /** Present only for a control-plane-owned typed workflow gate. */
   workflowDecision?: WorkflowDecisionView;
@@ -5080,6 +5517,9 @@ export interface GovernanceAuditEntry {
     rationaleDigest?: string;
     /** v166: digest of the child-facing message; its text lives only on the decision. */
     childMessageDigest?: string;
+    /** #2940: the Full Control issue boundary a person's approval of a follow-up publication was
+     * made under, written by the server from the controller's boundary, never from a request. */
+    publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string };
   };
   timestamp: number;
 }
@@ -5719,7 +6159,13 @@ export type SessionEventPayload =
     }
   | { kind: "status"; status: SessionStatus }
   | { kind: "turn_interrupted" }
-  | { kind: "error"; message: string }
+  | {
+      kind: "error";
+      message: string;
+      /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
+       * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
+      nonFatal?: true;
+    }
   | {
       kind: "policy_transport";
       state: "open" | "recovered";
@@ -5940,6 +6386,13 @@ export interface UsageRetentionPolicy {
   dailyDays: number;
   /** Existing lifetime session totals are a migration baseline, not backdated history. */
   coverageStartedAt: number;
+}
+
+/** Server-rendered display metadata for one archived-session row. */
+export interface ArchiveSessionMetadata {
+  project: string;
+  location: string;
+  agent: string;
 }
 
 /** Archived-history retention (#2777): bounds, in whole days after archiving. */
@@ -6472,8 +6925,9 @@ export interface ProviderAuthenticationAccountOptionsResponse {
 export interface SelectProviderAuthenticationAccountRequest {
   requestId: string;
   providerAccountId: string;
-  /** The session's configured account when the card was rendered; a change fails closed. */
-  expectedProviderAccountId: string;
+  /** The configured account when rendered, or explicit null for Machine default sign-in.
+   * Required: missing or empty values never skip the stale-binding check. */
+  expectedProviderAccountId: string | null;
 }
 
 export interface SelectProviderAuthenticationAccountResponse {
@@ -6568,6 +7022,33 @@ export type SessionTitleSource = "generated" | "user" | "provider";
  * currently active or awaiting delivery. `resumed` is accepted only for rolling compatibility
  * with pre-v106 runners and must never be presented as a current state. */
 export type BackgroundWorkState = "running" | "continuation_pending" | "orphaned" | "resumed";
+
+/** Display-only facts about the automatic turn returning managed background results. These
+ * never authorize a retry. Running requires the runner's exact current background-job ids. */
+export interface BackgroundFollowUpView {
+  state: "queued" | "running" | "blocked";
+  queuedAt?: number;
+  blocker?: "governance" | "control_plane" | "budget" | "tool_limit" | "input" | "worktree" | "recovery_authorization";
+  /** A local retry timer is armed; absence carries no scheduling evidence. */
+  retryScheduled?: boolean;
+}
+
+/** Keep the public projection bounded and content-free, including on persisted-data reads. */
+export function normalizeBackgroundFollowUp(value: unknown): BackgroundFollowUpView | undefined {
+  if (value == null || typeof value !== "object") return undefined;
+  const v = value as Record<string, unknown>;
+  if (v.state !== "queued" && v.state !== "running" && v.state !== "blocked") return undefined;
+  const blockers: NonNullable<BackgroundFollowUpView["blocker"]>[] =
+    ["governance", "control_plane", "budget", "tool_limit", "input", "worktree", "recovery_authorization"];
+  const blocker = blockers.find((candidate) => candidate === v.blocker);
+  if (v.state === "blocked" && !blocker) return undefined;
+  return {
+    state: v.state,
+    ...(typeof v.queuedAt === "number" && Number.isSafeInteger(v.queuedAt) && v.queuedAt > 0 ? { queuedAt: v.queuedAt } : {}),
+    ...(v.state === "blocked" ? { blocker } : {}),
+    ...(typeof v.retryScheduled === "boolean" ? { retryScheduled: v.retryScheduled } : {}),
+  };
+}
 
 /** Whether the runner can durably observe detached work for this provider. `untracked` is a
  * capability boundary, not proof that detached work currently exists. */
@@ -6995,6 +7476,33 @@ export interface WorktreeRecoveryReader {
 }
 
 /**
+ * The runner is moving this session's provider into another worktree (#3810): a selection the live
+ * process cannot follow takes a relaunch. `pending` waits for the current turn to end, and
+ * `relaunching` has retired the old process and is starting the new one. Display only: the queue,
+ * holds and continuation rules are unchanged, and the field clears once the relaunch is over.
+ */
+export interface SessionWorktreeSwitchView {
+  phase: "pending" | "relaunching";
+  /** Branch of the selected worktree, the name a person recognises; never a path. */
+  branch: string;
+  /** When this switch was first reported, in epoch milliseconds. */
+  since: number;
+}
+
+/** A peer's `worktreeSwitch` when it is exactly well formed, else null. */
+export function validWorktreeSwitch(value: unknown): SessionWorktreeSwitchView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).some((key) => key !== "phase" && key !== "branch" && key !== "since")) return null;
+  const { phase, branch, since } = candidate;
+  if (phase !== "pending" && phase !== "relaunching") return null;
+  // A Git branch name never holds a control character, and 255 bytes is Git's own ref-name limit.
+  if (typeof branch !== "string" || !branch || branch.length > 255 || /[\u0000-\u001f\u007f]/u.test(branch)) return null;
+  if (typeof since !== "number" || !Number.isSafeInteger(since) || since < 0) return null;
+  return { phase, branch, since };
+}
+
+/**
  * A prompt the runner has accepted but cannot start (#1651). The runner defers a worktree or
  * provider-account handoff until the provider's detached background work has settled, because
  * retiring the provider would end that work, and every ordinary queued prompt waits behind the
@@ -7024,10 +7532,28 @@ export interface SessionQueueHoldView {
   /** The live provider can stop one of the unfinished jobs by id without ending the others or the
    * session (#1780), through `stop_background_job`. Absent from runners older than v190. */
   canStopJobs?: true;
+  /** The live provider can end the work this hold waits on right now (#3752), through
+   * `release_queue_hold` or Proceed Now: what `endsAt` does at its deadline, on request. Every
+   * unfinished job is recorded as killed at the requester's request, then the handoff and the
+   * queued prompts run in order. Absent from runners older than v247. */
+  canRelease?: true;
+  /** Work the hold waits on that has no unfinished job in Background Work (#3752), so the session
+   * can show it there: at most 20, sorted by id; `unfinishedBackgroundJobs` still counts all of
+   * them. Proceed Now ends it with the rest. Absent when there is none, and from runners older than
+   * v250. */
+  unlistedJobs?: QueueHoldUnlistedJob[];
   /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports a
    * finished background result still owed to the new conversation (#1779). Absent from runners
    * older than v191, whose restart discards the queue. */
   restartKeepsQueue?: true;
+}
+
+/** One unlisted id a queue hold waits on (#3752). `provisional`: a launch the provider has not yet
+ * confirmed as a task (`tool:<tool-use-id>`). `unregistered`: a task id the runner tracks as pending
+ * without a job record, such as one found in the provider's task files. */
+export interface QueueHoldUnlistedJob {
+  id: string;
+  kind: "provisional" | "unregistered";
 }
 
 export function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
@@ -7054,8 +7580,14 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
     ? ` (${hold.unfinishedBackgroundJobs === 1 ? "" : "the oldest, "}${backgroundLaunchTypeNoun(hold.oldestUnfinishedJob.launchType)}` +
       ` started at ${new Date(hold.oldestUnfinishedJob.startedAt).toISOString().slice(0, 16)}Z)`
     : "";
+  // Work no Background Work row shows is named as such (#3752), so nobody looks there for it in vain.
+  const unlisted = Math.min(hold.unlistedJobs?.length ?? 0, hold.unfinishedBackgroundJobs);
+  const notListed = unlisted === 0 ? ""
+    : unlisted === hold.unfinishedBackgroundJobs
+      ? hold.unfinishedBackgroundJobs === 1 ? ", which Background Work does not list" : ", none of which Background Work lists"
+      : `, ${unlisted} of which Background Work does not list`;
   return `${messages} ${cannot}: the provider must first ${move}, and that handoff waits for ${jobs}` +
-    ` with no terminal status${oldest}.`;
+    ` with no terminal status${oldest}${notListed}.`;
 }
 
 /** What clears a queue hold. Waiting is the ordinary way. When the runner bounds the wait
@@ -7088,6 +7620,21 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
       "background job and starts a new conversation."
     : ` Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
   const deadline = hold.endsAt === undefined ? undefined : new Date(hold.endsAt).toISOString().slice(0, 16);
+  // Releasing needs the same authority as stopping a job (#3752): the owner or the controlling
+  // Orchestrator. It is named first because it works even when no listed job can be stopped.
+  if (hold.canRelease && canStopJobs) {
+    return wait +
+      `To proceed now, release the hold with release_queue_hold (hold ${hold.holdId}) or with Proceed Now in the ` +
+      `queued messages: Wollipog ends every unfinished background job, records each as killed at your request, ` +
+      `and then runs the handoff and the queued ${messages} in order. The conversation keeps running, and a finished ` +
+      "job's result from the same turn is still delivered." +
+      (hold.canStopJobs
+        ? " To end only one job instead, stop it by its job id with stop_background_job or with Stop Job in the " +
+          "Background Work panel."
+        : "") +
+      (deadline !== undefined ? ` Wollipog also ends any job still running at ${deadline}Z.` : "") +
+      avoidRestart("proceeding now");
+  }
   if (hold.canStopJobs && canStopJobs) {
     return wait +
       `To end ${one ? "it" : "one"} now, stop it by its job id with stop_background_job (get_session lists the unfinished jobs) ` +
@@ -7096,7 +7643,7 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
       (deadline !== undefined ? `; Wollipog also ends any job still running at ${deadline}Z.` : ".") +
       avoidRestart("stopping the job");
   }
-  if (hold.canStopJobs) {
+  if (hold.canStopJobs || hold.canRelease) {
     return wait +
       `Only the session owner or its controlling Orchestrator can end ${one ? "it" : "one"} sooner; ask them if it must end now.` +
       (deadline !== undefined ? ` Wollipog also ends any job still running at ${deadline}Z.` : "") +
@@ -7128,6 +7675,7 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
 /** What the person reading queue-hold advice may do to the held session (#1857), from its
  * `stopBackgroundJob` and `restart` command permissions. */
 export interface QueueHoldReader {
+  /** May stop the session's background jobs, and so also release its hold (#3752). */
   canStopJobs: boolean;
   canRestart: boolean;
 }
@@ -7283,6 +7831,8 @@ export interface SessionAttentionSummary {
 
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
+  /** Immutable review selection captured when this campaign child launched. */
+  reviewPolicy?: import("./orchestrator-review-policy.js").SessionReviewPolicySnapshot;
   /** Lightweight list projection. Open the authorized detail endpoint before rendering controls
    * that depend on request bodies, provider capabilities, queues, or campaign inventories. */
   projection?: "summary";
@@ -7349,6 +7899,10 @@ export interface SessionView {
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** Protocol v233 (#3240): the lease refusal that stopped the session's last launch. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
+  /** Protocol v248 (#3240): the busy provider account a starting session is waiting for. */
+  providerHomeWait?: ProviderHomeWaitView;
   /** Protocol v225 (#3239): the provider profile the account binding recorded. Absent for a binding
    * made before the account was adopted, a legacy HOME, and older control planes. */
   providerProfileId?: string;
@@ -7363,11 +7917,16 @@ export interface SessionView {
   worktreeRecovery?: WorktreeRecoveryView;
   /** A prompt the runner accepted waits behind a handoff barrier (#1651); see `holds`. */
   queueHold?: SessionQueueHoldView;
+  /** The runner is relaunching this session in another worktree (#3810). Omitted otherwise, for
+   * finished sessions, and by peers that predate v256. */
+  worktreeSwitch?: SessionWorktreeSwitchView;
   /** Conditions that keep the next turn from starting, with the step that clears each (#1650).
    * Omitted when there are none, and by control planes that predate it. */
   holds?: SessionHoldView[];
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
+  /** v240: display-only follow-up facts. Missing on older peers; never retry authority. */
+  backgroundFollowUp?: BackgroundFollowUpView | null;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
   /** Durable control-plane delivery stages. Omitted by pre-v82 control planes. */
@@ -7563,6 +8122,11 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier
+   * refusal. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView | null;
+  /** Protocol v248 (#3240). Three-valued: undefined is an older peer; null is no wait. */
+  providerHomeWait?: ProviderHomeWaitView | null;
   /** Protocol v225 (#3239): the provider profile the session's account binding recorded when it was
    * made. Three-valued: undefined carries no information (an older peer, or a registration snapshot
    * built before version negotiation); null is a binding without a profile (a legacy HOME, or one
@@ -7584,8 +8148,13 @@ export interface SessionSnapshot {
   /** A prompt the runner accepted but cannot start behind a handoff barrier (#1651). Three-valued
    * like worktreeRecovery: undefined is a pre-v187 peer, null explicitly clears. */
   queueHold?: SessionQueueHoldView | null;
+  /** v256: a worktree relaunch in progress (#3810). Three-valued like queueHold: undefined is an
+   * older peer, null explicitly clears. */
+  worktreeSwitch?: SessionWorktreeSwitchView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
+  /** v240: display-only follow-up facts. Missing on older peers; never retry authority. */
+  backgroundFollowUp?: BackgroundFollowUpView | null;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
   backgroundWorkTracking?: BackgroundWorkTracking;
   /** Bounded projection-safe managed-job inventory. Omitted for pre-v82 control planes. */
@@ -8097,6 +8666,7 @@ export interface WorkflowDefinition extends WorkflowDefinitionSpec {
   createdAt: number;
 }
 
+export * from "./workflow-event-retention.js";
 export type WorkflowInstanceStatus = "queued" | "running" | "waiting_gate" | "succeeded" | "failed" | "stopped";
 export type WorkflowNodeStatus = "pending" | "ready" | "running" | "waiting_gate" | "succeeded" | "failed" | "skipped" | "stopped";
 export type WorkflowAttemptStatus = "dispatching" | "running" | "awaiting_output" | "succeeded" | "failed" | "timed_out" | "cancelled";
@@ -8115,6 +8685,8 @@ export interface WorkflowNodeState {
 }
 
 export interface WorkflowInstanceView {
+  /** Event history removed by the separate opt-in completion-age retention policy. */
+  eventHistoryPruned?: import("./workflow-event-retention.js").WorkflowEventHistoryPruned;
   instanceId: string;
   workflowId: string;
   workflowVersion: number;
@@ -8308,9 +8880,22 @@ export interface AutomationSchedule extends AutomationSpec {
   lastFiredAt?: number;
   /** Current scheduled occurrence is waiting for target resolution. */
   targetHealth?: { scheduledFor: number; firstSeenAt: number; error: string };
+  /**
+   * The newest execution's outcome, on `GET /api/automations` only (#2969): its status and when it
+   * last changed, never its error text. Absent when the automation has never run, and from control
+   * planes that predate it; the automation's own page reads the full history.
+   */
+  latestExecution?: AutomationLatestExecution;
   createdBy: GovernanceActor;
   createdAt: number;
   updatedAt: number;
+}
+
+/** What the Automations list shows of an automation's newest execution (#2969). */
+export interface AutomationLatestExecution {
+  status: AutomationExecutionStatus;
+  /** Its completion, else its start, else its creation: the time the automation page's Last Run shows. */
+  at: number;
 }
 
 export type AutomationTriggerKind = "webhook" | "chatops";
@@ -8492,11 +9077,16 @@ export interface OutboundEventEnvelope {
   questionTitle?: string;
 }
 
+/** Exact runner evidence, present only when governance cancelled this execution's work. */
+export type AutomationGovernancePause = Pick<GovernanceTrippedMessage,
+  "sessionId" | "tripId" | "kind" | "threshold" | "observed" | "commandId">;
+
 export type AutomationExecutionStatus =
   | "dispatching"
   | "running"
   | "succeeded"
   | "failed"
+  | "ceiling_paused"
   | "skipped"
   | "expired";
 
@@ -8543,6 +9133,7 @@ export interface AutomationExecution {
   specSnapshot?: AutomationSpec;
   actionKind: AutomationAction["kind"];
   status: AutomationExecutionStatus;
+  governancePause?: AutomationGovernancePause;
   /** Legacy rows retain the original at-most-once boundary; v53 rows use the durable command
    * outbox and runner receipt journal. */
   deliveryMode?: "legacy_at_most_once" | "receipted_v53";
@@ -8702,6 +9293,75 @@ export interface RecordWorkflowActionAdmissionMessage {
   sessionTurnId: string;
 }
 
+/** v239 (#3602): before a GitLab `pr_merge` is armed, the child's runner reads GitLab through the
+ * session's own `glab` login and checks the exact snapshot against it: the merge request is open at
+ * the approved head, the merge method matches whether the project runs merge trains (so a merge
+ * never goes around an enabled train), squash fits the project's squash option, a train's
+ * source-branch setting matches, and the instance's version has the merge-train API. Read-only. */
+export interface GitLabMergePreflightMessage {
+  type: "gitlab_merge_preflight";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+  mergeMethod: "merge_train" | "merge";
+  squash: boolean;
+  removeSourceBranch: boolean;
+}
+
+/** `refusal` is set when `ok` is false: `stale_head` (the merge request moved, so the approval is
+ * stale), `mismatch` (the snapshot does not fit the project or merge request), or `unavailable`
+ * (GitLab could not be read, so nothing was proven). `reason` is a fixed sentence, never `glab`
+ * output. */
+export interface GitLabMergePreflightResultMessage {
+  type: "gitlab_merge_preflight_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "mismatch" | "unavailable";
+  reason?: string;
+}
+
+/** One issue a GitHub merge would close (#3713). `description` is the description's text, with
+ * its line in `excerpt`; `linked` is GitHub's own `closingIssuesReferences`, which also covers an
+ * issue linked by hand. Either alone closes the issue. */
+export interface PullRequestClosure {
+  issue: string;
+  sources: Array<"description" | "linked">;
+  excerpt?: string;
+}
+
+export interface PullRequestClosingReferenceCheck {
+  checkedAt: number;
+  closures: PullRequestClosure[];
+}
+
+/** v242 (#3713): before a GitHub `pr_merge` is requested or armed, the child's runner reads the open
+ * pull request through the session's own `gh` login: its head, its description and GitHub's closing
+ * links. Read-only; the control plane compares the closures with the snapshot's `intendedClosures`. */
+export interface GithubMergePreflightMessage {
+  type: "github_merge_preflight";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+}
+
+/** `refusal` is set when `ok` is false: `stale_head` (the pull request is not open at the snapshot's
+ * head, so that snapshot cannot merge) or `unavailable` (GitHub could not be read, so nothing was
+ * proven). `reason` is a fixed sentence, never `gh` output. */
+export interface GithubMergePreflightResultMessage {
+  type: "github_merge_preflight_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "unavailable";
+  reason?: string;
+  check?: PullRequestClosingReferenceCheck;
+}
+
 /** Runner-authoritative coordinates for one successfully appended action-arm fence. */
 export interface WorkflowActionAdmissionRecordedMessage {
   type: "workflow_action_admission_recorded";
@@ -8746,6 +9406,10 @@ export interface CampaignForgeObserveMessage {
   /** The root campaign Orchestrator session whose repository context runs `gh`. */
   sessionId: string;
   pullRequests: CampaignPullRequestRef[];
+  /** #3600: this control plane accepts GitLab merge-request observations, so the runner may read
+   * host-qualified GitLab refs through `glab`. Without it (an older control plane, which would reject
+   * the whole answer), and on an older runner that ignores it, GitLab refs stay `forge_unsupported`. */
+  gitlab?: true;
 }
 
 /** Why a forge read failed, for the whole request or one pull request. */
@@ -8764,7 +9428,7 @@ export interface CampaignForgeObserveResultMessage {
   failure?: CampaignForgeObservationFailure;
   /** Set when `ok` is true, one entry per requested pull request. */
   results?: Array<
-    | { ref: CampaignPullRequestRef; ok: true; observation: CampaignForgePullRequestObservation }
+    | { ref: CampaignPullRequestRef; ok: true; observation: CampaignForgeChangeRequestObservation }
     | { ref: CampaignPullRequestRef; ok: false; failure: CampaignForgeObservationFailure }
   >;
 }
@@ -8849,6 +9513,10 @@ export interface GovernanceTrippedMessage {
   kind: RunnerGuardrailKind;
   threshold: number;
   observed: number;
+  /** Additive and optional: the durable command whose active turn crossed this ceiling.
+   * Reconnect retains this identity even after that turn settles. Older peers omit/ignore it;
+   * turns without a durable command owner must omit it. */
+  commandId?: string;
 }
 
 /** Runner streams a normalized session event. In Phase 2 the runner owns the per-session `seq`
@@ -8871,6 +9539,28 @@ export interface SessionHistoryResultMessage {
   error?: string;
   /** Seq-ordered events the control plane hydrates into its cache. */
   events?: { seq: number; ts: number; payload: SessionEventPayload }[];
+}
+
+/** Sent only after a completed, armed organization prune and complete hydration. Coordinates are
+ * the runner’s negotiated epoch/sequence, never control-plane event ids. */
+export interface TrimSessionHistoryMessage {
+  type: "trim_session_history";
+  requestId: string;
+  sessionId: string;
+  logEpoch: number;
+  throughSeq: number;
+}
+export interface TrimSessionHistoryResultMessage {
+  type: "trim_session_history_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  trimmed?: boolean;
+  /** Explicit confirmation that superseded files were removed. Missing on older runners; retry. */
+  cleanupComplete?: boolean;
+  /** Bytes successfully unlinked from superseded files, excluding new-file allocations. */
+  bytesRemoved?: number;
+  error?: string;
 }
 
 export type SessionHistoryPageErrorCode =
@@ -9058,6 +9748,36 @@ export interface StopBackgroundJobResultMessage {
   terminalStatus?: "completed" | "failed" | "killed";
 }
 
+/** Why a runner could not release a queue hold (#3752). `session_not_found`: the runner has no
+ * such session. `no_hold`: nothing is held any more. `hold_changed`: the session is held, but not by
+ * the hold the requester saw (it cleared and a new one formed), so nothing was ended. `unsupported`:
+ * the session's harness cannot end its background work. `turn_active`: a turn started meanwhile and
+ * may be consuming the work. `in_progress`: the session's background work is being ended right now.
+ * `no_live_process`: no live provider process owns the work, so only its orphan recovery or a
+ * restart clears the hold. `nothing_to_end`: the live provider reported no unfinished work. */
+export type ReleaseQueueHoldRefusal =
+  | "session_not_found"
+  | "no_hold"
+  | "hold_changed"
+  | "unsupported"
+  | "turn_active"
+  | "in_progress"
+  | "no_live_process"
+  | "nothing_to_end";
+
+/** Correlated v247 answer to `release_queue_hold`. */
+export interface ReleaseQueueHoldResultMessage {
+  type: "release_queue_hold_result";
+  requestId: string;
+  sessionId: string;
+  holdId: string;
+  outcome: "released" | "refused";
+  /** Present exactly when `outcome` is `refused`. */
+  reason?: ReleaseQueueHoldRefusal;
+  /** For `released`, the jobs recorded as killed at the actor's request. */
+  jobIds?: string[];
+}
+
 /** Correlated runner disposition for a v73 steering request. */
 export interface SteerSessionResultMessage {
   type: "steer_session_result";
@@ -9227,6 +9947,8 @@ export type RunnerToControlPlane =
   | PolicyHookCredentialMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
+  | GitLabMergePreflightResultMessage
+  | GithubMergePreflightResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
   | CampaignIssueScopeResultMessage
@@ -9238,6 +9960,7 @@ export type RunnerToControlPlane =
   | SessionEventMessage
   | SessionHistoryResultMessage
   | SessionHistoryPageResultMessage
+  | TrimSessionHistoryResultMessage
   | ReprocessSessionResultMessage
   | ListExternalSessionsResultMessage
   | AdoptSessionResultMessage
@@ -9267,6 +9990,7 @@ export type RunnerToControlPlane =
   | SessionQueueMessage
   | InterruptTurnResultMessage
   | StopBackgroundJobResultMessage
+  | ReleaseQueueHoldResultMessage
   | SteerSessionResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
@@ -9359,6 +10083,9 @@ export interface SessionLaunchSpec {
   sessionId: string;
   /** Opaque identity used to prove that an ambiguous replacement start reached the runner. */
   controlPlaneLaunchId?: string;
+  /** Protocol v248 (#3240): when this launch finds the provider HOME busy, wait for its lease
+   * instead of failing. Sent only to a v248+ runner. */
+  waitForProviderHome?: boolean;
   workspaceId: string | null;
   workspacePath: string;
   agentId: string;
@@ -9646,6 +10373,28 @@ export interface BackgroundJobStopResponse {
   terminalStatus: "completed" | "failed" | "killed";
 }
 
+/** v247: release a worktree or provider-account handoff hold now (#3752). The runner ends the work
+ * the hold waits on, exactly as the hold's deadline would, records every ended job as killed at the
+ * actor's request, and then runs the handoff and the queued prompts in order. `holdId` is the hold
+ * the requester saw; a different or cleared hold is refused without ending anything. */
+export interface ReleaseQueueHoldMessage {
+  type: "release_queue_hold";
+  requestId: string;
+  sessionId: string;
+  holdId: string;
+  actor: BackgroundJobStopActor;
+}
+
+/** HTTP answer of `POST /api/sessions/:id/queue-hold/release`. A refusal is an HTTP error instead:
+ * 409 when the runner cannot release the hold. */
+export interface QueueHoldReleaseResponse {
+  sessionId: string;
+  holdId: string;
+  outcome: "released";
+  /** The jobs recorded as killed. */
+  jobIds: string[];
+}
+
 /** Control plane asks the runner to drop ONE not-yet-started prompt from a session's queue (the
  * running turn is unaffected — it's already been dequeued). No-op if the id already ran. */
 export interface CancelQueuedPromptMessage {
@@ -9817,6 +10566,9 @@ export interface ForkResultMessage {
   /** v128: a prompt the source retained unsent while quarantined, handed to the recovered session
    * as a composer draft. It is never submitted by the runner or the control plane. */
   retainedPrompt?: { text: string; images: PromptImageInput[] };
+  /** v248 (#3240): the provider-HOME lease refusal that stopped the fork, for a v248+ control
+   * plane. `error` still carries the text. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
 }
 
 /** Create, attach, or select the worktree targeted by a session's Git/file actions. The runner
@@ -9831,8 +10583,13 @@ export type SessionWorktreeRequestMessage =
       branch: string;
       /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
       progress?: boolean;
+      /** Protocol v255: the session's own agent credential made this request (#3810). */
+      requestedBySession?: boolean;
     }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "retry_setup"; path: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select"; path: string;
+      /** Protocol v255: the session's own agent credential made this request (#3810). */
+      requestedBySession?: boolean }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "retry_setup"; path: string }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "discard"; path: string;
       /** Protocol v193: require proof the exact checkout head was delivered before removal. */
       requireDelivered?: boolean }
@@ -9956,6 +10713,10 @@ export interface SessionWorktreeIsolationNotice {
   writableNow: boolean;
   /** True when the session's next launch binds the attached path into its writable boundary. */
   writableAtNextLaunch: boolean;
+  /** Protocol v255: the path is not writable now, the session asked for it from inside its own
+   * turn, and the runner continues that work by itself once the turn ends and the session has
+   * relaunched in the selected worktree (#3810). Absent from older runners. */
+  continuesAfterRelaunch?: boolean;
 }
 
 export interface SessionWorktreeRetirementResult {
@@ -10105,7 +10866,8 @@ export interface SelectProviderAuthenticationAccountMessage {
   sessionId: string;
   recoveryRequestId: string;
   providerAccountId: string;
-  expectedProviderAccountId: string;
+  /** Explicit null means the session was unbound when the card opened. */
+  expectedProviderAccountId: string | null;
   /** Who chose the account (#2783), recorded on this session's `auth:select-account` resolution
    * only, as `resolve_permission`'s v211 field is. Absent from older control planes; older runners
    * ignore it. Such selections name nobody. */
@@ -10229,6 +10991,9 @@ export interface ProviderHomeLeaseInspection {
   hasEvidence?: boolean;
   /** For `stale`: why a recovery would be refused now, or null when it would proceed. */
   refusal?: ProviderHomeLeaseRecoveryCode | null;
+  /** v235: specific recovery cause; process observations are Owner/Admin-only. */
+  cause?: ProviderHomeRecoveryCause;
+  blockingProcess?: ProviderHomeBlockingProcess;
 }
 
 /** Protocol v229 (#3241): read one account HOME's lease state. Creates nothing. */
@@ -10725,6 +11490,8 @@ export interface ShellOpenResultMessage {
   error?: string;
   /** Whether a real PTY was allocated (dashboards pick renderer/input mode on this). */
   pty?: boolean;
+  /** Protocol v258 (#3338): the Agent TUI's provider-HOME lease refused the open. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
 }
 
 /** Best-effort terminal resize (PTY shells; no-op in pipe mode). Fire-and-forget like input. */
@@ -11163,6 +11930,8 @@ export type ControlPlaneToRunner =
   | PolicyHookCredentialRegisteredMessage
   | RecordPolicyHookDecisionMessage
   | RecordWorkflowActionAdmissionMessage
+  | GitLabMergePreflightMessage
+  | GithubMergePreflightMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | CampaignIssueScopeMessage
@@ -11179,6 +11948,7 @@ export type ControlPlaneToRunner =
   | CancelSessionMessage
   | InterruptTurnMessage
   | StopBackgroundJobMessage
+  | ReleaseQueueHoldMessage
   | CancelQueuedPromptMessage
   | ReadQueuedPromptMessage
   | EditQueuedPromptMessage
@@ -11229,6 +11999,7 @@ export type ControlPlaneToRunner =
   | DeleteSessionMessage
   | ListExternalSessionsRequestMessage
   | AdoptSessionMessage
+  | TrimSessionHistoryMessage
   | ReprocessSessionMessage
   | ListDirectoryRequestMessage
   | ListSessionFilesRequestMessage

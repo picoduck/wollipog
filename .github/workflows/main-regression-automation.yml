@@ -1,0 +1,55 @@
+name: Main Regression Automation
+
+on:
+  workflow_run:
+    workflows: [Main Rolling Validation]
+    types: [completed]
+  schedule:
+    - cron: '13,33,53 * * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  reconcile:
+    if: github.ref == 'refs/heads/main' && (github.event_name != 'workflow_run' || (github.event.action == 'completed' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository && github.event.workflow_run.head_repository.full_name == github.repository && github.event.workflow_run.path == '.github/workflows/main-rolling-validation.yml' && github.event.workflow_run.event == 'workflow_dispatch'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    concurrency:
+      group: main-regression-automation
+      cancel-in-progress: false
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      # Trusted default-branch adapter only. Never check out tested_sha here.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '24'
+      - name: Reconcile Bounded Regression Investigation
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAIN_REGRESSION_AUTOMATION_ENABLED: ${{ vars.MAIN_REGRESSION_AUTOMATION_ENABLED }}
+          MAIN_REGRESSION_AUTOMATION_DRY_RUN: ${{ vars.MAIN_REGRESSION_AUTOMATION_DRY_RUN }}
+          MAIN_REGRESSION_AUTOMATION_OUTPUT: ${{ runner.temp }}/main-regression-automation.json
+          WOLLIPOG_REGRESSION_ORIGIN: ${{ vars.WOLLIPOG_REGRESSION_ORIGIN }}
+          WOLLIPOG_REGRESSION_AUTOMATION_ID: ${{ vars.WOLLIPOG_REGRESSION_AUTOMATION_ID }}
+          WOLLIPOG_REGRESSION_TRIGGER_ID: ${{ vars.WOLLIPOG_REGRESSION_TRIGGER_ID }}
+          WOLLIPOG_REGRESSION_REVISION: ${{ vars.WOLLIPOG_REGRESSION_REVISION }}
+          WOLLIPOG_REGRESSION_GENERATION: ${{ vars.WOLLIPOG_REGRESSION_GENERATION }}
+          WOLLIPOG_REGRESSION_ACTION_DIGEST: ${{ vars.WOLLIPOG_REGRESSION_ACTION_DIGEST }}
+          WOLLIPOG_REGRESSION_TOKEN: ${{ secrets.WOLLIPOG_REGRESSION_TOKEN }}
+          WOLLIPOG_REGRESSION_SECRET: ${{ secrets.WOLLIPOG_REGRESSION_SECRET }}
+        run: node scripts/main-regression-automation.mjs
+      - name: Retain Content-Free Adapter Receipt
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: main-regression-automation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/main-regression-automation.json
+          retention-days: 30
+          if-no-files-found: error

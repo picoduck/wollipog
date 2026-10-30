@@ -1,6 +1,6 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
-import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
+import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, WorkflowArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -550,7 +550,15 @@ export const estimateTimelineRow = (row: TimelineRenderRow): number => {
  * keystrokes, status flips) skips the whole timeline subtree, not just the row bodies.
  * `onRewind` (when provided — session detail only) must be identity-stable (useCallback)
  * or it defeats the row memoization. */
-const HandoffContext = createContext<{ open: (turn: number) => void; reason?: string } | undefined>(undefined);
+interface HandoffControl {
+  open: (turn: number) => void;
+  reason?: string;
+  /** Only in-place handoffs use prompt ordinals from the shared durable-history projection. */
+  inPlaceTurns?: ReadonlyMap<number, InPlaceHandoffTurn>;
+  historyReason?: string;
+}
+const TimelineAgentsContext = createContext<readonly Pick<AgentDefinition, "id" | "name">[] | undefined>(undefined);
+const HandoffContext = createContext<HandoffControl | undefined>(undefined);
 
 /** Retry Turn for a failed turn's notice (#2169): re-submits the turn's prompt as a new turn. */
 export interface TurnRetryControl {
@@ -565,6 +573,7 @@ export interface TurnRetryControl {
 const TurnRetryContext = createContext<TurnRetryControl | undefined>(undefined);
 export const EventTimeline = memo(function EventTimeline({
   handoff,
+  agents,
   turnRetry,
   items,
   onRewind,
@@ -598,7 +607,9 @@ export const EventTimeline = memo(function EventTimeline({
   onInsertReply,
   subagentStatus,
 }: {
-  handoff?: { open: (turn: number) => void; reason?: string };
+  handoff?: HandoffControl;
+  /** Current definitions on this session's runner; stored handoff IDs remain the fallback. */
+  agents?: readonly Pick<AgentDefinition, "id" | "name">[];
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
   turnRetry?: TurnRetryControl;
   items: TimelineItem[];
@@ -655,6 +666,7 @@ export const EventTimeline = memo(function EventTimeline({
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
+    <TimelineAgentsContext.Provider value={agents}>
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
     <InsertReplyContext.Provider value={onInsertReply}>
@@ -697,6 +709,7 @@ export const EventTimeline = memo(function EventTimeline({
     </InsertReplyContext.Provider>
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
+    </TimelineAgentsContext.Provider>
   );
 });
 
@@ -2392,6 +2405,7 @@ function TimelineRowContent({
     case "stderr":
       return <AgentLogStep item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "error":
+      if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
         : <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
@@ -2989,6 +3003,17 @@ function AutomaticTurnsHeldNotice({ message }: { message: string }) {
   );
 }
 
+/** A problem the driver reported while the turn kept running (#3806), such as an async question it
+ * could not show as a card. The turn did not fail, so there is no Retry Turn: re-running a turn that
+ * completed would repeat its side effects. The runner writes this message as a plain sentence. */
+function TurnProblemNotice({ message }: { message: string }) {
+  return (
+    <Notice tone="warning" title="Problem During Turn">
+      <p>{message}</p>
+    </Notice>
+  );
+}
+
 /** "Started 12:25:38 AM, finished 12:26:04 AM (26s)": the exact span behind the footer's clock. The
  * duration is always finish minus start, so the three figures never contradict one another. */
 export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt" | "finishedAt">): string {
@@ -2997,12 +3022,13 @@ export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt"
 
 /** The This Turn group, in menu order. Fork and Hand Off appear where the turn established a
  * conversation checkpoint, disabled with their reason when they cannot be used now. */
-export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff }: {
+export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff, handoffTurn = forkTurn }: {
   responseText: string;
   forkAvailability?: ConversationForkAvailability;
   onFork?: (turn: number) => void;
   forkTurn?: number;
-  handoff?: { open: (turn: number) => void; reason?: string };
+  handoffTurn?: number;
+  handoff?: HandoffControl;
 }): TranscriptAction[] {
   const noResponse = "This turn has no response to copy.";
   const actions: TranscriptAction[] = [
@@ -3033,13 +3059,13 @@ export function turnActions({ responseText, forkAvailability, onFork, forkTurn, 
         : { unavailableReason: forkAvailability.available ? "This action is unavailable." : forkAvailability.reason }),
     });
   }
-  if (handoff && forkTurn != null) {
+  if (handoff && handoffTurn != null) {
     actions.push({
       key: "handoff",
       label: "Hand Off After This Turn…",
       icon: <HandOffIcon size={16} />,
       unavailableReason: handoff.reason,
-      onSelect: () => handoff.open(forkTurn),
+      onSelect: () => handoff.open(handoffTurn),
     });
   }
   return actions;
@@ -3068,7 +3094,13 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const span = turnSpanDescription(summary);
   const usage = summary.usage ? turnUsageLabel(summary.usage, driver) : null;
   const responseText = useMemo(() => turnResponseText(summary), [summary.responseParts]);
-  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff });
+  const inPlacePoint = prompt ? handoff?.inPlaceTurns?.get(prompt.id) : undefined;
+  const handoffTurn = handoff?.inPlaceTurns ? inPlacePoint?.turn ?? 0 : forkTurn;
+  const handoffReason = handoff?.reason ?? (handoff?.inPlaceTurns
+    ? handoff.historyReason ?? inPlacePoint?.reason ?? (!inPlacePoint ? "This turn didn't finish, so it can't be handed off yet." : undefined)
+    : undefined);
+  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoffTurn,
+    handoff: handoff ? { ...handoff, reason: handoffReason } : undefined });
   const fork = actions.find((action) => action.key === "fork");
   const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
   const groups = [
@@ -3305,6 +3337,8 @@ function HistoryDivider({ icon, label, title, description }: {
 /** A fork or handoff names its turn; where the app can navigate, its source session is a link. */
 function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversation_forked" }> }) {
   const openSession = useContext(TimelineSessionLinkContext);
+  const agents = useContext(TimelineAgentsContext);
+  const agentName = (id: string) => agents?.find((agent) => agent.id === id)?.name || id;
   const sourceLink = openSession && (
     <button type="button" className="link" onClick={() => openSession(item.sourceSessionId)}>Open Source Session</button>
   );
@@ -3312,7 +3346,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
     return (
       <HistoryDivider
         icon={<ThreadForkIcon size={14} />}
-        label={`Forked from Turn ${item.turn}`}
+        label={`Forked from Turn\u00a0${item.turn}`}
         title={`Conversation forked from turn ${item.turn}`}
         description={sourceLink || undefined}
       />
@@ -3321,7 +3355,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
   return (
     <HistoryDivider
       icon={<HandOffIcon size={14} />}
-      label={`Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} After Turn ${item.turn}`}
+      label={`Handoff from ${agentName(item.handoff.sourceAgent)} to ${agentName(item.handoff.destinationAgent)} after Turn\u00a0${item.turn}`}
       description={<>Fresh provider conversation. {item.handoff.disclosure}{sourceLink && <> {sourceLink}</>}</>}
     />
   );
