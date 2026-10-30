@@ -395,6 +395,6 @@ test("touch Copy Message preserves the complete multiline prompt without a menu"
   assert.ok(copy, "a running prompt has direct Copy");
   await act(async () => { copy.click(); });
   assert.deepEqual(clipboard, [text]);
-  assert.equal(document.querySelector('[role="menu"]'), null);
+  assertNoDomNode(document.querySelector('[role="menu"]'), "direct Copy opens no menu");
   coarsePointer = false;
 });
