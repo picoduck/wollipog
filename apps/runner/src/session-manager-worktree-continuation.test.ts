@@ -341,3 +341,50 @@ test("a selection made while the relaunch runs supersedes the switch, even one b
     ), "the relaunch notice's promise is withdrawn plainly");
   });
 });
+
+/** Every distinct `worktreeSwitch` the runner published for the session, in order. */
+function publishedSwitches(sent: RunnerToControlPlane[], sessionId: string): unknown[] {
+  const values: unknown[] = [];
+  for (const message of sent) {
+    if (message.type !== "session_runtime_updated" || message.snapshot.id !== sessionId ||
+        !("worktreeSwitch" in message.snapshot)) continue;
+    const value = message.snapshot.worktreeSwitch ?? null;
+    const shape = value && { phase: value.phase, branch: value.branch };
+    if (JSON.stringify(values.at(-1)) !== JSON.stringify(shape)) values.push(shape);
+  }
+  return values;
+}
+
+test("a session reports Switching Worktree from its switch until the relaunch ends, then clears it (#3810)", { skip: !haveGit() }, async () => {
+  const relaunch = gate();
+  let since: number | undefined;
+  await withSession("status", {
+    beforeInitialize: async (launch) => { if (launch === 2) await relaunch.wait(); },
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/status" }, undefined,
+        { requestedBySession: true });
+    },
+  }, async ({ manager, store, sessionId, fake, sent }) => {
+    manager.prompt(sessionId, "start the fix");
+    await relaunch.arrived;
+    assert.deepEqual(publishedSwitches(sent, sessionId).slice(-2), [
+      { phase: "pending", branch: "fix/status" },
+      { phase: "relaunching", branch: "fix/status" },
+    ], "pending from the switch, relaunching once the old provider is retired");
+    const latest = [...sent].reverse().find((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === sessionId && message.snapshot.worktreeSwitch) as
+      Extract<RunnerToControlPlane, { type: "session_runtime_updated" }> | undefined;
+    since = latest?.snapshot.worktreeSwitch?.since;
+    assert.ok(since, "the switch says when it began");
+    relaunch.open();
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "the continuation did not run");
+    await settle();
+    assert.equal(publishedSwitches(sent, sessionId).at(-1), null, "the relaunch's end clears it explicitly");
+    const first = sent.find((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === sessionId && message.snapshot.worktreeSwitch) as
+      Extract<RunnerToControlPlane, { type: "session_runtime_updated" }> | undefined;
+    assert.equal(first?.snapshot.worktreeSwitch?.since, since, "one switch keeps one start time across phases");
+  });
+});
