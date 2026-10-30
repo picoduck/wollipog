@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const argv = process.argv.slice(2);
@@ -12,6 +12,14 @@ if (!argv.includes("--mode") || !argv.includes("rpc") ||
     (!argv.includes("--no-approve") && !verifiedTrustBridge && !(agentControlProbe && agentControlProbeNonce))) process.exit(64);
 if (scenario === "verified-launch" && argv.includes("--no-approve")) process.exit(65);
 if (scenario === "orchestrator-launch" && !argv.includes("--no-approve")) process.exit(67);
+if (argv.includes("--approve") && (argv.includes("--no-approve") || !verifiedTrustBridge)) process.exit(68);
+if (scenario === "project-trust-relaunch-fails" && argv.includes("--approve")) process.exit(69);
+// Real Pi decides project trust while building its runtime, before RPC reads stdin. A command-line
+// override skips the project_trust event; otherwise the runner extension declines it (without
+// remembering) when the project has protected resources, which these scenarios model.
+const trustOverride = argv.includes("--approve") || argv.includes("--no-approve");
+const projectTrusted = argv.includes("--approve");
+const projectTrustDispatched = !trustOverride && scenario.startsWith("project-trust");
 
 const resumedAt = argv.indexOf("--session");
 const forkedAt = argv.indexOf("--fork");
@@ -40,18 +48,32 @@ const models = [
 ];
 let selected = models[0];
 let buffer = Buffer.alloc(0);
-let entries = forkedAt >= 0 ? [
-  { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "hello" } },
-  { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
-] : [];
-let leafId = forkedAt >= 0 ? "pi-entry-1" : null;
-let startupTrustStateRequest;
+const timestamp = "2026-10-30T00:00:00.000Z";
+// Pi 1.4.0 records the startup model and thinking level as entries even under --no-session.
+const startupEntries = [
+  { type: "model_change", id: "pi-startup-model", parentId: null, timestamp, provider: selected.provider, modelId: selected.id },
+  { type: "thinking_level_change", id: "pi-startup-thinking", parentId: "pi-startup-model", timestamp, thinkingLevel: "high" },
+];
+const turnEntries = (assistantContent, userContent = "hello") => [
+  ...startupEntries,
+  { type: "message", id: "pi-user-1", parentId: "pi-startup-thinking", timestamp, message: { role: "user", content: userContent } },
+  { type: "message", id: "pi-entry-1", parentId: "pi-user-1", timestamp, message: { role: "assistant", content: assistantContent } },
+];
+let entries = forkedAt >= 0 ? turnEntries("Hello from Pi") : scenario === "legacy-null-leaf" ? [] : startupEntries;
+let leafId = forkedAt >= 0 ? "pi-entry-1" : scenario === "legacy-null-leaf" ? null : "pi-startup-thinking";
 if (scenario === "fork-leaf-mismatch" && forkedAt >= 0) {
   entries = [
     { type: "message", id: "expected-leaf", parentId: null, message: { role: "assistant", content: "Expected" } },
     { type: "message", id: "different-leaf", parentId: "expected-leaf", message: { role: "assistant", content: "Later" } },
   ];
   leafId = "different-leaf";
+}
+
+/** Pi reports a command's scope in sourceInfo; `location` was removed before 1.4.0. The
+ * legacy-location scenario models those older releases. */
+function command(name, description, source, scope, provenance = "auto") {
+  if (scenario.startsWith("legacy-location")) return { name, description, source, ...(scope === "temporary" ? {} : { location: scope }) };
+  return { name, description, source, sourceInfo: { path: `/fake/${name}`, source: provenance, scope, origin: "top-level" } };
 }
 
 function send(value) {
@@ -75,6 +97,16 @@ if (scenario === "agent-control-extension-error" && agentControlExtensionPath) {
   send({ type: "extension_error", extensionPath: agentControlExtensionPath,
     event: "session_start", error: "private bridge error" });
 }
+// The runner extension's session_start report, emitted before its Agent Control readiness.
+const projectTrustNonce = process.env.WOLLIPOG_PI_PROJECT_TRUST_NONCE;
+if (projectTrustNonce && verifiedTrustBridge) {
+  const reportedCwd = scenario === "project-trust-wrong-cwd" ? "/somewhere/else" : realpathSync(process.cwd());
+  const report = (nonce, state, cwd) => send({ type: "extension_ui_request", method: "setStatus",
+    statusKey: "wollipog-project-trust", statusText: `${nonce}.${state}.${Buffer.from(cwd).toString("base64url")}` });
+  if (scenario === "project-trust-stale-nonce") report("stale-launch-nonce", "declined", reportedCwd);
+  else report(projectTrustNonce, projectTrustDispatched ? "declined" : "not_requested", projectTrustDispatched ? reportedCwd : "");
+  if (scenario === "project-trust-replayed") report(projectTrustNonce, "declined", reportedCwd);
+}
 if (agentControlReadyNonce && scenario !== "agent-control-no-readiness" &&
     scenario !== "agent-control-extension-error") {
   send({ type: "extension_ui_request", method: "setStatus", statusKey: "wollipog-agent-control",
@@ -97,10 +129,7 @@ function settleNormal() {
   send({ type: "turn_start" });
   send({ type: "turn_end", message: {}, toolResults: [] });
   send({ type: "agent_end", messages: [], willRetry: false });
-  entries = [
-    { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "hello" } },
-    { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: "Hello from Pi" } },
-  ];
+  entries = turnEntries("Hello from Pi");
   leafId = "pi-entry-1";
   send({ type: "agent_settled" });
 }
@@ -112,10 +141,7 @@ function settleToolOnly() {
   send({ type: "tool_execution_start", toolCallId: "tool-only", toolName: "bash", args: { command: "true" } });
   send({ type: "tool_execution_end", toolCallId: "tool-only", result: { content: [] }, isError: false });
   send({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "tool-only", name: "bash" }], stopReason: "toolUse" } });
-  entries = [
-    { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "use a tool" } },
-    { type: "message", id: "pi-entry-1", parentId: "pi-user-1", message: { role: "assistant", content: [] } },
-  ];
+  entries = turnEntries([], "use a tool");
   leafId = "pi-entry-1";
   send({ type: "agent_settled" });
 }
@@ -123,15 +149,6 @@ function settleToolOnly() {
 function handle(request) {
   switch (request.type) {
     case "get_state":
-      if (scenario === "startup-trust" && !startupTrustStateRequest) {
-        startupTrustStateRequest = request;
-        const nonce = process.env.WOLLIPOG_PI_SECURITY_REQUEST_NONCE;
-        const encoded = Buffer.from(JSON.stringify({ kind: "project_trust", cwd: process.cwd() })).toString("base64url");
-        send({ type: "extension_ui_request", id: "startup-trust", method: "select",
-          title: `Wollipog Security Approval\nwollipog-security-v1:${nonce}.${encoded}`,
-          options: ["Trust This Project", "Skip Project Resources"] });
-        return;
-      }
       return response("get_state", request, { sessionId, sessionFile, model: selected,
         thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
     case "get_available_models":
@@ -149,12 +166,16 @@ function handle(request) {
       return response("set_thinking_level", request);
     case "get_commands":
       return response("get_commands", request, { commands: [
-        { name: "skill:review", description: "Review code", source: "skill", location: "user" },
-        { name: "ship", description: "Ship it", source: "prompt", location: "user" },
+        command("skill:review", "Review code", "skill", "user"),
+        command("ship", "Ship it", "prompt", "user"),
         // The shared grammar rejects `+`, so discovery never advertises this one (#2602).
-        { name: "deploy+prod", description: "Deploy to production", source: "prompt", location: "user" },
+        command("deploy+prod", "Deploy to production", "prompt", "user"),
+        // Project resources load only for a trusted project.
+        ...(projectTrusted || scenario.endsWith("project-commands")
+          ? [command("project-review", "Review this project", "prompt", "project"), command("skill:project-skill", "Project skill", "skill", "project")]
+          : []),
         ...(agentControlProbe && scenario !== "extension-unsupported"
-          ? [{ name: "wollipog-agent-control-probe", description: "probe", source: "extension" }]
+          ? [command("wollipog-agent-control-probe", "probe", "extension", "temporary", "cli")]
           : []),
       ] });
     case "get_entries":
@@ -169,7 +190,11 @@ function handle(request) {
           leafId: "huge-entry",
         });
       }
+      if (scenario === "entries-dangling-leaf") return response("get_entries", request, { entries, leafId: "not-an-entry" });
       if (request.since !== undefined) {
+        if (scenario === "entries-cursor-unsupported") {
+          return response("get_entries", request, { entries, leafId });
+        }
         const sinceIndex = entries.findIndex((entry) => entry.id === request.since);
         if (sinceIndex < 0) {
           send({ type: "response", id: request.id, command: request.type, success: false, error: `Entry not found: ${request.since}` });
@@ -203,12 +228,6 @@ function handle(request) {
       send({ type: "agent_settled" });
       return;
     case "extension_ui_response":
-      if (scenario === "startup-trust" && request.id === "startup-trust" && startupTrustStateRequest) {
-        response("get_state", startupTrustStateRequest, { sessionId, sessionFile, model: selected,
-          thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
-        startupTrustStateRequest = undefined;
-        return;
-      }
       send({ type: "message_start", message: { role: "assistant" } });
       send({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: `Selected ${request.value}` }], stopReason: "stop" } });
       send({ type: "agent_settled" });
