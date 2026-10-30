@@ -363,7 +363,7 @@ The older review bridge and controlled campaign review jobs are retired. Their o
 and CLI spellings refuse with review-session guidance. Upgrade unsupported peers; do not launch
 a native reviewer to bypass trust, admission, budget or review-limit refusals.
 
-Protocol 246 requires the retirement-aware control plane for new runners. Before upgrading,
+Protocol 251 requires the retirement-aware control plane for new runners. Before upgrading,
 finish or cancel legacy jobs using their prior runner and preserve their final receipts and usage.
 Upgrade the control plane first, then the runner. New runners refuse unfinished or unverified
 legacy execution without changing records or starting a controller. Drained terminal unpriced

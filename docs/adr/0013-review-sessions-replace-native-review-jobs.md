@@ -23,7 +23,7 @@ views and rechecked at authorization. A review grants no human approval, merge a
 Record-only reconciliation and lifecycle settlement preserve a completed authorized action after
 a later vote, while still requiring the exact armed command, current authority and forge proof.
 
-Protocol 246 gates retirement. Drain legacy jobs under the prior runner, preserving their final
+Protocol 251 gates retirement. Drain legacy jobs under the prior runner, preserving their final
 receipts and charges; upgrade the control plane before the runner. A new runner explicitly refuses
 an older or unverified control plane before registration resumes work: old servers can replay
 legacy dispatch and sanitize new refusal reasons into a generic failure. New runner startup also

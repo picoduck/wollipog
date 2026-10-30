@@ -238,7 +238,7 @@ resolves only a GitHub repository.
 ### Retired Review Jobs
 
 Use [Review Sessions](#review-sessions) for your own pushed PR, including from an isolated campaign
-child. Protocol 246 retires the runner-mediated review bridge and controlled campaign review job.
+child. Protocol 251 retires the runner-mediated review bridge and controlled campaign review job.
 Their MCP tools and CLI commands are no longer advertised or callable. Old tool names and command
 spellings receive an explicit migration refusal pointing to `request_review_session` and
 `wollipog review session run`; they are never silently forwarded or retried through another route.
