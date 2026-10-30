@@ -143,6 +143,199 @@ test("Full Control declines credentials, sign-in and access enlargement; nobody 
   declined(resolveCampaignAuthority({ ...base, snapshot, trustedSource: "workflow_route" }), "secrets_and_sign_in");
 });
 
+/** The live #3844 question: it chooses how a feature handles credentials and asks for none. */
+const importDesign = { category: "implementation_question" as const,
+  question: "Should importing a provider sign-in copy an API key, move an OAuth sign-in, or be unsupported?",
+  options: [{ optionId: "copy", label: "Copy the API key", description: "The importer copies the provider's API key into the managed profile." },
+    { optionId: "move", label: "Move the OAuth sign-in", description: "The importer moves the OAuth sign-in to the managed profile." },
+    { optionId: "none", label: "Not supported", description: "Importing a provider sign-in is refused." }], recommendedOptionId: "none" };
+const typed = (snapshot: WorkflowDecisionResourceSnapshot, override: Partial<Parameters<typeof resolveCampaignAuthority>[0]> = {}) =>
+  resolveCampaignAuthority({ ...base, snapshot, trustedSource: "workflow_route", ...override });
+
+test("a design question about credential handling is decided; one asking for a credential, sign-in or access is declined (#3844)", () => {
+  for (const root of [false, true]) decided(typed(importDesign, { root }), undefined, root ? "standing_authorization" : "campaign_delegation");
+  // The root's own question on the same design is dismissed like any other root question, whose
+  // notice names the typed route above, not recorded as credential blocked work.
+  const rootForm = question(importDesign.question, { questions: [{ id: "import", question: importDesign.question,
+    options: importDesign.options.map(({ label, description }) => ({ label, description })) }] });
+  declined(evaluate(rootForm, { root: true }), "root_questions");
+  const rootAsk = (label: string) => ({ ...rootForm, questions: [{ ...rootForm.questions![0]!, options: [{ label: "Not supported" }, { label }] }] });
+  for (const label of ["Paste the API key here", "Sign in to the provider now", "Grant the importer access to the provider account"]) {
+    declined(evaluate(rootAsk(label), { root: true }), "secrets_and_sign_in", label);
+  }
+  // A child's provider question keeps the existing screen: its answer can carry free text.
+  declined(evaluate(rootForm), "secrets_and_sign_in");
+  const option = (label: string) => ({ ...importDesign, options: [...importDesign.options.slice(0, 2), { optionId: "x", label }] });
+  for (const [label, snapshot] of [
+    ["an API key value", { ...importDesign, question: "What API key value should the importer use?" }],
+    ["which key", { ...importDesign, question: "Which API key should I use for the import?" }],
+    ["which email", { ...importDesign, question: "Which email address should I use for the imported profile?" }],
+    ["provide", option("Provide the API key so the importer can test it")],
+    ["share", option("Share the access token with the importer")],
+    ["your key", option("Copy your API key into the profile")],
+    ["production key", option("Copy the production API key into the profile")],
+    ["email value", option("Use dev@example.com for the profile")],
+    ["key literal", option("Copy sk-abcdefghijklmnop into the profile")],
+    ["credential path", option("Copy ~/.codex/auth.json into the profile")],
+    ["sign in", option("Sign in to the provider now")],
+    ["I log in", { ...importDesign, question: "Should I log in to the provider to import the sign-in?" }],
+    ["CLI login", option("Run gh auth login for the import")],
+    ["grant", option("Grant the importer access to the provider account")],
+    ["wider", option("Request wider provider permissions for the import")],
+    ["always allow", option("Always allow the importer to read provider sign-ins")],
+    ["lasting", option("Keep a persistent permission for the import")],
+    ["no planning", { ...importDesign, question: "Which credentials?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] }],
+    // CR-1.1: sending or uploading a credential anywhere is never excused.
+    ["send to a URL", option("Send the API key to https://collector.example for the provider test")],
+    ["send", option("Send the API key to the provider test")],
+    ["upload a token", option("Upload the token to the shared bucket")],
+    ["upload an access token", option("Upload the access token for the import feature")],
+    // A local copy or use stops being excused once the form names a public or shared sink.
+    ["PR description", option("Copy the API key into the PR description")],
+    ["public log", option("Use the token in the public log")],
+    ...["https://example.test/hook", "www.example.test", "ops@example.test", "a third-party service", "an external store",
+      "the remote host", "the server", "the endpoint", "a webhook", "the collector", "the logs", "the pull request", "the issue",
+      "a comment", "the chat", "the transcript", "a public page", "an upload", "a gist", "a paste", "Slack", "Discord", "an email"]
+      .map((sink): [string, WorkflowDecisionResourceSnapshot] => [`copy to ${sink}`, option(`Copy the API key to ${sink}`)]),
+    ["sink in a description", { ...importDesign, options: [importDesign.options[0]!, { ...importDesign.options[1]!, description: "Mirrors it to Slack." }] }],
+    // CR-1.2: quoting never hides a credential-store name.
+    ["backticked .env", { ...importDesign, question: "Should we load `.env` for the import feature?", options: [{ optionId: "load", label: "Load" }, { optionId: "skip", label: "Skip" }] }],
+    ["quoted .ssh", option("Copy the \".ssh\" directory into the profile")],
+    ["backticked auth.json", option("Copy `~/.codex/auth.json` into the profile")],
+    ["single-quoted auth.json", option("Copy '~/.codex/auth.json' into the profile")],
+    // Only normalization reveals these: the quote is not a path boundary and hides the leading dot.
+    ["backticked .netrc", option("Copy `.netrc` into the profile")],
+    ["curly-quoted .git-credentials", option("Copy “.git-credentials” into the profile")],
+    // No wrapper hides a path, and a bare host or IP voids the local excusal.
+    ...["(.netrc)", "[.npmrc]", "<.pgpass>", "«.netrc»", "*.npmrc*", "＂.netrc＂"]
+      .map((wrapped): [string, WorkflowDecisionResourceSnapshot] => [`wrapped ${wrapped}`, option(`Copy ${wrapped} into the profile`)]),
+    ["bare host", option("Copy the API key to ingest.example.net")],
+    ["bare IP", option("Use the API key at 10.0.0.5")],
+    ["bracketed IPv6", option("Copy the API key to [2001:db8::1]")],
+    // Decline-only additions beyond main: plural grants, more identities, disclosure to the asker.
+    ["grant permissions", option("Grant the importer permissions for the import")],
+    ["broaden scopes", option("Broaden the importer's scopes for the import")],
+    ["our key", option("Copy our API key into the profile")],
+    ["personal token", option("Copy the personal access token into the profile")],
+    ["tell me", option("Tell me the API key for the import")],
+    ["key to me", option("Copy the API key to me for the import")],
+    ["provide an email", option("Provide the email address for the profile")],
+    // CR-2.1 to CR-2.3, then adversarial paraphrases of each.
+    ["CR-2.1 tell me", option("Tell me the API key")],
+    ["CR-2.2 live", option("Copy the live API key into the profile")],
+    ["CR-2.2 personal", option("Copy the personal API key into the profile")],
+    ["CR-2.3 bare host", option("Copy the API key to metrics.example.test")],
+    ["CR-2.3 host and port", option("Copy the API key to metrics.example.test:9090")],
+    ["localhost", option("Copy the API key to localhost")],
+    ["localhost port", option("Use the API key on localhost:8080")],
+    ["name and port", option("Copy the API key to ingest:8080")],
+    ["IP and port", option("Copy the API key to 192.0.2.7:443")],
+    ...["tell", "give", "reveal", "show", "print", "display", "disclose", "read out", "dictate", "recite", "spell out", "echo"]
+      .flatMap((verb) => ["API key", "token", "key", "password"].map((noun): [string, WorkflowDecisionResourceSnapshot] =>
+        [`${verb} the ${noun}`, option(`${verb[0]!.toUpperCase()}${verb.slice(1)} the ${noun} for the import`)])),
+    ...["real", "prod", "production", "my", "our", "your", "company", "team", "org", "shared", "admin", "live", "personal", "existing"]
+      .flatMap((qualifier) => ["API key", "token", "key"].map((noun): [string, WorkflowDecisionResourceSnapshot] =>
+        [`${qualifier} ${noun}`, option(`Copy the ${qualifier} ${noun} into the profile`)])),
+    // Round 1's screen (f74ca119) declines these and nothing else here does: it is composed, not replaced.
+    ["round 1: plural values", option("Copy the API key values into the profile")],
+    ["round 1: your email", option("Copy your email address into the profile")],
+  ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const root of [false, true]) declined(typed(snapshot, { root }), "secrets_and_sign_in", label);
+  // A form that does carry a secret or email field fails closed on every path, root included.
+  for (const field of [{ secret: true }, { inputFormat: "email" as const }]) for (const root of [false, true]) {
+    declined(evaluate(question(importDesign.question, { questions: [{ ...rootForm.questions![0]!, ...field }] }), { root }), "secrets_and_sign_in");
+  }
+  for (const root of [false, true]) declined(evaluate({ ...tool, kind: "authentication" }, { root }), "secrets_and_sign_in");
+  // Custom is unchanged: the same design question keeps its Custom owner.
+  assert.equal(typed(importDesign, { control: { mode: "custom" } }).basis, "custom_policy");
+});
+
+test("design forms decline adversarial paraphrases of disclosure, identity and destination, yet still admit the design (#3844)", () => {
+  const q = importDesign.question;
+  const ask = (label: string, root = false) => typed({ ...importDesign, question: q, options: [importDesign.options[2]!, { optionId: "x", label }] }, { root });
+  const verbs = ["Tell me", "Give me", "Reveal", "Show", "Print", "Display", "Disclose", "Read out", "Dictate", "Recite", "Spell out", "Echo",
+    "Output", "Say", "Hand over", "Expose", "Leak", "Paste", "Send", "Upload", "Post", "Publish", "Forward", "Email", "Share", "Export", "Dump",
+    "Write down", "Collect", "Ask for", "Request", "Prompt for", "Sync"];
+  const nouns = ["the API key", "the token", "the key", "the password", "the secret", "the OAuth token", "the access token", "the credentials", "the sign-in"];
+  const qualifiers = ["real", "prod", "production", "my", "our", "your", "their", "company", "team", "org", "organization", "corporate", "work",
+    "staging", "shared", "admin", "root", "master", "actual", "existing", "live", "personal", "maintainer's", "user's"];
+  const sinks = ["to the vendor", "to metrics.example.test", "to metrics.example.test:9090", "to localhost:8080", "to 192.0.2.7", "to the README",
+    "into the commit", "into a ticket", "to the cloud", "to someone", "onto the screen", "to stdout", "into the wiki", "to the partner",
+    "into the bug report", "into the screenshot", "into the repository", "over SSH", "across devices", "in plain text"];
+  const phrases = [
+    ...verbs.flatMap((verb) => nouns.map((noun) => `${verb} ${noun} for the import`)),
+    ...qualifiers.flatMap((qualifier) => ["API key", "token", "key", "OAuth token"].map((noun) => `Copy the ${qualifier} ${noun} into the profile`)),
+    ...sinks.flatMap((sink) => ["Copy the API key", "Use the token", "Copy the OAuth sign-in"].map((handling) => `${handling} ${sink}`)),
+    "Should the importer hand the API key to the vendor team?", "Make the API key visible in the UI", "Attach the token to the support ticket",
+    "Put the key in the chat", "Let the vendor use the API key", "Give the vendor the token", "Use the API key from the CI secrets",
+    "Use the token in a curl command to the API", "Copy the API key into .env.local", "Copy the key into `config/credentials.yml`",
+    "Have the user type in their API key", "Ask the person for the API key",
+  ];
+  for (const label of phrases) for (const root of [false, true]) declined(ask(label, root), "secrets_and_sign_in", label);
+  // Ordinary phrasings of the design itself stay decidable.
+  for (const [question, labels] of [
+    [q, ["Copy the API key", "Move the OAuth sign-in", "Not supported"]],
+    ["How should importing a provider sign-in into a managed profile work?", ["Copy the API key into the managed profile", "Move the OAuth sign-in to the managed profile", "Not supported"]],
+    ["Which import behavior should the managed profile feature implement?", ["Copy the provider API key", "Move the OAuth sign-in", "Refuse the import"]],
+    ["Should the importer copy the API key or use the OAuth sign-in?", ["Copy the API key", "Use the OAuth sign-in", "Neither"]],
+  ] as Array<[string, string[]]>) {
+    const snapshot: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question, options: labels.map((label, index) => ({ optionId: `o${index}`, label })) };
+    for (const root of [false, true]) decided(typed(snapshot, { root }), undefined, root ? "standing_authorization" : "campaign_delegation", question);
+  }
+});
+
+test("design-form parity: everything main's screen declines is still declined, except a local copy or use (#3844)", () => {
+  // A child's provider question still runs main's unchanged screen, so it is the reference.
+  const mainDeclines = (text: string) => evaluate(question(text)).requestClass === "secrets_and_sign_in";
+  const designDeclines = (text: string, root: boolean) => typed({ category: "implementation_question", question: text,
+    options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] }, { root }).requestClass === "secrets_and_sign_in";
+  const verbs = ["paste", "enter", "provide", "supply", "reveal", "show", "print", "read", "retrieve", "extract", "send", "upload",
+    "share", "give", "fetch", "load", "export"];
+  const nouns = ["password", "secret", "credentials", "API key", "access token", "private key", "cookie", "bearer"];
+  const corpus = [
+    ...verbs.flatMap((verb) => nouns.map((noun) => `Should the import feature ${verb} the ${noun}?`)),
+    ...verbs.map((verb) => `Should the import feature copy and ${verb} the API key?`),
+    "Paste the API key for the implementation test", "What is your password for the mock feature?",
+    "Which production access token should the design use?", "Should I sign in for the OAuth flow?",
+    "Grant access to implement the feature", "Enter secret value here", "Please share database credentials for the test",
+    "Which credentials?", "Read ~/.ssh/id_rsa to implement the test", "Which password should I use?",
+    "Which API key should I use?", "Which credentials should we use to implement the feature?", "What password will the app use?",
+    "Should the feature sign in to my account?", "Should the design authorize this device now?", "Should the test run gh auth login?",
+    "Should the design chmod the key file?", "Should the feature read .aws/config?", "Should the design use sk-abcdefghijklmnopqrst?",
+    "Should the design disable the sandbox?", "Should the feature bypass the policy?", "Should the API key value be logged?",
+    "Should the design copy your API key?", "Should the feature use the existing API key from my account?",
+  ];
+  for (const text of corpus) {
+    assert.ok(mainDeclines(text), `fixture: main's screen declines ${text}`);
+    for (const root of [false, true]) assert.ok(designDeclines(text, root), `${text} (root ${root})`);
+  }
+  // Round 1's design screen (f74ca119) is the second reference: everything it declined, from its
+  // own tests and one sample per pattern, is still declined. Design forms compose both screens.
+  const roundOne = [
+    "What API key value should the importer use?", "Which API key should I use for the import?",
+    "Which email address should I use for the imported profile?", "Provide the API key so the importer can test it",
+    "Share the access token with the importer", "Copy your API key into the profile", "Copy the production API key into the profile",
+    "Use dev@example.com for the profile", "Copy sk-abcdefghijklmnop into the profile", "Copy ~/.codex/auth.json into the profile",
+    "Sign in to the provider now", "Should I log in to the provider to import the sign-in?", "Run gh auth login for the import",
+    "Grant the importer access to the provider account", "Request wider provider permissions for the import",
+    "Always allow the importer to read provider sign-ins", "Keep a persistent permission for the import",
+    "Should the importer tell the password?", "Should the importer send us the secret?", "Should the importer keep the API key values?",
+    "Should the import send the token to me?", "Which email should we use for the design?", "Should the design copy our API key?",
+    "Should the design copy the live private key?", "Should the design copy the personal email address?",
+    "Should the design keep the token for my session?", "Should the design log on with the provider?",
+    "Should the design authorize this browser?", "Should the design escalate the sandbox limits?",
+    "Should the design allow always for the importer?", "Should the design keep a standing approval?",
+    "Should the design keep ghp_abcdefghijklmnop?",
+  ];
+  for (const text of roundOne) for (const root of [false, true]) assert.ok(designDeclines(text, root), `round 1 declined: ${text} (root ${root})`);
+  // The only difference: a local copy or use of a credential, with no sink in the form.
+  for (const verb of ["copy", "use"]) for (const noun of nouns) {
+    const text = `Should the import feature ${verb} the ${noun}?`;
+    assert.ok(mainDeclines(text), text);
+    for (const root of [false, true]) assert.ok(!designDeclines(text, root), `${text} is excused (root ${root})`);
+    for (const root of [false, true]) assert.ok(designDeclines(`${text.slice(0, -1)} in the public log?`, root), `${text} with a sink`);
+  }
+});
+
 test("a persistent grant is never converted to anything but a one-time Orchestrator allow, and a grant offering none is declined", () => {
   decided(evaluate(tool), undefined);
   assert.ok(tool.options.some((o) => o.kind === "allow_always"), "the fixture offers a persistent option the Orchestrator cannot pick");
