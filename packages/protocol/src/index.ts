@@ -759,7 +759,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      `unlistedJobs`, each a provisional launch or an unregistered task id, and the runner no
 //      longer counts a pending id whose job this conversation already ended. Display only; an
 //      older peer omits or ignores the field.
-export const PROTOCOL_VERSION = 250;
+// 253: provider sign-in failure codes (#3519): a failed `ProviderLoginView` may carry
+//      `failureCode` from the closed `PROVIDER_LOGIN_FAILURE_CODES`, first
+//      `account_already_on_machine` for a duplicate account the runner discarded. Its `error`
+//      sentence is unchanged. The control plane passes only a known code through and puts
+//      `unrecognized` in place of any other, and dashboards fall back to matching the sentence only
+//      when the code is absent (an older runner or control plane).
+export const PROTOCOL_VERSION = 253;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1225,6 +1231,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   queueHoldRelease: 247,
   /** v250 names a queue hold's work that Background Work does not list (`unlistedJobs`, #3752). */
   queueHoldUnlistedJobs: 250,
+  /** v253 reports a failed provider sign-in's stable `failureCode` beside its `error` (#3519). */
+  providerLoginFailureCode: 253,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -3448,6 +3456,22 @@ export type ProviderLoginStatus =
   | "cancelled"
   | "timed_out";
 
+/** Protocol v253 (#3519): why a provider sign-in failed, as a stable code beside its `error`
+ * sentence, so clients decide what to offer without matching copy.
+ * - `account_already_on_machine`: the new account's identity matches an account already on the
+ *   Machine, so the runner discarded the sign-in.
+ * - `unrecognized`: the runner sent a code outside this set (a newer runner). The control plane puts
+ *   it in that code's place, so a code it does not know still reads as a plain failure rather than
+ *   as no code, which a client would read from the `error` sentence instead.
+ * A closed set that may grow: a client treats a code it does not know as a plain failure. */
+export type ProviderLoginFailureCode = "account_already_on_machine" | "unrecognized";
+
+export const PROVIDER_LOGIN_FAILURE_CODES: readonly ProviderLoginFailureCode[] = ["account_already_on_machine", "unrecognized"];
+
+export function isProviderLoginFailureCode(value: unknown): value is ProviderLoginFailureCode {
+  return PROVIDER_LOGIN_FAILURE_CODES.includes(value as ProviderLoginFailureCode);
+}
+
 /** Secret-minimized progress for one runner-owned provider login. Provider output, credential
  * paths, authorization responses, and tokens never enter this projection. */
 export interface ProviderLoginView {
@@ -3466,6 +3490,9 @@ export interface ProviderLoginView {
   sessionId?: string;
   /** Bounded operator-facing reason from Wollipog's closed failure vocabulary. */
   error?: string;
+  /** Protocol v253 (#3519): a failed sign-in's stable reason, sent with `error`, which stays
+   * unchanged for older clients. Absent from older runners and from endings stored before v253. */
+  failureCode?: ProviderLoginFailureCode;
   startedAt: number;
 }
 
