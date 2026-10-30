@@ -15885,6 +15885,35 @@ export class ControlPlaneDb {
     return row?.issue ?? null;
   }
 
+  /** The Human whose recorded approval allowed this human-owned decision: its single resolving
+   * `allowed` governance audit, bound to the decision's occurrence, category and payload digest.
+   * A missing, pruned, ambiguous or non-human record proves no approval (#2940). */
+  workflowDecisionHumanApprover(decision: WorkflowDecisionView): string | null {
+    if (decision.authority !== "human") return null;
+    const rows = this.stmt(`SELECT actor_kind, actor_id, content_digest, workflow_decision FROM governance_audit
+      WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision' AND stage='resolution' AND outcome='allowed' LIMIT 2`)
+      .all(decision.sessionId, decision.occurrenceId) as Array<{ actor_kind: string; actor_id: string | null; content_digest: string | null; workflow_decision: string | null }>;
+    const row = rows.length === 1 ? rows[0]! : null;
+    if (!row || row.actor_kind !== "human" || !row.actor_id || row.content_digest !== decision.resourceDigest) return null;
+    let recorded: { occurrenceId?: unknown; category?: unknown } | null;
+    try { recorded = JSON.parse(row.workflow_decision ?? "null") as typeof recorded; } catch { return null; }
+    return recorded?.occurrenceId === decision.occurrenceId && recorded.category === decision.category ? row.actor_id : null;
+  }
+
+  /** Whether the user owns this campaign for scope authority (#2940), as an active, non-viewer member
+   * of its organization: its owning user, a member of its owning team or, because every member owns
+   * an organization-owned session, only an owner or admin of that organization. */
+  campaignOwnerUser(rootId: string, userId: string): boolean {
+    const scope = this.sessionScope(rootId);
+    if (!scope) return false;
+    const role = (this.stmt(`SELECT membership.role FROM identity_memberships membership
+      JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+      WHERE membership.organization_id=? AND membership.user_id=?`).get(scope.organizationId, userId) as { role: string } | undefined)?.role;
+    if (!role || role === "viewer") return false;
+    if (scope.owner.kind === "organization") return role === "owner" || role === "admin";
+    return this.isSessionOwner({ userId, organizationId: scope.organizationId }, rootId);
+  }
+
   campaignSharesRepositoryWorkspace(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): boolean {
     const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
       (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);

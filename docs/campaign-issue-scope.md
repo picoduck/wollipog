@@ -92,6 +92,18 @@ proof, produces a human-owned exact decision instead of silently authorizing an 
 Scope proposals carry `lineage: {kind: "epic", epic}` for freshly inspected native/checklist members
 of a human-authorized epic, or `{kind: "follow_up", publicationOccurrenceId}` for one verified
 published issue. Dependencies, incidental references and cross-repository links remain excluded.
+A follow-up publication is either a bounded grant, which carries its own `issueAdmission`, or one a
+person approved as a human-owned decision. The second kind counts only when that person's recorded
+approval of the exact payload names the boundary's author or a campaign owner: the root session's
+owning user, a member of its owning team or, for an organization-owned campaign, an active owner or
+admin of that organization. Such a publication carries no recommendation claim, so the server binds
+it to the one accepted, non-duplicate recommendation in this campaign that records the published
+issue as its result and has the payload's title subject. Every other check applies to both kinds:
+consumed, controlled by the root, in its repository, never used to admit an issue before, origins
+still in scope, published payload matching exactly, and scope plus reservations within `maxIssues`.
+The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
+and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
+`lineage_missing`. A campaign owner can still propose any change from Campaign Status.
 The server binds lineage evidence, rationale, expected revision, affected assignments, active
 children and outstanding grants into the snapshot. Root standing authorization resolves and
 consumes that exact occurrence atomically; all incompatible grants and evidence receipts are revoked

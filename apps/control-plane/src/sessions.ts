@@ -26,7 +26,7 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
@@ -10050,9 +10050,11 @@ export class SessionsService {
         publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess, { trustedPublication: true });
   }
 
-  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number): Promise<boolean> {
+  /** `humanApproved`: the caller verified a person's qualifying approval of a publication that has
+   * no bounded admission (#2940); without it, only a bounded grant is inspected. */
+  private async inspectPublishedScopeIssue(sessionId: string, grant: WorkflowDecisionView, issue: number, humanApproved = false): Promise<boolean> {
     if (grant.status !== "consumed" || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-        !grant.resourceSnapshot.issueAdmission || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
+        !grant.resourceSnapshot.issueAdmission && !humanApproved || this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return false;
     const publication = grant.resourceSnapshot;
     const root = this.db.getSession(sessionId)!;
     const requestId = `publication_verify_${randomUUID()}`;
@@ -10142,36 +10144,63 @@ export class SessionsService {
       }
       const boundary = issueBoundary(latest);
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
+        // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
+        const refuse = (code: CampaignScopeAdmissionFailure): ServiceResult<WorkflowDecisionView> => {
+          this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+            boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: snapshot.lineage?.kind ?? "none", outcome: "refused", reason: code }));
+          const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
+          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code } };
+        };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
         if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) >
-            this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues)) return fail("Scope and publication reservations exceed the human-established issue limit", 409);
+            this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues)) return refuse("capacity_exhausted");
         let evidence: unknown = { removals: snapshot.removals };
         if (snapshot.additions.length) {
-          if (snapshot.lineage?.kind === "epic" && boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) {
+          if (!snapshot.lineage) return refuse("lineage_missing");
+          if (snapshot.lineage.kind === "epic") {
+            if (!boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) return refuse("epic_not_authorized");
             const members = await this.campaignIssueScope(sessionId, snapshot.lineage.epic, canAccess, false);
             if (!members.ok || members.data?.candidateMessage || !snapshot.additions.every((n) => members.data?.candidates?.some((c) =>
-              c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source)))) return fail("Additions are not verified members of a human-authorized epic", 409);
+              c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository && ["umbrella", "sub_issue", "member_checklist"].includes(c.source)))) return refuse("epic_members_unverified");
             evidence = { epic: snapshot.lineage.epic, members: members.data?.candidates };
-          } else if (snapshot.lineage?.kind === "follow_up" && boundary.issueAuthority!.relatedFollowUps && snapshot.additions.length === 1) {
+          } else {
+            if (!boundary.issueAuthority!.relatedFollowUps) return refuse("follow_ups_not_authorized");
+            if (snapshot.additions.length !== 1) return refuse("follow_up_not_single");
             const grant = this.db.workflowDecisionByOccurrence(snapshot.lineage.publicationOccurrenceId);
-            if (!grant || grant.controllingSessionId !== sessionId || grant.status !== "consumed" || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
-                !grant.resourceSnapshot.issueAdmission || grant.resourceSnapshot.repository !== snapshot.repository ||
-                this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return fail("Follow-up scope requires an unused exact consumed bounded publication grant", 409);
+            if (!grant || grant.controllingSessionId !== sessionId || grant.resourceSnapshot.category !== "follow_up_issue_publication" ||
+                grant.resourceSnapshot.repository !== snapshot.repository) return refuse("publication_not_found");
+            if (grant.status !== "consumed") return refuse("publication_not_consumed");
+            if (this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return refuse("publication_already_admitted");
             const publication = grant.resourceSnapshot;
-            const authority = publication.issueAdmission!.publicationAuthority;
-            if (publication.issueAdmission!.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
-                authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) return fail("The publication's original human/objective authority does not match the current boundary; use fresh human scope review", 403);
-            const recommendation = publication.recommendationId && this.db.campaignWorkLedger.recommendation(sessionId, publication.recommendationId);
-            if (!recommendation || recommendation.disposition !== "accepted" || recommendation.duplicateOfId ||
-                !recommendation.resultingIssue || recommendation.resultingIssue.number !== snapshot.additions[0] || recommendation.resultingIssue.repository.toLowerCase() !== snapshot.repository) return fail("Record the verified published issue on its accepted recommendation before admitting scope", 409);
+            // A bounded grant carries its own delegated authority. A publication without one counts
+            // only when a person approved its exact payload and could approve this scope directly:
+            // the boundary's author or a campaign owner. Any other approver grants nothing.
+            let approval: { kind: "human"; approvedByUserId: string; basis: "boundary_author" | "campaign_owner" } | undefined;
+            if (publication.issueAdmission) {
+              const authority = publication.issueAdmission.publicationAuthority;
+              if (publication.issueAdmission.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
+                  authority.objectiveDigest !== issueEvidenceDigest(boundary.objective))) return refuse("publication_authority_changed");
+            } else {
+              const approver = this.db.workflowDecisionHumanApprover(grant);
+              if (!approver) return refuse("publication_unapproved");
+              const basis = approver === boundary.authorizedByUserId ? "boundary_author" : this.db.campaignOwnerUser(sessionId, approver) ? "campaign_owner" : null;
+              if (!basis) return refuse("publication_approver_not_owner");
+              approval = { kind: "human", approvedByUserId: approver, basis };
+            }
+            const bound = scopePublicationRecommendation(this.db, sessionId, publication, snapshot.additions[0]!);
+            if ("failure" in bound) return refuse(bound.failure);
+            const { recommendation } = bound;
             if (!recommendation.originWorkItemIds.length || recommendation.originWorkItemIds.some((id) => {
               const origin = this.db.campaignWorkLedger.detail(sessionId, id, Date.now())?.issue;
               return !origin || origin.repository.toLowerCase() !== snapshot.repository || !snapshot.before.includes(origin.number);
-            })) return fail("The published follow-up's authorized origins were removed from scope", 409);
-            if (!await this.inspectPublishedScopeIssue(sessionId, grant, snapshot.additions[0]!)) return fail("Published issue does not match the exact authorized payload or its lineage was already consumed", 409);
+            })) return refuse("origin_outside_scope");
+            if (!await this.inspectPublishedScopeIssue(sessionId, grant, snapshot.additions[0]!, Boolean(approval))) return refuse("payload_mismatch");
             snapshot.verifiedPublications = [{ publicationOccurrenceId: grant.occurrenceId, issue: snapshot.additions[0]! }];
-            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0] };
-          } else return fail("Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope", 403);
+            evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0], ...(approval ? { approval } : {}) };
+            this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
+              boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
+              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis } : {}), outcome: "admitted" }));
+          }
         }
         snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
       }
