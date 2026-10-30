@@ -10507,10 +10507,13 @@ textarea {
   color: var(--text-faint);
   font: var(--type-small);
 }
+/* The agent gives way before the skill's name (#3526): from a zero basis it grows into whatever the
+   name and account leave, up to its own width, so a narrow row takes nothing from the name until
+   the agent is down to a few characters and its ellipsis. */
 .machine-skill-meta {
-  flex: 0 1 auto;
-  min-width: 0;
-  max-width: 40%;
+  flex: 1 0 0;
+  min-width: 3ch;
+  max-width: max-content;
   overflow: hidden;
   color: var(--text-dim);
   font: var(--type-small);
