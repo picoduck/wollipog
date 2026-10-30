@@ -38,7 +38,8 @@ function inactiveSssd(db: GroupDatabase): boolean {
   for (const pid of db.entries("/proc")) {
     if (!/^\d+$/u.test(pid)) continue;
     try { if (/^sssd(?:_|$)/u.test(db.read(`/proc/${pid}/comm`).trim())) return false; }
-    catch (error) { if (!missing(error)) throw error; }
+    // A process that exits between the listing and the read yields ESRCH instead of ENOENT.
+    catch (error) { if (!missing(error) && (error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
   }
   return true;
 }
