@@ -230,7 +230,7 @@ import {
   searchWorkspaceReferences,
 } from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
-import { prepareAgentTuiLaunch } from "./agent-tui.js";
+import { agentTuiProviderEnvironment, prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import { UnguardedAgentTuiRegistry } from "./agent-tui-guard-notice.js";
 import { capabilitiesFor } from "./catalog.js";
@@ -690,6 +690,13 @@ function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, co
   const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
   if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
   return { ...(exact?.env ?? resolveAdoptionLaunch(driver, context)?.env ?? {}) };
+}
+
+/** The runner-local agent environment a session launch starts from (see `prepareLaunch`). */
+function sessionAgentEnvironment(meta: SessionMeta): Record<string, string> {
+  return meta.adopted && !meta.agentId
+    ? adoptedLaunchEnvironment(meta)
+    : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
 }
 
 /** Native adopted rows retain the recorded launch command across later selection changes. */
@@ -3587,14 +3594,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           // `provision` writes an agent-control credential file or registers a credential (#1379).
           assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
           assertLaunchCurrent: assertCurrent,
+          agentEnvironment: sessionAgentEnvironment,
           provision: async (prepared) => {
-            prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
-            if (prepared.providerCredentialHome && prepared.providerAccountProvider) {
-              Object.assign(prepared.env, providerAccountEnvironment({
-                provider: prepared.providerAccountProvider,
-                credentialHome: prepared.providerCredentialHome,
-              }));
-            }
+            prepared.env = agentTuiProviderEnvironment(prepared, sessionAgentEnvironment(prepared));
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,

@@ -354,6 +354,24 @@ export interface LaunchProviderHome extends ProviderProcessObserver {
  * of every acquisition of that binding's credential HOME, ahead of the id the configured account
  * now records for the path, so a HOME substituted under a renamed or re-pointed account is refused
  * for the session. A binding without a recorded id, or another HOME, adds nothing. */
+/** The environment that decides which provider home an Agent TUI process uses. A native TUI is
+ * spawned with its launch environment layered over the runner's own, so a runner-level
+ * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is the TUI's home whenever the launch sets none (#3338): the
+ * lease must be keyed on that home, not on the home directory. A WSL TUI receives only its
+ * explicit environment. */
+export function agentTuiProviderHomeEnv(
+  meta: Pick<SessionMeta, "context" | "env">,
+  runnerEnv: NodeJS.ProcessEnv = process.env,
+): Record<string, string> {
+  if (meta.context.kind !== "native") return { ...meta.env };
+  const inherited: Record<string, string> = {};
+  for (const name of ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const) {
+    const value = runnerEnv[name];
+    if (value) inherited[name] = value;
+  }
+  return { ...inherited, ...meta.env };
+}
+
 export function sessionProviderProfileBinding(
   session: Pick<SessionMeta, "providerProfileId" | "providerCredentialHome">,
   home: string,
@@ -5064,7 +5082,7 @@ export class SessionManager {
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
-      env: meta.env,
+      env: agentTuiProviderHomeEnv(meta),
     }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
       this.agentTuiLaunchEpoch(meta.sessionId) === epoch }, meta);
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {

@@ -15,6 +15,7 @@ import {
 } from "./orchestrator-preset.js";
 import { windowsCmdInvocationSpec } from "./windows-cmd.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
+import { providerAccountEnvironment } from "./provider-accounts.js";
 
 import { decideCodexPermissionProfile } from "./codex-permission-profile.js";
 
@@ -35,6 +36,9 @@ export async function prepareAgentTuiLaunch(
   meta: SessionMeta,
   dependencies: {
     controlPlaneProtocolVersion: number | null;
+    /** The runner-local agent environment, resolved when the TUI opens as a session launch
+     * resolves it (see `agentTuiProviderEnvironment`). Absent, the persisted environment is used. */
+    agentEnvironment?(meta: SessionMeta): Record<string, string>;
     provision(meta: SessionMeta): Promise<void> | void;
     /** Plugin reconciliation mutates the native account home before any guard or provider probe
      * runs. A returned reference is owned by the launch from then on (#3238): this preparation
@@ -105,6 +109,26 @@ export async function prepareAgentTuiLaunch(
 
 type AgentTuiLaunchDependencies = Parameters<typeof prepareAgentTuiLaunch>[1];
 
+/**
+ * A TUI's provider environment, built when it opens exactly as `prepareLaunch` builds a session
+ * launch's (#3338): the runner-local agent environment plus the bound provider account's
+ * credential home. Persisted metadata carries no environment, so without the account's home the
+ * TUI would run under the runner's default provider home instead of the session's account. The
+ * result belongs to one launch and is never written back to the session.
+ */
+export function agentTuiProviderEnvironment(
+  meta: Pick<SessionMeta, "providerCredentialHome" | "providerAccountProvider">,
+  agentEnv: Readonly<Record<string, string>>,
+): Record<string, string> {
+  return {
+    ...agentEnv,
+    ...(meta.providerCredentialHome && meta.providerAccountProvider ? providerAccountEnvironment({
+      provider: meta.providerAccountProvider,
+      credentialHome: meta.providerCredentialHome,
+    }) : {}),
+  };
+}
+
 function inheritTuiPlugins(meta: SessionMeta, tracking: AgentTuiProviderHomeTracking): string[] {
   try {
     return inheritProviderPlugins(meta);
@@ -121,6 +145,9 @@ async function prepareAgentTuiLaunchHoldingProviderHome(
   tracking: AgentTuiProviderHomeTracking,
 ): Promise<ShellProcessLaunch | null> {
   if (!isOrchestratorLaunch(meta)) {
+    // A fresh object: the resolved environment must never reach durable metadata (#3338). It is
+    // in place before the lease, so the lease is keyed on the home the TUI will actually use.
+    meta = { ...meta, env: agentTuiProviderEnvironment(meta, dependencies.agentEnvironment?.(meta) ?? meta.env) };
     await tracking.acquireProviderHome(meta);
     dependencies.assertSessionNotDeleted(meta.sessionId);
     await dependencies.assertLaunchCurrent?.();
