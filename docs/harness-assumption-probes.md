@@ -21,11 +21,44 @@ platform package npm installs alongside it. A missing executable is could not ru
 ## Workflow
 
 The workflow runs daily at 09:17 UTC (outside 00:00–02:00 UTC) and on manual dispatch, on hosted
-`ubuntu-24.04` runners. It has `contents: read` permissions, uses no secrets, checks out without
-persisting the job token, and runs in one concurrency group (`harness-assumption-probes`) so runs
-never overlap on the shared runner pool; a queued run waits rather than cancelling a measurement.
-The job matrix has one entry per harness, and each entry is independent: one harness's release
-neither triggers nor skips another harness's suite, and `fail-fast` is off.
+`ubuntu-24.04` runners. It has `contents: read` permissions, uses no secrets and checks out without
+persisting the job token. The job matrix has one entry per harness, and each entry is independent:
+one harness's release neither triggers nor skips another harness's suite, and `fail-fast` is off.
+
+A manual dispatch measures `all` harnesses, or only the one chosen in the `harness` input. Every
+other harness reports **not measured**: its job publishes a report with no exit code and the reason,
+runs no release detection, restores and saves no record, and can never read as matched or no new
+release. Scheduled runs measure every harness whose record is missing or stale.
+
+### Queueing
+
+Each harness job runs in its own concurrency group, `harness-assumption-probes-<harness>`, with
+`cancel-in-progress: false`, so at most one measurement per harness runs at a time. Runs therefore
+can overlap across harnesses (a Pi dispatch runs while a Codex measurement is in progress), but the
+shared runner pool never holds more measurements than one run's matrix, which is the peak the
+single workflow-wide group had too. A job of a harness the dispatch excludes takes a group unique to
+its run, so it neither waits for nor displaces a measurement, and dispatches for different harnesses
+never cancel each other. That trade-off is not free: excluded jobs and each run's summary job are
+not bounded by any group, so overlapping dispatches can briefly hold more than three runners. Each
+of those jobs only checks out, sets up Node, reads or writes a small report and exits in seconds.
+
+A job waits while another job of its harness is in progress, but GitHub keeps only one waiting job
+per group: when a third job of the same harness arrives, the waiting one is cancelled before it
+starts. Preserving every queued run would need the workflow to read the Actions API, which its
+read-only, secret-free permissions rule out. Instead the run's final **Summarize Measurements**
+job, which runs on every outcome, downloads every harness report and lists each harness as
+matched, no new release, not measured, changed, could not run, interrupted (incomplete report) or
+**dropped** (no report: cancelled while waiting, or failed before reporting). A dropped or
+interrupted harness gets an error annotation and fails the summary job, so the run never concludes
+success. A run with a dropped job concludes `cancelled`, but its other harnesses' reports and the
+failed summary naming the dropped harness are kept; dispatch that harness again. Every report
+names its run attempt, and the summary counts only reports of its own attempt: a re-run keeps
+earlier attempts' artifacts, so a retried job that was dropped would otherwise hide behind its
+earlier report. A report of another attempt reads **earlier attempt** and fails the summary, which
+is also what a partial re-run (Re-run Failed Jobs) shows for the jobs it reused; re-run all jobs
+or dispatch again for a clean summary. With no
+workflow-wide group, no run is cancelled before its jobs exist, so a new dispatch can no longer drop
+a whole pending run with nothing but its `cancelled` conclusion.
 
 Each harness job:
 
@@ -39,8 +72,8 @@ Each harness job:
    built from every target version and the probe-source hash. Only a record of a fully matched
    measurement of exactly that key skips the suite; the job summary then says that no suite ran
    and links the run that measured it. A missing, evicted, unreadable or mismatched record always
-   measures. A manual dispatch measures `all` harnesses, or only the one named in the `harness`
-   input (the others still run detection); an unknown name is could not run.
+   measures. A manual dispatch measures its harness even with a matched record; a harness it
+   excludes stops before detection and reports not measured. An unknown name is could not run.
 3. **Measure.** Runs the harness's preparation, stages the isolation boundary below, then for
    each target installs the exact version into a disposable prefix with `npm install
    --ignore-scripts` and runs the suite in a minimal environment: a throwaway `HOME`, a private
@@ -134,8 +167,8 @@ Supporting a new harness includes adding its probe set here. To add one:
    executable, binary variable, baseline versions (each read from a repository file), optional
    host preparation, suite command, report flag, per-target timeout, documentation and the probe
    sources that invalidate its record.
-3. Add its id to the workflow matrix (`scripts/harness-assumptions.test.mjs` checks that the matrix
-   and registry agree), document the probe inventory, and dispatch the workflow on the pull
+3. Add its id to the workflow matrix and to the `harness` dispatch options
+   (`scripts/harness-assumptions.test.mjs` checks that both agree with the registry), document the probe inventory, and dispatch the workflow on the pull
    request's branch before merge: `gh workflow run harness-assumptions.yml --ref <branch> -f harness=<id>`.
    Note that a dispatch from a branch saves its record only to that branch's cache.
 
