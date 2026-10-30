@@ -226,7 +226,8 @@ test("each genuine impossibility blocks launch with a specific reason and create
     // Checkpoints are amounts within a cost ceiling; without one they are refused, never dropped.
     { name: "cost checkpoints without a cost limit", body: { ...launch, overrides: { session: launch.overrides!.session, budget: { toolCalls: 400, checkpointsUsd: [5] } } },
       id: "accounting_budget", reason: /^Cost checkpoints need a cost limit; enter one or remove the checkpoints\.$/ },
-    { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract", reason: /protocol-v218/ },
+    { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract",
+      reason: /^This machine needs a newer runner for campaign limits\. Update and restart the runner\.$/ },
     { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
   ];

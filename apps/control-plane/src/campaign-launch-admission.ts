@@ -365,7 +365,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   add("authority_contract", "Full Control Authority", authority.supported && !facts.invalidPolicyIds.length ? "verified" : "unsupported",
     !authority.supported ? authority.reason ?? "This provider path cannot enforce Full Control."
       : facts.invalidPolicyIds.length ? `Named policy asks are unknown, disabled, built in or Human Required: ${facts.invalidPolicyIds.join(", ")}.`
-      : `The ${plan.driver} root on runner protocol v${runner.protocolVersion} enforces the Full Control authority contract.`);
+      : `The ${plan.driver} root's runner enforces the Full Control authority contract.`);
 
   // Only limits the Human set must be enforceable, so only then is this row mandatory: an explicit
   // ceiling, or derived limits the schema refuses, such as a paused campaign's zero concurrency. With
@@ -394,7 +394,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   add("native_review", "Controlled Cross-Model Review", controlledReview ? "verified" : "informational",
     controlledReview ? `Reviews run as ${controlledReview.profile} through agent ${controlledReview.agentId}, charged to this campaign.`
       : !advertisedReview ? `This runner does not offer the controlled reviewer, which needs provider isolation (current: ${isolation?.mode ?? "unreported"}), Claude Code CLI 2.1.296 and python3 on Linux${regular}`
-      : !reviewPeer ? `Controlled review needs a protocol-v218 runner${regular}`
+      : !reviewPeer ? `Controlled review needs a newer runner${regular}`
       : !reviewOwnerScope ? `Controlled review accounting needs a user-owned campaign${regular}`
       : facts.dailyLimit ? `Controlled review cannot honor this organization's per-user daily limit${regular}`
       : rootCeiling ? `Controlled review cannot run under the root session's own cost or tool-call limit${regular}`

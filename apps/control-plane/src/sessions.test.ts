@@ -104,8 +104,11 @@ function assertRunnerRefusal(
 test("session refusals name no runner protocol numbers", () => {
   // docs/design-system.md §17.2: capability refusals use the shared runner sentence and return the
   // versions as `requiredRunnerProtocolVersion` and `runnerProtocolVersion` (#3219).
-  // Matches `protocol-v218` and `protocol v218` (#3457); reports only the offending lines.
-  assert.deepEqual(readFileSync(new URL("./sessions.ts", import.meta.url), "utf8").match(/^.*protocol[- ]v\d.*$/gm) ?? [], []);
+  // Matches `protocol-v218`, `protocol v218` (#3457) and an interpolated `protocol v${…}`; reports only
+  // the offending lines. The campaign authority and launch-check texts reach these refusals too (#3803).
+  for (const source of ["./sessions.ts", "./campaign-launch-admission.ts", "../../../packages/protocol/src/campaign-authority.ts"]) {
+    assert.deepEqual(readFileSync(new URL(source, import.meta.url), "utf8").match(/^.*protocol[- ]v(\d|\$\{).*$/gm) ?? [], [], source);
+  }
 });
 
 for (const scenario of ["downgrade", "revision-ahead", "identity-conflict", "stopped", "archived"]) test(`unsupported reconciled snapshot isolates its session and preserves enforcement: ${scenario}`, async () => {

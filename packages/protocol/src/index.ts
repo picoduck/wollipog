@@ -3,7 +3,7 @@ import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } fro
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
 export * from "./review-settings.js";
-import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
  * Shared protocol types for Wollipog.
  *
@@ -995,6 +995,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
    * tools check the same floor against the connected control plane. */
   sessionReviewJob: 223,
+  /** Runner peer for Full Control production evidence authority; the exact private media contract
+   * is checked separately (supportsPacedVideoReviewPeer). */
+  pacedVideoReview: PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   /** v225 provider profile adoption and per-control-plane grants (#3239). */
   providerProfiles: 225,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
