@@ -921,6 +921,70 @@ test("#2940 more excluded pull requests than one runner request admits are read 
   } finally { h.db.close(); }
 });
 
+/** #3793: the closure binds each child's prompts by identity and content. A durable outbox retry
+ * rewrites only delivery bookkeeping (`attemptCount`, `updatedAt`), which must not revoke it. */
+function promptedClosure(requestId: string) {
+  const fixture = delivery({ gate: "consumed", stage: [{ number: 9 }] });
+  const { h, setForge, close, useObserver } = fixture;
+  setForge(9, "closed"); setForge(10, "merged");
+  useObserver();
+  // Enabling Full Control sent the bound child a policy notice its runner has not acknowledged.
+  const prompts = () => h.db.getSession("child")?.pendingPrompts ?? [];
+  assert.equal(prompts().length, 1);
+  const commandId = prompts()[0]!.commandId;
+  assert.equal(prompts()[0]!.state, "sent");
+  const pending = () => prompts().find((prompt) => prompt.commandId === commandId);
+  return { ...fixture, prompts, pending, approved: async () => {
+    const c = await close(requestId);
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.ok(d.resourceSnapshot.category === "issue_closure" && d.resourceSnapshot.activeChildren.some((child) => child.sessionId === "child"),
+      "the prompted child is bound to the closure");
+    assert.ok(h.approve(d).ok);
+    return d;
+  } };
+}
+
+test("#3793 a prompt delivery retry between approval and execution keeps the closure", async () => {
+  const { h, pending, approved } = promptedClosure("retried-prompt");
+  try {
+    const d = await approved();
+    const before = pending()!;
+    // The outbox's backoff has elapsed: it sends the same unacknowledged prompt again.
+    h.svc.retryDuePrompts(Date.now() + 60_000);
+    const after = pending()!;
+    assert.equal(after.commandId, before.commandId);
+    assert.ok(after.attemptCount > before.attemptCount, `retried: ${before.attemptCount} -> ${after.attemptCount}`);
+    assert.ok(after.updatedAt > before.updatedAt);
+    // The runner then admits it to its queue: another delivery transition of the same prompt.
+    assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId: after.commandId,
+      sessionId: "child", state: "queued", revision: after.revision + 1 }));
+    assert.equal(pending()!.state, "queued");
+    assert.equal(h.db.getSession("child")?.queued?.[0]?.durableDeliveryState, "queued");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
+test("#3793 a new prompt for a bound child between approval and execution still revokes the closure", async () => {
+  const { h, prompts, approved } = promptedClosure("new-prompt");
+  try {
+    const d = await approved();
+    // Admitted while the child waits for a provider slot, the prompt takes the durable outbox.
+    h.db.updateSessionStatus("child", "queued", Date.now());
+    const sent = h.svc.prompt("child", "Start on something else");
+    assert.ok(sent.ok, sent.error ?? "prompt");
+    assert.equal(prompts().length, 2, "a second durable prompt is pending");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.match(executed.error ?? "", /active child work changed/u);
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+  } finally { h.db.close(); }
+});
+
 test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)", async () => {
   const { h, setForge, forgeReads, reads, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
   try {
