@@ -295,6 +295,45 @@ test("a sign-in started here shows the same two steps and endings inside the dia
   }
 });
 
+test("a row reads Signing In without Sign In while its sign-in runs, and Sign In returns only once the ending is dismissed (#3520)", async () => {
+  const running = {
+    operationId: "login_old", accountId: "claude-old", label: "Claude Old", provider: "claude", status: "awaiting_code",
+    verificationUrl: "https://claude.ai/oauth/authorize", expectsCode: true, startedAt: 1,
+  } as const;
+  const statuses = (view: Rendered) => [...view.dialog()!.querySelectorAll(".choice-row")].map((row) => [
+    row.querySelector(".choice-row-title")!.firstChild!.textContent,
+    row.querySelector(".choice-row-status")?.textContent,
+    row.querySelector(".choice-row-action button")?.textContent?.trim() ?? null,
+  ]);
+  const accounts = [WORK, PERSONAL, OLD, MAYBE, { ...OLD, id: "claude-spare", label: "Claude Spare" }];
+  const view = await renderDialog({ accounts, runnerOverrides: { providerLogins: [running] } });
+  try {
+    assert.deepEqual(statuses(view), [
+      ["Claude Personal", "Signed In", null],
+      ["Claude Old", "Signing In", null],
+      ["Claude Maybe", "Status Unknown", null],
+      ["Claude Spare", "Sign-In Required", "Sign In"],
+    ], "only the signing-in row changes");
+    assert.equal(view.row("Claude Old")!.querySelector(".choice-row-status .status.t-info") !== null, true,
+      "the provider-account Signing In badge");
+    await act(async () => { view.radio("Claude Old")!.click(); await tick(); });
+    assert.equal(view.button("Use Account")!.disabled, true, "a signed-out account still can't be used while it signs in");
+
+    for (const ending of ["failed", "timed_out"] as const) {
+      await view.setAccounts(accounts, { providerLogins: [{ ...running, status: ending, expectsCode: false }] });
+      assert.deepEqual(statuses(view)[1], ["Claude Old", "Sign-In Required", null],
+        `after ${ending} the row shows the account's own status and leaves the restart to the ending`);
+      assert.equal(view.button("Use Account")!.disabled, true);
+    }
+
+    await view.setAccounts(accounts, { providerLogins: [] });
+    assert.deepEqual(statuses(view)[1], ["Claude Old", "Sign-In Required", "Sign In"], "dismissing the ending brings Sign In back");
+    assert.equal(view.row("Claude Old")!.querySelector<HTMLButtonElement>(".choice-row-action button")!.disabled, false);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a signed-out account offers Sign In in its trailing slot, outside the row's label, to someone who may start it", async () => {
   const view = await renderDialog();
   try {
