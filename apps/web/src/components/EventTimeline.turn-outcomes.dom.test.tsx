@@ -98,6 +98,43 @@ test("the rejection hold is its own Automatic Turns Held notice, without Retry T
   });
 });
 
+test("a non-fatal driver problem is a Problem During Turn notice, without Retry Turn (#3806)", async () => {
+  const problem = "Codex asked a question Wollipog can't show as an answer card. " +
+    "Wollipog asked the agent to repeat it in a normal message.";
+  const builder = new TimelineBuilder();
+  for (const ev of [
+    event(1, at(25), { kind: "user_message", text: "Ask me to approve the merges." }),
+    event(2, at(25, 1), { kind: "agent_message", text: "Authorize the merges?", final: true }),
+    event(3, at(25, 1), { kind: "error", message: problem, nonFatal: true }),
+    event(4, at(25, 2), { kind: "agent_message", text: "Please answer in a message.", final: true }),
+    event(5, at(25, 3), { kind: "agent_response_completed" }),
+  ] as SessionEvent[]) builder.push(ev);
+  const retries: string[] = [];
+  const retry: TurnRetryControl = { onRetry: (prompt) => retries.push(prompt.text) };
+  await withView(<EventTimeline items={builder.snapshot()} turnRetry={retry} />, async (view) => {
+    assert.equal(notices(view.container).length, 0, "the turn did not fail");
+    const found = [...view.container.querySelectorAll(".notice")].filter((notice) =>
+      notice.querySelector(".notice-title")?.textContent === "Problem During Turn");
+    assert.equal(found.length, 1);
+    const notice = found[0]!;
+    assert.ok(notice.classList.contains("t-warning"));
+    assert.equal(notice.querySelector("p")?.textContent, problem);
+    assert.equal(button(notice, "Retry Turn"), undefined, "re-running a completed turn would repeat its side effects");
+  });
+  assert.deepEqual(retries, []);
+});
+
+test("a non-fatal problem never merges into a failed turn's error with the same words", () => {
+  const builder = new TimelineBuilder();
+  for (const ev of [
+    event(1, at(25), { kind: "user_message", text: "Go" }),
+    event(2, at(25, 1), { kind: "error", message: "Same words", nonFatal: true }),
+    event(3, at(25, 2), { kind: "error", message: "Same words" }),
+  ] as SessionEvent[]) builder.push(ev);
+  assert.deepEqual(builder.snapshot().filter((item) => item.kind === "error").map((item) =>
+    item.kind === "error" && [item.message, item.nonFatal ?? false]), [["Same words", true], ["Same words", false]]);
+});
+
 test("a provider error reported twice renders one Turn Failed notice, the transcript's last row", async () => {
   const items = failedTurnItems();
   assert.deepEqual(items.filter((item) => item.kind === "error").map((item) => item.kind === "error" && item.message),

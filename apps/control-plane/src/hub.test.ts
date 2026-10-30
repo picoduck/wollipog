@@ -43,6 +43,11 @@ test("reminder activity recognizes only authoritative agent response completion"
   assert.equal(reminderWakeReasonForEvent({ kind: "turn_interrupted" }), null);
 });
 
+test("a non-fatal driver problem is not a failure wake reason (#3806)", () => {
+  assert.equal(reminderWakeReasonForEvent({ kind: "error", message: "turn/start failed" }), "failure");
+  assert.equal(reminderWakeReasonForEvent({ kind: "error", message: "question not shown", nonFatal: true }), null);
+});
+
 function gitReq(requestId: string): GitActionRequestMessage {
   return { type: "git_action", requestId, sessionId: "s", worktreePath: "/w", action: { kind: "status" } };
 }

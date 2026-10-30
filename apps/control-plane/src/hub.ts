@@ -86,7 +86,9 @@ export function reminderWakeReasonForEvent(
   if (payload.kind === "permission_request" ||
       (payload.kind === "status" && payload.status === "input_required")) return "approval";
   if (payload.kind === "question_request") return "question";
-  if (payload.kind === "error" || (payload.kind === "status" && payload.status === "failed")) return "failure";
+  // A non-fatal driver problem (#3806) leaves the turn running, so it is no failure to wake for.
+  if ((payload.kind === "error" && !payload.nonFatal) ||
+      (payload.kind === "status" && payload.status === "failed")) return "failure";
   if (payload.kind === "background_continuation_delivered") return "background_job";
   if (payload.kind === "agent_response_completed" ||
       (payload.kind === "agent_message" && payload.final === true)) return "agent_response";
