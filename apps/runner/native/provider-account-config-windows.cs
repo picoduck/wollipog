@@ -67,7 +67,9 @@ public static class WollipogAccountConfigWindowsV1 {
  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h,int cls,out PBI info,int size,out int returned);
  // FileRenameInformation (10) through the native API: the name stays relative to the pinned parent handle. The
- // Win32 FileRenameInfo wrapper may first expand a relative name against the current directory.
+ // Win32 FileRenameInfo wrapper may first expand a relative name against the current directory. A replacement uses
+ // FileRenameInformationEx (65) with REPLACE_IF_EXISTS|POSIX_SEMANTICS (3): the context keeps the old config pinned
+ // open with delete sharing, and NTFS refuses an ordinary replacement of an open target.
  [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle h,out IOSB status,IntPtr info,uint size,int cls);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(SafeFileHandle h,out long creation,out long exit,out long kernel,out long user);
  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(SafeFileHandle h,uint timeout);
@@ -118,7 +120,7 @@ public static class WollipogAccountConfigWindowsV1 {
  static void Rename(Context c,SafeFileHandle h,string target,bool replace){
   c.Alive();Need(target.Length>0&&target.IndexOfAny(new char[]{'\\','/',':','\0'})<0&&target!="."&&target!="..");
   byte[] name=Encoding.Unicode.GetBytes(target);int root=IntPtr.Size==8?8:4;int count=root+IntPtr.Size;int off=count+4;IntPtr p=Marshal.AllocHGlobal(off+name.Length);
-  try{for(int i=0;i<off+name.Length;i++)Marshal.WriteByte(p,i,0);Marshal.WriteByte(p,0,(byte)(replace?1:0));Marshal.WriteIntPtr(p,root,c.ParentHandle.DangerousGetHandle());Marshal.WriteInt32(p,count,name.Length);Marshal.Copy(name,0,IntPtr.Add(p,off),name.Length);IOSB status;Need(NtSetInformationFile(h,out status,p,(uint)(off+name.Length),10)>=0,"IO");}finally{Marshal.FreeHGlobal(p);}
+  try{for(int i=0;i<off+name.Length;i++)Marshal.WriteByte(p,i,0);Marshal.WriteInt32(p,0,replace?3:0);Marshal.WriteIntPtr(p,root,c.ParentHandle.DangerousGetHandle());Marshal.WriteInt32(p,count,name.Length);Marshal.Copy(name,0,IntPtr.Add(p,off),name.Length);IOSB status;Need(NtSetInformationFile(h,out status,p,(uint)(off+name.Length),replace?65:10)>=0,"IO");}finally{Marshal.FreeHGlobal(p);}
  }
  static void ReleaseGuard(SafeFileHandle h){IntPtr p=Marshal.AllocHGlobal(1);try{Marshal.WriteByte(p,1);Need(SetFileInformationByHandle(h,4,p,1),"IO");}finally{Marshal.FreeHGlobal(p);}}
  // Directory short names are data, never a reason to skip the ORIGINAL raw ancestor walk.
