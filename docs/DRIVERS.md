@@ -310,6 +310,8 @@ compatibility floor. Readiness also requires the driver's implicit `acceptEdits`
 enumerated. A stale value explicitly submitted by a client is rejected, while an older persisted
 session is healed if a CLI update narrows its modes or effort levels. The runner checks the same
 advertised capability immediately before constructing argv.
+[Claude Code Assumption Probes](claude-assumption-probes.md) re-measure the floors, hooks, control
+channel and transcript layout against each release without credentials.
 
 `AgentDefinition.claudeCode` reports ready/unauthenticated/unsupported/unavailable state, how the
 binary was resolved (ordinary PATH, common directory, version manager, or login shell), and a safe

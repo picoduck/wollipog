@@ -63,6 +63,7 @@
     "benchmark:workflow-event-retention": "node --import tsx apps/control-plane/scripts/workflow-event-retention-benchmark.ts",
     "benchmark:session-search-deletion": "node --import tsx apps/control-plane/scripts/session-search-deletion-benchmark.ts",
     "benchmark:inbox": "node --import tsx apps/web/scripts/inbox-cold-load-benchmark.ts",
+    "probe:claude-assumptions": "node --import tsx scripts/claude-assumptions.mjs",
     "probe:claude-mcp-image": "node --import tsx apps/runner/scripts/claude-mcp-image-probe.ts",
     "probe:claude-media-reviewer": "node --import tsx apps/runner/scripts/claude-media-reviewer-probe.ts",
     "probe:codex-escalation": "node --import tsx apps/runner/scripts/codex-escalation-probe.ts",

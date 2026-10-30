@@ -9,7 +9,9 @@
 Codex upgrade measurements now have a unified, account-isolated maintenance entry point and a
 dedicated dogfood timer: [Codex Assumption Probes](../codex-assumption-probes.md). Reports name the
 assumption, observed behavior and historical measurement here. Changed/unavailable results never
-automatically widen hook trust or restore withheld permission-profile hardening.
+automatically widen hook trust or restore withheld permission-profile hardening. The Claude Code
+measurements below are re-measured the same way, without credentials, by
+[Claude Code Assumption Probes](../claude-assumption-probes.md).
 
 A runner-created session worktree must not be removed, retired, or corrupted by the provider: the
 runner owns its lifecycle, and `discard_worktree` exists so retirement can wait for the provider to
