@@ -189,6 +189,7 @@ import {
   selectProviderAccount,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
+import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -3681,6 +3682,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         },
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
+        providerHomeRefusal: (error, meta) =>
+          runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeAgentTuiRefusals")
+            ? providerHomeLaunchRefusal(error, meta) : undefined,
       }));
       break;
     }

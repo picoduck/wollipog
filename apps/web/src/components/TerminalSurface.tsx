@@ -25,6 +25,9 @@ import { TerminalIcon } from "./Icons.js";
 import type { ResolvedTheme } from "../theme.js";
 import { takeTerminalFocusRequest } from "../terminal-focus.js";
 import type { TerminalPlacement } from "../terminal-placement.js";
+import { useAccountEmailPrivacy } from "../account-email-privacy.js";
+import { isPersonalIdentifier } from "../personal-identifiers.js";
+import { providerHomeRefusalCopy } from "../provider-home-refusal.js";
 
 /** Focus the first of these controls that is there and enabled. */
 function focusFirst(ids: readonly string[]): void {
@@ -57,6 +60,8 @@ export interface TerminalHostModel extends SessionTerminalsState {
   readonly activeShell: ShellView | null;
   /** The Agent TUI is offered, and a tracked guardrail blocks it. */
   readonly agentTuiBlocked: boolean;
+  /** The last Agent TUI open its provider account's lease refused, in the session's words (#3338). */
+  readonly agentTuiRefusal: { title: string; message: string } | null;
   readonly hookGovernance: boolean;
   readonly terminalRef: RefObject<ShellTerminalHandle | null>;
   readonly pipeInputRef: RefObject<HTMLInputElement | null>;
@@ -123,6 +128,7 @@ export function useTerminalHost(sessionId: string, tabsetId: string, {
   const tuiGuardrailBlocked = nativeTuiHasTrackedGuardrails(session ?? {});
 
   const state = sessionTerminals?.state ?? null;
+  const privacy = useAccountEmailPrivacy();
   const terminalRef = useRef<ShellTerminalHandle | null>(null);
   const pipeInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -216,6 +222,15 @@ export function useTerminalHost(sessionId: string, tabsetId: string, {
     worktree: Boolean(session.worktreePath),
     activeShell,
     agentTuiBlocked: tuiSupported && tuiGuardrailBlocked,
+    agentTuiRefusal: state.errorRefusal ? (() => {
+      // Named as the session's own refusal notice names it: an email-shaped label is named by role
+      // while identifiers are hidden.
+      const label = state.errorRefusal.providerAccountLabel;
+      const account = label === undefined ? undefined
+        : privacy.hide && isPersonalIdentifier(label) ? "the selected account" : label;
+      const copy = providerHomeRefusalCopy(state.errorRefusal, account, { launch: "agent_tui" });
+      return { title: copy.title, message: copy.body };
+    })() : null,
     hookGovernance: sessionHasHookGovernance(session.agentCapabilities),
     terminalRef,
     pipeInputRef,
@@ -275,6 +290,7 @@ export function TerminalSurface({ host, theme, scheme }: {
     activeShell,
     outputIncomplete: Boolean(scrollback?.incomplete),
     agentTuiBlocked: host.agentTuiBlocked,
+    agentTuiRefusal: host.agentTuiRefusal,
     hookGovernance: host.hookGovernance,
     error,
   }).map((condition) => ({

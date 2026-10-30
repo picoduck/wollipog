@@ -9,9 +9,10 @@ export type ProviderHomeRefusalAction = "wait" | "restart" | "switch_account" | 
 export interface ProviderHomeRefusalOptions {
   /** The runner can wait for a busy account (protocol v248): a busy refusal offers Wait for Account. */
   canWait?: boolean;
-  /** What the lease refused: a session's launch (the default) or a conversation fork's. A fork's
-   * copy offers no restart, since the session itself is unaffected. */
-  launch?: "session" | "fork";
+  /** What the lease refused: a session's launch (the default), a conversation fork's, or an Agent
+   * TUI's open (#3338). A fork's or Agent TUI's copy offers no restart, since the session itself is
+   * unaffected: it is simply tried again. */
+  launch?: "session" | "fork" | "agent_tui";
 }
 
 export interface ProviderHomeRefusalCopy {
@@ -63,10 +64,14 @@ export function providerHomeRefusalCopy(
   // The runner's own HOME is not an account: no switch target names it, and nothing is adopted.
   const subject = account ?? `this Machine's ${provider} sign-in`;
   const fork = options.launch === "fork";
+  const tui = options.launch === "agent_tui";
+  // A fork or Agent TUI is tried again; only a session's own launch is restarted or waited for.
+  const retried = fork || tui;
+  const refused = fork ? "the fork didn't start" : tui ? "the Agent TUI didn't open" : "this session didn't start";
   // Only a busy HOME frees itself, so only it can be waited for; a fork is simply tried again. Wait
   // for Account replaces Restart Session: its launch starts at once when the account is already
   // free, so a restart would add nothing but a second refusal.
-  const restart: ProviderHomeRefusalAction = options.canWait && !fork && refusal.code === "busy" ? "wait" : "restart";
+  const restart: ProviderHomeRefusalAction = options.canWait && !retried && refusal.code === "busy" ? "wait" : "restart";
   if (refusal.cause) {
     const contention = ["holder_alive", "boundary_survivor", "process_survivor"].includes(refusal.cause);
     return {
@@ -80,8 +85,8 @@ export function providerHomeRefusalCopy(
   const builders: Record<ProviderHomeLaunchRefusalCode, () => ProviderHomeRefusalCopy> = {
     busy: () => ({
       title: "Account in Use",
-      body: `Another runner, provider, helper, or lease publication is using ${subject}, so ${fork ? "the fork" : "this session"} didn't start. ` +
-        (fork
+      body: `Another runner, provider, helper, or lease publication is using ${subject}, so ${refused}. ` +
+        (retried
           ? account ? "Try again once it's free, or switch the session to another account." : "Try again once it's free."
           : restart === "wait"
             ? account ? "Wait for the account to start the session as soon as it's free, or switch to another account."
@@ -107,12 +112,12 @@ export function providerHomeRefusalCopy(
     unavailable: () => ({
       title: "Lease Helper Unavailable",
       body: `The runner's lease helper isn't available, so it couldn't check that ${subject} is free. ` +
-        (fork ? "Update or restart the runner, then try again." : "Update or restart the runner, then restart the session."),
+        (retried ? "Update or restart the runner, then try again." : "Update or restart the runner, then restart the session."),
       actions: ["restart"],
     }),
     unverifiable: () => ({
       title: "Lease Can't Be Verified",
-      body: `The runner couldn't verify the lease records of ${subject}, so it didn't start the ${fork ? "fork" : "session"}. ` +
+      body: `The runner couldn't verify the lease records of ${subject}, so ${tui ? "the Agent TUI didn't open" : `it didn't start the ${fork ? "fork" : "session"}`}. ` +
         "Someone with access to the Machine must check them before it can be used.",
       actions: account ? ["switch_account"] : [],
     }),

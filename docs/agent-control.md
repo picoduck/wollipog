@@ -901,7 +901,7 @@ does not run and nothing changes. Otherwise:
 - Any other probe failure keeps Codex's policy and is only logged, inside this boundary or not. It
   is not proof that the sandbox cannot start.
 - On a namespace denial without this boundary, the launch fails. Its `failed` status carries `launchFailure:
-  "codex_sandbox_unavailable"` (protocol v257), and a campaign shows that child as blocked work
+  "codex_sandbox_unavailable"` (protocol v259), and a campaign shows that child as blocked work
   for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry. The
   runner keeps the reason with the failed state and reports it in the session snapshot, so it
   survives a runner restart and reconnect hydration. A failed status that arrives after

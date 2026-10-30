@@ -776,14 +776,18 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      runner is about to relaunch the provider in the selected worktree, or is relaunching it, so
 //      the session reads Switching Worktree instead of Idle. Display only; an older runner never
 //      reports it, and an older control plane or dashboard ignores it.
-// 257: Codex command sandbox nesting (#3843). Inside the runner's own bubblewrap boundary, a Codex
+// 258: a refused Agent TUI open is typed like a refused session launch (#3338). When the TUI's
+//      provider-HOME lease refuses it, `shell_open_result` carries the same `providerHomeRefusal` a
+//      session or fork reports, and the control plane passes a valid one to the client with its
+//      error. The runner sends it only to a v258+ control plane; older peers keep the text alone.
+// 259: Codex command sandbox nesting (#3843). Inside the runner's own bubblewrap boundary, a Codex
 //      App Server whose sandbox cannot start runs its commands under `externalSandbox`, so that
 //      boundary is the single sandbox. Anywhere else the launch fails, and its `failed`
 //      `session_status` carries `launchFailure: "codex_sandbox_unavailable"`, which a campaign
 //      reports as blocked work for the person. Discovery marks such a Codex installation
 //      unsupported with the `codex_sandbox_unavailable` failure code. An older peer omits or
 //      ignores both.
-export const PROTOCOL_VERSION = 257;
+export const PROTOCOL_VERSION = 259;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1058,6 +1062,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerHomeWait: 248,
   /** v248 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
   providerHomeForkRefusals: 248,
+  /** v258 runner reports a refused Agent TUI open's typed provider-HOME refusal in
+   * `shell_open_result` (#3338). */
+  providerHomeAgentTuiRefusals: 258,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
   worktreeSwitchContinuation: 255,
   /** v256 runner reports `worktreeSwitch` while it relaunches a session in another worktree (#3810). */
@@ -2349,7 +2356,7 @@ export type CodexAppServerFailureCode =
   | "probe_failed"
   | "app_server_unavailable"
   | "contract_mismatch"
-  /** v257 (#3843): Codex's own command sandbox cannot start on this host, for example because
+  /** v259 (#3843): Codex's own command sandbox cannot start on this host, for example because
    * the kernel does not let unprivileged processes create user namespaces. */
   | "codex_sandbox_unavailable";
 
@@ -3503,7 +3510,7 @@ export function isProviderLoginFailureCode(value: unknown): value is ProviderLog
 }
 
 /** Why a session's provider could not start, when the runner knows it as something a retry will
- * not fix (v257, #3843). `codex_sandbox_unavailable`: the provider's own command sandbox cannot
+ * not fix (v259, #3843). `codex_sandbox_unavailable`: the provider's own command sandbox cannot
  * start where the session runs, and no runner boundary stands in for it. A closed set that may
  * grow: the control plane keeps only a code it knows and treats any other failure as untyped. */
 export type SessionLaunchFailureCode = "codex_sandbox_unavailable";
@@ -8177,7 +8184,7 @@ export interface SessionSnapshot {
   status: SessionStatus;
   /** Durable runner-owned wait explanation for reconnect hydration. */
   capacityWait?: RunnerCapacityBlocker;
-  /** v257; the typed reason a `failed` session's launch failed, for reconnect hydration (#3843). */
+  /** v259; the typed reason a `failed` session's launch failed, for reconnect hydration (#3843). */
   launchFailure?: SessionLaunchFailureCode;
   driver: AgentDriverKind;
   useWorktree: boolean;
@@ -9251,7 +9258,7 @@ export interface SessionStatusMessage {
   controlPlaneLaunchId?: string;
   /** v218; emitted only after the provider has finished producing usage. */
   campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
-  /** v257; only with status `failed`, when the launch failed for a known reason (#3843). */
+  /** v259; only with status `failed`, when the launch failed for a known reason (#3843). */
   launchFailure?: SessionLaunchFailureCode;
 }
 
@@ -11509,6 +11516,8 @@ export interface ShellOpenResultMessage {
   error?: string;
   /** Whether a real PTY was allocated (dashboards pick renderer/input mode on this). */
   pty?: boolean;
+  /** Protocol v258 (#3338): the Agent TUI's provider-HOME lease refused the open. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
 }
 
 /** Best-effort terminal resize (PTY shells; no-op in pipe mode). Fire-and-forget like input. */
