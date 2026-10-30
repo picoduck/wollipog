@@ -27,8 +27,14 @@ import { SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
 export const CAMPAIGN_BEHAVIOR_CONFLICT = "Campaign Behavior changed elsewhere, so your change wasn't saved. The current values are shown.";
 export const CAMPAIGN_BEHAVIOR_FAILED = "Your change wasn't saved.";
 export const CAMPAIGN_BEHAVIOR_SCOPE = "Changes apply to children created from now on. Children already running keep their harness, model and effort.";
-export const CAMPAIGN_BEHAVIOR_FULL_CONTROL =
-  "Full Control stays as you authorized it: these changes don't alter its follow-up limit or Maximum Issues.";
+/** Under Full Control, how Follow-Ups relates to the follow-up limit #3826 made an approval
+ * threshold: this editor never changes the limit, which Campaign Status edits as Follow-Ups Without
+ * Approval. `limit` is the campaign allowance's current one; `null` is No Limit. */
+export function campaignBehaviorFullControlNote(limit: number | null | undefined): string {
+  const current = limit === undefined ? "" : limit === null ? " (now No Limit)" : ` (now ${limit})`;
+  return `Full Control stays as you authorized it: these changes don't alter Follow-Ups Without Approval${current} or ` +
+    "Maximum Issues. Past that limit, each follow-up waits for your approval. Change the limit in Campaign Status.";
+}
 
 const EDITED_PATHS: readonly OrchestratorPolicyPath[] = [
   "behavior.childHarness", "behavior.childModel", "behavior.childEffort", "behavior.followUps", "behavior.completion",
@@ -120,6 +126,7 @@ export function CampaignBehaviorEditor({ session, fullControl, onCancel, onSaved
   if (!loaded || !draft) return <p className="section-note" role="status">Loading the campaign's current values…</p>;
 
   const { view, context } = loaded;
+  const budget = session.orchestratorCampaign?.budget;
   const evaluation = evaluateOrchestratorPolicy(context, draft);
   const problemFor = (path: OrchestratorPolicyPath) => evaluation.problems.find((problem) => problem.path === path)?.message ?? null;
   const blocked = EDITED_PATHS.some((path) => problemFor(path) !== null);
@@ -155,7 +162,7 @@ export function CampaignBehaviorEditor({ session, fullControl, onCancel, onSaved
       <SettingsGroup
         intro={CAMPAIGN_BEHAVIOR_SCOPE}
         notice={failure ? <Notice tone="danger" role="alert" details={failure.detail ? <p>{failure.detail}</p> : undefined}>{failure.message}</Notice> : undefined}
-        foot={fullControl ? CAMPAIGN_BEHAVIOR_FULL_CONTROL : undefined}
+        foot={fullControl ? campaignBehaviorFullControlNote(budget ? budget.authority.acceptedFollowUps ?? null : undefined) : undefined}
       >
         <SelectRow
           title="Child Harness"

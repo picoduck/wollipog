@@ -1755,7 +1755,7 @@ const FULL_CONTROL_PREFERRED = async (): Promise<OrchestratorSettingsView> => ({
 
 /** Full Control adds nothing to fill in (#2940): no task, issues, limits, readiness or summary. */
 function assertNoFullControlForm(container: HTMLDivElement): void {
-  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"]) {
+  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Follow-Ups Without Approval", "Maximum Issues"]) {
     assert.equal([...container.querySelectorAll("label span")].some((node) => node.textContent === label), false, `no ${label} field`);
   }
   assertNoDomNode(container.querySelector("textarea"), "no task entry");

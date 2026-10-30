@@ -1218,7 +1218,7 @@ test("under Full Control Campaign Behavior stays editable and says the boundary 
   await act(async () => editButton(full.dialog())!.click());
   await flush();
   assert.match(behaviorForm(full.dialog()).textContent ?? "",
-    /Full Control stays as you authorized it: these changes don't alter its follow-up limit or Maximum Issues\./);
+    /Full Control stays as you authorized it: these changes don't alter Follow-Ups Without Approval or Maximum Issues\. Past that limit, each follow-up waits for your approval\. Change the limit in Campaign Status\./);
   await full.unmount();
 
   const nested = await open(orchestrator({ parentSessionId: "root", orchestratorCampaign: { ...CAMPAIGN, control: { mode: "custom" } },

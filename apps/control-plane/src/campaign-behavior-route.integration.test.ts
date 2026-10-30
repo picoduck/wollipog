@@ -150,7 +150,7 @@ async function startControlPlane(t: TestContext) {
     runner!.addEventListener("open", () => done(), { once: true });
     runner!.addEventListener("error", () => reject(new Error("runner websocket failed to open")), { once: true });
   });
-  const snapshot = (id: string, status: "running" | "idle", agentId = "claude-agent", driver = "claude-code" as const | "codex-app-server",
+  const snapshot = (id: string, status: "running" | "idle", agentId = "claude-agent", driver: "claude-code" | "codex-app-server" = "claude-code",
     config: Record<string, string> = { permissionMode: "orchestrator" }) => ({ id, workspaceId: WORKSPACE_ID, agentId, title: id, status,
     driver, useWorktree: false, worktreePath: null, config, preview: null, pendingApproval: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, historyEpoch: 0, createdAt: 1, updatedAt: 1 });

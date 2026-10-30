@@ -8184,7 +8184,7 @@ export class SessionsService {
     // because a machine that offers the unchanged one is offline.
     if (changed.some((key) => key === "childHarness" || key === "childModel" || key === "childEffort")) {
       if (parsed.behavior.childHarness !== null) {
-        const unsupported = this.capabilityFailure(root.data!.runnerId, "orchestratorChildHarnessPolicy", "a fixed Child Harness");
+        const unsupported = this.capabilityFailure(root.data!.runnerId, "orchestratorChildHarnessPolicy", "fixed child harness policies");
         if (unsupported) return unsupported;
       }
       const incompatible = compatibilityError(parsed.behavior);

@@ -105,7 +105,7 @@ async function editSessionPolicy(page: Page, tab: "Behavior" | "Decisions", edit
 
 /** Full Control adds nothing to fill in or review (#2940): no task, issues, limits, readiness or summary. */
 async function expectNoFullControlForm(page: Page) {
-  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"]) {
+  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Follow-Ups Without Approval", "Maximum Issues"]) {
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
   }
   for (const copy of [/Authorize and Start/, /Describe the task/, /Ready to (?:Authorize|Enable)/, /Can't (?:Start|Enable) Yet/, /Campaign Limits/, /No Limit/]) {
