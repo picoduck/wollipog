@@ -4617,6 +4617,37 @@ test("a starting session's provider-HOME wait is stored, projected only while st
   assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a later launch starts without the old wait");
 });
 
+test("a session's worktree switch is stored, projected while it lives, kept when absent and cleared by null (#3810)", () => {
+  const db = withRunner();
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  const pending = { phase: "pending" as const, branch: "fix/switch", since: 2_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "switching", status: "idle", worktreeSwitch: pending }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, pending);
+  assert.deepEqual(summary("switching")?.worktreeSwitch, pending, "lists show it too");
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 1 }), 3_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, pending, "an older runner's absent field keeps it");
+
+  const relaunching = { ...pending, phase: "relaunching" as const };
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 2,
+    worktreeSwitch: relaunching }), 4_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, relaunching);
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 3,
+    worktreeSwitch: { ...pending, path: "/home/user/worktrees/fix" } as never }), 5_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined, "a malformed switch, or one naming a path, is not stored");
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 4, worktreeSwitch: pending }), 6_000);
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 5, worktreeSwitch: null }), 7_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined, "null clears it");
+
+  // A finished session is switching nothing, even if the clearing snapshot never arrived.
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 6, worktreeSwitch: pending }), 8_000);
+  db.updateSessionStatus("switching", "stopped", 9_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined);
+  assert.equal(summary("switching")?.worktreeSwitch, undefined);
+});
+
 test("a session's recorded provider profile id is stored, projected, kept when absent and cleared by null (#3239)", () => {
   const db = withRunner();
   const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";

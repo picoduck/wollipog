@@ -4,6 +4,7 @@ import {
   queueHoldReason,
   validProviderHomeLaunchRefusal,
   validProviderHomeWait,
+  validWorktreeSwitch,
   isProviderLoginFailureCode,
   PROVIDER_LOGIN_FAILURE_CODES,
   queueHoldRecoveryAction,
@@ -115,7 +116,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 255);
+  assert.equal(PROTOCOL_VERSION, 256);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -330,8 +331,22 @@ test("a provider sign-in failure code is accepted only from the closed set (#351
   }
 });
 
-test("PROTOCOL_VERSION is 255", () => {
-  assert.equal(PROTOCOL_VERSION, 255);
+test("a worktree switch is accepted only as its exact display shape (#3810)", () => {
+  const pending = { phase: "pending", branch: "fix/issue-3810", since: 1_700 };
+  assert.deepEqual(validWorktreeSwitch(pending), pending);
+  assert.deepEqual(validWorktreeSwitch({ ...pending, phase: "relaunching" }), { ...pending, phase: "relaunching" });
+  for (const invalid of [
+    null, undefined, [], "pending", { ...pending, phase: "done" }, { ...pending, branch: "" },
+    { ...pending, branch: "x".repeat(256) }, { ...pending, branch: "fix\nnext" }, { ...pending, since: -1 },
+    { ...pending, since: 1.5 }, { ...pending, path: "/home/user/worktrees/fix" }, { phase: "pending", branch: "fix" },
+  ]) assert.equal(validWorktreeSwitch(invalid), null, JSON.stringify(invalid));
+});
+
+test("PROTOCOL_VERSION is 256", () => {
+  assert.equal(PROTOCOL_VERSION, 256);
+  // A v255 runner never says that a session is switching worktrees (#3810).
+  assert.equal(runnerSupportsProtocol(255, "worktreeSwitchStatus"), false);
+  assert.equal(runnerSupportsProtocol(256, "worktreeSwitchStatus"), true);
   // A v254 runner cannot continue a session's own worktree switch after its relaunch (#3810).
   assert.equal(runnerSupportsProtocol(254, "worktreeSwitchContinuation"), false);
   assert.equal(runnerSupportsProtocol(255, "worktreeSwitchContinuation"), true);

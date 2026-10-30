@@ -499,6 +499,14 @@ if (leaseWait) {
     waitingSince: Date.now() - 60_000, waitUntil: Date.now() - 60_000 + 8 * 3_600_000,
   };
 }
+// A session relaunching in the worktree it switched to (#3810): `worktree-switch=pending` (the turn
+// ended and the relaunch is next) or `relaunching`.
+const worktreeSwitch = params.get("worktree-switch");
+if (worktreeSwitch === "pending" || worktreeSwitch === "relaunching") {
+  session.status = worktreeSwitch === "pending" ? "idle" : "starting";
+  session.worktreeSwitch = { phase: worktreeSwitch, branch: "fix/issue-3810-switching-worktree-status", since: Date.now() - 5_000 };
+  session.updatedAt = Date.now() - 5_000;
+}
 // `lease-viewer=owner` or `member` (#3240): a viewer who manages the Machine, as an Owner of the
 // personal organization (Set Up Managed Profile and Recover Existing Profile) or a member (Set Up
 // Managed Profile only).

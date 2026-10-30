@@ -560,6 +560,8 @@ export type SessionConditionKind =
   /** Why a queued session is waiting: capacity, or a worktree or account handoff; or that a starting
    * session is waiting for its busy provider account. */
   | "queue_reason"
+  /** The runner is relaunching the session in the worktree it switched to (#3810). */
+  | "worktree_switch"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
   | "lifecycle";
 
@@ -609,7 +611,7 @@ export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval"
     "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries" |
-    "providerHomeWait">>;
+    "providerHomeWait" | "worktreeSwitch">>;
 
 const FOLLOW_UP_BLOCKERS: Record<NonNullable<NonNullable<SessionView["backgroundFollowUp"]>["blocker"]>, string> = {
   governance: "The session is paused by a governance limit. Review the session's pending action to continue.",
@@ -728,6 +730,25 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  * (background work while the agent is busy, a result still on its way back, workers and queue
  * reasons). Requests the Orchestrator owns are not a condition: their count is in the Requests panel.
  */
+/**
+ * Between the turn that switched worktrees and the provider relaunched there, the session is not
+ * idle but moving (#3810), so this outranks the lifecycle badge. A running turn is still the
+ * session's own news, and a prompt held behind the handoff already reads Worktree Handoff.
+ */
+function worktreeSwitchCondition(session: SessionStatusSource): SessionCondition | null {
+  const worktreeSwitch = session.worktreeSwitch;
+  if (!worktreeSwitch || !["idle", "starting", "queued", "input_required"].includes(session.status)) return null;
+  if (session.status === "queued" && session.queueHold) return null;
+  return {
+    kind: "worktree_switch",
+    meta: { label: "Switching Worktree", tone: "info", pulse: true },
+    description: worktreeSwitch.phase === "relaunching"
+      ? `The session is relaunching in worktree ${worktreeSwitch.branch}.`
+      : `The session is about to relaunch in worktree ${worktreeSwitch.branch}.`,
+    needsYou: false,
+  };
+}
+
 export function sessionStatusSummary(
   session: SessionStatusSource,
   context: SessionStatusContext = {},
@@ -810,6 +831,8 @@ export function sessionStatusSummary(
   if (lost) conditions.push(lost);
   if (disconnected) conditions.push(disconnected);
   if (waiting) conditions.push(waiting);
+  const switching = worktreeSwitchCondition(session);
+  if (switching) conditions.push(switching);
   // Listed even under a request, so the popover still says the agent is Running (#3073).
   conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
   if (background && !background.needsYou && background !== lost && background !== waiting) conditions.push(background);

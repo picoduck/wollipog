@@ -772,7 +772,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      switch needs has run in the selected worktree. Every isolation notice says whether that
 //      continuation will follow (`continuesAfterRelaunch`), and create and select now return the
 //      notice as attach always has. An older runner gets no flag and goes idle after the relaunch.
-export const PROTOCOL_VERSION = 255;
+// 256: a session switching worktrees says so (#3810). A snapshot may carry `worktreeSwitch` while the
+//      runner is about to relaunch the provider in the selected worktree, or is relaunching it, so
+//      the session reads Switching Worktree instead of Idle. Display only; an older runner never
+//      reports it, and an older control plane or dashboard ignores it.
+export const PROTOCOL_VERSION = 256;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1049,6 +1053,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerHomeForkRefusals: 248,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
   worktreeSwitchContinuation: 255,
+  /** v256 runner reports `worktreeSwitch` while it relaunches a session in another worktree (#3810). */
+  worktreeSwitchStatus: 256,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -7463,6 +7469,33 @@ export interface WorktreeRecoveryReader {
 }
 
 /**
+ * The runner is moving this session's provider into another worktree (#3810): a selection the live
+ * process cannot follow takes a relaunch. `pending` waits for the current turn to end, and
+ * `relaunching` has retired the old process and is starting the new one. Display only: the queue,
+ * holds and continuation rules are unchanged, and the field clears once the relaunch is over.
+ */
+export interface SessionWorktreeSwitchView {
+  phase: "pending" | "relaunching";
+  /** Branch of the selected worktree, the name a person recognises; never a path. */
+  branch: string;
+  /** When this switch was first reported, in epoch milliseconds. */
+  since: number;
+}
+
+/** A peer's `worktreeSwitch` when it is exactly well formed, else null. */
+export function validWorktreeSwitch(value: unknown): SessionWorktreeSwitchView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).some((key) => key !== "phase" && key !== "branch" && key !== "since")) return null;
+  const { phase, branch, since } = candidate;
+  if (phase !== "pending" && phase !== "relaunching") return null;
+  // A Git branch name never holds a control character, and 255 bytes is Git's own ref-name limit.
+  if (typeof branch !== "string" || !branch || branch.length > 255 || /[\u0000-\u001f\u007f]/u.test(branch)) return null;
+  if (typeof since !== "number" || !Number.isSafeInteger(since) || since < 0) return null;
+  return { phase, branch, since };
+}
+
+/**
  * A prompt the runner has accepted but cannot start (#1651). The runner defers a worktree or
  * provider-account handoff until the provider's detached background work has settled, because
  * retiring the provider would end that work, and every ordinary queued prompt waits behind the
@@ -7877,6 +7910,9 @@ export interface SessionView {
   worktreeRecovery?: WorktreeRecoveryView;
   /** A prompt the runner accepted waits behind a handoff barrier (#1651); see `holds`. */
   queueHold?: SessionQueueHoldView;
+  /** The runner is relaunching this session in another worktree (#3810). Omitted otherwise, for
+   * finished sessions, and by peers that predate v256. */
+  worktreeSwitch?: SessionWorktreeSwitchView;
   /** Conditions that keep the next turn from starting, with the step that clears each (#1650).
    * Omitted when there are none, and by control planes that predate it. */
   holds?: SessionHoldView[];
@@ -8105,6 +8141,9 @@ export interface SessionSnapshot {
   /** A prompt the runner accepted but cannot start behind a handoff barrier (#1651). Three-valued
    * like worktreeRecovery: undefined is a pre-v187 peer, null explicitly clears. */
   queueHold?: SessionQueueHoldView | null;
+  /** v256: a worktree relaunch in progress (#3810). Three-valued like queueHold: undefined is an
+   * older peer, null explicitly clears. */
+  worktreeSwitch?: SessionWorktreeSwitchView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** v240: display-only follow-up facts. Missing on older peers; never retry authority. */
