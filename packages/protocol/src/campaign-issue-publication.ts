@@ -24,12 +24,6 @@ export function campaignPublicationTitle(title: string): string {
   return campaignPublicationSubject(title).toLowerCase();
 }
 
-/** A tagged title is admissible only after a duplicate search by its subject: searching the tag's
- * terms filters out an older untagged issue with the same subject. */
-export function campaignPublicationTypeTagged(title: string): boolean {
-  return campaignPublicationSubject(title) !== collapsedTitle(title);
-}
-
 /** Why the server did not admit a follow-up publication that named a recommendation. Recorded on
  * the human-owned decision's authority evaluation and the admission log; it grants nothing. */
 export type CampaignPublicationAdmissionFailure =

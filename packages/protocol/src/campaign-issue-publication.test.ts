@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { campaignPublicationSubject, campaignPublicationTitle, campaignPublicationTypeTagged } from "./index.js";
+import { campaignPublicationSubject, campaignPublicationTitle } from "./index.js";
 
 test("publication titles compare without the issue-form type prefix (#2940)", () => {
   const subject = campaignPublicationTitle("Treat an Exiting Process's ESRCH as Absent");
@@ -16,7 +16,6 @@ test("publication titles compare without the issue-form type prefix (#2940)", ()
 test("the duplicate search subject keeps its case and drops only the type tag (#2940)", () => {
   assert.equal(campaignPublicationSubject("  [Bug]:  Treat ESRCH as Absent "), "Treat ESRCH as Absent");
   assert.equal(campaignPublicationSubject("Treat ESRCH as Absent"), "Treat ESRCH as Absent");
-  assert.equal(campaignPublicationTypeTagged("[Feature]: Keep Secrets Out"), true);
-  assert.equal(campaignPublicationTypeTagged("Keep Secrets Out [UI]"), false);
-  assert.equal(campaignPublicationTypeTagged("[Bug]:"), false);
+  assert.equal(campaignPublicationSubject("Keep Secrets Out [UI]"), "Keep Secrets Out [UI]");
+  assert.equal(campaignPublicationSubject("[Bug]:"), "[Bug]:");
 });

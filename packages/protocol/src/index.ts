@@ -4838,8 +4838,9 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
-  /** The duplicate search used the title's subject, without its type tag (#2940). Older runners
-   * omit it and searched the whole title, so a tagged title cannot be admitted through them. */
+  /** Duplicate inspection searched and compared titles by their subject, without a type tag
+   * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an
+   * existing issue that differs only by it, and no bounded publication is admitted through them. */
   duplicateSearch?: "subject";
 }
 

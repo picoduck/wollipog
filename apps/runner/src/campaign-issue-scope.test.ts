@@ -113,6 +113,17 @@ test("a tagged publication searches by its subject and finds an older untagged d
   assert.deepEqual(queries,Array(2).fill("q=repo:team/repo is:issue in:title Related repair"));
 });
 
+test("an untagged publication matches an existing tagged issue with the same subject (#2940)", async () => {
+  const publication = {sanitizedTitle:"Related repair",sanitizedBody:"## Problem\nFailure\n## Proposed Behavior\nRepair\n## Acceptance Criteria\n- Works\n## Security and Compatibility\nNone",labels:[]};
+  const tagged={number:123,title:"[Bug]: Related repair",html_url:"https://github.com/team/repo/issues/123"};
+  const run=async (command:string,args:string[]) => {
+    if(command==="git") return "https://github.com/team/repo.git";
+    if(args.some((arg)=>arg.includes("sort=created"))) return "[]";
+    return JSON.stringify({items:[tagged],total_count:1,incomplete_results:false});
+  };
+  await assert.rejects(inspectCampaignPublication(run,publication),/normalized title/u);
+});
+
 test("follow-up scope inspects exact title, body and labels rather than trusting its issue number", async () => {
   const publication={sanitizedTitle:"Exact",sanitizedBody:"Exact body",labels:["feature"]};
   for(const changed of ["none","title","body","labels"]) {

@@ -406,29 +406,31 @@ test("a child's accepted, in-scope publication with an issue-form title prefix i
   } finally { h.db.close(); }
 });
 
-test("a tagged title needs a runner that searched duplicates by its subject, at admission and consumption (#2940)", async () => {
-  const h = harness();
-  try {
-    const recommendationId = acceptedRecommendation(h);
-    const request = (requestId: string, sanitizedTitle: string) => h.svc.createWorkflowDecisionWithVideo("child",{requestId,resourceKey:requestId,
-      resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle,sanitizedBody:body,labels:[],recommendationId}});
-    // An older runner searched the whole title, whose tag terms can hide an untagged duplicate.
-    h.state.subjectSearch = false;
-    const older = await request("older-runner", "[Bug]: Related repair");
-    assert.ok(older.ok); assert.equal(older.data!.authority,"human");
-    assert.equal(older.data!.authorityEvaluation?.admissionFailure,"inspection_failed");
-    const untagged = await request("older-runner-untagged", "Related repair");
-    assert.ok(untagged.ok); assert.equal(untagged.data!.authority,"orchestrator","an untagged title was always searched in full");
-    h.state.subjectSearch = true;
-    const tagged = await request("subject-runner", "[Bug]: Related repair");
-    assert.ok(tagged.ok); assert.equal(tagged.data!.authority,"orchestrator");
-    assert.ok(h.svc.resolveWorkflowDecision("root","child",tagged.data!.occurrenceId,{outcome:"approve"},"orchestrator",{kind:"agent",id:"root"},()=>true).ok);
-    h.state.subjectSearch = false;
-    assert.equal((await h.svc.consumeWorkflowDecision("child",tagged.data!.occurrenceId,{resourceSnapshot:tagged.data!.resourceSnapshot})).ok,false,
-      "consumption repeats the subject search");
-    h.state.subjectSearch = true;
-    assert.ok((await h.svc.consumeWorkflowDecision("child",tagged.data!.occurrenceId,{resourceSnapshot:tagged.data!.resourceSnapshot})).ok);
-  } finally { h.db.close(); }
+test("every bounded publication needs a runner whose duplicate search and comparison ignore the tag (#2940)", async () => {
+  // An older runner keeps the tag on both sides of its duplicate check. A tagged title can hide an
+  // older untagged issue from its search; an untagged one misses an existing "[Bug]: Subject"
+  // issue in its comparison. Either way its successful inspection proves no deduplication.
+  for (const [recommendationTitle, payloadTitle] of [["Related repair", "[Bug]: Related repair"], ["[Bug]: Related repair", "Related repair"]] as const) {
+    const h = harness();
+    try {
+      const recommendationId = acceptedRecommendation(h, recommendationTitle);
+      const request = (requestId: string) => h.svc.createWorkflowDecisionWithVideo("child",{requestId,resourceKey:requestId,
+        resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:payloadTitle,sanitizedBody:body,labels:[],recommendationId}});
+      h.state.subjectSearch = false;
+      const older = await request("older-runner");
+      assert.ok(older.ok,payloadTitle); assert.equal(older.data!.authority,"human",payloadTitle);
+      assert.equal(older.data!.authorityEvaluation?.admissionFailure,"inspection_failed",payloadTitle);
+      h.state.subjectSearch = true;
+      const current = await request("subject-runner");
+      assert.ok(current.ok,payloadTitle); assert.equal(current.data!.authority,"orchestrator",payloadTitle);
+      assert.ok(h.svc.resolveWorkflowDecision("root","child",current.data!.occurrenceId,{outcome:"approve"},"orchestrator",{kind:"agent",id:"root"},()=>true).ok);
+      h.state.subjectSearch = false;
+      assert.equal((await h.svc.consumeWorkflowDecision("child",current.data!.occurrenceId,{resourceSnapshot:current.data!.resourceSnapshot})).ok,false,
+        `${payloadTitle}: consumption after a runner downgrade repeats the requirement`);
+      h.state.subjectSearch = true;
+      assert.ok((await h.svc.consumeWorkflowDecision("child",current.data!.occurrenceId,{resourceSnapshot:current.data!.resourceSnapshot})).ok,payloadTitle);
+    } finally { h.db.close(); }
+  }
 });
 
 test("a child's publication outside the proof routes to the person with a visible admission failure (#2940)", async () => {
