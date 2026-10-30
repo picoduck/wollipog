@@ -11255,6 +11255,16 @@ export class ControlPlaneDb {
     return row?.preference ?? "manual";
   }
 
+  /** Whose Artifact Uploads preference governs a session: its user owner, else the local owner when
+   * the personal organization owns it, as sessions inherit from the default runner (#3811). Teams and
+   * other organizations record no launching user, so they resolve to none and stay Manual. */
+  artifactUploadPreferenceUser(sessionId: string): string | undefined {
+    const row = this.stmt("SELECT owner_kind, owner_id FROM session_ownership WHERE session_id=?").get(sessionId) as
+      { owner_kind: string; owner_id: string } | undefined;
+    if (row?.owner_kind === "user") return row.owner_id;
+    return row?.owner_kind === "organization" && row.owner_id === PERSONAL_ORGANIZATION_ID ? LOCAL_OWNER_USER_ID : undefined;
+  }
+
   setArtifactUploadPreference(userId: string, preference: import("@wollipog/protocol").ArtifactUploadPreference): void {
     if (!["manual", "wollipog_automatic", "external_hosting"].includes(preference)) throw new Error("invalid artifact upload preference");
     this.stmt(`INSERT INTO artifact_upload_settings (user_id, preference) VALUES (?, ?)
