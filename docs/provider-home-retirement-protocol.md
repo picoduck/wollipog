@@ -293,12 +293,13 @@ These limits and indefinite refusal require disclosure in later review, PR and h
 Boundary fault tests use synthetic failures; they do not prove power-loss durability or optional
 platform support.
 
-**Unresolved compatibility blocker:** Windows account add/remove now encounter the POSIX-only
-publication admission and are refused. This is a new compatibility loss, distinct from provider
-profile adoption/markers already being unsupported on Windows. A native account-config proof
-adapter and positive Windows add/remove CI execution are required before treating this slice as
-merge-ready. The existing Windows lease/skill helpers are not account-config ownership or
-publication proof. No legacy unenrolled writer or skipped ownership/identity check is a remedy.
+**Windows compatibility:** the POSIX-only publication admission would refuse Windows account
+add/remove, so Windows uses the native WACW1 account-config backend below. Its positive add/remove
+execution comes from the windows-latest Platform Isolation job; this document records no run
+result, and the pull request carries the exact-head receipts. Provider profile adoption/markers
+remain unsupported on Windows. The existing Windows lease/skill helpers are not account-config
+ownership or publication proof. No legacy unenrolled writer or skipped ownership/identity check is
+a fallback.
 
 A sanitized refusal can ask an operator to verify existing ownership, restrictive config/parent
 permissions and retained publication evidence. It does not change permissions, repair/reset a
@@ -433,8 +434,9 @@ hooks remain absent; no runtime compiler, module autoload/profile or ExecutionPo
 is used. Build-only TEMP/TMP and fixed native payload fields retain their existing controls.
 Two read-only metadata resolutions add no process/temp producer; their OS-call duration is
 outside the existing child termination control, with no hard total metadata-call deadline.
-The source/SEA engine and DLL remain build-hash-bound. Both Windows jobs must still execute
-the existing 13 source cases and actual SEA verification; pure validation/env assertions do
+The source/SEA engine and DLL remain build-hash-bound. One passing windows-latest Platform
+Isolation job, which runs the existing 13 source cases and the actual SEA verification, is the
+required Windows receipt (a human decision replacing the earlier two-job requirement); pure validation/env assertions do
 not replace native success, architecture, death, sharing or durability evidence.
 
 Inside that trusted engine, all actual config/store file and parent owner SID, DACL, reparse,
@@ -467,8 +469,13 @@ partial store or coexisting POSIX store is adopted. The retained 4096-intent/819
 These are application-managed logical budgets, not a quota on the OS or filesystem internals.
 
 Native publication records intent before temp growth, then writes and flushes a private pending
-file opened WRITE_THROUGH. Rename uses that SAME handle with FileRenameInfo and the pinned
-parent handle. Microsoft documents NTFS metadata flushing, including rename, for write-through
+file opened WRITE_THROUGH. Rename uses that SAME handle and the pinned parent handle through
+`NtSetInformationFile`, so the target name stays relative to that handle; the Win32
+`SetFileInformationByHandle` wrapper refused every such rename on windows-latest. Store-slot renames
+use FileRenameInformation without replacement. The config replacement uses FileRenameInformationEx
+with REPLACE_IF_EXISTS|POSIX_SEMANTICS, because the command's own delete-sharing read pin keeps the
+old config open and NTFS refuses an ordinary replacement of an open target with access denied.
+A handle another process holds without delete sharing still refuses the replacement. Microsoft documents NTFS metadata flushing, including rename, for write-through
 requests; this is the implementation design basis under ordinary OS/storage assumptions and
 the documented hardware caveat, not synthetic power-loss proof. No path-based fallback,
 unsupported ReplaceFile write-through, TxF, ACL repair or administrator volume flush is used.
@@ -488,5 +495,5 @@ asset and DLL. Test-only fixture/fault assembly is separate and never embedded i
 All native outcomes, compiler/build identities, real OS exits, selected case names/counts and
 remaining architecture/launcher/sharing limits require actual receipts. Source selection or a
 filtered/skipped job is not passing proof. The existing OS matrix and 25-minute deadlines remain.
-No actual Windows build/test/CI result is supplied by preparing this candidate. PR3506's
-Windows blocker remains until admitted native receipts and fresh independent review exist.
+This document supplies no Windows build/test/CI result. The windows-latest job's exact-head
+receipts and a fresh independent review are recorded on the pull request, not here.

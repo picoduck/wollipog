@@ -63,7 +63,7 @@ assert.equal(sea.isSea(),true);const sha=b=>crypto.createHash('sha256').update(b
 const engine=Buffer.from(sea.getAsset('wollipog/account-config-windows-engine-wacw1')),dll=Buffer.from(sea.getAsset('wollipog/account-config-windows-ntfs-v1'));
 assert.equal(sha(engine),${JSON.stringify(id.engine.sha256)});assert.equal(sha(dll),${JSON.stringify(id.dll.sha256)});
 assert.equal(sha(Buffer.from(sea.getAsset('wollipog/account-config-windows-ntfs-v1.identity'))),${JSON.stringify(sha(readFileSync(join(DIR,"provider-account-config-windows-v1.identity.json"))))});
-const target={exports:{}};vm.runInThisContext('(function(exports,require,module,__filename,__dirname){'+engine.toString()+'\n})')(target.exports,n=>{assert.ok(n.startsWith('node:'));return require(n)},target,__filename,__dirname);
+const target={exports:{}};vm.runInThisContext('(function(exports,require,module,__filename,__dirname){'+engine.toString()+'\\n})')(target.exports,n=>{assert.ok(n.startsWith('node:'));return require(n)},target,__filename,__dirname);
 const config=path.join(${JSON.stringify(root)},'runner.json');assert.equal(fs.existsSync(config),true);
 const first=target.exports.capture(config);assert.equal(first.revision,0);const next=Buffer.from(JSON.stringify({providerAccounts:[],untouched:true,after:true}));
 target.exports.publish({path:config,stamp:first.stamp,parentBirth:first.parentBirth,beforeAccounts:sha('[]'),afterAccounts:sha('[]'),next});
