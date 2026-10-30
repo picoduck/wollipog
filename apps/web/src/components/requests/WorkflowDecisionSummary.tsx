@@ -4,6 +4,7 @@ import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 import { followUpLimitText } from "../../follow-up-limit.js";
+import { issueRefLabel } from "../../campaign-status.js";
 
 /** The issues a GitHub merge would close (#3713). The control plane creates the decision only when
  * they are exactly the snapshot's declared ones, so with a check this is what GitHub reported; a
@@ -48,7 +49,7 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
           {snapshot.recommendationTitle !== undefined && (snapshot.rebinds || snapshot.recommendationTitle !== snapshot.title) &&
             <div><dt>Recommendation</dt><dd>{snapshot.recommendationTitle}</dd></div>}
           <div><dt>{snapshot.rebinds ? "Approved Follow-Up" : "Follow-Up"}</dt><dd>{snapshot.title}</dd></div>
-          {snapshot.issue && <div><dt>Issue</dt><dd>{snapshot.issue.repository}#{snapshot.issue.number}</dd></div>}
+          {snapshot.issue && <div><dt>Issue</dt><dd>{issueRefLabel(snapshot.issue)}</dd></div>}
           <div><dt>Follow-Up Limit</dt><dd>{followUpLimitText(snapshot.acceptedFollowUps, snapshot.limit)}</dd></div>
         </dl>
         <p>{snapshot.rebinds

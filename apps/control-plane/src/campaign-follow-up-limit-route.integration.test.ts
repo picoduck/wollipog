@@ -16,6 +16,7 @@ import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOC
 import { hashToken } from "./auth.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { ControlPlaneDb } from "./db.js";
+import { normalizeWorkflowDecisionSnapshot } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -447,4 +448,40 @@ test("another recommendation accepted into a follow-up admitted past the thresho
     assert.equal(decision(cp.database, rebind).status, "consumed");
     assert.equal(read(cp.database, (db) => db.campaignWorkLedger.recommendation(ROOT, b.id)!.disposition), "accepted");
     assert.equal(read(cp.database, (db) => db.campaignBudgets.view(ROOT)!.acceptedFollowUps), 2, "a rebinding is not another follow-up");
+  });
+
+test("a follow-up admission names an issue in any repository the work ledger accepts, GitLab projects included (CR-4.1)", () => {
+  const snapshot = (repository: string) => ({ category: "campaign_follow_up_admission", subject: { kind: "work_item", key: "follow-up-gitlab" },
+    title: "Fix the runner", issue: { repository, number: 7 }, identityDigest: "a".repeat(64), acceptedFollowUps: 1, limit: 1 });
+  for (const repository of ["gitlab.com/team/project", "gitlab.example.com:8443/group/subgroup/project", "picoduck/wollipog"]) {
+    const normalized = normalizeWorkflowDecisionSnapshot(snapshot(repository));
+    assert.ok(normalized.ok, `${repository}: ${normalized.error}`);
+    assert.deepEqual(normalized.data!.category === "campaign_follow_up_admission" && normalized.data!.issue, { repository, number: 7 });
+  }
+  for (const repository of ["github.com/picoduck/wollipog", "not a repository", "wollipog"]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot(snapshot(repository)).ok, false, `${repository} is not a ledger repository`);
+  }
+});
+
+test("an over-threshold follow-up tracking a GitLab issue is asked about, approved and admitted through the real routes (CR-4.1)",
+  { timeout: 90_000 }, async (t) => {
+    const cp = await startControlPlane(t);
+    assert.equal((await planFollowUp(cp, "follow-up-1")).status, 200);
+    const GITLAB = { repository: "gitlab.com/team/project", number: 7 };
+    const over = await planFollowUp(cp, "follow-up-gitlab", "Fix the GitLab runner", GITLAB);
+    assert.equal(over.status, 409, over.text);
+    assert.match(String(over.json.error), /so it needs the person's approval\. Requested decision/);
+    const requested = occurrence(String(over.json.error));
+    assert.deepEqual(admissionFacts(decision(cp.database, requested).resourceSnapshot).issue, GITLAB);
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: requested, optionId: "approve" })).status, 200);
+    const admitted = await planFollowUp(cp, "follow-up-gitlab", "Fix the GitLab runner", GITLAB);
+    assert.equal(admitted.status, 200, admitted.text);
+    assert.equal(decision(cp.database, requested).status, "consumed");
+    // A later change naming another GitLab issue is a decision of its own, which the person can approve.
+    const moved = await planFollowUp(cp, "follow-up-gitlab", "Fix the GitLab runner", { repository: "gitlab.com/team/project", number: 8 });
+    assert.equal(moved.status, 409, moved.text);
+    const change = occurrence(String(moved.json.error));
+    assert.deepEqual(admissionFacts(decision(cp.database, change).resourceSnapshot).issue, { repository: "gitlab.com/team/project", number: 8 });
+    assert.equal((await cp.human(`/api/sessions/${ROOT}/approve`, { requestId: change, optionId: "approve" })).status, 200);
+    assert.equal((await planFollowUp(cp, "follow-up-gitlab", "Fix the GitLab runner", { repository: "gitlab.com/team/project", number: 8 })).status, 200);
   });

@@ -845,8 +845,9 @@ export function normalizeWorkflowDecisionSnapshot(
         ? { kind: "recommendation" as const, recommendationId: subject.recommendationId }
         : subject.kind === "work_item" && boundedDecisionString(subject.key, 256) ? { kind: "work_item" as const, key: subject.key } : null;
     const issue = value.issue && typeof value.issue === "object" && !Array.isArray(value.issue) ? value.issue as Record<string, unknown> : null;
+    // Any repository the work ledger accepts: GitHub `owner/name`, or a host-qualified GitLab project.
     const normalizedIssue = issue && Object.keys(issue).length === 2 && boundedDecisionString(issue.repository, 256) &&
-      /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(issue.repository) && Number.isSafeInteger(issue.number) && (issue.number as number) > 0
+      campaignRepositoryLocation(issue.repository) !== null && Number.isSafeInteger(issue.number) && (issue.number as number) > 0
       ? { repository: issue.repository, number: issue.number as number } : null;
     const acceptedFollowUps = count(value.acceptedFollowUps), limit = value.limit === null ? null : count(value.limit);
     const revises = value.revises;

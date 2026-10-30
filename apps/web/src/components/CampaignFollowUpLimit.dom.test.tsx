@@ -195,3 +195,14 @@ test("Campaign Status past the limit shows what started without approval and how
     view.unmount();
   }
 });
+
+test("the request card names a GitLab issue as the work ledger does (CR-4.1)", async () => {
+  const view = await render(<WorkflowDecisionSummary snapshot={{ category: "campaign_follow_up_admission",
+    subject: { kind: "work_item", key: "follow-up-gitlab" }, title: "Fix the GitLab runner",
+    issue: { repository: "gitlab.com/team/project", number: 7 }, identityDigest: "c".repeat(64), acceptedFollowUps: 1, limit: 1 }} />);
+  try {
+    assert.equal(value(view.container, "Issue"), "gitlab.com/team/project#7");
+  } finally {
+    view.unmount();
+  }
+});
