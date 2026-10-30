@@ -163,13 +163,24 @@ string form.
 
 ## Hosted Workflow
 
-The scheduled hosted workflow from #3796 will run this suite against the newest
-`@earendil-works/pi-coding-agent` release once that workflow exists. Until then the suite runs only
-by hand. The suite already fits that workflow's shared harness contract:
+[Harness Assumption Probes](harness-assumption-probes.md) runs this suite daily, as the `pi`
+harness, against the newest `@earendil-works/pi-coding-agent` release only, because no repository
+source pins or gates a Pi version. The suite follows that workflow's shared contract:
 
 - **Report.** `latest.json` names exactly the installed version, sets `complete` and an `exitCode`
   equal to the process exit, and its results use only `unchanged`, `changed` and `could not run`.
 - **Environment.** It needs only `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI` and `PI_BIN`. It runs from a
-  read-only checkout as an unprivileged user and writes only under its report directory, `HOME`
-  and `TMPDIR`.
-- **Preparation.** Host setup happens in `scripts/harness-assumptions-prepare-pi.sh`.
+  read-only checkout as the unprivileged probe user, without sudo, and writes only under its report
+  directory, `HOME` and `TMPDIR`.
+- **Preparation.** `scripts/harness-assumptions-prepare-pi.sh` installs bubblewrap, grants it user
+  namespaces and checks `bwrap --unshare-net` before any release code runs. A preparation failure
+  makes the run could not run; the probe user's namespace is still verified inside each group.
+
+While the 1.4.0 divergences above stand, every full run exits 1 (changed) and is re-measured the
+next day, because only a fully matched measurement is recorded.
+
+To measure Pi on demand, including on a branch before merge:
+
+```sh
+gh workflow run harness-assumptions.yml --ref <branch> -f harness=pi
+```
