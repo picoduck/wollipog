@@ -387,9 +387,23 @@ function helperState(pid: number): HelperState | undefined {
   }
 }
 
+// exit_notify() publishes EXIT_ZOMBIE (Z), and reaping moves it to EXIT_DEAD (X) before procfs
+// drops the entry. Neither state can return to user code.
+function helperExited(snapshot: HelperState | undefined): boolean {
+  return snapshot === undefined || snapshot.state === "Z" || snapshot.state === "X";
+}
+
 function alive(pid: number): boolean {
-  const snapshot = helperState(pid);
-  return snapshot !== undefined && snapshot.state !== "Z";
+  return !helperExited(helperState(pid));
+}
+
+function describeHelper(snapshot: HelperState | undefined): string {
+  if (snapshot === undefined) return "procfs entry gone";
+  return `state=${snapshot.state} flags=0x${snapshot.flags.toString(16)} PF_EXITING=${(snapshot.flags & 0x4n) !== 0n}`;
+}
+
+function assertHelperExited(snapshot: HelperState | undefined): void {
+  assert.ok(helperExited(snapshot), `proof cannot precede the helper's death (${describeHelper(snapshot)})`);
 }
 
 async function waitForHelperExit(readState: () => HelperState | undefined): Promise<void> {
@@ -400,7 +414,7 @@ async function waitForHelperExit(readState: () => HelperState | undefined): Prom
   await waitUntil(() => {
     const snapshot = readState();
     if (snapshot === undefined || snapshot.state === "Z") return true;
-    assert.notEqual(snapshot.flags & 0x4n, 0n, "proof cannot precede the helper's death"); // PF_EXITING
+    assert.notEqual(snapshot.flags & 0x4n /* PF_EXITING */, 0n, `proof cannot precede the helper's death (${describeHelper(snapshot)})`);
     return false;
   });
 }
@@ -411,7 +425,7 @@ for (const state of ["R", "S", "D", "T"]) {
     await assert.rejects(waitForHelperExit(() => {
       reads++;
       return reads === 1 ? { state, flags: 0n } : undefined;
-    }), /proof cannot precede the helper's death/u);
+    }), new RegExp(`proof cannot precede the helper's death \\(state=${state} flags=0x0 PF_EXITING=false\\)`, "u"));
     assert.equal(reads, 1, "a task that could still execute must fail immediately, even if it later exits");
   });
 }
@@ -425,6 +439,29 @@ for (const state of ["R", "X"]) for (const finalState of ["zombie", "disappeared
       return finalState === "zombie" ? { state: "Z", flags: 0x4n } : undefined;
     });
     assert.ok(reads >= 3, "the pre-zombie exit window must reach an exit-complete observation");
+  });
+}
+
+for (const finalState of ["dead", "disappeared"] as const) {
+  test(`a helper the exit wait saw as a zombie stays exited once it is ${finalState}`, async () => {
+    // Reaping can move the zombie to EXIT_DEAD (X) between the wait's read and the final check.
+    const reads = [{ state: "Z", flags: 0x4n }, finalState === "dead" ? { state: "X", flags: 0x4n } : undefined];
+    let index = 0;
+    const readState = () => reads[index++];
+    await waitForHelperExit(readState);
+    assert.equal(index, 1, "the wait returns on its first zombie observation");
+    assertHelperExited(readState());
+    assert.equal(index, 2);
+  });
+}
+
+// The final check follows a zombie or disappearance observation, and exit_state never reverts.
+// Any other state, even with PF_EXITING, is not the helper that was proven exited.
+for (const [state, flags] of [["R", 0x400100n], ["S", 0x400100n], ["D", 0x400100n], ["T", 0x400100n], ["R", 0x400104n]] as const) {
+  test(`the final exit check rejects state ${state} with flags 0x${flags.toString(16)} and reports its procfs evidence`, () => {
+    const exiting = (flags & 0x4n) !== 0n;
+    assert.throws(() => assertHelperExited({ state, flags }),
+      new RegExp(`proof cannot precede the helper's death \\(state=${state} flags=0x${flags.toString(16)} PF_EXITING=${exiting}\\)`, "u"));
   });
 }
 
@@ -533,7 +570,7 @@ for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {
     if (mode === "detached") assert.equal(await provenProcessTreeExit(child), true, "early per-process proof reaps the same boundary");
     else assert.deepEqual(await Promise.all(terminatePosixProcessBoundaries(ledger.owner)), [true], "shutdown uses the same boundary proof");
     await waitForHelperExit(() => helperState(pid));
-    assert.equal(alive(pid), false, "proof cannot precede the helper's death");
+    assertHelperExited(helperState(pid));
     if (mode === "term") assert.equal(readFileSync(pidfile + ".term", "utf8"), "term", "a retained setsid descendant receives TERM before forced cleanup");
     assert.equal(await ledger.prove({ terminate: true }), true);
     assert.equal(unrelated.exitCode, null, "unrelated same-user processes are untouched");
