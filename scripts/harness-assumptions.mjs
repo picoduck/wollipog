@@ -354,6 +354,7 @@ export function sandbox(harness, isolation, { env, root, exec, location }) {
   if (!isolation) {
     return {
       isolated: false, cwd: root, installRoot: location.installRoot, workRoot: join(env.RUNNER_TEMP, "harness-assumption-work", harness.id),
+      nodePath: process.execPath, searchPath: env.PATH,
       stage: async () => ({ code: 0 }),
       makeDir: async dir => { rmSync(dir, { recursive: true, force: true }); mkdirSync(dir, { recursive: true, mode: 0o700 }); return true; },
       run: (argv, suiteEnvironment, timeoutMs) => exec(argv, { cwd: root, env: suiteEnvironment, timeoutMs }),
@@ -368,6 +369,9 @@ export function sandbox(harness, isolation, { env, root, exec, location }) {
   process.umask(0o022); // Installs and directories the runner creates stay unwritable for the user.
   return {
     isolated: true, cwd: join(base, "repo"), installRoot: join(base, "install", harness.id), workRoot: join(base, "work", harness.id),
+    // The user is denied the world-writable tool cache; npm shims such as `#!/usr/bin/env node`
+    // resolve to its private, unwritable copy first.
+    nodePath: join(base, "node", "bin", "node"), searchPath: `${join(base, "node", "bin")}:${env.PATH}`,
     stage: () => exec(["bash", "scripts/harness-assumptions-isolate.sh", user, base], { cwd: root, env, timeoutMs: 20 * 60_000, stdio: "capture" }),
     makeDir: async dir => ok(await sudo(["rm", "-rf", "--", dir])) && ok(await sudo(["install", "-d", "-o", user, "-g", user, "-m", "700", dir])),
     // env -i: the suite sees only the minimal environment, never the job's.
@@ -479,7 +483,7 @@ async function measureTarget(harness, target, { box, env, exec, suiteMarkdown })
   if (!await box.makeDir(work) || !await box.makeDir(home) || !await box.makeDir(suiteDir)) return fail("could not create the suite's throwaway directories");
   try {
     const timeoutMinutes = harness.timeoutMinutes;
-    const execution = await box.run(suiteArgv(harness, suiteDir), suiteEnv(harness, binary, home, env), timeoutMinutes * 60_000);
+    const execution = await box.run(suiteArgv(harness, suiteDir, box.nodePath), suiteEnv(harness, binary, home, { ...env, PATH: box.searchPath }), timeoutMinutes * 60_000);
     // Nothing the release started may outlive its suite, or its results are not trustworthy.
     if (!await box.reap()) return fail("processes started by the suite survived it and could not be killed");
     const json = await box.collect(suiteDir, "latest.json");

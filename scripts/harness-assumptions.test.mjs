@@ -400,6 +400,9 @@ test("isolated suites run as the probe user with only the minimal environment, a
   assert.deepEqual(Object.keys(plan.suites[0].env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
   assert.ok(plan.suites[0].env.HOME.startsWith(join(extra.HARNESS_PROBE_ROOT, "work", "codex")));
   assert.ok(plan.suites[0].env.CODEX_BIN.startsWith(join(extra.HARNESS_PROBE_ROOT, "install", "codex")));
+  const privateNode = join(extra.HARNESS_PROBE_ROOT, "node", "bin");
+  assert.equal(plan.suites[0].argv[0], join(privateNode, "node"), "suites use the private Node, not the world-writable tool cache");
+  assert.ok(plan.suites[0].env.PATH.startsWith(`${privateNode}:`), "npm shims resolve the private Node first");
   const order = fake.calls.map(c => c.argv[0] === "sudo" ? c.argv[2] === "-u" ? c.argv[5] === "cat" ? "read" : "suite" : c.argv[2] : c.argv[0]);
   const firstSuite = order.indexOf("suite");
   assert.ok(order.indexOf("bash") < firstSuite, "staging and preparation happen before any release code runs");
