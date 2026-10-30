@@ -1539,6 +1539,36 @@ export class CodexAppServerDriver implements Driver {
     }
   }
 
+  /** A rejected async question is not a failed turn (#3806): the turn runs on, so report it as a
+   * non-fatal problem. A root agent whose turn is still open is told through a steer, because it
+   * otherwise believes its card is showing; a subagent's turn is not this driver's to steer. The
+   * notice waits for the steer's outcome so it only says the agent was told when Codex accepted it. */
+  private async reportRejectedAsyncQuestion(itemId: string, reason: string, rootThread: boolean): Promise<void> {
+    let told = false;
+    if (rootThread && this.promptBusy && this.turnId) {
+      const result = await this.steer({
+        submissionId: `wollipog-async-question-rejected:${itemId}`,
+        text: "Wollipog could not show your async question to the user as an answer card " +
+          `(reason: ${reason}), so the user has not seen it as a question. If you still need an answer, ` +
+          "ask it again in a normal message.",
+        deadlineAt: Date.now() + ASYNC_QUESTION_REJECTION_STEER_MS,
+      });
+      told = result.outcome === "accepted";
+      if (!told) {
+        this.cb.onStderr(`could not tell Codex its async question was not shown item=${diagnosticValue(itemId)} ` +
+          `outcome=${result.outcome}`);
+      }
+    }
+    if (this.disposed) return;
+    this.cb.onEvent({
+      kind: "error",
+      nonFatal: true,
+      message: told
+        ? "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message."
+        : "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message.",
+    });
+  }
+
   /** A definitely-refused steer will never be echoed or settled by Codex, so drop its echo filter
    * and clean its staged images now instead of at turn end. Cleanup is not awaited: a slow cleanup
    * (a WSL subprocess) must not hold the refusal past the runner's steering deadline, which would
@@ -2511,7 +2541,7 @@ export class CodexAppServerDriver implements Driver {
             this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions: normalized.questions, async: true });
           } else {
             this.cb.onStderr(`unsupported Codex async question item=${diagnosticValue(id)} reason=${normalized.rejected} — reporting a compatibility error`);
-            this.cb.onEvent({ kind: "error", message: "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message." });
+            void this.reportRejectedAsyncQuestion(id, normalized.rejected, !parentToolUseId);
           }
         }
         break;
@@ -3025,6 +3055,9 @@ interface NormalizedQuestionRequest {
 
 type McpElicitationAction = "accept" | "decline" | "cancel";
 const MAX_STRUCTURED_QUESTIONS = 20;
+/** How long the rejected-async-question steer may wait for Codex before the notice asks the user to
+ * prompt the agent instead. */
+const ASYNC_QUESTION_REJECTION_STEER_MS = 5_000;
 const MAX_QUESTION_OPTIONS = 20;
 const MAX_QUESTION_ID = 256;
 const MAX_QUESTION_HEADER = 80;
