@@ -66,6 +66,42 @@ ledger disposition. Duplicate acceptance is idempotent. Rejection, deletion or l
 does not refund accepted work, and preexisting follow-ups count when the human establishes limits.
 Publishing and admitting follow-up work still require their own authority contracts and gates.
 
+## Follow-Up Approval Limit
+
+`acceptedFollowUps` is an approval threshold, not a hard cap (#2940). Up to it, the Orchestrator
+accepts follow-ups on its own. Past it, accepting one (`record_campaign_plan` with a follow-up
+item, or `adjudicate_campaign_recommendation` with `accepted`) is refused with a
+`campaign_follow_up_admission` decision that the server creates for exactly that recommendation
+or work item key. The decision is always the Human's: the Orchestrator cannot resolve it as a
+parent gate, as a person or by consuming it, and agents cannot request one. Once the person
+approves it, accepting the same follow-up again admits it once and consumes the approval in the
+same write. A denial keeps that follow-up refused, by name, until the person raises the limit.
+While a decision is pending, accepting the follow-up again names it instead of asking twice.
+Each follow-up the person admits this way adds one slot to the boundary's Maximum Issues, so its
+issue is not then refused by a limit derived from the follow-ups it passed.
+
+The approval binds the follow-up's complete identity, not just what the card shows: a SHA-256 of its
+recommendation or work item key, the recommendation's full recorded title, the item's full title
+and its issue (`identityDigest`). The card's titles are bounded to 200 characters for display only.
+A follow-up admitted past the limit stays bound to that identity. Retitling it or changing its
+issue, through the plan or the work item route, is a decision of its own that names the approval it
+`revises`. Accepting another recommendation into it is one too, marked `rebinds`: the card names
+that recommendation and says it replaces the approved follow-up. Approving either applies that
+change once. An approved change is not another follow-up and adds no issue slot. Follow-ups
+accepted under the limit stay the Orchestrator's to change.
+
+The campaign owner changes the limit in Campaign Status (`POST
+/api/sessions/:id/orchestrator-campaign/follow-up-limit`, Human-only, no agent allowlist entry):
+raise it, lower it, or clear it. Only the person who authorized the current boundary can change it,
+compare-and-set on the policy revision. The boundary is re-minted around the new limit in the same
+transaction as the allowance, as a Human scope approval re-mints it (#3778), so the campaign keeps
+a current boundary. Raising the limit raises Maximum Issues by as much, clearing it lifts Maximum
+Issues to its ceiling of 100, and lowering it changes neither. Lowering below the accepted count
+revokes nothing: only the next follow-up needs approval. Like any boundary change, saving revokes
+every unconsumed decision; the Orchestrator requests again what it still needs. On a campaign still
+waiting for its first message, the edit makes the follow-up limit explicit, so that message keeps
+the person's limit (an explicit 0, or No Limit left omitted) rather than deriving one.
+
 ## Unsupported Accounting and Overshoot
 
 Only managed Claude Code and Codex App Server workers can enter a protected campaign. Session cost

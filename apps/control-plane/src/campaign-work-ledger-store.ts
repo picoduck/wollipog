@@ -25,6 +25,7 @@ import {
   type CampaignAttemptEndReason,
   type CampaignAttemptSessionSnapshot,
   type CampaignCostValue,
+  type CampaignFollowUpSubject,
   type CampaignIssueRef,
   type CampaignObservedCleanup,
   type CampaignObservedFact,
@@ -324,6 +325,12 @@ const fail = <T>(error: string, status = 400, details?: Record<string, string | 
   ({ ok: false, status, error, ...(details ? { details } : {}) });
 const done = <T>(data: T): LedgerResult<T> => ({ ok: true, data });
 
+/** What a follow-up admission binds (#2940): the work item's title and the issue it tracks. */
+export interface CampaignFollowUpContent { title: string | null; issue: CampaignIssueRef | null }
+
+const itemIssue = (repository: string | null, number: number | null): CampaignIssueRef | null =>
+  repository !== null && number !== null ? { repository, number } : null;
+
 /** What the ledger needs from the rest of the control plane. Observations must read raw session
  * rows: a SessionView embeds the campaign projection, which would recurse. */
 export interface CampaignWorkLedgerHooks {
@@ -336,7 +343,14 @@ export interface CampaignWorkLedgerHooks {
   observeCleanup(sessionId: string): CampaignObservedCleanup["worktrees"] | null;
   boundary(sessionId: string): CampaignAttemptBoundary;
   atomic<T>(work: () => T): T;
-  acceptFollowUp?(campaignId: string, workItemId: string): string | null;
+  /** Counts a new follow-up work item against the campaign allowance: null when accepted, else the
+   * refusal, whose `details` name a follow-up that needs the Human's approval (#2940). */
+  acceptFollowUp?(campaignId: string, workItemId: string, subject: CampaignFollowUpSubject, content: CampaignFollowUpContent):
+    { error: string; details?: Record<string, string | number> } | null;
+  /** A change to a follow-up item's title or issue: null when allowed, else the refusal. A follow-up
+   * admitted past the approval limit stays bound to what the Human approved (#2940). */
+  reviseFollowUp?(campaignId: string, workItemId: string, content: CampaignFollowUpContent):
+    { error: string; details?: Record<string, string | number> } | null;
   /** Slice 8: the stored GitHub facts of these pull requests, one per ref in order. Status data
    * only; the read routes narrow it for readers who may not see the observing runner. */
   forgePullRequests?(campaignId: string, refs: readonly CampaignPullRequestRef[], now: number):
@@ -646,6 +660,14 @@ export class CampaignWorkLedgerStore {
       .get(itemId, campaignId) as ItemRow | undefined;
   }
 
+  /** A change to a follow-up item's title or issue, refused when it needs the Human (#2940). */
+  private followUpRevision(campaignId: string, item: ItemRow, title: string | null, issueRepository: string | null,
+    issueNumber: number | null): LedgerResult<never> | null {
+    if (item.origin !== "follow_up" || title === item.title && issueRepository === item.issue_repository && issueNumber === item.issue_number) return null;
+    const refused = this.hooks.reviseFollowUp?.(campaignId, item.id, { title, issue: itemIssue(issueRepository, issueNumber) });
+    return refused ? fail<never>(refused.error, 409, refused.details) : null;
+  }
+
   private itemByKey(campaignId: string, key: string): ItemRow | undefined {
     return this.stmt("SELECT * FROM campaign_work_items WHERE campaign_session_id=? AND item_key=?")
       .get(campaignId, key) as ItemRow | undefined;
@@ -842,8 +864,9 @@ export class CampaignWorkLedgerStore {
           const id = newId(CAMPAIGN_WORK_ITEM_ID_PREFIX);
           const origin = input.origin ?? "original";
           if (origin === "follow_up") {
-            const budgetError = this.hooks.acceptFollowUp?.(campaignId, id);
-            if (budgetError) return fail(budgetError, 409);
+            const refused = this.hooks.acceptFollowUp?.(campaignId, id, { kind: "work_item", key: input.key },
+              { title: input.title?.trim() ?? null, issue: input.issue ?? null });
+            if (refused) return fail(refused.error, 409, refused.details);
           }
           this.stmt(
             `INSERT INTO campaign_work_items
@@ -870,6 +893,8 @@ export class CampaignWorkLedgerStore {
           dispatchState: input.dispatchState ?? existing.dispatch_state,
           queuePosition: input.queuePosition !== undefined ? input.queuePosition : existing.queue_position,
         };
+        const revised = this.followUpRevision(campaignId, existing, next.title, next.issueRepository, next.issueNumber);
+        if (revised) return revised;
         if (next.title !== existing.title || next.issueRepository !== existing.issue_repository ||
             next.issueNumber !== existing.issue_number || next.dispatchState !== existing.dispatch_state ||
             next.queuePosition !== existing.queue_position) {
@@ -996,6 +1021,10 @@ export class CampaignWorkLedgerStore {
         sets.push(`${column}=?`);
         values.push(value);
       };
+      const revised = this.followUpRevision(campaignId, item, request.title !== undefined ? request.title?.trim() ?? null : item.title,
+        request.issue !== undefined ? request.issue?.repository ?? null : item.issue_repository,
+        request.issue !== undefined ? request.issue?.number ?? null : item.issue_number);
+      if (revised) return revised;
       if (request.title !== undefined) set("title", request.title?.trim() ?? null, item.title);
       if (request.issue !== undefined) {
         set("issue_repository", request.issue?.repository ?? null, item.issue_repository);
@@ -1278,6 +1307,7 @@ export class CampaignWorkLedgerStore {
             return fail(`work item ${key} already tracks ${existing.issue_repository}#${existing.issue_number}`, 409);
           }
           workItemId = existing.id;
+          // Accepting this recommendation below binds its issue, and its recommendation, to an admitted item.
           if (resultingIssue && existing.issue_repository === null) {
             this.stmt("UPDATE campaign_work_items SET issue_repository=?, issue_number=?, updated_at=? WHERE id=?")
               .run(resultingIssue.repository, resultingIssue.number, now, existing.id);
@@ -1310,8 +1340,10 @@ export class CampaignWorkLedgerStore {
         }
       }
       if (request.disposition === "accepted" && workItemId) {
-        const budgetError = this.hooks.acceptFollowUp?.(campaignId, workItemId);
-        if (budgetError) return fail(budgetError, 409);
+        const admitted = this.item(campaignId, workItemId)!;
+        const refused = this.hooks.acceptFollowUp?.(campaignId, workItemId, { kind: "recommendation", recommendationId: recommendation.id },
+          { title: admitted.title, issue: itemIssue(admitted.issue_repository, admitted.issue_number) });
+        if (refused) return fail(refused.error, 409, refused.details);
       }
       const previous = this.stmt(
         `SELECT disposition, reason, publication_required, resulting_issue_repository, resulting_issue_number,

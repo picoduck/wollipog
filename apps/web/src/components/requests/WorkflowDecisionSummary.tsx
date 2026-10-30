@@ -3,6 +3,8 @@ import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
 import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
+import { followUpLimitText } from "../../follow-up-limit.js";
+import { issueRefLabel } from "../../campaign-status.js";
 
 /** The issues a GitHub merge would close (#3713). The control plane creates the decision only when
  * they are exactly the snapshot's declared ones, so with a check this is what GitHub reported; a
@@ -36,6 +38,26 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
       return <CampaignIssueScopeSummary snapshot={snapshot} />;
     case "issue_closure":
       return <IssueClosureSummary snapshot={snapshot} />;
+    case "campaign_follow_up_admission":
+      // One follow-up past the campaign's approval limit (#2940): approving admits exactly this one,
+      // with this title and issue. Its recommendation or work item id stays under Request Details.
+      return <>
+        {snapshot.rebinds && <p>
+          Replaces the approved follow-up <q>{snapshot.title}</q> with the recommendation <q>{snapshot.recommendationTitle}</q>.
+        </p>}
+        <dl className="facts">
+          {snapshot.recommendationTitle !== undefined && (snapshot.rebinds || snapshot.recommendationTitle !== snapshot.title) &&
+            <div><dt>Recommendation</dt><dd>{snapshot.recommendationTitle}</dd></div>}
+          <div><dt>{snapshot.rebinds ? "Approved Follow-Up" : "Follow-Up"}</dt><dd>{snapshot.title}</dd></div>
+          {snapshot.issue && <div><dt>Issue</dt><dd>{issueRefLabel(snapshot.issue)}</dd></div>}
+          <div><dt>Follow-Up Limit</dt><dd>{followUpLimitText(snapshot.acceptedFollowUps, snapshot.limit)}</dd></div>
+        </dl>
+        <p>{snapshot.rebinds
+          ? "You approved that follow-up past the limit. Approving this lets the Orchestrator accept this recommendation as that follow-up's work instead."
+          : snapshot.revises
+          ? "You approved this follow-up past the limit. Approving this change lets the Orchestrator give it this title and issue."
+          : "Approving admits only this follow-up. Change the limit in Campaign Status to let more start without approval."}</p>
+      </>;
     case "pr_merge":
       return <dl className="facts">
         <div><dt>Repository</dt><dd>{snapshot.repository}</dd></div>

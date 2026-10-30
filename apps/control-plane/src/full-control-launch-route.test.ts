@@ -1320,6 +1320,35 @@ test("explicit launch ceilings survive the first message: 0 follow-ups and 1 iss
   } finally { await server.close(); f.db.close(); }
 });
 
+test("a follow-up limit the person sets before the first message survives it: 0 stays 0 and No Limit stays omitted (#2940)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const limit of [0, null] as const) {
+      // A taskless launch derives its follow-up limit until the person sets one.
+      const { id } = await firstMessageLaunch(f, server);
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+        { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: true } });
+      const edited = f.sessions.setCampaignFollowUpLimit(id,
+        { acceptedFollowUps: limit, expectedRevision: f.db.parentControlPolicy(id)!.revision }, f.human);
+      assert.equal(edited.ok, true, edited.error ?? "");
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+        { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: true } }, "the person's limit is explicit now");
+      assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+      const after = boundaryOf(f, id);
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+      if (limit === null) {
+        assert.equal("acceptedFollowUps" in after.budgetAuthority!, false, "No Limit stays omitted, never a derived number");
+        assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, undefined);
+        assert.equal(after.issueAuthority!.maxIssues, 100, "with no follow-up limit the derived issue limit reaches its ceiling");
+      } else {
+        assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "an explicit 0 is not replaced by the derived count");
+        assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0);
+      }
+    }
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("enable never trusts issue numbers a restart backfilled from an automation's first message (CR-1.2)", async () => {
   const f = fixture();
   const { server } = await app(f);

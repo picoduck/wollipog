@@ -1155,6 +1155,13 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ proposal: { mode: "custom" }, expectedRevision }),
     }),
+  /** Authenticated Human-only change to a Full Control campaign's follow-up approval limit (#2940);
+   * `null` clears it. Compare-and-set on the campaign's policy revision. */
+  setCampaignFollowUpLimit: (id: string, acceptedFollowUps: number | null, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/follow-up-limit`, {
+      method: "POST",
+      body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
+    }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",

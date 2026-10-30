@@ -76,7 +76,9 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
   const grants = db.campaignPublicationReservations(root.id);
   if (grants.some((d) => d.status === "consumed" && d.resourceSnapshot.category === snapshot.category && d.resourceSnapshot.recommendationId === snapshot.recommendationId)) return failed("recommendation_spent");
   const reservations = reservedPublicationSlots(db, root, undefined, snapshot.recommendationId);
-  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= boundary.issueAuthority.maxIssues) return failed("capacity_exhausted");
+  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= db.campaignIssueLimit(root.id, boundary.issueAuthority.maxIssues)) {
+    return failed("capacity_exhausted");
+  }
   return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };
 }
 

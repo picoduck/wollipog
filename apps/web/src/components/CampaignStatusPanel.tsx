@@ -57,6 +57,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -247,6 +248,16 @@ function AvailableCampaignStatus({
                 <CampaignRecoveryNotice key={record.id} record={record} />
               ))}
               {data.summary.campaign?.recovery?.truncated && <p>More recovery records are available through the campaign tools.</p>}
+              {data.summary.campaign?.budget?.followUpApprovals && (
+                <CampaignFollowUpLimit
+                  campaignId={availability.campaignSessionId}
+                  budget={data.summary.campaign.budget}
+                  policyRevision={data.summary.campaign.policyRevision}
+                  canEdit={availability.role === "campaign"}
+                  findRequest={(occurrenceId) => findRequest({ occurrenceId, sessionId: availability.campaignSessionId })}
+                  onOpenRequest={onOpenRequest}
+                />
+              )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
@@ -359,8 +370,7 @@ export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/prot
   const limits = [budget.authority.costUsd === undefined && budget.authority.toolCalls === undefined ? "No limit" : null,
     budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
     budget.authority.toolCalls === undefined ? null : `${budget.authority.toolCalls} tool calls`,
-    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`,
-    budget.authority.acceptedFollowUps === undefined ? null : `${budget.authority.acceptedFollowUps} accepted follow-ups`].filter(Boolean).join(", ");
+    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`].filter(Boolean).join(", ");
   return <>
     <div><dt>Campaign Allowance</dt><dd>{limits}<span className="campaign-status-meta">{budget.reason ?? "Human authorized; allocations cannot enlarge this allowance."}</span></dd></div>
     <div><dt>Session Limits</dt><dd>{budget.sessionLimits?.costBudgetUsd == null ? "No session cost ceiling" : `$${budget.sessionLimits.costBudgetUsd.toFixed(2)}`}, {budget.sessionLimits?.maxToolCalls == null ? "no session tool ceiling" : `${budget.sessionLimits.maxToolCalls} tool calls`}</dd></div>

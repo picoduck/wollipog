@@ -1,5 +1,7 @@
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
+import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
+import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
@@ -708,6 +710,9 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
       `(resource ${decisionLiteral(decision.resourceKey)})${option}` +
       (decision.childMessage ? " and left this message for you:" : "."),
     ...(decision.childMessage ? [decision.childMessage] : []),
+    ...(decision.category === "campaign_follow_up_admission" ? [decision.status === "approved"
+      ? "Repeat the same request for that follow-up; the campaign applies it once and consumes this approval. Do not call consume_workflow_decision."
+      : "Do not repeat that request for that follow-up: it stays refused."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
@@ -842,6 +847,40 @@ export function normalizeWorkflowDecisionSnapshot(
   if (category === "campaign_issue_scope") {
     const normalized = normalizeCampaignIssueScopeSnapshot(value);
     return normalized ? ok(normalized) : fail("scope changes require exact bounded repository, revision, additions, removals, and affected work");
+  }
+  if (category === "campaign_follow_up_admission") {
+    // Server-created from the campaign's own records (#2940): the follow-up, its title and issue, the
+    // counts that made it need the Human, and for a change to an admitted follow-up the approval it
+    // replaces. Nothing else is accepted.
+    const subject = value.subject && typeof value.subject === "object" && !Array.isArray(value.subject)
+      ? value.subject as Record<string, unknown> : null;
+    const count = (candidate: unknown) => Number.isSafeInteger(candidate) && (candidate as number) >= 0 ? candidate as number : null;
+    const normalizedSubject = !subject || Object.keys(subject).length !== 2 ? null
+      : subject.kind === "recommendation" && boundedDecisionString(subject.recommendationId, 256)
+        ? { kind: "recommendation" as const, recommendationId: subject.recommendationId }
+        : subject.kind === "work_item" && boundedDecisionString(subject.key, 256) ? { kind: "work_item" as const, key: subject.key } : null;
+    const issue = value.issue && typeof value.issue === "object" && !Array.isArray(value.issue) ? value.issue as Record<string, unknown> : null;
+    // Any repository the work ledger accepts: GitHub `owner/name`, or a host-qualified GitLab project.
+    const normalizedIssue = issue && Object.keys(issue).length === 2 && boundedDecisionString(issue.repository, 256) &&
+      campaignRepositoryLocation(issue.repository) !== null && Number.isSafeInteger(issue.number) && (issue.number as number) > 0
+      ? { repository: issue.repository, number: issue.number as number } : null;
+    const acceptedFollowUps = count(value.acceptedFollowUps), limit = value.limit === null ? null : count(value.limit);
+    const revises = value.revises;
+    const identityDigest = typeof value.identityDigest === "string" && /^[a-f0-9]{64}$/u.test(value.identityDigest) ? value.identityDigest : null;
+    const recommendationTitle = value.recommendationTitle;
+    if (!normalizedSubject || !boundedDecisionString(value.title, 200) || acceptedFollowUps === null || !identityDigest ||
+        value.limit !== null && limit === null || value.issue !== null && !normalizedIssue ||
+        (revises === undefined ? limit === null || acceptedFollowUps < limit : !boundedDecisionString(revises, 256)) ||
+        (recommendationTitle === undefined ? normalizedSubject.kind === "recommendation" && value.rebinds !== undefined
+          : normalizedSubject.kind !== "recommendation" || !boundedDecisionString(recommendationTitle, 200)) ||
+        value.rebinds !== undefined && (value.rebinds !== true || revises === undefined || normalizedSubject.kind !== "recommendation") ||
+        Object.keys(value).some((key) => !["category", "subject", "title", "issue", "recommendationTitle", "identityDigest", "acceptedFollowUps",
+          "limit", "revises", "rebinds"].includes(key))) {
+      return fail("a follow-up admission names one follow-up, its title and issue, and the accepted count that reached the limit");
+    }
+    return ok({ category, subject: normalizedSubject, title: value.title, issue: normalizedIssue,
+      ...(typeof recommendationTitle === "string" ? { recommendationTitle } : {}), identityDigest, acceptedFollowUps, limit,
+      ...(typeof revises === "string" ? { revises } : {}), ...(value.rebinds === true ? { rebinds: true as const } : {}) });
   }
   if (category === "issue_closure") {
     const normalized = normalizeIssueClosureSnapshot(value);
@@ -8334,17 +8373,77 @@ export class SessionsService {
 
   private ledgerWrite<T extends { revision: number }>(
     scope: { caller: SessionView; root: SessionView },
-    write: () => { ok: true; data: T } | { ok: false; status: number; error: string },
+    write: () => { ok: true; data: T } | { ok: false; status: number; error: string; details?: Record<string, string | number> },
   ): ServiceResult<T> {
     const before = this.db.campaignWorkLedger.revision(scope.root.id);
     const attemptsBefore = this.db.campaignWorkLedger.openAttemptsBySession(scope.root.id);
+    const approvedBefore = this.db.campaignFollowUpApprovedOccurrences(scope.root.id);
     const result = write();
-    if (!result.ok) return fail(result.error, result.status);
+    if (!result.ok) {
+      return result.details?.code === "follow_up_approval_required"
+        ? this.followUpApprovalRequired(scope.root, result.details) : fail(result.error, result.status);
+    }
+    // A follow-up admitted past the approval limit consumed the Human's approval in the same write.
+    const now = Date.now();
+    for (const occurrenceId of approvedBefore) {
+      const consumed = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (consumed?.status !== "consumed") continue;
+      this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: scope.caller.id }, now);
+      this.log.info(JSON.stringify({ event: "campaign_follow_up_admitted", sessionId: scope.root.id, occurrenceId }));
+      this.hub.sessionChangedById(scope.root.id);
+    }
     if (result.data.revision !== before) {
       this.campaignLedgerChanged(scope.root.id, scope.caller.id);
       this.campaignMembershipsChanged(scope.root.id, attemptsBefore);
     }
     return ok(result.data);
+  }
+
+  /** A follow-up past the campaign's approval limit (#2940) becomes the Human's decision instead of a
+   * refusal: the first attempt requests it for exactly that follow-up, and accepting it again after
+   * approval admits it once. While pending, or after a denial, accepting it is refused by name. */
+  private followUpApprovalRequired(root: SessionView, details: Record<string, string | number>): ServiceResult<never> {
+    const subject: CampaignFollowUpSubject = details.subjectKind === "recommendation"
+      ? { kind: "recommendation", recommendationId: String(details.subjectId) } : { kind: "work_item", key: String(details.subjectId) };
+    const limit = details.limit === undefined ? null : Number(details.limit), accepted = Number(details.acceptedFollowUps);
+    const title = String(details.title);
+    const issue = details.issueRepository === undefined ? null : { repository: String(details.issueRepository), number: Number(details.issueNumber) };
+    const revises = details.revises === undefined ? undefined : String(details.revises);
+    const rebinds = revises !== undefined && details.rebinds === 1;
+    const recommendationTitle = details.recommendationTitle === undefined ? undefined : String(details.recommendationTitle);
+    const identityDigest = String(details.identityDigest);
+    const snapshot: CampaignFollowUpAdmissionSnapshot = { category: "campaign_follow_up_admission", subject, title, issue,
+      ...(recommendationTitle === undefined ? {} : { recommendationTitle }), identityDigest,
+      acceptedFollowUps: accepted, limit, ...(revises ? { revises } : {}), ...(rebinds ? { rebinds: true as const } : {}) };
+    // A follow-up admitted past the limit stays bound to what the person approved: a change to its
+    // title or issue is a decision of its own (#2940).
+    const named = rebinds
+      ? `Accepting recommendation "${recommendationTitle}" into a follow-up admitted past the campaign's follow-up limit as "${title}" needs the person's approval`
+      : revises
+      ? "This follow-up was admitted past the campaign's follow-up limit, so changing its title or issue needs the person's approval"
+      : `This follow-up is past the campaign's limit of ${limit} follow-up${limit === 1 ? "" : "s"} without approval (${accepted} accepted)`;
+    const again = revises ? "make the change again" : "accept it again";
+    const latest = this.db.campaignFollowUpAdmission(root.id, subject);
+    // A decision about other content for the same follow-up is not about this request.
+    const bound = latest?.resourceSnapshot;
+    const same = bound?.category === "campaign_follow_up_admission" && bound.revises === revises && bound.identityDigest === identityDigest;
+    if (same && latest?.status === "denied") {
+      return fail(`${named}, and the person denied it (decision ${latest.occurrenceId}). Do not ${again}; ` +
+        (revises ? "keep the follow-up as approved." : "it stays refused unless they raise the follow-up limit."), 409);
+    }
+    if (same && latest?.status === "pending") {
+      return fail(`${named}. It is waiting for the person's decision ${latest.occurrenceId}; ${again} once they approve it.`, 409);
+    }
+    const requested = this.createWorkflowDecision(root.id, {
+      requestId: `follow_up_admission_${randomUUID()}`,
+      resourceKey: campaignFollowUpAdmissionKey(root.id, subject),
+      resourceSnapshot: snapshot,
+    }, () => true, { trustedFollowUpAdmission: true });
+    if (!requested.ok || !requested.data) return fail(`${named}, and its approval could not be requested: ${requested.error}`, 409);
+    this.log.info(JSON.stringify({ event: "campaign_follow_up_approval_requested", sessionId: root.id,
+      occurrenceId: requested.data.occurrenceId, acceptedFollowUps: accepted, limit, revision: Boolean(revises) }));
+    return fail(`${named}${revises ? "." : ", so it needs the person's approval."} Requested decision ${requested.data.occurrenceId}; ` +
+      `${again} once they approve it. If they deny it, it stays refused.`, 409);
   }
 
   /** A session's `campaignMembership` names its open attempt, so re-send every session whose open
@@ -8921,7 +9020,8 @@ export class SessionsService {
     if (!control) return fail("Full Control requires authenticated repository scope and a valid boundary", 400);
     if (control.mode === "full_control") {
       if (control.boundary.issueAuthority) {
-        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) > control.boundary.issueAuthority.maxIssues) {
+        if (scope!.issueNumbers.length + reservedPublicationSlots(this.db, session, undefined, undefined, true) >
+            this.db.campaignIssueLimit(sessionId, control.boundary.issueAuthority.maxIssues)) {
           return fail("The issue boundary exceeds its human-set scope limit.", 409);
         }
         const outdated = scopeParticipants(this.db, session).find((participant) =>
@@ -8993,6 +9093,37 @@ export class SessionsService {
       mode: control.mode, policyRevision: expectedRevision + 1, authorizedByUserId: principal.userId,
       revokedOccurrences: outstanding.length }));
     this.hub.sessionChangedById(sessionId);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  /** The campaign owner's change to how many follow-ups its Full Control campaign accepts without
+   * approval (#2940), `null` for no limit. Human-only, compare-and-set on the policy revision; the
+   * boundary is re-minted around it (`ControlPlaneDb.setCampaignFollowUpLimit`). */
+  setCampaignFollowUpLimit(sessionId: string, request: SetCampaignFollowUpLimitRequest, principal: HumanPrincipal): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
+    const root = this.orchestratorCampaignController(session);
+    if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) {
+      return fail("Only a live root campaign can change its follow-up limit.", 409);
+    }
+    const limit = request?.acceptedFollowUps;
+    if (!request || typeof request !== "object" || Array.isArray(request) || !Number.isSafeInteger(request.expectedRevision) ||
+        Object.keys(request).some((key) => key !== "acceptedFollowUps" && key !== "expectedRevision") ||
+        !(limit === null || Number.isSafeInteger(limit) && limit >= 0 && limit <= 1000)) {
+      return fail("Enter a whole number of follow-ups from 0 to 1000, or choose no limit.", 400);
+    }
+    const now = Date.now();
+    const result = this.db.setCampaignFollowUpLimit(sessionId, limit, principal.userId, request.expectedRevision, now);
+    if (!result.ok) return fail(result.error, result.status);
+    for (const decision of result.revoked) {
+      this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+      this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+    }
+    const updated = this.db.getSession(sessionId)!;
+    this.log.info(JSON.stringify({ event: "campaign_follow_up_limit_changed", sessionId, acceptedFollowUps: limit,
+      policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
+    for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
+    this.publishCampaignAttentionTransition(updated);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -10012,7 +10143,8 @@ export class SessionsService {
       const boundary = issueBoundary(latest);
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
-        if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) > boundary.issueAuthority!.maxIssues) return fail("Scope and publication reservations exceed the human-established issue limit", 409);
+        if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) >
+            this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues)) return fail("Scope and publication reservations exceed the human-established issue limit", 409);
         let evidence: unknown = { removals: snapshot.removals };
         if (snapshot.additions.length) {
           if (snapshot.lineage?.kind === "epic" && boundary.issueAuthority!.epics.includes(snapshot.lineage.epic)) {
@@ -10332,6 +10464,8 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
+      /** The server's own request when a follow-up passes the campaign's approval limit (#2940). */
+      trustedFollowUpAdmission?: boolean;
       /** #3713: the child runner's GitHub read, taken just before this request. */
       closingReferenceCheck?: PullRequestClosingReferenceCheck },
   ): ServiceResult<WorkflowDecisionView> {
@@ -10361,6 +10495,9 @@ export class SessionsService {
     if (unsupported) return unsupported;
     if (normalized.data.category === "campaign_issue_scope" && !internal?.trustedIssueScope) {
       return fail("use request_campaign_issue_scope_change for a repository-bound human scope proposal", 403);
+    }
+    if (normalized.data.category === "campaign_follow_up_admission" && !internal?.trustedFollowUpAdmission) {
+      return fail("the server requests a follow-up admission itself when an accepted follow-up passes the campaign's approval limit", 403);
     }
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
@@ -10545,7 +10682,8 @@ export class SessionsService {
       return ok(this.withMergeReviewEvidence(resolved));
     }
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
-        !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && parentSessionId === childSessionId ||
+        !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope" ||
+          decision.category === "campaign_follow_up_admission") && parentSessionId === childSessionId ||
           // A standalone session's own extra review rounds, which only a person decides (#3369).
           decision.category === "review_round_extension" && parentSessionId === childSessionId && decision.authority === "human" ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
@@ -10594,6 +10732,14 @@ export class SessionsService {
     }
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
+    }
+    if (decision.category === "campaign_follow_up_admission") {
+      // Only the campaign's owner admits a follow-up past its approval limit (#2940), never an agent.
+      const audience = this.db.sessionScope(childSessionId);
+      if (authority !== "human" || actor.kind !== "human" || !actor.id || !audience ||
+          !this.db.isSessionOwner({ userId: actor.id, organizationId: audience.organizationId }, childSessionId)) {
+        return fail("Only the campaign owner can admit a follow-up past the campaign's approval limit", 403);
+      }
     }
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
@@ -10678,12 +10824,14 @@ export class SessionsService {
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
-      if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved > boundary.issueAuthority!.maxIssues)) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved >
+          this.db.campaignIssueLimit(childSessionId, boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
       // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
       // within the scope limit that boundary names, counting the slots consumed publications still
       // hold other than those this change admits: only a fresh authorization can raise that limit.
       const control = currentChild.orchestratorPolicy?.control;
-      const limit = authority === "human" && control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+      const maxIssues = authority === "human" && control?.mode === "full_control" ? control.boundary.issueAuthority?.maxIssues : undefined;
+      const limit = maxIssues === undefined ? undefined : this.db.campaignIssueLimit(childSessionId, maxIssues);
       const held = limit === undefined ? 0 : this.db.unsettledPublicationSlots(childSessionId, scopeSettlements(snapshot));
       const total = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + held;
       if (limit !== undefined && total > limit) {
@@ -10760,6 +10908,9 @@ export class SessionsService {
     if (decision.category === "campaign_issue_scope") return fail("Scope resolution applies and consumes the exact authorized proposal atomically", 403);
     if (decision.category === "automation_creation") return fail("use execute_automation_creation to consume and create the approved automation atomically", 403);
     if (decision.category === "issue_closure") return fail("use close_github_issue to consume and execute the exact approved closure", 403);
+    if (decision.category === "campaign_follow_up_admission") {
+      return fail("accept the follow-up again: the approval is consumed when the campaign admits exactly that follow-up", 403);
+    }
     if (decision.status !== "approved") {
       return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
     }
@@ -11363,7 +11514,8 @@ export class SessionsService {
         this.workflowDecisionRelationship(child.id, child.id)) {
       return { session: child, policy: child.parentControlPolicy };
     }
-    if ((category === "issue_closure" || category === "campaign_issue_scope") && sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
+    if ((category === "issue_closure" || category === "campaign_issue_scope" || category === "campaign_follow_up_admission") &&
+        sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
     // The outermost Orchestrator above the child owns its gates, found by the same walk the
@@ -11596,7 +11748,7 @@ export class SessionsService {
       decision.controllingSessionId === decision.sessionId;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
-    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure"].includes(decision.category)) {
+    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
     const requester = this.db.getSession(decision.sessionId);
@@ -11751,6 +11903,7 @@ export class SessionsService {
       issue_closure: "Issue Closure Approval Required",
       automation_creation: "Create Automation Approval Required",
       campaign_issue_scope: "Campaign Issue Scope Approval Required",
+      campaign_follow_up_admission: "Follow-Up Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
       review_round_extension: "Review Round Extension Approval Required",
     };
