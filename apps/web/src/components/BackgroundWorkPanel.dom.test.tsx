@@ -1827,9 +1827,15 @@ test("a handoff hold waiting on work no row shows is named in a notice, with Pro
       [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]),
     [["Unregistered Task", "b5p3g2lyb"], ["Unconfirmed Launch", "tool:toolu_watch"]]);
 
-    await panel.render({ session: managedSession({ status: "queued", queueHold, commandPermissions: viewer } as Partial<SessionView>) });
+    await panel.render({ session: managedSession({ status: "queued", queueHold: { ...queueHold, endsAt: Date.now() + 19 * MINUTE },
+      commandPermissions: viewer } as Partial<SessionView>) });
     assert.match(unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "",
       /It ends when the provider reports it finished, or when the hold's deadline passes\.$/u);
+    // A hold with no deadline (its bound disabled, or an older runner) promises none.
+    await panel.render({ session: managedSession({ status: "queued", queueHold, commandPermissions: viewer } as Partial<SessionView>) });
+    const noDeadline = unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(noDeadline, /It ends when the provider reports it finished\.$/u);
+    assert.doesNotMatch(noDeadline, /deadline/u);
 
     const account = { ...queueHold, kind: "provider_account_switch" as const, holdId: "provider-account-switch:1",
       target: "dev@example.com", unlistedJobs: [queueHold.unlistedJobs[1]!] };

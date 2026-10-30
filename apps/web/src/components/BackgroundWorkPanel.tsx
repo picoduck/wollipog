@@ -387,7 +387,9 @@ export function BackgroundWorkPanel({
           {`${handoff} waits for ${unlisted.length === 1 ? "a task that has" : `${unlisted.length} tasks that have`} no job in this list. `}
           {canRelease
             ? "Proceed Now in the queued messages ends it with the rest of this session's background work."
-            : "It ends when the provider reports it finished, or when the hold's deadline passes."}
+            : unlistedHold.endsAt !== undefined
+              ? "It ends when the provider reports it finished, or when the hold's deadline passes."
+              : "It ends when the provider reports it finished."}
         </Notice>
       ),
     });
