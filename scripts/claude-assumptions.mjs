@@ -3,8 +3,8 @@ import { accessSync, constants, mkdirSync, mkdtempSync, readFileSync, renameSync
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { isolatedClaudeEnv, isolatedHome } from "../apps/runner/scripts/claude-probe-support.ts";
-import { REVIEWER_PIN } from "../apps/runner/scripts/claude-assumption-probes.ts";
+import { closedLoopbackPort, detectorSeesCanary, foreignTraceAttempts, isolatedClaudeEnv, isolatedHome, runClaude, startRefusingProxy } from "../apps/runner/scripts/claude-probe-support.ts";
+import { REVIEWER_PIN, silenceVerdict } from "../apps/runner/scripts/claude-assumption-probes.ts";
 import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION, claudeVersionAtLeast } from "../apps/runner/src/discovery/claude-code.ts";
 
 // Same report and exit contract as scripts/codex-assumptions.mjs: exit 0 matched, 1 changed,
@@ -54,8 +54,11 @@ export function collectResult(probe, execution) {
   const valid = events.length > 0 && events.every(e => STATUSES.includes(e.status) &&
     typeof e.assumption === "string" && typeof e.observed === "string" && typeof e.documentation === "string");
   const changed = events.some(e => e.status === "changed");
-  const status = execution.unavailable || !valid || (!changed && events.length < (probe.minimum ?? 1)) || ![0, 1].includes(execution.code) ||
-    (execution.code === 1 && !changed) || events.some(e => e.status === "could not run") ? "could not run" : changed ? "changed" : "unchanged";
+  // A well-formed changed measurement is evidence even when the probe also failed elsewhere, so
+  // changed wins (the shared contract). Anything short of a complete, clean exit-0 run is not a pass.
+  const status = valid && changed ? "changed"
+    : execution.unavailable || !valid || events.length < (probe.minimum ?? 1) || execution.code !== 0 ||
+      events.some(e => e.status === "could not run") ? "could not run" : "unchanged";
   return { probe: probe.id, status, assumptions: valid ? events.map(({ event, ...value }) => value) : [],
     observed: status === "could not run" ? "missing/incompatible binary, detector, timeout, dependency or incomplete probe result" : "see measured assumptions",
     documentation: probe.documentation };
@@ -132,12 +135,31 @@ function writeReport(dir, report) {
   }
 }
 
-async function measuredVersion(binary, scratch) {
+/** The suite's own `--version` runs are CLI runs too: traced into `ledger` like every probe run. */
+async function measuredVersion(binary, scratch, ledger) {
   if (!binary) return null;
   // Even `--version` runs in a throwaway home with a dead base URL: nothing reads the real account.
   const paths = isolatedHome(mkdtempSync(join(scratch, "version-")));
-  const run = await execute(binary, ["--version"], isolatedClaudeEnv(paths, "http://127.0.0.1:9", "http://127.0.0.1:9"), paths.work, 30_000);
-  return run.code === 0 && !run.unavailable ? parseVersion(run.stdout) : null;
+  const proxy = await startRefusingProxy();
+  try {
+    const run = await runClaude({ bin: binary, args: ["--version"], cwd: paths.work, timeoutMs: 30_000,
+      env: isolatedClaudeEnv(paths, `http://127.0.0.1:${await closedLoopbackPort()}`, proxy.url),
+      traceFile: ledger.detector.ok ? join(paths.root, "trace.log") : undefined });
+    ledger.runs += 1;
+    ledger.proxied.push(...proxy.destinations);
+    if (ledger.detector.ok && run.trace === null) ledger.untraced += 1;
+    if (ledger.detector.ok && run.trace !== null) ledger.foreign.push(...foreignTraceAttempts(run.trace, []).map(a => `${a.family} ${a.address}:${a.port ?? "?"}`));
+    return run.code === 0 && !run.timedOut && !run.spawnError ? parseVersion(run.stdout) : null;
+  } finally { await proxy.close(); }
+}
+
+/** Add the version runs' silence to the isolation result; changed wins, then could not run. */
+export function withVersionSilence(isolation, verdict) {
+  const assumptions = [...isolation.assumptions, { assumption: "the suite's own --version invocations contact nothing", status: verdict.status,
+    observed: verdict.observed, documentation: "docs/claude-assumption-probes.md#feasibility" }];
+  const status = isolation.status === "changed" || verdict.status === "changed" ? "changed"
+    : isolation.status === "could not run" || verdict.status === "could not run" ? "could not run" : "unchanged";
+  return { ...isolation, status, assumptions, observed: status === "could not run" && isolation.status !== "could not run" ? "version invocations could not be traced" : isolation.observed };
 }
 
 export async function main(args = process.argv.slice(2)) {
@@ -155,7 +177,8 @@ export async function main(args = process.argv.slice(2)) {
   const report = { startedAt: new Date().toISOString(), completedAt: null, version: null, complete: false, exitCode: 2, results: [], exclusions: EXCLUSIONS };
   try {
     const binary = resolveBinary(process.env.CLAUDE_BIN || "claude");
-    report.version = await measuredVersion(binary, scratch);
+    const versionRuns = { detector: await detectorSeesCanary(scratch), runs: 0, untraced: 0, foreign: [], proxied: [], routes: new Set() };
+    report.version = await measuredVersion(binary, scratch, versionRuns);
     report.floors = floorResults(report.version);
     // An incomplete fresh report replaces yesterday's green before doing any long-running work.
     writeReport(reportDir, report);
@@ -171,7 +194,10 @@ export async function main(args = process.argv.slice(2)) {
       for (const a of result.assumptions.filter(a => a.status !== "unchanged")) console.log(`${a.assumption}: ${a.status}; ${a.observed}; old measurement: ${a.documentation}`);
       writeReport(reportDir, report);
     }
-    if (report.version && !interrupted && await measuredVersion(binary, scratch) !== report.version) {
+    const finalVersion = report.version && !interrupted ? await measuredVersion(binary, scratch, versionRuns) : null;
+    const isolation = report.results.findIndex(r => r.probe === "isolation");
+    report.results[isolation] = withVersionSilence(report.results[isolation], silenceVerdict(versionRuns));
+    if (report.version && !interrupted && finalVersion !== report.version) {
       for (const result of report.results) { result.status = "could not run"; result.observed = "CLI changed or became unavailable during measurement; mixed-version results are not a pass"; }
     }
     report.reviewerPin = reviewerPinResult(report.version, report.results.find(r => r.probe === "reviewer-pin"));

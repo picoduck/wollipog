@@ -342,11 +342,19 @@ export function runClaude(options: RunOptions): Promise<ClaudeRun> {
   });
 }
 
-/** The result event of a `-p` run, or a CouldNotRun explaining why there is none. */
+/**
+ * The result event of a run that completed cleanly: exit 0, no signal, and a final `success`
+ * result that is not an error. Anything else is a CouldNotRun, because a turn that failed after
+ * the measured step is not evidence that the measured behaviour held.
+ */
 export function finalResult(run: ClaudeRun): Record<string, unknown> {
   if (run.spawnError) throw new CouldNotRun(`claude could not start: ${run.spawnError}`);
   if (run.timedOut) throw new CouldNotRun("claude timed out or exceeded the output bound");
   const result = [...run.events].reverse().find((e) => e.type === "result");
   if (!result) throw new CouldNotRun(`claude produced no result event (exit ${run.code ?? run.signal})`);
+  if (run.code !== 0 || run.signal) throw new CouldNotRun(`claude exited ${run.code ?? run.signal} after its result event`);
+  if (result.is_error === true || result.subtype !== "success") {
+    throw new CouldNotRun(`claude's turn ended in ${String(result.subtype)}${result.is_error === true ? " (is_error)" : ""}`);
+  }
   return result;
 }

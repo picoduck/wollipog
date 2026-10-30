@@ -124,12 +124,12 @@ function assistantTurns(request: StubRequest): number {
  * Route each request to the scripted conversation whose marker opens it (a subagent's task is its
  * own conversation) and answer by how many assistant turns it already holds. Requests without
  * tools are the CLI's side requests (titles, summaries) and get a plain reply. The auto-mode
- * classifier is answered "allow"; the probes avoid depending on it, and count when it is asked.
+ * classifier is answered "allow" so allow-controls can run; no probe depends on its judgement.
  */
-function scripted(conversations: Conversation[], seen: { classifier: number }): Responder {
+function scripted(conversations: Conversation[]): Responder {
   return (request) => {
     const stops = request.body?.stop_sequences;
-    if (Array.isArray(stops) && stops.includes("</block>")) { seen.classifier += 1; return text("<block>no</block>"); }
+    if (Array.isArray(stops) && stops.includes("</block>")) return text("<block>no</block>");
     if (toolNames(request.body).length) {
       const first = firstUserText(request.body);
       for (const conversation of conversations) {
@@ -165,7 +165,10 @@ function resultFor(requests: StubRequest[], toolUseId: string): Block | undefine
 // One isolated CLI session
 
 interface SessionSpec {
-  responder: Responder;
+  /** The scripted conversations this run must hold; each must reach its final answer (see completed). */
+  conversations: Conversation[];
+  /** Steering ends its conversation on its own terms and checks completion itself. */
+  allowUnfinished?: boolean;
   args: (paths: IsolatedHome) => string[];
   stdin?: (paths: IsolatedHome) => string[];
   onEvent?: Parameters<typeof runClaude>[0]["onEvent"];
@@ -176,12 +179,21 @@ interface SessionSpec {
   /** Extra loopback ports the run may legitimately reach (the in-CLI canary). */
   allowPorts?: number[];
 }
-interface Session { run: ClaudeRun; requests: StubRequest[]; paths: IsolatedHome; init?: Record<string, unknown>; foreign: string[] }
+interface Session { run: ClaudeRun; requests: StubRequest[]; paths: IsolatedHome; init?: Record<string, unknown>; foreign: string[]; spec: SessionSpec }
+
+/** The clean final result of a session whose scripted conversations all reached their final answer. */
+function completed(result: Session): Record<string, unknown> {
+  const final = finalResult(result.run);
+  if (!result.spec.allowUnfinished && result.spec.conversations.some((conversation) => !conversation.finished)) {
+    throw new CouldNotRun("a scripted conversation never reached its final answer");
+  }
+  return final;
+}
 
 async function session(context: Context, spec: SessionSpec): Promise<Session> {
   const paths = spec.paths ?? isolatedHome(mkdtempSync(join(context.scratch, "case-")));
   spec.prepare?.(paths);
-  const stub = await startMessagesStub(spec.responder);
+  const stub = await startMessagesStub(scripted(spec.conversations));
   const proxy = await startRefusingProxy();
   try {
     const env = { ...isolatedClaudeEnv(paths, stub.url, proxy.url), ...spec.env };
@@ -202,7 +214,7 @@ async function session(context: Context, spec: SessionSpec): Promise<Session> {
     if (run.spawnError) throw new CouldNotRun(`claude could not start: ${run.spawnError}`);
     if (run.timedOut) throw new CouldNotRun("claude timed out or exceeded the output bound");
     const init = run.events.find((e) => e.type === "system" && e.subtype === "init");
-    return { run, requests: stub.requests, paths, init, foreign };
+    return { run, requests: stub.requests, paths, init, foreign, spec };
   } finally {
     await stub.close();
     await proxy.close();
@@ -230,14 +242,13 @@ async function probeIsolation(context: Context): Promise<void> {
   await measure("detector sees traffic from the CLI's own tool processes (positive control)", FEASIBILITY, async () => {
     const port = await closedLoopbackPort();
     const marker = `PROBE-${randomUUID().slice(0, 8)}`;
-    const seen = { classifier: 0 };
     const result = await session(context, {
-      responder: scripted([{ marker, steps: [() => tool("toolu_canary", "Bash", { command: `exec 3<>/dev/tcp/127.0.0.1/${port} || true`, description: "canary" })] }], seen),
+      conversations: [{ marker, steps: [() => tool("toolu_canary", "Bash", { command: `exec 3<>/dev/tcp/127.0.0.1/${port} || true`, description: "canary" })] }],
       args: () => printArgs(marker, ["--permission-mode", "bypassPermissions"]),
       // The canary is this run's only permitted extra destination; the silence ledger excludes it.
       allowPorts: [port],
     });
-    finalResult(result.run);
+    completed(result);
     if (!context.detector.ok) throw new CouldNotRun(context.detector.observed);
     const canary = `127.0.0.1:${port}`;
     if (!foreignTraceAttempts(result.run.trace ?? "", []).some((attempt) => attempt.port === port)) {
@@ -249,10 +260,10 @@ async function probeIsolation(context: Context): Promise<void> {
   await measure("a quiet turn contacts only POST /v1/messages on the loopback stub", FEASIBILITY, async () => {
     const marker = `PROBE-${randomUUID().slice(0, 8)}`;
     const result = await session(context, {
-      responder: scripted([{ marker, steps: [() => tool("toolu_quiet", "Bash", { command: "true", description: "quiet" })] }], { classifier: 0 }),
+      conversations: [{ marker, steps: [() => tool("toolu_quiet", "Bash", { command: "true", description: "quiet" })] }],
       args: () => printArgs(marker, ["--permission-mode", "bypassPermissions"]),
     });
-    const final = finalResult(result.run);
+    const final = completed(result);
     if (final.is_error === true) throw new CouldNotRun(`turn ended in error: ${String(final.result).slice(0, 200)}`);
     if (result.foreign.length) throw new AssumptionChanged(`contacted ${result.foreign.join(", ")}`);
     const realHome = process.env.HOME;
@@ -303,10 +314,10 @@ async function hookCase(context: Context, mode: string, behaviour: HookBehaviour
     : [{ marker, steps: [() => tool(bashId, "Bash", { command, description: "probe" })] }];
   const result = await session(context, {
     prepare: (paths) => { hook = writeHook(paths, behaviour); },
-    responder: scripted(conversations, { classifier: 0 }),
+    conversations: conversations,
     args: () => printArgs(marker, ["--permission-mode", mode, "--settings", hookSettings(hook.command)]),
   });
-  finalResult(result.run);
+  completed(result);
   requireMode(result, mode);
   if (subagent && !conversations[0]!.finished) throw new CouldNotRun("the subagent never completed its scripted turn");
   const calls = hookCalls(hook.log).filter((call) => call.tool_name === "Bash");
@@ -351,7 +362,7 @@ async function settingsCase(context: Context, forms: Array<"file" | "inline">): 
   const hooks: Array<{ command: string; log: string }> = [];
   const result = await session(context, {
     prepare: (paths) => forms.forEach((_, index) => hooks.push(writeHook(paths, "allow", `hook-${index}`))),
-    responder: scripted([{ marker, steps: [() => tool("toolu_settings", "Bash", { command: "true", description: "probe" })] }], { classifier: 0 }),
+    conversations: [{ marker, steps: [() => tool("toolu_settings", "Bash", { command: "true", description: "probe" })] }],
     args: (paths) => printArgs(marker, ["--permission-mode", "bypassPermissions", ...forms.flatMap((form, index) => {
       const document = hookSettings(hooks[index]!.command);
       if (form === "inline") return ["--settings", document];
@@ -360,7 +371,7 @@ async function settingsCase(context: Context, forms: Array<"file" | "inline">): 
       return ["--settings", file];
     })]),
   });
-  finalResult(result.run);
+  completed(result);
   if (!resultFor(result.requests, "toolu_settings")) throw new CouldNotRun("the CLI never returned a result for the scripted Bash call");
   return hooks.map((hook, index) => hookCalls(hook.log).length ? `${forms[index]}#${index}` : "").filter(Boolean);
 }
@@ -409,7 +420,7 @@ async function controlCase(context: Context, answer: "allow" | "deny", subagent:
   const frames: Array<Record<string, unknown>> = [];
   const result = await session(context, {
     prepare: (paths) => mkdirSync(join(paths.work, "build")),
-    responder: scripted(conversations, { classifier: 0 }),
+    conversations: conversations,
     // The driver's own interactive argument set for `default` and its stream-json prompt shape. The
     // mode is named explicitly so the envelope is measured even on a release whose flagless default
     // differs; whether the flagless launch starts in `default` is its own assumption below.
@@ -430,7 +441,7 @@ async function controlCase(context: Context, answer: "allow" | "deny", subagent:
       if (event.type === "result" && main.finished) closeStdin();
     },
   });
-  finalResult(result.run);
+  completed(result);
   requireMode(result, "default");
   const bash = frames.filter((f) => (f.request as Record<string, unknown> | undefined)?.tool_name === "Bash");
   if (!resultFor(result.requests, bashId)) throw new CouldNotRun("the CLI never returned a result for the scripted Bash call");
@@ -464,13 +475,13 @@ async function probeControl(context: Context): Promise<void> {
   await measure("the driver's flagless `default` launch starts the CLI in default mode", `${DRIVERS} (2.6 Approvals mapping)`, async () => {
     const marker = `PROBE-${randomUUID().slice(0, 8)}`;
     const result = await session(context, {
-      responder: scripted([{ marker, steps: [] }], { classifier: 0 }),
+      conversations: [{ marker, steps: [] }],
       args: () => ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--session-id", randomUUID(),
         "--model", MODEL, ...claudePermissionArgs("default").args],
       stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
       onEvent: (event, _write, closeStdin) => { if (event.type === "result") closeStdin(); },
     });
-    finalResult(result.run);
+    completed(result);
     const mode = result.init?.permissionMode;
     if (typeof mode !== "string") throw new CouldNotRun("the init event reports no permission mode");
     expect(mode === "default", `with ${MODEL} and no --permission-mode the CLI started in ${mode}`);
@@ -518,10 +529,10 @@ async function probeMcpImage(context: Context): Promise<void> {
     const result = await session(context, {
       prepare: (paths) => { mcp = mcpConfig(paths, "probe", [{ name: "image", description: "Returns an image.", content: [
         { type: "text", text: "receipt" }, { type: "image", data, mimeType: "image/png" }] }]); },
-      responder: scripted([{ marker, steps: [() => tool("toolu_image", "mcp__probe__image", {})] }], { classifier: 0 }),
+      conversations: [{ marker, steps: [() => tool("toolu_image", "mcp__probe__image", {})] }],
       args: () => printArgs(marker, ["--mcp-config", mcp.config, "--strict-mcp-config", "--permission-mode", "bypassPermissions"]),
     });
-    finalResult(result.run);
+    completed(result);
     const called = existsSync(mcp.log) && readFileSync(mcp.log, "utf8").includes("\"image\"");
     if (!called) throw new CouldNotRun("the CLI never called the scripted MCP tool");
     const toolResult = resultFor(result.requests, "toolu_image");
@@ -554,7 +565,8 @@ async function probeSteering(context: Context): Promise<void> {
       () => text("waiting"),
     ] };
     const result = await session(context, {
-      responder: scripted([conversation], { classifier: 0 }),
+      conversations: [conversation],
+      allowUnfinished: true,
       args: () => ["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--session-id", randomUUID(),
         "--model", MODEL, "--replay-user-messages", ...claudePermissionArgs("bypassPermissions", false, true).args],
       stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
@@ -571,7 +583,7 @@ async function probeSteering(context: Context): Promise<void> {
         }
       },
     });
-    finalResult(result.run);
+    completed(result);
     if (!wrote) throw new CouldNotRun("the scripted tool call never started, so no steering was sent");
     const reached = result.requests.some((r) => requestText(r.body).includes(steer));
     const observed = `replay acknowledgement: ${replayed ? "yes" : "no"}; steering text reached the model: ${reached ? "yes" : "no"}`;
@@ -590,10 +602,10 @@ async function probeTranscript(context: Context): Promise<void> {
     const followUp = `PROBE-RESUME-${randomUUID().slice(0, 8)}`;
     const sessionId = randomUUID();
     const first = await session(context, {
-      responder: scripted([{ marker, steps: [] }], { classifier: 0 }),
+      conversations: [{ marker, steps: [] }],
       args: () => printArgs(marker, ["--permission-mode", "bypassPermissions", "--session-id", sessionId]),
     });
-    finalResult(first.run);
+    completed(first);
     const expected = join(first.paths.configDir, "projects", claudeProjectPathKey(first.paths.work), `${sessionId}.jsonl`);
     const found = filesUnder(first.paths.root).filter((f) => f.endsWith(`${sessionId}.jsonl`));
     expect(existsSync(expected), `transcript not at the expected path; found: ${found.join(", ") || "none"}`);
@@ -604,10 +616,10 @@ async function probeTranscript(context: Context): Promise<void> {
     const second = await session(context, {
       paths: first.paths,
       // The resumed conversation opens with the first prompt, so it is scripted under that marker.
-      responder: scripted([{ marker, steps: [] }], { classifier: 0 }),
+      conversations: [{ marker, steps: [] }],
       args: () => printArgs(followUp, ["--permission-mode", "bypassPermissions", "--resume", sessionId]),
     });
-    finalResult(second.run);
+    completed(second);
     const resumed = second.requests.filter((r) => toolNames(r.body).length && requestText(r.body).includes(followUp));
     if (!resumed.length) throw new CouldNotRun("the resumed turn never reached the stub");
     expect(resumed.some((r) => requestText(r.body).includes(marker)), "the resumed turn did not carry the first turn's prompt");
@@ -699,13 +711,13 @@ async function probeReviewer(context: Context): Promise<void> {
     window = await session(context, {
       prepare: (paths) => { mcp = mcpConfig(paths, MEDIA_MCP_SERVER_NAME, CLAUDE_MEDIA_REVIEWER_TOOLS.map((name) => ({
         name: name.split("__").pop()!, description: "probe", content: [{ type: "text", text: "frame" }] }))); },
-      responder: scripted([{ marker, steps: [() => tool("toolu_frame", CLAUDE_MEDIA_REVIEWER_TOOLS[0]!, { frame: 1 })] }], { classifier: 0 }),
+      conversations: [{ marker, steps: [() => tool("toolu_frame", CLAUDE_MEDIA_REVIEWER_TOOLS[0]!, { frame: 1 })] }],
       args: () => claudeMediaReviewerArgs({ providerCommand: "claude", mcpConfig: mcp.config, model: MODEL, maxBudgetUsd: 1 }).slice(1),
       env: { ...CLAUDE_MEDIA_REVIEWER_ENV },
       stdin: () => [JSON.stringify(buildClaudeUserMessage(marker, []))],
       onEvent: (event, _write, closeStdin) => { if (event.type === "result") closeStdin(); },
     });
-    finalResult(window.run);
+    completed(window);
   } catch (error) { windowError = error as Error; }
   const reviewerWindow = (): Session => {
     if (windowError) throw windowError instanceof AssumptionChanged ? windowError : new CouldNotRun(windowError.message);
@@ -767,7 +779,8 @@ async function main(args: string[]): Promise<number> {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
-  return statuses.includes("could not run") ? 2 : statuses.includes("changed") ? 1 : 0;
+  // Changed wins in mixed runs (the shared contract); could not run still fails the run.
+  return statuses.includes("changed") ? 1 : statuses.includes("could not run") ? 2 : 0;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
-import { collectResult, EXCLUSIONS, floorResults, markdown, parseVersion, PROBES, reportExit, reportFresh, resolveBinary, reviewerPinResult } from "./claude-assumptions.mjs";
-import { DUMMY_API_KEY, foreignTraceAttempts, isolatedClaudeEnv, isolatedHome, startMessagesStub } from "../apps/runner/scripts/claude-probe-support.ts";
+import { collectResult, EXCLUSIONS, floorResults, markdown, parseVersion, PROBES, reportExit, reportFresh, resolveBinary, reviewerPinResult, withVersionSilence } from "./claude-assumptions.mjs";
+import { CouldNotRun, DUMMY_API_KEY, finalResult, foreignTraceAttempts, isolatedClaudeEnv, isolatedHome, startMessagesStub, straceAvailable } from "../apps/runner/scripts/claude-probe-support.ts";
 import { PROBE_IDS, REVIEWER_PIN, silenceVerdict } from "../apps/runner/scripts/claude-assumption-probes.ts";
 
 const probe = { id: "fixture", documentation: "old-measurement.md" };
@@ -32,6 +32,65 @@ test("changed and could-not-run stay distinct; nothing short of a complete, clea
   assert.equal(collectResult({ ...probe, minimum: 2 }, execution()).status, "could not run", "too few measurements is incomplete");
   assert.equal(collectResult({ ...probe, minimum: 2 }, execution("changed")).status, "changed", "a change is reported even when incomplete");
   assert.equal(reportExit([collectResult(probe, execution()), changed, collectResult(probe, { code: 2, stdout: "", unavailable: false })]), 1);
+});
+
+test("a changed measurement survives the same probe's other failures (changed wins)", () => {
+  const stdout = [line("changed"), line("could not run")].join("\n");
+  for (const run of [{ stdout, code: 1, unavailable: false }, { stdout, code: 2, unavailable: false }, { stdout, code: null, unavailable: true }]) {
+    const result = collectResult({ ...probe, minimum: 2 }, run);
+    assert.equal(result.status, "changed", JSON.stringify(run));
+    assert.deepEqual(result.assumptions.map(a => a.status), ["changed", "could not run"], "both facts are kept");
+    assert.equal(reportExit([result, collectResult(probe, execution())]), 1);
+  }
+  assert.equal(collectResult(probe, { stdout: line("changed", { observed: 7 }), code: 1, unavailable: false }).status, "could not run", "malformed events are not evidence");
+  assert.equal(reviewerPinResult("2.1.314", collectResult({ ...probe, minimum: 2 }, { stdout, code: 2, unavailable: false })).status, "differs from the pinned behaviour");
+});
+
+test("a CLI turn that failed after the measured step is could not run", () => {
+  const ok = { type: "result", subtype: "success", is_error: false };
+  const run = (extra, events = [ok]) => ({ code: 0, signal: null, timedOut: false, stdout: "", events, trace: "", ...extra });
+  assert.equal(finalResult(run({})), ok);
+  for (const failed of [run({ code: 1 }), run({ signal: "SIGKILL", code: null }), run({ timedOut: true }), run({ spawnError: "ENOENT" }),
+    run({}, [{ ...ok, is_error: true }]), run({}, [{ ...ok, subtype: "error_during_execution" }]), run({}, [{ ...ok, subtype: "error_max_turns" }]),
+    run({}, [ok, { type: "result", subtype: "error_during_execution", is_error: true }]), run({}, [])]) {
+    assert.throws(() => finalResult(failed), CouldNotRun, JSON.stringify(failed));
+  }
+});
+
+test("the suite's own --version runs are part of the silence measurement", () => {
+  const isolation = collectResult(PROBES[0], { code: 0, unavailable: false, stdout: Array(PROBES[0].minimum).fill(line("unchanged")).join("\n") });
+  assert.equal(isolation.status, "unchanged");
+  assert.equal(withVersionSilence(isolation, { status: "unchanged", observed: "2 traced runs" }).status, "unchanged");
+  const loud = withVersionSilence(isolation, { status: "changed", observed: "traced destinations: AF_INET 1.2.3.4:443" });
+  assert.equal(loud.status, "changed"); assert.equal(loud.assumptions.at(-1).status, "changed");
+  assert.equal(withVersionSilence(isolation, { status: "could not run", observed: "blind" }).status, "could not run");
+  assert.equal(withVersionSilence({ ...isolation, status: "could not run" }, { status: "changed", observed: "x" }).status, "changed");
+});
+
+test("a CLI that phones home only during --version never yields a passing isolation result", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "claude-version-net-test-"));
+  try {
+    const binary = join(dir, "claude");
+    writeFileSync(binary, `#!${process.execPath}
+if (process.argv.includes("--version")) {
+  require("node:net").connect(9, "127.0.0.1").on("error", () => { console.log("2.1.314 (Claude Code)"); process.exit(0); }).on("connect", () => process.exit(0));
+} else process.exit(1);
+`, { mode: 0o755 });
+    const result = spawnSync(process.execPath, ["--import", "tsx", "scripts/claude-assumptions.mjs", "--report-dir", dir], {
+      encoding: "utf8", timeout: 240000, env: { PATH: process.env.PATH, HOME: dir, TMPDIR: tmpdir(), CLAUDE_BIN: binary },
+    });
+    assert.notEqual(result.status, 0, result.stdout + result.stderr);
+    const report = JSON.parse(readFileSync(join(dir, "latest.json")));
+    assert.equal(report.version, "2.1.314");
+    const isolation = report.results.find(r => r.probe === "isolation");
+    const versionSilence = isolation.assumptions.find(a => a.assumption.includes("--version invocations"));
+    assert.ok(versionSilence, JSON.stringify(isolation));
+    assert.notEqual(versionSilence.status, "unchanged");
+    if (straceAvailable()) {
+      assert.equal(versionSilence.status, "changed"); assert.match(versionSilence.observed, /127\.0\.0\.1:9\b/);
+      assert.equal(report.exitCode, 1);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("network silence is a pass only with a working detector that traced every run", () => {

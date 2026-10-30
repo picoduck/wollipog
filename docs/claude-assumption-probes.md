@@ -115,8 +115,10 @@ Nothing outside the throwaway directories is read.
   `HOME/.claude`, so a write that ignores it is visible), XDG tree, `TMPDIR` and working directory.
   All of them are removed afterwards.
 - **No model.** The model is a scripted loopback server. Its replies depend only on the conversation
-  it receives. Side requests get a plain reply. Auto-mode classifier requests are answered "allow"
-  and counted. A route it was not scripted for answers 404 and is still recorded.
+  it receives. Side requests get a plain reply. Auto-mode classifier requests are answered "allow".
+  A route it was not scripted for answers 404 and is still recorded. A case counts only when the
+  CLI exits 0 with a non-error `success` result and every scripted conversation reached its final
+  answer.
 - **Network silence is measured.** It is measured in every probe process.
   - Before measuring, a traced shell must be seen connecting to a closed loopback port. A host
     without a working `strace`, or a detector that misses the canary, makes every silence
