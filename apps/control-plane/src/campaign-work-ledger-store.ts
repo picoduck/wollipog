@@ -1433,6 +1433,10 @@ export class CampaignWorkLedgerStore {
     return row ? this.recommendationView(row) : null;
   }
 
+  recommendations(campaignId: string): CampaignRecommendation[] {
+    return this.recommendationRows(campaignId).map((row) => this.recommendationView(row));
+  }
+
   recommendationsPage(campaignId: string, query: CampaignRecommendationsQuery): LedgerResult<CampaignRecommendationsPage> {
     const limit = pageLimit(query.limit);
     if (!limit.ok) return limit;

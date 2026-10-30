@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
-  type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef } from "@wollipog/protocol";
+  type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.js";
@@ -80,6 +80,63 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
     return failed("capacity_exhausted");
   }
   return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };
+}
+
+/** Why the server refused an Orchestrator's own Full Control scope change (#2940). Each code names
+ * the one condition that failed and maps to a fixed sentence; neither carries issue or payload text. */
+export type CampaignScopeAdmissionFailure =
+  | "capacity_exhausted" | "lineage_missing" | "epic_not_authorized" | "epic_members_unverified"
+  | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
+  | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
+  | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch";
+
+const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
+
+export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdmissionFailure, { status: number; message: string }>> = {
+  capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed the human-established issue limit" },
+  lineage_missing: { status: 403, message: "Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope. " +
+    `Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
+  epic_not_authorized: { status: 403, message: `The named epic is not one this campaign's Full Control boundary authorizes; ${HUMAN_SCOPE_ROUTE}.` },
+  epic_members_unverified: { status: 409, message: "Additions are not verified members of a human-authorized epic" },
+  follow_ups_not_authorized: { status: 403, message: `This campaign's Full Control boundary does not authorize related follow-ups; ${HUMAN_SCOPE_ROUTE}.` },
+  follow_up_not_single: { status: 403, message: "Follow-up lineage admits exactly one issue; propose each published follow-up as its own addition." },
+  publication_not_found: { status: 409, message: "The named publication is not a follow-up issue publication this campaign controls in its repository." },
+  publication_not_consumed: { status: 409, message: "The named publication has not been consumed; publish its approved payload before admitting the issue." },
+  publication_already_admitted: { status: 409, message: "The named publication was already used to admit an issue; each publication admits one issue once." },
+  publication_unapproved: { status: 409, message: "The named publication has neither a bounded admission nor a recorded approval by a person; use fresh human scope review." },
+  publication_approved_under_earlier_boundary: { status: 403, message: "The named publication was approved before the current Full Control authorization, " +
+    `so its objective is unproven; ${HUMAN_SCOPE_ROUTE}.` },
+  publication_approver_not_owner: { status: 403, message: "The named publication was approved by a person who is neither the Full Control boundary's author " +
+    `nor an owner of this campaign; ${HUMAN_SCOPE_ROUTE}.` },
+  publication_authority_changed: { status: 403, message: "The publication's original human/objective authority does not match the current boundary; use fresh human scope review" },
+  recommendation_not_found: { status: 409, message: "No recommendation in this campaign has the published title's subject." },
+  recommendation_not_accepted: { status: 409, message: "The publication's recommendation is missing, not accepted, or a duplicate; accept it before admitting scope." },
+  resulting_issue_mismatch: { status: 409, message: "Record the verified published issue on exactly one accepted recommendation before admitting scope" },
+  origin_outside_scope: { status: 409, message: "The published follow-up's authorized origins were removed from scope" },
+  payload_mismatch: { status: 409, message: "The published issue does not match the exact approved payload." },
+};
+
+/** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.
+ * A person-approved publication never does: the fallback strips that claim (#3063). It binds only
+ * to exactly one accepted, non-duplicate recommendation of this campaign that records `issue` as its
+ * result and whose title has the approved payload's subject. */
+export function scopePublicationRecommendation(db: ControlPlaneDb, rootId: string, publication: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>,
+  issue: number): { recommendation: CampaignRecommendation } | { failure: CampaignScopeAdmissionFailure } {
+  const usable = (r: CampaignRecommendation) => r.disposition === "accepted" && !r.duplicateOfId;
+  const delivered = (r: CampaignRecommendation) => r.resultingIssue?.number === issue && r.resultingIssue.repository.toLowerCase() === publication.repository;
+  if (publication.recommendationId) {
+    const named = db.campaignWorkLedger.recommendation(rootId, publication.recommendationId);
+    if (!named || !usable(named)) return { failure: "recommendation_not_accepted" };
+    return delivered(named) ? { recommendation: named } : { failure: "resulting_issue_mismatch" };
+  }
+  const subject = campaignPublicationTitle(publication.sanitizedTitle);
+  const titled = db.campaignWorkLedger.recommendations(rootId).filter((r) =>
+    r.repository.toLowerCase() === publication.repository && campaignPublicationTitle(r.title) === subject);
+  if (!titled.length) return { failure: "recommendation_not_found" };
+  const accepted = titled.filter(usable);
+  if (!accepted.length) return { failure: "recommendation_not_accepted" };
+  const matches = accepted.filter(delivered);
+  return matches.length === 1 ? { recommendation: matches[0]! } : { failure: "resulting_issue_mismatch" };
 }
 
 /** The publications a scope change admits: its follow-up lineage and the exact payloads it verified. */
