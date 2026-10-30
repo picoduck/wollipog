@@ -5,7 +5,7 @@
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const ROOT = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -24,6 +24,9 @@ const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u;
  * One entry per supported harness. Adding a harness means adding an entry here, its id to the
  * workflow matrix, and a suite that honours the report contract. Every command is an argv array.
  * - npmPackage / bin: the release that is installed and the executable it provides.
+ * - binPath: optional prefix-relative executable for a package whose `.bin` entry only works after
+ *   its install scripts ran (which --ignore-scripts skips); `{platform}` and `{arch}` expand to the
+ *   runner's own, so the native platform package's binary is used directly.
  * - binaryEnv: environment variable through which the suite receives that executable.
  * - baselines: versions measured on every full run besides the newest release, each read from a
  *   repository file so a reviewed change to the source moves the measurement with it.
@@ -90,7 +93,50 @@ export const HARNESSES = [
       { dir: "apps/runner/scripts", prefix: "pi-" },
     ],
   },
+  {
+    id: "claude",
+    name: "Claude Code",
+    npmPackage: "@anthropic-ai/claude-code",
+    bin: "claude",
+    // The package's bin/claude.exe is a placeholder that exits 1 until its postinstall copies the
+    // native binary in; --ignore-scripts skips that, so run the platform package's binary itself.
+    binPath: "node_modules/@anthropic-ai/claude-code-{platform}-{arch}/claude",
+    binaryEnv: "CLAUDE_BIN",
+    baselines: [
+      { label: "CLAUDE_CONTROL_CONTRACT_MIN_VERSION floor", file: "apps/runner/src/discovery/claude-code.ts",
+        pattern: /^export const CLAUDE_CONTROL_CONTRACT_MIN_VERSION = "(\d+\.\d+\.\d+)";$/mu },
+      { label: "CLAUDE_STEERING_MIN_VERSION floor", file: "apps/runner/src/discovery/claude-code.ts",
+        pattern: /^export const CLAUDE_STEERING_MIN_VERSION = "(\d+\.\d+\.\d+)";$/mu },
+      { label: "CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION floor", file: "apps/runner/src/discovery/claude-code.ts",
+        pattern: /^export const CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION = "(\d+\.\d+\.\d+)";$/mu },
+      { label: "CLAUDE_MEDIA_REVIEWER_CLI_VERSION reviewer pin", file: "apps/runner/src/claude-media-reviewer.ts",
+        pattern: /^export const CLAUDE_MEDIA_REVIEWER_CLI_VERSION = "(\d+\.\d+\.\d+)";$/mu },
+    ],
+    prepare: {
+      command: ["bash", "scripts/harness-assumptions-prepare-claude.sh"],
+      purpose: "Network-silence measurement needs strace, which the hosted image does not ship",
+    },
+    suite: ["node", "--import", "tsx", "scripts/claude-assumptions.mjs"],
+    reportDirArg: "--report-dir",
+    timeoutMinutes: 40,
+    documentation: "docs/claude-assumption-probes.md",
+    sources: [
+      "scripts/claude-assumptions.mjs",
+      "scripts/harness-assumptions-prepare-claude.sh",
+      "apps/runner/src/discovery/claude-code.ts",
+      "apps/runner/src/claude-media-reviewer.ts",
+      "apps/runner/src/drivers/fixtures/claude-can-use-tool-subagent.json",
+      { dir: "apps/runner/scripts", prefix: "claude-" },
+    ],
+  },
 ];
+
+/** The executable a target's install provides: `binPath` when declared, else `.bin/<bin>`. */
+export function executablePath(harness, prefix, platform = process.platform, arch = process.arch) {
+  return harness.binPath
+    ? join(prefix, ...harness.binPath.replaceAll("{platform}", platform).replaceAll("{arch}", arch).split("/"))
+    : join(prefix, "node_modules", ".bin", harness.bin);
+}
 
 export function harnessById(id) {
   const harness = HARNESSES.find(h => h.id === id);
@@ -506,10 +552,11 @@ async function measureTarget(harness, target, { box, env, exec, suiteMarkdown })
   const install = await exec(["npm", "install", "--prefix", prefix, "--no-save", "--package-lock=false", "--ignore-scripts", "--no-audit", "--no-fund", `${harness.npmPackage}@${target.version}`],
     { cwd: prefix, env, timeoutMs: 10 * 60_000, stdio: "capture" });
   const installed = readJson(join(prefix, "node_modules", ...harness.npmPackage.split("/"), "package.json"))?.version;
-  const binary = join(prefix, "node_modules", ".bin", harness.bin);
-  if (!ok(install) || installed !== target.version || !existsSync(binary)) {
+  const binary = executablePath(harness, prefix);
+  if (!ok(install) || installed !== target.version) {
     return fail(`npm install of ${harness.npmPackage}@${target.version} failed (${describeRun(install)}, installed ${installed ?? "nothing"})`);
   }
+  if (!existsSync(binary)) return fail(`the installed release has no executable at ${relative(prefix, binary)}`);
   const work = join(box.workRoot, target.version);
   const home = join(work, "home"), suiteDir = join(work, "report"), temp = join(work, "tmp");
   if (!await box.makeDir(work) || !await box.makeDir(home) || !await box.makeDir(suiteDir) || !await box.makeDir(temp)) return fail("could not create the suite's throwaway directories");

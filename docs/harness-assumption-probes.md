@@ -10,8 +10,13 @@ withheld hardening automatically.
 | --- | --- | --- |
 | Codex | `pnpm probe:codex-assumptions` ([Codex Assumption Probes](codex-assumption-probes.md)) | Newest `@openai/codex` release and the lower bound of `CODEX_GUARD_TRUST_VERSION_RANGE` |
 | Pi | `pnpm probe:pi-assumptions` ([Pi Assumption Probes](pi-assumption-probes.md)) | Newest `@earendil-works/pi-coding-agent` release |
+| Claude Code | `pnpm probe:claude-assumptions` ([Claude Code Assumption Probes](claude-assumption-probes.md)) | Newest `@anthropic-ai/claude-code` release, the three floors in `apps/runner/src/discovery/claude-code.ts` and the reviewer pin `CLAUDE_MEDIA_REVIEWER_CLI_VERSION` |
 
-Claude Code (#3797) adds its probe set to the same workflow.
+A harness whose package `.bin` entry works only after its install scripts ran declares `binPath`, the
+executable to run instead, relative to the install prefix. Claude Code is one: under
+`--ignore-scripts` its `bin/claude.exe` is a placeholder that exits 1, so the suite runs
+`node_modules/@anthropic-ai/claude-code-<platform>-<arch>/claude`, the native binary from the
+platform package npm installs alongside it. A missing executable is could not run.
 
 ## Workflow
 

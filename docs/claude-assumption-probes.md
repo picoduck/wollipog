@@ -11,10 +11,10 @@ CLAUDE_BIN=/absolute/path/to/claude pnpm probe:claude-assumptions [--report-dir 
 ```
 
 `CLAUDE_BIN` defaults to `claude` on `PATH` and must be the real executable. Under
-`npm install --ignore-scripts`, `node_modules/.bin/claude` is only a placeholder: the native binary is
-`node_modules/@anthropic-ai/claude-code-<platform>/claude`. The command needs Linux, Node 24, the
-repository dependencies, Bash and `strace`. It is an operator and CI maintenance command, and it
-never changes discovery, launch policy, a floor or a pin.
+`npm install --ignore-scripts`, `node_modules/.bin/claude` is only a placeholder: the native binary
+is `node_modules/@anthropic-ai/claude-code-<platform>-<arch>/claude`. The command needs Linux,
+Node 24, the repository dependencies, Bash and `strace`. It is an operator and CI maintenance
+command, and it never changes discovery, launch policy, a floor or a pin.
 
 ## Report and Exit Contract
 
@@ -205,3 +205,29 @@ write access to the checkout, so it can run as an unprivileged user from a read-
 
 `strace` must be installed beforehand. The default Ubuntu `kernel.yama.ptrace_scope=1` allows it,
 because it traces only its own descendants. Without it, every silence assumption is "could not run".
+
+## Hosted Measurement
+
+`.github/workflows/harness-assumptions.yml` runs this suite as the `claude` harness under the
+harness-neutral contract in [Harness Assumption Probes](harness-assumption-probes.md). Each full
+run measures:
+
+- the newest stable `@anthropic-ai/claude-code` release from the npm `latest` dist-tag;
+- the three floors, `CLAUDE_CONTROL_CONTRACT_MIN_VERSION`, `CLAUDE_STEERING_MIN_VERSION` and
+  `CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION`, read from `apps/runner/src/discovery/claude-code.ts`;
+- the reviewer pin `CLAUDE_MEDIA_REVIEWER_CLI_VERSION`, read from
+  `apps/runner/src/claude-media-reviewer.ts`, so the pin comparison always has the pin's own
+  measurement beside it.
+
+Each target is installed with `npm install --ignore-scripts`, and the suite runs the platform
+package's native binary (`binPath` in the registry), never the placeholder `.bin/claude`.
+`scripts/harness-assumptions-prepare-claude.sh` installs `strace` before privileges are dropped. The
+suite still proves the detector itself with its canary as the unprivileged `harness-probe` user, so
+a host where `strace` cannot trace there reports could not run.
+
+The 2.1.296 pin target reports **changed** while the driver's flagless `default` launch starts that
+release in `auto` (see Feasibility). That is a real defect in the runner, not in the probe, and it
+stays visible until a reviewed change fixes it.
+
+Dispatch one harness on a branch with
+`gh workflow run harness-assumptions.yml --ref <branch> -f harness=claude`.
