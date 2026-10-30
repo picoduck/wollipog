@@ -17,8 +17,10 @@
  *   - "the model" is a scripted OpenAI Responses-API server this script starts, selected through a
  *     throwaway `CODEX_HOME`. It emits one `exec_command` tool call with the exact arguments the
  *     case wants and then one final message, so each case is one deterministic turn. It also
- *     answers Codex's own `codex-auto-review` Guardian requests with a scripted verdict, which is
- *     how the Guardian-approved path is measured without a Guardian model.
+ *     answers Codex's own Guardian requests (`isGuardianRequest`) with a scripted verdict, which is
+ *     how the Guardian-approved path is measured without a Guardian model. Each case counts those
+ *     requests: a Guardian case passes only when Guardian actually asked, so a Guardian request the
+ *     fixture misread (which Codex treats as a denial) never reads as a measured denial.
  *   - the hook state directory is a throwaway directory holding a random marker, never the
  *     runner's real one.
  */
@@ -32,7 +34,7 @@ import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { codexPermissionProfileOverrides } from "../src/codex-permission-profile.js";
-import { isolatedProbeEnv, unavailableProbeOutput, probeResult, probeExit, GUARD_DOCUMENTATION, ownProbeProcess, type ProbeStatus } from "./codex-probe-support.js";
+import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput, probeResult, probeExit, GUARD_DOCUMENTATION, ownProbeProcess, type ProbeStatus } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 const TURN_TIMEOUT_MS = 90_000;
@@ -124,15 +126,21 @@ function networkServer(): Server {
   });
 }
 
+interface ModelState { tool: Json | null; guardian: "allow" | "deny"; calls: number; guardianRequests: number }
+
+/** What one case produced: the command's output and how many Guardian requests the fixture answered. */
+export interface CaseOutcome { output: string; guardianRequests: number }
+
 /** One scripted model turn, plus scripted Guardian verdicts. */
-function modelServer(state: { tool: Json | null; guardian: "allow" | "deny"; calls: number }): Server {
+function modelServer(state: ModelState): Server {
   return createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       let body: Json = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Json; } catch { /* keep {} */ }
-      const isGuardian = String(body.model ?? "").startsWith("codex-auto-review");
+      const isGuardian = isGuardianRequest(request.headers, body);
+      if (isGuardian) state.guardianRequests++;
       // The Guardian runs inside the same turn; only the agent's own calls advance the script.
       const step = isGuardian ? -1 : state.calls++;
       const item: Json = isGuardian
@@ -168,7 +176,7 @@ function message(text: string): Json {
 
 interface Fixture { repo: string; codexHome: string; hookDir: string; marker: string; networkPort: number }
 
-function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; guardian: "allow" | "deny"; calls: number }): Promise<string> {
+function runCase(testCase: Case, fixture: Fixture, model: ModelState): Promise<string> {
   const command = testCase.command === "network"
     ? `curl -s --max-time 3 http://127.0.0.1:${fixture.networkPort}/ || echo NETBLOCKED`
     : `cat ${join(fixture.hookDir, "verdict.json")} 2>&1 | head -1`;
@@ -180,6 +188,7 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
   };
   model.guardian = testCase.guardian ?? "allow";
   model.calls = 0;
+  model.guardianRequests = 0;
 
   const args = testCase.sandbox === "profile"
     ? ["-c", codexPermissionProfileOverrides(":workspace", fixture.hookDir)[0],
@@ -275,6 +284,15 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
   });
 }
 
+/** A Guardian case was actually reviewed by the scripted Guardian; a client case never reached it. */
+export function guardianRouted(testCase: Case, guardianRequests: number): boolean {
+  return testCase.guardian ? guardianRequests > 0 : guardianRequests === 0;
+}
+
+export function caseMatches(testCase: Case, outcome: CaseOutcome, marker: string): boolean {
+  return guardianRouted(testCase, outcome.guardianRequests) && verdict(testCase, outcome.output, marker);
+}
+
 export function verdict(testCase: Case, output: string, marker: string): boolean {
   switch (testCase.expect) {
     case "network": return output.includes(NETWORK_BODY);
@@ -285,12 +303,12 @@ export function verdict(testCase: Case, output: string, marker: string): boolean
   }
 }
 
-export function hardeningRestorable(outputs: Map<string, string>, marker: string): boolean {
+export function hardeningRestorable(outcomes: Map<string, CaseOutcome>, marker: string): boolean {
   return CASES.every(testCase => {
-    const output = outputs.get(testCase.name);
-    if (output === undefined || unavailableProbeOutput(output)) return false;
+    const outcome = outcomes.get(testCase.name);
+    if (outcome === undefined || unavailableProbeOutput(outcome.output) || !guardianRouted(testCase, outcome.guardianRequests)) return false;
     return testCase.sandbox === "profile" && testCase.escalate && testCase.expect === "noNetwork"
-      ? output.includes(NETWORK_BODY) : verdict(testCase, output, marker);
+      ? outcome.output.includes(NETWORK_BODY) : verdict(testCase, outcome.output, marker);
   });
 }
 
@@ -324,11 +342,11 @@ async function main(): Promise<number> {
     networkPort: 0,
   };
   const net = networkServer();
-  const model = { tool: null as Json | null, guardian: "allow" as "allow" | "deny", calls: 0 };
+  const model: ModelState = { tool: null, guardian: "allow", calls: 0, guardianRequests: 0 };
   const models = modelServer(model);
   let failures = 0;
   const statuses: ProbeStatus[] = [];
-  const outputs = new Map<string, string>();
+  const outcomes = new Map<string, CaseOutcome>();
   try {
     mkdirSync(fixture.repo, { recursive: true });
     mkdirSync(fixture.codexHome, { recursive: true });
@@ -362,20 +380,23 @@ async function main(): Promise<number> {
 
     for (const testCase of CASES) {
       const output = await runCase(testCase, fixture, model);
-      const ok = verdict(testCase, output, fixture.marker);
-      outputs.set(testCase.name, output);
+      const outcome: CaseOutcome = { output, guardianRequests: model.guardianRequests };
+      const ok = caseMatches(testCase, outcome, fixture.marker);
+      outcomes.set(testCase.name, outcome);
       const status = unavailableProbeOutput(output) ? "could not run" : ok ? "unchanged" : "changed";
       statuses.push(status);
+      const result = output.includes(NETWORK_BODY) ? "network retained" : output.includes("NETBLOCKED") ? "network blocked" :
+        output.includes(fixture.marker) ? "denied marker readable" : verdict(testCase, output, fixture.marker) ? testCase.expect : "unexpected command result";
       probeResult(`permission profile: ${testCase.name}`, status,
         unavailableProbeOutput(output) ? "sandbox or CLI could not execute the fixture command" :
-          output.includes(NETWORK_BODY) ? "network retained" : output.includes("NETBLOCKED") ? "network blocked" :
-            output.includes(fixture.marker) ? "denied marker readable" : verdict(testCase, output, fixture.marker) ? testCase.expect : "unexpected command result",
+          `${result}; guardianRequests=${outcome.guardianRequests}`,
         GUARD_DOCUMENTATION);
       if (!ok) failures++;
       const shown = output.replace(fixture.marker, "<MARKER>").slice(0, 60);
-      process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(44)} ${testCase.expect.padEnd(11)} ${JSON.stringify(shown)}\n`);
+      process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(44)} ${testCase.expect.padEnd(11)} ` +
+        `guardian×${outcome.guardianRequests} ${JSON.stringify(shown)}\n`);
     }
-    if (hardeningRestorable(outputs, fixture.marker)) {
+    if (hardeningRestorable(outcomes, fixture.marker)) {
       probeResult("provider-mode permission-profile deny withheld by #1336", "changed",
         "approved escalations retain network and directory denial still holds; withheld hardening is re-enablable through a reviewed code change", GUARD_DOCUMENTATION);
     }

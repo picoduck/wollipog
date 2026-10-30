@@ -22,7 +22,7 @@
  *   - "the model" is a scripted OpenAI Responses-API server this script starts, selected through a
  *     throwaway `CODEX_HOME`. Its first answer calls `wait_pull_request`; every later answer is a
  *     final message. It records the time of every request, including Codex's own Guardian
- *     (`codex-auto-review`) requests, so "no model request while the call blocks" is counted, not
+ *     requests (`isGuardianRequest`), so "no model request while the call blocks" is counted, not
  *     inferred.
  *   - `wait_pull_request` is a stub stdio MCP server that sleeps for `--seconds` and answers. The
  *     entry that launches it is built by `sessionCodexMcpServerArg`, the function the runner uses,
@@ -45,7 +45,7 @@ import {
   additiveCodexMcpServerArg,
   sessionCodexMcpServerArg,
 } from "../src/orchestrator-preset.js";
-import { isolatedProbeEnv, unavailableProbeOutput, probeResult, ownProbeProcess } from "./codex-probe-support.js";
+import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput, probeResult, ownProbeProcess } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 
@@ -110,7 +110,7 @@ function modelServer(state: ModelState, seconds: number): Server {
     request.on("end", () => {
       let body: Json = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Json; } catch { /* keep {} */ }
-      const guardian = String(body.model ?? "").startsWith("codex-auto-review");
+      const guardian = isGuardianRequest(request.headers, body);
       state.requests.push({ at: Date.now(), guardian });
       if (!guardian && state.toolCall === null) state.toolCall = waitToolCall(body);
       const step = guardian ? -1 : state.agentCalls++;
