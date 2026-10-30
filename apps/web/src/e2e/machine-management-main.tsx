@@ -275,7 +275,10 @@ if (fixtureParams.get("workspaces") === "long" && runner) {
     { id: "notes", name: "Research Notes With a Long Name for a Narrow Row", path: "D:\\archive\\2026\\research\\notes" },
   );
 }
-/** `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989). */
+/**
+ * `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989).
+ * `skills=long` adds a name that fits a phone row once the agent gives way, and one that never fits (#3526).
+ */
 const skillsScenario = fixtureParams.get("skills");
 let skillsFailures = skillsScenario === "fail" ? 1 : 0;
 /**
@@ -391,7 +394,11 @@ const skillsReport = () => ({
   desired: [],
   reported: {
     unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog",
-      providerAccountId: "claude-work" }],
+      providerAccountId: "claude-work" },
+    ...(skillsScenario === "long" ? [
+      { agentId: "custom-acp", name: "design-review", providerAccountId: "claude-work" },
+      { agentId: "custom-acp", name: "frontend-design-review-for-every-storefront-page", providerAccountId: "claude-work" },
+    ] : [])],
     removals: [
       { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
       { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
