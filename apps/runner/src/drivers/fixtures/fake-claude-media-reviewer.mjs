@@ -25,7 +25,11 @@ const rpc = (method, params) => new Promise((resolve) => {
 
 await rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fake", version: "1" } });
 const listed = (await rpc("tools/list")).result.tools.map((tool) => `mcp__media__${tool.name}`);
-const sessionId = "fake-media-session";
+const sessionId = "6b0c3f7e-2d4a-4f1b-9c8e-5a7d1e3b9f20";
+// The pinned 2.1.296 CLI under --bare announces one UI render notice before its startup init (#3849).
+const preInit = () => args.includes("--bare") && emit(mode === "pre-init-other"
+  ? { type: "system", subtype: "status", status: "starting", session_id: sessionId }
+  : { type: "system", subtype: "ui_invalidate", event: "ui.render", uuid: "0d5e8c41-7a2b-4c6d-8e9f-1a2b3c4d5e6f", session_id: sessionId });
 const init = () => emit({ type: "system", subtype: "init", session_id: sessionId, cwd: "/review",
   tools: mode === "extra-tool" ? [...listed, "Bash"] : listed,
   mcp_servers: [{ name: "media", status: "connected", source: "dynamic" }, ...(mode === "extra-server" ? [{ name: "fs", status: "connected" }] : [])],
@@ -53,6 +57,7 @@ let first = 0, end = 0, final = false;
 for await (const line of input) {
   const prompt = JSON.parse(line).message.content;
   turn++;
+  if (turn === 1) preInit();
   init();
   record({ turn, prompt });
   // The real CLI's first tool call follows a model round trip; the runner proves init meanwhile.
