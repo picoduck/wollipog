@@ -11,11 +11,23 @@ export function campaignPublicationSafe(title: string, body: string, labels: str
     (i === 0 || headings.indexOf(heading) > headings.indexOf(required[i - 1]!)))) && /^\s*-\s+(?:\[[ xX]\]\s+)?\S/mu.test(body);
 }
 
+const collapsedTitle = (title: string) => title.normalize("NFKC").trim().replace(/\s+/gu, " ");
+
 /** The subject a title names. One leading issue-form type tag, such as GitHub's prefilled
  * "[Bug]: ", classifies the issue rather than naming it, so drafts and recommendations that differ
- * only by that tag compare equal (#2940). Duplicate inspection uses the same comparison. */
+ * only by that tag compare equal (#2940). Duplicate inspection searches and compares by it. */
+export function campaignPublicationSubject(title: string): string {
+  return collapsedTitle(title).replace(/^\[[^[\]]{1,32}\]:? (?=\S)/u, "");
+}
+
 export function campaignPublicationTitle(title: string): string {
-  return title.normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase().replace(/^\[[^[\]]{1,32}\]:? (?=\S)/u, "");
+  return campaignPublicationSubject(title).toLowerCase();
+}
+
+/** A tagged title is admissible only after a duplicate search by its subject: searching the tag's
+ * terms filters out an older untagged issue with the same subject. */
+export function campaignPublicationTypeTagged(title: string): boolean {
+  return campaignPublicationSubject(title) !== collapsedTitle(title);
 }
 
 /** Why the server did not admit a follow-up publication that named a recommendation. Recorded on

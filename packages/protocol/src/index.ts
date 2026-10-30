@@ -4838,6 +4838,9 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
+  /** The duplicate search used the title's subject, without its type tag (#2940). Older runners
+   * omit it and searched the whole title, so a tagged title cannot be admitted through them. */
+  duplicateSearch?: "subject";
 }
 
 export interface GithubIssueClosureInspection {

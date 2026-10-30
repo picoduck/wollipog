@@ -29,11 +29,12 @@ function harness(full = true, maximum = 5) {
   }
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
-  const state = { publicationOk: true, executes: 0, openPR: false, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
+  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
-        ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }) };
+        ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }),
+        ...(state.subjectSearch ? { duplicateSearch: "subject" as const } : {}) };
       return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
         ...(message.operation === "synchronize" ? { revision: message.scope.revision } : { candidates: (message.issues ?? [100, 101]).map((number) =>
           ({ issue: { repository: "team/repo", number }, title: message.publication?.sanitizedTitle ?? state.publicationTitles[number] ?? `Issue ${number}`, source: "sub_issue" as const })) }) };
@@ -402,6 +403,31 @@ test("a child's accepted, in-scope publication with an issue-form title prefix i
       resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:"Related repair",sanitizedBody:body,labels:[],recommendationId}});
     assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","a consumed recommendation never mints a second standing grant");
     assert.equal(replay.data!.authorityEvaluation?.admissionFailure,"recommendation_spent");
+  } finally { h.db.close(); }
+});
+
+test("a tagged title needs a runner that searched duplicates by its subject, at admission and consumption (#2940)", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const request = (requestId: string, sanitizedTitle: string) => h.svc.createWorkflowDecisionWithVideo("child",{requestId,resourceKey:requestId,
+      resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle,sanitizedBody:body,labels:[],recommendationId}});
+    // An older runner searched the whole title, whose tag terms can hide an untagged duplicate.
+    h.state.subjectSearch = false;
+    const older = await request("older-runner", "[Bug]: Related repair");
+    assert.ok(older.ok); assert.equal(older.data!.authority,"human");
+    assert.equal(older.data!.authorityEvaluation?.admissionFailure,"inspection_failed");
+    const untagged = await request("older-runner-untagged", "Related repair");
+    assert.ok(untagged.ok); assert.equal(untagged.data!.authority,"orchestrator","an untagged title was always searched in full");
+    h.state.subjectSearch = true;
+    const tagged = await request("subject-runner", "[Bug]: Related repair");
+    assert.ok(tagged.ok); assert.equal(tagged.data!.authority,"orchestrator");
+    assert.ok(h.svc.resolveWorkflowDecision("root","child",tagged.data!.occurrenceId,{outcome:"approve"},"orchestrator",{kind:"agent",id:"root"},()=>true).ok);
+    h.state.subjectSearch = false;
+    assert.equal((await h.svc.consumeWorkflowDecision("child",tagged.data!.occurrenceId,{resourceSnapshot:tagged.data!.resourceSnapshot})).ok,false,
+      "consumption repeats the subject search");
+    h.state.subjectSearch = true;
+    assert.ok((await h.svc.consumeWorkflowDecision("child",tagged.data!.occurrenceId,{resourceSnapshot:tagged.data!.resourceSnapshot})).ok);
   } finally { h.db.close(); }
 });
 

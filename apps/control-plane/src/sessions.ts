@@ -24,7 +24,7 @@ import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, campaignPublicationTypeTagged, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
@@ -9963,7 +9963,8 @@ export class SessionsService {
       const requestId = `publication_inspect_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(root.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect",
         requestId, sessionId: root.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
-      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== root.id || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest) return refused("inspection_failed", boundaryRevision);
+      if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== root.id || result.repository?.toLowerCase() !== snapshot.repository || !result.publicationDigest ||
+          campaignPublicationTypeTagged(snapshot.sanitizedTitle) && result.duplicateSearch !== "subject") return refused("inspection_failed", boundaryRevision);
       publicationDigest = result.publicationDigest;
     } catch { return refused("inspection_failed", boundaryRevision); }
     const current = this.db.getSession(root.id)!;
@@ -10903,6 +10904,7 @@ export class SessionsService {
         const result = await this.hub.requestFromRunner(parent.runnerId, requestId, { type: "campaign_issue_scope", operation: "publication_inspect", requestId,
           sessionId: parent.id, sanitizedTitle: snapshot.sanitizedTitle, sanitizedBody: snapshot.sanitizedBody, labels: snapshot.labels }, 60_000);
         if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== parent.id || result.repository?.toLowerCase() !== snapshot.repository ||
+            campaignPublicationTypeTagged(snapshot.sanitizedTitle) && result.duplicateSearch !== "subject" ||
             issueEvidenceDigest({ evidence, publicationDigest: result.publicationDigest }) !== snapshot.issueAdmission!.evidenceDigest ||
             issueEvidenceDigest(publicationEvidence(this.db, this.db.getSession(parent.id)!, snapshot)) !== issueEvidenceDigest(evidence) ||
             !this.workflowDecisionAuthorityCurrent(this.db.getSession(parent.id)!, policy, decision)) return fail("Fresh publication evidence changed; request a new exact grant", 409);

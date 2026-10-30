@@ -104,7 +104,9 @@ For related publication, record and adjudicate a unique recommendation with auth
 items. Submit its `recommendationId` with the exact sanitized repository/title/body/labels through
 the usual workflow request. The root or a member whose gates the root controls, usually the child
 that drafted it, may request it; inspection and consumption run as the root. Titles compare without
-one leading issue-form type tag such as `[Bug]: `. The server verifies accepted lineage and scope
+one leading issue-form type tag such as `[Bug]: `, and the duplicate search uses that subject, so
+an older untagged issue is still found. A tagged title is admitted and consumed only through a runner
+that reports this subject search. The server verifies accepted lineage and scope
 capacity. When it cannot admit the request, the decision goes to the person, and its
 `authorityEvaluation.admissionFailure` names the failed condition (for example `title_mismatch`,
 `capacity_exhausted` or `inspection_failed`), which the server also logs. The runner
