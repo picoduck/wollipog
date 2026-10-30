@@ -8,6 +8,7 @@ import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { agentTuiProviderHomeEnv, SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { windowsEnvironmentForLaunch } from "./windows-conpty.js";
 
 /** Records the exact HOME each acquisition is keyed on, through the registry's own selection. */
 class RecordingRegistry {
@@ -101,6 +102,28 @@ test("an unbound TUI leases the home it actually inherits, including the runner'
   assert.throws(() => lease("claude", {}, { kind: "wsl", distro: "Ubuntu" }), /cannot be safely owner-leased/);
   assert.deepEqual(agentTuiProviderHomeEnv({ context: { kind: "wsl", distro: "Ubuntu" }, env: { A: "1" } }, runnerEnv),
     { A: "1" });
+});
+
+test("a Windows TUI leases the provider home its ConPTY launch selects, whatever the name's case (#3338)", () => {
+  const context = { kind: "native" } as const;
+  const lease = (env: Record<string, string>, runnerEnv: NodeJS.ProcessEnv, platform: NodeJS.Platform) =>
+    providerHomeLeaseTarget({
+      driver: "codex-app-server", command: "codex", context,
+      env: agentTuiProviderHomeEnv({ context, env }, runnerEnv, platform),
+    })?.home;
+  const launched = (env: Record<string, string>, runnerEnv: NodeJS.ProcessEnv) =>
+    windowsEnvironmentForLaunch(env, [], runnerEnv).find((entry) => /^codex_home=/i.test(entry))?.split("=")[1];
+  for (const [env, runnerEnv] of [
+    [{ codex_home: "/selected" }, { CODEX_HOME: "/runner" }],
+    [{}, { Codex_Home: "/runner" }],
+    [{ CODEX_HOME: "/selected" }, { codex_home: "/runner" }],
+  ] as const) {
+    const expected = launched(env, runnerEnv);
+    assert.ok(expected);
+    assert.equal(lease(env, runnerEnv, "win32"), expected, JSON.stringify({ env, runnerEnv }));
+  }
+  // POSIX names are case-sensitive: a lowercase variable is not the provider's home.
+  assert.equal(lease({ codex_home: "/selected" }, { CODEX_HOME: "/runner" }, "linux"), "/runner");
 });
 
 test("an ordinary TUI without an account binding keeps the runner-local environment (#3338)", async () => {
