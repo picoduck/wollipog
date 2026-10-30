@@ -772,7 +772,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      switch needs has run in the selected worktree. Every isolation notice says whether that
 //      continuation will follow (`continuesAfterRelaunch`), and create and select now return the
 //      notice as attach always has. An older runner gets no flag and goes idle after the relaunch.
-export const PROTOCOL_VERSION = 255;
+// 257: Codex command sandbox nesting (#3843). Inside the runner's own bubblewrap boundary, a Codex
+//      App Server whose sandbox cannot start runs its commands under `externalSandbox`, so that
+//      boundary is the single sandbox. Anywhere else the launch fails, and its `failed`
+//      `session_status` carries `launchFailure: "codex_sandbox_unavailable"`, which a campaign
+//      reports as blocked work for the person. Discovery marks such a Codex installation
+//      unsupported with the `codex_sandbox_unavailable` failure code. An older peer omits or
+//      ignores both.
+export const PROTOCOL_VERSION = 257;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -2335,7 +2342,10 @@ export type CodexAppServerFailureCode =
   | "probe_timeout"
   | "probe_failed"
   | "app_server_unavailable"
-  | "contract_mismatch";
+  | "contract_mismatch"
+  /** v257 (#3843): Codex's own command sandbox cannot start on this host, for example because
+   * the kernel does not let unprivileged processes create user namespaces. */
+  | "codex_sandbox_unavailable";
 
 export interface CodexAppServerFailure {
   code: CodexAppServerFailureCode;
@@ -3484,6 +3494,18 @@ export const PROVIDER_LOGIN_FAILURE_CODES: readonly ProviderLoginFailureCode[] =
 
 export function isProviderLoginFailureCode(value: unknown): value is ProviderLoginFailureCode {
   return PROVIDER_LOGIN_FAILURE_CODES.includes(value as ProviderLoginFailureCode);
+}
+
+/** Why a session's provider could not start, when the runner knows it as something a retry will
+ * not fix (v257, #3843). `codex_sandbox_unavailable`: the provider's own command sandbox cannot
+ * start where the session runs, and no runner boundary stands in for it. A closed set that may
+ * grow: the control plane keeps only a code it knows and treats any other failure as untyped. */
+export type SessionLaunchFailureCode = "codex_sandbox_unavailable";
+
+export const SESSION_LAUNCH_FAILURE_CODES: readonly SessionLaunchFailureCode[] = ["codex_sandbox_unavailable"];
+
+export function isSessionLaunchFailureCode(value: unknown): value is SessionLaunchFailureCode {
+  return SESSION_LAUNCH_FAILURE_CODES.includes(value as SessionLaunchFailureCode);
 }
 
 /** Secret-minimized progress for one runner-owned provider login. Provider output, credential
@@ -9185,6 +9207,8 @@ export interface SessionStatusMessage {
   controlPlaneLaunchId?: string;
   /** v218; emitted only after the provider has finished producing usage. */
   campaignBudgetCheckpoint?: import("./campaign-budget.js").CampaignBudgetUsageCheckpoint;
+  /** v257; only with status `failed`, when the launch failed for a known reason (#3843). */
+  launchFailure?: SessionLaunchFailureCode;
 }
 
 export interface StopSessionResultMessage {

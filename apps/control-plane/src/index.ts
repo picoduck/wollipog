@@ -1479,6 +1479,7 @@ app.register(async (instance) => {
           msg.controlPlaneLaunchId,
           msg.capacityWait,
           msg.campaignBudgetCheckpoint,
+          msg.launchFailure,
         );
         break;
       case "stop_session_result":

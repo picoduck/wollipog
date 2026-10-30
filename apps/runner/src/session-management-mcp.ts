@@ -1301,6 +1301,10 @@ export const TOOLS: McpTool[] = [
         driver: agent.driver ?? "acp",
         context: agent.context ?? { kind: "native" },
         available: agent.available ?? null,
+        // Why an unavailable installation cannot start sessions, such as a Codex whose command
+        // sandbox cannot start on its host (#3843), so a child is never created to find out.
+        ...(agent.available === false && typeof agent.unavailableReason === "string"
+          ? { unavailableReason: agent.unavailableReason } : {}),
         authStatus: agent.authStatus ?? null,
       };
       const discoveryUnavailable = !capabilities || typeof capabilities !== "object" ||

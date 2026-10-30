@@ -23,7 +23,7 @@ import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { isProviderLoginFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
+import { isProviderLoginFailureCode, isSessionLaunchFailureCode, type SessionLaunchFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -7693,6 +7693,15 @@ export class ControlPlaneDb {
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_stop_intents_runner ON session_stop_intents(runner_id, created_at, session_id)",
     );
+    // A runner-typed reason the session's last launch failed (#3843), for campaign recovery to read.
+    // It lives only while that failure is the session's state: any later status clears it.
+    db.exec(
+      `CREATE TABLE IF NOT EXISTS session_launch_failures (
+         session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+         code       TEXT NOT NULL,
+         created_at INTEGER NOT NULL
+       )`,
+    );
     // Stop provenance (#1466). A row stopped before this column existed has no evidence that its
     // runner confirmed the stop, so it starts provisional; the runner's next terminal snapshot or
     // absent inventory confirms it, exactly as it would a fresh disconnect stop. One transaction,
@@ -14119,6 +14128,13 @@ export class ControlPlaneDb {
   }
 
   /** Resolve a runner+agent to its launch command/args/env + driver/context. */
+  /** The runner's reason an installed agent cannot start sessions, when it reported one. */
+  unavailableAgentReason(runnerId: string, agentId: string): string | null {
+    const row = this.stmt("SELECT unavailable_reason FROM runner_agents WHERE runner_id=? AND agent_id=? AND available = 0")
+      .get(runnerId, agentId) as { unavailable_reason: string | null } | undefined;
+    return row?.unavailable_reason ?? null;
+  }
+
   getAgentLaunch(runnerId: string, agentId: string, targetBound = false): AgentLaunch | null {
     const row = this.stmt(
       `SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control, installation
@@ -18381,6 +18397,8 @@ export class ControlPlaneDb {
     this.stmt(`UPDATE sessions SET status=?, capacity_wait=NULL,
       provider_home_wait=CASE WHEN ?='starting' THEN provider_home_wait ELSE NULL END, updated_at=? WHERE id=?`)
       .run(effectiveStatus, effectiveStatus, now, id);
+    // A typed launch failure explains only the failed state it arrived with (#3843).
+    if (effectiveStatus !== "failed") this.setSessionLaunchFailure(id, null);
     // The overloads require provenance for `stopped`; an untyped caller still records a stop that
     // nothing has confirmed rather than one that claims runner evidence it never had.
     const stopWrite = stop ?? { cause: "unrecorded" };
@@ -23249,6 +23267,22 @@ export class ControlPlaneDb {
 
   hasSessionStopIntent(sessionId: string): boolean {
     return this.stmt("SELECT 1 FROM session_stop_intents WHERE session_id=?").get(sessionId) != null;
+  }
+
+  /** Record, or with null clear, the typed reason this session's launch failed (#3843). */
+  setSessionLaunchFailure(sessionId: string, code: SessionLaunchFailureCode | null, now = Date.now()): void {
+    if (!code) {
+      this.stmt("DELETE FROM session_launch_failures WHERE session_id=?").run(sessionId);
+      return;
+    }
+    this.stmt(`INSERT INTO session_launch_failures (session_id, code, created_at) VALUES (?, ?, ?)
+      ON CONFLICT(session_id) DO UPDATE SET code=excluded.code, created_at=excluded.created_at`).run(sessionId, code, now);
+  }
+
+  sessionLaunchFailure(sessionId: string): SessionLaunchFailureCode | null {
+    const row = this.stmt("SELECT code FROM session_launch_failures WHERE session_id=?").get(sessionId) as
+      { code: string } | undefined;
+    return row && isSessionLaunchFailureCode(row.code) ? row.code : null;
   }
 
   removeSessionStopIntent(sessionId: string): void {

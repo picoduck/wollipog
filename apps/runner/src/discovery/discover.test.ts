@@ -8,6 +8,7 @@ import { capabilitiesFor } from "../catalog.js";
 import {
   applyAgentModelDiscovery,
   commandDirectoriesForDriver,
+  applyCodexAgentEnvironment,
   codexAgentDefinitions,
   nativeDiscoveredDefinitions,
   mergeAgents,
@@ -23,6 +24,7 @@ import {
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
 import { resolvedLaunchIdentity } from "./resolve.js";
+import { applyCodexCommandSandboxProbe } from "./codex-app-server.js";
 import { ProviderHomeLeaseError } from "../provider-home-lease-worker-protocol.js";
 
 const testAdmission = { authorize: async () => ({ settle: async (proofs: Promise<boolean>[]) => { await Promise.all(proofs); } }) };
@@ -401,6 +403,22 @@ test("supported Codex discovery emits only its App Server row (#3259)", () => {
     [],
   );
   assert.deepEqual(wsl.map((agent) => [agent.id, agent.driver]), [["codex-wsl-Ubuntu", "codex-app-server"]]);
+});
+
+test("a Codex whose command sandbox cannot start on its host is unavailable with the host fix (#3843)", () => {
+  const blocked = applyCodexCommandSandboxProbe(SUPPORTED_APP_SERVER, {
+    code: 1, stdout: "", stderr: "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.\n",
+  });
+  const [agent] = codexAgentDefinitions(
+    cfg({ id: "codex", name: "Codex", driver: "codex", bin: "codex", version: "0.165.0", source: "discovered", authStatus: "authenticated" }),
+    blocked,
+    [],
+  );
+  assert.equal(agent!.available, false);
+  assert.equal(agent!.codexAppServer?.failure?.code, "codex_sandbox_unavailable");
+  assert.match(agent!.unavailableReason ?? "", /unprivileged processes create user namespaces/);
+  // An explicit API-key setup recomputes availability from the App Server row, which stays blocked.
+  assert.equal(applyCodexAgentEnvironment(agent!).available, false);
 });
 
 test("a Codex replacement during discovery keeps the primary driver and rediscovery guidance", () => {

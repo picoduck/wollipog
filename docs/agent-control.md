@@ -848,6 +848,42 @@ root and admin directory of every worktree this launch's boundary binds, and onl
 turn can commit there too. Codex keeps each root's `.git` link read-only. A worktree retired since
 launch is left out of the turn's roots.
 
+### Codex's Sandbox Inside This Boundary
+
+Codex App Server's workspace sandbox starts its own bubblewrap. On a host that restricts
+unprivileged user namespaces, such as recent Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`
+and the stock `bwrap-userns-restrict` AppArmor profile, a bubblewrap started inside this boundary
+cannot create its namespace. Every command then fails before it runs and asks to run outside the
+sandbox (#3843).
+
+Before a native Linux Codex session starts its thread, the driver runs `true` through the App
+Server's `command/exec` under the same policy its turns will send:
+
+- If the command runs, nothing changes.
+- If it fails because bubblewrap may not create a user namespace, and this boundary encloses the
+  process, the turns send `externalSandbox` in place of a workspace-write policy. This boundary is
+  then the single sandbox. It already limits writes to the roots described above and keeps the
+  runner's entries read-only. Network access follows the runner's `executionIsolation.network`:
+  `deny` keeps `--unshare-net`, and `inherit` allows it. Codex does not enforce
+  `networkAccess: "restricted"` itself (measured with codex-cli 0.165.0); the value only tells the
+  model what to expect. The approval policy, the reviewer, the guard hook and Full Control's tool
+  rules are unchanged, so an escalation or permission request still reaches them. A read-only
+  turn keeps its own policy, because this boundary would let it write. The runner logs the
+  switch as `codex_command_sandbox_outer_boundary`.
+- Two things Codex's own sandbox protected inside its writable roots become writable to commands,
+  as they already are to Claude Code sessions in this boundary: the provider transcript directory
+  the boundary binds, and `.git` or `.codex` entries inside the worktree that are not
+  runner-owned.
+- Any other failure inside this boundary keeps Codex's policy and is only logged.
+- Without this boundary, the launch fails. Its `failed` status carries `launchFailure:
+  "codex_sandbox_unavailable"` (protocol v257), and a campaign shows that child as blocked work
+  for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry.
+
+Discovery runs `codex sandbox -- true` on the host as well. When it reports the same namespace
+denial, the Codex installation is unsupported with failure code `codex_sandbox_unavailable`. Its
+`unavailableReason` names the fix and appears in Machine settings and `get_agent_capabilities`,
+and `create_session` refuses it with that reason. Contexts other than native Linux are unchanged.
+
 ### Deleting the Session's Own Refs
 
 Git takes `packed-refs.lock` in the shared Git directory before it deletes any ref: a worktree's

@@ -547,6 +547,34 @@ test("a provider account switch hold waits for the Human and never wakes the par
   } finally { h.db.close(); }
 });
 
+test("a child whose command sandbox cannot start is blocked work for the person, not a retry (#3843)", () => {
+  for (const [launchFailure, expected] of [
+    ["codex_sandbox_unavailable", ["human", "unsupported_capability", "use_supported_capability"]],
+    // An untyped failure, or a code this control plane does not know, stays the Orchestrator's retry.
+    [undefined, ["orchestrator", "transient_failure", "none"]],
+    ["future_code", ["orchestrator", "transient_failure", "none"]],
+  ] as const) {
+    const h = fixture();
+    try {
+      h.svc.onSessionStatus("child", "failed", "Codex's command sandbox cannot start here", undefined, "r",
+        undefined, undefined, undefined, launchFailure);
+      assert.equal(h.db.sessionLaunchFailure("child"), launchFailure === "codex_sandbox_unavailable" ? launchFailure : null);
+      h.db.updateSessionStatus("root", "idle", 4);
+      h.recovery.maintain(Date.now());
+      const record = h.db.campaignRecovery.projection("root").records.find(item => item.action === "replace_worker")!;
+      assert.deepEqual([record.resource.sessionId, record.effectiveOwner, record.reason, record.requiredInput],
+        ["child", ...expected], String(launchFailure));
+      if (launchFailure === "codex_sandbox_unavailable") {
+        assert.equal(record.state, "waiting_human");
+        assert.equal(JSON.stringify(record).includes("sandbox cannot start"), false, "the record carries no runner text");
+        // A relaunch clears the typed reason with the failure it explained.
+        h.db.updateSessionStatus("child", "starting", 6);
+        assert.equal(h.db.sessionLaunchFailure("child"), null);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
 test("an idle Full Control parent continues unrelated work while a child waits for a human", () => {
   const h = fixture();
   try {

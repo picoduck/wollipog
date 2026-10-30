@@ -3,7 +3,7 @@ import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
 import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
-import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
+import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
@@ -4278,7 +4278,12 @@ export class SessionsService {
     if (isRetiredCodexExec(launch ?? {}) || (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.agentId))) {
       return fail(CODEX_EXEC_RETIRED_REASON, 409);
     }
-    if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
+    if (!launch) {
+      // An installed agent that cannot start sessions says why (#3843) instead of reading as absent.
+      const unavailable = this.db.unavailableAgentReason(req.runnerId, req.agentId);
+      if (unavailable) return fail(`agent '${req.agentId}' is unavailable on runner '${req.runnerId}': ${unavailable}`, 409);
+      return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
+    }
     const launchHarness = agentHarnessIdentityFor({
       id: req.agentId,
       driver: launch.driver,
@@ -15594,6 +15599,7 @@ export class SessionsService {
     controlPlaneLaunchId?: string,
     capacityWait?: RunnerCapacityBlocker,
     budgetCheckpoint?: import("@wollipog/protocol").CampaignBudgetUsageCheckpoint,
+    launchFailure?: unknown,
   ): void {
     const session = this.db.getSession(sessionId);
     if (!session) return;
@@ -15665,6 +15671,11 @@ export class SessionsService {
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
     this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now(), RUNNER_REPORTED_STOP);
+    // Only a code this control plane knows is kept; any later status write, such as a relaunch's,
+    // clears it.
+    if (status === "failed") {
+      this.db.setSessionLaunchFailure(sessionId, isSessionLaunchFailureCode(launchFailure) ? launchFailure : null);
+    }
     if (!childAttention && status === "queued" && capacityWait) {
       this.db.setSessionCapacityWait(sessionId, capacityWait);
     }

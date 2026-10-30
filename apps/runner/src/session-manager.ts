@@ -71,6 +71,7 @@ import type {
   ReadQueuedPromptMessage,
   ReadQueuedPromptResultMessage,
   RunnerCapacityBlocker,
+  SessionLaunchFailureCode,
   RunnerCapacityConfiguration,
   RunnerCapacityState,
   RunnerAutomaticAccountSwitchConfiguration,
@@ -155,7 +156,7 @@ import type {
   StopReason,
 } from "./drivers/driver.js";
 import { coalesceDriverTextDeltas, type TextDeltaCoalescer } from "./text-delta-coalescer.js";
-import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
+import { CodexAppServerResumeError, CodexCommandSandboxUnavailableError } from "./drivers/codex-app-server.js";
 import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
 import {
   applyClaudeSessionCatalog,
@@ -9627,7 +9628,8 @@ export class SessionManager {
       if (err instanceof CodexAppServerResumeError && err.retryable) {
         this.emitStatus(sessionId, "idle", `${errText(err)} — retry when the other app-server releases the thread`);
       } else {
-        this.emitStatus(sessionId, "failed", errText(err));
+        this.emitStatus(sessionId, "failed", errText(err), undefined, undefined, false,
+          err instanceof CodexCommandSandboxUnavailableError ? err.launchFailure : undefined);
       }
       retireUnlaunched();
       await this.cancelNewCloudHandoff(meta, hadCloudHandoffBeforeLaunch, "driver initialization failed", launchGeneration);
@@ -18165,6 +18167,7 @@ export class SessionManager {
     worktreePath?: string | null,
     capacityWait?: RunnerCapacityBlocker,
     finalProviderUsage=false,
+    launchFailure?: SessionLaunchFailureCode,
   ): void {
     const latchedBeforeFlush = this.active.get(sessionId)?.historyIntegrityFailure;
     this.flushTextDeltas(sessionId);
@@ -18227,6 +18230,7 @@ export class SessionManager {
       worktreePath,
       controlPlaneLaunchId: this.store.readMeta(sessionId)?.controlPlaneLaunchId,
       ...(checkpoint?{campaignBudgetCheckpoint:checkpoint}:{}),
+      ...(launchFailure && status === "failed" ? { launchFailure } : {}),
     });
     // Publish the matched turn at its actual start, without waiting for provider acceptance;
     // status-only messages cannot refresh the display-only follow-up facts at the control plane.

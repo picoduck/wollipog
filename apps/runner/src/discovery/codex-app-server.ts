@@ -144,14 +144,48 @@ export function wslCodexAppServerProbeArgs(distro: string, launch: ResolvedLaunc
   return { command: "wsl.exe", args: ["-d", distro, "--exec", launch.command, ...launch.args, "app-server", "--help"] };
 }
 
+export function nativeCodexCommandSandboxProbeArgs(launch: ResolvedLaunch): { command: string; args: string[] } {
+  return { command: launch.command, args: [...launch.args, "sandbox", "--", "true"] };
+}
+
+const USER_NAMESPACE_DENIED = /No permissions to create new namespace|unprivileged user namespaces/i;
+
+/** Fold the host's `codex sandbox -- true` result into a supported App Server row (#3843). Only a
+ * positive user-namespace denial makes Codex unsupported: the runner can stand in for its sandbox
+ * only inside its own bubblewrap, which needs the same namespaces. Any other failure, including a
+ * Codex whose `sandbox` subcommand has another shape, leaves the row as it was, and the launch
+ * probe still decides each session. */
+export function applyCodexCommandSandboxProbe(
+  compatibility: CodexAppServerCapabilities,
+  result: ProbeResult,
+): CodexAppServerCapabilities {
+  if (compatibility.status !== "supported" || result.timedOut || result.errorCode || result.code === 0) return compatibility;
+  if (!USER_NAMESPACE_DENIED.test(result.stderr)) return compatibility;
+  return {
+    ...compatibility,
+    status: "unsupported",
+    failure: {
+      code: "codex_sandbox_unavailable",
+      message: "Codex can't sandbox its commands on this host because the kernel doesn't let unprivileged processes create user namespaces. Allow them, then rediscover.",
+      retryable: true,
+    },
+  };
+}
+
 export async function probeNativeCodexAppServer(
   launch: ResolvedLaunch,
   version: string | undefined,
   observer: CodexProbeObserver = {},
+  platform: NodeJS.Platform = process.platform,
 ): Promise<CodexAppServerCapabilities> {
   const probe = nativeCodexAppServerProbeArgs(launch);
   const result = await run(probe.command, probe.args, { timeoutMs: 8000, maxBuffer: 256 * 1024, trackDescendants: true, ...observer });
-  return interpretCodexAppServerProbe(version, result);
+  const compatibility = interpretCodexAppServerProbe(version, result);
+  if (platform !== "linux" || compatibility.status !== "supported") return compatibility;
+  const sandbox = nativeCodexCommandSandboxProbeArgs(launch);
+  return applyCodexCommandSandboxProbe(compatibility, await run(sandbox.command, sandbox.args, {
+    timeoutMs: 8000, maxBuffer: 64 * 1024, trackDescendants: true, ...observer,
+  }));
 }
 
 export async function probeWslCodexAppServer(

@@ -5,6 +5,7 @@ import {
   validProviderHomeLaunchRefusal,
   validProviderHomeWait,
   isProviderLoginFailureCode,
+  isSessionLaunchFailureCode,
   PROVIDER_LOGIN_FAILURE_CODES,
   queueHoldRecoveryAction,
   sessionHolds,
@@ -115,7 +116,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 255);
+  assert.equal(PROTOCOL_VERSION, 257);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -330,8 +331,13 @@ test("a provider sign-in failure code is accepted only from the closed set (#351
   }
 });
 
-test("PROTOCOL_VERSION is 255", () => {
-  assert.equal(PROTOCOL_VERSION, 255);
+test("PROTOCOL_VERSION is 257", () => {
+  assert.equal(PROTOCOL_VERSION, 257);
+  // A v257 runner names a launch that failed because its command sandbox cannot start (#3843).
+  assert.equal(isSessionLaunchFailureCode("codex_sandbox_unavailable"), true);
+  for (const value of ["", "Command_Sandbox_Unavailable", "unknown_code", 1, null, undefined, {}]) {
+    assert.equal(isSessionLaunchFailureCode(value), false, JSON.stringify(value));
+  }
   // A v254 runner cannot continue a session's own worktree switch after its relaunch (#3810).
   assert.equal(runnerSupportsProtocol(254, "worktreeSwitchContinuation"), false);
   assert.equal(runnerSupportsProtocol(255, "worktreeSwitchContinuation"), true);
