@@ -178,6 +178,35 @@ export function campaignContainedOperation(request: PendingApproval, repositoryR
 }
 const sensitiveSubject = /\b(?:auth(?:entication)?|passwords?|secrets?|credentials?|tokens?|api[ _-]?key|oauth|identity|login|account|permission|access)\b/iu;
 const planningIntent = /\b(?:implement(?:ation)?|design|approach|schema|library|framework|test|mock|fixture|component|feature|architecture|provider|flow|validation|review|tradeoff|format|should)\b/iu;
+// A design form's answer is structurally one offered option, so it can carry no value back. There,
+// asking ABOUT credential handling ("copy the API key") is design (#3844); asking FOR a credential,
+// an identity, a sign-in or access is not. Everything else keeps the broader screen above.
+const designCredentialNoun = String.raw`(?:passwords?|passphrases?|secrets?|credentials?|api[ _-]?keys?|access[ _-]?tokens?|private[ _-]?keys?|cookies?|bearer|e-?mail(?:[ _-]?address(?:es)?)?)`;
+const designCredentialRequest = new RegExp([
+  // Disclosing a credential or identity to, or collecting one from, whoever answers.
+  String.raw`\b(?:paste|enter|provide|supply|reveal|show|print|share|give|tell|send\s+(?:me|us))\b.{0,80}\b${designCredentialNoun}`,
+  String.raw`\b(?:${designCredentialNoun}|tokens?)\b.{0,40}\b(?:values?|here|please|to\s+(?:me|us))\b`,
+  String.raw`\b(?:${designCredentialNoun}|tokens?)\s+(?:values?\s+)?(?:should|shall|will|can|do|does|may)\s+(?:I|we|you|(?:the|our)\s+(?:app|application|client|provider))\s+(?:use|enter|provide|supply|send|paste|choose|select)\b`,
+  // A real identity's credential, rather than credentials as a kind of data.
+  String.raw`\b(?:your|my|our|real|production|live|personal)\b.{0,50}\b${designCredentialNoun}`,
+  String.raw`\b(?:${designCredentialNoun}|tokens?)\b.{0,40}\b(?:your|my)\b`,
+  // Performing a sign-in, as opposed to a sign-in as the subject of the design.
+  String.raw`\b(?:sign|log)\s+(?:in|on)\b`, String.raw`\b(?:I|you|we|please)\s+(?:sign[ -]?in|log[ -]?in|authenticate|authorize)\b`,
+  String.raw`\b(?:authenticate|authorize)\b.{0,60}\b(?:me|your|my|account|device|browser|now)\b`, String.raw`\b(?:gh|railway|vercel|npm|aws)\s+(?:auth\s+)?login\b`,
+  // An option granting access, wider provider permissions or a lasting permission.
+  String.raw`\b(?:grant|give|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox|polic(?:y|ies)|limits?|protections?)\b`,
+  String.raw`\b(?:wider|broader|more|additional|extra|elevated|admin)\s+(?:provider\s+)?(?:access|permissions?|scopes?)\b`,
+  String.raw`\b(?:always|permanently|persistently|indefinitely)\s+(?:allow|approve|trust|grant|permit)\b`, String.raw`\ballow\s+(?:always|permanently)\b`,
+  String.raw`\b(?:lasting|persistent|permanent|standing|durable)\s+(?:permissions?|access|grants?|approvals?)\b`, String.raw`\b(?:chmod|chown|sudo)\b`,
+  // Values the form carries itself: credential-shaped literals and email addresses.
+  String.raw`\b(?:sk-[a-z0-9]{12,}|gh[pousr]_[a-z0-9]{12,})\b`, String.raw`[^\s@]+@[^\s@]+\.[a-z]{2,}`,
+].join("|"), "iu");
+/** Credential-store paths a design form names, matched only on path-like words so that the subject
+ * "credentials" stays discussable while "~/.codex/auth.json" or ".env" does not. */
+const designCredentialPath = (text: string) => text.split(/\s+/u).some((word) => {
+  const path = word.replace(/[.,;:!?)\]]+$/u, "");
+  return /[\\/]|^[.~]/u.test(path) && protectedPath.test(path);
+});
 
 /** Exact finite operation selectors shared by the runner's evidence collector and resolver.
  * This parses effects, never authorization; unresolved filesystem targets still fail closed. */
@@ -232,14 +261,18 @@ type ProtectedRequestClass = "secrets_and_sign_in" | "provider_access_expansion"
 
 /** Trusted is a caller-side fact derived from the normalized provider bridge or typed route,
  * not a field taken from a child-authored snapshot. Unknown sensitive forms fail closed.
- * Credential text is screened before every other class, so it always wins the classification. */
-function protectedRequestClass(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation: boolean): ProtectedRequestClass | null {
+ * Credential text is screened before every other class, so it always wins the classification.
+ * `designForm` is equally caller-side: set only where no answer can carry a value back (the
+ * typed implementation route, which selects one offered option id, or a root's own question,
+ * which is dismissed without applying any answer). */
+function protectedRequestClass(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation: boolean, designForm = false): ProtectedRequestClass | null {
   if (request.kind === "authentication") return "secrets_and_sign_in";
   if (request.runnerGuardrail) return "guardrail";
   if (request.kind === "question") {
     if (request.questions?.some((q) => {
       if (q.secret || q.inputFormat === "email") return true;
       const text = [q.id, q.header, q.question, q.context, ...q.options.flatMap((o) => [o.label, o.description])].join(" ");
+      if (designForm) return designCredentialRequest.test(text) || designCredentialPath(text) || (sensitiveSubject.test(text) && !planningIntent.test(text));
       return protectedAction.test(text) || credentialIdentity.test(text) || credentialValueChoice.test(text) || (sensitiveSubject.test(text) && (!verifiedPlanning || !planningIntent.test(text)));
     })) return "secrets_and_sign_in";
   } else {
@@ -327,14 +360,19 @@ export function resolveCampaignAuthority(input: {
     if (input.trustedSource !== "workflow_route") return result("human", "human_required", "unverified_intent");
     if (category === "implementation_question") {
       const snapshot = input.snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>;
-      if (campaignRequestProtected({ requestId: "", title: "", options: [], kind: "question", questions: [{ id: "", question: snapshot.question, options: snapshot.options }] }, true)) return declined("secrets_and_sign_in");
+      // The route normalizes the snapshot to text and options, and approval selects one option id.
+      if (protectedRequestClass({ requestId: "", title: "", options: [], kind: "question", questions: [{ id: "", question: snapshot.question, options: snapshot.options }] }, true, false, true)) return declined("secrets_and_sign_in");
     }
     return result("orchestrator", input.root ? "standing_authorization" : "campaign_delegation", "authorized_operation");
   }
   const generic = request!;
   const question = generic.kind === "question";
   const verifiedCode = input.trustedSource === "provider_tool" && repositoryCodeToolIntent(generic, input.repositoryRoot);
-  const screened = protectedRequestClass(generic, input.trustedSource === "provider_question", verifiedCode);
+  // A root's own question is dismissed without applying any answer, so it is a design form and a
+  // credential-design question becomes `root_questions`, whose notice names the typed route. A
+  // child's provider question can be answered with free text, so it keeps the broader screen.
+  const designForm = input.root && question && input.trustedSource === "provider_question";
+  const screened = protectedRequestClass(generic, input.trustedSource === "provider_question", verifiedCode, designForm);
   if (screened === "secrets_and_sign_in" || screened === "provider_access_expansion" || screened === "persistent_permissions") return declined(screened);
   // Runner guardrails and cost or limit pauses belong to budget and guardrail authority: human-only.
   if (screened === "guardrail" || (generic.kind && !["question", "permission", "policy_hook"].includes(generic.kind))) return result("human", "human_required", "protected_request");

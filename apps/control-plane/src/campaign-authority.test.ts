@@ -612,6 +612,52 @@ test("ambiguous credential-value choices are declined, never answered, even on t
   } finally { h.db.close(); }
 });
 
+test("a typed credential-handling design question is decided by the Orchestrator; one seeking a credential, sign-in or access is declined (#3844)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const design: WorkflowDecisionResourceSnapshot = { category: "implementation_question",
+      question: "Should importing a provider sign-in copy an API key, move an OAuth sign-in, or be unsupported?",
+      options: [{ optionId: "copy", label: "Copy the API key" }, { optionId: "move", label: "Move the OAuth sign-in" },
+        { optionId: "none", label: "Not supported" }], recommendedOptionId: "none" };
+    // The service entry point the request_workflow_decision route calls.
+    const ask = (requestId: string, resourceSnapshot: WorkflowDecisionResourceSnapshot, sessionId = "child") =>
+      h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot }, () => true);
+    // The root decides the same question through its own typed route, as its question notice says.
+    const rootAsked = await ask("root-import-design", design, "root");
+    assert.ok(rootAsked.ok, rootAsked.error ?? "root request failed");
+    assert.equal(rootAsked.data!.authorityEvaluation?.basis, "standing_authorization");
+    assert.equal(rootAsked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.ok(h.svc.resolveDescendantRequest("root", "root", rootAsked.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("root", rootAsked.data!.occurrenceId, { resourceSnapshot: design })).ok);
+    const asked = await ask("import-design", design);
+    assert.ok(asked.ok, asked.error ?? "request failed");
+    assert.equal(asked.data!.authority, "orchestrator");
+    assert.equal(asked.data!.authorityEvaluation?.basis, "campaign_delegation");
+    assert.equal(asked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", asked.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("child", asked.data!.occurrenceId, { resourceSnapshot: design });
+    assert.ok(consumed.ok, consumed.error ?? "consume failed");
+    const option = (label: string): WorkflowDecisionResourceSnapshot => ({ ...design, options: [{ optionId: "none", label: "Not supported" }, { optionId: "b", label }] });
+    for (const [requestId, snapshot] of [
+      ["key-value", { ...design, question: "What API key value should the importer use?" }],
+      ["email-value", option("Use dev@example.com for the profile")],
+      ["sign-in", option("Sign in to the provider now")],
+      ["grant", option("Grant the importer access to the provider account")],
+      ["lasting", option("Always allow the importer to read provider sign-ins")],
+    ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) {
+      const declined = await ask(requestId, snapshot);
+      assert.equal(declined.ok, false, requestId);
+      assert.equal(declined.status, 403, requestId);
+    }
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no declined decision is left for anyone to answer");
+    const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+    assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state]), [["child", "blocked"]]);
+  } finally { h.db.close(); }
+});
+
 test("a real parked root NDJSON provider resumes after its dismissed question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-root-authority-"));
   mkdirSync(join(root, "src")); writeFileSync(join(root, "src/authentication.ts"), "export const implementation = true;\n");

@@ -143,6 +143,58 @@ test("Full Control declines credentials, sign-in and access enlargement; nobody 
   declined(resolveCampaignAuthority({ ...base, snapshot, trustedSource: "workflow_route" }), "secrets_and_sign_in");
 });
 
+/** The live #3844 question: it chooses how a feature handles credentials and asks for none. */
+const importDesign = { category: "implementation_question" as const,
+  question: "Should importing a provider sign-in copy an API key, move an OAuth sign-in, or be unsupported?",
+  options: [{ optionId: "copy", label: "Copy the API key", description: "The importer copies the provider's API key into the managed profile." },
+    { optionId: "move", label: "Move the OAuth sign-in", description: "The importer moves the OAuth sign-in to the managed profile." },
+    { optionId: "none", label: "Not supported", description: "Importing a provider sign-in is refused." }], recommendedOptionId: "none" };
+const typed = (snapshot: WorkflowDecisionResourceSnapshot, override: Partial<Parameters<typeof resolveCampaignAuthority>[0]> = {}) =>
+  resolveCampaignAuthority({ ...base, snapshot, trustedSource: "workflow_route", ...override });
+
+test("a design question about credential handling is decided; one asking for a credential, sign-in or access is declined (#3844)", () => {
+  for (const root of [false, true]) decided(typed(importDesign, { root }), undefined, root ? "standing_authorization" : "campaign_delegation");
+  // The root's own question on the same design is dismissed like any other root question, whose
+  // notice names the typed route above, not recorded as credential blocked work.
+  const rootForm = question(importDesign.question, { questions: [{ id: "import", question: importDesign.question,
+    options: importDesign.options.map(({ label, description }) => ({ label, description })) }] });
+  declined(evaluate(rootForm, { root: true }), "root_questions");
+  const rootAsk = (label: string) => ({ ...rootForm, questions: [{ ...rootForm.questions![0]!, options: [{ label: "Not supported" }, { label }] }] });
+  for (const label of ["Paste the API key here", "Sign in to the provider now", "Grant the importer access to the provider account"]) {
+    declined(evaluate(rootAsk(label), { root: true }), "secrets_and_sign_in", label);
+  }
+  // A child's provider question keeps the existing screen: its answer can carry free text.
+  declined(evaluate(rootForm), "secrets_and_sign_in");
+  const option = (label: string) => ({ ...importDesign, options: [...importDesign.options.slice(0, 2), { optionId: "x", label }] });
+  for (const [label, snapshot] of [
+    ["an API key value", { ...importDesign, question: "What API key value should the importer use?" }],
+    ["which key", { ...importDesign, question: "Which API key should I use for the import?" }],
+    ["which email", { ...importDesign, question: "Which email address should I use for the imported profile?" }],
+    ["provide", option("Provide the API key so the importer can test it")],
+    ["share", option("Share the access token with the importer")],
+    ["your key", option("Copy your API key into the profile")],
+    ["production key", option("Copy the production API key into the profile")],
+    ["email value", option("Use dev@example.com for the profile")],
+    ["key literal", option("Copy sk-abcdefghijklmnop into the profile")],
+    ["credential path", option("Copy ~/.codex/auth.json into the profile")],
+    ["sign in", option("Sign in to the provider now")],
+    ["I log in", { ...importDesign, question: "Should I log in to the provider to import the sign-in?" }],
+    ["CLI login", option("Run gh auth login for the import")],
+    ["grant", option("Grant the importer access to the provider account")],
+    ["wider", option("Request wider provider permissions for the import")],
+    ["always allow", option("Always allow the importer to read provider sign-ins")],
+    ["lasting", option("Keep a persistent permission for the import")],
+    ["no planning", { ...importDesign, question: "Which credentials?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] }],
+  ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const root of [false, true]) declined(typed(snapshot, { root }), "secrets_and_sign_in", label);
+  // A form that does carry a secret or email field fails closed on every path, root included.
+  for (const field of [{ secret: true }, { inputFormat: "email" as const }]) for (const root of [false, true]) {
+    declined(evaluate(question(importDesign.question, { questions: [{ ...rootForm.questions![0]!, ...field }] }), { root }), "secrets_and_sign_in");
+  }
+  for (const root of [false, true]) declined(evaluate({ ...tool, kind: "authentication" }, { root }), "secrets_and_sign_in");
+  // Custom is unchanged: the same design question keeps its Custom owner.
+  assert.equal(typed(importDesign, { control: { mode: "custom" } }).basis, "custom_policy");
+});
+
 test("a persistent grant is never converted to anything but a one-time Orchestrator allow, and a grant offering none is declined", () => {
   decided(evaluate(tool), undefined);
   assert.ok(tool.options.some((o) => o.kind === "allow_always"), "the fixture offers a persistent option the Orchestrator cannot pick");
