@@ -165,6 +165,7 @@ if (signInFixture && runner.providerAccounts) {
       operationId: "login_fixture_duplicate", accountId: "work-2-1a2b3c4d", label: emailLabels ? "work.two@example.com" : "Work 2",
       provider: "claude", status: "failed", startedAt: Date.now(),
       error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+      failureCode: "account_already_on_machine",
     },
   ];
 }
@@ -275,7 +276,10 @@ if (fixtureParams.get("workspaces") === "long" && runner) {
     { id: "notes", name: "Research Notes With a Long Name for a Narrow Row", path: "D:\\archive\\2026\\research\\notes" },
   );
 }
-/** `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989). */
+/**
+ * `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989).
+ * `skills=long` adds a name that fits a phone row once the agent gives way, and one that never fits (#3526).
+ */
 const skillsScenario = fixtureParams.get("skills");
 let skillsFailures = skillsScenario === "fail" ? 1 : 0;
 /**
@@ -299,6 +303,9 @@ if (sshState && runner) {
 let failingSettingsSave: "capacity" | null = null;
 /** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */
 const busyMachine = fixtureParams.has("busy");
+/** `reconnect=hold` leaves Reconnect's request unanswered; `reconnect=fail` never reaches the server (#3525). */
+const reconnectOutcome = fixtureParams.get("reconnect");
+let reconnectRequests = 0;
 const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
   activeSessions: [
     { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
@@ -391,7 +398,11 @@ const skillsReport = () => ({
   desired: [],
   reported: {
     unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog",
-      providerAccountId: "claude-work" }],
+      providerAccountId: "claude-work" },
+    ...(skillsScenario === "long" ? [
+      { agentId: "custom-acp", name: "design-review", providerAccountId: "claude-work" },
+      { agentId: "custom-acp", name: "frontend-design-review-for-every-storefront-page", providerAccountId: "claude-work" },
+    ] : [])],
     removals: [
       { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
       { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
@@ -696,6 +707,9 @@ const client = {
   rediscover: async () => ({ ok: true as const }),
   reconnectBox: async (_boxId: string, force = false) => {
     if (busyMachine && !force) throw activeSessionsConflict();
+    reconnectRequests += 1;
+    if (reconnectOutcome === "fail") throw new TypeError("Failed to fetch");
+    if (reconnectOutcome === "hold") await new Promise(() => {});
     return { ok: true as const };
   },
   updateBoxRunner: async (_boxId: string, force = false) => {
@@ -714,6 +728,8 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
+      /** How many Reconnect requests reached the fixture's API (#3525). */
+      reconnectRequests(): number;
       /** status 0 is a request that never reached the server (the browser's TypeError). */
       setAddBoxOutcome(outcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" }): void;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
@@ -736,6 +752,7 @@ declare global {
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
+  reconnectRequests: () => reconnectRequests,
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },
   setAgentAvailabilityScenario: (scenario) => {
     if (!runner) return;

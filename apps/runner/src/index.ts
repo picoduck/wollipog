@@ -1,6 +1,7 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
-import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
-import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { assertLegacyReviewsDrained, retiredReviewReceipt } from "./retired-review-jobs.js";
+import { reviewRetirementPeerRefusal } from "@wollipog/protocol";
+import { configuredSessionWritablePaths } from "./review-trust.js";
 import { configuredCodexHomes } from "./review-trust.js";
 import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
@@ -57,7 +58,6 @@ import {
   type RegisterMessage,
   type ReprocessSessionMessage,
   type RunnerMetadata,
-  type SessionReviewCapability,
   type RunnerToControlPlane,
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
@@ -534,6 +534,9 @@ const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
+// Refuse unfinished legacy work before constructing any provider/session managers.
+assertLegacyReviewsDrained(config.dataDir);
+
 const configuredAgentDefinitions = config.agents.map((a) => {
   const driver = a.driver ?? "acp";
   // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
@@ -591,8 +594,6 @@ const metadata: RunnerMetadata = {
       ),
     },
     maxConcurrentSessions: config.maxConcurrentSessions,
-    campaignReview: config.executionIsolation.mode==="provider"?await discoverControlledReview(configuredAgentDefinitions.find((a)=>
-      a.driver==="claude-code" && (!a.context || a.context.kind==="native") && a.command==="claude")?.id):undefined,
     admission: config.admission,
     executionIsolation: config.executionIsolation,
   },
@@ -797,6 +798,7 @@ function sameAcpCapabilities(
 }
 
 let ws: WebSocket | null = null;
+let controlPlanePeerRefused = false;
 let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
 let policyHookRegistrationGeneration = 0;
@@ -1621,12 +1623,7 @@ function recoverStaleSessionCommands(): void {
 }
 
 sessions.setSend(sendUp);
-const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"campaign-review-jobs"),store,sendUp,
-  (jobId,agentId)=>sessions.reserveControlledReviewAdmission(jobId,agentId),(jobId)=>sessions.releaseControlledReviewAdmission(jobId));
-// A session's own cross-model review, run outside its sandbox (#3306). Linux only: job liveness is
-// read from /proc, and the protected session namespace it works around exists only there.
-// Nothing it runs may live where a session can write: project checkouts, provider account homes,
-// provider homes an agent's or session's environment names, and every session's provider homes.
+// Shared trusted-tool roots for review sessions.
 const sessionWritablePaths = () => configuredSessionWritablePaths({
   workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
   sessions: store.listSessions(), hostEnv: process.env,
@@ -1638,16 +1635,11 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
 const codexProtection = () => sessions.codexReviewerProtection();
 sessions.setReviewerInstallations(() => reviewerInstallations(agentsForControlPlane(),
   (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
-const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
-// One owner of every review mirror, so the bridge's fetches and review sessions' never race.
-const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
-const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
-  sessionReviewDependencies, undefined, reviewSnapshots);
-// Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
-const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
-  defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
-    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
-    codexProtection));
+const reviewDependencies = defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
+  codexProtection);
+const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), reviewDependencies.exec, log);
+const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store, reviewDependencies);
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
 sessions.setReviewSessions({
@@ -1705,16 +1697,6 @@ const mediaReviewers = new MediaReviewerDispatcher({
   log,
 });
 
-/** Discovery runs at every registration so an installed or removed controller is advertised. */
-function sessionReviewCapability(): SessionReviewCapability | undefined {
-  if (process.platform !== "linux") return undefined;
-  try {
-    return sessionReviewJobs.capability();
-  } catch (error) {
-    log(`session review discovery failed: ${errText(error)}`);
-    return undefined;
-  }
-}
 /** The review-session capability from the agents discovered so far (#3368, #3369). */
 function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
   if (process.platform !== "linux") return undefined;
@@ -1726,10 +1708,9 @@ function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability
   }
 }
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
-  const { sessionReview: _previous, reviewSession: _previousReviewSession, ...rest } = runtime;
-  const sessionReview = sessionReviewCapability();
+  const { sessionReview: _previous, campaignReview: _previousCampaignReview, reviewSession: _previousReviewSession, ...rest } = runtime;
   const reviewSession = reviewSessionCapability();
-  return { ...rest, ...(sessionReview ? { sessionReview } : {}), ...(reviewSession ? { reviewSession } : {}) };
+  return { ...rest, ...(reviewSession ? { reviewSession } : {}) };
 }
 
 function startTrackedSession(
@@ -2340,8 +2321,11 @@ function runCommandTask(kind: string, task: Promise<void>): void {
 }
 
 function handleCommand(msg: ControlPlaneToRunner): void {
+  if (controlPlanePeerRefused) return;
   switch (msg.type) {
-    case "registered":
+    case "registered": {
+      const refusal = reviewRetirementPeerRefusal(msg.protocolVersion);
+      if (refusal) { controlPlanePeerRefused = true; log(refusal); ws?.terminate(); break; }
       try {
         stagedRunnerCredential.promote();
       } catch (error) {
@@ -2415,6 +2399,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
       for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
       break;
+    }
     case "register_rejected":
       log(`registration rejected: ${msg.reason}`);
       // Keep the staged bytes for the reconnect loop. A transient rejection can be followed by a
@@ -2886,16 +2871,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       mediaReviewers.stop(msg.request);
       break;
     case "campaign_review_job":
-      runCommandTask("campaign_review_job",campaignReviewer.dispatch(msg));
+      sendUp(retiredReviewReceipt(config.dataDir, "campaign", msg.jobId, msg.nonce));
       break;
     case "cancel_campaign_review_job":
-      campaignReviewer.cancel(msg.jobId,msg.nonce);
+      sendUp(retiredReviewReceipt(config.dataDir, "campaign", msg.jobId, msg.nonce));
       break;
     case "session_review_job":
-      runCommandTask("session_review_job", sessionReviewJobs.dispatch(msg));
+      sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
       break;
     case "cancel_session_review_job":
-      sessionReviewJobs.cancel(msg.jobId, msg.nonce);
+      sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
       break;
     case "priced_session_cost":
       sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd, msg);
@@ -4228,6 +4213,7 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
 function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
+  controlPlanePeerRefused = false;
   controlPlaneProtocolVersion = null;
   automaticAccountSwitchConfigurationSynchronized = false;
   sessions.setAutomaticAccountSwitchAuthorityReady(false);
@@ -4262,7 +4248,7 @@ function connect(): void {
   });
 
   socket.on("message", (raw: Buffer) => {
-    if (ws !== socket) return;
+    if (ws !== socket || controlPlanePeerRefused) return;
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
     if (!msg) return;
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not
@@ -4332,8 +4318,6 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
   bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
-  // Running reviews continue detached and are recovered from their job files on restart.
-  bestEffort("stop session review polling", () => sessionReviewJobs.close());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.

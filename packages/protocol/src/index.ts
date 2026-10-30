@@ -3,7 +3,7 @@ import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } fro
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
 export * from "./review-settings.js";
-import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
+import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
  * Shared protocol types for Wollipog.
  *
@@ -755,13 +755,24 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      GitLab project. The runner reads and closes the issue with `glab` (a not-planned closure
 //      states its reason in a note), and a GitLab epic is its member checklist only. The control
 //      plane refuses GitLab closure or scope work on a pre-v249 runner. Publication stays GitHub-only.
-// 252: a worktree switch a session made itself continues automatically (#3810). The control plane
+// 250: a queue hold names the work it waits on that Background Work does not list (#3752):
+//      `unlistedJobs`, each a provisional launch or an unregistered task id, and the runner no
+//      longer counts a pending id whose job this conversation already ended. Display only; an
+//      older peer omits or ignores the field.
+// 253: provider sign-in failure codes (#3519): a failed `ProviderLoginView` may carry
+//      `failureCode` from the closed `PROVIDER_LOGIN_FAILURE_CODES`, first
+//      `account_already_on_machine` for a duplicate account the runner discarded. Its `error`
+//      sentence is unchanged. The control plane passes only a known code through and puts
+//      `unrecognized` in place of any other, and dashboards fall back to matching the sentence only
+//      when the code is absent (an older runner or control plane).
+// 254: retire native review jobs; new runners require the retirement-aware control plane (#3371).
+// 255: a worktree switch a session made itself continues automatically (#3810). The control plane
 //      marks a create/attach/select that the session's own agent credential requested with
 //      `requestedBySession`, and the runner then submits one continuation turn once the relaunch the
 //      switch needs has run in the selected worktree. Every isolation notice says whether that
 //      continuation will follow (`continuesAfterRelaunch`), and create and select now return the
 //      notice as attach always has. An older runner gets no flag and goes idle after the relaunch.
-export const PROTOCOL_VERSION = 252;
+export const PROTOCOL_VERSION = 255;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -771,6 +782,7 @@ export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
+export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
 export * from "./review-run.js";
@@ -1005,6 +1017,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v223 runner runs a session's own cross-model review outside its sandbox (#3306); the session
    * tools check the same floor against the connected control plane. */
   sessionReviewJob: 223,
+  /** Runner peer for Full Control production evidence authority; the exact private media contract
+   * is checked separately (supportsPacedVideoReviewPeer). */
+  pacedVideoReview: PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   /** v225 provider profile adoption and per-control-plane grants (#3239). */
   providerProfiles: 225,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
@@ -1032,8 +1047,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerHomeWait: 248,
   /** v248 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
   providerHomeForkRefusals: 248,
-  /** v252 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
-  worktreeSwitchContinuation: 252,
+  /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
+  worktreeSwitchContinuation: 255,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -1078,6 +1093,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   delegatedParentControl: 136,
   typedWorkflowDecisionDelegation: 139,
   mergeReviewEvidence: 243,
+  reviewSessionOnly: 254,
   agentAutomationCreation: 236,
   fullControlAuthority: 215,
   /** Bounded Full Control issue lineage, publication admission and verified closure. */
@@ -1224,6 +1240,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundJobEndedBy: 192,
   /** v247 releases a worktree or account handoff hold at once (`release_queue_hold`, #3752). */
   queueHoldRelease: 247,
+  /** v250 names a queue hold's work that Background Work does not list (`unlistedJobs`, #3752). */
+  queueHoldUnlistedJobs: 250,
+  /** v253 reports a failed provider sign-in's stable `failureCode` beside its `error` (#3519). */
+  providerLoginFailureCode: 253,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -3447,6 +3467,22 @@ export type ProviderLoginStatus =
   | "cancelled"
   | "timed_out";
 
+/** Protocol v253 (#3519): why a provider sign-in failed, as a stable code beside its `error`
+ * sentence, so clients decide what to offer without matching copy.
+ * - `account_already_on_machine`: the new account's identity matches an account already on the
+ *   Machine, so the runner discarded the sign-in.
+ * - `unrecognized`: the runner sent a code outside this set (a newer runner). The control plane puts
+ *   it in that code's place, so a code it does not know still reads as a plain failure rather than
+ *   as no code, which a client would read from the `error` sentence instead.
+ * A closed set that may grow: a client treats a code it does not know as a plain failure. */
+export type ProviderLoginFailureCode = "account_already_on_machine" | "unrecognized";
+
+export const PROVIDER_LOGIN_FAILURE_CODES: readonly ProviderLoginFailureCode[] = ["account_already_on_machine", "unrecognized"];
+
+export function isProviderLoginFailureCode(value: unknown): value is ProviderLoginFailureCode {
+  return PROVIDER_LOGIN_FAILURE_CODES.includes(value as ProviderLoginFailureCode);
+}
+
 /** Secret-minimized progress for one runner-owned provider login. Provider output, credential
  * paths, authorization responses, and tokens never enter this projection. */
 export interface ProviderLoginView {
@@ -3465,6 +3501,9 @@ export interface ProviderLoginView {
   sessionId?: string;
   /** Bounded operator-facing reason from Wollipog's closed failure vocabulary. */
   error?: string;
+  /** Protocol v253 (#3519): a failed sign-in's stable reason, sent with `error`, which stays
+   * unchanged for older clients. Absent from older runners and from endings stored before v253. */
+  failureCode?: ProviderLoginFailureCode;
   startedAt: number;
 }
 
@@ -6055,7 +6094,13 @@ export type SessionEventPayload =
     }
   | { kind: "status"; status: SessionStatus }
   | { kind: "turn_interrupted" }
-  | { kind: "error"; message: string }
+  | {
+      kind: "error";
+      message: string;
+      /** A problem the driver reported while the turn kept running (#3806), not a failed turn: a
+       * dashboard shows it without Retry Turn. Older peers ignore the flag and show a failed turn. */
+      nonFatal?: true;
+    }
   | {
       kind: "policy_transport";
       state: "open" | "recovered";
@@ -7400,10 +7445,23 @@ export interface SessionQueueHoldView {
    * unfinished job is recorded as killed at the requester's request, then the handoff and the
    * queued prompts run in order. Absent from runners older than v247. */
   canRelease?: true;
+  /** Work the hold waits on that has no unfinished job in Background Work (#3752), so the session
+   * can show it there: at most 20, sorted by id; `unfinishedBackgroundJobs` still counts all of
+   * them. Proceed Now ends it with the rest. Absent when there is none, and from runners older than
+   * v250. */
+  unlistedJobs?: QueueHoldUnlistedJob[];
   /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports a
    * finished background result still owed to the new conversation (#1779). Absent from runners
    * older than v191, whose restart discards the queue. */
   restartKeepsQueue?: true;
+}
+
+/** One unlisted id a queue hold waits on (#3752). `provisional`: a launch the provider has not yet
+ * confirmed as a task (`tool:<tool-use-id>`). `unregistered`: a task id the runner tracks as pending
+ * without a job record, such as one found in the provider's task files. */
+export interface QueueHoldUnlistedJob {
+  id: string;
+  kind: "provisional" | "unregistered";
 }
 
 export function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
@@ -7430,8 +7488,14 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
     ? ` (${hold.unfinishedBackgroundJobs === 1 ? "" : "the oldest, "}${backgroundLaunchTypeNoun(hold.oldestUnfinishedJob.launchType)}` +
       ` started at ${new Date(hold.oldestUnfinishedJob.startedAt).toISOString().slice(0, 16)}Z)`
     : "";
+  // Work no Background Work row shows is named as such (#3752), so nobody looks there for it in vain.
+  const unlisted = Math.min(hold.unlistedJobs?.length ?? 0, hold.unfinishedBackgroundJobs);
+  const notListed = unlisted === 0 ? ""
+    : unlisted === hold.unfinishedBackgroundJobs
+      ? hold.unfinishedBackgroundJobs === 1 ? ", which Background Work does not list" : ", none of which Background Work lists"
+      : `, ${unlisted} of which Background Work does not list`;
   return `${messages} ${cannot}: the provider must first ${move}, and that handoff waits for ${jobs}` +
-    ` with no terminal status${oldest}.`;
+    ` with no terminal status${oldest}${notListed}.`;
 }
 
 /** What clears a queue hold. Waiting is the ordinary way. When the runner bounds the wait
@@ -10421,11 +10485,11 @@ export type SessionWorktreeRequestMessage =
       branch: string;
       /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
       progress?: boolean;
-      /** Protocol v252: the session's own agent credential made this request (#3810). */
+      /** Protocol v255: the session's own agent credential made this request (#3810). */
       requestedBySession?: boolean;
     }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select"; path: string;
-      /** Protocol v252: the session's own agent credential made this request (#3810). */
+      /** Protocol v255: the session's own agent credential made this request (#3810). */
       requestedBySession?: boolean }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "retry_setup"; path: string }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "discard"; path: string;
@@ -10551,7 +10615,7 @@ export interface SessionWorktreeIsolationNotice {
   writableNow: boolean;
   /** True when the session's next launch binds the attached path into its writable boundary. */
   writableAtNextLaunch: boolean;
-  /** Protocol v252: the path is not writable now, the session asked for it from inside its own
+  /** Protocol v255: the path is not writable now, the session asked for it from inside its own
    * turn, and the runner continues that work by itself once the turn ends and the session has
    * relaunched in the selected worktree (#3810). Absent from older runners. */
   continuesAfterRelaunch?: boolean;

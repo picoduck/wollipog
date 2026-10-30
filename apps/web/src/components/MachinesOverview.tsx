@@ -1,4 +1,4 @@
-import { useId, useMemo, useState } from "react";
+import { useId, useMemo } from "react";
 import {
   MACHINE_CAPACITY_UNIT_NOTE,
   MACHINES_OVERVIEW_ALL_READY,
@@ -11,7 +11,7 @@ import {
 } from "../machines-overview.js";
 import type { MachineListEntry } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import type { MachineOperations } from "./MachineDetail.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
@@ -24,8 +24,8 @@ export interface MachinesOverviewProps {
   canManage: boolean;
   onOpen: (runnerId: string) => void;
   onRepair: (runnerId: string) => void;
-  /** Reconnects an SSH machine, confirming first when that interrupts its sessions; rejects on failure. */
-  onReconnect: (boxId: string) => Promise<void>;
+  /** The machines' requests in flight and their one Reconnect, shared with the machine detail (#3525). */
+  machines: MachineOperations;
 }
 
 /**
@@ -33,7 +33,7 @@ export interface MachinesOverviewProps {
  * #2986): which machine needs the person, and where there is room to run more. A phone has none;
  * its list is the overview, sorted by attention with every row's badge.
  */
-export function MachinesOverview({ entries, activeSessions, canManage, onOpen, onRepair, onReconnect }: MachinesOverviewProps) {
+export function MachinesOverview({ entries, activeSessions, canManage, onOpen, onRepair, machines }: MachinesOverviewProps) {
   const id = useId().replace(/:/g, "");
   const now = Date.now();
   const attention = machinesOverviewAttention(entries, activeSessions, canManage, now);
@@ -56,7 +56,7 @@ export function MachinesOverview({ entries, activeSessions, canManage, onOpen, o
         {attention.length > 0 ? (
           <div className="surface">
             {attention.map((item) => (
-              <AttentionRow key={item.entry.runnerId} item={item} onOpen={onOpen} onRepair={onRepair} onReconnect={onReconnect} />
+              <AttentionRow key={item.entry.runnerId} item={item} onOpen={onOpen} onRepair={onRepair} machines={machines} />
             ))}
           </div>
         ) : (
@@ -92,26 +92,14 @@ export function MachinesOverview({ entries, activeSessions, canManage, onOpen, o
 }
 
 /** A Needs Attention row (§5.2): the name and its badge, the top reason, and what resolves it. */
-function AttentionRow({ item, onOpen, onRepair, onReconnect }: {
+function AttentionRow({ item, onOpen, onRepair, machines }: {
   item: MachinesOverviewAttentionItem;
   onOpen: (runnerId: string) => void;
   onRepair: (runnerId: string) => void;
-  onReconnect: (boxId: string) => Promise<void>;
+  machines: MachineOperations;
 }) {
-  const { showToast } = useFeedback();
-  const [reconnecting, setReconnecting] = useState(false);
   const { entry } = item;
-  const reconnect = async () => {
-    if (!entry.box) return;
-    setReconnecting(true);
-    try {
-      await onReconnect(entry.box.boxId);
-    } catch (error) {
-      showToast(`Couldn't reconnect ${entry.name}.`, { tone: "error", detail: (error as Error).message });
-    } finally {
-      setReconnecting(false);
-    }
-  };
+  const operation = machines.operations[entry.runnerId];
   return (
     <div className="row row-2 machines-overview-row">
       <span className="row-body">
@@ -125,8 +113,9 @@ function AttentionRow({ item, onOpen, onRepair, onReconnect }: {
         <button type="button" className="btn sm" aria-label={`Repair Connection to ${entry.name}…`}
           onClick={() => onRepair(entry.runnerId)}>Repair Connection…</button>
       ) : item.action === "reconnect" ? (
-        <BusyButton className="btn sm" busy={reconnecting} progress={`Reconnecting ${entry.name}…`}
-          aria-label={`Reconnect ${entry.name}`} onClick={() => void reconnect()}>Reconnect</BusyButton>
+        <BusyButton className="btn sm" busy={operation === "reconnect"} progress={`Reconnecting ${entry.name}…`}
+          disabled={operation !== undefined && operation !== "reconnect"}
+          aria-label={`Reconnect ${entry.name}`} onClick={() => machines.reconnect(entry)}>Reconnect</BusyButton>
       ) : (
         <button type="button" className="btn sm" aria-label={`Review ${entry.name}`}
           onClick={() => onOpen(entry.runnerId)}>Review</button>

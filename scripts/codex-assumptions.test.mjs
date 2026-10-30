@@ -6,7 +6,7 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { acknowledgeUnavailable, collectResult, guardRangeResult, markdown, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
 import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
-import { CASES, hardeningRestorable, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
+import { CASES, fixtureHomeBase, hardeningRestorable, SANDBOX_CONTROL_ARGS, sandboxFailureDetail, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
 import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.ts";
 import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
@@ -41,6 +41,37 @@ test("only the measured namespace denial is eligible for acknowledgement, never 
   for (const result of [null, { ...denied, error: new Error("ETIMEDOUT") }, { ...denied, signal: "SIGTERM" },
     { ...denied, status: null }, { ...denied, status: 0 }, { ...denied, stderr: "bwrap: Operation not permitted" },
     { ...denied, stderr: "error: unrecognized subcommand sandbox" }]) assert.equal(sandboxNamespaceUnavailable(result), false);
+});
+
+test("the sandbox control uses the current `codex sandbox [OPTIONS] [COMMAND]...` form", () => {
+  // `codex sandbox linux -- ...` runs a program named `linux` on 0.155.1 and 0.166.0.
+  assert.deepEqual(SANDBOX_CONTROL_ARGS.slice(0, 2), ["sandbox", "--"]);
+  assert.ok(!SANDBOX_CONTROL_ARGS.includes("linux"));
+  assert.equal(SANDBOX_CONTROL_ARGS.at(-1), "printf PROBE_SANDBOX_READY");
+});
+
+test("the escalation fixture's Codex home leaves the temporary directory only for a throwaway HOME outside it", () => {
+  assert.equal(fixtureHomeBase("/opt/harness-probe/work/codex/0.166.0/tmp/s/home", "/tmp"), "/opt/harness-probe/work/codex/0.166.0/tmp/s/home");
+  assert.equal(fixtureHomeBase("/tmp/wollipog-codex-assumptions-x/home", "/tmp"), null);
+  assert.equal(fixtureHomeBase("/tmp", "/tmp"), null);
+  assert.equal(fixtureHomeBase("/tmpfoo/home", "/tmp"), "/tmpfoo/home");
+  assert.equal(fixtureHomeBase(undefined, "/tmp"), null);
+  assert.equal(fixtureHomeBase("relative/home", "/tmp"), null);
+});
+
+test("a failed sandbox control reports its exact cause, bounded and printable", () => {
+  assert.equal(sandboxFailureDetail({ status: 1, signal: null, stderr: "\nbwrap: setting up uid map: Permission denied\nmore\n" }), "exited 1: bwrap: setting up uid map: Permission denied");
+  assert.equal(sandboxFailureDetail({ status: null, signal: "SIGKILL", stderr: "" }), "killed by SIGKILL with no stderr");
+  assert.equal(sandboxFailureDetail({ status: null, error: Object.assign(new Error("x"), { code: "ETIMEDOUT" }), stderr: null }), "could not start (ETIMEDOUT) with no stderr");
+  assert.equal(sandboxFailureDetail({ status: 0, stderr: "" }), "exited 0 without the ready marker with no stderr");
+  assert.equal(sandboxFailureDetail(null), "no Linux sandbox on this platform");
+  assert.equal(sandboxFailureDetail({ status: 101, stderr: 'WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp"\nthread main panicked at sandbox.rs: could not exec helper\n' }),
+    "exited 101: thread main panicked at sandbox.rs: could not exec helper");
+  assert.equal(sandboxFailureDetail({ status: 101, stderr: "thread 'main' (2) panicked at linux-sandbox/src/linux_run_main.rs:1193:5:\nfailed to apply sandbox: Permission denied (os error 13)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }),
+    "exited 101: thread 'main' (2) panicked at linux-sandbox/src/linux_run_main.rs:1193:5: failed to apply sandbox: Permission denied (os error 13)");
+  assert.equal(sandboxFailureDetail({ status: 1, stderr: "WARNING: only a warning\n" }), "exited 1: WARNING: only a warning");
+  const long = sandboxFailureDetail({ status: 2, stderr: `\u001b[31m${"x".repeat(500)}` });
+  assert.ok(long.length < 430 && !long.includes("\u001b"));
 });
 
 test("acknowledged namespace unavailability succeeds operationally with visible unmeasured evidence; every other failure remains failing", () => {

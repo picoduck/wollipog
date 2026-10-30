@@ -86,7 +86,9 @@ export function reminderWakeReasonForEvent(
   if (payload.kind === "permission_request" ||
       (payload.kind === "status" && payload.status === "input_required")) return "approval";
   if (payload.kind === "question_request") return "question";
-  if (payload.kind === "error" || (payload.kind === "status" && payload.status === "failed")) return "failure";
+  // A non-fatal driver problem (#3806) leaves the turn running, so it is no failure to wake for.
+  if ((payload.kind === "error" && !payload.nonFatal) ||
+      (payload.kind === "status" && payload.status === "failed")) return "failure";
   if (payload.kind === "background_continuation_delivered") return "background_job";
   if (payload.kind === "agent_response_completed" ||
       (payload.kind === "agent_message" && payload.final === true)) return "agent_response";
@@ -608,8 +610,7 @@ export class Hub {
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "artifactSessionGuidance")) return msg;
     const session = this.db.getSession(sessionId);
     if (!session || session.runnerId !== runnerId) return msg;
-    const owner = this.db.sessionOwnerUser(sessionId);
-    const artifactUploads = this.db.artifactUploadPreference(owner?.userId);
+    const artifactUploads = this.db.artifactUploadPreference(this.db.artifactUploadPreferenceUser(sessionId));
     if (msg.type === "durable_session_command") return { ...msg, artifactUploads };
     if (msg.type === "start_session") return { ...msg, spec: { ...msg.spec, artifactUploads } };
     if (msg.type === "prompt_session") return { ...msg, artifactUploads };
@@ -617,11 +618,11 @@ export class Hub {
   }
 
   private syncSessionArtifactUploads(session: Pick<SessionView, "id" | "runnerId">, userId?: string): void {
-    const owner = this.db.sessionOwnerUser(session.id);
-    if (userId && owner?.userId !== userId) return;
+    const owner = this.db.artifactUploadPreferenceUser(session.id);
+    if (userId && owner !== userId) return;
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(session.runnerId), "artifactSessionGuidance")) return;
     this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
-      preference: this.db.artifactUploadPreference(owner?.userId) });
+      preference: this.db.artifactUploadPreference(owner) });
   }
 
   syncArtifactUploads(userId?: string, runnerId?: string): void {

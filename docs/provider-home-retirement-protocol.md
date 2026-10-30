@@ -308,8 +308,8 @@ PR/exact head, latest Claude Opus/high and read-only snapshot. Follow `using-wol
 brief, receive the continuation when idle, read the validated verdict and report, and independently
 adjudicate findings before pushing fixes and requesting delta rounds. Preserve the four-valid-round
 epoch/two-counted-attempt-per-round limits and actual admission/cost/refusal receipts; extra rounds
-need the exact `review_round_extension` decision. The older `request_cross_model_review` bridge is
-a version-only fallback, never an admission or budget workaround. No alternate native reviewer.
+need the exact `review_round_extension` decision. The older bridge and campaign review jobs are retired; upgrade unsupported peers and use review
+sessions, never an admission or budget workaround. No alternate native reviewer.
 Required exact-head CI, human per-PR merge consent, exact typed parent merge decision, actual
 merge-group MERGED and separate human/typed branch-deletion consent remain. Use Refs #3157; closure
 stays parent-owned. No stack operations, settings/auth/grant expansion or real-credential retirement.

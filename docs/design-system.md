@@ -3304,8 +3304,8 @@ follows these rules so it never crowds out the conversation it asks about:
   `Ban` on the card, and Choose Another Account… leaves that request's footer. With no other account
   the dialog is the compact No Other Accounts state with Open Connections. While a sign-in
   runs, Cancel Sign-In is the only button, the sentence carries the sign-in's status, and the runner's
-  sign-in renders in the body without repeating the account, so Open Provider Sign-In and the code
-  field are in view. An agent
+  sign-in renders in the body without repeating the account, so Open Provider Sign-In, the device
+  code in a code well (§11.7) with its icon Copy Device Code (#3521), and the code field are in view. An agent
   with several sign-in methods lists them as ChoiceRows with their descriptions visible and one
   Start Sign-In. A machine-owner-only Start Sign-In is disabled with its reason as the card's
   foot-note. No control in the card has a `title`: every name is visible or is its accessible name.

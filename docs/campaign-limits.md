@@ -90,63 +90,30 @@ not intercept arbitrary shell subprocesses or turn their cost into managed usage
 are outside the supported protected-worker contract. Provider child usage already included in a
 parent total is not billed twice; independently reported managed sessions count separately.
 
-## Required Controlled Native Review
+## Review Sessions and Historical Review Jobs
 
-The optional human-minted `budgetAuthority.controlledReview` binds the exact
-`native_opus_5_5_high_read_only` profile, audited installed controller SHA-256, native executable
-SHA-256, Claude CLI 2.1.296, existing runner-default Claude account, and provider admission agent
-identity. It requires a campaign concurrency ceiling; cost and tool-call ceilings are optional,
-because every review job reserves its own finite cost and tool-call bound, which is metered and
-charged to the campaign whether or not the campaign has a ceiling (#2940). Numeric protocol218
-alone does not establish this capability; the runner must advertise the matching `campaignReview`
-descriptor. Other versions, execution-isolation contexts and unknown pricing fail closed. No
-installed skill, account, hosting setting or permission is edited by this adapter.
+Campaign members use `request_review_session` (`wollipog review session run`) for their own
+pushed PR. Admission reserves campaign allowance and actual managed Session usage settles against
+it, including unsuccessful attempts. The reviewer's exact harness/model/effort, read-only snapshot
+and round/attempt limits remain enforced. Review approval grants no human approval, merge authority
+or passing checks. Optional review-session citations at merge gates are verified by the server.
 
-`run_campaign_review_job` (CLI `campaign review --input '<json>'`) accepts `requestId`, `workItemId`,
-`pullRequest: {repository,number}`, `baseSha`, `headSha`, `costUsd`, `toolCalls`, and an untrusted
-`brief`. The assigned work item, authorized issue scope, recorded PR, same runner/workspace,
-owned clean worktree and canonical GitHub REST base/head must match. Reservations and dispatch
-identity commit atomically before launching. A repeated identical request reads the existing job;
-it cannot launch another provider. `get_campaign_review_job` / `campaign review-job <job-id>`
-reads its receipt metadata without new spending, including after the allowance stops.
-`list_campaign_review_jobs` / `campaign review-jobs` also reads terminal jobs, with keyset
-`afterJobId` pagination and a limit of 1–100 (default 25). Read authorization rechecks the current
-root audience, authorized repository/issue, durable work-item attempt and source-session lineage.
-Metadata contains the profile, epoch, round/attempt, validity/consumption facts and usage settlement,
-never a brief or provider transcript. Separate `get_campaign_review_report` / `campaign review-report`
-returns only a machine-valid controller report for independent adjudication, bound to its receipt.
+Protocol 254 retires the older bridge and campaign review job tools, CLI commands and native
+executors. Follow the [upgrade order](./agent-control.md#retired-review-jobs): drain with the prior
+runner, upgrade the control plane, then upgrade the runner. New runners explicitly refuse older
+control planes and unfinished or unverified legacy execution. Drained terminal unpriced receipts
+permit upgrade and replay unchanged; they retain unknown costs and reservations. Reconnect never redispatches a legacy
+job. Cancellation does not refund possible launched usage.
 
-The runner invokes the unchanged installed controller with its exact model, high effort,
-Read-only tools, pinned patch, independent coverage validation and fresh provider session. Private
-runner artifacts hold raw stream bytes and lifecycle summaries. Only authenticated owning-runner
-messages can report cost; no agent route accepts usage JSON. Provider list-price totals and
-model/token/cache provenance must agree. These are **estimates**, not exact invoice amounts.
-Unsuccessful paid attempts also consume allowance. Durable per-PR/base epochs enforce four valid
-rounds and two launched attempts per round across replay/restart. Recovery validates the same
-completed transcript without relaunching a provider; ambiguous or unpriced termination keeps
-capacity reserved and blocks protected admission. Host/provider slot admission is also required.
-A replay of an already admitted live job retains its lease even when unrelated sessions are
-waiting. A restart in the durable pre-dispatch preparation phase reports known-zero `not_launched`
-without consuming an attempt or relaunching; persisted launch intent remains conservative.
-Recovery repeats the current dispatch admission checks against the same durable request. An
-unsupported peer receives neither native dispatch nor cancellation frames; possible charges stay
-reserved and protected admission stops. A supported peer cancels jobs whose authority, owner,
-scope, profile or applicable limits no longer admit them.
-Each independent job contributes once to its original work-item attempt and the campaign cost
-summary as well as the allowance ledger. Replacement attempts and deleted workers cannot refund
-that charge. Pending/unpriced review usage remains unavailable rather than a zero-cost worker;
-a durable refusal before any provider launch is the distinct known-zero case.
-Server-owned positive cost deltas also persist against the dispatch owner's UTC day, surviving
-root deletion and receipt replay. A daily limit enabled later therefore cannot erase prior native
-spending. Enabling that unsupported boundary while a job runs cancels it and stops admission.
+Historical campaign job ledgers, immutable dispatch-owner daily costs, receipts and archive reads
+remain. Only authenticated owning-runner updates can settle them; duplicate receipts cannot charge
+again, and old charges survive root/worker deletion. Missing or unpriced usage remains unavailable
+with its reservation retained. No agent supplies a cost JSON assertion or repairs accounting by
+deleting state. A human must replace an obsolete `budgetAuthority.controlledReview` boundary;
+retirement grants no new authority, profile, budget, sign-in or provider access.
 
-This initial native path conservatively refuses organization daily limits and inherited tighter
-session limits, whose accounting adapters are not integrated into this job path. It never bypasses
-them. The supported path is an explicitly authorized campaign envelope without those additional
-limits, the exact matching native profile, and available host/provider capacity. The native path
-requires a user-owned root so its immutable dispatch-owner charge scope is known. Integrated live
-cost, dispatch and zero-prompt proof remains a separate prerequisite before claiming production
-readiness; parser fixtures and manual legacy reviews do not establish it.
+The removed executors make extra unsandboxed admission-context recording for legacy jobs moot.
+Current review sessions retain their own admission and usage evidence.
 
 Managed evidence workers retain the active preflight snapshot (including dispatch generation).
 After normal terminal usage settlement, `campaignBudgets.completedAttestation(sessionId)` returns

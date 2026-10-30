@@ -16,7 +16,7 @@ a future installation. Other session-writable executable locations remain refuse
 An installation that contains a requested writable worktree, cache or state root also fails with
 both paths instead of silently making that root read-only. Use a dedicated installation directory.
 
-Both review sessions and the older bridge accept the conventional
+Review sessions accept the conventional
 `~/.codex/packages/standalone` installation based on that launch invariant. Trust still rejects
 other-user ownership, session-writable locations outside that exception, world-writable paths
 and shared writable groups. A writable user-private group is accepted only when the system

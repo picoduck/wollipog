@@ -61,9 +61,8 @@ review epoch. Exhausted rounds require the exact `review_round_extension` decisi
 owner is human and Full Control does not delegate it. With protocol 232 or later, campaign review
 sessions reserve allowance before launch and record actual Session usage against it. Exhausted,
 stopped or unavailable allowances refuse admission with a reason; original human cost ceilings
-still apply across attempts. Use the older runner bridge
-only for an unavailable version, never to bypass those limits or a missing reviewer. An explicit
-human-approved native review exception must remain disclosed as such.
+still apply across attempts. The older bridge and controlled campaign review jobs are retired.
+Upgrade unsupported peers; never use a native subprocess to bypass an admission or budget refusal.
 
 Run the required cross-model review using the installed workflow's exact reviewer model/effort,
 read-only contract, attempt limits and private ledger. Independently adjudicate every finding.
@@ -71,19 +70,12 @@ Delegated review does not permit extra attempts after an exhausted limit or trea
 attempt as valid. External unmetered reviewers are unsupported for production admission when
 managed budget reservations are required; do not disguise an ordinary CLI review as accounted work.
 
-The installed Codex cross-model-review runner launches its controlled Claude Opus 5.5 high reviewer
-as a native subprocess. A manual launch outside supported campaign admission remains unaccounted
-for protected admission purposes; report its actual raw costs and invalid attempts, never zero
-cost. Main includes the #2936 controlled native adapter described in `docs/campaign-limits.md`.
-Its availability requires the actual registered `campaignReview` profile, matching audited
-controller/executable, human-established controlled-review budget authority and available limits;
-a protocol number or merged feature code proves none of those. Preserve the installed runner's
-strict Read-only/dontAsk contract, full pinned patch and tracked-path catalog, exact harness/model/
-effort, coverage validation, no helper or MCP tools, and four-valid-round/two-attempt limits with
-a 30-minute attempt timeout including infrastructure. Do not substitute a matching model on a
-different harness, edit installed guardrails, change campaign settings or invent accounting.
-#2939 must prove actual integrated delivery, cost and zero-prompt behavior before production
-readiness is claimed. This policy alignment grants no live configuration or paid-launch authority.
+Hosted review sessions preserve the required harness/model/effort, read-only snapshot, coverage
+contract and attempt limits. Native reviewer subprocesses outside managed Session accounting remain
+unaccounted for protected admission; disclose their actual raw cost and invalid attempts. Retirement
+adds no native fallback or paid-launch authority. Drain historical jobs with their prior runner and
+follow the control-plane-first transition in `docs/agent-control.md`; never update the hosting stack
+from this session. Old grants and unknown charges require their existing human/accounting recovery.
 
 Before merge, verify the reviewed head equals the pushed head and required CI passed on that SHA.
 The required check is `Typecheck, Test & Sidecar Bundle`; an empty required list into `main` with

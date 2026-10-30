@@ -955,6 +955,101 @@ test("Reconnect resolves an offline SSH machine, confirming first when it would 
   }
 });
 
+/** #3525: the overview's Reconnect and the machine detail's are one action, with one busy state. */
+const offlineBuild: BoxView = { ...buildBox, status: "offline" };
+type ReconnectSurface = "overview" | "detail";
+const mountReconnect = (surface: ReconnectSurface, reconnectBox: ApiClient["reconnectBox"]) => mount({
+  ...(surface === "detail" ? { view: machineView("build") } : {}),
+  runners: [studio],
+  boxes: [offlineBuild],
+  client: { reconnectBox } as Partial<ApiClient>,
+});
+const overviewReconnect = (body: HTMLElement) => attentionRows(body)
+  .find((item) => item.querySelector(".row-title")?.textContent === "Build Box")!.querySelector<HTMLButtonElement>("button")!;
+/** The offline notice's Reconnect in Build Box's detail. */
+const detailReconnect = (body: HTMLElement) => [...machineDetail(body)!.querySelectorAll<HTMLButtonElement>(".notice button")]
+  .find((button) => button.textContent?.includes("Reconnect"))!;
+async function pressReconnect(view: Awaited<ReturnType<typeof mount>>, surface: ReconnectSurface) {
+  const button = surface === "overview" ? overviewReconnect(view.body) : detailReconnect(view.body);
+  await act(async () => button.click());
+  await settle();
+}
+const toastTexts = (body: HTMLElement) => [...body.querySelectorAll<HTMLElement>(".toast")]
+  .map((toast) => [toast.querySelector(".toast-message")?.textContent, toast.querySelector(".toast-detail")?.textContent]);
+
+for (const surface of ["overview", "detail"] as const) {
+  test(`a Reconnect that fails from the ${surface} reads Couldn't Reconnect with the SSH failure sentence, never the raw error`, async () => {
+    for (const [failure, sentence] of [
+      // The browser's words for a request that never reached the control plane.
+      [new TypeError("Failed to fetch"), "Wollipog couldn't be reached. Check the connection, then try again."],
+      [new ApiError("Bad Gateway", 502), "Wollipog couldn't start connecting to me@build. Try again."],
+    ] as const) {
+      const view = await mountReconnect(surface, async () => { throw failure; });
+      try {
+        await pressReconnect(view, surface);
+        assert.deepEqual(toastTexts(view.body), [["Couldn't reconnect Build Box.", sentence]], failure.message);
+      } finally {
+        await view.unmount();
+      }
+    }
+  });
+
+  test(`Reconnect from the ${surface} names the sessions it would interrupt, and keeping them sends no forced request`, async () => {
+    const calls: boolean[] = [];
+    const view = await mountReconnect(surface, async (_boxId: string, force = false) => {
+      calls.push(force);
+      throw new ApiError("2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
+        activeSessionCount: 2,
+        activeSessions: [{ title: "Fix the build", status: "running" }, { title: "Write the release notes" }],
+      });
+    });
+    try {
+      await pressReconnect(view, surface);
+      const confirmation = [...view.body.querySelectorAll<HTMLElement>('[role="alertdialog"], [role="dialog"]')]
+        .find((candidate) => candidate.textContent?.includes("Interrupt Sessions and Reconnect"))!;
+      assert.ok(confirmation, "the interruption asks first");
+      assert.equal(confirmation.querySelector(".confirmation-message")?.textContent,
+        "Reconnecting this runner will interrupt 2 active sessions.");
+      assert.deepEqual([...confirmation.querySelectorAll(".confirmation-rows .row-title")].map((title) => title.textContent),
+        ["Fix the build", "Write the release notes"]);
+      await act(async () => [...confirmation.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent?.trim() === "Cancel")!.click());
+      await settle();
+      assert.deepEqual(calls, [false], "keeping the sessions sends no forced request");
+      assert.deepEqual(toastTexts(view.body), [], "and is not a failure");
+      const button = surface === "overview" ? overviewReconnect(view.body) : detailReconnect(view.body);
+      assert.equal(button.getAttribute("aria-busy"), null, "Reconnect is idle again");
+    } finally {
+      await view.unmount();
+    }
+  });
+}
+
+test("a Reconnect started from the overview is busy in the machine's detail, which sends no second request", async () => {
+  const calls: boolean[] = [];
+  const answer = deferred();
+  const view = await mountReconnect("overview", async (_boxId: string, force = false) => {
+    calls.push(force);
+    await answer.promise;
+    return {} as never;
+  });
+  try {
+    await pressReconnect(view, "overview");
+    assert.equal(overviewReconnect(view.body).getAttribute("aria-busy"), "true");
+    await act(async () => row(view.body, "Build Box").click());
+    await settle();
+    assert.equal(detailName(view.body), "Build Box");
+    assert.equal(detailReconnect(view.body).getAttribute("aria-busy"), "true", "the detail shows the overview's Reconnect");
+    await pressReconnect(view, "detail");
+    assert.deepEqual(calls, [false], "one request");
+    await answer.resolve();
+    assert.equal(detailReconnect(view.body).getAttribute("aria-busy"), null, "idle once it answers");
+    assert.deepEqual(toastTexts(view.body), []);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("on a desktop, a machine removed while another tab is open is Machine Not Found when Back returns to it", async () => {
   const view = await mount({ view: { name: "runners", section: "machines", machineId: "alpha" } });
   try {

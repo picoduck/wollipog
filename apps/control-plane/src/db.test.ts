@@ -2132,6 +2132,49 @@ test("provider sign-in projections are validated, version-gated, and replace ato
   assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
 });
 
+test("a failed sign-in's failure code is only ever one from the closed set, and its error is validated as before (#3519)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const duplicate = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude" as const,
+    status: "failed" as const,
+    expectsCode: false,
+    error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+    startedAt: 500,
+  };
+  const stored = () => db.getRunner("runner-1")?.providerLogins?.[0];
+  db.registerRunner(meta({ providerLogins: [duplicate] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  assert.deepEqual(stored(), duplicate, "a login without the code, from an older runner, is stored as it was");
+  assert.equal(stored()?.failureCode, undefined);
+
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: "account_already_on_machine" }], 525);
+  assert.deepEqual(stored(), { ...duplicate, failureCode: "account_already_on_machine" }, "the known code passes with its sentence");
+
+  // A code outside the closed set never passes, and is not simply dropped either: without a code the
+  // dashboard would match this duplicate sentence and show Already on This Machine for what the
+  // newer runner reported as some other failure. `unrecognized` keeps it a plain failure.
+  for (const failureCode of ["account_already_on_this_machine", "", 7, { code: "account_already_on_machine" }]) {
+    db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode } as never], 550);
+    assert.deepEqual(stored(), { ...duplicate, failureCode: "unrecognized" },
+      `an unknown code is replaced, and the login and its sentence kept: ${JSON.stringify(failureCode)}`);
+  }
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: null } as never], 560);
+  assert.deepEqual(stored(), duplicate, "a null code reads as none");
+  db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, status: "awaiting_code", error: undefined, failureCode: "account_already_on_machine",
+  }], 575);
+  assert.equal(stored()?.failureCode, undefined, "only a failed sign-in carries a failure code");
+
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "x".repeat(501),
+  }], 600), /provider sign-in inventory/, "the error sentence is still validated beside a code");
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "bad\u0000sentence",
+  }], 625), /provider sign-in inventory/);
+});
+
 test("machine sign-in dismissals persist per user, runner, and completed attempt", () => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-login-dismiss-"));
   const location = join(temp, "control-plane.db");
@@ -2661,6 +2704,26 @@ test("a queue hold keeps the runner's word that it can be released now (#3752)",
   const unreleasable = db.getSession("not-releasable-hold")!;
   assert.equal(unreleasable.queueHold?.canRelease, undefined, "only an exact true is kept");
   assert.doesNotMatch(unreleasable.holds?.[0]?.recoveryAction ?? "", /release_queue_hold/u);
+});
+
+test("a queue hold keeps the unlisted work it waits on, dropping malformed entries (#3752)", () => {
+  const db = withRunner();
+  const unlistedJobs = [{ id: "tool:toolu_watch", kind: "provisional" as const }, { id: "b5p3g2lyb", kind: "unregistered" as const }];
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 2, unlistedJobs,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "unlisted-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("unlisted-hold")!;
+  assert.deepEqual(held.queueHold?.unlistedJobs, unlistedJobs);
+  assert.match(held.holds?.[0]?.reason ?? "", /none of which Background Work lists\.$/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "malformed-unlisted-hold", status: "queued",
+    queueHold: { ...queueHold, unlistedJobs: [{ id: "", kind: "provisional" }, { id: "x", kind: "other" }, unlistedJobs[0]] as never },
+  }), "runner-1", 6_000);
+  const malformed = db.getSession("malformed-unlisted-hold")!;
+  assert.equal(malformed.queueHold?.holdId, "worktree-rebind:5000", "the hold itself is kept");
+  assert.deepEqual(malformed.queueHold?.unlistedJobs, [unlistedJobs[0]]);
 });
 
 test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {

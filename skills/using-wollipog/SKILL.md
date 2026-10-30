@@ -362,18 +362,30 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   `review session cancel` stops one. A review session takes no messages; request a new one after
   pushing a new head. An upvote grants no merge authority or exemption from exact-head CI.
 
-## Cross-Model Review Through the Runner (Fallback)
+## Review Session Compatibility and Merge Evidence
 
-Use the older bridge only when the runner predates review sessions or refuses them with a version
-reason: `wollipog review run --repo <owner/name> --pr <number> --head <sha> --brief-file <path>
---json` (MCP `request_cross_model_review`). It runs the installed controller against a private
-snapshot of your own pushed pull request. Poll `review get <job-id> --json`
-(`get_cross_model_review`) every minute or two until `terminal`, then read its summary, report and
-read-only ledger and adjudicate the findings. Later rounds reuse the brief and review deltas;
-`--scope full --full-reason <text>` requests a full review. Controller round/attempt limits apply.
-A campaign member with an allowance cannot use this bridge; it requests its own review session
-through `request_review_session` instead. Missing reviewer/trust, admission, budget or review-limit refusals are
-blockers; do not switch routes or launch a reviewer inside the session to evade them.
+The older review bridge and controlled campaign review jobs are retired. Their old tool names
+and CLI spellings refuse with review-session guidance. Upgrade unsupported peers; do not launch
+a native reviewer to bypass trust, admission, budget or review-limit refusals.
+
+Protocol 254 requires the retirement-aware control plane for new runners. Before upgrading,
+finish or cancel legacy jobs using their prior runner and preserve their final receipts and usage.
+Upgrade the control plane first, then the runner. New runners refuse unfinished or unverified
+legacy execution without changing records or starting a controller. Drained terminal unpriced
+receipts permit upgrade and replay unchanged, retaining unknown cost and reservations. Older
+runners may not re-send a lost finished result on cancellation; upgrading delivers the historical
+receipt without redispatch. Reconnect never redispatches those
+jobs. Missing usage remains unknown, with campaign reservations retained. A human must replace
+an obsolete controlled-review boundary; this migration never grants new authority or budget.
+
+A `pr_merge` snapshot may optionally cite `reviewSessionId`, the immutable attempt that
+upvoted its exact head (protocol 243+). The server checks the requester's own run, repository,
+PR, head and valid UPVOTE. A newer valid UPVOTE or DOWNVOTE supersedes it; invalid, cancelled,
+failed and unfinished attempts do not. Read the exact decision's server-derived `reviewEvidence`
+with `get_workflow_decision` before relying on it. A refusal names the mismatch or superseding
+session and head. Citation is optional and grants no merge authority, human approval or passing CI.
+Authorization rechecks it immediately before action. Record-only reconciliation of a proven
+completed merge preserves the original action without authorizing another one.
 
 ## Creating an Automation With Human Approval
 

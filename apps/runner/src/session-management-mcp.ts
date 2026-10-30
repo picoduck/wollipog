@@ -1,3 +1,4 @@
+import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
 import { createHash } from "node:crypto";
@@ -317,19 +318,7 @@ async function campaignBudgetCompatibilityError(deps:McpDeps):Promise<ToolResult
     actual=compatibility.data?.protocolVersion;
   }
   const required=RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission;
-  return Number.isInteger(actual) && actual!>=required?null:controlPlaneUpdateRequired(needsNewerWollipog("Campaign budget and review jobs need"),required,actual);
-}
-
-async function sessionReviewCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  let actual = deps.controlPlaneProtocolVersion;
-  if (!Number.isInteger(actual)) {
-    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
-    if (!compatibility.ok) return errorResult(wollipogSupportUnverified("cross-model review through the runner", compatibility.message));
-    actual = compatibility.data?.protocolVersion;
-  }
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob;
-  return Number.isInteger(actual) && actual! >= required ? null
-    : controlPlaneUpdateRequired(needsNewerWollipog("Cross-model review through the runner needs"), required, actual);
+  return Number.isInteger(actual) && actual!>=required?null:controlPlaneUpdateRequired(needsNewerWollipog("Campaign budgets need"),required,actual);
 }
 
 async function reviewSessionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -519,8 +508,7 @@ async function workflowDecisionChildMessageCompatibilityError(deps: McpDeps): Pr
       "Resolve without childMessage and send it with prompt_session, or update Wollipog."), required, actual);
 }
 
-/** A pre-v242 control plane drops an unknown intendedClosures and creates the merge decision
- * without reading GitHub, so the requester would believe its closures were checked (#3713). */
+/** A citation must never be silently dropped by an older control plane. */
 async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps): Promise<ToolResult | null> {
   if (args?.resourceSnapshot?.category !== "pr_merge" || args.resourceSnapshot.reviewSessionId === undefined) return null;
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.mergeReviewEvidence;
@@ -535,6 +523,7 @@ async function mergeReviewEvidenceCompatibilityError(args: Json, deps: McpDeps):
       "Update Wollipog before citing a review session; this citation was not submitted."), required, actual);
 }
 
+/** A pre-v242 control plane drops intendedClosures without checking GitHub (#3713). */
 async function intendedClosuresCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.githubMergeClosingReferences;
   let actual = deps.controlPlaneProtocolVersion;
@@ -777,7 +766,7 @@ function mapWorktreeResult(data: Json): Json {
     // A switch under platform isolation: null when the runner does not report it. `writableNow:
     // false` means the path is readable but not writable until this session relaunches, which a
     // worktree switch schedules on its own — so the agent waits rather than treating a write
-    // denial as a broken switch. `continuesAfterRelaunch` (v252) means the runner then resumes the
+    // denial as a broken switch. `continuesAfterRelaunch` (v255) means the runner then resumes the
     // session's task by itself, so the agent should end its turn rather than ask for a message.
     isolation: data?.isolation == null ? null : {
       writableNow: data.isolation.writableNow === true,
@@ -1098,9 +1087,6 @@ const CAMPAIGN_WORK_LEDGER_TOOLS = ["record_campaign_plan", "update_campaign_wor
 const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "list_sessions", "get_session", "get_session_events",
   "request_automation_creation", "get_automation_creation", "execute_automation_creation",
   "allocate_campaign_budget",
-  "run_campaign_review_job",
-  "get_campaign_review_job",
-  "list_campaign_review_jobs", "get_campaign_review_report",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "get_campaign_issue_scope", "request_campaign_issue_scope_change",
   "request_github_issue_closure", "close_github_issue",
@@ -1114,9 +1100,6 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
-  "run_campaign_review_job",
-  "get_campaign_review_job",
-  "list_campaign_review_jobs", "get_campaign_review_report",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
@@ -1713,51 +1696,6 @@ export const TOOLS: McpTool[] = [
       }
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/budget-allocations`, args);
       return r.ok ? textResult(r.data) : errorResult(r.message);
-    },
-  },
-  {
-    name: "run_campaign_review_job",
-    description: "Reserve and dispatch the exact controlled native Opus 5.5/high/read-only cross-model review for an assigned campaign PR. Requires the human-minted matching native profile and priced allowance; never accepts caller usage. Repeat the identical requestId and fields to read current durable state without relaunching. Four valid rounds and two launched attempts per round are enforced.",
-    inputSchema: {type:"object",properties:{requestId:{type:"string"},workItemId:{type:"string"},pullRequest:{type:"object",properties:{repository:{type:"string"},number:{type:"integer",minimum:1}},required:["repository","number"],additionalProperties:false},baseSha:{type:"string"},headSha:{type:"string"},costUsd:{type:"number",exclusiveMinimum:0},toolCalls:{type:"integer",minimum:1},brief:{type:"string"}},required:["requestId","workItemId","pullRequest","baseSha","headSha","costUsd","toolCalls","brief"],additionalProperties:false},
-    handler:async(args,deps)=>{
-      if(!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
-      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
-      const r=await cpFetch(deps,"POST",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs`,args);
-      return r.ok?textResult(r.data):errorResult(r.message);
-    },
-  },
-  {
-    name:"get_campaign_review_job",
-    description:"Read a same-campaign controlled review job and its historical priced receipt/report without dispatching or authorizing any new spend.",
-    inputSchema:{type:"object",properties:{jobId:{type:"string"}},required:["jobId"],additionalProperties:false},
-    handler:async(args,deps)=>{
-      if(!deps.selfSessionId || !deps.orchestrator || typeof args.jobId!=="string") return errorResult("this tool requires an Orchestrator identity and jobId");
-      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
-      const r=await cpFetch(deps,"GET",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs/${encodeURIComponent(args.jobId)}`);
-      return r.ok?textResult(r.data):errorResult(r.message);
-    },
-  },
-  {
-    name:"list_campaign_review_jobs",
-    description:"Read bounded same-root review metadata, including terminal jobs, exact profile/epoch/round/attempt, consumed/valid flags and settlement state. This never admits work, resets allowance or returns briefs/provider transcripts. Continue with nextAfterJobId.",
-    inputSchema:{type:"object",properties:{limit:{type:"integer",minimum:1,maximum:100},afterJobId:{type:"string"},workItemId:{type:"string"}},additionalProperties:false},
-    handler:async(args,deps)=>{
-      if(!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator identity");
-      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
-      const params=new URLSearchParams();for(const key of ["limit","afterJobId","workItemId"]) if(args[key]!==undefined) params.set(key,String(args[key]));
-      const r=await cpFetch(deps,"GET",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs?${params}`);
-      return r.ok?textResult(r.data):errorResult(r.message);
-    },
-  },
-  {
-    name:"get_campaign_review_report",
-    description:"Read the separate controller-validated report of an exact machine-valid same-campaign review, bound to its receipt. This returns review prose for independent adjudication, never raw provider stdout, tool arguments, a brief or credentials; it grants no new spend or merge vote.",
-    inputSchema:{type:"object",properties:{jobId:{type:"string"}},required:["jobId"],additionalProperties:false},
-    handler:async(args,deps)=>{
-      if(!deps.selfSessionId || !deps.orchestrator || typeof args.jobId!=="string") return errorResult("this tool requires an Orchestrator identity and jobId");
-      const incompatible=await campaignBudgetCompatibilityError(deps);if(incompatible) return incompatible;
-      const r=await cpFetch(deps,"GET",`/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/review-jobs/${encodeURIComponent(args.jobId)}/report`);
-      return r.ok?textResult(r.data):errorResult(r.message);
     },
   },
   {
@@ -2385,82 +2323,6 @@ export const TOOLS: McpTool[] = [
         ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
       });
       return result.ok ? textResult(result.summary) : errorResult(result.error);
-    },
-  },
-  {
-    name: "request_cross_model_review",
-    description: "Ask the runner to run the installed cross-model review controller for this session's own open pull request, at its pushed head, outside this session's sandbox. The reviewer is the other model family (Codex for a Claude Code session, Claude Code for a Codex session) with its own read-only sandbox; it reads a runner-private snapshot and never touches your worktree. The pull request must be open, from this repository, on this session's managed worktree branch, and headSha must be its current pushed head: push first. The first round of a pull request needs a brief (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round, unless scope is full with a fullReason. One review runs per session at a time. Returns a jobId at once: poll get_cross_model_review until terminal is true, then read its summary, report and ledger. Campaign members request their own reviews with request_review_session, which reserves and charges their campaign allowance.",
-    inputSchema: { type: "object", properties: {
-      repository: { type: "string", description: "The pull request's GitHub repository, owner/name." },
-      number: { type: "integer", minimum: 1 },
-      headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The pull request's current pushed head commit." },
-      brief: { type: "string", minLength: 1, description: "Required for the first round of a pull request; optional afterwards (replaces the stored brief)." },
-      scope: { type: "string", enum: ["delta", "full"], description: "Later rounds default to delta." },
-      fullReason: { type: "string", maxLength: 500, description: "Why a full re-review is needed; only with scope full." },
-    }, required: ["repository", "number", "headSha"], additionalProperties: false },
-    handler: async (args, deps) => {
-      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
-      const incompatible = await sessionReviewCompatibilityError(deps);
-      if (incompatible) return incompatible;
-      const { repository, number, ...rest } = args as Record<string, unknown>;
-      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews`,
-        { pullRequest: { repository, number }, ...rest });
-      return r.ok ? textResult(r.data) : errorResult(r.message);
-    },
-  },
-  {
-    name: "get_cross_model_review",
-    description: "Read one of this session's cross-model review jobs: state (requested, running, completed, failed, not_launched), round, attempt, reviewer and reason. Once terminal is true it also returns the controller's summary, its report.json and the runner-owned ledger (read-only; record adjudication in the pull request). A completed job is a finished review attempt; read the summary and report to see whether the round was valid and what it found. Each artifact is up to 256 KiB: pass include to fetch only what you need, or use the wollipog review get CLI and redirect it to a file.",
-    inputSchema: { type: "object", properties: {
-      jobId: { type: "string" },
-      include: { type: "array", items: { type: "string", enum: ["report", "ledger"] }, uniqueItems: true,
-        description: "Artifacts to return beside the summary once the job is terminal; default both." },
-    }, required: ["jobId"], additionalProperties: false },
-    handler: async (args, deps) => {
-      if (!deps.selfSessionId || typeof args?.jobId !== "string") return errorResult("jobId and a session identity are required");
-      const incompatible = await sessionReviewCompatibilityError(deps);
-      if (incompatible) return incompatible;
-      const base = `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews/${encodeURIComponent(args.jobId)}`;
-      const job = await cpFetch(deps, "GET", base);
-      if (!job.ok) return errorResult(job.message);
-      if (job.data?.terminal !== true) return textResult({ job: job.data });
-      const artifacts = await cpFetch(deps, "GET", `${base}/artifacts`);
-      if (!artifacts.ok) return errorResult(artifacts.message);
-      const include = Array.isArray(args.include) ? new Set(args.include) : new Set(["report", "ledger"]);
-      const { report, reportTruncated, ledger, ledgerTruncated, ...rest } = artifacts.data ?? {};
-      return textResult({ job: job.data, artifacts: {
-        ...rest,
-        ...(include.has("report") ? { report, reportTruncated } : {}),
-        ...(include.has("ledger") ? { ledger, ledgerTruncated } : {}),
-      } });
-    },
-  },
-  {
-    name: "list_cross_model_reviews",
-    description: "List this session's cross-model review jobs, newest first, without their report or ledger. Continue with nextAfterJobId.",
-    inputSchema: { type: "object", properties: { limit: { type: "integer", minimum: 1, maximum: 100 }, afterJobId: { type: "string" } }, additionalProperties: false },
-    handler: async (args, deps) => {
-      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
-      const incompatible = await sessionReviewCompatibilityError(deps);
-      if (incompatible) return incompatible;
-      const params = new URLSearchParams();
-      for (const key of ["limit", "afterJobId"]) if (args?.[key] !== undefined) params.set(key, String(args[key]));
-      const query = params.toString();
-      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews${query ? `?${query}` : ""}`);
-      return r.ok ? textResult(r.data) : errorResult(r.message);
-    },
-  },
-  {
-    name: "cancel_cross_model_review",
-    description: "Cancel one of this session's unfinished cross-model review jobs. The runner stops the review and reports it as failed or not launched; poll get_cross_model_review for the final state. A cancelled launched attempt still counts toward the round's attempts.",
-    inputSchema: { type: "object", properties: { jobId: { type: "string" } }, required: ["jobId"], additionalProperties: false },
-    handler: async (args, deps) => {
-      if (!deps.selfSessionId || typeof args?.jobId !== "string") return errorResult("jobId and a session identity are required");
-      const incompatible = await sessionReviewCompatibilityError(deps);
-      if (incompatible) return incompatible;
-      const r = await cpFetch(deps, "POST",
-        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/cross-model-reviews/${encodeURIComponent(args.jobId)}/cancel`, {});
-      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {
@@ -3542,6 +3404,7 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
       if (!isRequest) return null;
       const name = m.params?.name;
       if (typeof name !== "string") return rpcError(-32602, "tools/call requires params.name");
+      if (RETIRED_REVIEW_TOOL_NAMES.some((retired) => retired === name)) return reply(errorResult(REVIEW_JOBS_RETIRED_REASON));
       const tool = TOOLS.find((t) => t.name === name);
       if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return reply(errorResult("the orchestrator preset does not allow this tool"));
       if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return reply(errorResult("this tool requires the orchestrator preset"));
@@ -3563,6 +3426,7 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
 /** Direct programmatic access for the CLI. It deliberately executes the exact MCP tool table so
  * schemas, response projection, self-targeting checks, and REST routes cannot drift. */
 export async function executeManagerTool(name: string, args: Json, deps: McpDeps): Promise<ToolResult> {
+  if (RETIRED_REVIEW_TOOL_NAMES.some((retired) => retired === name)) return errorResult(REVIEW_JOBS_RETIRED_REASON);
   if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return errorResult("the orchestrator preset does not allow this tool");
   if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return errorResult("this tool requires the orchestrator preset");
   const tool = TOOLS.find((candidate) => candidate.name === name);

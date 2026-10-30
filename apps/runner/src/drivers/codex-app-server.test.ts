@@ -2411,7 +2411,58 @@ test("unsupported async question payload reports compatibility failure without a
     questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] }, true);
   assert.deepEqual(h.events.map((event) => event.kind), ["agent_message", "error"]);
   assert.match((h.events[1] as { message: string }).message, /cannot safely answer/);
+  assert.equal((h.events[1] as { nonFatal?: true }).nonFatal, true, "a rejected question is not a failed turn (#3806)");
   assert.ok(h.stderr.some((line) => /async question.*reason=option_shape index=0/.test(line)));
+});
+
+const REJECTED_ASK = { type: "agentMessage", id: "rejected-ask", text: "Please decide.", delivery: "async",
+  questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] };
+
+test("a rejected async question in an open root turn steers the agent and reports a non-fatal notice (#3806)", async () => {
+  const h = makeHarness();
+  const calls: Array<{ method: string; params: any }> = [];
+  activateSteer(h.driver, async (method, params) => {
+    calls.push({ method, params });
+    return { turnId: "provider-turn-steer" };
+  });
+  h.onItem(REJECTED_ASK, true);
+  await waitForCondition(() => h.events.some((event) => event.kind === "error"));
+  assert.deepEqual(calls.map((call) => call.method), ["turn/steer"]);
+  assert.equal(calls[0]!.params.expectedTurnId, "provider-turn-steer");
+  assert.equal(calls[0]!.params.clientUserMessageId, "wollipog-async-question-rejected:rejected-ask");
+  assert.match(calls[0]!.params.input[0].text, /could not show your async question.*reason: option_shape index=0.*normal message/);
+  assert.deepEqual(h.events.find((event) => event.kind === "error"), {
+    kind: "error",
+    nonFatal: true,
+    message: "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message.",
+  });
+});
+
+test("a refused steer leaves the user-facing guidance to ask the agent and logs why", async () => {
+  const h = makeHarness();
+  activateSteer(h.driver, async () => { throw new Error("turn already completed"); });
+  h.onItem(REJECTED_ASK, true);
+  await waitForCondition(() => h.events.some((event) => event.kind === "error"));
+  const notice = h.events.find((event) => event.kind === "error") as { message: string; nonFatal?: true };
+  assert.equal(notice.nonFatal, true);
+  assert.match(notice.message, /Ask the agent to repeat the question in a normal message\.$/);
+  assert.ok(h.stderr.some((line) => /could not tell Codex its async question was not shown item=rejected-ask outcome=rejected/.test(line)));
+});
+
+test("a subagent's rejected async question never steers the root turn", async () => {
+  const h = makeHarness();
+  const methods: string[] = [];
+  activateSteer(h.driver, async (method) => {
+    methods.push(method);
+    return { turnId: "provider-turn-steer" };
+  });
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  (h.driver as any).onItem({ ...REJECTED_ASK, id: "child-rejected" }, true, "child");
+  await nextTask();
+  assert.deepEqual(methods, []);
+  const notice = h.events.find((event) => event.kind === "error") as { message: string; nonFatal?: true };
+  assert.equal(notice.nonFatal, true);
+  assert.match(notice.message, /Ask the agent to repeat/);
 });
 
 test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {

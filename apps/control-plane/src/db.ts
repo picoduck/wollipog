@@ -1,3 +1,4 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
@@ -19,7 +20,7 @@ import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
+import { isProviderLoginFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -115,6 +116,7 @@ import {
   type HeldSessionResumeView,
   type HoldAdviceReader,
   type SessionHoldView,
+  type QueueHoldUnlistedJob,
   type SessionQueueHoldView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobEnd,
@@ -440,8 +442,20 @@ function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginV
       ...(login.userCode === undefined ? {} : { userCode: login.userCode }),
       ...(login.sessionId === undefined ? {} : { sessionId: login.sessionId }),
       ...(login.error === undefined ? {} : { error: login.error }),
+      ...providerLoginFailureCodeField(login),
     };
   });
+}
+
+/** v253 (#3519): a failed sign-in's code from the closed set. The runner's value never passes unless
+ * it is in that set: any other is replaced by `unrecognized` rather than refusing the whole
+ * inventory. It is not simply dropped, because a dashboard reads a missing code as an older runner's
+ * and falls back to matching the `error` sentence, which could turn a newer runner's plain failure
+ * into Already on This Machine. Only a failed sign-in carries one. */
+function providerLoginFailureCodeField(login: ProviderLoginView): Pick<ProviderLoginView, "failureCode"> {
+  const value: unknown = login.failureCode;
+  if (login.status !== "failed" || value === undefined || value === null) return {};
+  return { failureCode: isProviderLoginFailureCode(value) ? value : "unrecognized" };
 }
 
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `
@@ -11256,6 +11270,16 @@ export class ControlPlaneDb {
     return row?.preference ?? "manual";
   }
 
+  /** Whose Artifact Uploads preference governs a session: its user owner, else the local owner when
+   * the personal organization owns it, as sessions inherit from the default runner (#3811). Teams and
+   * other organizations record no launching user, so they resolve to none and stay Manual. */
+  artifactUploadPreferenceUser(sessionId: string): string | undefined {
+    const row = this.stmt("SELECT owner_kind, owner_id FROM session_ownership WHERE session_id=?").get(sessionId) as
+      { owner_kind: string; owner_id: string } | undefined;
+    if (row?.owner_kind === "user") return row.owner_id;
+    return row?.owner_kind === "organization" && row.owner_id === PERSONAL_ORGANIZATION_ID ? LOCAL_OWNER_USER_ID : undefined;
+  }
+
   setArtifactUploadPreference(userId: string, preference: import("@wollipog/protocol").ArtifactUploadPreference): void {
     if (!["manual", "wollipog_automatic", "external_hosting"].includes(preference)) throw new Error("invalid artifact upload preference");
     this.stmt(`INSERT INTO artifact_upload_settings (user_id, preference) VALUES (?, ?)
@@ -20067,20 +20091,11 @@ export class ControlPlaneDb {
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     const budget=this.campaignBudgets.view(resolvedCampaignId);
-    if(budget) {
-      const runner=this.getRunner(campaign.runner_id),profile=budget.authority.controlledReview,capability=runner?.runtime?.campaignReview;
-      const scope=this.sessionScope(resolvedCampaignId);
-      const tighter=this.campaignBudgets.members(resolvedCampaignId).some((id)=>{
-        const original=this.campaignBudgets.userLimits(id);return original?.costBudgetUsd!=null || original?.maxToolCalls!=null;
-      });
-      const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=218 &&
-        controlledReviewCapabilityKey(profile)===controlledReviewCapabilityKey(capability)) && !tighter &&
-        scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
-      budget.requiredNativeReview={supported,reason:supported?
-        "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
-        !profile?"Controlled review is not part of this campaign; it uses the regular cross-model review workflow.":
-        "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
-    }
+    if (budget) budget.requiredNativeReview = {
+      supported: false,
+      reason: budget.authority.controlledReview ? REVIEW_JOBS_RETIRED_REASON
+        : "Use review sessions for each member's own pushed PR; native campaign review jobs are retired.",
+    };
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
     if (recovery) {
       recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
@@ -31617,6 +31632,12 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
       !BACKGROUND_LAUNCH_TYPES.has(oldest.launchType) ||
       !Number.isSafeInteger(oldest.startedAt) || oldest.startedAt < 0)) return undefined;
   if (value.endsAt !== undefined && (!Number.isSafeInteger(value.endsAt) || value.endsAt < value.since!)) return undefined;
+  // Display only (#3752): a malformed entry is dropped, not the hold that still holds the queue.
+  const unlistedJobs = (Array.isArray(value.unlistedJobs) ? value.unlistedJobs : [])
+    .filter((job): job is QueueHoldUnlistedJob => !!job && typeof job === "object" &&
+      validBackgroundIdentity(job.id) && (job.kind === "provisional" || job.kind === "unregistered"))
+    .slice(0, 20)
+    .map((job) => ({ id: job.id, kind: job.kind }));
   return {
     kind: value.kind,
     holdId: value.holdId,
@@ -31628,6 +31649,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
     ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
     ...(value.canRelease === true ? { canRelease: true as const } : {}),
+    ...(unlistedJobs.length > 0 ? { unlistedJobs } : {}),
     ...(value.restartKeepsQueue === true ? { restartKeepsQueue: true as const } : {}),
   };
 }

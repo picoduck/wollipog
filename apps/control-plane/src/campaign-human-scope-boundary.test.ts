@@ -72,7 +72,7 @@ function harness(maxIssues = 4) {
     stored.control = structuredClone(control);
     db.raw().prepare("UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=? WHERE id='root'").run(JSON.stringify(stored), revision);
   };
-  return { db, svc, hub, principal, sent, boundary, approve, humanProposal, leaveAsBeforeFix };
+  return { db, svc, hub, principal, sent, metadata, boundary, approve, humanProposal, leaveAsBeforeFix };
 }
 
 test("a Human scope addition re-mints the Full Control boundary, so the owner's next message is admitted (#2940)", async () => {
@@ -305,6 +305,27 @@ test("a stale boundary no Human scope approval explains refuses a person's messa
     // The stated recovery works: revoking and enabling again authorizes the current scope.
     const revoked = h.svc.setCampaignControl("root", { mode: "custom" }, h.db.getSession("root")!.parentControlPolicy!.revision, h.principal);
     assert.ok(revoked.ok, revoked.error ?? "revoke");
+  } finally { h.db.close(); }
+});
+
+test("evidence authority on an older runner refuses with the shared sentence and versions, never a protocol number (#3803)", async () => {
+  const h = harness();
+  try {
+    const stored = h.db.sessionOrchestratorPolicy("root")!;
+    const control = stored.control as Extract<CampaignControl, { mode: "full_control" }>;
+    control.boundary.evidenceAuthority = evidence(control.boundary);
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(stored));
+    h.db.registerRunner(h.metadata, 2, 222);
+    const older = await h.svc.promptFromHuman(h.principal, "root", "Continue");
+    assert.equal(older.status, 409);
+    assert.equal(older.error, "This machine needs a newer runner for production evidence authority. Update and restart the runner.");
+    assert.deepEqual(older.capabilityRequirement, { requiredRunnerProtocolVersion: 223, runnerProtocolVersion: 222 });
+    // A current runner without the private media contract has nothing to update; it gets no versions.
+    h.db.registerRunner(h.metadata, 3, PROTOCOL_VERSION);
+    const current = await h.svc.promptFromHuman(h.principal, "root", "Continue");
+    assert.equal(current.status, 409);
+    assert.match(current.error!, /^Production evidence authority requires the exact private media contract;/);
+    assert.equal(current.capabilityRequirement, undefined);
   } finally { h.db.close(); }
 });
 

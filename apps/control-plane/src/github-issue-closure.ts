@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import type { GithubIssueClosureSnapshot, SessionView } from "@wollipog/protocol";
 import { campaignIssueForgeUrl, campaignRepositoryLocation, isTerminal, validIssueAdmission } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 
@@ -49,6 +49,22 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     ...(value.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(value.issueAdmission) as GithubIssueClosureSnapshot["issueAdmission"] }) };
 }
 
+/** A child's outstanding prompts by identity and content only (#3793). Both projections decode the
+ * durable prompt commands, keyed by command id, whose payload is never rewritten: it is only
+ * cleared, which drops the prompt from both, so a command id fixes its content. Delivery bookkeeping
+ * (state, attempt count, revision, timestamps, errors) moves on every outbox retry and receipt, so
+ * binding it would let a routine retry of an already-pending prompt revoke an approval. A new
+ * prompt, or one leaving the projection, still changes the list. With no prompts the list is
+ * empty, as before, so such a child's digest is unchanged from earlier releases. */
+function issueClosurePrompts(child: Pick<SessionView, "queued" | "pendingPrompts">) {
+  const prompts = new Map<string, { commandId: string; text: string; hasImages: boolean }>();
+  for (const { commandId, text, hasImages } of child.pendingPrompts ?? []) prompts.set(commandId, { commandId, text, hasImages: hasImages === true });
+  for (const { id, text, hasImages } of child.queued ?? []) {
+    if (!prompts.has(id)) prompts.set(id, { commandId: id, text, hasImages: hasImages === true });
+  }
+  return [...prompts.values()];
+}
+
 /** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
  * its launch prompt is recorded (the runner echoes it as the first user message) and the campaign
  * work ledger attributes it elsewhere: it has an open attempt, and every attempt it has ever had is
@@ -65,10 +81,9 @@ export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string
     const assignment = db.initialUserMessageText(id);
     if (excludable?.has(id) && assignment !== null) return [];
     const state = db.issueClosureAssignmentState(id);
-    const prompts = [...(child.queued ?? []), ...(child.pendingPrompts ?? [])];
     return [{ sessionId: id, title: child.title,
       assignmentDigest: createHash("sha256").update(JSON.stringify({
-        assignment, state, prompts, parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,
+        assignment, state, prompts: issueClosurePrompts(child), parentSessionId: child.parentSessionId, worktreePath: child.worktreePath,
         pending: db.unconsumedWorkflowDecisionsForSession(id).map((decision) => ({
           occurrenceId: decision.occurrenceId, digest: decision.resourceDigest, status: decision.status,
         })),

@@ -20,7 +20,7 @@ export interface WorktreeCreateCoordinates {
 export interface WorktreeCreateCompletion {
   snapshot: SessionSnapshot;
   worktree?: SessionWorktreeView;
-  /** What a live sandbox can write in the new worktree; absent from a pre-v252 runner (#3810). */
+  /** What a live sandbox can write in the new worktree; absent from a pre-v255 runner (#3810). */
   isolation?: SessionWorktreeIsolationNotice;
 }
 

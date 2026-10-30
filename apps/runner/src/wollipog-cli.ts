@@ -1,3 +1,4 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 /** Provider-neutral Wollipog CLI plus the general stdio MCP entrypoint. */
 
 import { readFileSync } from "node:fs";
@@ -378,13 +379,9 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const body = input();
       return "error" in body ? body : { tool: "allocate_campaign_budget", input: body.value };
     }
-    if (verb === "review") {
-      const body=jsonObjectOption(args,"--input");
-      return "error" in body?body:{tool:"run_campaign_review_job",input:body.value};
+    if (["review", "review-job", "review-jobs", "review-report"].includes(verb ?? "")) {
+      return { error: REVIEW_JOBS_RETIRED_REASON };
     }
-    if(verb==="review-job") return {tool:"get_campaign_review_job",input:{jobId:operand(2)}};
-    if(verb==="review-report") return {tool:"get_campaign_review_report",input:{jobId:operand(2)}};
-    if(verb==="review-jobs") return {tool:"list_campaign_review_jobs",input:{limit:numeric(option(args,"--limit")),afterJobId:option(args,"--cursor"),workItemId:option(args,"--item")}};
     if (verb === "plan") {
       const body = input();
       return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
@@ -597,42 +594,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
   if (words[0] === "review") {
     if (optionPresent(args, "--session")) return { error: "review commands act only on the injected session and do not accept --session" };
     const verb = words[1];
-    if (verb === "run") {
-      const repository = option(args, "--repo");
-      const number = option(args, "--pr");
-      const headSha = option(args, "--head");
-      if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha) {
-        return { error: "review run requires --repo <owner/name>, --pr <number>, and --head <sha>" };
-      }
-      const scope = option(args, "--scope");
-      if (optionPresent(args, "--scope") && scope !== "delta" && scope !== "full") return { error: "review run --scope is delta or full" };
-      const fullReason = option(args, "--full-reason");
-      if (optionPresent(args, "--full-reason") && (scope !== "full" || !fullReason?.trim() || fullReason.startsWith("--"))) {
-        return { error: "review run --full-reason needs text and --scope full" };
-      }
-      const briefFile = option(args, "--brief-file");
-      let brief: string | undefined;
-      if (optionPresent(args, "--brief-file")) {
-        if (!briefFile || briefFile.startsWith("--")) return { error: "review run --brief-file requires a path" };
-        try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
-        catch (error) { return { error: `could not read the brief: ${(error as Error).message}` }; }
-      }
-      return {
-        tool: "request_cross_model_review",
-        input: {
-          repository, number: Number(number), headSha,
-          ...(brief !== undefined ? { brief } : {}),
-          ...(scope ? { scope } : {}),
-          ...(fullReason ? { fullReason } : {}),
-        },
-      };
-    }
-    if ((verb === "get" || verb === "cancel") && words[2]) {
-      return { tool: verb === "get" ? "get_cross_model_review" : "cancel_cross_model_review", input: { jobId: words[2] } };
-    }
-    if (verb === "list") {
-      return { tool: "list_cross_model_reviews", input: { limit: numeric(option(args, "--limit")), afterJobId: option(args, "--cursor") } };
-    }
+    if (["run", "get", "list", "cancel"].includes(verb ?? "")) return { error: REVIEW_JOBS_RETIRED_REASON };
     return { error: reviewHelp() };
   }
   if (words[0] !== "session" && words[0] !== "sessions") return { error: usage() };
@@ -977,10 +939,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
-    : ["allocate_campaign_budget","run_campaign_review_job","get_campaign_review_job","list_campaign_review_jobs","get_campaign_review_report"].includes(parsed.tool)
+    : parsed.tool === "allocate_campaign_budget"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
-    : ["request_cross_model_review", "get_cross_model_review", "list_cross_model_reviews", "cancel_cross_model_review"].includes(parsed.tool)
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob
     : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",

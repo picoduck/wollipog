@@ -28,7 +28,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { codexPermissionProfileOverrides } from "../src/codex-permission-profile.js";
@@ -93,6 +93,27 @@ function listen(server: Server): Promise<number> {
 export function sandboxNamespaceUnavailable(result: { error?: unknown; status: number | null; signal?: string | null; stderr: string | null } | null): boolean {
   return !!result && !result.error && !result.signal && result.status !== null && result.status !== 0 &&
     /^bwrap: No permissions to create new namespace(?:,|$)/m.test(result.stderr ?? "");
+}
+
+/**
+ * Why the benign sandbox control failed, so a could-not-run report names the cause: the exit
+ * status and the first stderr line, printable ASCII only and bounded. The control runs a fixed
+ * command in a throwaway home, so its stderr carries no credential.
+ */
+export function sandboxFailureDetail(result: { error?: unknown; status: number | null; signal?: string | null; stdout?: string | null; stderr: string | null } | null): string {
+  if (!result) return "no Linux sandbox on this platform";
+  const error = result.error as { code?: string } | undefined;
+  const outcome = error ? `could not start (${error.code ?? "error"})` : result.signal ? `killed by ${result.signal}` :
+    result.status === 0 ? "exited 0 without the ready marker" : `exited ${result.status}`;
+  const lines = (result.stderr ?? "").split("\n").map(l => l.replace(/[^\x20-\x7e]/gu, "").trim()).filter(Boolean);
+  // Prefer the failure itself over a leading warning, such as Codex's PATH-alias notice.
+  const index = lines.findIndex(l => /panicked|error|bwrap:|denied|not permitted|refus/iu.test(l) && !/^WARNING:/u.test(l));
+  const fallback = lines.findLastIndex(l => !/^WARNING:/u.test(l));
+  const at = index >= 0 ? index : fallback >= 0 ? fallback : 0;
+  // A Rust panic prints its location first and its message on the following lines.
+  const picked = lines.slice(at, /panicked at/u.test(lines[at] ?? "") ? at + 3 : at + 1)
+    .filter(l => !/^note: run with `RUST_BACKTRACE/u.test(l)).join(" ");
+  return picked ? `${outcome}: ${picked.length > 400 ? `${picked.slice(0, 400)}...` : picked}` : `${outcome} with no stderr`;
 }
 
 /** Stands in for the network: reachable outside the sandbox, refused inside it. */
@@ -277,11 +298,27 @@ export function hardeningRestorable(outputs: Map<string, string>, marker: string
  * Driver.
  * ----------------------------------------------------------------------------------------- */
 
+/** The benign sandbox control: Codex's default platform sandbox around a fixed shell command. */
+export const SANDBOX_CONTROL_ARGS = ["sandbox", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"] as const;
+
+/**
+ * Codex refuses to create its sandbox helper aliases when CODEX_HOME is under the temporary
+ * directory, so the fixture's Codex home lives in this probe's throwaway HOME when that is
+ * outside it. The workspace and hook state stay under the temporary directory as measured.
+ */
+export function fixtureHomeBase(home: string | undefined, temp: string): string | null {
+  if (!home || !isAbsolute(home)) return null;
+  const inside = relative(resolve(temp), resolve(home));
+  return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)) ? null : home;
+}
+
 async function main(): Promise<number> {
   const root = mkdtempSync(join(tmpdir(), "wollipog-escalation-probe-"));
+  const homeBase = fixtureHomeBase(process.env.HOME, tmpdir());
+  const codexHome = homeBase ? mkdtempSync(join(homeBase, "escalation-codex-home-")) : join(root, "codex-home");
   const fixture: Fixture = {
     repo: join(root, "repo"),
-    codexHome: join(root, "codex-home"),
+    codexHome,
     hookDir: join(root, "hook-state"),
     marker: randomBytes(16).toString("hex"),
     networkPort: 0,
@@ -301,14 +338,16 @@ async function main(): Promise<number> {
 
     // Prove the host can execute Codex's sandbox before spending thirteen turn timeouts.
     // A denied namespace is an environment failure, never a network/deny measurement.
+    // `codex sandbox [OPTIONS] [COMMAND]...` (0.155.1 and 0.166.0) has no `linux` subcommand:
+    // hosted run 41036582625 showed `sandbox linux` executing a program named `linux`.
     const sandbox = process.platform === "linux" ? spawnSync(CODEX,
-      ["sandbox", "linux", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"],
+      SANDBOX_CONTROL_ARGS,
       { cwd: fixture.repo, env: isolatedProbeEnv(fixture.codexHome), encoding: "utf8", timeout: 15_000 }) : null;
     if (!sandbox || sandbox.error || sandbox.status !== 0 || !sandbox.stdout.includes("PROBE_SANDBOX_READY")) {
       const namespaceUnavailable = sandboxNamespaceUnavailable(sandbox);
       probeResult("permission profile escalation matrix", "could not run",
         namespaceUnavailable ? "Host denies unprivileged user namespaces; Codex's benign sandbox control could not run; no escalation assumption measured" :
-          "Codex Linux sandbox cannot execute a benign control command on this host; no escalation assumption measured", GUARD_DOCUMENTATION,
+          `Codex Linux sandbox cannot execute a benign control command on this host (${sandboxFailureDetail(sandbox)}); no escalation assumption measured`, GUARD_DOCUMENTATION,
         namespaceUnavailable ? "sandbox_namespace_unavailable" : undefined);
       return 2;
     }
@@ -344,6 +383,7 @@ async function main(): Promise<number> {
     net.close();
     models.close();
     rmSync(root, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
   }
   // "no command ran" on every case means the harness never got a turn out of `codex` — a wrong
   // CODEX_BIN, a rejected argument, a config error — not a behaviour change. Say so, rather than

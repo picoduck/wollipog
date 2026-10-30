@@ -5574,7 +5574,7 @@ async function runSessionWorktreeRequest(
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
-  // Only the session's own switch may continue by itself after its relaunch (#3810). A pre-v252
+  // Only the session's own switch may continue by itself after its relaunch (#3810). A pre-v255
   // runner gets no flag and keeps going idle once the relaunch has run.
   const selfRequest = (request.operation === "create" || request.operation === "attach" || request.operation === "select") &&
       worktreeRequestedBySession(principal, sessionId) &&

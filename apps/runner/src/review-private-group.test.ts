@@ -6,12 +6,13 @@ import { test } from "node:test";
 import { isUserPrivateGroup, type GroupDatabase } from "./review-private-group.js";
 import { trustedPath } from "./review-trust.js";
 
-function database(options: { source?: string; members?: string; otherPrimary?: boolean; configured?: string; process?: string; denied?: boolean; hidden?: boolean; duplicateGroup?: boolean; initgroups?: string } = {}): GroupDatabase {
+function database(options: { source?: string; members?: string; otherPrimary?: boolean; configured?: string; process?: string; denied?: boolean; exited?: boolean; hidden?: boolean; duplicateGroup?: boolean; initgroups?: string } = {}): GroupDatabase {
   const user = "owner:x:1000:1000::/home/owner:/bin/sh";
   return {
     read: (path) => {
       if (path === "/etc/nsswitch.conf") return `passwd: files systemd ${options.source ?? "sss"}\ngroup: files systemd ${options.source ?? "sss"}\n${options.initgroups ? `initgroups: ${options.initgroups}\n` : ""}`;
       if (path === "/proc/mounts") return `proc /proc proc rw${options.hidden ? ",hidepid=2" : ""} 0 0\n`;
+      if (options.exited) throw Object.assign(new Error("no such process, read"), { code: "ESRCH" });
       if (options.denied) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
       return options.process ?? "node";
     },
@@ -32,6 +33,11 @@ test("a user-private group is proven from passwd/group with Ubuntu's inactive ss
   assert.equal(isUserPrivateGroup(1000, 1000, database({ duplicateGroup: true })), false,
     "all group entries with the same gid contribute supplementary membership");
   assert.throws(() => isUserPrivateGroup(1000, 1000, database({ initgroups: "files ldap" })), /NSS source ldap/);
+});
+
+test("a process that exits during the SSSD liveness scan counts as absent", () => {
+  assert.equal(isUserPrivateGroup(1000, 1000, database({ exited: true })), true);
+  assert.equal(isUserPrivateGroup(1000, 1000, database({ exited: true, members: "other" })), false);
 });
 
 test("configured or running SSSD and non-enumerable NSS sources fail closed by name", () => {

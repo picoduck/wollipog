@@ -2405,6 +2405,7 @@ function TimelineRowContent({
     case "stderr":
       return <AgentLogStep item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "error":
+      if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
         : <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
@@ -2998,6 +2999,17 @@ function AutomaticTurnsHeldNotice({ message }: { message: string }) {
       details={<div className="code-well"><pre>{withoutPromptFailedPrefix(message)}</pre></div>}
     >
       <p>{AUTOMATIC_TURNS_HELD_SENTENCE}</p>
+    </Notice>
+  );
+}
+
+/** A problem the driver reported while the turn kept running (#3806), such as an async question it
+ * could not show as a card. The turn did not fail, so there is no Retry Turn: re-running a turn that
+ * completed would repeat its side effects. The runner writes this message as a plain sentence. */
+function TurnProblemNotice({ message }: { message: string }) {
+  return (
+    <Notice tone="warning" title="Problem During Turn">
+      <p>{message}</p>
     </Notice>
   );
 }

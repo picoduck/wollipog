@@ -14,17 +14,20 @@ import { StatusBadge } from "./StatusBadge.js";
 import { Steps } from "./Steps.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
-/** The runner's failure for a new account whose identity matches an account already on the
+/** The runner's failure sentence for a new account whose identity matches an account already on the
  * Machine (`existingAccountWithSameIdentity` in provider-login.ts). */
 const ALREADY_ON_MACHINE = /^This (?:Claude|Codex) account is already on this Machine\./u;
 
 /**
  * Whether a sign-in ended because its account is already on the Machine, so the runner discarded it
- * (#2996). The runner reports no failure code for this yet, so its message is matched; older runners
- * will keep saying it this way even once a code exists.
+ * (#2996). From protocol v253 the runner says so with `failureCode` (#3519), which decides whenever
+ * it is present: any other code is a plain failure. Only without a code (a pre-v253 runner or
+ * control plane, or an ending stored before the upgrade) is the runner's sentence matched instead.
  */
-export function providerSignInAlreadyOnMachine(login: Pick<ProviderLoginView, "status" | "error">): boolean {
-  return login.status === "failed" && ALREADY_ON_MACHINE.test(login.error ?? "");
+export function providerSignInAlreadyOnMachine(login: Pick<ProviderLoginView, "status" | "error" | "failureCode">): boolean {
+  if (login.status !== "failed") return false;
+  if (login.failureCode !== undefined) return login.failureCode === "account_already_on_machine";
+  return ALREADY_ON_MACHINE.test(login.error ?? "");
 }
 
 /**
@@ -293,7 +296,8 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
 }
 
 /** The Request Card's and the recovery panel's sign-in body: the link, the device code and the code
- * field as they were before the shared steps (#2198). */
+ * field as they were before the shared steps (#2198). The device code sits in a code well (§11.7)
+ * with Copy Device Code, untitled like the card's other controls (#3521). */
 function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: ProviderLoginView; name: string }) {
   const api = useApi();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -329,7 +333,10 @@ function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: Pr
       {login.userCode && (
         <div className="provider-login-device-code">
           <span>Device Code</span>
-          <code>{login.userCode}</code>
+          <div className="code-well">
+            <code>{login.userCode}</code>
+            <CopyButton text={login.userCode} iconOnly ariaLabel="Copy Device Code" className="icon-btn sm" tooltip={false} />
+          </div>
         </div>
       )}
       {login.expectsCode && (
