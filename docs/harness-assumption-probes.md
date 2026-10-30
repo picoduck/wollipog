@@ -60,15 +60,18 @@ A newly published release is code nobody has reviewed, and the hosted runner's o
 passwordless sudo plus the job's runtime token, which can write Actions cache entries in the
 default branch's scope. The driver therefore never runs a release as that user in CI; without
 `HARNESS_PROBE_USER` and `HARNESS_PROBE_ROOT` it reports could not run.
-`scripts/harness-assumptions-isolate.sh` creates the system user `harness-probe` without sudo or
-privileged groups, stages a copy of the checkout (`git archive HEAD` plus `pnpm install
---frozen-lockfile`) under `/opt/harness-probe/repo` that the user can read but not write, and
-denies the user traversal of the runner's home with an ACL. It verifies each property and fails
-closed. Each suite runs through `sudo -n -u harness-probe -- /usr/bin/env -i ...` from the staged
-copy; its throwaway home and report directory are owned by the probe user. After each suite every
-process of that user is killed before anything else happens, and only a regular file owned by the
-probe user named `latest.json` or `latest.md`, under 2 MiB, is copied back, so a planted symlink
-cannot pull another file into the published report. Workflow commands are stopped while suite
+`scripts/harness-assumptions-isolate.sh` creates the system user `harness-probe` without sudo,
+cron, at or privileged groups, stages a copy of the checkout (`git archive HEAD` plus `pnpm install
+--frozen-lockfile`, then `chmod -R go-w`) under `/opt/harness-probe/repo` that the user can read
+but not write, and denies the user traversal of the runner's home with an ACL. It verifies each
+property, including that no entry in the copy and neither the Node binary nor its directory is
+writable by the user, and fails closed. Each suite runs through
+`sudo -n -u harness-probe -- /usr/bin/env -i ...` from the staged copy; its throwaway home and
+report directory are owned by the probe user. After each suite every process of that user is
+killed before anything else happens, and its crontab and files in `/tmp`, `/var/tmp` and
+`/dev/shm` are removed so nothing carries into the next target. Only a regular file owned by the
+probe user named `latest.json` or `latest.md`, under 2 MiB, is read back, and it is read as that
+user, so a planted symlink cannot pull another file into the published report. Workflow commands are stopped while suite
 output reaches the log. Host preparation and installs, which run no release code, still run as
 the runner user.
 

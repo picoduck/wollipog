@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+umask 022
 
 # Stage a read-only copy of this checkout for an unprivileged user that runs unreviewed harness
-# releases. The user has no sudo, cannot write the copy or the installs, and cannot traverse the
-# runner's home, so it cannot reach the job token, later steps' action files or the cache.
+# releases. The user has no sudo, cron or at, cannot write the copy, the installs or the Node
+# toolchain, and cannot traverse the runner's home, so it cannot reach the job token, later steps'
+# action files or the cache.
 user="$1"
 root="$2"
 test "${GITHUB_ACTIONS:-}" = true
@@ -17,21 +19,30 @@ if id -nG "$user" | tr ' ' '\n' | grep -qxE 'sudo|admin|adm|docker|root'; then
   echo "$user must not belong to a privileged group" >&2
   exit 1
 fi
+for deny in /etc/cron.deny /etc/at.deny; do
+  sudo touch "$deny"
+  sudo grep -qx "$user" "$deny" || echo "$user" | sudo tee -a "$deny" > /dev/null
+done
 sudo rm -rf -- "$root"
 sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 "$root" "$root/repo" "$root/install"
 sudo install -d -o root -g root -m 755 "$root/work"
 git archive --format=tar HEAD | tar -x -C "$root/repo"
 (cd "$root/repo" && pnpm install --frozen-lockfile --prefer-offline)
+# pnpm and tar may keep permissive modes; nothing in the copy stays writable by other users.
+chmod -R go-w "$root/repo"
 # Deny traversal of the runner's home to this user specifically; other users are unaffected.
 command -v setfacl > /dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y acl
 sudo setfacl -m "u:$user:---" "$HOME"
 
 as_user() { sudo -n -u "$user" -- "$@"; }
+node_bin="$(command -v node)"
 as_user test -r "$root/repo/package.json"
-as_user test -x "$(command -v node)"
-for path in "$root/repo" "$root/repo/scripts" "$root/repo/node_modules" "$root/install" "$root/work"; do
-  if as_user test -w "$path"; then echo "$user can write $path" >&2; exit 1; fi
+as_user test -x "$node_bin"
+for path in "$root/repo" "$root/repo/scripts" "$root/repo/node_modules" "$root/install" "$root/work" "$node_bin" "$(dirname "$node_bin")"; do
+  if as_user test -w "$path"; then echo "$user can write $path ($(stat -c '%a %U:%G' "$path"))" >&2; exit 1; fi
 done
+writable="$(find "$root/repo" ! -type l -perm /o+w -print -quit)"
+if [ -n "$writable" ]; then echo "$user can write $writable" >&2; exit 1; fi
 if as_user test -x "$HOME"; then echo "$user can traverse $HOME" >&2; exit 1; fi
 if as_user sudo -n true > /dev/null 2>&1; then echo "$user can use sudo" >&2; exit 1; fi
-echo "Isolated $user: read-only $root/repo, no sudo, no access to $HOME"
+echo "Isolated $user: read-only $root/repo, no sudo, cron or at, no access to $HOME"

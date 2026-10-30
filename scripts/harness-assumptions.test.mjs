@@ -259,6 +259,10 @@ function fakeExec(temp, plan) {
     return { code: outcome.code, tail: "" };
   };
   const sudo = rest => {
+    if (rest[0] === "-u" && rest[3] === "cat") {
+      assert.equal(rest[1], "harness-probe", "reports are read as the probe user, never as root");
+      return { code: 0, stdout: readFileSync(rest.at(-1), "utf8") };
+    }
     if (rest[0] === "-u") {
       const command = rest.slice(rest.indexOf("-i") + 1);
       const env = {};
@@ -270,12 +274,13 @@ function fakeExec(temp, plan) {
     if (tool === "install") { mkdirSync(args.at(-1), { recursive: true }); return { code: 0, stdout: "" }; }
     if (tool === "pkill") return { code: 0, stdout: "" };
     if (tool === "pgrep") return { code: plan.survivors ? 0 : 1, stdout: plan.survivors ? "4242\n" : "" };
+    if (tool === "crontab") return { code: 1, stdout: "" };
+    if (tool === "find" && args.includes("-delete")) { plan.cleaned = [...(plan.cleaned ?? []), args.slice(0, 3)]; return { code: 0, stdout: "" }; }
     if (tool === "find") {
       const path = join(args[0], args[args.indexOf("-name") + 1]);
       let regular = false; try { regular = lstatSync(path).isFile(); } catch {}
       return { code: 0, stdout: regular ? `${path}\n` : "" };
     }
-    if (tool === "cat") return { code: 0, stdout: readFileSync(args.at(-1), "utf8") };
     throw new Error(`unexpected sudo ${rest.join(" ")}`);
   };
   return { calls, exec: async (argv, options) => {
@@ -388,16 +393,17 @@ test("isolated suites run as the probe user with only the minimal environment, a
   assert.equal(exit, EXIT.matched);
   assert.equal(report.isolation.status, "ok");
   assert.ok(existsSync(recordPath));
-  const suiteCall = fake.calls.find(c => c.argv[0] === "sudo" && c.argv[2] === "-u");
+  const suiteCall = fake.calls.find(c => c.argv[0] === "sudo" && c.argv[2] === "-u" && c.argv[5] === "/usr/bin/env");
+  assert.deepEqual(plan.cleaned[0], ["/tmp", "/var/tmp", "/dev/shm"], "the user's temporary leftovers are removed after each suite");
   assert.deepEqual(suiteCall.argv.slice(0, 7), ["sudo", "-n", "-u", "harness-probe", "--", "/usr/bin/env", "-i"]);
   assert.equal(suiteCall.options.cwd, join(extra.HARNESS_PROBE_ROOT, "repo"), "suites run from the staged read-only copy");
   assert.deepEqual(Object.keys(plan.suites[0].env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
   assert.ok(plan.suites[0].env.HOME.startsWith(join(extra.HARNESS_PROBE_ROOT, "work", "codex")));
   assert.ok(plan.suites[0].env.CODEX_BIN.startsWith(join(extra.HARNESS_PROBE_ROOT, "install", "codex")));
-  const order = fake.calls.map(c => c.argv[0] === "sudo" ? c.argv[2] === "-u" ? "suite" : c.argv[2] : c.argv[0]);
+  const order = fake.calls.map(c => c.argv[0] === "sudo" ? c.argv[2] === "-u" ? c.argv[5] === "cat" ? "read" : "suite" : c.argv[2] : c.argv[0]);
   const firstSuite = order.indexOf("suite");
   assert.ok(order.indexOf("bash") < firstSuite, "staging and preparation happen before any release code runs");
-  assert.ok(order.indexOf("pkill", firstSuite) > firstSuite && order.indexOf("pkill", firstSuite) < order.indexOf("find", firstSuite), "processes are killed before reports are read");
+  assert.ok(order.indexOf("pkill", firstSuite) > firstSuite && order.indexOf("pkill", firstSuite) < order.indexOf("read", firstSuite), "processes are killed before reports are read");
   const stop = logs.find(l => l.startsWith("::stop-commands::"));
   assert.ok(stop, "workflow commands are stopped while release output can reach the log");
   const resumeAt = logs.indexOf(`::${stop.slice("::stop-commands::".length)}::`);

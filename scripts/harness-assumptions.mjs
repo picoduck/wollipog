@@ -365,6 +365,7 @@ export function sandbox(harness, isolation, { env, root, exec, location }) {
     };
   }
   const { user, root: base } = isolation;
+  process.umask(0o022); // Installs and directories the runner creates stay unwritable for the user.
   return {
     isolated: true, cwd: join(base, "repo"), installRoot: join(base, "install", harness.id), workRoot: join(base, "work", harness.id),
     stage: () => exec(["bash", "scripts/harness-assumptions-isolate.sh", user, base], { cwd: root, env, timeoutMs: 20 * 60_000, stdio: "capture" }),
@@ -372,21 +373,24 @@ export function sandbox(harness, isolation, { env, root, exec, location }) {
     // env -i: the suite sees only the minimal environment, never the job's.
     run: (argv, suiteEnvironment, timeoutMs) => exec(["sudo", "-n", "-u", user, "--", "/usr/bin/env", "-i", ...Object.entries(suiteEnvironment).map(([k, v]) => `${k}=${v}`), ...argv],
       { cwd: join(base, "repo"), env, timeoutMs }),
+    // Kill everything the user runs, then remove what it could leave for the next suite.
     reap: async () => {
       await sudo(["pkill", "-KILL", "-u", user]);
-      for (let attempt = 0; attempt < 10; attempt++) {
-        if ((await sudo(["pgrep", "-u", user])).code === 1) return true;
-        await new Promise(r => setTimeout(r, 500));
-        await sudo(["pkill", "-KILL", "-u", user]);
+      let gone = false;
+      for (let attempt = 0; attempt < 10 && !gone; attempt++) {
+        gone = (await sudo(["pgrep", "-u", user])).code === 1;
+        if (!gone) { await new Promise(r => setTimeout(r, 500)); await sudo(["pkill", "-KILL", "-u", user]); }
       }
-      return false;
+      await sudo(["crontab", "-r", "-u", user]);
+      await sudo(["find", "/tmp", "/var/tmp", "/dev/shm", "-xdev", "-mindepth", "1", "-user", user, "-delete"]);
+      return gone;
     },
-    // Only a regular file owned by the probe user is read, so a planted symlink or another file
-    // can never be copied into the published report.
+    // Only a regular file owned by the probe user is read, and it is read as that user, so a
+    // planted symlink can reach nothing the user could not already read.
     collect: async (dir, name) => {
       const found = await sudo(["find", dir, "-maxdepth", "1", "-type", "f", "-user", user, "-name", name, "-size", "-2048k", "-print"]);
       if (!ok(found) || found.stdout.trim() !== join(dir, name)) return null;
-      const read = await sudo(["cat", "--", join(dir, name)]);
+      const read = await sudo(["-u", user, "--", "cat", "--", join(dir, name)]);
       return ok(read) ? read.stdout : null;
     },
     remove: async dir => { await sudo(["rm", "-rf", "--", dir]); },
