@@ -4,6 +4,8 @@ import {
   queueHoldReason,
   validProviderHomeLaunchRefusal,
   validProviderHomeWait,
+  isProviderLoginFailureCode,
+  PROVIDER_LOGIN_FAILURE_CODES,
   queueHoldRecoveryAction,
   sessionHolds,
   worktreeRecoveryAction,
@@ -113,7 +115,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 250);
+  assert.equal(PROTOCOL_VERSION, 253);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -319,8 +321,19 @@ test("a provider-HOME wait is accepted only when well formed and content-free", 
   ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 250", () => {
-  assert.equal(PROTOCOL_VERSION, 250);
+test("a provider sign-in failure code is accepted only from the closed set (#3519)", () => {
+  assert.deepEqual(PROVIDER_LOGIN_FAILURE_CODES, ["account_already_on_machine"]);
+  assert.equal(isProviderLoginFailureCode("account_already_on_machine"), true);
+  for (const value of ["", "Account_Already_On_Machine", "account_already_on_machine ", "unknown_code", 1, null, undefined, {}]) {
+    assert.equal(isProviderLoginFailureCode(value), false, JSON.stringify(value));
+  }
+});
+
+test("PROTOCOL_VERSION is 253", () => {
+  assert.equal(PROTOCOL_VERSION, 253);
+  // A v252 runner reports a duplicate-account sign-in by its sentence alone (#3519).
+  assert.equal(runnerSupportsProtocol(252, "providerLoginFailureCode"), false);
+  assert.equal(runnerSupportsProtocol(253, "providerLoginFailureCode"), true);
   // A v249 runner does not name the unlisted work a queue hold waits on (#3752).
   assert.equal(runnerSupportsProtocol(249, "queueHoldUnlistedJobs"), false);
   assert.equal(runnerSupportsProtocol(250, "queueHoldUnlistedJobs"), true);

@@ -407,6 +407,33 @@ test("a timed-out sign-in for a new account offers Start Again with the same pro
   }
 });
 
+test("a v253 duplicate-account ending is Not Added with Dismiss only by its failure code, even with a reworded sentence (#3519)", async () => {
+  const cases: [string, ProviderLoginView, boolean][] = [
+    ["code, reworded sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed",
+      "That Claude login belongs to an account this machine already has; nothing was added."),
+    failureCode: "account_already_on_machine" }, true],
+    ["unknown code, today's sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE),
+      failureCode: "some_future_code" as ProviderLoginView["failureCode"] }, false],
+  ];
+  for (const [name, login, duplicate] of cases) {
+    const ui = await render({ runner: runnerView({ providerAccounts: SIGN_IN_ACCOUNTS, providerLogins: [login] }) });
+    try {
+      const expansion = ui.row("Work 2").nextElementSibling as HTMLElement;
+      if (duplicate) {
+        assert.equal(ui.badge("Work 2")?.textContent, "Not Added", name);
+        assert.equal(expansion.querySelector(".notice-title")?.textContent, "Already on This Machine", name);
+        assert.deepEqual(ui.buttons(expansion), ["Dismiss"], name);
+      } else {
+        assert.notEqual(ui.badge("Work 2")?.textContent, "Not Added", name);
+        assert.equal(expansion.querySelector(".notice-title")?.textContent, "Sign-In Failed", name);
+        assert.ok(ui.buttons(expansion).includes("Try Again"), name);
+      }
+    } finally {
+      await ui.unmount();
+    }
+  }
+});
+
 test("a new account already on this machine reads Already on This Machine and Not Added; Dismiss removes the row and adds nothing", async () => {
   const api = client();
   const duplicate = ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE);

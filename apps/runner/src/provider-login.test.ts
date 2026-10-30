@@ -924,6 +924,7 @@ test("configuration write failure reports failure and does not publish the new a
     const view = fx.supervisor.views()[0]!;
     assert.equal(view.status, "failed");
     assert.match(view.error ?? "", /configuration could not be updated/i);
+    assert.equal(view.failureCode, undefined, "only a duplicate account carries a failure code (#3519)");
     assert.equal(fx.accounts.length, 0);
     assert.equal(fx.added.length, 0);
     assert.equal(fx.releases.length, 1);
@@ -998,7 +999,9 @@ test("a new sign-in to an account already on the Machine is discarded instead of
     await new Promise<void>((resolve) => setImmediate(resolve));
     const view = fx.supervisor.views()[0]!;
     assert.equal(view.status, "failed");
-    assert.match(view.error ?? "", /already on this Machine.*discarded/i);
+    assert.equal(view.failureCode, "account_already_on_machine", "the dashboard decides the ending from the code (#3519)");
+    assert.equal(view.error, "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+      "the sentence is unchanged, for an older control plane or dashboard that still matches it");
     assert.doesNotMatch(view.error ?? "", /Personal|dev@example\.com/u, "the card never names the account");
     assert.deepEqual(fx.accounts.map((account) => account.id), ["existing", "other"]);
     assert.equal(fx.added.length, 0);

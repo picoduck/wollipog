@@ -907,11 +907,14 @@ export class ProviderLoginSupervisor {
       });
     } else if (operation.resolved.persistAccount &&
         (duplicate = await this.existingAccountWithSameIdentity(operation.resolved))) {
+      // The code decides the dashboard's Already on This Machine ending (#3519). Keep the sentence
+      // exactly as it is: an older control plane drops the code, and older dashboards match the words.
       this.update(operation, {
         status: "failed",
         expectsCode: false,
         error: `This ${providerName(duplicate.provider)} account is already on this Machine. ` +
           "The duplicate sign-in was discarded.",
+        failureCode: "account_already_on_machine",
         verificationUrl: undefined,
         userCode: undefined,
       });

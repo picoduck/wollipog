@@ -2132,6 +2132,43 @@ test("provider sign-in projections are validated, version-gated, and replace ato
   assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
 });
 
+test("a failed sign-in's failure code passes only from the closed set, and its error is validated as before (#3519)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const duplicate = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude" as const,
+    status: "failed" as const,
+    expectsCode: false,
+    error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+    startedAt: 500,
+  };
+  const stored = () => db.getRunner("runner-1")?.providerLogins?.[0];
+  db.registerRunner(meta({ providerLogins: [duplicate] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  assert.deepEqual(stored(), duplicate, "a login without the code, from an older runner, is stored as it was");
+  assert.equal(stored()?.failureCode, undefined);
+
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: "account_already_on_machine" }], 525);
+  assert.deepEqual(stored(), { ...duplicate, failureCode: "account_already_on_machine" }, "the known code passes with its sentence");
+
+  for (const failureCode of ["account_already_on_this_machine", "", 7, { code: "account_already_on_machine" }]) {
+    db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode } as never], 550);
+    assert.deepEqual(stored(), duplicate, `an unknown code is dropped, and the login kept: ${JSON.stringify(failureCode)}`);
+  }
+  db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, status: "awaiting_code", error: undefined, failureCode: "account_already_on_machine",
+  }], 575);
+  assert.equal(stored()?.failureCode, undefined, "only a failed sign-in carries a failure code");
+
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "x".repeat(501),
+  }], 600), /provider sign-in inventory/, "the error sentence is still validated beside a code");
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "bad\u0000sentence",
+  }], 625), /provider sign-in inventory/);
+});
+
 test("machine sign-in dismissals persist per user, runner, and completed attempt", () => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-login-dismiss-"));
   const location = join(temp, "control-plane.db");

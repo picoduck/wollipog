@@ -165,6 +165,7 @@ if (signInFixture && runner.providerAccounts) {
       operationId: "login_fixture_duplicate", accountId: "work-2-1a2b3c4d", label: emailLabels ? "work.two@example.com" : "Work 2",
       provider: "claude", status: "failed", startedAt: Date.now(),
       error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+      failureCode: "account_already_on_machine",
     },
   ];
 }

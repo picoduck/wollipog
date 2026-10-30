@@ -19,7 +19,7 @@ import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
+import { isProviderLoginFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -441,6 +441,9 @@ function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginV
       ...(login.userCode === undefined ? {} : { userCode: login.userCode }),
       ...(login.sessionId === undefined ? {} : { sessionId: login.sessionId }),
       ...(login.error === undefined ? {} : { error: login.error }),
+      // v253 (#3519): only a failed sign-in's known code passes. Any other value is dropped rather
+      // than refusing the whole inventory, so a newer runner's code reads as a plain failure.
+      ...(login.status === "failed" && isProviderLoginFailureCode(login.failureCode) ? { failureCode: login.failureCode } : {}),
     };
   });
 }
