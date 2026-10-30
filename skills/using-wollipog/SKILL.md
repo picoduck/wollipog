@@ -87,7 +87,11 @@ An Orchestrator campaign must use the management tools as the policy boundary, n
 from its prompt. Call `get_campaign` at campaign start and after a human changes policy. It returns
 the effective behavior, typed decision owners, revision, admission and guardrail limits, child and
 follow-up counts, UI-review compatibility, and one of `waiting_human`, `active`, `blocked`, or
-`verified_complete`, without returning credentials.
+`verified_complete`, without returning credentials. Its `behavior` holds the Child Harness, Child
+Model, Child Effort, Follow-Ups and Completion the next child creation enforces. A person can change
+them while the campaign runs; changed values carry the `active_campaign` source and a higher
+`behavior.revision`. They apply to children created afterwards, existing children keep their own
+configuration, and no agent, the Orchestrator included, can change them.
 
 The Orchestrator role defaults to **Delegate Implementation**: plan, delegate, monitor, and review.
 An ordinary request covering several issues does not authorize a campaign or child creation unless

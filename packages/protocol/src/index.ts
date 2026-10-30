@@ -2792,6 +2792,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** `harness`: a fixed Child Harness admits any row of the same harness on every Machine (#3247).
    * Absent on campaigns created earlier, which keep enforcing the exact Machine-local agent id. */
   childHarnessMatch?: "harness";
+  /** How many times a person changed the campaign behavior after launch (#3580), the compare-and-set
+   * revision of that change. Separate from the Parent Control revision on purpose: a Full Control
+   * boundary is pinned to that one, and none of these values is part of it. Absent means 0. */
+  behaviorRevision?: number;
   /** Server-owned human authorization. Never accepted from child config or ordinary prompts. */
   control?: CampaignControl;
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
@@ -2886,6 +2890,12 @@ export interface OrchestratorCampaignProjection {
   recovery?: import("./campaign-recovery.js").CampaignRecoveryProjection;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
+  /** The root campaign's child behavior as the next child creation enforces it (#3580), with where
+   * each value came from: `active_campaign` once a person changed it after launch. */
+  behavior?: OrchestratorCampaignBehavior & {
+    revision: number;
+    sources: Record<OrchestratorCampaignBehaviorKey, OrchestratorPolicySource>;
+  };
   limits: {
     maximumConcurrentChildren: number;
     occupied: number;
@@ -3156,6 +3166,31 @@ export interface OrchestratorSettingsView {
 
 export interface UpdateOrchestratorSettingsRequest {
   defaults: OrchestratorDefaults;
+}
+
+/** The campaign behavior a person may change on a running Orchestrator (#3580). Each applies to
+ * children created afterwards; none is part of a Full Control boundary. */
+export const ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS = ["childHarness", "childModel", "childEffort", "followUps", "completion"] as const;
+export type OrchestratorCampaignBehaviorKey = typeof ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS[number];
+export type OrchestratorCampaignBehavior = Pick<OrchestratorBehaviorDefaults, OrchestratorCampaignBehaviorKey>;
+
+/** The campaign's current editable behavior, for the Orchestrator Controls edit form (#3580). */
+export interface OrchestratorCampaignBehaviorView {
+  /** Compare-and-set revision of these values; 0 until a person first changes them. */
+  revision: number;
+  behavior: OrchestratorCampaignBehavior;
+  sources: Record<OrchestratorCampaignBehaviorKey, OrchestratorPolicySource>;
+  /** What the person's connected machines offer, evaluated against the campaign's current values. */
+  capabilities: OrchestratorSettingsCapabilities;
+  /** The Orchestrator's own runner, which admits a fixed Child Harness only once it supports one. */
+  runnerProtocolVersion: number | null;
+}
+
+/** A person's change to a running campaign's behavior (#3580): the complete set of editable values,
+ * sent against the revision the person saw. Human-only; no agent may call it. */
+export interface UpdateOrchestratorCampaignBehaviorRequest {
+  expectedRevision: number;
+  behavior: OrchestratorCampaignBehavior;
 }
 
 /** Native provider TUIs do not expose their turns through Wollipog's structured event stream.

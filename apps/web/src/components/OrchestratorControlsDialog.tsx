@@ -27,6 +27,7 @@ import { ChoiceRows, SegmentedControl, type ChoiceRowOption } from "./ui/ChoiceC
 import { SAVED_MS } from "./ui/SettingsRows.js";
 import { BusyButton } from "./ui/BusyButton.js";
 import { enableFullControlCampaign, OrchestratorControlChoice } from "./FullControlPreparation.js";
+import { CampaignBehaviorEditor } from "./CampaignBehaviorEditor.js";
 
 /** Who answers a descendant session's requests (§8.4 choice rows). The off choice is "Human",
  * matching each gate's Human | Orchestrator (#2192). */
@@ -123,7 +124,7 @@ function sourceLabel(source: string | undefined): string {
   return titleCaseLabel((source ?? "legacy_session").replaceAll("_", " "));
 }
 
-type SaveKey = "parentControl" | "control" | DelegatableWorkflowDecisionCategory;
+type SaveKey = "parentControl" | "control" | "behavior" | DelegatableWorkflowDecisionCategory;
 
 type PendingChoices = Partial<Record<SaveKey, { value: string; request: number }>>;
 
@@ -342,7 +343,8 @@ export function OrchestratorControlsDialog({
   const fullControlView = effectiveMode === "full_control" || (canEnable && controlPreview === "full_control");
   const savedStatus = saved === null
     ? ""
-    : `${saved === "parentControl" ? "Child Session Requests" : saved === "control" ? "Orchestrator Control" : WORKFLOW_DECISION_LABELS[saved]} saved`;
+    : `${saved === "parentControl" ? "Child Session Requests" : saved === "control" ? "Orchestrator Control"
+      : saved === "behavior" ? "Campaign Behavior" : WORKFLOW_DECISION_LABELS[saved]} saved`;
 
   return (
     <Modal
@@ -453,7 +455,11 @@ export function OrchestratorControlsDialog({
         </section>
       )}
 
-      {session.orchestratorPolicy && !fullControlView && <CampaignBehavior session={session} titleId={`${ids}-campaign`} />}
+      {/* Under Full Control Campaign Behavior still governs every child the Orchestrator creates, so
+          it stays, and can be changed, while Full Control is in effect (#3580). */}
+      {session.orchestratorPolicy && (!fullControlView || effectiveMode === "full_control") && <CampaignBehavior session={session}
+        titleId={`${ids}-campaign`} editable={!session.parentSessionId && refusal === null} fullControl={effectiveMode === "full_control"}
+        saved={saved === "behavior"} onSaved={(next) => { onSessionChanged(next); showSaved("behavior"); }} />}
 
       <span className="sr-only" role="status">{savedStatus}</span>
       {failure && (
@@ -529,10 +535,30 @@ function Fact({ label, value, source, title }: { label: string; value: ReactNode
 }
 
 /** The campaign's stored behavior as facts (§5.4), each value with where it came from. */
-function CampaignBehavior({ session, titleId }: { session: SessionView; titleId: string }) {
+function CampaignBehavior({ session, titleId, editable, fullControl, saved, onSaved }: {
+  session: SessionView;
+  titleId: string;
+  /** A person may change the root campaign's child behavior here (#3580); a descendant inherits it. */
+  editable: boolean;
+  fullControl: boolean;
+  saved: boolean;
+  onSaved: (session: SessionView) => void;
+}) {
   const policy = session.orchestratorPolicy!;
   const campaign = session.orchestratorCampaign;
   const { behavior, sources } = policy;
+  const [editing, setEditing] = useState(false);
+  const editButton = useRef<HTMLButtonElement | null>(null);
+  const finishEditing = (next: SessionView | null) => {
+    setEditing(false);
+    if (next) onSaved(next);
+    // The form replaced the facts and its Edit action; focus returns to the action it came from.
+    window.setTimeout(() => editButton.current?.focus(), 0);
+  };
+  // `active_campaign` on a root is a value a person changed after launch; on a descendant it is the
+  // value it inherits from the root (#3580).
+  const behaviorSource = (source: string | undefined) => source !== "active_campaign" ? sourceLabel(source)
+    : session.parentSessionId ? "Set by the Root Campaign" : "Changed After Launch";
   // A pre-v164 payload has no field. Derive it in the same order the control-plane migration does,
   // and for the same reason: EVERY coupled preset launch replaces the provider surface and so
   // carries no user integration, including the non-strict Claude and Codex preset shapes, where
@@ -550,9 +576,16 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
     <section className="section" aria-labelledby={titleId}>
       <div className="section-head">
         <h3 className="section-title" id={titleId}>Campaign Behavior</h3>
+        {editable && !editing ? <div className="actions">
+          {saved && <SavedCheck />}
+          <button type="button" className="btn sm" ref={editButton} aria-label="Edit Campaign Behavior" onClick={() => setEditing(true)}>Edit</button>
+        </div> : saved && <SavedCheck />}
       </div>
       <p className="section-note">This campaign keeps its stored policy when account defaults change.</p>
-      <dl className="facts orchestrator-facts">
+      {session.parentSessionId && <p className="section-note">This nested Orchestrator uses its root campaign's behavior. Change it on the root Orchestrator.</p>}
+      {editing && <CampaignBehaviorEditor session={session} fullControl={fullControl}
+        onCancel={() => finishEditing(null)} onSaved={(next) => finishEditing(next)} />}
+      {!editing && <dl className="facts orchestrator-facts">
         {campaign && (
           <Fact
             label="Campaign Status"
@@ -563,13 +596,13 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
         <Fact
           label="Child Harness"
           value={behavior.childHarness ? agentHarnessIdentityLabel(behavior.childHarness) : "Automatic"}
-          source={sourceLabel(sources.behavior.childHarness)}
+          source={behaviorSource(sources.behavior.childHarness)}
         />
-        <Fact label="Child Model" value={behavior.childModel ?? "Automatic"} source={sourceLabel(sources.behavior.childModel)} />
+        <Fact label="Child Model" value={behavior.childModel ?? "Automatic"} source={behaviorSource(sources.behavior.childModel)} />
         <Fact
           label="Child Effort"
           value={behavior.childEffort ? titleCaseLabel(behavior.childEffort) : "Automatic"}
-          source={sourceLabel(sources.behavior.childEffort)}
+          source={behaviorSource(sources.behavior.childEffort)}
         />
         {policy.reviewPolicySnapshotVersion === 1 && <>
           <Fact label="Review Harness" value={behavior.reviewHarness === "codex" ? "Codex" : behavior.reviewHarness === "claude-code" ? "Claude Code" : "Automatic"}
@@ -581,17 +614,17 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
         <Fact
           label="Maximum Concurrent Children"
           value={behavior.maximumConcurrentChildren}
-          source={sourceLabel(sources.behavior.maximumConcurrentChildren)}
+          source={behaviorSource(sources.behavior.maximumConcurrentChildren)}
         />
         <Fact
           label="Follow-Ups"
           value={titleCaseLabel(behavior.followUps.replaceAll("_", " "))}
-          source={sourceLabel(sources.behavior.followUps)}
+          source={behaviorSource(sources.behavior.followUps)}
         />
         <Fact
           label="Completion"
           value={titleCaseLabel(behavior.completion.replaceAll("_", " "))}
-          source={sourceLabel(sources.behavior.completion)}
+          source={behaviorSource(sources.behavior.completion)}
         />
         <Fact
           label="Integration Isolation"
@@ -613,7 +646,7 @@ function CampaignBehavior({ session, titleId }: { session: SessionView; titleId:
             />
           </>
         )}
-      </dl>
+      </dl>}
       {campaign?.uiEvidenceReview.status === "available" && campaign.uiEvidenceReview.effectiveOwner === "orchestrator" && (
         <Notice tone="info" compact>
           The Orchestrator reviews image evidence attached as Session artifacts.{" "}

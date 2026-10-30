@@ -2,6 +2,7 @@ import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
 import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
+import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
@@ -142,7 +143,10 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type ParentControlPolicy,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
+  type OrchestratorCampaignBehavior,
+  type OrchestratorCampaignBehaviorView,
   type OrchestratorCampaignProjection,
+  type OrchestratorSettingsCapabilities,
   type OrchestratorFollowUpRecord,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
@@ -8120,6 +8124,83 @@ export class SessionsService {
     return ok(this.db.getSession(sessionId)!);
   }
 
+  /** The root Orchestrator whose campaign behavior a person may change (#3580). A nested one
+   * inherits its campaign's values and is refused. */
+  private campaignBehaviorRoot(sessionId: string): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy) {
+      return fail("campaign behavior is available only for the Orchestrator role", 409);
+    }
+    const controller = this.orchestratorCampaignController(session);
+    if (controller === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    if (controller?.id !== session.id) {
+      return fail("A nested Orchestrator inherits its campaign's behavior. Change it on the root Orchestrator.", 409);
+    }
+    return ok(session);
+  }
+
+  /** A root campaign's editable behavior and the capability catalog its edit form offers (#3580). */
+  campaignBehaviorView(
+    sessionId: string,
+    capabilities: (behavior: OrchestratorCampaignBehavior) => OrchestratorSettingsCapabilities,
+  ): ServiceResult<OrchestratorCampaignBehaviorView> {
+    const root = this.campaignBehaviorRoot(sessionId);
+    if (!root.ok) return fail(root.error!, root.status);
+    const policy = root.data!.orchestratorPolicy!;
+    const behavior = campaignBehaviorValues(policy);
+    return ok({
+      revision: policy.behaviorRevision ?? 0,
+      behavior,
+      sources: campaignBehaviorSources(policy),
+      capabilities: capabilities(behavior),
+      runnerProtocolVersion: this.db.getRunner(root.data!.runnerId)?.protocolVersion ?? null,
+    });
+  }
+
+  /**
+   * A person's change to a running campaign's Child Harness, Child Model, Child Effort, Follow-Ups
+   * and Completion (#3580). Human-only (the route admits no agent), compare-and-set on the behavior
+   * revision. Children created afterwards get the new values; existing children keep the
+   * configuration they launched with. The Parent Control revision, a Full Control boundary, the
+   * campaign allowance and every decision are untouched, so nothing is revoked and a Full Control
+   * campaign stays promptable and restartable.
+   */
+  setCampaignBehavior(
+    sessionId: string,
+    request: unknown,
+    actor: GovernanceActor,
+    compatibilityError: (behavior: OrchestratorCampaignBehavior) => string | null,
+  ): ServiceResult<SessionView> {
+    if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing campaign behavior", 409);
+    const parsed = parseCampaignBehaviorRequest(request);
+    if (!parsed) {
+      return fail("expectedRevision and a valid childHarness, childModel, childEffort, followUps and completion are required", 400);
+    }
+    const root = this.campaignBehaviorRoot(sessionId);
+    if (!root.ok) return root;
+    const changed = changedCampaignBehavior(root.data!.orchestratorPolicy!, parsed.behavior);
+    // Only a changed child combination must be launchable now: an unrelated change never fails
+    // because a machine that offers the unchanged one is offline.
+    if (changed.some((key) => key === "childHarness" || key === "childModel" || key === "childEffort")) {
+      if (parsed.behavior.childHarness !== null) {
+        const unsupported = this.capabilityFailure(root.data!.runnerId, "orchestratorChildHarnessPolicy", "a fixed Child Harness");
+        if (unsupported) return unsupported;
+      }
+      const incompatible = compatibilityError(parsed.behavior);
+      if (incompatible) return fail(incompatible, 409);
+    }
+    const now = Date.now();
+    const result = this.db.updateCampaignBehavior(sessionId, parsed.behavior, parsed.expectedRevision, now);
+    if (!result) return fail("Campaign behavior changed; refresh and try again.", 409);
+    if (result.changed.length > 0) {
+      this.log.info(JSON.stringify({ event: "campaign_behavior_changed", sessionId, actor: actor.kind,
+        revision: parsed.expectedRevision + 1, changed: result.changed, members: result.memberIds.length }));
+    }
+    for (const id of result.memberIds) this.hub.sessionChangedById(id);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
   campaignProjection(sessionId: string): ServiceResult<OrchestratorCampaignProjection> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -9748,10 +9829,14 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale";
     }
     const behavior = controller?.orchestratorPolicy?.behavior;
-    if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel) {
+    // A child keeps the model and effort it launched with after a person changes the campaign's
+    // (#3580): restating its own value is no change. Any other value must be the campaign's.
+    if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel &&
+        config.model !== session.model) {
       return `child model is fixed by campaign policy at ${behavior.childModel}`;
     }
-    if (behavior && behavior.childEffort !== null && config.effort !== undefined && config.effort !== behavior.childEffort) {
+    if (behavior && behavior.childEffort !== null && config.effort !== undefined && config.effort !== behavior.childEffort &&
+        config.effort !== session.effort) {
       return `child effort is fixed by campaign policy at ${behavior.childEffort}`;
     }
     return null;

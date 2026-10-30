@@ -4234,6 +4234,27 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
   ));
 });
 
+// A running campaign's Child Harness, Model, Effort, Follow-Ups and Completion (#3580): a person's
+// compare-and-set on the campaign's own behavior revision. No agent allowlist entry exists for these
+// endpoints, so neither the Orchestrator nor any child can read the form or change the values.
+app.get("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.campaignBehaviorView(id, (behavior) => orchestratorSettings.campaignCapabilities(human, behavior)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.setCampaignBehavior(id, req.body, { kind: "human", id: humanActorId(req) },
+    (behavior) => orchestratorSettings.campaignBehaviorError(human, behavior)));
+});
+
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);

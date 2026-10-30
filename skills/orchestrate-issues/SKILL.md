@@ -21,7 +21,7 @@ If the current session is restricted by the Orchestrator permission preset and c
 
 - `count`: any positive integer, the number of initial issues to select. Infer it from the request; if omitted, use 5 and state that assumption. An explicit issue list replaces priority selection and determines the count.
 - `concurrency`: optional ceiling, independent of count. Default to the smallest of count, the policy's `maximumConcurrentChildren`, and available live-child capacity. Queue excess issues; never raise platform limits to fit the count.
-- Child harness, model, and effort come from the campaign's Wollipog Orchestrator policy (`childHarness`, `childModel`, `childEffort` in `get_campaign`); this skill has no defaults of its own. Each value is either fixed or Automatic (`null`). See [Resolve Child Model and Effort](#resolve-child-model-and-effort).
+- Child harness, model, and effort come from the campaign's Wollipog Orchestrator policy (`childHarness`, `childModel`, `childEffort` in `get_campaign.behavior`); this skill has no defaults of its own. Each value is either fixed or Automatic (`null`). See [Resolve Child Model and Effort](#resolve-child-model-and-effort).
 - Reviewers retain the model specified by the repository's review workflow.
 - Optional user-specified cost, time, total-issue, or follow-up-depth limits. Preserve inherited guardrails. Do not invent budget values or an arbitrary successful stopping round.
 
@@ -31,7 +31,7 @@ Discover the current runner, repository/workspace, available worker harnesses an
 
 ### Resolve Child Model and Effort
 
-Read `childHarness`, `childModel`, and `childEffort` from the `get_campaign` policy before selecting anything. Wollipog's Orchestrator settings are the only source of these values. Never fall back to a model or effort written in this skill, remembered from an earlier campaign, or inherited from the parent session.
+Read `childHarness`, `childModel`, and `childEffort` from `get_campaign.behavior` before selecting anything, and read them again before each dispatch: a person can change them while the campaign runs, and only children created afterwards use the new values. Wollipog's Orchestrator settings are the only source of these values. Never fall back to a model or effort written in this skill, remembered from an earlier campaign, or inherited from the parent session.
 
 - **Fixed value:** use it exactly. The server fills in a fixed value when `create_session` omits it and rejects any different value, so do not override it. If the user's prompt asks for a different model or effort than a fixed setting, report the conflict and ask the user to change the Wollipog setting; do not dispatch the affected issue until it is resolved.
 - **Fixed harness:** a fixed `childHarness` names a harness, and each machine has its own agent for it. When `get_campaign` returns `childHarnessAgents`, pass the `agentId` listed for the machine you create the child on; a machine listed with `null` cannot run it. Do not derive the agent from `childHarness.agentId`; it need not be an agent on any machine.

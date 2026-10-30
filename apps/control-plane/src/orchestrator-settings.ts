@@ -13,6 +13,7 @@ import {
   type AgentCapabilities,
   type AgentHarnessIdentity,
   type AgentModel,
+  type OrchestratorCampaignBehavior,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
   type OrchestratorChildHarnessAgent,
@@ -413,6 +414,20 @@ export class OrchestratorSettings {
     return capabilities.status === "unavailable"
       ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON
       : null;
+  }
+
+  /** The capability catalog New Session's Orchestrator Policy offers, evaluated against a running
+   * campaign's child behavior instead of the person's defaults (#3580). */
+  campaignCapabilities(principal: HumanPrincipal, behavior: OrchestratorCampaignBehavior): OrchestratorSettingsCapabilities {
+    return this.capabilities(principal, { ...DEFAULT_ORCHESTRATOR_DEFAULTS, behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, ...behavior } });
+  }
+
+  /** Why a running campaign can't take these fixed child values, by the rule saving defaults uses:
+   * at least one connected installation must support the whole combination. */
+  campaignBehaviorError(principal: HumanPrincipal, behavior: OrchestratorCampaignBehavior): string | null {
+    if (behavior.childHarness === null && behavior.childModel === null && behavior.childEffort === null) return null;
+    const capabilities = this.campaignCapabilities(principal, behavior);
+    return capabilities.compatibleInstallations === 0 ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON : null;
   }
 
   update(principal: HumanPrincipal, request: unknown, now = Date.now()): OrchestratorSettingsView {

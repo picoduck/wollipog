@@ -62,10 +62,11 @@ const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnima
   .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
 /** Under Full Control the dialog shows only its mode, its line and its action (#2940): the boundary
- * owns every gate, so no Custom owner, request choice, evidence note or stored behavior is shown. */
-async function expectFullControlOnly(page: Page) {
+ * owns every gate, so no Custom owner, request choice or evidence note is shown. Once Full Control is
+ * in effect Campaign Behavior stays, since it governs every child the campaign creates (#3580). */
+async function expectFullControlOnly(page: Page, { inEffect }: { inEffect: boolean }) {
   const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
-  await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control"]);
+  await expect(dialog.locator(".section-title")).toHaveText(inEffect ? ["Orchestrator Control", "Campaign Behavior"] : ["Orchestrator Control"]);
   await expect(dialog.getByRole("radiogroup", { name: "PR Merge Approval", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("radiogroup", { name: "Child Session Requests", exact: true })).toHaveCount(0);
   await expect(dialog.getByText("The Orchestrator runs this campaign end to end.").first()).toBeVisible();
@@ -250,7 +251,7 @@ for (const viewport of viewports) {
       await page.getByRole("radio", { name: "Full Control", exact: true }).click();
       await expect(page.getByText(FULL_CONTROL_LINE)).toBeVisible();
       await expectNoFullControlForm(page);
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: false });
       const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
       const footer = page.locator(".modal-foot");
       await expect(footer.getByRole("button")).toHaveText(["Done", "Enable Full Control"]);
@@ -261,7 +262,7 @@ for (const viewport of viewports) {
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: true });
       await expect(footer.getByRole("button")).toHaveText(["Done"]);
       await shoot(page, heading, `${prefix}-enabled.png`);
       expect(bodies).toEqual([{}]);
@@ -285,7 +286,7 @@ for (const viewport of viewports) {
       await expect(alert).toContainText("This campaign pauses new children; raise Live Child Limit in Guardrails to enable Full Control.");
       await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
       await expectNoFullControlForm(page);
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: false });
       await expect(enable).toBeInViewport();
       await shoot(page, alert, `${captures}/paused-${viewport.name}-${theme}-blocked.png`);
     });
@@ -301,7 +302,7 @@ for (const viewport of viewports) {
     await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
     const heading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
     await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
-    await expectFullControlOnly(page);
+    await expectFullControlOnly(page, { inEffect: true });
     await shoot(page, heading, `${captures}/revoke-${viewport.name}-${theme}-full.png`);
     await page.getByRole("button", { name: "Revoke Full Control", exact: true }).click();
     await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();

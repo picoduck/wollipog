@@ -1,4 +1,5 @@
 import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
+import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
 import type {
   CampaignForgeRefreshResponse,
   CampaignWorkItemDetailResponse,
@@ -1171,6 +1172,13 @@ export function createApiClient(transport: ApiTransport) {
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control-policy`, {
       method: "POST",
       body: JSON.stringify({ decisions, expectedRevision }),
+    }),
+  campaignBehavior: (id: string, signal?: AbortSignal) =>
+    req<OrchestratorCampaignBehaviorView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/behavior`, { signal }),
+  setCampaignBehavior: (id: string, request: UpdateOrchestratorCampaignBehaviorRequest) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/behavior`, {
+      method: "POST",
+      body: JSON.stringify(request),
     }),
   descendantRequests: (id: string, signal?: AbortSignal) =>
     req<DescendantRequestsView>(
