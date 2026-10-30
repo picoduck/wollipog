@@ -97,7 +97,7 @@ test("Full Control planning uses trusted provenance; Custom preserves keyword-ba
   }).owner, "human");
   assert.equal(evaluate(question("Which architecture?"), { control: undefined, parentControl: "questions" }).owner, "orchestrator");
   assert.equal(evaluate(question("Which architecture?"), { root: true, control: undefined, parentControl: "questions" }).owner, "human");
-  assert.equal(evaluate(question("Which architecture?"), { root: true }).basis, "standing_authorization");
+  assert.equal(evaluate(question("Which architecture?"), { root: true }).basis, "standing_decline");
 });
 
 const declined = (result: ReturnType<typeof evaluate>, requestClass: string, label = requestClass) => {
@@ -161,8 +161,10 @@ test("the Orchestrator decides elicitations, unverified provenance, escalations 
   declined(evaluate(escalated, { root: true }), "unverified_tool_effects");
   const free = question("Which design?", { questions: [{ id: "q", question: "Which design?", options: [] }] });
   decided(evaluate(free), undefined);
-  declined(evaluate(free, { root: true }), "root_forms_without_suggested_answers");
-  assert.equal(evaluate(question("Which architecture?"), { root: true }).basis, "standing_authorization", "a suggested answer is still applied");
+  declined(evaluate(free, { root: true }), "root_questions");
+  // A root's own question is dismissed even when it offers a choice: nobody else can answer it, and
+  // applying an option would claim a decision no person made (#2940).
+  declined(evaluate(question("Which architecture?"), { root: true }), "root_questions", "no option is applied for a root");
 });
 
 test("ordinary ask rules left undelegated go to the Orchestrator; Human Required and built-in rules and guardrails stay human", () => {

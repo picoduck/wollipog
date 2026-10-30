@@ -41,7 +41,7 @@ export type CampaignRequestSource = "provider_question" | "provider_tool" | "pro
 /** Request classes Full Control once routed to the Human. Each now has a fixed owner: the
  * Orchestrator decides it, the server declines it, or (rules only) the Human keeps it. */
 export type FullControlRequestClass = "secrets_and_sign_in" | "persistent_permissions" | "provider_access_expansion" |
-  "external_elicitation" | "root_forms_without_suggested_answers" | "unverified_tool_effects" |
+  "external_elicitation" | "root_questions" | "unverified_tool_effects" |
   "git_execution_without_bounded_effect_proof" | "script_execution_without_bounded_effect_proof" |
   "human_required_rules" | "undelegated_policy_asks" | "relative_shell_commands_without_verified_cwd";
 
@@ -224,25 +224,6 @@ export function repositoryCodeToolIntent(request: PendingApproval, repositoryRoo
   });
 }
 
-/** A parked root provider cannot run another tool to answer itself. Its own recommended choice,
- * or first offered assumption, can be applied from the standing authorization. Free-text forms
- * lacking a bounded suggested answer are explicitly unsupported by this admission path. */
-export function standingRootQuestionAnswers(request: PendingApproval): Record<string, string | string[]> | null {
-  if (request.kind !== "question" || !request.questions?.length) return null;
-  const answers: Record<string, string | string[]> = {};
-  for (const question of request.questions) {
-    if (!question.options?.length || question.secret || question.inputFormat === "email") return null;
-    const recommended = question.options.filter((option) => /\(recommended\)/iu.test(option.label));
-    if (recommended.length > 1) return null;
-    const ordered = recommended.length ? [...recommended, ...question.options.filter((option) => option !== recommended[0])] : question.options;
-    const count = question.multiSelect ? Math.max(1, question.minSelections ?? 1) : 1;
-    if (count > ordered.length || (question.maxSelections !== undefined && count > question.maxSelections)) return null;
-    const choices = ordered.slice(0, count).map((option) => option.label);
-    answers[question.id] = question.multiSelect ? choices : choices[0]!;
-  }
-  return answers;
-}
-
 /** Why a request fails the protected screen. Credential, sign-in and access-expansion classes are
  * declined under Full Control; runner guardrails stay with the Human; the rest are decidable. */
 type ProtectedRequestClass = "secrets_and_sign_in" | "provider_access_expansion" | "persistent_permissions" |
@@ -368,8 +349,11 @@ export function resolveCampaignAuthority(input: {
     requestClass = "unverified_tool_effects";
   } else if (!question && !repositoryCodeToolIntent(generic, input.repositoryRoot)) {
     requestClass = toolEffectClass(generic);
-  } else if (input.root && question && !standingRootQuestionAnswers(generic)) {
-    requestClass = "root_forms_without_suggested_answers";
+  } else if (input.root && question) {
+    // A root's own question has nobody to answer it: the root is the campaign's only owner and its
+    // provider is parked. Applying one of its options would put words in a person's mouth, so the
+    // server dismisses it and tells the root to decide with its typed tools.
+    requestClass = "root_questions";
   }
   if (generic.governancePolicyId && !boundary.delegatablePolicyIds.includes(generic.governancePolicyId)) requestClass ??= "undelegated_policy_asks";
   const classified = requestClass ? { requestClass } : {};
@@ -382,8 +366,8 @@ export function resolveCampaignAuthority(input: {
     return result("orchestrator", "standing_decline", "unresolved_effects", { ...classified, disposition: "decline" });
   }
   // A parked root cannot judge its own request, and text never proves an effect is safe. It allows
-  // once only a verified bounded effect outside any undelegated ask rule (or answers with its own
-  // suggestion) and declines the rest, so an unverified root effect can never reach a secret and an
+  // once only a verified bounded effect outside any undelegated ask rule and declines the rest,
+  // including every question of its own, so an unverified root effect can never reach a secret and an
   // ask a person wanted checked is never self-approved. A child's goes to the Orchestrator.
   if (input.root && requestClass) {
     return result("orchestrator", "standing_decline", "authorized_operation", { ...classified, disposition: "decline" });
@@ -409,7 +393,7 @@ export const FULL_CONTROL_HUMAN_REQUIRED_LABELS: Record<string, string> = {
   persistent_permissions: "Persistent Permission Grants",
   provider_access_expansion: "Provider Access Expansion",
   external_elicitation: "External Provider Forms",
-  root_forms_without_suggested_answers: "Root Questions Without a Suggested Answer",
+  root_questions: "Root Questions",
   unverified_tool_effects: "Tool Effects That Cannot Be Verified",
   git_execution_without_bounded_effect_proof: "Git Commands Without Bounded Effect Proof",
   script_execution_without_bounded_effect_proof: "Scripts Without Bounded Effect Proof",
@@ -427,6 +411,16 @@ export const FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE = "[Wollipog Full Control] 
   "a file outside the worktree, a symlink leading out of it, a glob, a script, an interpreter with inline code, or a Git " +
   "command), so it could not rule out credential access. Nobody was asked and the request will not be replayed. Retry with " +
   "explicit file paths inside your worktree, such as reading or editing named files, or continue without it.";
+
+/** Delivered to a Full Control root after the server dismisses its own question (#2940). No person
+ * sees a root's questions, and none of its options is applied for it. Content-safe: it never
+ * repeats the question. */
+export const FULL_CONTROL_ROOT_QUESTION_MESSAGE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +
+  "no person sees this campaign's questions, and none of its options was chosen for you. You own every Orchestrator-owned " +
+  "decision under your standing authorization, so decide it yourself and continue with the typed tools. To approve your own " +
+  "pending workflow decision, such as an issue closure or scope change, call resolve_descendant_workflow_decision with your own " +
+  "session ID as sessionId, then execute it (for a closure, close_github_issue with the same occurrenceId and resourceDigest). " +
+  "A human-owned decision still waits for a person in Wollipog; report it instead of asking.";
 
 /** Shown beside the Human Required list: the classes the Orchestrator cannot supply. */
 export const FULL_CONTROL_DECLINED_NOTE = "Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status. You are not asked.";

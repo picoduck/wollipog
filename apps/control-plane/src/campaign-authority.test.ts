@@ -519,7 +519,10 @@ test("pending root requests settle on human admission; unavailable delivery beco
   for (const available of [true, false]) {
     const h = harness();
     try {
-      h.generic("root", "already-parked");
+      // A verified one-time effect: the allow path a root's standing authorization still answers.
+      h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "already-parked", occurrenceId: "already-parked", requestSource: "provider_tool",
+        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
       assert.ok(h.db.getSession("root")!.pendingApproval);
       if (!available) (h.svc as unknown as { hub: Hub }).hub.sendToRunner = () => false;
       assert.ok(h.enable().ok);
@@ -538,6 +541,24 @@ test("pending root requests settle on human admission; unavailable delivery beco
       }
     } finally { h.db.close(); }
   }
+});
+
+test("a root's own pending typed decision never blocks its standing allow of a verified effect (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const own = h.ask("root", "own-decision");
+    assert.ok(own.ok, own.error ?? "own decision");
+    assert.equal(own.data!.status, "pending");
+    assert.ok(h.db.getSession("root")!.pendingRequestOwners!.requests!.some((r) => r.occurrenceId === own.data!.occurrenceId), "the root holds its own typed decision");
+    h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "root-tool", occurrenceId: "root-tool", requestSource: "provider_tool",
+      title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
+    const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ sessionId: string; requestId: string; optionId: string }>;
+    assert.deepEqual(resolved.map((m) => [m.sessionId, m.requestId, m.optionId]), [["root", "root-tool", "once"]],
+      "the parked root is allowed once instead of waiting on a request only it could answer");
+    assert.equal(h.db.workflowDecisionByOccurrence(own.data!.occurrenceId)!.status, "pending", "its own typed decision is untouched");
+  } finally { h.db.close(); }
 });
 
 test("live Human Required, deny and withdrawn asks have the same effective owner in every projection and resolution", () => {
@@ -591,7 +612,7 @@ test("ambiguous credential-value choices are declined, never answered, even on t
   } finally { h.db.close(); }
 });
 
-test("a real parked root NDJSON provider resumes after its question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
+test("a real parked root NDJSON provider resumes after its dismissed question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-root-authority-"));
   mkdirSync(join(root, "src")); writeFileSync(join(root, "src/authentication.ts"), "export const implementation = true;\n");
   const h = harness(PROTOCOL_VERSION, root, "codex-app-server");
@@ -620,7 +641,8 @@ test("a real parked root NDJSON provider resumes after its question and one-time
     assert.equal(await driver.prompt("Implement the approved authentication feature."), "end_turn", stderr.join("\n"));
     assert.ok(events.includes("Root continued autonomously."));
     assert.equal(h.db.getSession("root")!.pendingApproval, null);
-    assert.equal(h.sent.filter((m) => (m as { type: string }).type === "answer_question").length, 1);
+    assert.deepEqual(h.sent.filter((m) => (m as { type: string }).type === "answer_question").map((m) => (m as { action: string }).action), ["dismiss"],
+      "the root's own question is dismissed, never answered with its recommended option");
     assert.equal(h.sent.filter((m) => (m as { type: string }).type === "resolve_permission").length, 1);
     assert.ok(h.db.listGovernanceAudit("root").filter((a) => a.stage === "resolution").every((a) => a.actor.kind === "system"));
   } finally { driver.dispose(); h.db.close(); rmSync(root, { recursive: true, force: true }); }

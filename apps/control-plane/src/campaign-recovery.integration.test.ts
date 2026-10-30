@@ -436,7 +436,7 @@ test("a card restored only by runner registration gets its standing decline, onc
 });
 
 test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)", () => {
-  // A credential decline, a root standing answer, and a sign-in dismissal whose runner resolution
+  // A credential decline, a root question dismissal, and a sign-in dismissal whose runner resolution
   // is still pending: each restored card is answered exactly once across repeated snapshots.
   const rootQuestion: PendingApproval = { requestId: "root-q", occurrenceId: "root-q", kind: "question", title: "Placement",
     options: [], requestSource: "provider_question",
@@ -452,7 +452,7 @@ test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)
       }
       const answered = sentOf(h.sent, type).filter((message) => message.requestId === pending.requestId);
       assert.equal(answered.length, 1, `${pending.requestId}: answered exactly once`);
-      if (sessionId === "root") assert.equal(answered[0]!.action, "submit", "the root's own suggested answer");
+      if (sessionId === "root") assert.equal(answered[0]!.action, "dismiss", "the root's own question is dismissed, never answered for it (#2940)");
       if (pending.kind === "authentication") assert.equal(answered[0]!.optionId, "auth:dismiss");
     } finally { h.db.close(); }
   }

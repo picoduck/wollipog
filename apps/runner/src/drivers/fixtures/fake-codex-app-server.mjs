@@ -53,8 +53,9 @@ function send(message) {
 createInterface({ input: process.stdin }).on("line", (line) => {
   const message = JSON.parse(line);
   if (scenario === "full-control-root" && message.method == null && message.id === "root-question") {
-    if (message.result?.answers?.library?.answers?.[0] !== "Library A (Recommended)") {
-      process.stderr.write("root question was not resolved from its bounded suggested answer\n"); process.exitCode = 2; return;
+    // A Full Control root's own question is dismissed: none of its options is chosen for it (#2940).
+    if (!message.result?.answers || Object.keys(message.result.answers).length !== 0) {
+      process.stderr.write("root question was answered for the root instead of dismissed\n"); process.exitCode = 2; return;
     }
     send({ id: "root-tool", method: "item/commandExecution/requestApproval", params: {
       threadId, turnId: "fixture-turn", itemId: "root-command", command: "cat src/authentication.ts", cwd: rootCwd,
