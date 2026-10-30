@@ -650,6 +650,12 @@ function automaticTurn(prompt: QueuedPrompt): boolean {
     prompt.backgroundJobIds?.length);
 }
 
+/** The exact live turn a session's own worktree request came from (#3810). */
+interface RequestingTurn {
+  entry: ActiveSession;
+  turnId: string;
+}
+
 /** The runner's turn after the relaunch a session's own worktree switch needed (#3810). */
 export function worktreeContinuationPrompt(worktree: { path: string; branch: string }): string {
   return `Wollipog relaunched this session in the worktree you switched to: ${worktree.path} ` +
@@ -1762,6 +1768,9 @@ export class SessionManager {
     meta: SessionMeta,
     protections: ManagedWorktreeProtection[],
   ) => ManagedWorktreeGuardRefreshOutcome;
+
+  /** Bumped by every worktree activation; a relaunch's captured continuation needs it unchanged. */
+  private readonly worktreeSelectionRevisions = new Map<string, number>();
 
   /** Exact duplicate create requests join one operation, including after a control-plane retry. */
   private readonly worktreeCreates = new Map<string, {
@@ -3113,16 +3122,31 @@ export class SessionManager {
     return "completed";
   }
 
+  /** The live turn a session's own worktree request came from, captured when the request arrives.
+   * Worktree Git work is awaited, so by activation that turn may have been interrupted, stopped, or
+   * replaced by the next one; only the exact turn, still uninterrupted, may continue (#3810). */
+  private requestingTurn(sessionId: string): RequestingTurn | undefined {
+    const entry = this.active.get(sessionId);
+    const turnId = entry && this.liveTurnId(entry);
+    return entry && turnId ? { entry, turnId } : undefined;
+  }
+
+  private liveTurnId(entry: ActiveSession): string | undefined {
+    if (entry.cancelRequested || entry.interruptRequested) return undefined;
+    return entry.providerInitiatedTurnActive ? entry.providerInitiatedTurnId
+      : entry.running ? entry.activeTurnId : undefined;
+  }
+
   /** Activate a create, attach, or select, and say what the live sandbox can do with it. When the
    * session's own turn switched to a worktree it cannot write yet, the turn's end relaunches it there
    * and the runner continues the task by itself (#3810); the notice tells the agent so. */
   private async activateWorktreeWithNotice(
     meta: SessionMeta,
     worktree: SessionWorktreeView,
-    requestedBySession = false,
+    requester?: RequestingTurn,
   ): Promise<{ snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }> {
     const isolation = await this.worktreeIsolationNotice(meta, worktree.path);
-    const snapshot = await this.activateWorktree(meta, worktree, requestedBySession && !isolation.writableNow);
+    const snapshot = await this.activateWorktree(meta, worktree, isolation.writableNow ? undefined : requester);
     const continuation = this.active.get(meta.sessionId)?.worktreeRebindContinuation;
     return {
       snapshot,
@@ -3135,7 +3159,7 @@ export class SessionManager {
   private async activateWorktree(
     meta: SessionMeta,
     worktree: SessionWorktreeView,
-    continueAfterRebind = false,
+    continuationRequester?: RequestingTurn,
   ): Promise<SessionSnapshot> {
     // Every worktree switch funnels through here — select, create, and attach alike — so the
     // quarantine guard belongs at this choke point rather than on one entry. The recovery
@@ -3204,16 +3228,21 @@ export class SessionManager {
       active.pendingWorktreeRebind = sameWorktreePath(active.context, active.cwd, worktree.path)
         ? undefined
         : worktree.path;
-      // Only a switch made from inside the session's own live turn continues by itself. Any other
-      // selection, including one back to the launch worktree, supersedes an earlier one.
-      active.worktreeRebindContinuation = continueAfterRebind && active.pendingWorktreeRebind &&
-          (active.running || active.providerInitiatedTurnActive)
+      // Only a switch made from inside the session's own live turn continues by itself, and only
+      // while that exact turn is still live and uninterrupted. Any other selection, including one
+      // back to the launch worktree, supersedes an earlier one.
+      active.worktreeRebindContinuation = continuationRequester && active.pendingWorktreeRebind &&
+          continuationRequester.entry === active && this.liveTurnId(active) === continuationRequester.turnId
         ? worktree.path
         : undefined;
       if (active.pendingWorktreeRebind && !active.running) {
         setImmediate(() => this.scheduleDrain(meta.sessionId));
       }
     }
+    // Every selection moves the revision, live entry or not, so a continuation captured by a
+    // relaunch already under way is dropped if anyone selects again before it is queued — even back
+    // to the same path.
+    this.worktreeSelectionRevisions.set(meta.sessionId, (this.worktreeSelectionRevisions.get(meta.sessionId) ?? 0) + 1);
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
     if (resumeAfterRecovery) this.emitStatus(meta.sessionId, "idle", undefined, worktree.path);
@@ -3269,6 +3298,7 @@ export class SessionManager {
         try { observer(phase); } catch { /* Progress must never fail the Git operation. */ }
       }
     };
+    const requester = activation.requestedBySession ? this.requestingTurn(sessionId) : undefined;
     const operation = this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -3311,7 +3341,7 @@ export class SessionManager {
           : "invalid worktree setup configuration");
         if (setup === "failed") throw new Error("required worktree setup failed; retry the retained worktree setup");
         report("activating");
-        return { worktree: canonical, ...await this.activateWorktreeWithNotice(meta, canonical, activation.requestedBySession) };
+        return { worktree: canonical, ...await this.activateWorktreeWithNotice(meta, canonical, requester) };
       }
       // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
       // synchronously and must never reach for Git to do it. The advertised branch wins when we
@@ -3346,7 +3376,7 @@ export class SessionManager {
           });
         }
         report("activating");
-        return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, activation.requestedBySession) };
+        return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
       } catch (error) {
         if (created.created && !(error as { retainWorktree?: boolean }).retainWorktree) {
           try {
@@ -3446,6 +3476,7 @@ export class SessionManager {
     snapshot: SessionSnapshot;
     isolation: SessionWorktreeIsolationNotice;
   }> {
+    const requester = options.requestedBySession ? this.requestingTurn(sessionId) : undefined;
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -3488,7 +3519,7 @@ export class SessionManager {
       // that no longer exists — and the contract on the field is that absent means unknown.
       if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
       else delete worktree.defaultBranch;
-      return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, options.requestedBySession) };
+      return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, requester) };
     });
   }
 
@@ -3563,6 +3594,7 @@ export class SessionManager {
     options: { requestedBySession?: boolean } = {},
   ): Promise<{ snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }> {
     if (this.roleConversionPending(sessionId)) throw new Error("wait for the session role change to finish before selecting a worktree");
+    const requester = options.requestedBySession ? this.requestingTurn(sessionId) : undefined;
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
       if (!meta || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
@@ -3595,7 +3627,7 @@ export class SessionManager {
         ? `invalid worktree setup configuration: ${selected.setupConfig.error}`
         : "invalid worktree setup configuration");
       if (setup === "failed") throw new Error("required worktree setup must succeed before selection");
-      return this.activateWorktreeWithNotice(meta, selected, options.requestedBySession);
+      return this.activateWorktreeWithNotice(meta, selected, requester);
     });
   }
 
@@ -13998,6 +14030,7 @@ export class SessionManager {
         sameWorktreePath(meta.context, entry.worktreeRebindContinuation, selectedPath)
       ? { path: selectedPath, branch: selectedBranch }
       : undefined;
+    const continuationRevision = this.worktreeSelectionRevisions.get(sessionId) ?? 0;
     entry.worktreeRebindContinuation = undefined;
     if (continuation) {
       this.emitEvent(sessionId, {
@@ -14148,7 +14181,9 @@ export class SessionManager {
         }
         const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
         this.activatePreLaunchQueue(sessionId);
+        // A selection made while the relaunch ran supersedes the switch, even one back to its path.
         const continued = !hasQueuedWork && !!continuation &&
+          (this.worktreeSelectionRevisions.get(sessionId) ?? 0) === continuationRevision &&
           this.queueWorktreeContinuation(sessionId, reboundEntry, continuation);
         preserveRebindLockForQueue = hasQueuedWork || continued;
         if (continuation && !hasQueuedWork && !continued) {
@@ -16644,6 +16679,7 @@ export class SessionManager {
       const entry = this.active.get(sessionId);
       if (!closing && !rebinding && !accountSwitching) this.releaseAdmissionIfInactive(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
+      this.worktreeSelectionRevisions.delete(sessionId);
       if (entry) {
         this.deleteActiveSession(sessionId, entry, false);
         this.rejectQueued(entry.queue, "session was deleted before queued command started");

@@ -41,7 +41,12 @@ interface Switched {
 }
 
 /** A provider whose turn for `text` stays open while `during` runs, as an agent's tool call does. */
-function fakeProvider(options: { during?: (text: string) => Promise<void>; failRelaunch?: boolean }) {
+function fakeProvider(options: {
+  during?: (text: string) => Promise<void>;
+  failRelaunch?: boolean;
+  /** Runs before the numbered provider launch finishes starting. */
+  beforeInitialize?: (launch: number) => Promise<void>;
+}) {
   const prompts: Array<{ cwd: string; text: string }> = [];
   let launches = 0;
   const factory = (
@@ -50,10 +55,12 @@ function fakeProvider(options: { during?: (text: string) => Promise<void>; failR
     cb: DriverCallbacks,
   ) => {
     launches++;
+    const generation = launches;
     const relaunch = launches > 1;
     return {
       pid: launches,
       initialize: async () => {
+        await options.beforeInitialize?.(generation);
         if (relaunch && options.failRelaunch) throw new Error("provider failed to start");
       },
       newSession: async () => {},
@@ -98,6 +105,7 @@ async function withSession(
     /** The live process cannot write a worktree created after it launched, as in production. */
     managedGitBoundary?: boolean;
     failRelaunch?: boolean;
+    beforeInitialize?: (launch: number) => Promise<void>;
   },
   body: (harness: Harness) => Promise<void>,
 ): Promise<void> {
@@ -116,6 +124,7 @@ async function withSession(
     const fake = fakeProvider({
       during: options.during ? (text) => options.during!(harness, text) : undefined,
       failRelaunch: options.failRelaunch,
+      beforeInitialize: options.beforeInitialize,
     });
     manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
       fake.factory as never, dataDir, 1);
@@ -255,5 +264,80 @@ test("an interrupt, a waiting prompt, or a failed relaunch each prevent the cont
     await settle();
     assert.equal(fake.prompts.length, 1);
     assert.equal(stderr(store, sessionId).some((text) => text.startsWith("Runner continued the task")), false);
+  });
+});
+
+/** A promise the test resolves, and one that resolves when the code under test reaches it. */
+function gate() {
+  let open!: () => void;
+  let reached!: () => void;
+  const opened = new Promise<void>((resolve) => { open = resolve; });
+  const arrived = new Promise<void>((resolve) => { reached = resolve; });
+  return { open, arrived, wait: () => { reached(); return opened; } };
+}
+
+test("an interrupt that lands while the switch is still activating is not undone when activation finishes (#3810)", { skip: !haveGit() }, async () => {
+  const activation = gate();
+  let switched: Promise<Switched> | undefined;
+  let interrupted: string | undefined;
+  await withSession("interrupt-mid-activation", {
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      // Hold activation where it reads the live sandbox, after the request was admitted for this turn.
+      const internals = manager as unknown as {
+        worktreeIsolationNotice: (meta: unknown, path: string) => Promise<SessionWorktreeIsolationNotice>;
+      };
+      const notice = internals.worktreeIsolationNotice.bind(manager);
+      internals.worktreeIsolationNotice = async (meta, path) => {
+        await activation.wait();
+        return notice(meta, path);
+      };
+      switched = manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/interrupt-mid-activation" },
+        undefined, { requestedBySession: true });
+      await activation.arrived;
+      interrupted = manager.interruptTurn(sessionId);
+      activation.open();
+      await switched;
+    },
+  }, async ({ manager, store, sessionId, fake }) => {
+    manager.prompt(sessionId, "start the fix");
+    await waitFor(() => fake.launches() === 2 && store.readMeta(sessionId)?.status === "idle",
+      "the relaunch after the interrupt did not finish");
+    await settle();
+    assert.equal(interrupted, "applied");
+    assert.equal(fake.prompts.length, 1, "the interrupted turn's switch does not restart the work");
+    assert.equal((await switched!).isolation.continuesAfterRelaunch, undefined);
+    assert.equal(stderr(store, sessionId).some((text) => text.startsWith("Relaunching this session")), false);
+  });
+});
+
+test("a selection made while the relaunch runs supersedes the switch, even one back to the same worktree (#3810)", { skip: !haveGit() }, async () => {
+  const relaunch = gate();
+  let other: Switched | undefined;
+  let target: Switched | undefined;
+  await withSession("reselected", {
+    beforeInitialize: async (launch) => { if (launch === 2) await relaunch.wait(); },
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      other = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/reselected-other" }, undefined,
+        { requestedBySession: true });
+      target = await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/reselected-target" }, undefined,
+        { requestedBySession: true });
+    },
+  }, async ({ manager, store, sessionId, fake }) => {
+    manager.prompt(sessionId, "start the fix");
+    await relaunch.arrived;
+    assert.equal(target?.isolation.continuesAfterRelaunch, true);
+    // Someone else moves the selection away and back while the replacement provider starts.
+    await manager.selectWorktree(sessionId, other!.worktree.path);
+    await manager.selectWorktree(sessionId, target!.worktree.path);
+    relaunch.open();
+    await waitFor(() => store.readMeta(sessionId)?.status === "idle" && fake.launches() >= 2,
+      "the relaunch did not finish");
+    await settle();
+    assert.equal(fake.prompts.length, 1, "the superseded switch does not continue");
+    assert.ok(stderr(store, sessionId).includes(
+      "The session did not continue on its own after the relaunch. Send a message to continue.",
+    ), "the relaunch notice's promise is withdrawn plainly");
   });
 });
