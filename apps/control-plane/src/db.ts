@@ -115,6 +115,7 @@ import {
   type HeldSessionResumeView,
   type HoldAdviceReader,
   type SessionHoldView,
+  type QueueHoldUnlistedJob,
   type SessionQueueHoldView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobEnd,
@@ -31627,6 +31628,12 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
       !BACKGROUND_LAUNCH_TYPES.has(oldest.launchType) ||
       !Number.isSafeInteger(oldest.startedAt) || oldest.startedAt < 0)) return undefined;
   if (value.endsAt !== undefined && (!Number.isSafeInteger(value.endsAt) || value.endsAt < value.since!)) return undefined;
+  // Display only (#3752): a malformed entry is dropped, not the hold that still holds the queue.
+  const unlistedJobs = (Array.isArray(value.unlistedJobs) ? value.unlistedJobs : [])
+    .filter((job): job is QueueHoldUnlistedJob => !!job && typeof job === "object" &&
+      validBackgroundIdentity(job.id) && (job.kind === "provisional" || job.kind === "unregistered"))
+    .slice(0, 20)
+    .map((job) => ({ id: job.id, kind: job.kind }));
   return {
     kind: value.kind,
     holdId: value.holdId,
@@ -31638,6 +31645,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
     ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
     ...(value.canRelease === true ? { canRelease: true as const } : {}),
+    ...(unlistedJobs.length > 0 ? { unlistedJobs } : {}),
     ...(value.restartKeepsQueue === true ? { restartKeepsQueue: true as const } : {}),
   };
 }

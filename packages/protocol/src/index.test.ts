@@ -113,7 +113,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 249);
+  assert.equal(PROTOCOL_VERSION, 250);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -319,8 +319,11 @@ test("a provider-HOME wait is accepted only when well formed and content-free", 
   ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 249", () => {
-  assert.equal(PROTOCOL_VERSION, 249);
+test("PROTOCOL_VERSION is 250", () => {
+  assert.equal(PROTOCOL_VERSION, 250);
+  // A v249 runner does not name the unlisted work a queue hold waits on (#3752).
+  assert.equal(runnerSupportsProtocol(249, "queueHoldUnlistedJobs"), false);
+  assert.equal(runnerSupportsProtocol(250, "queueHoldUnlistedJobs"), true);
   // A v246 runner cannot release a queue hold on request (#3752).
   assert.equal(runnerSupportsProtocol(246, "queueHoldRelease"), false);
   assert.equal(runnerSupportsProtocol(247, "queueHoldRelease"), true);
@@ -2039,4 +2042,24 @@ test("a releasable hold names Proceed Now only to a reader who may stop its jobs
   const viewer = queueHoldRecoveryAction(hold, { canStopJobs: false, canRestart: false });
   assert.match(viewer, /Only the session owner or its controlling Orchestrator can end it sooner/u);
   assert.doesNotMatch(viewer, /release_queue_hold|Proceed Now|restart/u);
+});
+
+test("a hold's reason says when Background Work does not list the work it waits on (#3752)", () => {
+  const hold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:9", since: 9, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1,
+  };
+  const listed = queueHoldReason(hold);
+  assert.match(listed, /waits for 1 background job with no terminal status\.$/u);
+  assert.match(queueHoldReason({ ...hold, unlistedJobs: [{ id: "tool:toolu_1", kind: "provisional" }] }),
+    /waits for 1 background job with no terminal status, which Background Work does not list\.$/u);
+  assert.match(queueHoldReason({
+    ...hold, unfinishedBackgroundJobs: 2,
+    unlistedJobs: [{ id: "a", kind: "unregistered" }, { id: "b", kind: "unregistered" }],
+  }), /waits for 2 background jobs with no terminal status, none of which Background Work lists\.$/u);
+  assert.match(queueHoldReason({
+    ...hold, unfinishedBackgroundJobs: 3,
+    oldestUnfinishedJob: { launchType: "shell", startedAt: Date.UTC(2026, 9, 28, 4, 0) },
+    unlistedJobs: [{ id: "tool:toolu_1", kind: "provisional" }],
+  }), /\(the oldest, a shell command started at 2026-10-28T04:00Z\), 1 of which Background Work does not list\.$/u);
 });

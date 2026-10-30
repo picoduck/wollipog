@@ -1683,6 +1683,14 @@ queued behind a turn that had never started.
   (`no_live_process`; only orphan recovery or a restart clears that hold), the provider reported
   nothing to end (`nothing_to_end`), the harness cannot end its work (`unsupported`), or the runner
   is offline or older than v247; with 504 when the runner does not answer in time.
+- **It names work Background Work does not list (#3752).** On protocol v250, a pending id with no
+  unfinished job record is listed in the hold's `unlistedJobs` (at most 20, sorted; the count still
+  covers all of them): `provisional` for a launch the provider has not confirmed as a task yet
+  (`tool:<tool-use-id>`), `unregistered` for a task id the runner tracks without a job record. The
+  hold's reason says how many of its jobs Background Work does not list, and Background Work shows a
+  **Handoff Waiting on Unlisted Work** notice naming each one and, for a reader who may take it,
+  Proceed Now. A pending id whose job this conversation already recorded as ended no longer counts:
+  it cannot be running, so it holds no handoff and no queued prompt.
 - **The way out is stated.** A releasable hold's recovery action, for a reader who may stop jobs,
   names `release_queue_hold` with its hold id and **Proceed Now** first, then stopping a single job
   where the runner can. For a bounded hold, or one whose runner can stop a single job, the

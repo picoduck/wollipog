@@ -755,7 +755,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      GitLab project. The runner reads and closes the issue with `glab` (a not-planned closure
 //      states its reason in a note), and a GitLab epic is its member checklist only. The control
 //      plane refuses GitLab closure or scope work on a pre-v249 runner. Publication stays GitHub-only.
-export const PROTOCOL_VERSION = 249;
+// 250: a queue hold names the work it waits on that Background Work does not list (#3752):
+//      `unlistedJobs`, each a provisional launch or an unregistered task id, and the runner no
+//      longer counts a pending id whose job this conversation already ended. Display only; an
+//      older peer omits or ignores the field.
+export const PROTOCOL_VERSION = 250;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1219,6 +1223,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundJobEndedBy: 192,
   /** v247 releases a worktree or account handoff hold at once (`release_queue_hold`, #3752). */
   queueHoldRelease: 247,
+  /** v250 names a queue hold's work that Background Work does not list (`unlistedJobs`, #3752). */
+  queueHoldUnlistedJobs: 250,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -7401,10 +7407,23 @@ export interface SessionQueueHoldView {
    * unfinished job is recorded as killed at the requester's request, then the handoff and the
    * queued prompts run in order. Absent from runners older than v247. */
   canRelease?: true;
+  /** Work the hold waits on that has no unfinished job in Background Work (#3752), so the session
+   * can show it there: at most 20, sorted by id; `unfinishedBackgroundJobs` still counts all of
+   * them. Proceed Now ends it with the rest. Absent when there is none, and from runners older than
+   * v250. */
+  unlistedJobs?: QueueHoldUnlistedJob[];
   /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports a
    * finished background result still owed to the new conversation (#1779). Absent from runners
    * older than v191, whose restart discards the queue. */
   restartKeepsQueue?: true;
+}
+
+/** One unlisted id a queue hold waits on (#3752). `provisional`: a launch the provider has not yet
+ * confirmed as a task (`tool:<tool-use-id>`). `unregistered`: a task id the runner tracks as pending
+ * without a job record, such as one found in the provider's task files. */
+export interface QueueHoldUnlistedJob {
+  id: string;
+  kind: "provisional" | "unregistered";
 }
 
 export function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
@@ -7431,8 +7450,14 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
     ? ` (${hold.unfinishedBackgroundJobs === 1 ? "" : "the oldest, "}${backgroundLaunchTypeNoun(hold.oldestUnfinishedJob.launchType)}` +
       ` started at ${new Date(hold.oldestUnfinishedJob.startedAt).toISOString().slice(0, 16)}Z)`
     : "";
+  // Work no Background Work row shows is named as such (#3752), so nobody looks there for it in vain.
+  const unlisted = Math.min(hold.unlistedJobs?.length ?? 0, hold.unfinishedBackgroundJobs);
+  const notListed = unlisted === 0 ? ""
+    : unlisted === hold.unfinishedBackgroundJobs
+      ? hold.unfinishedBackgroundJobs === 1 ? ", which Background Work does not list" : ", none of which Background Work lists"
+      : `, ${unlisted} of which Background Work does not list`;
   return `${messages} ${cannot}: the provider must first ${move}, and that handoff waits for ${jobs}` +
-    ` with no terminal status${oldest}.`;
+    ` with no terminal status${oldest}${notListed}.`;
 }
 
 /** What clears a queue hold. Waiting is the ordinary way. When the runner bounds the wait
