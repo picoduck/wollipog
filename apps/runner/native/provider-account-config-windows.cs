@@ -34,6 +34,7 @@ public static class WollipogAccountConfigWindowsV1 {
  [StructLayout(LayoutKind.Sequential)] struct Basic { public long Creation,Access,Write,Change; public uint Attributes; }
  [StructLayout(LayoutKind.Sequential)] struct SA { public int Length; public IntPtr Descriptor; [MarshalAs(UnmanagedType.Bool)] public bool Inherit; }
  [StructLayout(LayoutKind.Sequential)] struct PBI { public IntPtr Reserved1,Peb,Reserved2,Reserved3,Pid,ParentPid; }
+ [StructLayout(LayoutKind.Sequential)] struct IOSB { public IntPtr Status; public UIntPtr Information; }
  [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct StreamData { public long Size; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=296)] public string Name; }
  [StructLayout(LayoutKind.Sequential,Pack=4,CharSet=CharSet.Unicode)] struct FindData { public uint Attributes; public long Creation,Access,Write; public uint High,Low,Reserved0,Reserved1; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=260)] public string Name; [MarshalAs(UnmanagedType.ByValTStr,SizeConst=14)] public string Alternate; }
  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string name,uint access,uint share,IntPtr sa,uint disposition,uint flags,IntPtr template);
@@ -65,6 +66,9 @@ public static class WollipogAccountConfigWindowsV1 {
  [DllImport("kernel32.dll",SetLastError=true)] static extern SafeFileHandle OpenProcess(uint access,bool inherit,int pid);
  [DllImport("kernel32.dll")] static extern IntPtr GetCurrentProcess();
  [DllImport("ntdll.dll")] static extern int NtQueryInformationProcess(IntPtr h,int cls,out PBI info,int size,out int returned);
+ // FileRenameInformation (10) through the native API: the name stays relative to the pinned parent handle. The
+ // Win32 FileRenameInfo wrapper may first expand a relative name against the current directory.
+ [DllImport("ntdll.dll")] static extern int NtSetInformationFile(SafeFileHandle h,out IOSB status,IntPtr info,uint size,int cls);
  [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(SafeFileHandle h,out long creation,out long exit,out long kernel,out long user);
  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(SafeFileHandle h,uint timeout);
  static void Need(bool yes,string code="STORE_UNVERIFIABLE",[System.Runtime.CompilerServices.CallerMemberName] string phase=""){if(!yes)throw new Refusal(code,phase);}
@@ -114,7 +118,7 @@ public static class WollipogAccountConfigWindowsV1 {
  static void Rename(Context c,SafeFileHandle h,string target,bool replace){
   c.Alive();Need(target.Length>0&&target.IndexOfAny(new char[]{'\\','/',':','\0'})<0&&target!="."&&target!="..");
   byte[] name=Encoding.Unicode.GetBytes(target);int root=IntPtr.Size==8?8:4;int count=root+IntPtr.Size;int off=count+4;IntPtr p=Marshal.AllocHGlobal(off+name.Length);
-  try{for(int i=0;i<off+name.Length;i++)Marshal.WriteByte(p,i,0);Marshal.WriteByte(p,0,(byte)(replace?1:0));Marshal.WriteIntPtr(p,root,c.ParentHandle.DangerousGetHandle());Marshal.WriteInt32(p,count,name.Length);Marshal.Copy(name,0,IntPtr.Add(p,off),name.Length);Need(SetFileInformationByHandle(h,3,p,(uint)(off+name.Length)),"IO");}finally{Marshal.FreeHGlobal(p);}
+  try{for(int i=0;i<off+name.Length;i++)Marshal.WriteByte(p,i,0);Marshal.WriteByte(p,0,(byte)(replace?1:0));Marshal.WriteIntPtr(p,root,c.ParentHandle.DangerousGetHandle());Marshal.WriteInt32(p,count,name.Length);Marshal.Copy(name,0,IntPtr.Add(p,off),name.Length);IOSB status;Need(NtSetInformationFile(h,out status,p,(uint)(off+name.Length),10)>=0,"IO");}finally{Marshal.FreeHGlobal(p);}
  }
  static void ReleaseGuard(SafeFileHandle h){IntPtr p=Marshal.AllocHGlobal(1);try{Marshal.WriteByte(p,1);Need(SetFileInformationByHandle(h,4,p,1),"IO");}finally{Marshal.FreeHGlobal(p);}}
  // Directory short names are data, never a reason to skip the ORIGINAL raw ancestor walk.

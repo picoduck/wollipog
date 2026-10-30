@@ -90,7 +90,8 @@ test("native Windows account-config fences stale preimages and refuses retained 
 
 test("native Windows account-config reserves capacity before producer growth", onlyWindows, () => {
   const f = fixture(), pre = captureProviderAccountsConfigPreimage(f.path, []), before = readFileSync(f.path);
-  const accounts = [{ id: "large", label: "x".repeat(2 * 1024 * 1024), provider: "claude" as const, directory: "C:\\synthetic" }];
+  // Labels are limited to 100 characters, so only a long directory reaches the publication capacity check.
+  const accounts = [{ id: "large", label: "Large", provider: "claude" as const, directory: `C:\\${"x".repeat(2 * 1024 * 1024)}` }];
   refused(() => writeProviderAccountsConfig(f.path, accounts, pre)); assert.deepEqual(readFileSync(f.path), before); assert.equal(readdirSync(f.root).length, 1);
 });
 
