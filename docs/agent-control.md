@@ -870,10 +870,12 @@ Server's `command/exec` under the same policy its turns will send:
   rules are unchanged, so an escalation or permission request still reaches them. A read-only
   turn keeps its own policy, because this boundary would let it write. The runner logs the
   switch as `codex_command_sandbox_outer_boundary`.
-- Two things Codex's own sandbox protected inside its writable roots become writable to commands,
-  as they already are to Claude Code sessions in this boundary: the provider transcript directory
-  the boundary binds, and `.git` or `.codex` entries inside the worktree that are not
-  runner-owned.
+- Everything else this boundary binds writable for the provider process becomes writable to its
+  commands, as it already is to Claude Code sessions in this boundary. In the default `provider`
+  isolation mode that includes the whole provider credential directory (`~/.codex`, with its
+  `auth.json` and `config.toml`) and the managed Linux caches; otherwise it includes the provider
+  transcript directory. It also includes `.git` or `.codex` entries inside the worktree that are
+  not runner-owned, which Codex's own sandbox kept read-only.
 - Any other failure inside this boundary keeps Codex's policy and is only logged.
 - Without this boundary, the launch fails. Its `failed` status carries `launchFailure:
   "codex_sandbox_unavailable"` (protocol v257), and a campaign shows that child as blocked work
