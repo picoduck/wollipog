@@ -52,9 +52,12 @@ function sameChildHarness(policy: OrchestratorCampaignPolicy, next: Orchestrator
 
 /** The exact agent row a campaign from before #3247 still admits for its fixed Child Harness, which
  * its capability catalog and validation must use for that harness (CR-2.1). Undefined when the
- * campaign matches by harness or has no fixed harness. */
-export function exactChildHarnessRow(policy: OrchestratorCampaignPolicy): AgentHarnessIdentity | undefined {
-  return policy.childHarnessMatch === "harness" ? undefined : policy.behavior.childHarness ?? undefined;
+ * campaign matches by harness or has no fixed harness, and, given `next`, when `next` does not keep
+ * that harness: Automatic, or another harness, admits every row of the harness it names (CR-3.1). */
+export function exactChildHarnessRow(policy: OrchestratorCampaignPolicy, next?: OrchestratorCampaignBehavior): AgentHarnessIdentity | undefined {
+  const row = policy.childHarnessMatch === "harness" ? undefined : policy.behavior.childHarness ?? undefined;
+  if (!row || !next) return row;
+  return next.childHarness && agentHarnessIdentityKey(next.childHarness) === agentHarnessIdentityKey(row) ? row : undefined;
 }
 
 /** The editable values `next` would change in `policy`. */

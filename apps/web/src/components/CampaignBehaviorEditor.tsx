@@ -47,7 +47,7 @@ const EDITED_PATHS: readonly OrchestratorPolicyPath[] = [
  * runs with now. Only the Orchestrator's own runner decides whether a fixed Child Harness is
  * supported; nothing here is about the Orchestrator's own launch.
  */
-function editorContext(view: OrchestratorCampaignBehaviorView, session: SessionView): OrchestratorPolicyContext {
+function editorContext(view: OrchestratorCampaignBehaviorView, session: SessionView, keepsRetainedRow = false): OrchestratorPolicyContext {
   const policy = session.orchestratorPolicy!;
   const defaults: OrchestratorDefaults = {
     behavior: { ...policy.behavior, ...structuredClone(view.behavior) },
@@ -55,7 +55,10 @@ function editorContext(view: OrchestratorCampaignBehaviorView, session: SessionV
     execution: policy.execution ?? DEFAULT_ORCHESTRATOR_DEFAULTS.execution,
   };
   return {
-    view: { defaults, source: "user_default", capabilities: view.capabilities },
+    view: { defaults, source: "user_default", capabilities: keepsRetainedRow && view.retainedRow
+      ? { ...view.capabilities, harnesses: view.capabilities.harnesses?.map((harness) =>
+        agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(view.retainedRow!) ? view.retainedRow! : harness) }
+      : view.capabilities },
     machine: "the Orchestrator's machine",
     runnerProtocolVersion: view.runnerProtocolVersion,
     driver: session.driver,
@@ -99,16 +102,15 @@ export function CampaignBehaviorEditor({ session, fullControl, onCancel, onSaved
   onSaved: (session: SessionView) => void;
 }) {
   const api = useApi();
-  const [loaded, setLoaded] = useState<{ view: OrchestratorCampaignBehaviorView; context: OrchestratorPolicyContext } | null>(null);
+  const [loaded, setLoaded] = useState<{ view: OrchestratorCampaignBehaviorView } | null>(null);
   const [draft, setDraft] = useState<OrchestratorPolicyDraft | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [failure, setFailure] = useState<{ message: string; detail?: string } | null>(null);
 
   const take = (view: OrchestratorCampaignBehaviorView) => {
-    const context = editorContext(view, session);
-    setLoaded({ view, context });
-    setDraft(draftFrom(context));
+    setLoaded({ view });
+    setDraft(draftFrom(editorContext(view, session)));
   };
 
   useEffect(() => {
@@ -129,7 +131,13 @@ export function CampaignBehaviorEditor({ session, fullControl, onCancel, onSaved
   }
   if (!loaded || !draft) return <p className="section-note" role="status">Loading the campaign's current values…</p>;
 
-  const { view, context } = loaded;
+  const { view } = loaded;
+  // An exact-row campaign's harness offers only what its kept row does, but only while the change
+  // keeps that harness: Automatic and every other harness use the full catalog (CR-2.1, CR-3.1).
+  const draftHarness = draft.values.behavior.childHarness;
+  const keepsRetainedRow = Boolean(view.retainedRow && draftHarness &&
+    agentHarnessIdentityKey(draftHarness) === agentHarnessIdentityKey(view.retainedRow));
+  const context = editorContext(view, session, keepsRetainedRow);
   const budget = session.orchestratorCampaign?.budget;
   const evaluation = evaluateOrchestratorPolicy(context, draft);
   const next = editedBehavior(draft);

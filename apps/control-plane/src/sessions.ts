@@ -4,6 +4,7 @@ import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
 import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
 import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, exactChildHarnessRow,
   parseCampaignBehaviorRequest } from "./campaign-behavior.js";
+import { agentHarnessIdentityKey } from "@wollipog/protocol";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
@@ -8151,11 +8152,17 @@ export class SessionsService {
     if (!root.ok) return fail(root.error!, root.status);
     const policy = root.data!.orchestratorPolicy!;
     const behavior = campaignBehaviorValues(policy);
+    // The full catalog serves Automatic and every other harness; the kept row's own entry serves a
+    // change that keeps this campaign's exact-row harness (CR-2.1, CR-3.1).
+    const row = exactChildHarnessRow(policy);
+    const retainedRow = row && capabilities(behavior, row).harnesses?.find((harness) =>
+      agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(row));
     return ok({
       revision: policy.behaviorRevision ?? 0,
       behavior,
       sources: campaignBehaviorSources(policy),
-      capabilities: capabilities(behavior, exactChildHarnessRow(policy)),
+      capabilities: capabilities(behavior),
+      ...(retainedRow ? { retainedRow } : {}),
       runnerProtocolVersion: this.db.getRunner(root.data!.runnerId)?.protocolVersion ?? null,
     });
   }
@@ -8189,7 +8196,7 @@ export class SessionsService {
         const unsupported = this.capabilityFailure(root.data!.runnerId, "orchestratorChildHarnessPolicy", "fixed child harness policies");
         if (unsupported) return unsupported;
       }
-      const incompatible = compatibilityError(parsed.behavior, exactChildHarnessRow(root.data!.orchestratorPolicy!));
+      const incompatible = compatibilityError(parsed.behavior, exactChildHarnessRow(root.data!.orchestratorPolicy!, parsed.behavior));
       if (incompatible) return fail(incompatible, 409);
     }
     const now = Date.now();

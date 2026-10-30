@@ -1289,3 +1289,35 @@ test("with no installations at all, every child value can still be set to Automa
   await flush();
   assert.deepEqual(writes, [{ expectedRevision: 2, behavior: { ...behaviorView().behavior, childHarness: null, childModel: null, childEffort: null } }]);
 });
+
+test("an exact-row campaign offers only its kept row's models while the change keeps that harness (CR-2.1, CR-3.1)", async () => {
+  const full = behaviorView().capabilities;
+  const codexAll = full.harnesses!.find((harness) => harness.driver === "codex-app-server")!;
+  const view = behaviorView({
+    behavior: { childHarness: { agentId: "codex-local", driver: "codex-app-server", context: { kind: "native" } }, childModel: "gpt-5.5",
+      childEffort: "high", followUps: "recommend_only", completion: "retain" },
+    // Two Codex rows: together they offer two models; the row this campaign keeps offers one.
+    capabilities: { ...full, harnesses: full.harnesses!.map((harness) => harness === codexAll ? { ...codexAll,
+      models: [...codexAll.models, { id: "gpt-5.4", displayName: "GPT-5.4", efforts: ["low", "high"] }],
+      supportedPairs: [...codexAll.supportedPairs, { modelId: "gpt-5.4", effortLevels: ["low", "high"] }] } : harness) },
+    retainedRow: codexAll,
+  });
+  const harness = await open(orchestrator(), { campaignBehavior: async () => view });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  const modelOptions = async () => {
+    const trigger = form.querySelector<HTMLButtonElement>('[aria-label^="Child Model:"]')!;
+    await act(async () => trigger.click());
+    const labels = [...form.ownerDocument.querySelectorAll('[role="option"]')].map((node) => node.textContent ?? "");
+    await act(async () => trigger.click());
+    return labels;
+  };
+  assert.equal((await modelOptions()).some((label) => label.startsWith("GPT-5.4")), false, "the kept row does not offer GPT-5.4");
+  assert.ok((await modelOptions()).some((label) => label.startsWith("GPT-5.5")));
+  // Another harness has its full catalog, and coming back to Codex keeps the row again.
+  await chooseOption(form, "Child Harness", /^Claude Code/);
+  assert.ok((await modelOptions()).some((label) => label.startsWith("Claude Opus 5")));
+  await chooseOption(form, "Child Harness", /^Codex/);
+  assert.equal((await modelOptions()).some((label) => label.startsWith("GPT-5.4")), false);
+});

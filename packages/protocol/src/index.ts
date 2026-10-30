@@ -3182,6 +3182,10 @@ export interface OrchestratorCampaignBehaviorView {
   sources: Record<OrchestratorCampaignBehaviorKey, OrchestratorPolicySource>;
   /** What the person's connected machines offer, evaluated against the campaign's current values. */
   capabilities: OrchestratorSettingsCapabilities;
+  /** A campaign from before harness matching admits only the exact agent row of its fixed Child
+   * Harness: that harness as this row alone offers it. While a change keeps that harness, it replaces
+   * the harness's entry in `capabilities`; Automatic or another harness uses `capabilities` as is. */
+  retainedRow?: OrchestratorHarnessCapability;
   /** The Orchestrator's own runner, which admits a fixed Child Harness only once it supports one. */
   runnerProtocolVersion: number | null;
 }
