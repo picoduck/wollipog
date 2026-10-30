@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  baselineVersions, combinedExit, decide, detect, EXIT, fingerprint, forced, HARNESSES, harnessById, judgeSuite, markdown, measure,
+  baselineVersions, combinedExit, decide, detect, EXIT, fingerprint, forced, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
   newestRelease, paths, recordKey, RECORD_VERSION, sourceFiles, suiteEnv, targetsFor, validRecord,
 } from "./harness-assumptions.mjs";
 import { CODEX_GUARD_TRUST_VERSION_RANGE } from "../apps/runner/src/codex-managed-worktree-guard.ts";
@@ -59,7 +59,7 @@ test("the workflow is scheduled outside 00:00-02:00 UTC, single-flight, read-onl
   assert.doesNotMatch(workflow, /secrets\.|github\.token|GH_TOKEN|GITHUB_TOKEN/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
-  assert.match(workflow, /pnpm install --frozen-lockfile/);
+  assert.match(readFileSync(new URL("./harness-assumptions-isolate.sh", import.meta.url), "utf8"), /pnpm install --frozen-lockfile/);
   for (const use of workflow.match(/uses: \S+/g)) assert.match(use, /@[0-9a-f]{40}$/, `${use} must be pinned`);
   // Dispatch input only reaches the driver through the environment, never interpolated into a script.
   assert.match(workflow, /DISPATCH_HARNESS: \$\{\{ inputs\.harness \}\}/);
@@ -73,8 +73,9 @@ test("the workflow publishes every outcome and records only a matched measuremen
   assert.match(step("Save Measurement Record"), /if: steps\.measure\.outcome == 'success' && steps\.measure\.outputs\.exit == '0'/);
   assert.doesNotMatch(step("Restore Measurement Record"), /restore-keys/, "only the exact key may count as measured");
   assert.doesNotMatch(workflow, /continue-on-error/);
-  for (const name of ["Setup pnpm", "Install Dependencies", "Measure Assumptions"]) assert.match(step(name), /if: steps\.decide\.outputs\.measure == 'true'/);
-  assert.ok(workflow.indexOf("Detect Releases") < workflow.indexOf("Install Dependencies"), "detection needs no dependency install");
+  for (const name of ["Setup pnpm", "Setup Node 24 With pnpm Cache", "Measure Assumptions"]) assert.match(step(name), /if: steps\.decide\.outputs\.measure == 'true'/);
+  assert.ok(workflow.indexOf("Detect Releases") < workflow.indexOf("Setup pnpm"), "detection needs no dependency install");
+  assert.match(step("Measure Assumptions"), /HARNESS_PROBE_USER: harness-probe\n {10}HARNESS_PROBE_ROOT: \/opt\/harness-probe/);
 });
 
 test("no harness ever runs a probe that needs real credentials or a real model", () => {
@@ -242,8 +243,45 @@ test("combined exit: changed wins, any could not run or failed preparation fails
 
 function fakeExec(temp, plan) {
   const calls = [];
+  const suite = (argv, env) => {
+    const reportDir = argv.at(-1);
+    const version = reportDir.split("/").at(-2);
+    const outcome = plan.suite?.[version] ?? { code: 0, statuses: ["unchanged"] };
+    if (outcome.statuses) {
+      mkdirSync(reportDir, { recursive: true });
+      writeFileSync(join(reportDir, "latest.json"), JSON.stringify({ ...suiteReport(outcome.statuses, { version }), ...outcome.report }));
+      writeFileSync(join(reportDir, "latest.md"), `# Codex Assumption Report\n\nMeasured CLI: ${version}\n`);
+    }
+    if (outcome.symlink) { rmSync(join(reportDir, "latest.json")); symlinkSync(outcome.symlink, join(reportDir, "latest.json")); }
+    assert.ok(existsSync(env.HOME), "the suite receives a throwaway HOME");
+    plan.homes = [...(plan.homes ?? []), env.HOME];
+    plan.suites = [...(plan.suites ?? []), { argv, env }];
+    return { code: outcome.code, tail: "" };
+  };
+  const sudo = rest => {
+    if (rest[0] === "-u") {
+      const command = rest.slice(rest.indexOf("-i") + 1);
+      const env = {};
+      while (/^[A-Z_]+=/.test(command[0])) { const [k, ...v] = command.shift().split("="); env[k] = v.join("="); }
+      return suite(command, env);
+    }
+    const [tool, ...args] = rest;
+    if (tool === "rm") { rmSync(args.at(-1), { recursive: true, force: true }); return { code: 0, stdout: "" }; }
+    if (tool === "install") { mkdirSync(args.at(-1), { recursive: true }); return { code: 0, stdout: "" }; }
+    if (tool === "pkill") return { code: 0, stdout: "" };
+    if (tool === "pgrep") return { code: plan.survivors ? 0 : 1, stdout: plan.survivors ? "4242\n" : "" };
+    if (tool === "find") {
+      const path = join(args[0], args[args.indexOf("-name") + 1]);
+      let regular = false; try { regular = lstatSync(path).isFile(); } catch {}
+      return { code: 0, stdout: regular ? `${path}\n` : "" };
+    }
+    if (tool === "cat") return { code: 0, stdout: readFileSync(args.at(-1), "utf8") };
+    throw new Error(`unexpected sudo ${rest.join(" ")}`);
+  };
   return { calls, exec: async (argv, options) => {
     calls.push({ argv, options });
+    if (argv[0] === "sudo") { assert.equal(argv[1], "-n", "sudo never prompts"); return sudo(argv.slice(2)); }
+    if (argv[0] === "bash" && argv[1].endsWith("isolate.sh")) return { code: plan.stage ?? 0, tail: plan.stage ? "harness-probe can traverse /home/runner\n" : "" };
     if (argv[0] === "bash") return { code: plan.prepare ?? 0, tail: plan.prepare ? "bwrap: setting up uid map: Permission denied\n" : "" };
     if (argv[0] === "npm") {
       const prefix = argv[argv.indexOf("--prefix") + 1];
@@ -255,22 +293,12 @@ function fakeExec(temp, plan) {
       writeFileSync(join(prefix, "node_modules/.bin/codex"), "");
       return { code: 0, tail: "" };
     }
-    const reportDir = argv.at(-1);
-    const version = reportDir.split("/").at(-1);
-    const outcome = plan.suite?.[version] ?? { code: 0, statuses: ["unchanged"] };
-    if (outcome.statuses) {
-      mkdirSync(reportDir, { recursive: true });
-      writeFileSync(join(reportDir, "latest.json"), JSON.stringify({ ...suiteReport(outcome.statuses, { version }), ...outcome.report }));
-      writeFileSync(join(reportDir, "latest.md"), `# Codex Assumption Report\n\nMeasured CLI: ${version}\n`);
-    }
-    assert.ok(existsSync(options.env.HOME), "the suite receives a throwaway HOME");
-    plan.homes = [...(plan.homes ?? []), options.env.HOME];
-    return { code: outcome.code, tail: "" };
+    return suite(argv, options.env);
   } };
 }
 
-async function measured(t, plan) {
-  const { temp, env } = await detected(t);
+async function measured(t, plan, extra = {}) {
+  const { temp, env } = await detected(t, extra);
   rmSync(join(temp, "output"));
   assert.equal(decide(codex, { env }), EXIT.matched);
   const fake = fakeExec(temp, plan);
@@ -286,14 +314,14 @@ test("a fully matched measurement covers both targets, publishes the summary and
   assert.equal(exit, EXIT.matched);
   assert.deepEqual(report.targets.map(t => [t.version, t.status]), [["0.166.0", "matched"], [baselineVersions(codex)[0].version, "matched"]]);
   assert.equal(report.preparation.status, "ok");
+  assert.equal(report.isolation.status, "not isolated");
   assert.equal(outputs(temp).exit, "0");
   assert.match(readFileSync(env.GITHUB_STEP_SUMMARY, "utf8"), /# Codex Assumption Probes: matched/);
   assert.match(md, /## 0\.166\.0 Suite Report[\s\S]*### Codex Assumption Report/);
   const record = JSON.parse(readFileSync(recordPath, "utf8"));
   assert.ok(validRecord(record, JSON.parse(readFileSync(paths(codex, temp).statePath, "utf8"))));
   assert.ok(plan.homes.every(home => !existsSync(home)), "throwaway homes are removed");
-  const suiteCalls = fake.calls.filter(c => c.argv[0] === "node");
-  assert.deepEqual(suiteCalls[0].argv.slice(0, 4), ["node", "--import", "tsx", "scripts/codex-assumptions.mjs"]);
+  assert.deepEqual(plan.suites[0].argv.slice(0, 4), [process.execPath, "--import", "tsx", "scripts/codex-assumptions.mjs"]);
   assert.ok(fake.calls.filter(c => c.argv[0] === "npm").every(c => c.argv.includes("--ignore-scripts")));
 });
 
@@ -331,6 +359,68 @@ test("measure clears a previous record and report before running", async (t) => 
   assert.equal(exit, EXIT.couldNotRun);
   assert.ok(!existsSync(join(paths(codex, temp).recordDir, "record.json")));
   assert.ok(!existsSync(join(paths(codex, temp).reportDir, "stale.md")));
+});
+
+test("CI never runs an unreviewed release without the unprivileged probe user", async (t) => {
+  assert.throws(() => isolationFrom({ GITHUB_ACTIONS: "true" }), /required in CI/);
+  assert.equal(isolationFrom({}), null);
+  const plan = {};
+  const { exit, report, recordPath } = await measured(t, plan, { GITHUB_ACTIONS: "true" });
+  assert.equal(exit, EXIT.couldNotRun);
+  assert.equal(plan.suites, undefined, "no suite ran");
+  assert.ok(report.targets.every(target => /required in CI/.test(target.reason)));
+  assert.ok(!existsSync(recordPath));
+});
+
+function isolatedEnv(temp) {
+  const root = join(temp, "opt");
+  for (const dir of ["repo", "install", "work"]) mkdirSync(join(root, dir), { recursive: true });
+  return { GITHUB_ACTIONS: "true", HARNESS_PROBE_USER: "harness-probe", HARNESS_PROBE_ROOT: root };
+}
+
+test("isolated suites run as the probe user with only the minimal environment, and are reaped before results are read", async (t) => {
+  const plan = {};
+  const temp0 = scratch(t);
+  const extra = isolatedEnv(temp0);
+  const logs = [];
+  t.mock.method(console, "log", line => logs.push(String(line)));
+  const { exit, report, fake, recordPath } = await measured(t, plan, extra);
+  assert.equal(exit, EXIT.matched);
+  assert.equal(report.isolation.status, "ok");
+  assert.ok(existsSync(recordPath));
+  const suiteCall = fake.calls.find(c => c.argv[0] === "sudo" && c.argv[2] === "-u");
+  assert.deepEqual(suiteCall.argv.slice(0, 7), ["sudo", "-n", "-u", "harness-probe", "--", "/usr/bin/env", "-i"]);
+  assert.equal(suiteCall.options.cwd, join(extra.HARNESS_PROBE_ROOT, "repo"), "suites run from the staged read-only copy");
+  assert.deepEqual(Object.keys(plan.suites[0].env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
+  assert.ok(plan.suites[0].env.HOME.startsWith(join(extra.HARNESS_PROBE_ROOT, "work", "codex")));
+  assert.ok(plan.suites[0].env.CODEX_BIN.startsWith(join(extra.HARNESS_PROBE_ROOT, "install", "codex")));
+  const order = fake.calls.map(c => c.argv[0] === "sudo" ? c.argv[2] === "-u" ? "suite" : c.argv[2] : c.argv[0]);
+  const firstSuite = order.indexOf("suite");
+  assert.ok(order.indexOf("bash") < firstSuite, "staging and preparation happen before any release code runs");
+  assert.ok(order.indexOf("pkill", firstSuite) > firstSuite && order.indexOf("pkill", firstSuite) < order.indexOf("find", firstSuite), "processes are killed before reports are read");
+  const stop = logs.find(l => l.startsWith("::stop-commands::"));
+  assert.ok(stop, "workflow commands are stopped while release output can reach the log");
+  const resumeAt = logs.indexOf(`::${stop.slice("::stop-commands::".length)}::`);
+  assert.ok(resumeAt > logs.indexOf(stop));
+  assert.ok(logs.slice(resumeAt + 1).every(l => !l.includes("Suite Report")), "release-influenced markdown is not logged after commands resume");
+});
+
+test("an isolated run fails closed on staging failure, surviving processes or a planted symlink", async (t) => {
+  const cases = [
+    [{ stage: 1 }, /could not be prepared/],
+    [{ survivors: true }, /survived it and could not be killed/],
+    [{ suite: { "0.166.0": { code: 0, statuses: ["unchanged"], symlink: "/etc/passwd" } } }, /no readable latest\.json/],
+  ];
+  for (const [plan, reason] of cases) {
+    const extra = isolatedEnv(scratch(t));
+    const { exit, report, recordPath, md } = await measured(t, plan, extra);
+    assert.equal(exit, EXIT.couldNotRun, JSON.stringify(plan));
+    assert.ok(report.targets.some(target => reason.test(target.reason)), JSON.stringify(report.targets));
+    assert.ok(!existsSync(recordPath));
+    assert.doesNotMatch(md, /root:x:0/);
+  }
+  const { md } = await measured(t, { stage: 1 }, isolatedEnv(scratch(t)));
+  assert.match(md, /Isolation: \*\*failed\*\*[\s\S]*harness-probe can traverse/);
 });
 
 test("markdown labels a skip as not measured and truncates oversized reports", () => {

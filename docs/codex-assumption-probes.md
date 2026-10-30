@@ -72,7 +72,9 @@ measured matched with the current probe sources, or on manual dispatch. Each ful
   `apps/runner/src/codex-managed-worktree-guard.ts`, so a range change moves the measurement with it.
 
 Each target is installed with `npm install --ignore-scripts` into a disposable prefix and measured
-with `CODEX_BIN` pointing at it, a throwaway `HOME` and no acknowledgement, so the namespace
+as the unprivileged `harness-probe` user (see
+[Isolating Unreviewed Releases](harness-assumption-probes.md#isolating-unreviewed-releases)) with
+`CODEX_BIN` pointing at it, a throwaway `HOME` and no acknowledgement, so the namespace
 acknowledgement below never applies in CI. `probe:codex-inference-transport` is never run.
 Before the suite, `scripts/harness-assumptions-prepare-codex.sh` installs bubblewrap and runs
 `scripts/configure-ci-bubblewrap.sh`. Two targets take about twice the 47-minute suite. The report is

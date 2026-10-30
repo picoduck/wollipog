@@ -70,13 +70,14 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
-      - name: Install Dependencies
-        if: steps.decide.outputs.measure == 'true'
-        run: pnpm install --frozen-lockfile
-
+      # Releases are unreviewed code: each suite runs as an unprivileged user without sudo against a
+      # read-only staged copy (dependencies installed there), and nothing it starts outlives it.
       - name: Measure Assumptions
         id: measure
         if: steps.decide.outputs.measure == 'true'
+        env:
+          HARNESS_PROBE_USER: harness-probe
+          HARNESS_PROBE_ROOT: /opt/harness-probe
         run: node scripts/harness-assumptions.mjs measure --harness "${{ matrix.harness }}"
 
       - name: Upload Report

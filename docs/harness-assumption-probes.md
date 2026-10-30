@@ -35,10 +35,11 @@ Each harness job:
    and links the run that measured it. A missing, evicted, unreadable or mismatched record always
    measures. A manual dispatch measures `all` harnesses, or only the one named in the `harness`
    input (the others still run detection); an unknown name is could not run.
-3. **Measure.** Runs the harness's preparation, then for each target installs the exact version
-   into a disposable prefix with `npm install --ignore-scripts` and runs the suite in a minimal
-   environment: a throwaway `HOME`, `PATH`, `TMPDIR=/tmp`, `LANG`, `CI` and the binary variable.
-   No job token, credential, provider configuration or operator acknowledgement reaches it.
+3. **Measure.** Stages the isolation boundary below, runs the harness's preparation, then for
+   each target installs the exact version into a disposable prefix with `npm install
+   --ignore-scripts` and runs the suite in a minimal environment: a throwaway `HOME`, `PATH`,
+   `TMPDIR=/tmp`, `LANG`, `CI` and the binary variable. No job token, credential, provider
+   configuration or operator acknowledgement reaches it.
 4. **Report.** Writes `latest.json` and `latest.md`, appends `latest.md` to the job summary and
    uploads the report directory as the `harness-assumptions-<harness>` artifact (30 days), on every
    outcome including detection failures.
@@ -52,6 +53,24 @@ under repository cache pressure. Every loss fails safe: an evicted record costs 
 measurement, never a skipped one. The key includes a hash of the driver and the harness's declared
 probe sources, so changing them re-measures; dispatch the workflow after changing other code the
 suite depends on.
+
+### Isolating Unreviewed Releases
+
+A newly published release is code nobody has reviewed, and the hosted runner's own user has
+passwordless sudo plus the job's runtime token, which can write Actions cache entries in the
+default branch's scope. The driver therefore never runs a release as that user in CI; without
+`HARNESS_PROBE_USER` and `HARNESS_PROBE_ROOT` it reports could not run.
+`scripts/harness-assumptions-isolate.sh` creates the system user `harness-probe` without sudo or
+privileged groups, stages a copy of the checkout (`git archive HEAD` plus `pnpm install
+--frozen-lockfile`) under `/opt/harness-probe/repo` that the user can read but not write, and
+denies the user traversal of the runner's home with an ACL. It verifies each property and fails
+closed. Each suite runs through `sudo -n -u harness-probe -- /usr/bin/env -i ...` from the staged
+copy; its throwaway home and report directory are owned by the probe user. After each suite every
+process of that user is killed before anything else happens, and only a regular file owned by the
+probe user named `latest.json` or `latest.md`, under 2 MiB, is copied back, so a planted symlink
+cannot pull another file into the published report. Workflow commands are stopped while suite
+output reaches the log. Host preparation and installs, which run no release code, still run as
+the runner user.
 
 ## Shared Report and Exit Contract
 
@@ -95,7 +114,10 @@ Supporting a new harness includes adding its probe set here. To add one:
    its binary environment variable. Probes must be credential-free: never read a real provider home
    or configuration directory, use throwaway homes created per run and removed afterwards, keep any
    dummy key inside that throwaway environment, and use scripted loopback model servers only.
-   Exclude any probe that needs real credentials or a real model, and record why.
+   Exclude any probe that needs real credentials or a real model, and record why. The suite runs
+   as the unprivileged probe user from a read-only checkout, so it must write only under its
+   report directory, its `HOME` and `TMPDIR`, and must not need sudo; do host preparation in the
+   harness's `prepare` command instead.
 2. Add an entry to `HARNESSES` in `scripts/harness-assumptions.mjs`: its npm package and
    executable, binary variable, baseline versions (each read from a repository file), optional
    host preparation, suite command, report flag, per-target timeout, documentation and the probe
