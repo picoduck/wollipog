@@ -100,7 +100,7 @@ export function silenceVerdict(ledger: SilenceLedger): { status: ProbeStatus; ob
   if (!ledger.detector.ok) return { status: "could not run", observed: `network detector unavailable: ${ledger.detector.observed}` };
   if (ledger.untraced) return { status: "could not run", observed: `${ledger.untraced} runs left no trace log` };
   if (ledger.runs === 0) return { status: "could not run", observed: "no CLI run completed" };
-  return { status: "unchanged", observed: `${ledger.runs} traced runs; every connect() went to the stub; routes: ${[...ledger.routes].join(", ") || "none"}` };
+  return { status: "unchanged", observed: `${ledger.runs} traced runs; no destination besides the stub; stub routes: ${[...ledger.routes].join(", ") || "none"}` };
 }
 
 function emitSilence(context: Context, probe: string): void {

@@ -276,6 +276,13 @@ export interface RunOptions {
   stdin?: string[];
   /** Called for each stdout JSON event; may write to stdin (control responses, steering). */
   onEvent?: (event: Record<string, unknown>, write: (line: string) => void, closeStdin: () => void) => void;
+  /**
+   * Who handles SIGINT/SIGTERM. "process" (probe processes) kills every owned CLI group and exits 2.
+   * "caller" (the suite, which must still stop its own probe and write an interrupted report)
+   * installs nothing and cancels through `abort` instead.
+   */
+  signals?: "process" | "caller";
+  abort?: AbortSignal;
 }
 
 const owned = new Set<ChildProcess>();
@@ -303,7 +310,10 @@ export function runClaude(options: RunOptions): Promise<ClaudeRun> {
     : [options.bin, ...options.args];
   return new Promise((resolve) => {
     const child = spawn(argv[0]!, argv.slice(1), { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"], detached: true });
-    own(child);
+    if (options.signals !== "caller") own(child);
+    const cancel = () => killGroup(child);
+    if (options.abort?.aborted) cancel();
+    options.abort?.addEventListener("abort", cancel, { once: true });
     let stdout = "";
     let pending = "";
     let timedOut = false;
@@ -335,6 +345,7 @@ export function runClaude(options: RunOptions): Promise<ClaudeRun> {
     child.on("error", (error) => { spawnError = error.message; });
     child.on("close", (code, signal) => {
       clearTimeout(timer);
+      options.abort?.removeEventListener("abort", cancel);
       let trace: string | null = null;
       if (options.traceFile) { try { trace = readFileSync(options.traceFile, "utf8"); } catch { trace = null; } }
       resolve({ code, signal, timedOut, spawnError, stdout, events, trace });

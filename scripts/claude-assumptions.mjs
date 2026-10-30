@@ -14,6 +14,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const PROBE_SCRIPT = "apps/runner/scripts/claude-assumption-probes.ts";
 const STATUSES = ["unchanged", "changed", "could not run"];
 let interrupted = false;
+const cancellation = new AbortController();
 
 export const PROBES = [
   { id: "isolation", minimum: 3, timeout: 6 * 60_000, documentation: "docs/claude-assumption-probes.md#feasibility" },
@@ -142,9 +143,10 @@ async function measuredVersion(binary, scratch, ledger) {
   const paths = isolatedHome(mkdtempSync(join(scratch, "version-")));
   const proxy = await startRefusingProxy();
   try {
+    // The suite keeps cancellation: it must still stop its probe and write an interrupted report.
     const run = await runClaude({ bin: binary, args: ["--version"], cwd: paths.work, timeoutMs: 30_000,
       env: isolatedClaudeEnv(paths, `http://127.0.0.1:${await closedLoopbackPort()}`, proxy.url),
-      traceFile: ledger.detector.ok ? join(paths.root, "trace.log") : undefined });
+      traceFile: ledger.detector.ok ? join(paths.root, "trace.log") : undefined, signals: "caller", abort: cancellation.signal });
     ledger.runs += 1;
     ledger.proxied.push(...proxy.destinations);
     if (ledger.detector.ok && run.trace === null) ledger.untraced += 1;
@@ -175,12 +177,17 @@ export async function main(args = process.argv.slice(2)) {
   if (args.some((a, i) => !["--report-dir", "--check-fresh"].includes(a) && !(dirIndex >= 0 && i === dirIndex + 1))) throw new Error("Usage: pnpm probe:claude-assumptions [--report-dir PATH] [--check-fresh]");
   const scratch = mkdtempSync(join(tmpdir(), "wollipog-claude-assumptions-"));
   const report = { startedAt: new Date().toISOString(), completedAt: null, version: null, complete: false, exitCode: 2, results: [], exclusions: EXCLUSIONS };
+  // Probe runs get their own once-listeners in execute(); this one covers the version runs and keeps
+  // the default exit from skipping the interrupted report.
+  const onSignal = () => { interrupted = true; cancellation.abort(); };
+  process.on("SIGTERM", onSignal); process.on("SIGINT", onSignal);
   try {
+    // An incomplete fresh report replaces yesterday's green before running anything at all.
+    writeReport(reportDir, report);
     const binary = resolveBinary(process.env.CLAUDE_BIN || "claude");
     const versionRuns = { detector: await detectorSeesCanary(scratch), runs: 0, untraced: 0, foreign: [], proxied: [], routes: new Set() };
-    report.version = await measuredVersion(binary, scratch, versionRuns);
+    report.version = interrupted ? null : await measuredVersion(binary, scratch, versionRuns);
     report.floors = floorResults(report.version);
-    // An incomplete fresh report replaces yesterday's green before doing any long-running work.
     writeReport(reportDir, report);
     // The probe process gets no inherited provider variables either; it builds each CLI's environment itself.
     const env = { PATH: process.env.PATH, HOME: join(scratch, "probe-home"), TMPDIR: tmpdir(), LANG: "C.UTF-8", CLAUDE_BIN: binary ?? "", CLAUDE_PROBE_VERSION: report.version ?? "" };
@@ -207,7 +214,10 @@ export async function main(args = process.argv.slice(2)) {
     writeReport(reportDir, report);
     console.log(`claude ${report.version ?? "could not run"}; reviewer pin ${REVIEWER_PIN}: ${report.reviewerPin.status}; report: ${join(reportDir, "latest.md")}; exit=${report.exitCode}`);
     return report.exitCode;
-  } finally { rmSync(scratch, { recursive: true, force: true }); }
+  } finally {
+    process.removeListener("SIGTERM", onSignal); process.removeListener("SIGINT", onSignal);
+    rmSync(scratch, { recursive: true, force: true });
+  }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

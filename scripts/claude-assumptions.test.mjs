@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
@@ -65,6 +66,57 @@ test("the suite's own --version runs are part of the silence measurement", () =>
   assert.equal(loud.status, "changed"); assert.equal(loud.assumptions.at(-1).status, "changed");
   assert.equal(withVersionSilence(isolation, { status: "could not run", observed: "blind" }).status, "could not run");
   assert.equal(withVersionSilence({ ...isolation, status: "could not run" }, { status: "changed", observed: "x" }).status, "changed");
+});
+
+/** Start the suite against a fake CLI that blocks (recording its PID) at `blockOn`, cancel the suite
+ * once the CLI is blocked, and return what was left behind. */
+async function cancelledSuite(blockOn, seedReport) {
+  const dir = mkdtempSync(join(tmpdir(), "claude-cancel-test-"));
+  const pidFile = join(dir, "cli.pid");
+  const binary = join(dir, "claude");
+  writeFileSync(binary, `#!${process.execPath}
+const block = ${JSON.stringify(blockOn)} === "version" ? process.argv.includes("--version") : !process.argv.includes("--version");
+if (!block) { console.log("2.1.314 (Claude Code)"); process.exit(0); }
+require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+setInterval(() => {}, 1000);
+`, { mode: 0o755 });
+  if (seedReport) writeFileSync(join(dir, "latest.json"), JSON.stringify(seedReport));
+  const suite = spawn(process.execPath, ["--import", "tsx", "scripts/claude-assumptions.mjs", "--report-dir", dir], {
+    env: { PATH: process.env.PATH, HOME: dir, TMPDIR: tmpdir(), CLAUDE_BIN: binary }, stdio: "ignore" });
+  const exited = new Promise(resolve => suite.on("close", (code, signal) => resolve({ code, signal })));
+  const deadline = Date.now() + 90_000;
+  while (!existsSync(pidFile) && Date.now() < deadline) await new Promise(r => setTimeout(r, 100));
+  const cliPid = Number(readFileSync(pidFile, "utf8"));
+  suite.kill("SIGTERM");
+  const outcome = await Promise.race([exited, new Promise(r => setTimeout(() => r({ hung: true }), 60_000))]);
+  if (outcome.hung) suite.kill("SIGKILL");
+  await new Promise(r => setTimeout(r, 500));
+  let cliAlive = true; try { process.kill(cliPid, 0); } catch { cliAlive = false; }
+  if (cliAlive) try { process.kill(cliPid, "SIGKILL"); } catch {}
+  const fresh = spawnSync(process.execPath, ["--import", "tsx", "scripts/claude-assumptions.mjs", "--check-fresh", "--report-dir", dir], { encoding: "utf8", timeout: 30000 });
+  let report = null; try { report = JSON.parse(readFileSync(join(dir, "latest.json"), "utf8")); } catch {}
+  rmSync(dir, { recursive: true, force: true });
+  return { outcome, cliAlive, fresh: fresh.status, report };
+}
+
+test("cancelling the suite mid-probe stops the probe's CLI and leaves an incomplete report", { skip: process.platform === "win32" }, async () => {
+  const { outcome, cliAlive, fresh, report } = await cancelledSuite("turn");
+  assert.ok(!outcome.hung, "the suite exited after SIGTERM");
+  assert.equal(outcome.code, 2);
+  assert.equal(cliAlive, false, "the blocked CLI was killed with its probe");
+  assert.equal(report.complete, false); assert.equal(report.exitCode, 2);
+  assert.equal(fresh, 2);
+});
+
+test("cancelling during the first --version run cannot leave an earlier green report looking fresh", { skip: process.platform === "win32" }, async () => {
+  const green = { version: "2.1.314", complete: true, completedAt: new Date().toISOString(), exitCode: 0,
+    results: PROBES.map(p => collectResult(p, { code: 0, unavailable: false, stdout: Array(p.minimum).fill(line("unchanged")).join("\n") })) };
+  const { outcome, cliAlive, fresh, report } = await cancelledSuite("version", green);
+  assert.ok(!outcome.hung, "the suite exited after SIGTERM");
+  assert.equal(outcome.code, 2);
+  assert.equal(cliAlive, false, "the blocked --version run was killed");
+  assert.equal(report.complete, false);
+  assert.notEqual(fresh, 0);
 });
 
 test("a CLI that phones home only during --version never yields a passing isolation result", { skip: process.platform === "win32" }, () => {
