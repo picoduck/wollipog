@@ -756,7 +756,12 @@ const client = {
       revision: policy.behaviorRevision ?? 0,
       behavior: pick(policy.behavior as unknown as Record<string, unknown>),
       sources: pick(policy.sources.behavior as unknown as Record<string, string>),
-      capabilities: FIXTURE_CHILD_CAPABILITIES,
+      // `childMachines=offline` (#3580): no machine offers the campaign's fixed children now.
+      capabilities: params.get("childMachines") === "offline" ? {
+        harnesses: [{ ...FIXTURE_CODEX_HARNESS, name: "Codex", models: [], effortLevels: [], supportedPairs: [], installations: 0, machines: 0 }],
+        models: [], effortLevels: [], supportedPairs: [], installations: 0, compatibleInstallations: 0, status: "unavailable",
+        reason: "No connected machine supports this Child Harness, Child Model and Child Effort combination.",
+      } : FIXTURE_CHILD_CAPABILITIES,
       runnerProtocolVersion: PROTOCOL_VERSION,
     } as unknown as OrchestratorCampaignBehaviorView;
   },

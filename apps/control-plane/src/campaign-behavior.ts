@@ -2,7 +2,6 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS,
   agentHarnessIdentityKey,
-  exactAgentHarnessIdentityKey,
   type OrchestratorCampaignBehavior,
   type OrchestratorCampaignBehaviorKey,
   type OrchestratorCampaignPolicy,
@@ -40,15 +39,14 @@ export function parseCampaignBehaviorRequest(value: unknown): UpdateOrchestrator
   return { expectedRevision: input.expectedRevision as number, behavior: { childHarness, childModel, childEffort, followUps, completion } };
 }
 
-/** Whether a policy's Child Harness already names `next`. A harness-matched campaign (#3247) admits
- * any row of the harness, so another row of the same harness is no change; an older campaign still
- * enforces the exact agent row it stored. */
+/** Whether a policy's Child Harness already names `next`, by harness. A request names a built-in
+ * harness only in its canonical form (the harness catalog has no Machine-local rows), so it cannot
+ * say "this exact row" of an older campaign that still enforces one (#3247). The same harness is
+ * therefore no change: the stored identity, exact row and all, and its matching stay as they are. */
 function sameChildHarness(policy: OrchestratorCampaignPolicy, next: OrchestratorCampaignBehavior["childHarness"]): boolean {
   const current = policy.behavior.childHarness;
   if (!current || !next) return current === next;
-  return policy.childHarnessMatch === "harness"
-    ? agentHarnessIdentityKey(current) === agentHarnessIdentityKey(next)
-    : exactAgentHarnessIdentityKey(current) === exactAgentHarnessIdentityKey(next);
+  return agentHarnessIdentityKey(current) === agentHarnessIdentityKey(next);
 }
 
 /** The editable values `next` would change in `policy`. */
@@ -66,7 +64,8 @@ export function changedCampaignBehavior(policy: OrchestratorCampaignPolicy, next
  * follow-up limit and related-follow-up grant stay as they are. A campaign still waiting for its
  * first message would otherwise derive its follow-up limit from the new Follow-Ups when that message
  * arrives, so a change to Follow-Ups keeps the limit the launch authorized, as a limit the person set
- * does (#3826).
+ * does (#3826). That includes a first message being delivered: if its delivery fails, the campaign
+ * waits again with these same derivation flags, and the next message must not derive a larger limit.
  */
 export function applyCampaignBehavior(policy: OrchestratorCampaignPolicy, next: OrchestratorCampaignBehavior, revision: number,
   changed = changedCampaignBehavior(policy, next)): void {
@@ -76,7 +75,8 @@ export function applyCampaignBehavior(policy: OrchestratorCampaignPolicy, next: 
   }
   if (changed.includes("childHarness")) policy.childHarnessMatch = "harness";
   const waiting = policy.firstMessageScope;
-  if (changed.includes("followUps") && waiting?.state === "pending" && waiting.derivedLimits?.acceptedFollowUps) {
+  if (changed.includes("followUps") && (waiting?.state === "pending" || waiting?.state === "delivering") &&
+      waiting.derivedLimits?.acceptedFollowUps) {
     waiting.derivedLimits = { ...waiting.derivedLimits, acceptedFollowUps: false };
   }
   policy.behaviorRevision = revision;

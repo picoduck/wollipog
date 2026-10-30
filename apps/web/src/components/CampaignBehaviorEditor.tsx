@@ -77,10 +77,14 @@ function editedBehavior(draft: OrchestratorPolicyDraft): OrchestratorCampaignBeh
   return { childHarness, childModel, childEffort, followUps, completion };
 }
 
-function sameBehavior(left: OrchestratorCampaignBehavior, right: OrchestratorCampaignBehavior): boolean {
+function sameChild(left: OrchestratorCampaignBehavior, right: OrchestratorCampaignBehavior): boolean {
   const harness = (value: OrchestratorCampaignBehavior["childHarness"]) => value ? agentHarnessIdentityKey(value) : null;
   return harness(left.childHarness) === harness(right.childHarness) && left.childModel === right.childModel &&
-    left.childEffort === right.childEffort && left.followUps === right.followUps && left.completion === right.completion;
+    left.childEffort === right.childEffort;
+}
+
+function sameBehavior(left: OrchestratorCampaignBehavior, right: OrchestratorCampaignBehavior): boolean {
+  return sameChild(left, right) && left.followUps === right.followUps && left.completion === right.completion;
 }
 
 /**
@@ -128,10 +132,16 @@ export function CampaignBehaviorEditor({ session, fullControl, onCancel, onSaved
   const { view, context } = loaded;
   const budget = session.orchestratorCampaign?.budget;
   const evaluation = evaluateOrchestratorPolicy(context, draft);
-  const problemFor = (path: OrchestratorPolicyPath) => evaluation.problems.find((problem) => problem.path === path)?.message ?? null;
-  const blocked = EDITED_PATHS.some((path) => problemFor(path) !== null);
   const next = editedBehavior(draft);
   const unchanged = sameBehavior(next, view.behavior);
+  // The server checks a child combination only when it changes, and never an all-Automatic one, so
+  // the form does the same: when the machines offering the stored combination are offline, Follow-Ups
+  // and Completion still save, and so does Automatic (CR-1.3).
+  const checksChild = !sameChild(next, view.behavior) &&
+    (next.childHarness !== null || next.childModel !== null || next.childEffort !== null);
+  const problemFor = (path: OrchestratorPolicyPath) => checksChild
+    ? evaluation.problems.find((problem) => problem.path === path)?.message ?? null : null;
+  const blocked = EDITED_PATHS.some((path) => problemFor(path) !== null);
   const setBehavior = <K extends "childEffort" | "followUps" | "completion">(key: K, value: OrchestratorDefaults["behavior"][K]) =>
     setDraft((current) => current && ({ ...current, values: { ...current.values, behavior: { ...current.values.behavior, [key]: value } } }));
 

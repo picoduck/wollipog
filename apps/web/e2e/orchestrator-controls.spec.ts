@@ -271,3 +271,30 @@ for (const viewport of [
     await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-saved.png` });
   });
 }
+
+/** #3580 CR-1.3: the machines that offer the campaign's fixed children are offline. That is no
+ * problem for a change to Follow-Ups or Completion, which saves with the unchanged child values. */
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+] as const) {
+  test(`${viewport.name}: with the fixed children's machines offline, Follow-Ups still changes from Campaign Behavior`, async ({ page }) => {
+    await openFixture(page, viewport.width, viewport.height, "&fullControlFixture=1&childHarness=codex&childMachines=offline");
+    const dialog = await openControls(page);
+    await dialog.getByRole("button", { name: "Edit Campaign Behavior", exact: true }).click();
+    const form = dialog.getByRole("form", { name: "Edit Campaign Behavior" });
+    const save = form.getByRole("button", { name: "Save Changes", exact: true });
+    await expect(save).toBeDisabled();
+    await form.locator('[aria-label^="Follow-Ups:"]').click();
+    await page.getByRole("option", { name: /^Execute Approved/ }).click();
+    await expect(save).toBeEnabled();
+    await expect(form.locator(".field-error")).toHaveCount(0);
+    await save.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-offline-children.png` });
+    await save.click();
+    await expect(form).toHaveCount(0);
+    const facts = dialog.locator("dl.facts");
+    await expect(facts).toContainText("Codex");
+    await expect(facts).toContainText("Execute Approved");
+  });
+}

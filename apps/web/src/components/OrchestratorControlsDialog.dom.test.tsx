@@ -1240,3 +1240,52 @@ test("the Child Model fact reads as the Child Model selector names it, and its i
   const unnamed = await open(orchestrator(), {});
   assert.match(behaviorFact(unnamed.dialog(), "Child Model"), /^claude-opus-5Session Override$/);
 });
+
+/** No machine offers the campaign's fixed children now: the stored harness is listed but unavailable,
+ * as the server lists a saved harness no installation advertises. */
+function offlineBehaviorView(): OrchestratorCampaignBehaviorView {
+  return behaviorView({ capabilities: {
+    harnesses: [{ ...CLAUDE_HARNESS, name: "Claude Code", models: [], effortLevels: [], supportedPairs: [], installations: 0, machines: 0 }],
+    models: [], effortLevels: [], supportedPairs: [], installations: 0, compatibleInstallations: 0, status: "unavailable",
+    reason: "No connected machine supports this Child Harness, Child Model and Child Effort combination.",
+  } });
+}
+
+test("with the fixed children's machines offline, Follow-Ups and Completion still save with the unchanged child values (CR-1.3)", async () => {
+  const writes: UpdateOrchestratorCampaignBehaviorRequest[] = [];
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async () => offlineBehaviorView(),
+    setCampaignBehavior: async (_id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => { writes.push(request); return orchestrator(); },
+  });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  assert.equal(formButton(form, "Save Changes").disabled, true, "nothing changed yet");
+  assertNoDomNode(form.querySelector(".field-error"), "an unchanged combination is not reported as a problem");
+  await chooseOption(form, "Follow-Ups", /^Execute Approved/);
+  await act(async () => option(form.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Completion"]')!, "Stop and Archive").click());
+  assert.equal(formButton(form, "Save Changes").disabled, false);
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+  assert.deepEqual(writes, [{ expectedRevision: 2, behavior: { ...behaviorView().behavior, followUps: "execute_approved", completion: "stop_and_archive" } }]);
+});
+
+test("with no installations at all, every child value can still be set to Automatic and saved (CR-1.3)", async () => {
+  const writes: UpdateOrchestratorCampaignBehaviorRequest[] = [];
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async () => offlineBehaviorView(),
+    setCampaignBehavior: async (_id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => { writes.push(request); return orchestrator(); },
+  });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  // A new Child Harness starts its model and effort over at Automatic.
+  await chooseOption(form, "Child Harness", /^Automatic/);
+  assert.match(form.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+  assert.match(form.querySelector('[aria-label^="Child Effort:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+  assertNoDomNode(form.querySelector(".field-error"));
+  assert.equal(formButton(form, "Save Changes").disabled, false);
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+  assert.deepEqual(writes, [{ expectedRevision: 2, behavior: { ...behaviorView().behavior, childHarness: null, childModel: null, childEffort: null } }]);
+});

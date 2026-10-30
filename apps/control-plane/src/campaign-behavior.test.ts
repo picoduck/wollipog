@@ -39,12 +39,36 @@ test("only changed values move to the active campaign source, and a new harness 
   assert.equal(stored.behaviorRevision, 4);
 });
 
-test("another row of the same harness is no change to a harness-matched campaign, but is to an exact-agent one", () => {
+test("another row of the same harness is no change to a harness-matched campaign", () => {
   const sameHarness = { ...LAUNCHED, childHarness: { ...CODEX, agentId: "codex-second-row" } };
   assert.deepEqual(changedCampaignBehavior(policy(), sameHarness), []);
+});
+
+test("an unchanged harness on an exact-agent campaign round-trips: only Completion changes, its row and matching stay (CR-1.2)", () => {
+  // A campaign from before #3247: its fixed Child Harness is a Machine-local row, matched exactly.
   const legacy = policy();
   delete legacy.childHarnessMatch;
-  assert.deepEqual(changedCampaignBehavior(legacy, sameHarness), ["childHarness"]);
+  legacy.behavior.childHarness = { agentId: "codex-local", driver: "codex-app-server", context: { kind: "native" } };
+  // The form sends the stored values back, which the request parser canonicalizes as it does defaults.
+  const request = parseCampaignBehaviorRequest({ expectedRevision: 0, behavior: { ...LAUNCHED,
+    childHarness: legacy.behavior.childHarness, completion: "stop_and_archive" } })!;
+  assert.equal(request.behavior.childHarness!.agentId, "codex-app-server");
+  assert.deepEqual(changedCampaignBehavior(legacy, request.behavior), ["completion"]);
+  applyCampaignBehavior(legacy, request.behavior, 1);
+  assert.deepEqual(legacy.behavior.childHarness, { agentId: "codex-local", driver: "codex-app-server", context: { kind: "native" } });
+  assert.equal(legacy.sources.behavior.childHarness, "user_default");
+  assert.equal("childHarnessMatch" in legacy, false, "other rows stay refused");
+  // Another harness is a change, and it is chosen from the harness catalog, so it matches by harness.
+  applyCampaignBehavior(legacy, { ...request.behavior, childHarness: { agentId: "claude-code", driver: "claude-code", context: { kind: "native" } } }, 2);
+  assert.equal(legacy.childHarnessMatch, "harness");
+});
+
+test("changing Follow-Ups while the first message is being delivered keeps the authorized follow-up limit too (CR-1.1)", () => {
+  const delivering = policy();
+  delivering.firstMessageScope = { state: "delivering", messageDigest: "a".repeat(64), deliveryId: "first_message_x",
+    derivedLimits: { acceptedFollowUps: true, maxIssues: true } };
+  applyCampaignBehavior(delivering, { ...LAUNCHED, followUps: "execute_approved" }, 1);
+  assert.deepEqual(delivering.firstMessageScope.derivedLimits, { acceptedFollowUps: false, maxIssues: true });
 });
 
 test("under Full Control, changing Follow-Ups before the first message keeps the follow-up limit the launch authorized", () => {
