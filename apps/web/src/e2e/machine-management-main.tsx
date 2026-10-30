@@ -302,6 +302,9 @@ if (sshState && runner) {
 let failingSettingsSave: "capacity" | null = null;
 /** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */
 const busyMachine = fixtureParams.has("busy");
+/** `reconnect=hold` leaves Reconnect's request unanswered; `reconnect=fail` never reaches the server (#3525). */
+const reconnectOutcome = fixtureParams.get("reconnect");
+let reconnectRequests = 0;
 const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
   activeSessions: [
     { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
@@ -703,6 +706,9 @@ const client = {
   rediscover: async () => ({ ok: true as const }),
   reconnectBox: async (_boxId: string, force = false) => {
     if (busyMachine && !force) throw activeSessionsConflict();
+    reconnectRequests += 1;
+    if (reconnectOutcome === "fail") throw new TypeError("Failed to fetch");
+    if (reconnectOutcome === "hold") await new Promise(() => {});
     return { ok: true as const };
   },
   updateBoxRunner: async (_boxId: string, force = false) => {
@@ -721,6 +727,8 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
+      /** How many Reconnect requests reached the fixture's API (#3525). */
+      reconnectRequests(): number;
       /** status 0 is a request that never reached the server (the browser's TypeError). */
       setAddBoxOutcome(outcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" }): void;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
@@ -743,6 +751,7 @@ declare global {
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
+  reconnectRequests: () => reconnectRequests,
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },
   setAgentAvailabilityScenario: (scenario) => {
     if (!runner) return;
