@@ -42,6 +42,25 @@ for (const width of [1440, 390]) {
   }
 }
 
+for (const width of [1440, 390]) {
+  for (const theme of ["dark", "light"]) {
+    test(`a non-fatal problem is a Problem During Turn notice without Retry Turn at ${width}px ${theme} (#3806)`, async ({ page }) => {
+      await page.setViewportSize({ width, height: 900 });
+      await page.goto(`/turn-outcomes-e2e.html?theme=${theme}&problem=nonfatal`);
+      const problem = page.locator(".timeline .notice", {
+        has: page.locator(".notice-title", { hasText: "Problem During Turn" }),
+      });
+      await expect(problem).toHaveCount(1);
+      await expect(problem.locator(".notice-body")).toHaveText(
+        "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message.");
+      await expect(problem.getByRole("button", { name: "Retry Turn" })).toHaveCount(0);
+      await expect(turnFailed(page), "only the rate-limited turn failed").toHaveCount(1);
+      await problem.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: test.info().outputPath(`turn-problem-${width}-${theme}.png`) });
+    });
+  }
+}
+
 test("Retry Turn submits the failed turn's prompt again", async ({ page }) => {
   await page.goto("/turn-outcomes-e2e.html");
   const retry = turnFailed(page).getByRole("button", { name: "Retry Turn" });
