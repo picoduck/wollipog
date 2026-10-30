@@ -31,6 +31,8 @@ const EXISTING = "campaign-behavior-existing-child";
 const NESTED = "campaign-behavior-nested";
 /** A current Full Control campaign whose children are fixed to Codex. */
 const FULL = "campaign-behavior-full-control";
+/** A campaign from before #3247: its fixed Child Harness admits only the exact `codex-agent` row. */
+const LEGACY = "campaign-behavior-legacy-exact-row";
 
 const CODEX: AgentHarnessIdentity = { agentId: "codex-agent", driver: "codex-app-server", context: { kind: "native" } };
 const CLAUDE: AgentHarnessIdentity = { agentId: "claude-agent", driver: "claude-code", context: { kind: "native" } };
@@ -54,6 +56,9 @@ function runnerMetadata(): RunnerMetadata {
         available: true, capabilities: capabilities("claude-opus-5-5") },
       { id: "codex-agent", name: "Codex", command: "codex", args: ["app-server"], env: {}, driver: "codex-app-server", context: { kind: "native" },
         available: true, capabilities: capabilities("gpt-5.5") },
+      // Another row of the same harness, which only it offers gpt-5.4 from (CR-2.1).
+      { id: "codex-other", name: "Codex (Other)", command: "codex", args: ["app-server"], env: {}, driver: "codex-app-server", context: { kind: "native" },
+        available: true, capabilities: capabilities("gpt-5.4") },
     ] };
 }
 
@@ -97,6 +102,9 @@ function seed(database: string): void {
         "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"], delegatablePolicyIds: [],
       issueAuthority: { epics: [3580], relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] }, budgetAuthority } };
     orchestrator(FULL, full);
+    const legacy = launched();
+    delete legacy.childHarnessMatch;
+    orchestrator(LEGACY, legacy);
     db.raw().prepare("UPDATE sessions SET parent_control_policy_revision=1 WHERE id=?").run(FULL);
     db.campaignBudgets.authorize(FULL, budgetAuthority);
     db.updateSessionStatus(FULL, "idle", now + 2);
@@ -155,7 +163,7 @@ async function startControlPlane(t: TestContext) {
     driver, useWorktree: false, worktreePath: null, config, preview: null, pendingApproval: null,
     tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, historyEpoch: 0, createdAt: 1, updatedAt: 1 });
   runner.send(JSON.stringify({ type: "register", token: RUNNER_TOKEN, protocolVersion: PROTOCOL_VERSION, runner: runnerMetadata(),
-    sessionSnapshots: [snapshot(ROOT, "running"), snapshot(NESTED, "running"), snapshot(FULL, "idle"),
+    sessionSnapshots: [snapshot(ROOT, "running"), snapshot(NESTED, "running"), snapshot(FULL, "idle"), snapshot(LEGACY, "running"),
       snapshot(EXISTING, "idle", "codex-agent", "codex-app-server", { model: "gpt-5.5", effort: "high" })] }));
   for (let waited = 0; !messages.some((message) => message.type === "registered"); waited += 25) {
     if (waited > 10_000) throw new Error(`runner was not registered:\n${logs}`);
@@ -313,4 +321,26 @@ test("changing a Full Control campaign's Child Harness keeps its boundary, so it
   await cp.next((message) => message.type === "start_session" && JSON.stringify(message).includes(FULL), "the restart's launch");
   expectOk(await cp.human(`/api/sessions/${FULL}/prompt`, { text: "Resume" }), "prompt after restart", cp.logs);
   assert.equal(campaignBoundaryCurrent(session(cp.database, FULL)), true);
+});
+
+test("an exact-row campaign is offered and validated only against the row it keeps (CR-2.1)", { timeout: 60_000 }, async (t) => {
+  const cp = await startControlPlane(t);
+  const path = `/api/sessions/${LEGACY}/orchestrator-campaign/behavior`;
+  // The edit form's Codex catalog is the kept row's, not the other row's.
+  const view = await cp.human(path);
+  expectOk(view, "behavior view", cp.logs);
+  const codex = (view.json as unknown as OrchestratorCampaignBehaviorView).capabilities.harnesses!
+    .find((harness) => harness.driver === "codex-app-server")!;
+  assert.deepEqual(codex.models.map((model) => model.id), ["gpt-5.5"]);
+  // A model only the other row offers is refused: no child could be created with it.
+  const refused = await cp.human(path, { expectedRevision: 0, behavior: { ...LAUNCHED, childModel: "gpt-5.4" } });
+  assert.equal(refused.status, 409, refused.text);
+  const unchanged = session(cp.database, LEGACY).orchestratorPolicy!;
+  assert.equal(unchanged.behavior.childModel, "gpt-5.5");
+  assert.equal(unchanged.behaviorRevision, undefined);
+  assert.equal("childHarnessMatch" in unchanged, false);
+  // A harness-matched campaign may use the other row, so there the same model is admitted.
+  const root = await cp.human(`/api/sessions/${ROOT}/orchestrator-campaign/behavior`,
+    { expectedRevision: 0, behavior: { ...LAUNCHED, childModel: "gpt-5.4" } });
+  expectOk(root, "harness-matched change", cp.logs);
 });

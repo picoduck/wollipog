@@ -2,7 +2,8 @@ import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
 import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
-import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, parseCampaignBehaviorRequest } from "./campaign-behavior.js";
+import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, exactChildHarnessRow,
+  parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
@@ -143,6 +144,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type ParentControlPolicy,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
+  type AgentHarnessIdentity,
   type OrchestratorCampaignBehavior,
   type OrchestratorCampaignBehaviorView,
   type OrchestratorCampaignProjection,
@@ -8143,7 +8145,7 @@ export class SessionsService {
   /** A root campaign's editable behavior and the capability catalog its edit form offers (#3580). */
   campaignBehaviorView(
     sessionId: string,
-    capabilities: (behavior: OrchestratorCampaignBehavior) => OrchestratorSettingsCapabilities,
+    capabilities: (behavior: OrchestratorCampaignBehavior, exactRow?: AgentHarnessIdentity) => OrchestratorSettingsCapabilities,
   ): ServiceResult<OrchestratorCampaignBehaviorView> {
     const root = this.campaignBehaviorRoot(sessionId);
     if (!root.ok) return fail(root.error!, root.status);
@@ -8153,7 +8155,7 @@ export class SessionsService {
       revision: policy.behaviorRevision ?? 0,
       behavior,
       sources: campaignBehaviorSources(policy),
-      capabilities: capabilities(behavior),
+      capabilities: capabilities(behavior, exactChildHarnessRow(policy)),
       runnerProtocolVersion: this.db.getRunner(root.data!.runnerId)?.protocolVersion ?? null,
     });
   }
@@ -8170,7 +8172,7 @@ export class SessionsService {
     sessionId: string,
     request: unknown,
     actor: GovernanceActor,
-    compatibilityError: (behavior: OrchestratorCampaignBehavior) => string | null,
+    compatibilityError: (behavior: OrchestratorCampaignBehavior, exactRow?: AgentHarnessIdentity) => string | null,
   ): ServiceResult<SessionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before changing campaign behavior", 409);
     const parsed = parseCampaignBehaviorRequest(request);
@@ -8187,7 +8189,7 @@ export class SessionsService {
         const unsupported = this.capabilityFailure(root.data!.runnerId, "orchestratorChildHarnessPolicy", "fixed child harness policies");
         if (unsupported) return unsupported;
       }
-      const incompatible = compatibilityError(parsed.behavior);
+      const incompatible = compatibilityError(parsed.behavior, exactChildHarnessRow(root.data!.orchestratorPolicy!));
       if (incompatible) return fail(incompatible, 409);
     }
     const now = Date.now();

@@ -4243,7 +4243,7 @@ app.get("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) =
   if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   reply.header("cache-control", "no-store");
-  return respond(reply, svc.campaignBehaviorView(id, (behavior) => orchestratorSettings.campaignCapabilities(human, behavior)));
+  return respond(reply, svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow)));
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
@@ -4252,7 +4252,7 @@ app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) 
   if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
   if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
   return respond(reply, svc.setCampaignBehavior(id, req.body, { kind: "human", id: humanActorId(req) },
-    (behavior) => orchestratorSettings.campaignBehaviorError(human, behavior)));
+    (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
 });
 
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {

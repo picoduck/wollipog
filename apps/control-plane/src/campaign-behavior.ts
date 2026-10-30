@@ -2,6 +2,7 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS,
   agentHarnessIdentityKey,
+  type AgentHarnessIdentity,
   type OrchestratorCampaignBehavior,
   type OrchestratorCampaignBehaviorKey,
   type OrchestratorCampaignPolicy,
@@ -47,6 +48,13 @@ function sameChildHarness(policy: OrchestratorCampaignPolicy, next: Orchestrator
   const current = policy.behavior.childHarness;
   if (!current || !next) return current === next;
   return agentHarnessIdentityKey(current) === agentHarnessIdentityKey(next);
+}
+
+/** The exact agent row a campaign from before #3247 still admits for its fixed Child Harness, which
+ * its capability catalog and validation must use for that harness (CR-2.1). Undefined when the
+ * campaign matches by harness or has no fixed harness. */
+export function exactChildHarnessRow(policy: OrchestratorCampaignPolicy): AgentHarnessIdentity | undefined {
+  return policy.childHarnessMatch === "harness" ? undefined : policy.behavior.childHarness ?? undefined;
 }
 
 /** The editable values `next` would change in `policy`. */
