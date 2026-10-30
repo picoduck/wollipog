@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   baselineVersions, combinedExit, decide, detect, EXIT, fingerprint, forced, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
@@ -400,6 +400,7 @@ test("isolated suites run as the probe user with only the minimal environment, a
   assert.equal(suiteCall.options.cwd, join(extra.HARNESS_PROBE_ROOT, "repo"), "suites run from the staged read-only copy");
   assert.deepEqual(Object.keys(plan.suites[0].env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
   assert.ok(plan.suites[0].env.HOME.startsWith(join(extra.HARNESS_PROBE_ROOT, "work", "codex")));
+  assert.equal(plan.suites[0].env.TMPDIR, join(dirname(plan.suites[0].env.HOME), "tmp"), "each suite gets a private TMPDIR beside its throwaway HOME");
   assert.ok(plan.suites[0].env.CODEX_BIN.startsWith(join(extra.HARNESS_PROBE_ROOT, "install", "codex")));
   const privateNode = join(extra.HARNESS_PROBE_ROOT, "node", "bin");
   assert.equal(plan.suites[0].argv[0], join(privateNode, "node"), "suites use the private Node, not the world-writable tool cache");

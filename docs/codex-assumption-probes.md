@@ -77,7 +77,13 @@ as the unprivileged `harness-probe` user (see
 `CODEX_BIN` pointing at it, a throwaway `HOME` and no acknowledgement, so the namespace
 acknowledgement below never applies in CI. `probe:codex-inference-transport` is never run.
 Before the suite, `scripts/harness-assumptions-prepare-codex.sh` installs bubblewrap and runs
-`scripts/configure-ci-bubblewrap.sh`. Two targets take about twice the 47-minute suite. The report is
+`scripts/configure-ci-bubblewrap.sh`. Codex (measured on 0.155.1 and 0.166.0) refuses to create its
+sandbox helper aliases when `CODEX_HOME` is under the temporary directory, and its benign sandbox
+control then exits 101. The escalation fixture therefore places its Codex home in the suite's
+throwaway `HOME` whenever that lies outside the temporary directory, as the workflow's private
+`TMPDIR` arranges; its workspace and hook state stay under `/tmp`. A local run whose `TMPDIR` is
+`/tmp` keeps the old placement, and a sandbox control failure reports its exit status and first
+error line. Two targets take about twice the 47-minute suite. The report is
 the job summary and the `harness-assumptions-codex` artifact; it embeds each target's `latest.md`,
 including the guard trust classification, so **measured OK, range can be widened** appears there
 for review without failing the run. Changed or could-not-run results fail it.

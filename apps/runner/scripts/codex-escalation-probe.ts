@@ -28,7 +28,7 @@ import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { resolve } from "node:path";
 import { codexPermissionProfileOverrides } from "../src/codex-permission-profile.js";
@@ -105,7 +105,10 @@ export function sandboxFailureDetail(result: { error?: unknown; status: number |
   const error = result.error as { code?: string } | undefined;
   const outcome = error ? `could not start (${error.code ?? "error"})` : result.signal ? `killed by ${result.signal}` :
     result.status === 0 ? "exited 0 without the ready marker" : `exited ${result.status}`;
-  const line = (result.stderr ?? "").split("\n").map(l => l.replace(/[^\x20-\x7e]/gu, "").trim()).find(Boolean);
+  const lines = (result.stderr ?? "").split("\n").map(l => l.replace(/[^\x20-\x7e]/gu, "").trim()).filter(Boolean);
+  // Prefer the failure itself over a leading warning, such as Codex's PATH-alias notice.
+  const line = lines.find(l => /panicked|error|bwrap:|denied|not permitted|refus/iu.test(l) && !/^WARNING:/u.test(l)) ??
+    lines.findLast(l => !/^WARNING:/u.test(l)) ?? lines[0];
   return line ? `${outcome}: ${line.length > 200 ? `${line.slice(0, 200)}...` : line}` : `${outcome} with no stderr`;
 }
 
@@ -291,11 +294,24 @@ export function hardeningRestorable(outputs: Map<string, string>, marker: string
  * Driver.
  * ----------------------------------------------------------------------------------------- */
 
+/**
+ * Codex refuses to create its sandbox helper aliases when CODEX_HOME is under the temporary
+ * directory, so the fixture's Codex home lives in this probe's throwaway HOME when that is
+ * outside it. The workspace and hook state stay under the temporary directory as measured.
+ */
+export function fixtureHomeBase(home: string | undefined, temp: string): string | null {
+  if (!home || !isAbsolute(home)) return null;
+  const inside = relative(resolve(temp), resolve(home));
+  return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)) ? null : home;
+}
+
 async function main(): Promise<number> {
   const root = mkdtempSync(join(tmpdir(), "wollipog-escalation-probe-"));
+  const homeBase = fixtureHomeBase(process.env.HOME, tmpdir());
+  const codexHome = homeBase ? mkdtempSync(join(homeBase, "escalation-codex-home-")) : join(root, "codex-home");
   const fixture: Fixture = {
     repo: join(root, "repo"),
-    codexHome: join(root, "codex-home"),
+    codexHome,
     hookDir: join(root, "hook-state"),
     marker: randomBytes(16).toString("hex"),
     networkPort: 0,
@@ -358,6 +374,7 @@ async function main(): Promise<number> {
     net.close();
     models.close();
     rmSync(root, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
   }
   // "no command ran" on every case means the harness never got a turn out of `codex` — a wrong
   // CODEX_BIN, a rejected argument, a config error — not a behaviour change. Say so, rather than

@@ -35,11 +35,11 @@ Each harness job:
    and links the run that measured it. A missing, evicted, unreadable or mismatched record always
    measures. A manual dispatch measures `all` harnesses, or only the one named in the `harness`
    input (the others still run detection); an unknown name is could not run.
-3. **Measure.** Stages the isolation boundary below, runs the harness's preparation, then for
+3. **Measure.** Runs the harness's preparation, stages the isolation boundary below, then for
    each target installs the exact version into a disposable prefix with `npm install
-   --ignore-scripts` and runs the suite in a minimal environment: a throwaway `HOME`, `PATH`,
-   `TMPDIR=/tmp`, `LANG`, `CI` and the binary variable. No job token, credential, provider
-   configuration or operator acknowledgement reaches it.
+   --ignore-scripts` and runs the suite in a minimal environment: a throwaway `HOME`, a private
+   `TMPDIR` beside it (outside `/tmp`), `PATH`, `LANG`, `CI` and the binary variable. No job
+   token, credential, provider configuration or operator acknowledgement reaches it.
 4. **Report.** Writes `latest.json` and `latest.md`, appends `latest.md` to the job summary and
    uploads the report directory as the `harness-assumptions-<harness>` artifact (30 days), on every
    outcome including detection failures.

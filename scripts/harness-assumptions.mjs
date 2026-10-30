@@ -199,9 +199,9 @@ export function judgeSuite(target, execution, report) {
 }
 
 /** Minimal suite environment: a throwaway HOME, no CI tokens, credentials or acknowledgements. */
-export function suiteEnv(harness, binary, home, base = process.env) {
-  // TMPDIR stays /tmp, where the recorded local measurements placed their fixtures.
-  return { PATH: base.PATH, HOME: home, TMPDIR: "/tmp", LANG: "C.UTF-8", CI: "true", [harness.binaryEnv]: binary };
+export function suiteEnv(harness, binary, home, base = process.env, temp = "/tmp") {
+  // A private TMPDIR keeps a suite's own scratch, and the homes it derives, out of shared /tmp.
+  return { PATH: base.PATH, HOME: home, TMPDIR: temp, LANG: "C.UTF-8", CI: "true", [harness.binaryEnv]: binary };
 }
 
 function readJson(path) {
@@ -482,11 +482,11 @@ async function measureTarget(harness, target, { box, env, exec, suiteMarkdown })
     return fail(`npm install of ${harness.npmPackage}@${target.version} failed (${describeRun(install)}, installed ${installed ?? "nothing"})`);
   }
   const work = join(box.workRoot, target.version);
-  const home = join(work, "home"), suiteDir = join(work, "report");
-  if (!await box.makeDir(work) || !await box.makeDir(home) || !await box.makeDir(suiteDir)) return fail("could not create the suite's throwaway directories");
+  const home = join(work, "home"), suiteDir = join(work, "report"), temp = join(work, "tmp");
+  if (!await box.makeDir(work) || !await box.makeDir(home) || !await box.makeDir(suiteDir) || !await box.makeDir(temp)) return fail("could not create the suite's throwaway directories");
   try {
     const timeoutMinutes = harness.timeoutMinutes;
-    const execution = await box.run(suiteArgv(harness, suiteDir, box.nodePath), suiteEnv(harness, binary, home, { ...env, PATH: box.searchPath }), timeoutMinutes * 60_000);
+    const execution = await box.run(suiteArgv(harness, suiteDir, box.nodePath), suiteEnv(harness, binary, home, { ...env, PATH: box.searchPath }, temp), timeoutMinutes * 60_000);
     // Nothing the release started may outlive its suite, or its results are not trustworthy.
     if (!await box.reap()) return fail("processes started by the suite survived it and could not be killed");
     const json = await box.collect(suiteDir, "latest.json");
