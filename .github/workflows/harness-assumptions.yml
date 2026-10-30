@@ -25,11 +25,13 @@ jobs:
     name: ${{ matrix.harness }} Assumptions
     runs-on: ubuntu-24.04
     timeout-minutes: 340
-    # At most one job per harness at a time, so the shared runner pool never holds more probe jobs
-    # than one run's matrix. A job waits for an in-progress job of its harness, but GitHub keeps only
-    # one waiting job per group: a newer one cancels it before it starts, and the summarize job then
-    # reports that harness as dropped and fails the run. A harness the dispatch excludes takes a
-    # group of its own, so it neither waits for nor displaces a measurement.
+    # At most one measurement per harness at a time, so the shared runner pool never holds more
+    # measurements than one run's matrix; the seconds-long excluded and summary jobs are unbounded.
+    # A job waits for an in-progress job of its harness, but GitHub keeps only one waiting job per
+    # group: a newer one cancels it before it starts, and the summarize job then reports that
+    # harness as dropped and fails, so the run never concludes success (GitHub marks it cancelled).
+    # A harness the dispatch excludes takes a group of its own, so it neither waits for nor
+    # displaces a measurement.
     concurrency:
       group: ${{ (github.event_name != 'workflow_dispatch' || inputs.harness == 'all' || inputs.harness == matrix.harness) && format('harness-assumption-probes-{0}', matrix.harness) || format('harness-assumption-probes-{0}-excluded-{1}', matrix.harness, github.run_id) }}
       cancel-in-progress: false
@@ -107,7 +109,7 @@ jobs:
           key: ${{ steps.detect.outputs.key }}
 
   # Lists every harness's outcome in this run; a harness without a complete report was dropped or
-  # interrupted, which is annotated and fails the run instead of passing silently.
+  # interrupted, which is annotated and fails this job instead of passing silently.
   summarize:
     name: Summarize Measurements
     needs: probe

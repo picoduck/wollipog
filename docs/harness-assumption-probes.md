@@ -33,12 +33,14 @@ release. Scheduled runs measure every harness whose record is missing or stale.
 ### Queueing
 
 Each harness job runs in its own concurrency group, `harness-assumption-probes-<harness>`, with
-`cancel-in-progress: false`, so at most one job per harness runs at a time. Runs therefore can
-overlap across harnesses (a Pi dispatch runs while a Codex measurement is in progress), but the
-shared runner pool never holds more probe jobs than one run's matrix, which is the peak the single
-workflow-wide group had too. A job of a harness the dispatch excludes takes a group unique to its
-run, so it neither waits for nor displaces a measurement, and dispatches for different harnesses
-never cancel each other.
+`cancel-in-progress: false`, so at most one measurement per harness runs at a time. Runs therefore
+can overlap across harnesses (a Pi dispatch runs while a Codex measurement is in progress), but the
+shared runner pool never holds more measurements than one run's matrix, which is the peak the
+single workflow-wide group had too. A job of a harness the dispatch excludes takes a group unique to
+its run, so it neither waits for nor displaces a measurement, and dispatches for different harnesses
+never cancel each other. That trade-off is not free: excluded jobs and each run's summary job are
+not bounded by any group, so overlapping dispatches can briefly hold more than three runners. Each
+of those jobs only checks out, sets up Node, reads or writes a small report and exits in seconds.
 
 A job waits while another job of its harness is in progress, but GitHub keeps only one waiting job
 per group: when a third job of the same harness arrives, the waiting one is cancelled before it
@@ -47,9 +49,16 @@ read-only, secret-free permissions rule out. Instead the run's final **Summarize
 job, which runs on every outcome, downloads every harness report and lists each harness as
 matched, no new release, not measured, changed, could not run, interrupted (incomplete report) or
 **dropped** (no report: cancelled while waiting, or failed before reporting). A dropped or
-interrupted harness gets an error annotation and fails the run, so it never passes silently;
-dispatch it again. With no workflow-wide group, no run is cancelled before its jobs exist, so a new
-dispatch can no longer drop a whole pending run with nothing but its `cancelled` conclusion.
+interrupted harness gets an error annotation and fails the summary job, so the run never concludes
+success. A run with a dropped job concludes `cancelled`, but its other harnesses' reports and the
+failed summary naming the dropped harness are kept; dispatch that harness again. Every report
+names its run attempt, and the summary counts only reports of its own attempt: a re-run keeps
+earlier attempts' artifacts, so a retried job that was dropped would otherwise hide behind its
+earlier report. A report of another attempt reads **earlier attempt** and fails the summary, which
+is also what a partial re-run (Re-run Failed Jobs) shows for the jobs it reused; re-run all jobs
+or dispatch again for a clean summary. With no
+workflow-wide group, no run is cancelled before its jobs exist, so a new dispatch can no longer drop
+a whole pending run with nothing but its `cancelled` conclusion.
 
 Each harness job:
 

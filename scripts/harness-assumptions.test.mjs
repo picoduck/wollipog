@@ -21,7 +21,7 @@ function scratch(t) {
 }
 function ciEnv(temp, extra = {}) {
   return { RUNNER_TEMP: temp, PATH: process.env.PATH, GITHUB_OUTPUT: join(temp, "output"), GITHUB_STEP_SUMMARY: join(temp, "summary.md"),
-    GITHUB_EVENT_NAME: "schedule", GITHUB_SERVER_URL: "https://github.com", GITHUB_REPOSITORY: "picoduck/wollipog", GITHUB_RUN_ID: "1", ...extra };
+    GITHUB_EVENT_NAME: "schedule", GITHUB_SERVER_URL: "https://github.com", GITHUB_REPOSITORY: "picoduck/wollipog", GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1", ...extra };
 }
 function outputs(temp) {
   if (!existsSync(join(temp, "output"))) return {};
@@ -95,7 +95,7 @@ test("the workflow publishes every outcome and records only a matched measuremen
   for (const name of ["Restore Measurement Record", "Decide Whether to Measure"]) assert.match(step(name), /if: steps\.detect\.outputs\.excluded != 'true'/);
 });
 
-test("every run ends with a summary that fails on a dropped or interrupted harness", () => {
+test("every run ends with a summary job that fails on a dropped or interrupted harness", () => {
   const job = workflow.slice(workflow.indexOf("\n  summarize:"));
   assert.match(job, /^ {4}needs: probe\n {4}if: always\(\)$/m, "the summary runs after cancelled and failed harness jobs too");
   assert.match(job, /uses: actions\/download-artifact@[0-9a-f]{40} # v\S+\n {8}with:\n {10}pattern: harness-assumptions-\*\n {10}path: \$\{\{ runner\.temp \}\}\/harness-assumption-reports\n/);
@@ -253,7 +253,7 @@ function assertNotMeasured(temp, harness = codex) {
   assert.match(md, /^# Codex Assumption Probes: not measured$/m);
   assert.doesNotMatch(md, /matched|no new release|Last matched measurement/);
   assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /^# Codex Assumption Probes: not measured$/m, "the job summary says not measured");
-  assert.deepEqual(runOutcome(harness, report), { verdict: "not measured", failed: false, detail: "this dispatch named another harness" });
+  assert.deepEqual(runOutcome(harness, report, "1"), { verdict: "not measured", failed: false, detail: "this dispatch named another harness" });
 }
 
 test("a dispatch naming another harness never detects, measures, records or passes this one", async (t) => {
@@ -288,7 +288,7 @@ test("decide never measures or passes an excluded harness, even beside a matched
 
 function writeReport(dir, harness, report) {
   mkdirSync(join(dir, `harness-assumptions-${harness}`), { recursive: true });
-  writeFileSync(join(dir, `harness-assumptions-${harness}`, "latest.json"), typeof report === "string" ? report : JSON.stringify(report));
+  writeFileSync(join(dir, `harness-assumptions-${harness}`, "latest.json"), typeof report === "string" ? report : JSON.stringify({ runAttempt: "1", ...report }));
 }
 
 test("the run summary lists not measured harnesses and fails on a dropped or interrupted one", (t) => {
@@ -309,21 +309,46 @@ test("the run summary lists not measured harnesses and fails on a dropped or int
   assert.ok(!lines.some(line => /^::error title=(Pi|Codex)/.test(line)));
 
   writeReport(reports, "claude", { harness: "claude", complete: false, selected: true, measured: true, exitCode: 2 });
-  assert.equal(summarize(reports, { env }), EXIT.couldNotRun, "an interrupted measurement fails the run");
+  assert.equal(summarize(reports, { env }), EXIT.couldNotRun, "an interrupted measurement fails the summary");
   writeReport(reports, "claude", { harness: "claude", complete: true, selected: true, measured: false, exitCode: 0 });
   assert.equal(summarize(reports, { env }), EXIT.matched, "only when every harness reported does the summary pass");
   assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /\| Claude Code \| no new release \|/);
 });
 
-test("a run outcome is matched only for a complete, measured, matched report of that harness", () => {
+test("a re-run whose job was dropped never passes on an earlier attempt's matched report", (t) => {
+  const temp = scratch(t);
+  const reports = join(temp, "reports");
+  for (const harness of ["codex", "claude"]) writeReport(reports, harness, { harness, complete: true, selected: true, measured: false, exitCode: 0, runAttempt: "2" });
+  // Attempt 1 matched; attempt 2's Pi job was cancelled while waiting, so only attempt 1's artifact exists.
+  writeReport(reports, "pi", { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0, runAttempt: "1" });
+  const lines = [];
+  t.mock.method(console, "log", line => lines.push(line));
+  assert.equal(summarize(reports, { env: ciEnv(temp, { GITHUB_RUN_ATTEMPT: "2" }) }), EXIT.couldNotRun);
+  assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /\| Pi \| earlier attempt \| the only report is from another run attempt/);
+  assert.doesNotMatch(readFileSync(join(temp, "summary.md"), "utf8"), /\| Pi \| matched/);
+  assert.ok(lines.some(line => /^::error title=Pi Assumptions earlier attempt::/.test(line)));
+});
+
+test("every published harness report names its run attempt", async (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp, { GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "pi", GITHUB_RUN_ATTEMPT: "3" });
+  assert.equal(await detect(codex, { env, fetchImpl: silent }), EXIT.matched);
+  assert.equal(JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8")).runAttempt, "3");
+  assert.equal(await detect(codex, { env: { ...env, DISPATCH_HARNESS: "all" }, fetchImpl: silent, delayMs: 0 }), EXIT.couldNotRun);
+  assert.equal(JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8")).runAttempt, "3");
+});
+
+test("a run outcome is matched only for a complete, measured, matched report of that harness and attempt", () => {
   const pi = harnessById("pi");
-  const base = { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0 };
-  assert.equal(runOutcome(pi, base).verdict, "matched");
+  const base = { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0, runAttempt: "1" };
+  assert.equal(runOutcome(pi, base, "1").verdict, "matched");
   for (const [report, verdict] of [[null, "dropped"], [{ ...base, harness: "codex" }, "interrupted"], [{ ...base, complete: false }, "interrupted"],
+    [{ ...base, runAttempt: "2" }, "earlier attempt"], [{ ...base, runAttempt: 1 }, "earlier attempt"], [{ ...base, runAttempt: undefined }, "earlier attempt"],
+    [{ ...base, selected: false, runAttempt: "0" }, "earlier attempt"],
     [{ ...base, selected: false }, "not measured"], [{ ...base, selected: false, exitCode: 0 }, "not measured"], [{ ...base, measured: false }, "no new release"],
     [{ ...base, exitCode: 1 }, "changed"], [{ ...base, exitCode: 2 }, "could not run"], [{ ...base, exitCode: null }, "could not run"], [{ ...base, exitCode: "0" }, "could not run"]]) {
-    assert.equal(runOutcome(pi, report).verdict, verdict, JSON.stringify(report));
-    assert.equal(runOutcome(pi, report).failed, !["matched", "not measured", "no new release"].includes(verdict));
+    assert.equal(runOutcome(pi, report, "1").verdict, verdict, JSON.stringify(report));
+    assert.equal(runOutcome(pi, report, "1").failed, !["matched", "not measured", "no new release"].includes(verdict));
   }
 });
 
@@ -604,7 +629,7 @@ test("documentation describes the implemented dispatch scope and queueing", () =
   assert.doesNotMatch(doc, /waits rather than cancelling|runs never overlap/, "the retired single-group promise is gone");
   assert.doesNotMatch(workflow, /waits instead of cancelling/);
   for (const phrase of ["Every other harness reports **not measured**", "`harness-assumption-probes-<harness>`", "GitHub keeps only one waiting job per group",
-    "**Summarize Measurements**", "**dropped**", "fails the run", "the shared runner pool never holds more probe jobs than one run's matrix"]) assert.ok(doc.includes(phrase), phrase);
+    "**Summarize Measurements**", "**dropped**", "fails the summary job, so the run never concludes success", "the shared runner pool never holds more measurements than one run's matrix", "excluded jobs and each run's summary job are not bounded by any group", "**earlier attempt**"]) assert.ok(doc.includes(phrase), phrase);
 });
 
 test("Claude Code targets the newest release, the three floors and the reviewer pin, all read from source", () => {

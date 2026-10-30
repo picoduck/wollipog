@@ -336,7 +336,7 @@ function output(values, env = process.env) {
 }
 
 function baseReport(harness, env = process.env) {
-  return { harness: harness.id, name: harness.name, npmPackage: harness.npmPackage, event: env.GITHUB_EVENT_NAME ?? null, runUrl: runUrl(env),
+  return { harness: harness.id, name: harness.name, npmPackage: harness.npmPackage, event: env.GITHUB_EVENT_NAME ?? null, runUrl: runUrl(env), runAttempt: env.GITHUB_RUN_ATTEMPT ?? null,
     selected: true, measured: false, complete: true, exitCode: EXIT.couldNotRun, completedAt: new Date().toISOString(), documentation: harness.documentation };
 }
 
@@ -608,11 +608,15 @@ async function measureTarget(harness, target, { box, env, exec, suiteMarkdown })
 /**
  * One harness's outcome in a run, from the report its job uploaded. Only a complete report of a
  * measured, fully matched run is "matched"; no report means the job never reported, which is how a
- * job cancelled while pending in its concurrency group looks.
+ * job cancelled while pending in its concurrency group looks. A re-run still sees an earlier
+ * attempt's artifact when its own job uploaded nothing, so a report of another attempt never counts.
  */
-export function runOutcome(harness, report) {
+export function runOutcome(harness, report, runAttempt) {
   if (!report) return { verdict: "dropped", failed: true, detail: "no report: the job was cancelled while waiting for its concurrency group, or failed before reporting; dispatch it again" };
   if (report.harness !== harness.id || report.complete !== true) return { verdict: "interrupted", failed: true, detail: "the report is incomplete; the measurement did not finish" };
+  if ((report.runAttempt ?? null) !== (runAttempt ?? null)) {
+    return { verdict: "earlier attempt", failed: true, detail: "the only report is from another run attempt: this attempt's job was dropped, or a partial re-run reused it; re-run all jobs or dispatch again" };
+  }
   if (report.selected === false) return { verdict: "not measured", failed: false, detail: "this dispatch named another harness" };
   if (report.exitCode === EXIT.matched) return report.measured === true
     ? { verdict: "matched", failed: false, detail: "measured in this run" }
@@ -624,18 +628,19 @@ export function runOutcome(harness, report) {
 /**
  * Summarize every harness job of a run from the downloaded report artifacts, so a dropped or
  * interrupted measurement is listed and annotated instead of disappearing. Exits could not run
- * when any harness has no complete report; changed and could-not-run already fail their own jobs.
+ * when any harness has no complete report of this run attempt; changed and could-not-run already
+ * fail their own jobs.
  */
 export function summarize(reportsDir, { env = process.env } = {}) {
   const rows = HARNESSES.map(harness => {
     const report = readJson(join(reportsDir, `harness-assumptions-${harness.id}`, "latest.json"));
-    return { harness, ...runOutcome(harness, report) };
+    return { harness, ...runOutcome(harness, report, env.GITHUB_RUN_ATTEMPT) };
   });
   const text = ["# Harness Assumption Probes", "", "| Harness | Result | Detail |", "| --- | --- | --- |",
     ...rows.map(r => `| ${r.harness.name} | ${r.verdict} | ${r.detail} |`), ""].join("\n");
   if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, text + "\n");
   console.log(text);
-  const lost = rows.filter(r => r.verdict === "dropped" || r.verdict === "interrupted");
+  const lost = rows.filter(r => ["dropped", "interrupted", "earlier attempt"].includes(r.verdict));
   for (const r of lost) console.log(`::error title=${r.harness.name} Assumptions ${r.verdict}::${r.harness.name}: ${r.detail}`);
   return lost.length ? EXIT.couldNotRun : EXIT.matched;
 }
