@@ -385,6 +385,32 @@ for (const ownDecisionPending of [true, false]) {
   });
 }
 
+test("a Full Control root that keeps asking gets every question dismissed but one guidance notice per policy revision (CR-1.1)", async () => {
+  const h = bridge();
+  try {
+    assert.ok(h.enable().ok);
+    const toRunner: ControlPlaneToRunner[] = [];
+    const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+    (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+    const guidance = () => toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" &&
+      message.text === FULL_CONTROL_ROOT_QUESTION_MESSAGE).length;
+    // A root answering each notice with a fresh question: distinct request and occurrence ids.
+    for (const index of [1, 2, 3]) {
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: `ask-${index}`, occurrenceId: `request_ask_${index}`,
+        requestSource: "provider_question", questions: [{ id: "close", question: `Close #2940? (attempt ${index})`,
+          options: [{ label: "Approved in Wollipog (Recommended)" }, { label: "Leave it open" }] }] });
+      for (let tickIndex = 0; tickIndex < 4; tickIndex += 1) await tick();
+    }
+    const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+    assert.deepEqual(answers.map((message) => [message.requestId, message.action, Object.keys(message.answers).length]),
+      [["ask-1", "dismiss", 0], ["ask-2", "dismiss", 0], ["ask-3", "dismiss", 0]], "every question is dismissed and no option is ever applied");
+    assert.equal(pendingRequests(h.db.getSession("root")!.pendingApproval).length, 0);
+    assert.equal(guidance(), 1, "the notice is bounded, so repeated questions cannot drive a wake-up loop");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 0,
+      "bounding the notice does not turn the root's questions into blocked work");
+  } finally { h.close(); }
+});
+
 test("a queued ordinary hook ask promoted after a person resolves the gate ahead of it gets the standing decline", () => {
   const h = bridge();
   try {

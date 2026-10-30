@@ -8860,11 +8860,16 @@ export class SessionsService {
     } else if (evaluation.requestClass === "root_questions" && session.id === controller.id) {
       // The question was observed as an Orchestrator-owned request just before it was dismissed;
       // settle that record now rather than show the root a request it can no longer answer.
+      const first = this.db.campaignRecovery.recordDecline(controller.id, session.id, "root_questions", occurrence, revision, now).firstForClass;
       this.campaignRecovery.synchronize(this.db.getSession(controller.id) ?? controller, now);
-      // A bare dismissal reads as a person declining (#2940). Tell the root that nobody saw the
-      // question and how to decide it itself, after this event settles; a root that ended its turn
-      // on the dismissal is woken by this message rather than left idle.
-      setImmediate(() => {
+      // A bare dismissal reads as a person declining (#2940). Tell the root once per policy revision
+      // that nobody sees its questions and how to decide them itself, after this event settles; a
+      // root that ended its turn on the dismissal is woken by this message rather than left idle.
+      // Later questions are still dismissed but wake nothing: one notice per question could loop a
+      // root that answers each notice with another question. Neither provider's dismissal carries
+      // text (Claude Code sends a fixed deny message; Codex an empty answer set), so the guidance
+      // cannot ride on the dismissal itself without a runner protocol change.
+      if (first) setImmediate(() => {
         try {
           const delivered = this.prompt(session.id, FULL_CONTROL_ROOT_QUESTION_MESSAGE);
           if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);

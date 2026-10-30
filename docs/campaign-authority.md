@@ -105,10 +105,15 @@ records a system resolution, rather than an agent-created grant. A root's own qu
 `root_questions`) are dismissed at once, whatever options they offer: the root is the campaign's
 only owner, so nobody else can answer them, and applying one of the root's options would record a
 decision no person made. A live root once asked the person to confirm "Approved in Wollipog" for a
-closure it owned itself. After the dismissal the server queues one notice to the root (the
-`FULL_CONTROL_ROOT_QUESTION_MESSAGE` constant). It says nobody saw the question, and that the root
-decides Orchestrator-owned matters with the typed tools, approving its own pending occurrence with
-`resolve_descendant_workflow_decision` and its own session ID. The dismissal is not blocked work.
+closure it owned itself. After the root's first dismissal in a policy revision, the server queues
+one notice to the root (the `FULL_CONTROL_ROOT_QUESTION_MESSAGE` constant). It says nobody sees the
+root's questions, and that the root decides Orchestrator-owned matters with the typed tools,
+approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
+session ID. Later questions in the same revision are still dismissed but wake the root with no
+further notice, so a root that answers each notice with another question cannot loop; the bound is
+the durable decline ledger's first-for-class record. Neither provider's dismissal can carry text
+(Claude Code sends a fixed deny message, Codex an empty answer set), so the guidance travels as a
+prompt. The dismissal is not blocked work.
 The root's own pending typed workflow decisions never park its provider, so they never stop a
 standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
