@@ -441,11 +441,20 @@ function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginV
       ...(login.userCode === undefined ? {} : { userCode: login.userCode }),
       ...(login.sessionId === undefined ? {} : { sessionId: login.sessionId }),
       ...(login.error === undefined ? {} : { error: login.error }),
-      // v253 (#3519): only a failed sign-in's known code passes. Any other value is dropped rather
-      // than refusing the whole inventory, so a newer runner's code reads as a plain failure.
-      ...(login.status === "failed" && isProviderLoginFailureCode(login.failureCode) ? { failureCode: login.failureCode } : {}),
+      ...providerLoginFailureCodeField(login),
     };
   });
+}
+
+/** v253 (#3519): a failed sign-in's code from the closed set. The runner's value never passes unless
+ * it is in that set: any other is replaced by `unrecognized` rather than refusing the whole
+ * inventory. It is not simply dropped, because a dashboard reads a missing code as an older runner's
+ * and falls back to matching the `error` sentence, which could turn a newer runner's plain failure
+ * into Already on This Machine. Only a failed sign-in carries one. */
+function providerLoginFailureCodeField(login: ProviderLoginView): Pick<ProviderLoginView, "failureCode"> {
+  const value: unknown = login.failureCode;
+  if (login.status !== "failed" || value === undefined || value === null) return {};
+  return { failureCode: isProviderLoginFailureCode(value) ? value : "unrecognized" };
 }
 
 const ARTIFACT_TABLE_SCHEMA = /* sql */ `

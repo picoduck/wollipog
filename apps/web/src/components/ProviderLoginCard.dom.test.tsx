@@ -271,7 +271,7 @@ test("from v253 the duplicate-account ending is decided by its failure code, wha
   assert.equal(providerSignInAlreadyOnMachine({ status: "timed_out", error: DUPLICATE, failureCode: code }), false,
     "only a failed sign-in");
   // Any other code is a plain failure, even beside today's sentence: the code decides when present.
-  for (const other of ["provider_did_not_confirm", "", "Account_Already_On_Machine"]) {
+  for (const other of ["unrecognized", "provider_did_not_confirm", "", "Account_Already_On_Machine"]) {
     assert.equal(providerSignInAlreadyOnMachine({ status: "failed", error: DUPLICATE,
       failureCode: other as ProviderLoginView["failureCode"] }), false, JSON.stringify(other));
   }

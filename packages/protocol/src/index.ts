@@ -762,8 +762,9 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 253: provider sign-in failure codes (#3519): a failed `ProviderLoginView` may carry
 //      `failureCode` from the closed `PROVIDER_LOGIN_FAILURE_CODES`, first
 //      `account_already_on_machine` for a duplicate account the runner discarded. Its `error`
-//      sentence is unchanged. The control plane passes only a known code through, and dashboards
-//      fall back to matching the sentence when it is absent (an older runner or control plane).
+//      sentence is unchanged. The control plane passes only a known code through and puts
+//      `unrecognized` in place of any other, and dashboards fall back to matching the sentence only
+//      when the code is absent (an older runner or control plane).
 export const PROTOCOL_VERSION = 253;
 
 export * from "./campaign-authority.js";
@@ -3459,10 +3460,13 @@ export type ProviderLoginStatus =
  * sentence, so clients decide what to offer without matching copy.
  * - `account_already_on_machine`: the new account's identity matches an account already on the
  *   Machine, so the runner discarded the sign-in.
+ * - `unrecognized`: the runner sent a code outside this set (a newer runner). The control plane puts
+ *   it in that code's place, so a code it does not know still reads as a plain failure rather than
+ *   as no code, which a client would read from the `error` sentence instead.
  * A closed set that may grow: a client treats a code it does not know as a plain failure. */
-export type ProviderLoginFailureCode = "account_already_on_machine";
+export type ProviderLoginFailureCode = "account_already_on_machine" | "unrecognized";
 
-export const PROVIDER_LOGIN_FAILURE_CODES: readonly ProviderLoginFailureCode[] = ["account_already_on_machine"];
+export const PROVIDER_LOGIN_FAILURE_CODES: readonly ProviderLoginFailureCode[] = ["account_already_on_machine", "unrecognized"];
 
 export function isProviderLoginFailureCode(value: unknown): value is ProviderLoginFailureCode {
   return PROVIDER_LOGIN_FAILURE_CODES.includes(value as ProviderLoginFailureCode);

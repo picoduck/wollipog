@@ -322,8 +322,9 @@ test("a provider-HOME wait is accepted only when well formed and content-free", 
 });
 
 test("a provider sign-in failure code is accepted only from the closed set (#3519)", () => {
-  assert.deepEqual(PROVIDER_LOGIN_FAILURE_CODES, ["account_already_on_machine"]);
+  assert.deepEqual(PROVIDER_LOGIN_FAILURE_CODES, ["account_already_on_machine", "unrecognized"]);
   assert.equal(isProviderLoginFailureCode("account_already_on_machine"), true);
+  assert.equal(isProviderLoginFailureCode("unrecognized"), true);
   for (const value of ["", "Account_Already_On_Machine", "account_already_on_machine ", "unknown_code", 1, null, undefined, {}]) {
     assert.equal(isProviderLoginFailureCode(value), false, JSON.stringify(value));
   }

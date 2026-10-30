@@ -412,6 +412,9 @@ test("a v253 duplicate-account ending is Not Added with Dismiss only by its fail
     ["code, reworded sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed",
       "That Claude login belongs to an account this machine already has; nothing was added."),
     failureCode: "account_already_on_machine" }, true],
+    // What the control plane stores for a newer runner's code beside today's sentence (db.test.ts).
+    ["unrecognized code, today's sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE),
+      failureCode: "unrecognized" }, false],
     ["unknown code, today's sentence", { ...ended("work-2-1a2b3c4d", "Work 2", "failed", DUPLICATE),
       failureCode: "some_future_code" as ProviderLoginView["failureCode"] }, false],
   ];
