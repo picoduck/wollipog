@@ -13668,12 +13668,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* Preview Right (#2219) starts the preview's content --space-6 from the divider, as its bar does. */
 .sessions-md[data-layout="right"] .inbox-preview-skeleton { padding-left: var(--space-6); }
 .inbox-preview-skeleton > .skeleton-bar.title { max-width: 320px; }
-/* The Sessions preview (#2210; §4.3, §6.3): a quick look, so it starts at the page gutter like the
-   page title and the rows above it, and its reading column is at most --chat-max wide, never
-   centered: its end padding is the gutter or whatever is left past the column. A size container,
-   so its request dock caps at half the preview. --preview-inset is where the bar, the meta line, the
-   request dock and the transcript start: the page gutter under the list, and --space-6 from the
-   divider in Preview Right (#2219). */
+/* The Sessions preview (#2210; §4.3, §6.3): its bar and meta line start at the page gutter like the
+   page title and the rows above it, and its reading column (the request dock and the transcript) is
+   at most --chat-max wide and centered, as in the open session. A size container, so its request
+   dock caps at half the preview. --preview-inset is where the bar and the meta line start, and the
+   reading column's least gutter: the page gutter under the list, and --space-6 from the divider in
+   Preview Right (#2219). */
 .session-detail.preview {
   --preview-inset: var(--page-gutter);
   background: var(--bg);
@@ -13688,13 +13688,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .session-detail.preview .detail-main { min-height: 0; }
 .session-detail.preview .detail-scroll {
   padding-block: var(--space-3);
-  padding-inline: var(--preview-inset) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max)));
+  padding-inline: max(var(--preview-inset), calc((100% - var(--chat-max)) / 2));
 }
-.session-detail.preview .transcript-history-band { padding-inline: var(--preview-inset) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max))); }
-.session-detail.preview .transcript-tail-anchor > .btn.transcript-tail-control {
-  right: max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max)));
-  left: var(--preview-inset);
-}
+.session-detail.preview .transcript-history-band { padding-inline: max(var(--preview-inset), calc((100% - var(--chat-max)) / 2)); }
 /* The detail bar's one row, with the meta line under it as part of the same header. */
 .session-preview-bar { padding-left: var(--preview-inset); border-bottom: 0; }
 .session-preview-open { flex: none; }
@@ -13737,7 +13733,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   overflow-y: auto;
   overscroll-behavior: contain;
   margin: 0;
-  padding: var(--space-2) max(var(--page-gutter), calc(100% - var(--preview-inset) - var(--chat-max))) var(--space-2) var(--preview-inset);
+  padding: var(--space-2) max(var(--preview-inset), calc((100% - var(--chat-max)) / 2));
   /* The transcript scrolls beneath the dock, so the dock draws an edge over it (#2217): a hairline,
      which dark themes need because --elev-1 barely shows on their canvas, and the shadow. */
   position: relative;

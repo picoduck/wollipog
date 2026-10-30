@@ -1579,7 +1579,7 @@ master-detail pages stay side by side.
 │  Row          whole rows only, 45% of the area, at least 3, own scroll   │
 ├─────────────────────────────────── ▬ ────────────────────────────────────┤
 │ Detail bar: title, status ............ actions, Open Session             │
-│ Preview body, left-aligned at the page gutter, max 860px, own scroll     │
+│              Preview body, centered, max 860px, own scroll               │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1589,8 +1589,10 @@ master-detail pages stay side by side.
   never under 3 rows, and never so tall that the preview drops under 240px. At 1440×900 that is 6 rows
   of `--row-h-2`; the divider never cuts a row. Rows must be exactly their row token for this to hold.
 - **Panes.** Both panes are flush (no card) and span the page between the gutters, so the page
-  title, the tab row, the rows and the preview all start at one left edge. The list body and the
-  preview body each scroll on their own; the page never scrolls. Notices above the list (order
+  title, the tab row, the rows and the preview's bar and meta line all start at one left edge. The
+  preview's reading column (the docked request and the transcript) is at most `--chat-max` wide and
+  centered in the preview, as in the open session, so a session reads the same in both. The list
+  body and the preview body each scroll on their own; the page never scrolls. Notices above the list (order
   changed, sign-in) take list height in whole rows; they do not push the divider, and no row is cut
   at it (#2221, the list notice slot of §13.2). A new selection resets the
   preview's scroll to its request or latest turn; resizing never scrolls either pane.
@@ -1683,9 +1685,9 @@ master-detail pages stay side by side.
   touch, which cannot hover, keeps a 6×40px pill grip. `aria-orientation="vertical"` and
   `aria-valuenow` in pixels; ←/→ move 16px, Home and End go to 280px and 440px, Enter or a
   double-click restores 400px, and only a release or a key stores a width. The preview pane is
-  isolated so its docked request stays under the band. The preview's bar, meta line, docked request
-  and transcript start at `--preview-inset`: the page gutter when stacked, `--space-6` from the
-  divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
+  isolated so its docked request stays under the band. The preview's bar and meta line start at
+  `--preview-inset`, which is also the least gutter of its centered reading column: the page gutter
+  when stacked, `--space-6` from the divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
   and a notice above the list tops the list column only. The preview bar's badge collapses on the
   preview's own width, not the window's tier (#2221): wherever the full badge would leave the title
   truncated under 200px (`DETAIL_TITLE_READABLE_PX`), as in Preview Right at 1100px, the badge is its
