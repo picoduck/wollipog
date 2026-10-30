@@ -866,8 +866,9 @@ decides the result:
 - It must lie outside every root this boundary makes writable.
 - It runs with `PATH=/usr/bin:/bin` and with `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`
   unset.
-- A failure counts only when the sentinel never printed (the command never started) and a stderr
-  line begins with bubblewrap's own namespace refusal.
+- A failure counts only when the sentinel never printed (the command never started) and stderr,
+  apart from the Codex CLI's own `WARNING:` notices, is exactly one line: bubblewrap's namespace
+  refusal.
 
 Without a trusted `printf`, as for a runner that itself runs inside a user namespace, the probe
 does not run and nothing changes. Otherwise:

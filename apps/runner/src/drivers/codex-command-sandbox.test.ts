@@ -113,6 +113,9 @@ test("output a started command prints cannot pass for a sandbox that never start
     { exitCode: 1, stdout: CODEX_SANDBOX_PROBE_SENTINEL, stderr: NESTED_BWRAP_FAILURE.stderr },
     // The refusal text quoted inside another message rather than as bubblewrap's own line.
     { exitCode: 1, stdout: "", stderr: "error: bwrap: No permissions to create new namespace\n" },
+    // The refusal beside other diagnostic output is not the probe's only failure.
+    { exitCode: 1, stdout: "", stderr: `something else failed first\n${NESTED_BWRAP_FAILURE.stderr}` },
+    { exitCode: 1, stdout: "", stderr: `${NESTED_BWRAP_FAILURE.stderr}bwrap: execvp printf: No such file\n` },
     // A clean exit without the sentinel proves nothing either way.
     { exitCode: 0, stdout: "", stderr: "" },
   ]) {
@@ -215,6 +218,10 @@ test("the probe reads a failure only when the command never started and bubblewr
   assert.deepEqual(codexCommandSandboxProbe({ thread: { id: "x" } }), { outcome: "inconclusive" });
   const denied = codexCommandSandboxProbe(NESTED_BWRAP_FAILURE);
   assert.equal(denied.outcome === "failed" && denied.namespaceDenied, true);
+  // The Codex CLI's own WARNING notice before the refusal, as `codex sandbox` prints (measured).
+  const warned = codexCommandSandboxProbe({ ...NESTED_BWRAP_FAILURE,
+    stderr: `WARNING: proceeding, even though we could not create PATH aliases: Read-only file system (os error 30)\n${NESTED_BWRAP_FAILURE.stderr}` });
+  assert.equal(warned.outcome === "failed" && warned.namespaceDenied, true);
   const other = codexCommandSandboxProbe({ exitCode: 101, stderr: "panicked at linux-sandbox" });
   assert.deepEqual(other, { outcome: "failed", namespaceDenied: false,
     reason: "Codex's command sandbox could not run a command here (exit 101)" });

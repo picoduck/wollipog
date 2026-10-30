@@ -66,9 +66,19 @@ export function probeExecutableWritable(executable: string, writableRoots: reado
   });
 }
 
-/** bubblewrap's own refusal, as the first word of a stderr line. A command's output cannot be
- * mistaken for it: the classification also requires that the command never printed the sentinel. */
-const BWRAP_NAMESPACE_DENIED = /^bwrap: (?:No permissions to create new namespace|.*unprivileged user namespaces)/m;
+/** bubblewrap's own refusal, as the whole of one line. */
+const BWRAP_NAMESPACE_DENIED = /^bwrap: (?:No permissions to create new namespace|.*unprivileged user namespaces)/;
+
+/** The refusal is the probe's ENTIRE diagnostic output: once the Codex CLI's own `WARNING:` notices
+ * are set aside (measured: `codex sandbox` prints one about PATH aliases first), exactly one line
+ * remains and it is bubblewrap's. Anything else, including the refusal beside other output, is not
+ * read as a namespace denial. The classification also requires that the command never printed the
+ * sentinel, so a command's output cannot be mistaken for it. */
+function onlyBwrapNamespaceDenial(stderr: unknown): boolean {
+  if (typeof stderr !== "string") return false;
+  const lines = stderr.split("\n").map((line) => line.trimEnd()).filter((line) => line && !line.startsWith("WARNING: "));
+  return lines.length === 1 && BWRAP_NAMESPACE_DENIED.test(lines[0]!);
+}
 
 export type CodexSandboxProbeOutcome =
   | { outcome: "started" }
@@ -82,6 +92,5 @@ export function classifyCodexSandboxProbe(exitCode: unknown, stdout: unknown, st
   const started = typeof stdout === "string" && stdout.includes(CODEX_SANDBOX_PROBE_SENTINEL);
   if (exitCode === 0) return started ? { outcome: "started" } : { outcome: "inconclusive" };
   if (started) return { outcome: "inconclusive" };
-  return { outcome: "failed", exitCode,
-    namespaceDenied: typeof stderr === "string" && BWRAP_NAMESPACE_DENIED.test(stderr) };
+  return { outcome: "failed", exitCode, namespaceDenied: onlyBwrapNamespaceDenial(stderr) };
 }
