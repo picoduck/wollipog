@@ -12,6 +12,12 @@ import { githubRepository } from "./campaign-forge-status.js";
 
 // Audited installed controller; no code is copied, edited, or substituted by this adapter.
 const CONTROLLER_SHA = "769fd5ddec331f150caef27775b4f3cff2dd08c31096f9f24c9543c9fdcd8bb3";
+/** The only Claude Code release whose flags and usage provenance were audited for this reviewer.
+ * `pnpm probe:claude-assumptions` reports whether a newer release matches it; moving it stays a
+ * reviewed change. */
+export const CONTROLLED_REVIEW_CLI_VERSION = "2.1.296";
+export const CONTROLLED_REVIEW_REQUIRED_FLAGS: readonly string[] = ["--model","--effort","--tools","--allowedTools","--permission-mode",
+  "--disable-slash-commands","--strict-mcp-config","--no-session-persistence","--output-format"];
 const sha=(bytes: string|Buffer)=>createHash("sha256").update(bytes).digest("hex");
 const finite=(v:unknown):v is number=>typeof v==="number" && Number.isFinite(v) && v>=0;
 const hashFile=(path:string)=>sha(readFileSync(path));
@@ -30,13 +36,13 @@ async function installation(agentId:string) {
   if(hashFile(controller)!==CONTROLLER_SHA) throw new Error("installed review controller differs from the audited version");
   const claude=executable("claude"), python=executable("python3");
   const version=(await run(claude,["--version"],{encoding:"utf8",timeout:10_000})).stdout.trim().split(" ")[0];
-  if(version!=="2.1.296") throw new Error("native reviewer usage provenance is unsupported for this CLI version");
+  if(version!==CONTROLLED_REVIEW_CLI_VERSION) throw new Error("native reviewer usage provenance is unsupported for this CLI version");
   const help=(await run(claude,["--help"],{encoding:"utf8",timeout:10_000})).stdout;
-  for(const flag of ["--model","--effort","--tools","--allowedTools","--permission-mode","--disable-slash-commands","--strict-mcp-config","--no-session-persistence","--output-format"]) {
+  for(const flag of CONTROLLED_REVIEW_REQUIRED_FLAGS) {
     if(!help.includes(flag)) throw new Error(`controlled reviewer lacks ${flag}`);
   }
   const profile:ControlledReviewCapability={profile:CONTROLLED_REVIEW_PROFILE,controllerSha256:CONTROLLER_SHA,
-    executableSha256:hashFile(claude),cliVersion:"2.1.296",accounting:"provider_list_estimate",account:"runner_default_claude",agentId};
+    executableSha256:hashFile(claude),cliVersion:CONTROLLED_REVIEW_CLI_VERSION,accounting:"provider_list_estimate",account:"runner_default_claude",agentId};
   return {controller,claude,python,profile};
 }
 export async function discoverControlledReview(agentId:string|undefined):Promise<ControlledReviewCapability|undefined> {

@@ -17,7 +17,7 @@ export const CLAUDE_MEDIA_REVIEWER_CLI_VERSION = "2.1.296";
 export const CLAUDE_MEDIA_REVIEWER_PROFILE = "claude-code-media-only-v1" as const;
 /** Provider-visible names of the two scoped media handlers, and nothing else. */
 export const CLAUDE_MEDIA_REVIEWER_TOOLS: readonly string[] = MEDIA_REVIEWER_TOOLS.map((tool) => `mcp__${MEDIA_MCP_SERVER_NAME}__${tool}`);
-const REQUIRED_FLAGS = ["--bare", "--tools", "--strict-mcp-config", "--mcp-config", "--disable-slash-commands",
+export const CLAUDE_MEDIA_REVIEWER_REQUIRED_FLAGS: readonly string[] = ["--bare", "--tools", "--strict-mcp-config", "--mcp-config", "--disable-slash-commands",
   "--no-session-persistence", "--permission-mode", "--allowedTools", "--output-format", "--input-format",
   "--model", "--effort", "--max-budget-usd"];
 
@@ -68,7 +68,7 @@ export async function inspectClaudeMediaReviewer(command: string, pathEnv = proc
   const version = (await run(claude, ["--version"], { encoding: "utf8", timeout: 10_000, env: { PATH: "/usr/bin:/bin" } })).stdout.trim().split(" ")[0];
   if (version !== CLAUDE_MEDIA_REVIEWER_CLI_VERSION) throw new Error("media reviewer is unsupported for this Claude Code version");
   const help = (await run(claude, ["--help"], { encoding: "utf8", timeout: 10_000, env: { PATH: "/usr/bin:/bin" }, maxBuffer: 4_000_000 })).stdout;
-  for (const flag of REQUIRED_FLAGS) if (!help.includes(flag)) throw new Error(`media reviewer CLI lacks ${flag}`);
+  for (const flag of CLAUDE_MEDIA_REVIEWER_REQUIRED_FLAGS) if (!help.includes(flag)) throw new Error(`media reviewer CLI lacks ${flag}`);
   return { claude, executableSha256: sha(readFileSync(claude)), cliVersion: version };
 }
 
