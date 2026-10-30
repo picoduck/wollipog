@@ -66,9 +66,17 @@ retains that executable-task check. The test then requires `Z` or disappearance 
 original `proof cannot precede the helper's death` assertion. `ENOENT` and `ESRCH` both represent
 a disappearing proc entry; other read failures propagate.
 
+The final check after that wait reads procfs once more. A zombie can be reaped between the two
+reads, so `Z`, `X` and a missing entry all count as exited there; any other state fails at once,
+and the failure message carries the observed state, flags and `PF_EXITING` bit. The `alive()`
+helper uses the same classification. #3773 records a main CI failure of the earlier `Z`-only
+final check after the wait had already returned.
+
 Deterministic cases reject `R`, `S`, `D` and `T` without `PF_EXITING` on the first read, and exercise
 `R`/`X` with `PF_EXITING` reaching zombie or disappearance. The pre-fix immediate zombie check
-failed both initial transition cases. No containment check, cleanup retry, CI retry policy,
+failed both initial transition cases. Further cases pass a zombie that then reads `X` or
+disappears, which the `Z`-only final check failed for `X`, and reject `R`, `S`, `D`, `T`, and `R`
+with `PF_EXITING` at the final check. No containment check, cleanup retry, CI retry policy,
 `failOnFlakyTests`, workflow, or product proof behavior is changed.
 
 ## Local evidence and repetition
