@@ -74,6 +74,22 @@ function inheritedEnvironmentScrub(names: readonly string[] = []): string[] {
   return [...new Set([...RUNNER_ONLY_ENV, ...names])];
 }
 
+/** Layer a provider's environment, later layers winning (#3858). Windows names match in any case,
+ * so there a later spelling replaces an earlier one: left side by side, Node would keep only the
+ * lexicographically first, and a runner's `CODEX_HOME` would shadow a configured `codex_home`
+ * that the provider-HOME lease (`providerHomeLeaseEnv`) correctly reads as the launch's. */
+export function layerLaunchEnvironment(
+  layers: readonly Readonly<Record<string, string | undefined>>[],
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  if (platform !== "win32") return Object.assign({}, ...layers) as NodeJS.ProcessEnv;
+  const merged = new Map<string, [string, string | undefined]>();
+  for (const layer of layers) {
+    for (const [key, value] of Object.entries(layer)) merged.set(key.toUpperCase(), [key, value]);
+  }
+  return Object.fromEntries(merged.values());
+}
+
 function withoutRunnerOnlyEnv(env: Record<string, string> | undefined): Record<string, string> {
   const result = { ...(env ?? {}) };
   const runnerOnly = new Set(RUNNER_ONLY_ENV.map((key) => key.toLowerCase()));
@@ -744,16 +760,14 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   // #3241: a provider-HOME lease's lifecycle evidence is this runner's marker; an explicit
   // environment must not drop or replace it.
   const leaseRunnerMarker = currentProviderHomeRunnerMarker();
-  const launchEnv: NodeJS.ProcessEnv = {
-    ...inherited,
-    ...explicitEnv,
-    ...isolationEnv,
-    ...(leaseRunnerMarker ? { [PROVIDER_HOME_RUNNER_MARKER_ENV]: leaseRunnerMarker } : {}),
-    ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
-    ...(worktreeDescendantMarker
-      ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }
-      : {}),
-  };
+  const launchEnv = layerLaunchEnvironment([
+    inherited,
+    explicitEnv,
+    isolationEnv,
+    leaseRunnerMarker ? { [PROVIDER_HOME_RUNNER_MARKER_ENV]: leaseRunnerMarker } : {},
+    descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {},
+    worktreeDescendantMarker ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker } : {},
+  ]);
   if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
       opts.context?.kind !== "wsl" && opts.descendantOwner) {
     return spawnClaudeNamespaceProvider(

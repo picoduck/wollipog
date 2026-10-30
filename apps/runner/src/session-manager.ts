@@ -351,13 +351,17 @@ export interface LaunchProviderHome extends ProviderProcessObserver {
   markUnprovable(): void;
 }
 
-/** The environment that decides which provider home an Agent TUI process uses. A native TUI is
+/** The environment that decides which provider home a provider process uses: an Agent TUI's
+ * (#3338), a structured session driver's, or a provider fork's (#3858). A native provider is
  * spawned with its launch environment layered over the runner's own, so a runner-level
- * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is the TUI's home whenever the launch sets none (#3338): the
- * lease must be keyed on that home, not on the home directory. On Windows a name matches in any
- * case and its last spelling wins, the launch's over the runner's, exactly as the ConPTY launch
- * merges them (`windowsEnvironmentForLaunch`). A WSL TUI receives only its explicit environment. */
-export function agentTuiProviderHomeEnv(
+ * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is its home whenever the launch sets none: the lease must be
+ * keyed on that home, not on the home directory. A bound account's credential home is set by the
+ * launch environment, so it still wins. On Windows a name matches in any case and its last
+ * spelling wins, the launch's over the runner's, exactly as the ConPTY launch
+ * (`windowsEnvironmentForLaunch`) and `spawnAgent` (`layerLaunchEnvironment`) merge them. A WSL
+ * provider receives only its explicit environment. Only the lease reads the result: it is neither
+ * the launch environment nor persisted. */
+export function providerHomeLeaseEnv(
   meta: Pick<SessionMeta, "context" | "env">,
   runnerEnv: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
@@ -759,6 +763,9 @@ interface ActiveSession {
   /** Exact launch generation that owns this provider process; fences callbacks from retirees. */
   launchGeneration: number;
   client: Driver;
+  /** The environment `client` was launched with, held in memory only: a later provider fork
+   * through this client keys its provider-HOME lease on it (#3858). */
+  launchEnv: Record<string, string>;
   repoPath: string;
   cwd: string;
   worktree: WorktreeHandle | null;
@@ -1468,6 +1475,9 @@ export class SessionManager {
    * process must still fail closed instead of matching the replacement generation. */
   private readonly queueEditGeneration = randomUUID();
   private readonly active = new Map<string, ActiveSession>();
+  /** The runner's own environment, which every native provider inherits beneath its launch
+   * environment; a provider-HOME lease reads it through `providerHomeLeaseEnv`. */
+  private readonly runnerEnvironment: NodeJS.ProcessEnv = process.env;
   /** The live provider launch's streamed-text coalescer per session (#2762). */
   private readonly textDeltaCoalescers = new Map<string, TextDeltaCoalescer>();
   /** Stable ordering spans active queues, promotion reservations, and app-server recovery queues. */
@@ -5096,7 +5106,7 @@ export class SessionManager {
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
-      env: agentTuiProviderHomeEnv(meta),
+      env: providerHomeLeaseEnv(meta, this.runnerEnvironment),
     }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
       this.agentTuiLaunchEpoch(meta.sessionId) === epoch }, meta);
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
@@ -9186,7 +9196,8 @@ export class SessionManager {
         driver: meta.driver,
         command: meta.command,
         context: meta.context,
-        env: meta.env,
+        // Keyed on the home the driver will actually use, the runner's own included (#3858).
+        env: providerHomeLeaseEnv(meta, this.runnerEnvironment),
         isolation,
       }, { isCurrent: () => this.launchIsCurrent(sessionId, launchGeneration) }, meta);
       launchHome = await (providerHomeWait ? providerHomeWait(acquireLaunchHome) : acquireLaunchHome());
@@ -9511,6 +9522,7 @@ export class SessionManager {
       sessionId,
       launchGeneration,
       client,
+      launchEnv: meta.env,
       repoPath: meta.repoPath,
       cwd,
       worktree,
@@ -15440,8 +15452,12 @@ export class SessionManager {
     handoff?: { agent: AgentDefinition; config: SessionConfig },
     recovery = false,
   ): Promise<{ ok: boolean; error?: string; snapshot?: ReturnType<typeof metaToSnapshot>; events?: ReturnType<SessionStore["readEvents"]>; handoffDraft?: ConversationHandoffDraft; retainedPrompt?: { text: string; images: PromptImageInput[] }; providerHomeRefusal?: ProviderHomeLaunchRefusalView }> {
-    const source = this.store.readMeta(sourceSessionId);
-    if (!source) return { ok: false, error: "source session not found on this box" };
+    const stored = this.store.readMeta(sourceSessionId);
+    if (!stored) return { ok: false, error: "source session not found on this box" };
+    // Launch preparation resolves a temporary provider's environment onto this object. readMeta
+    // can return the store's cached one, which a later patch writes back: the copy keeps the
+    // resolved environment out of durable metadata (#3858).
+    const source = structuredClone(stored);
     try {
       this.assertHostIsolationContextSupported(source);
     } catch (error) {
@@ -15719,7 +15735,7 @@ export class SessionManager {
           driver: source.driver,
           command: source.command,
           context: source.context,
-          env: source.env,
+          env: providerHomeLeaseEnv(source, this.runnerEnvironment),
           isolation,
         }, { isCurrent: forkIsCurrent }, source);
         if (!forkIsCurrent()) {
@@ -15860,7 +15876,7 @@ export class SessionManager {
           driver: source.driver,
           command: source.command,
           context: source.context,
-          env: source.env,
+          env: providerHomeLeaseEnv(source, this.runnerEnvironment),
           isolation: forkIsolation,
         }, { isCurrent: forkIsCurrent }, source);
         if (!forkIsCurrent()) {
@@ -15910,11 +15926,16 @@ export class SessionManager {
         forkIsolation = await this.resolveLaunchIsolation(forkMeta, worktree.path);
         await this.proveGuardInsideSandbox(forkMeta, forkIsolation, worktree.path);
         // Past the handle budget this is a plain reference kept until shutdown (null here).
+        // The fork process inherits its client's launch environment. Durable metadata carries
+        // none, so a live client's comes from its launch; a temporary one's was prepared above.
         claudeForkHome = await this.acquireDriverProviderHome({
           driver: source.driver,
           command: source.command,
           context: source.context,
-          env: source.env,
+          env: providerHomeLeaseEnv(
+            { context: source.context, env: live && client === live.client ? live.launchEnv : source.env },
+            this.runnerEnvironment,
+          ),
           isolation: forkIsolation,
         }, { isCurrent: forkIsCurrent }, source);
         if (!forkIsCurrent()) throw new Error("source session changed during provider-home acquisition");

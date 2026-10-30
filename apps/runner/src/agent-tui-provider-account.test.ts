@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { agentTuiProviderHomeEnv, SessionManager } from "./session-manager.js";
+import { providerHomeLeaseEnv, SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { windowsEnvironmentForLaunch } from "./windows-conpty.js";
 
@@ -88,7 +88,7 @@ test("an unbound TUI leases the home it actually inherits, including the runner'
   const lease = (provider: Provider, env: Record<string, string>, context: SessionMeta["context"] = { kind: "native" }) =>
     providerHomeLeaseTarget({
       driver: provider === "claude" ? "claude-code" : "codex-app-server", command: provider, context,
-      env: agentTuiProviderHomeEnv({ context, env }, runnerEnv),
+      env: providerHomeLeaseEnv({ context, env }, runnerEnv),
     })?.home;
   for (const provider of ["claude", "codex"] as const) {
     assert.equal(lease(provider, {}), `/runner/${provider}`, `${provider}: the runner's own provider home`);
@@ -100,7 +100,7 @@ test("an unbound TUI leases the home it actually inherits, including the runner'
   // Nothing of the runner's environment crosses into a WSL distro except the explicit launch
   // environment, and the lease still refuses a shared WSL home (#3337).
   assert.throws(() => lease("claude", {}, { kind: "wsl", distro: "Ubuntu" }), /cannot be safely owner-leased/);
-  assert.deepEqual(agentTuiProviderHomeEnv({ context: { kind: "wsl", distro: "Ubuntu" }, env: { A: "1" } }, runnerEnv),
+  assert.deepEqual(providerHomeLeaseEnv({ context: { kind: "wsl", distro: "Ubuntu" }, env: { A: "1" } }, runnerEnv),
     { A: "1" });
 });
 
@@ -109,7 +109,7 @@ test("a Windows TUI leases the provider home its ConPTY launch selects, whatever
   const lease = (env: Record<string, string>, runnerEnv: NodeJS.ProcessEnv, platform: NodeJS.Platform) =>
     providerHomeLeaseTarget({
       driver: "codex-app-server", command: "codex", context,
-      env: agentTuiProviderHomeEnv({ context, env }, runnerEnv, platform),
+      env: providerHomeLeaseEnv({ context, env }, runnerEnv, platform),
     })?.home;
   const launched = (env: Record<string, string>, runnerEnv: NodeJS.ProcessEnv) =>
     windowsEnvironmentForLaunch(env, [], runnerEnv).find((entry) => /^codex_home=/i.test(entry))?.split("=")[1];
