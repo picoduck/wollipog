@@ -411,3 +411,38 @@ test.describe("limit entry lifecycle", () => {
     await expect(cost).toHaveValue("40");
   });
 });
+
+/** #3580 with #3826: the follow-up limit is an approval threshold, so wherever Follow-Ups is chosen
+ * under Full Control it is named Follow-Ups Without Approval and explained, and the launch still adds
+ * no follow-up field to fill in (the old "Accepted Follow-Ups" field left with #3590). */
+for (const viewport of viewports) {
+  test(`follow-ups ${viewport.name}: under Full Control, Execute Approved explains Follow-Ups Without Approval`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const prefix = `${captures}/follow-ups-${viewport.name}`;
+    await routeSettings(page, []);
+    await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=dark`);
+    await openSessionOptions(page);
+    await page.getByRole("button", { name: "Customize…" }).click();
+    const policy = page.getByRole("dialog", { name: "Orchestrator Policy" });
+    await policy.getByRole("tab", { name: /^Decisions/ }).click();
+    await policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click();
+    await policy.getByRole("tab", { name: /^Behavior/ }).click();
+    await policy.locator('[aria-label^="Follow-Ups:"]').click();
+    await page.getByRole("option", { name: /^Execute Approved/ }).click();
+    const note = policy.getByText(/Under Full Control, follow-ups up to Follow-Ups Without Approval start on their own\. Past that limit, each waits for your approval\. Change the limit in Campaign Status\./);
+    await expect(note).toBeVisible();
+    await expect(policy).not.toContainText("Accepted Follow-Ups");
+    await note.scrollIntoViewIfNeeded();
+    await page.mouse.move(0, 0);
+    await settle(page);
+    await page.screenshot({ path: `${prefix}-policy.png` });
+
+    await policy.getByRole("button", { name: "Apply Policy" }).click();
+    await expect(policy).toHaveCount(0);
+    const control = page.locator(".orchestrator-policy-summary");
+    await expect(control).toContainText("Full Control");
+    await expect(control).toContainText("Executes Approved Follow-Ups");
+    await expectNoFullControlForm(page);
+    await shoot(page, control, `${prefix}-launch.png`);
+  });
+}

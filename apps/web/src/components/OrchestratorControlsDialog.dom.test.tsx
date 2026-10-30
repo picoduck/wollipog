@@ -150,7 +150,7 @@ async function open(
   session: SessionView,
   client: Partial<ApiClient>,
   refusal: string | null = null,
-  { strict = false }: { strict?: boolean } = {},
+  { strict = false, modelLabel }: { strict?: boolean; modelLabel?: (modelId: string) => string } = {},
 ): Promise<Harness> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -166,6 +166,7 @@ async function open(
         <OrchestratorControlsDialog
           session={current}
           refusal={refusal}
+          modelLabel={modelLabel}
           onClose={() => { closed += 1; }}
           // The store's part: the session the dialog is given follows what it reports.
           onSessionChanged={(next) => { changed.push(next); render(next); }}
@@ -1230,4 +1231,12 @@ test("under Full Control Campaign Behavior stays editable and says the boundary 
 
   const refused = await open(orchestrator(), {}, "Only the session's owner can change its configuration.");
   assert.equal(editButton(refused.dialog()), undefined);
+});
+
+test("the Child Model fact reads as the Child Model selector names it, and its id only when nothing names it (#3580)", async () => {
+  const named = await open(orchestrator(), {}, null, { modelLabel: (id) => id === "claude-opus-5" ? "Claude Opus 5" : id });
+  assert.match(behaviorFact(named.dialog(), "Child Model"), /^Claude Opus 5Session Override$/);
+  await named.unmount();
+  const unnamed = await open(orchestrator(), {});
+  assert.match(behaviorFact(unnamed.dialog(), "Child Model"), /^claude-opus-5Session Override$/);
 });

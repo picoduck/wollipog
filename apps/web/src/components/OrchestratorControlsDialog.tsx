@@ -225,6 +225,7 @@ export function OrchestratorControlsDialog({
   onClose,
   onSessionChanged,
   refusal = null,
+  modelLabel = (modelId) => modelId,
   returnFocusRef,
 }: {
   session: SessionView;
@@ -233,6 +234,8 @@ export function OrchestratorControlsDialog({
   onSessionChanged: (session: SessionView) => void;
   /** Why the signed-in person may not change this session's configuration (#1857). */
   refusal?: string | null;
+  /** A model's name as the Child Model selector shows it, so the stored id reads the same (#3580). */
+  modelLabel?: (modelId: string) => string;
   returnFocusRef?: { current: HTMLElement | null };
 }) {
   const api = useApi();
@@ -459,7 +462,7 @@ export function OrchestratorControlsDialog({
           it stays, and can be changed, while Full Control is in effect (#3580). */}
       {session.orchestratorPolicy && (!fullControlView || effectiveMode === "full_control") && <CampaignBehavior session={session}
         titleId={`${ids}-campaign`} editable={!session.parentSessionId && refusal === null} fullControl={effectiveMode === "full_control"}
-        saved={saved === "behavior"} onSaved={(next) => { onSessionChanged(next); showSaved("behavior"); }} />}
+        saved={saved === "behavior"} modelLabel={modelLabel} onSaved={(next) => { onSessionChanged(next); showSaved("behavior"); }} />}
 
       <span className="sr-only" role="status">{savedStatus}</span>
       {failure && (
@@ -535,13 +538,14 @@ function Fact({ label, value, source, title }: { label: string; value: ReactNode
 }
 
 /** The campaign's stored behavior as facts (§5.4), each value with where it came from. */
-function CampaignBehavior({ session, titleId, editable, fullControl, saved, onSaved }: {
+function CampaignBehavior({ session, titleId, editable, fullControl, saved, modelLabel, onSaved }: {
   session: SessionView;
   titleId: string;
   /** A person may change the root campaign's child behavior here (#3580); a descendant inherits it. */
   editable: boolean;
   fullControl: boolean;
   saved: boolean;
+  modelLabel: (modelId: string) => string;
   onSaved: (session: SessionView) => void;
 }) {
   const policy = session.orchestratorPolicy!;
@@ -598,7 +602,8 @@ function CampaignBehavior({ session, titleId, editable, fullControl, saved, onSa
           value={behavior.childHarness ? agentHarnessIdentityLabel(behavior.childHarness) : "Automatic"}
           source={behaviorSource(sources.behavior.childHarness)}
         />
-        <Fact label="Child Model" value={behavior.childModel ?? "Automatic"} source={behaviorSource(sources.behavior.childModel)} />
+        <Fact label="Child Model" value={behavior.childModel ? modelLabel(behavior.childModel) : "Automatic"}
+          source={behaviorSource(sources.behavior.childModel)} />
         <Fact
           label="Child Effort"
           value={behavior.childEffort ? titleCaseLabel(behavior.childEffort) : "Automatic"}

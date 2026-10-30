@@ -229,6 +229,9 @@ for (const viewport of [
     await expect(edit).toHaveText("Edit");
     const facts = dialog.locator("dl.facts");
     await expect(facts).toContainText("Codex");
+    // The stored model id reads as the Child Model selector names it, not as its raw id.
+    await expect(facts).toContainText("GPT-6.1 Sol");
+    await expect(facts).not.toContainText("gpt-6.1-sol");
     await heading.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-edit-action.png` });
 
@@ -260,7 +263,7 @@ for (const viewport of [
     const fact = (label: string) => facts.locator("div").filter({ has: page.locator("dt", { hasText: new RegExp(`^${label}$`) }) });
     await expect(fact("Child Harness")).toContainText("Claude Code");
     await expect(fact("Child Harness")).toContainText("Changed After Launch");
-    await expect(fact("Child Model")).toContainText("claude-opus-5-5");
+    await expect(fact("Child Model")).toContainText("Claude Opus 5.5");
     await expect(fact("Child Model")).toContainText("Changed After Launch");
     await expect(fact("Follow-Ups")).not.toContainText("Changed After Launch");
     await expect(edit).toBeFocused();

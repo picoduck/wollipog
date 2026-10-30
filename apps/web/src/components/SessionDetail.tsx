@@ -202,6 +202,7 @@ import { routedSessionPlaceholder, shouldHydrateRoutedSession } from "../detail-
 import { composerActionError, type ComposerAction, type ComposerActionError } from "../composer-action-errors.js";
 import { transcriptPresentation } from "../transcript-presentation.js";
 import { OrchestratorControlsDialog, orchestratorControlsSummary } from "./OrchestratorControlsDialog.js";
+import { childModelDisplayName } from "../orchestrator-policy.js";
 import {
   acquireSessionFork,
   canStopActiveTurn,
@@ -8228,6 +8229,7 @@ function SessionDetailLoaded({
           onClose={() => setOrchestratorControlsOpen(false)}
           onSessionChanged={loadSession}
           refusal={configRefusal}
+          modelLabel={(modelId) => childModelDisplayName(allRunners.values(), modelId, session.orchestratorPolicy?.behavior.childHarness)}
           returnFocusRef={orchestratorControlsReturnFocusRef}
         />
       )}

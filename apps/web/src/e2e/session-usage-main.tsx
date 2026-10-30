@@ -48,6 +48,13 @@ const FIXTURE_CHILD_CAPABILITIES: OrchestratorSettingsCapabilities = {
   ],
   models: [], effortLevels: [], supportedPairs: [], installations: 3, compatibleInstallations: 3, status: "available",
 };
+const FIXTURE_CHILD_RUNNER = {
+  runnerId: "runner-children", hostname: "children-host", os: "linux", version: "1", status: "online",
+  agents: FIXTURE_CHILD_CAPABILITIES.harnesses!.map((harness) => ({ id: harness.agentId, name: harness.name,
+    command: harness.agentId, args: [], env: {}, driver: harness.driver, available: true,
+    capabilities: { models: harness.models, effortLevels: harness.effortLevels, slashCommands: [], supportsImages: true, supportsApprovals: true } })),
+  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 67,
+} as RunnerView;
 if (params.has("theme")) document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
@@ -600,7 +607,9 @@ const snapshotMessage: ControlPlaneToUi = {
     paginatedSessionHistory: false,
     projects: true,
   },
-  runners: [runner],
+  // `childHarness=codex` (#3580): a second machine whose installations name the child models, as
+  // the Child Model selector and the Campaign Behavior facts both show them.
+  runners: params.get("childHarness") === "codex" ? [runner, FIXTURE_CHILD_RUNNER] : [runner],
   boxes: [],
   projects: [],
   sessions: [session],
