@@ -1,21 +1,46 @@
 import type { CampaignIssueScopeSnapshot } from "./index.js";
+import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
 
 export function boundedIssueNumbers(value: unknown): value is number[] {
   return Array.isArray(value) && value.length <= 100 && value.every((n) => Number.isSafeInteger(n) && n > 0) && new Set(value).size === value.length;
 }
 
-/** Only a leading issue in an explicitly named member checklist is a candidate. Nothing here grants authority. */
+/** Whether `url` is the exact web address of issue (or pull/merge request) `number` in a campaign
+ * repository (#3539). GitHub: `https://github.com/<repository>/issues/<n>` (`/pull/<n>`), exactly.
+ * GitLab: `http(s)://<host>/<project>/-/issues/<n>` (`/-/merge_requests/<n>`), with the host (and
+ * port) exactly as the repository names it in lower case and the project compared case-insensitively. */
+export function campaignIssueForgeUrl(url: unknown, repository: string, kind: "issue" | "change", number: number): boolean {
+  const location = campaignRepositoryLocation(repository);
+  if (!location || typeof url !== "string" || !Number.isSafeInteger(number) || number < 1) return false;
+  if (location.forge === "github") return url === `https://github.com/${repository}/${kind === "issue" ? "issues" : "pull"}/${number}`;
+  const match = /^https?:\/\/([^/?#@\s]+)\/([^?#\s]+)\/-\/(issues|merge_requests)\/([1-9][0-9]*)$/u.exec(url);
+  return Boolean(match && match[1] === location.host.toLowerCase() && match[2]!.toLowerCase() === location.project.toLowerCase() &&
+    match[3] === (kind === "issue" ? "issues" : "merge_requests") && match[4] === String(number));
+}
+
+/** Only a leading issue in an explicitly named member checklist is a candidate. Nothing here grants authority.
+ * On GitLab (#3539) a member is `#N` or `http(s)://<host>/<project>/-/issues/N` of the same project;
+ * GitLab epics, issue links and work-item children are never read. */
 export function epicChecklistMembers(body: string, repository: string): number[] {
   if (body.length > 65536) throw new Error("Epic body exceeds the bounded membership inspection limit");
+  const location = campaignRepositoryLocation(repository);
+  const gitlab = location?.forge === "gitlab" ? location : null;
   const members = new Set<number>();
   let memberSection = false;
   for (const line of body.split(/\r?\n/u)) {
     const heading = /^#{1,6}\s+(.+?)\s*#*$/u.exec(line);
     if (heading) memberSection = /^(?:units|members|child issues|sub-issues|implementation issues)$/iu.test(heading[1]!.trim());
     if (!memberSection) continue;
-    const row = /^\s*[-*]\s+\[[ xX]\]\s+(?:#([1-9][0-9]*)\b|https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9][0-9]*)\b)/u.exec(line);
-    if (!row || (row[2] && row[2].toLowerCase() !== repository.toLowerCase())) continue;
-    const number = Number(row[1] ?? row[3]);
+    let number: number;
+    if (gitlab) {
+      const row = /^\s*[-*]\s+\[[ xX]\]\s+(?:#([1-9][0-9]*)\b|https?:\/\/([^\s/?#@]+)\/([^\s?#]+?)\/-\/issues\/([1-9][0-9]*)\b)/u.exec(line);
+      if (!row || (row[2] !== undefined && (row[2].toLowerCase() !== gitlab.host.toLowerCase() || row[3]!.toLowerCase() !== gitlab.project.toLowerCase()))) continue;
+      number = Number(row[1] ?? row[4]);
+    } else {
+      const row = /^\s*[-*]\s+\[[ xX]\]\s+(?:#([1-9][0-9]*)\b|https:\/\/github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9][0-9]*)\b)/u.exec(line);
+      if (!row || (row[2] && row[2].toLowerCase() !== repository.toLowerCase())) continue;
+      number = Number(row[1] ?? row[3]);
+    }
     if (!Number.isSafeInteger(number)) throw new Error("Epic contains an invalid member issue number");
     members.add(number);
     if (members.size > 99) throw new Error("Epic scope exceeds 100 issues; select a smaller explicit scope");
@@ -30,7 +55,7 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
         !Array.isArray(input.additions) || !input.additions.includes(p.issue)) ||
       new Set(input.verifiedPublications.map((p) => p.publicationOccurrenceId)).size !== input.verifiedPublications.length)) return null;
-  if (typeof input.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(input.repository) || input.repository.length > 256 ||
+  if (typeof input.repository !== "string" || !campaignRepositoryLocation(input.repository) ||
       !Number.isSafeInteger(input.expectedRevision) || (input.expectedRevision as number) < 0 ||
       !boundedIssueNumbers(input.before) || !boundedIssueNumbers(input.additions) || !boundedIssueNumbers(input.removals) ||
       (!input.additions.length && !input.removals.length) ||

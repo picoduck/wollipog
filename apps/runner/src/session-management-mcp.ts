@@ -1164,7 +1164,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_campaign_issue_scope",
-    description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. Use before delegating an epic and after any human scope change.",
+    description: "Inspect the root campaign's authorized repository-qualified issue scope, revision, outside-scope work, and optional epic membership candidates. Native sub-issues and leading checklist entries in member sections are proposals only; dependencies and incidental references grant no authority. GitLab issues are supported from runner protocol v249: a GitLab epic is an ordinary issue of the same project whose member checklist (#N or same-project issue URLs) names its members; GitLab epics and issue links are not read. Use before delegating an epic and after any human scope change.",
     inputSchema: { type: "object", properties: { epic: { type: "integer", minimum: 1 } }, additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
@@ -1194,7 +1194,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_github_issue_closure",
-    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An already-closed issue is reported without posting a comment.",
+    description: "Propose closing one authorized campaign issue with fresh forge/conflict evidence. Custom requires a human; bounded Full Control additionally requires verified delivery and actual default-branch merges, or a recorded supported not-planned disposition. An already-closed issue is reported without posting a comment. GitLab issues are supported from runner protocol v249 through the session's glab login: not_planned closes the issue after a note stating 'Closed as not planned: <explanation>' (then the comment), and completed posts the comment as a note only when one is supplied.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, issue: { type: "integer", minimum: 1 },
       reason: { type: "string", enum: ["completed", "not_planned"] },
@@ -1213,7 +1213,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "close_github_issue",
-    description: "Execute one exact human-approved issue closure using its occurrenceId and resourceDigest from get_workflow_decision. Checks current child assignments and GitHub evidence, consumes approval once, and verifies the final state. Read issueClosureResult: uncertain means the mutation may have succeeded and must not be replayed. Changed, denied, expired, revoked, consumed, or superseded approvals fail closed. Never use a shell command as a substitute.",
+    description: "Execute one exact human-approved issue closure using its occurrenceId and resourceDigest from get_workflow_decision. Checks current child assignments and GitHub or GitLab evidence, consumes approval once, and verifies the final state. Read issueClosureResult: uncertain means the mutation may have succeeded and must not be replayed. Changed, denied, expired, revoked, consumed, or superseded approvals fail closed. Never use a shell command as a substitute.",
     inputSchema: { type: "object", properties: {
       occurrenceId: { type: "string" }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
     }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
@@ -1223,7 +1223,7 @@ export const TOOLS: McpTool[] = [
       if (compatibility) return compatibility;
       const result = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/github-issue-closures/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }, deps.requestTimeoutMs ?? 180_000);
       return result.ok ? textResult({ decision: result.data }) : errorResult(result.status === undefined || result.status >= 500
-        ? `${result.message}. Closure may already have been applied; inspect get_workflow_decision and GitHub before requesting renewed human review. Never replay a mutation.`
+        ? `${result.message}. Closure may already have been applied; inspect get_workflow_decision and the issue on its forge before requesting renewed human review. Never replay a mutation.`
         : result.message);
     },
   },

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  campaignAuthorityPreflight, runnerSupportsProtocol, validCampaignControl,
+  campaignAuthorityPreflight, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignControl,
   FULL_CONTROL_EVIDENCE_EXCEPTIONS, FULL_CONTROL_HUMAN_REQUIRED_LABELS, FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
@@ -111,8 +111,9 @@ export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task
 const MAX_MESSAGE_ISSUES = 100;
 
 /** Issue references in the owner's first message that name the campaign's own repository: `#123`,
- * `owner/repo#123` and `https://github.com/owner/repo/issues/123`. References to another repository
- * and pull request URLs are ignored. These are candidates only; the runner still verifies each one
+ * `owner/repo#123` and `https://github.com/owner/repo/issues/123`, or for a GitLab project (#3539)
+ * `http(s)://<host>/<project>/-/issues/123`. References to another repository and pull or merge
+ * request URLs are ignored. These are candidates only; the runner still verifies each one
  * is an issue of the repository before it enters the scope. */
 export function issueReferencesInMessage(text: string, repository: string): number[] {
   const own = repository.toLowerCase();
@@ -127,6 +128,11 @@ export function issueReferencesInMessage(text: string, repository: string): numb
   }
   for (const match of text.matchAll(/\bhttps?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9][0-9]{0,15})(?![\w-])/giu)) {
     if (match[1]!.toLowerCase() === own) add(match[2]!);
+  }
+  if (campaignRepositoryLocation(repository)?.forge === "gitlab") {
+    for (const match of text.matchAll(/\bhttps?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/issues\/([1-9][0-9]{0,15})(?![\w-])/giu)) {
+      if (match[1]!.toLowerCase() === own) add(match[2]!);
+    }
   }
   const numbers = [...found].sort((a, b) => a - b);
   return numbers.length <= MAX_MESSAGE_ISSUES ? numbers : numbers.slice(0, MAX_MESSAGE_ISSUES);
@@ -290,7 +296,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const issueNumbers = [...(campaignScope ? campaignScope.issueNumbers : request.issueNumbers ?? [])].sort((a, b) => a - b);
   const behavior = plan.policy.behavior;
   const inspectionVersion = runner.runtime?.campaignLaunchInspection?.version ?? 0;
-  const verified = campaignScope ? campaignScope.authorizedByCaller && /^[\w.-]+\/[\w.-]+$/u.test(campaignScope.repository)
+  const verified = campaignScope ? campaignScope.authorizedByCaller && campaignRepositoryLocation(campaignScope.repository) !== null
     : inspection?.ok === true && inspection.workspaceId === plan.workspaceId &&
       typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
       canonical(inspection.issueNumbers) === canonical(issueNumbers);

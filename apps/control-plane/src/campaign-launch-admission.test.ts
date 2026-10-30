@@ -65,6 +65,13 @@ test("a first message's issue references name only the campaign's own repository
   assert.equal(issueReferencesInMessage(many, "owner/repo").length, 100, "a scope holds at most 100 issues");
 });
 
+test("GitLab first messages name their own project's issues by #N or exact issue address (#3539)", () => {
+  const text = "Fix #3, https://gitlab.example.com/Group/Sub/Project/-/issues/4, " +
+    "https://gitlab.example.com/group/sub/other/-/issues/5, https://elsewhere.example.com/group/sub/project/-/issues/6, " +
+    "https://gitlab.example.com/group/sub/project/-/merge_requests/7 and https://github.com/group/sub/issues/8.";
+  assert.deepEqual(issueReferencesInMessage(text, "gitlab.example.com/group/sub/project"), [3, 4]);
+});
+
 test("a first message becomes a one-line bounded objective, and its digest binds the exact text", () => {
   assert.equal(firstMessageObjective("  Ship #12\n\n\tthen\u0007 tidy  "), "Ship #12 then tidy");
   const long = firstMessageObjective("x".repeat(5000));

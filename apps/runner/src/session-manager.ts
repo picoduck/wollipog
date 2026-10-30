@@ -4,8 +4,8 @@ import { shellGuidance } from "./shell-guidance.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
-import { inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
+import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
+import { boundedIssueNumbers, campaignRepositoryLocation, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage } from "@wollipog/protocol";
@@ -18494,7 +18494,10 @@ export class SessionManager {
   }
 
   /** Only the authenticated control-plane channel can send authoritative scope synchronization. */
-  async campaignIssueScope(message: import("@wollipog/protocol").CampaignIssueScopeMessage): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
+  async campaignIssueScope(
+    message: import("@wollipog/protocol").CampaignIssueScopeMessage,
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<import("@wollipog/protocol").CampaignIssueScopeResultMessage> {
     const base = { type: "campaign_issue_scope_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
@@ -18509,7 +18512,7 @@ export class SessionManager {
         error: "Campaign issue scope requires a valid local or SSH host execution target belonging to its runner" };
     }
     try {
-      const run = issueClosureRun(meta.context, meta.repoPath);
+      const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
       if (message.operation === "publication_inspect") return { ...base, ok: true, ...await inspectCampaignPublication(run, message) };
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
@@ -18520,7 +18523,7 @@ export class SessionManager {
       if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
       const scope = message.scope;
       if (!scope || !boundedIssueNumbers(scope.issueNumbers) || !Number.isSafeInteger(scope.revision) || scope.revision < 1 ||
-          typeof scope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(scope.repository) ||
+          typeof scope.repository !== "string" || !campaignRepositoryLocation(scope.repository) ||
           !scope.authorizedByUserId || !Number.isSafeInteger(scope.authorizedAt) || scope.authorizedAt < 1) return { ...base, ok: false, error: "Invalid authoritative scope" };
       const { repository } = await inspectCampaignIssueScope(run);
       if (repository !== scope.repository.toLowerCase()) return { ...base, ok: false, error: "Scope repository differs from the runner's origin" };
@@ -18543,11 +18546,17 @@ export class SessionManager {
       if (live) { live.issueNumbers = [...scope.issueNumbers]; live.issueScope = scope; if (control !== undefined) live.control = control; }
       this.log(JSON.stringify({ event: "campaign_issue_scope_synchronized", sessionId: message.sessionId, revision: scope.revision }));
       return { ...base, ok: true, repository, revision: scope.revision };
-    } catch { return { ...base, ok: false, error: "Cannot inspect or synchronize campaign scope; verify origin and gh authentication" }; }
+    } catch (error) {
+      return { ...base, ok: false, error: error instanceof CampaignIssueScopeRefusal ? error.message
+        : "Cannot inspect or synchronize campaign scope; verify origin and gh or glab authentication" };
+    }
   }
 
   /** Execute only trusted, human-approved closures, with a durable fence before mutation. */
-  async githubIssueClosure(message: GithubIssueClosureMessage): Promise<GithubIssueClosureResultMessage> {
+  async githubIssueClosure(
+    message: GithubIssueClosureMessage,
+    options: { agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<GithubIssueClosureResultMessage> {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
@@ -18573,7 +18582,7 @@ export class SessionManager {
         Boolean(control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason));
     };
     if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
-    const run = issueClosureRun(meta.context, meta.repoPath);
+    const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests);
@@ -18605,7 +18614,7 @@ export class SessionManager {
       return { ...base, ok: true, result };
     } catch (error) {
       return { ...base, ok: false, error: error instanceof IssueClosureInspectionError ? error.message
-        : "GitHub issue inspection failed; verify gh authentication and complete conflict evidence" };
+        : "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
     }
   }
 
