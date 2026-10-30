@@ -199,6 +199,11 @@ An older runner leaves cleanup pending and requires the explicit recovery shown 
 Worktree commands default to `WOLLIPOG_SESSION_ID`; paired-device callers add `--session <id>`.
 Creation without `--base` fetches the repository's remote default branch. Use the returned path
 for file and Git commands in the current turn; a later provider launch resumes in the selection.
+Under a platform sandbox the result's `isolation.writableNow` may be `false`: the live sandbox
+cannot write or commit there until the session relaunches in it when the current turn ends. Do not
+work around it. Follow `isolation.nextStep`. When `isolation.continuesAfterRelaunch` is `true`, end
+the turn with a short note and do not ask the user to send a message: Wollipog relaunches the
+session in that worktree and continues the task with one automatic turn.
 Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
 clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
 upstream deleted with the remote branch, but only when it exactly matches the local head, whatever

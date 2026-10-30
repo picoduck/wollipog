@@ -352,6 +352,7 @@ import {
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
   orchestratorSelfWorktreeAuthorizationError,
+  worktreeRequestedBySession,
   type AuthPrincipal,
   type HumanPrincipal,
   workflowActorForPrincipal,
@@ -5573,6 +5574,13 @@ async function runSessionWorktreeRequest(
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  // Only the session's own switch may continue by itself after its relaunch (#3810). A pre-v252
+  // runner gets no flag and keeps going idle once the relaunch has run.
+  const selfRequest = (request.operation === "create" || request.operation === "attach" || request.operation === "select") &&
+      worktreeRequestedBySession(principal, sessionId) &&
+      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "worktreeSwitchContinuation")
+    ? { requestedBySession: true }
+    : {};
   if (request.operation === "create" && request.progress === true && runnerSupportsProtocol(
     db.getRunner(session.runnerId)?.protocolVersion,
     "progressAwareSessionWorktrees",
@@ -5587,7 +5595,7 @@ async function runSessionWorktreeRequest(
       const res = await hub.requestFromRunner(
         session.runnerId,
         requestId,
-        { ...request, type: "session_worktree", requestId, sessionId, progress: true },
+        { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId, progress: true },
         SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
       );
       if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
@@ -5596,7 +5604,7 @@ async function runSessionWorktreeRequest(
       }
       if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
       db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-      return { snapshot: res.snapshot, worktree: res.worktree };
+      return { snapshot: res.snapshot, worktree: res.worktree, ...(res.isolation ? { isolation: res.isolation } : {}) };
     });
     if (operation.status === "in_progress") {
       return reply.code(202).send({ operation });
@@ -5609,6 +5617,7 @@ async function runSessionWorktreeRequest(
       operation: { id: operation.id, status: operation.status },
       worktree: operation.worktree,
       session: db.getSession(sessionId),
+      ...(operation.isolation ? { isolation: operation.isolation } : {}),
     };
   }
   const requestId = `worktree_${randomUUID().slice(0, 8)}`;
@@ -5616,7 +5625,7 @@ async function runSessionWorktreeRequest(
     const res = await hub.requestFromRunner(
       session.runnerId,
       requestId,
-      { ...request, type: "session_worktree", requestId, sessionId },
+      { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId },
       request.operation === "create"
         ? 65 * 60_000
         : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,

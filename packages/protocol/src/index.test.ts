@@ -113,7 +113,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 248);
+  assert.equal(PROTOCOL_VERSION, 252);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -319,8 +319,11 @@ test("a provider-HOME wait is accepted only when well formed and content-free", 
   ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 248", () => {
-  assert.equal(PROTOCOL_VERSION, 248);
+test("PROTOCOL_VERSION is 252", () => {
+  assert.equal(PROTOCOL_VERSION, 252);
+  // A v251 runner cannot continue a session's own worktree switch after its relaunch (#3810).
+  assert.equal(runnerSupportsProtocol(251, "worktreeSwitchContinuation"), false);
+  assert.equal(runnerSupportsProtocol(252, "worktreeSwitchContinuation"), true);
   // A v246 runner cannot release a queue hold on request (#3752).
   assert.equal(runnerSupportsProtocol(246, "queueHoldRelease"), false);
   assert.equal(runnerSupportsProtocol(247, "queueHoldRelease"), true);

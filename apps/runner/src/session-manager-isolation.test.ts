@@ -311,11 +311,11 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     symlinkSync(retargetedHome, homeLink, "dir");
     const currentMeta = store.readMeta("s1");
     assert.deepEqual(
-      await internals.attachIsolationNotice(currentMeta, join(retargetedHome, ".claude", "projects", "attached")),
+      await internals.worktreeIsolationNotice(currentMeta, join(retargetedHome, ".claude", "projects", "attached")),
       { writableNow: false, writableAtNextLaunch: true },
     );
     assert.deepEqual(
-      await internals.attachIsolationNotice(currentMeta, join(originalTranscript, "attached")),
+      await internals.worktreeIsolationNotice(currentMeta, join(originalTranscript, "attached")),
       { writableNow: true, writableAtNextLaunch: true },
     );
 
@@ -324,11 +324,11 @@ test("Seatbelt attach notices keep the live launch roots after HOME or its trans
     rmSync(join(originalHome, ".claude", "projects"));
     symlinkSync(retargetedTranscript, join(originalHome, ".claude", "projects"), "dir");
     assert.deepEqual(
-      await internals.attachIsolationNotice(currentMeta, join(retargetedTranscript, "attached")),
+      await internals.worktreeIsolationNotice(currentMeta, join(retargetedTranscript, "attached")),
       { writableNow: false, writableAtNextLaunch: true },
     );
     assert.deepEqual(
-      await internals.attachIsolationNotice(currentMeta, join(originalTranscript, "attached")),
+      await internals.worktreeIsolationNotice(currentMeta, join(originalTranscript, "attached")),
       { writableNow: true, writableAtNextLaunch: true },
     );
   } finally {
@@ -383,11 +383,11 @@ test("Seatbelt attach notices pin a symlinked additional root to its launch targ
     symlinkSync(retargetedAdditional, additionalLink, "dir");
     const currentMeta = store.readMeta("s1");
     assert.deepEqual(
-      await internals.attachIsolationNotice(currentMeta, join(additionalLink, "attached")),
+      await internals.worktreeIsolationNotice(currentMeta, join(additionalLink, "attached")),
       { writableNow: false, writableAtNextLaunch: true },
     );
     assert.deepEqual(
-      await internals.attachIsolationNotice(currentMeta, join(originalAdditional, "attached")),
+      await internals.worktreeIsolationNotice(currentMeta, join(originalAdditional, "attached")),
       { writableNow: true, writableAtNextLaunch: true },
     );
   } finally {

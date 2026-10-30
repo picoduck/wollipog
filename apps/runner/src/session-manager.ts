@@ -616,8 +616,12 @@ interface QueuedPrompt {
   sessionId?: string;
   /** Runner-owned continuation used only to consume orphaned Claude task notifications. */
   syntheticRecovery?: boolean;
-  /** Runner-owned authentication continuation; never attribute it to a user message. */
+  /** Runner-owned continuation of the existing conversation — after authentication, or after the
+   * relaunch a session's own worktree switch needed (`worktreeContinuation`). Never attribute it to
+   * a user message. */
   providerRecovery?: boolean;
+  /** The worktree a `providerRecovery` continuation resumes the session's task in (#3810). */
+  worktreeContinuation?: { path: string; branch: string };
   /** Control-plane-authenticated automatic campaign turn, distinct from a human prompt. */
   campaignContinuation?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
@@ -644,6 +648,14 @@ interface QueuedPrompt {
 function automaticTurn(prompt: QueuedPrompt): boolean {
   return Boolean(prompt.campaignContinuation || prompt.syntheticRecovery || prompt.providerRecovery ||
     prompt.backgroundJobIds?.length);
+}
+
+/** The runner's turn after the relaunch a session's own worktree switch needed (#3810). */
+export function worktreeContinuationPrompt(worktree: { path: string; branch: string }): string {
+  return `Wollipog relaunched this session in the worktree you switched to: ${worktree.path} ` +
+    `(branch ${worktree.branch}). It is now your working directory, and you can write and commit there. ` +
+    "Continue the task you were working on. Check what already completed before taking further actions; " +
+    "do not repeat completed work.";
 }
 
 interface QueueEditReceipt {
@@ -821,6 +833,14 @@ interface ActiveSession {
    * original OS cwd, then the drain resumes the same conversation inside the selected worktree
    * before admitting another turn. */
   pendingWorktreeRebind?: string;
+  /** The selected worktree this process cannot write, which the session's own turn switched to
+   * (#3810). Once the rebind into exactly that worktree has run, the runner continues the task
+   * there with one automatic turn. A later selection, an interrupt, or a stop clears it. */
+  worktreeRebindContinuation?: string;
+  /** This process's bwrap boundary protects a managed worktree's Git registration: only its launch
+   * worktree and `boundOwnedWorktrees` have writable Git admin directories, so a worktree created
+   * after launch has writable files but cannot be committed in until the next launch. */
+  managedGitBoundary?: true;
   /** A validated provider account selected after this process launched. It is applied only after
    * the current turn settles, before any queued turn can reach a provider. */
   pendingProviderAccountSwitch?: BoundProviderAccount;
@@ -1745,7 +1765,7 @@ export class SessionManager {
 
   /** Exact duplicate create requests join one operation, including after a control-plane retry. */
   private readonly worktreeCreates = new Map<string, {
-    promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
+    promise: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }>;
     observers: Set<(phase: SessionWorktreeProgressPhase) => void>;
     phase?: SessionWorktreeProgressPhase;
   }>();
@@ -3093,7 +3113,30 @@ export class SessionManager {
     return "completed";
   }
 
-  private async activateWorktree(meta: SessionMeta, worktree: SessionWorktreeView): Promise<SessionSnapshot> {
+  /** Activate a create, attach, or select, and say what the live sandbox can do with it. When the
+   * session's own turn switched to a worktree it cannot write yet, the turn's end relaunches it there
+   * and the runner continues the task by itself (#3810); the notice tells the agent so. */
+  private async activateWorktreeWithNotice(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+    requestedBySession = false,
+  ): Promise<{ snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }> {
+    const isolation = await this.worktreeIsolationNotice(meta, worktree.path);
+    const snapshot = await this.activateWorktree(meta, worktree, requestedBySession && !isolation.writableNow);
+    const continuation = this.active.get(meta.sessionId)?.worktreeRebindContinuation;
+    return {
+      snapshot,
+      isolation: continuation && sameWorktreePath(meta.context, continuation, worktree.path)
+        ? { ...isolation, continuesAfterRelaunch: true }
+        : isolation,
+    };
+  }
+
+  private async activateWorktree(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+    continueAfterRebind = false,
+  ): Promise<SessionSnapshot> {
     // Every worktree switch funnels through here — select, create, and attach alike — so the
     // quarantine guard belongs at this choke point rather than on one entry. The recovery
     // checkpoint is attributed to the worktree it was taken in, and a quarantined session can never
@@ -3161,6 +3204,12 @@ export class SessionManager {
       active.pendingWorktreeRebind = sameWorktreePath(active.context, active.cwd, worktree.path)
         ? undefined
         : worktree.path;
+      // Only a switch made from inside the session's own live turn continues by itself. Any other
+      // selection, including one back to the launch worktree, supersedes an earlier one.
+      active.worktreeRebindContinuation = continueAfterRebind && active.pendingWorktreeRebind &&
+          (active.running || active.providerInitiatedTurnActive)
+        ? worktree.path
+        : undefined;
       if (active.pendingWorktreeRebind && !active.running) {
         setImmediate(() => this.scheduleDrain(meta.sessionId));
       }
@@ -3199,7 +3248,8 @@ export class SessionManager {
     sessionId: string,
     request: { baseRef?: string; branch: string },
     onProgress?: (phase: SessionWorktreeProgressPhase) => void,
-  ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }> {
+    activation: { requestedBySession?: boolean } = {},
+  ): Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }> {
     if (this.roleConversionPending(sessionId)) return Promise.reject(new Error("wait for the session role change to finish before creating a worktree"));
     const key = JSON.stringify([sessionId, request.baseRef ?? null, request.branch]);
     const existing = this.worktreeCreates.get(key);
@@ -3261,7 +3311,7 @@ export class SessionManager {
           : "invalid worktree setup configuration");
         if (setup === "failed") throw new Error("required worktree setup failed; retry the retained worktree setup");
         report("activating");
-        return { worktree: canonical, snapshot: await this.activateWorktree(meta, canonical) };
+        return { worktree: canonical, ...await this.activateWorktreeWithNotice(meta, canonical, activation.requestedBySession) };
       }
       // Stamped once, here, and persisted with the record: `attributedWorktrees` rebuilds views
       // synchronously and must never reach for Git to do it. The advertised branch wins when we
@@ -3296,7 +3346,7 @@ export class SessionManager {
           });
         }
         report("activating");
-        return { worktree, snapshot: await this.activateWorktree(meta, worktree) };
+        return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, activation.requestedBySession) };
       } catch (error) {
         if (created.created && !(error as { retainWorktree?: boolean }).retainWorktree) {
           try {
@@ -3318,7 +3368,7 @@ export class SessionManager {
         throw error;
       }
     });
-    let tracked!: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot }>;
+    let tracked!: Promise<{ worktree: SessionWorktreeView; snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }>;
     tracked = operation.finally(() => {
       if (this.worktreeCreates.get(key)?.promise === tracked) this.worktreeCreates.delete(key);
     });
@@ -3390,6 +3440,7 @@ export class SessionManager {
   async attachWorktree(
     sessionId: string,
     path: string,
+    options: { requestedBySession?: boolean } = {},
   ): Promise<{
     worktree: SessionWorktreeView;
     snapshot: SessionSnapshot;
@@ -3410,7 +3461,6 @@ export class SessionManager {
         // at the next launch instead of refusing a worktree the repository legitimately registers.
         allowedProjectPaths: this.configuredProjectPaths,
       });
-      const isolation = await this.attachIsolationNotice(meta, attached.path);
       // Re-attaching an already-attributed runner-owned tree must never launder it into an
       // operator-owned record that session deletion would deliberately retain.
       const existing = this.attributedWorktrees(meta)
@@ -3438,21 +3488,18 @@ export class SessionManager {
       // that no longer exists — and the contract on the field is that absent means unknown.
       if (attachedDefaultBranch) worktree.defaultBranch = attachedDefaultBranch;
       else delete worktree.defaultBranch;
-      return { worktree, snapshot: await this.activateWorktree(meta, worktree), isolation };
+      return { worktree, ...await this.activateWorktreeWithNotice(meta, worktree, options.requestedBySession) };
     });
   }
 
-  /** State, never guess, what a platform sandbox does with a path attached mid-session. A bwrap or
-   * Seatbelt boundary is bound at launch: a live provider keeps the roots it was given, so a
+  /** State, never guess, what a platform sandbox does with a worktree selected mid-session. A bwrap
+   * or Seatbelt boundary is bound at launch: a live provider keeps the roots it was given, so a
    * worktree outside them is readable but not writable until the relaunch that a worktree switch
    * already schedules. With no live process, the next launch binds it before anything can write. */
-  private async attachIsolationNotice(
+  private async worktreeIsolationNotice(
     meta: SessionMeta,
     path: string,
   ): Promise<SessionWorktreeIsolationNotice> {
-    const mode = this.executionIsolation.mode;
-    const platformIsolated = mode === "bwrap" || mode === "seatbelt";
-    if (!platformIsolated) return { writableNow: true, writableAtNextLaunch: true };
     const live = this.active.get(meta.sessionId);
     // With nothing running there is no sandbox to be outside of: the runner performs the session's
     // Git actions on the host itself.
@@ -3461,6 +3508,20 @@ export class SessionManager {
     // writable, so the attached path is always writable then — that is what makes "next launch" a
     // real remedy rather than a hope.
     const writableAtNextLaunch = true;
+    // A provider launched in a runner-created worktree runs in this bwrap boundary whatever mode the
+    // runner is configured with, so read the live process rather than the configuration (#3810).
+    // Git writes a worktree's index and HEAD under its own admin directory, and the boundary binds
+    // only the admin directories of the worktrees that existed at launch: one created since has
+    // writable files but cannot be committed in, which is not a worktree an agent can work in.
+    if (live.managedGitBoundary) {
+      return {
+        writableNow: sameWorktreePath(meta.context, path, live.cwd) ||
+          !!live.boundOwnedWorktrees?.some((bound) => sameWorktreePath(meta.context, bound, path)),
+        writableAtNextLaunch,
+      };
+    }
+    const mode = this.executionIsolation.mode;
+    if (mode !== "bwrap" && mode !== "seatbelt") return { writableNow: true, writableAtNextLaunch };
     // Direct WSL gets no requested-worktree boundary at all (`requestedWorktreeIsolation` returns
     // no roots for it), and the target-local launcher read-only-binds `/` with only the launch cwd
     // writable. Claiming otherwise would have an agent attempt edits this turn and collect
@@ -3492,6 +3553,15 @@ export class SessionManager {
 
   /** Select one already-attributed worktree as the target for every session Git action. */
   async selectWorktree(sessionId: string, path: string): Promise<SessionSnapshot> {
+    return (await this.selectWorktreeWithNotice(sessionId, path)).snapshot;
+  }
+
+  /** `selectWorktree`, also reporting what the live sandbox can write there (#3810). */
+  async selectWorktreeWithNotice(
+    sessionId: string,
+    path: string,
+    options: { requestedBySession?: boolean } = {},
+  ): Promise<{ snapshot: SessionSnapshot; isolation: SessionWorktreeIsolationNotice }> {
     if (this.roleConversionPending(sessionId)) throw new Error("wait for the session role change to finish before selecting a worktree");
     return this.runWorktreeOperation(sessionId, async () => {
       const meta = this.store.readMeta(sessionId);
@@ -3525,7 +3595,7 @@ export class SessionManager {
         ? `invalid worktree setup configuration: ${selected.setupConfig.error}`
         : "invalid worktree setup configuration");
       if (setup === "failed") throw new Error("required worktree setup must succeed before selection");
-      return this.activateWorktree(meta, selected);
+      return this.activateWorktreeWithNotice(meta, selected, options.requestedBySession);
     });
   }
 
@@ -9352,6 +9422,7 @@ export class SessionManager {
       ...((isolation?.backend === "bwrap" || isolation?.backend === "seatbelt")
         ? { codexPackageReadOnlyPaths: [...(isolation.codexPackageReadOnlyPaths ?? [])] } : {}),
       ...(boundOwnedWorktrees.length ? { boundOwnedWorktrees } : {}),
+      ...(isolation?.backend === "bwrap" && isolation.protectedWorktree ? { managedGitBoundary: true as const } : {}),
       status: "starting",
       providerReady: false,
       providerLaunchPending: true,
@@ -13920,6 +13991,21 @@ export class SessionManager {
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
     const queued = entry.queue.splice(0);
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
+    // The session's own switch into exactly this worktree continues once the relaunch has run
+    // (#3810). Capture it before the entry retires; prompts already waiting run instead of it.
+    const selectedBranch = this.attributedWorktreeForPath(meta, selectedPath)?.branch;
+    const continuation = !queued.length && selectedBranch && entry.worktreeRebindContinuation &&
+        sameWorktreePath(meta.context, entry.worktreeRebindContinuation, selectedPath)
+      ? { path: selectedPath, branch: selectedBranch }
+      : undefined;
+    entry.worktreeRebindContinuation = undefined;
+    if (continuation) {
+      this.emitEvent(sessionId, {
+        kind: "stderr",
+        text: `Relaunching this session in worktree ${continuation.branch} so it can write there. ` +
+          "It continues the task on its own once the relaunch finishes.",
+      });
+    }
     // Keep the cached inventory resident until the exact closing-process fence is installed below;
     // otherwise releaseActiveTurn() can publish a transient parked count for a live process.
     this.deleteActiveSession(sessionId, entry, false, false);
@@ -14062,8 +14148,17 @@ export class SessionManager {
         }
         const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
         this.activatePreLaunchQueue(sessionId);
-        preserveRebindLockForQueue = hasQueuedWork;
-        if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
+        const continued = !hasQueuedWork && !!continuation &&
+          this.queueWorktreeContinuation(sessionId, reboundEntry, continuation);
+        preserveRebindLockForQueue = hasQueuedWork || continued;
+        if (continuation && !hasQueuedWork && !continued) {
+          // The relaunch notice promised a continuation; say plainly that it did not happen.
+          this.emitEvent(sessionId, {
+            kind: "stderr",
+            text: "The session did not continue on its own after the relaunch. Send a message to continue.",
+          });
+        }
+        if (!hasQueuedWork && !continued) this.emitStatus(sessionId, "idle");
         if (reboundEntry?.pendingWorktreeRebind) {
           setImmediate(() => this.scheduleDrain(sessionId));
         }
@@ -14090,6 +14185,38 @@ export class SessionManager {
       }
       if (rebindLockHeld && !preserveRebindLockForQueue && !retirementPending) this.clearLock(sessionId);
     }
+  }
+
+  /** Continue a session's task with one runner-owned turn in the worktree its own turn switched to,
+   * now that the relaunch it needed has run there (#3810). Anything that says a person or another
+   * runner path decides what runs next — a waiting prompt, a further switch, a stop, an interrupt, a
+   * hold, an open question — wins, and the session goes idle as it did before. Returns whether the
+   * continuation was queued. */
+  private queueWorktreeContinuation(
+    sessionId: string,
+    entry: ActiveSession | undefined,
+    continuation: { path: string; branch: string },
+  ): boolean {
+    const meta = this.store.readMeta(sessionId);
+    if (!entry || !meta || this.active.get(sessionId) !== entry ||
+        !sameWorktreePath(entry.context, entry.cwd, continuation.path) ||
+        entry.queue.length || entry.pendingWorktreeRebind || entry.pendingProviderAccountSwitch ||
+        this.shuttingDown || entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry) ||
+        entry.authenticationBlocked || entry.historyQuarantined || entry.historyIntegrityFailure ||
+        entry.governanceTripped || this.hasPendingApproval(sessionId) || this.backgroundRecoveryHeld(meta) ||
+        this.recoveryQueues.has(sessionId) || meta.status === "stopped" || !meta.agentSessionId ||
+        !canResumeSession(meta)) return false;
+    this.insertQueuedPrompt(sessionId, entry.queue, {
+      id: `worktreecont_${randomUUID()}`,
+      text: worktreeContinuationPrompt(continuation),
+      images: [],
+      providerRecovery: true,
+      worktreeContinuation: continuation,
+      config: this.snapshotQueuedConfig(sessionId),
+    });
+    this.emitQueue(sessionId);
+    this.scheduleDrain(sessionId);
+    return true;
   }
 
   private hasPendingAgentInput(sessionId: string): boolean {
@@ -14263,6 +14390,7 @@ export class SessionManager {
       durable,
       syntheticRecovery,
       providerRecovery,
+      worktreeContinuation,
       backgroundJobIds,
       recoveredQuestion,
       campaignContinuation,
@@ -14387,7 +14515,9 @@ export class SessionManager {
       : providerRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
-          text: "Runner continued the interrupted task after authentication was verified.",
+          text: worktreeContinuation
+            ? `Runner continued the task in worktree ${worktreeContinuation.branch} after relaunching the session there.`
+            : "Runner continued the interrupted task after authentication was verified.",
         })
       : syntheticRecovery
       ? this.emitEvent(sessionId, {
@@ -15965,6 +16095,8 @@ export class SessionManager {
     // not own the runner queue drain. Do not leave a pre-launch fence that would discard the next
     // explicit prompt after that unsolicited turn is gone.
     entry.cancelRequested = entry.running;
+    // Someone stopped this turn on purpose; its worktree switch must not restart the work (#3810).
+    entry.worktreeRebindContinuation = undefined;
     entry.client.cancel();
   }
 
@@ -15986,6 +16118,7 @@ export class SessionManager {
     if (turnId !== undefined && currentTurnId !== turnId) return "stale_turn";
     this.cancelApprovalTelemetry(sessionId);
     entry.interruptRequested = true;
+    entry.worktreeRebindContinuation = undefined;
     this.setInterruptQueueHold(sessionId, entry, true);
     try {
       entry.client.cancel();

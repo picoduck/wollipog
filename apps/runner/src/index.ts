@@ -3006,13 +3006,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         path?: ".wollipog.json";
         detected?: string[];
       }> = msg.operation === "create"
-        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
+        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress,
+          { requestedBySession: msg.requestedBySession === true })
         : msg.operation === "attach"
-          ? sessions.attachWorktree(msg.sessionId, msg.path)
+          ? sessions.attachWorktree(msg.sessionId, msg.path, { requestedBySession: msg.requestedBySession === true })
           : msg.operation === "select"
-            ? sessions.selectWorktree(msg.sessionId, msg.path).then((snapshot) => ({
+            ? sessions.selectWorktreeWithNotice(msg.sessionId, msg.path,
+              { requestedBySession: msg.requestedBySession === true }).then(({ snapshot, isolation }) => ({
               snapshot,
               worktree: snapshot.worktrees?.find((item) => item.path === snapshot.worktreePath),
+              isolation,
             }))
             : msg.operation === "retry_setup"
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
