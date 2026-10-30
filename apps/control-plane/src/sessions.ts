@@ -286,7 +286,7 @@ import {
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
-import { canonicalAutomationCommandJson } from "./automation-command-outbox.js";
+import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
 import { capabilityRefusal, failureBody } from "./capability-refusal.js";
@@ -5992,6 +5992,16 @@ export class SessionsService {
       }
     } else {
       if (command.type !== "prompt_session") return fail("session prompt command is malformed", 409);
+      // No outbox row records this prompt, so bind it before the send: an approved issue closure
+      // must see it before the runner echoes it back as a user message (#3835). A send that then
+      // fails leaves the record, which can only revoke an approval, never keep one.
+      try {
+        this.db.recordImmediatePromptAdmission(sessionId, automationCommandDigest(command), now);
+      } catch (error) {
+        this.db.updateSessionStatus(sessionId, session.status, Date.now(), UNCHANGED_STOP);
+        this.hub.sessionChangedById(sessionId);
+        return fail(`prompt could not be persisted: ${(error as Error).message}`, 500);
+      }
       const delivered = this.hub.sendToRunner(session.runnerId, command);
       if (!delivered) {
         this.db.updateSessionStatus(sessionId, session.status, Date.now(), UNCHANGED_STOP);
