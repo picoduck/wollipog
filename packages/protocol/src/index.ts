@@ -772,7 +772,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      switch needs has run in the selected worktree. Every isolation notice says whether that
 //      continuation will follow (`continuesAfterRelaunch`), and create and select now return the
 //      notice as attach always has. An older runner gets no flag and goes idle after the relaunch.
-export const PROTOCOL_VERSION = 255;
+// 258: a refused Agent TUI open is typed like a refused session launch (#3338). When the TUI's
+//      provider-HOME lease refuses it, `shell_open_result` carries the same `providerHomeRefusal` a
+//      session or fork reports, and the control plane passes a valid one to the client with its
+//      error. The runner sends it only to a v258+ control plane; older peers keep the text alone.
+export const PROTOCOL_VERSION = 258;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1047,6 +1051,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerHomeWait: 248,
   /** v248 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
   providerHomeForkRefusals: 248,
+  /** v258 runner reports a refused Agent TUI open's typed provider-HOME refusal in
+   * `shell_open_result` (#3338). */
+  providerHomeAgentTuiRefusals: 258,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
   worktreeSwitchContinuation: 255,
   authoritativeHistoryWindow: 213,
@@ -11441,6 +11448,8 @@ export interface ShellOpenResultMessage {
   error?: string;
   /** Whether a real PTY was allocated (dashboards pick renderer/input mode on this). */
   pty?: boolean;
+  /** Protocol v258 (#3338): the Agent TUI's provider-HOME lease refused the open. */
+  providerHomeRefusal?: ProviderHomeLaunchRefusalView;
 }
 
 /** Best-effort terminal resize (PTY shells; no-op in pipe mode). Fire-and-forget like input. */

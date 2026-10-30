@@ -288,6 +288,7 @@ export function terminalNoticeConditions({
   agentTuiBlocked,
   hookGovernance,
   error,
+  agentTuiRefusal = null,
 }: {
   machineOnline: boolean;
   machineName: string;
@@ -301,6 +302,9 @@ export function terminalNoticeConditions({
   hookGovernance: boolean;
   /** The last terminal action that failed, in the server's words. */
   error: string | null;
+  /** That failure was an Agent TUI open its provider account's lease refused (#3338): the session's
+   * state and recovery for the refusal, shown in place of the server's words. */
+  agentTuiRefusal?: { title: string; message: string } | null;
 }): TerminalNoticeCondition[] {
   const rank = TERMINAL_NOTICE_RANKS;
   const conditions: TerminalNoticeCondition[] = [];
@@ -352,7 +356,10 @@ export function terminalNoticeConditions({
       message: "Some of this shell's output may be missing after the connection recovered.",
     });
   }
-  if (error) {
+  if (error && agentTuiRefusal) {
+    // A warning, as the session's own refusal notice is: the account needs the person, not a fix.
+    conditions.push({ key: "action-failed", severity: "warning", rank: rank.actionFailed, ...agentTuiRefusal });
+  } else if (error) {
     conditions.push({ key: "action-failed", severity: "danger", rank: rank.actionFailed, title: "Terminal Error", message: error });
   }
   return conditions;

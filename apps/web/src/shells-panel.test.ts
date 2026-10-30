@@ -284,6 +284,15 @@ test("terminalNoticeConditions: every condition, in the issue's rank order, with
   }
 });
 
+test("terminalNoticeConditions: an Agent TUI its account refused shows the session's state, not a Terminal Error (#3338)", () => {
+  const refusal = { title: "Account in Use", message: "Another runner is using Work, so the Agent TUI didn't open." };
+  assert.deepEqual(terminalNoticeConditions({ ...QUIET, error: "provider home is busy", agentTuiRefusal: refusal }), [
+    { key: "action-failed", severity: "warning", rank: TERMINAL_NOTICE_RANKS.actionFailed, ...refusal },
+  ]);
+  // A refusal is only ever the account's reason for the error it explains.
+  assert.deepEqual(terminalNoticeConditions({ ...QUIET, agentTuiRefusal: refusal }), []);
+});
+
 test("shellExitedMessage and the dock's fixed copy read as sentences (#2865)", () => {
   assert.equal(shellExitedMessage("shell", 0), "Shell exited with code 0.");
   assert.equal(shellExitedMessage(undefined, 130), "Shell exited with code 130.");

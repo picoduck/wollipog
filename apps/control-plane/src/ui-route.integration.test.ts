@@ -1275,6 +1275,37 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     `/api/sessions/${createdSessionId}/shells/${initialTui.shellId}`,
     { method: "DELETE" },
   )).status, 204);
+  // #3338: a TUI its account lease refused carries the session's typed refusal to the client, and a
+  // malformed one falls back to the runner's sentence.
+  const busyRefusal = {
+    code: "busy", provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 7,
+  };
+  for (const [providerHomeRefusal, expected] of [
+    [busyRefusal, busyRefusal],
+    [{ ...busyRefusal, homePath: "/private/account" }, undefined],
+  ] as const) {
+    const refusedOpen = ownerFetch(`/api/sessions/${createdSessionId}/shells`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "agent_tui" }),
+    });
+    const refusedRequest = await runnerInbox.take((message) =>
+      message.type === "shell_open" && message.sessionId === createdSessionId &&
+      message.shellId !== initialTui.shellId);
+    runner.send(JSON.stringify({
+      type: "shell_open_result",
+      requestId: refusedRequest.requestId,
+      ok: false,
+      error: "provider home is busy",
+      providerHomeRefusal,
+    }));
+    const refused = await refusedOpen;
+    assert.equal(refused.status, 502);
+    assert.deepEqual(await refused.json(), {
+      error: "provider home is busy",
+      ...(expected ? { providerHomeRefusal: expected } : {}),
+    });
+  }
   const manualOpen = ownerFetch(`/api/sessions/${createdSessionId}/shells`, {
     method: "POST",
     headers: { "content-type": "application/json" },

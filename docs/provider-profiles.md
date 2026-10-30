@@ -277,6 +277,18 @@ and the same guidance, worded for a fork ("so the fork didn't start. Try again o
 with the runner's message under its details. A fork is never waited for. The source session is
 unaffected. Older peers keep the text-only failure.
 
+### Refused Agent TUIs
+
+An ordinary Agent TUI runs in its session's provider account: the runner resolves the account's
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME` when the TUI opens and leases exactly that HOME, without writing
+the environment to session metadata (#3338). A TUI of a session without an account leases the HOME
+it inherits, including the runner's own `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. A v258 runner returns the
+lease's typed `providerHomeRefusal` in `shell_open_result` for a v258 control plane, which passes it
+on with the open's error. The terminal's notice then shows the guidance of a refused session launch,
+worded for the TUI ("so the Agent TUI didn't open. Try again once it's free."), in place of the
+generic Terminal Error. An Agent TUI is never waited for, and the session itself is unaffected.
+Older peers keep the text-only failure.
+
 ## Set Up and Recover Onboarding
 
 Two control planes connected to the same SSH account share the runner user's own provider HOME,

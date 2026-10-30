@@ -59,6 +59,7 @@ import {
   runnerCapabilityRequirementError,
   runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
+  type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
   validProviderHomeLaunchRefusal,
   scopeAudienceContained,
@@ -3824,6 +3825,8 @@ type OpenSessionShellResult =
       capabilityRequirement?: RunnerCapabilityRequirementDetails;
       /** False when a runner timeout/disconnect leaves process creation unknown. */
       definitive?: boolean;
+      /** The Agent TUI's provider-HOME lease refused the open (#3338). */
+      providerHomeRefusal?: ProviderHomeLaunchRefusalView;
     };
 
 async function openSessionShell(
@@ -3889,7 +3892,14 @@ async function openSessionShell(
       // The runner answered definitively that no process was opened. A tombstone is needed only
       // for ambiguous outcomes where a late snapshot could otherwise resurrect a live process.
       shellRegistry.discardUnopened(shellId, session.runnerId);
-      return { ok: false, status: 502, error: res.error ?? "could not open a shell" };
+      // #3338: the TUI's account lease refused it; the client offers the session's recovery for it.
+      // A malformed refusal falls back to the text.
+      const providerHomeRefusal = kind === "agent_tui" && res.providerHomeRefusal !== undefined
+        ? validProviderHomeLaunchRefusal(res.providerHomeRefusal) : null;
+      return {
+        ok: false, status: 502, error: res.error ?? "could not open a shell",
+        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
+      };
     }
     const shell = shellRegistry.setPty(shellId, Boolean(res.pty), Date.now());
     if (!shell) {
@@ -3915,7 +3925,10 @@ app.post("/api/sessions/:id/shells", async (req, reply) => {
   );
   return result.ok
     ? reply.code(result.status).send({ shell: result.shell })
-    : reply.code(result.status).send(failureBody(result));
+    : reply.code(result.status).send({
+      ...failureBody(result),
+      ...(result.providerHomeRefusal ? { providerHomeRefusal: result.providerHomeRefusal } : {}),
+    });
 });
 
 // Best-effort PTY resize (fire-and-forget, like input — pipe shells ignore it).

@@ -115,7 +115,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 255);
+  assert.equal(PROTOCOL_VERSION, 258);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -330,8 +330,11 @@ test("a provider sign-in failure code is accepted only from the closed set (#351
   }
 });
 
-test("PROTOCOL_VERSION is 255", () => {
-  assert.equal(PROTOCOL_VERSION, 255);
+test("PROTOCOL_VERSION is 258", () => {
+  assert.equal(PROTOCOL_VERSION, 258);
+  // A v257 runner reports a refused Agent TUI open by its sentence alone (#3338).
+  assert.equal(runnerSupportsProtocol(257, "providerHomeAgentTuiRefusals"), false);
+  assert.equal(runnerSupportsProtocol(258, "providerHomeAgentTuiRefusals"), true);
   // A v254 runner cannot continue a session's own worktree switch after its relaunch (#3810).
   assert.equal(runnerSupportsProtocol(254, "worktreeSwitchContinuation"), false);
   assert.equal(runnerSupportsProtocol(255, "worktreeSwitchContinuation"), true);
