@@ -350,6 +350,32 @@ export interface LaunchProviderHome extends ProviderProcessObserver {
   markUnprovable(): void;
 }
 
+/** The environment that decides which provider home an Agent TUI process uses. A native TUI is
+ * spawned with its launch environment layered over the runner's own, so a runner-level
+ * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is the TUI's home whenever the launch sets none (#3338): the
+ * lease must be keyed on that home, not on the home directory. On Windows a name matches in any
+ * case and its last spelling wins, the launch's over the runner's, exactly as the ConPTY launch
+ * merges them (`windowsEnvironmentForLaunch`). A WSL TUI receives only its explicit environment. */
+export function agentTuiProviderHomeEnv(
+  meta: Pick<SessionMeta, "context" | "env">,
+  runnerEnv: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  if (meta.context.kind !== "native") return { ...meta.env };
+  const env = { ...meta.env };
+  const matches = (key: string, name: string) => platform === "win32" ? key.toUpperCase() === name : key === name;
+  for (const name of ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const) {
+    let effective: string | undefined;
+    for (const source of [runnerEnv, meta.env]) {
+      for (const [key, value] of Object.entries(source)) {
+        if (value !== undefined && matches(key, name)) effective = value;
+      }
+    }
+    if (effective !== undefined) env[name] = effective;
+  }
+  return env;
+}
+
 /** Provider profiles (#3239): the profile id a session's account binding recorded is the expected id
  * of every acquisition of that binding's credential HOME, ahead of the id the configured account
  * now records for the path, so a HOME substituted under a renamed or re-pointed account is refused
@@ -5064,7 +5090,7 @@ export class SessionManager {
       driver: meta.driver,
       command: meta.command,
       context: meta.context,
-      env: meta.env,
+      env: agentTuiProviderHomeEnv(meta),
     }, { isCurrent: () => !this.shuttingDown && this.sessionCanOpen(meta.sessionId) &&
       this.agentTuiLaunchEpoch(meta.sessionId) === epoch }, meta);
     if (this.shuttingDown || !this.sessionCanOpen(meta.sessionId) || this.agentTuiLaunchEpoch(meta.sessionId) !== epoch) {
