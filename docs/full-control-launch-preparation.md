@@ -1,6 +1,6 @@
 # Full Control Launch Preparation
 
-Native code-review profile details below describe the historical launch schema. Protocol 251
+Native code-review profile details below describe the historical launch schema. Protocol 254
 retires those jobs; campaign members use their own review sessions with managed Session accounting.
 Existing human grants retain their restrictions until a person replaces the obsolete boundary.
 The legacy launch-profile UI/schema needs a separate migration; its fields cannot establish

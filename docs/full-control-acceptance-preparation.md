@@ -12,7 +12,7 @@ Current protocol 222, including child-at-create attribution/transaction rollback
 rejection recovery, stays intact. The merged #3230 touch behavior and #3260 settled opening-frame
 fixtures are preserved without editing their implementation or tests. Preparation tests do not complete the original live release criteria.
 
-Protocol 251 retires the native code-review job used by the historical v1 plan. The offline
+Protocol 254 retires the native code-review job used by the historical v1 plan. The offline
 checker retains that shape for historical completeness and always reports blocked; it now names
 `review_session_plan_migration` as an independent requirement. Current code review uses admitted
 review sessions and managed Session usage. Updating the live plan's admission/evidence schema is
