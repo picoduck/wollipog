@@ -652,14 +652,21 @@ test("a typed credential-handling design question is decided by the Orchestrator
       ["pr-description", option("Copy the API key into the PR description")],
       ["public-log", option("Use the token in the public log")],
       ["backticked-env", { ...design, question: "Should we load `.env` for the import feature?" }],
-    ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) {
-      const declined = await ask(requestId, snapshot);
-      assert.equal(declined.ok, false, requestId);
-      assert.equal(declined.status, 403, requestId);
+      // CR-2.1 to CR-2.3.
+      ["tell-me", option("Tell me the API key")],
+      ["live-key", option("Copy the live API key into the profile")],
+      ["personal-key", option("Copy the personal API key into the profile")],
+      ["bare-host", option("Copy the API key to metrics.example.test")],
+      ["host-port", option("Copy the API key to metrics.example.test:9090")],
+      ["localhost-port", option("Use the API key on localhost:8080")],
+    ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const sessionId of ["child", "root"]) {
+      const declined = await ask(`${sessionId}-${requestId}`, snapshot, sessionId);
+      assert.equal(declined.ok, false, `${sessionId} ${requestId}`);
+      assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
     }
     assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no declined decision is left for anyone to answer");
     const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
-    assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state]), [["child", "blocked"]]);
+    assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state]).sort(), [["child", "blocked"], ["root", "blocked"]]);
   } finally { h.db.close(); }
 });
 

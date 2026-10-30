@@ -172,19 +172,32 @@ there a question such as whether importing a provider sign-in should copy an API
 sign-in or be unsupported is decided like any other, for a child or the root. The same screen
 classifies a root's own question, which is dismissed without applying any answer: a design question
 becomes `root_questions`, whose notice names the typed route, rather than credential blocked work.
-These design forms run the ordinary question screen unchanged, with one excusal: a credential
-match whose only verb is a local "copy" or "use". Any other verb (send, upload, load, export,
-paste, share, read and the rest) still declines. So do a credential value, a real identity's
-credential and a sign-in, and so does an excused copy or use once the form names a destination:
-a URL, a `www.` host or any host-shaped or IP token, an email, or a third-party, external, remote, server, endpoint, webhook,
-collector, log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord
-or email sink. Design forms also decline, beyond the ordinary screen:
-- handling any credential, a bare token included, near such a sink;
-- an email value, or disclosing a credential or email to whoever answers;
-- our, live or personal credentials;
-- signing in;
+A design form is declined when any of three screens declines it:
+- the ordinary question screen, unchanged;
+- the round-1 design screen of #3844, which declines asking for a credential, an identity, a
+  sign-in or access;
+- a stricter disclosure and destination screen.
+
+The stricter screen declines:
+- disclosing, collecting or transferring any credential, a bare token, key or sign-in included
+  (tell, give, reveal, show, print, display, read out, dictate, send, upload, post, publish,
+  forward, share, export, leak, dump, hand over, ask for, prompt for, sync and others);
+- a qualified credential (my, our, your, their, real, prod, company, team, shared, admin, live,
+  personal, the maintainer's or user's, and others);
+- handling any credential near a destination:
+  - a URL, a `www.` host, any dotted host or IP with or without a port, `localhost` or a name:port,
+    or an email;
+  - a public or shared sink: third-party, external, remote, server, endpoint, webhook, collector,
+    log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord, email,
+    vendor, someone, cloud, ticket, wiki, README, commit, bug report, screenshot, repository, SSH,
+    another device, plain text and others;
+- an email value, and signing in;
 - an option granting access, wider provider access or a lasting permission;
 - a credential-store path named in the form.
+
+The only excusal is an ordinary-screen match whose sole verb is a local "copy" or "use", and only
+when neither of the other two screens matches and no destination is named. A decline that proves
+unnecessary is acceptable; an admission that should have been declined is not.
 
 Quotes and backticks are removed before these checks. For paths, every character that cannot be
 part of a path separates words, so `(.netrc)`, `«.netrc»` or a quoted `.netrc` is still seen. A secret
