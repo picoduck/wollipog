@@ -745,6 +745,8 @@ const SUCCESSOR_CLEANUP_MS = 5_000;
 // fixed deadline there covered only about twenty calls (#3859). Each contender measures one call
 // before it reports ready, and every helper-call allowance below scales with the slower of the two.
 // The allowances are fixed counts, so a contender looping on helper calls still misses its budget.
+// Measured on windows-latest: a winning acquisition makes 11 calls (5 before and 8 after a
+// catch-up refusal), a losing one 2, and the loser's verification 1.
 const SUCCESSOR_HELPER_CALLS = { acquisition: 16, catchUpRetry: 12, publication: 4, release: 12 } as const;
 // Phases in the critical path share the fixed allowance; each still gets its own slack so a single
 // slow phase is named in the failure.
@@ -893,8 +895,10 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
         process.send({ phase: name, timings, outcome, checkpointFailures }, (error) => error ? reject(error) : resolve());
       });
+      // Outlasts the parent's race deadline, so a slow winner is reported by the parent's
+      // phase budgets rather than as a loser's barrier timeout.
       const waitFor = (path) => {
-        const deadline = performance.now() + 20_000;
+        const deadline = performance.now() + ${SUCCESSOR_REPORT_CEILING_MS + 5_000};
         while (!existsSync(path)) {
           if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
           pause(5);
