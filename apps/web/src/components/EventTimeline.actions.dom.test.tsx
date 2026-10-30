@@ -149,7 +149,7 @@ test("an unavailable item is disabled with its reason as a visible second line i
   }
 });
 
-test("a fine pointer gets the hover clusters; a coarse pointer gets only More Turn Actions", async () => {
+test("a coarse pointer keeps direct Copy Message alongside the turn menu", async () => {
   coarsePointer = false;
   const fine = await mount({ onEditAndResend: () => {} });
   const names = (root: HTMLElement) => [...root.querySelectorAll(".tl-message-actions button")].map((button) => button.getAttribute("aria-label"));
@@ -158,7 +158,7 @@ test("a fine pointer gets the hover clusters; a coarse pointer gets only More Tu
 
   coarsePointer = true;
   const coarse = await mount({ onEditAndResend: () => {} });
-  assert.deepEqual(names(coarse.container), ["More Turn Actions"], "no hover cluster renders on a coarse pointer");
+  assert.deepEqual(names(coarse.container), ["Copy Message", "More Turn Actions"], "direct Copy stays visible on touch screens");
   assertNoDomNode(coarse.container.querySelector(".tl-user-actions"), "no message cluster on a coarse pointer");
   const edit = await readTranscriptAction(coarse.container, "More Turn Actions", "Edit as a New Turn");
   assert.equal(edit?.disabled, false, "the turn menu still reaches every message action");
@@ -239,7 +239,11 @@ test("on a coarse pointer, a message no turn menu lists keeps More Message Actio
   const names = [...container.querySelectorAll(".tl-message-actions button")].map((button) => button.getAttribute("aria-label"));
   // The first prompt is in its settled turn's menu. The steer belongs to that turn but is not its
   // prompt, so it keeps its own menu before the footer; the running turn's prompt has no footer yet.
-  assert.deepEqual(names, ["More Message Actions", "More Turn Actions", "More Message Actions"]);
+  assert.deepEqual(names, ["Copy Message", "Copy Message", "More Message Actions", "More Turn Actions", "Copy Message", "More Message Actions"]);
+  clipboard.length = 0;
+  const copies = container.querySelectorAll<HTMLButtonElement>('button[aria-label="Copy Message"]');
+  for (const button of copies) await act(async () => { button.click(); });
+  assert.deepEqual(clipboard, ["First **question**", "A steer", "Second prompt"]);
   for (const index of [0, 1]) {
     const edit = await readTranscriptAction(container, "More Message Actions", "Edit as a New Turn", index);
     assert.equal(edit?.disabled, false);
@@ -379,4 +383,18 @@ test("Insert into Draft appears only where a transcript supplies it, on top-leve
   await act(async () => { inserts[0]!.click(); });
   assert.deepEqual(inserted, ["## Result\n\nThe **answer** is [here](https://example.test).\n\n- one\n- two"],
     "the reply's own source text");
+});
+
+
+test("touch Copy Message preserves the complete multiline prompt without a menu", async () => {
+  coarsePointer = true;
+  clipboard.length = 0;
+  const text = "A long **prompt**\n\n" + "Keep every line.\n".repeat(100);
+  const { container } = await mount({ items: [{ kind: "user_message", id: 1, text }] });
+  const copy = container.querySelector<HTMLButtonElement>('button[aria-label="Copy Message"]');
+  assert.ok(copy, "a running prompt has direct Copy");
+  await act(async () => { copy.click(); });
+  assert.deepEqual(clipboard, [text]);
+  assert.equal(document.querySelector('[role="menu"]'), null);
+  coarsePointer = false;
 });

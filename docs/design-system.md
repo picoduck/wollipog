@@ -3461,6 +3461,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 
 ### 15.3 Touch on Any Width
 
+User messages containing text keep an always-visible **Copy Message** icon button on touch
+screens. It sits in a row immediately below the bubble, with space for the shared 44px touch
+targets. A message without a settled turn menu also keeps **More Message Actions** in that row.
+The settled turn's **More Turn Actions** menu remains available; copying a prompt never requires
+scrolling past the response or opening that menu. Fine pointers retain the hover cluster.
+
 `@media (pointer: coarse)` applies the control and row sizes in §2.8 regardless of width (tablets at
 834px get 44px targets). Hover styles are wrapped in `@media (hover: hover)`.
 
