@@ -1476,3 +1476,31 @@ test("account recovery uses plain guidance with separate authorized process deta
   await expect(details).toHaveCount(0);
   await expect(badge).toHaveText("Recovery Needed");
 });
+
+/** #3525: All Machines' Reconnect and the machine detail's are one action, with one busy state. */
+test("a Reconnect started from All Machines is busy in the machine's detail, which sends no second request (#3525)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/machine-management-e2e.html?ssh=ended&reconnect=hold");
+  const fromOverview = page.locator(".machines-overview").getByRole("button", { name: "Reconnect Design Workstation" });
+  await fromOverview.click();
+  await expect(fromOverview).toHaveAttribute("aria-busy", "true");
+  await machineRow(page).click();
+  const fromDetail = page.locator("article.machine-detail .notice").getByRole("button", { name: /^Reconnect/ });
+  await expect(fromDetail).toHaveAttribute("aria-busy", "true");
+  // Busy is aria-disabled rather than disabled (BusyButton), so the press itself must do nothing.
+  await fromDetail.click({ force: true });
+  expect(await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.reconnectRequests())).toBe(1);
+});
+
+test("a Reconnect that fails from All Machines reads as it does from the machine's detail (#3525)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/machine-management-e2e.html?ssh=ended&reconnect=fail");
+  await page.locator(".machines-overview").getByRole("button", { name: "Reconnect Design Workstation" }).click();
+  const toast = page.locator(".toast").filter({ hasText: "Couldn't reconnect Design Workstation." });
+  await expect(toast.locator(".toast-detail")).toHaveText("Wollipog couldn't be reached. Check the connection, then try again.");
+  await toast.getByRole("button", { name: "Dismiss Notification" }).click();
+  await expect(toast).toHaveCount(0);
+  await machineRow(page).click();
+  await page.locator("article.machine-detail .notice").getByRole("button", { name: "Reconnect" }).click();
+  await expect(toast.locator(".toast-detail")).toHaveText("Wollipog couldn't be reached. Check the connection, then try again.");
+});
