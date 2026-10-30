@@ -647,6 +647,11 @@ test("a typed credential-handling design question is decided by the Orchestrator
       ["sign-in", option("Sign in to the provider now")],
       ["grant", option("Grant the importer access to the provider account")],
       ["lasting", option("Always allow the importer to read provider sign-ins")],
+      ["send-url", option("Send the API key to https://collector.example for the provider test")],
+      ["upload-token", option("Upload the token to the shared bucket")],
+      ["pr-description", option("Copy the API key into the PR description")],
+      ["public-log", option("Use the token in the public log")],
+      ["backticked-env", { ...design, question: "Should we load `.env` for the import feature?" }],
     ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) {
       const declined = await ask(requestId, snapshot);
       assert.equal(declined.ok, false, requestId);

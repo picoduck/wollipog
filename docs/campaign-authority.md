@@ -172,11 +172,22 @@ there a question such as whether importing a provider sign-in should copy an API
 sign-in or be unsupported is decided like any other, for a child or the root. The same screen
 classifies a root's own question, which is dismissed without applying any answer: a design question
 becomes `root_questions`, whose notice names the typed route, rather than credential blocked work.
-Either form is still declined as `secrets_and_sign_in` when it asks for a credential value, token,
-password, email address or a real identity's credential, asks someone to sign in, names a
-credential-store path or carries a key-shaped or email value, or offers an option granting access,
-wider provider permissions or a lasting permission. A secret or email field always fails closed. A
-child's provider question can be answered with free text, so it keeps the broader screen.
+These design forms run the ordinary question screen unchanged, with one excusal: a credential
+match whose only verb is a local "copy" or "use". Any other verb (send, upload, load, export,
+paste, share, read and the rest) still declines. So do a credential value, a real identity's
+credential and a sign-in, and so does an excused copy or use once the form names a destination:
+a URL, a `www.` host, an email, or a third-party, external, remote, server, endpoint, webhook,
+collector, log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord
+or email sink. Design forms also decline, beyond the ordinary screen:
+- handling any credential, a bare token included, near such a sink;
+- an email value;
+- signing in;
+- an option granting wider provider access or a lasting permission;
+- a credential-store path named in the form.
+
+Quotes and backticks are removed before these checks, so a quoted `.netrc` is still seen. A secret
+or email field always fails closed. A child's provider question can be answered with free text, so
+it keeps the ordinary screen without the excusal.
 
 The worktree allowlist decides whether a tool effect can be approved at all. No denylist can name
 every credential store, and no runner isolation mode hides those stores from a child: bwrap binds
