@@ -89,8 +89,8 @@ function settleNormal() {
   send({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 1, delta: "Hello from Pi" } });
   send({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", contentIndex: 2, id: "tool-1", toolName: "read" } });
   send({ type: "tool_execution_start", toolCallId: "tool-1", toolName: "read", args: { path: "README.md" } });
-  send({ type: "tool_execution_update", toolCallId: "tool-1", partialResult: { content: "partial" } });
-  send({ type: "tool_execution_end", toolCallId: "tool-1", result: { content: "done" }, isError: false });
+  send({ type: "tool_execution_update", toolCallId: "tool-1", partialResult: { content: [{ type: "text", text: "partial" }] } });
+  send({ type: "tool_execution_end", toolCallId: "tool-1", result: { content: [{ type: "text", text: "done" }] }, isError: false });
   send({ type: "message_end", message: { role: "assistant", model: selected.id, content: [], stopReason: "toolUse",
     usage: { input: 12, output: 4, cacheRead: 2, cacheWrite: 1, cost: { total: 0.02 } } } });
   send({ type: "turn_end", message: {}, toolResults: [] });
@@ -110,7 +110,7 @@ function settleToolOnly() {
   send({ type: "message_start", message: { role: "assistant" } });
   send({ type: "message_update", assistantMessageEvent: { type: "toolcall_start", id: "tool-only", toolName: "bash" } });
   send({ type: "tool_execution_start", toolCallId: "tool-only", toolName: "bash", args: { command: "true" } });
-  send({ type: "tool_execution_end", toolCallId: "tool-only", result: { content: "" }, isError: false });
+  send({ type: "tool_execution_end", toolCallId: "tool-only", result: { content: [] }, isError: false });
   send({ type: "message_end", message: { role: "assistant", content: [{ type: "toolCall", id: "tool-only", name: "bash" }], stopReason: "toolUse" } });
   entries = [
     { type: "message", id: "pi-user-1", parentId: null, message: { role: "user", content: "use a tool" } },

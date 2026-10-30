@@ -188,7 +188,9 @@ mode would, and is **never** blanket auto-confirmed — the preset's auto-confir
 the preset also excludes `bash`, `edit`, and `write`. Measured against pi 0.85.0, repeated
 `--append-system-prompt` values accumulate rather than displace one another, and the flag is matched
 by exact equality (so `--append-system-prompt=TEXT` is an extension flag, not an append, and the
-resume strip leaves it alone). The Pi bridge requirement reaches the control plane as `capabilities.orchestratorAdditive`, a
+resume strip leaves it alone). Pi 1.4.0 keeps the accumulation but rejects the `=` form as an
+unknown option and exits; it still never appends. `pnpm probe:pi-assumptions` re-measures these and
+the rest of the Pi RPC contract; see [Pi Assumption Probes](pi-assumption-probes.md). The Pi bridge requirement reaches the control plane as `capabilities.orchestratorAdditive`, a
 runner attestation published only for a discovery-verified bridge; `piAgentControl` itself is
 cleared before publication and never persisted.
 
