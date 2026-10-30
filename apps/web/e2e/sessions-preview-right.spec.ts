@@ -219,19 +219,23 @@ test.describe("at 1440×900", () => {
     await expectListWidth(page, 400);
   });
 
-  test("the preview's bar, meta line, docked request and transcript are inset --space-6 from the divider", async ({ page }) => {
+  test("the preview's bar and meta line are inset --space-6 from the divider, and its reading column is centered", async ({ page }) => {
     await open(page);
     await choosePreviewRight(page);
     // The fixture opens on the blocked session, whose request is docked at the top of the preview.
     await expect(page.locator(".session-detail.preview .session-notice-slot .request-dock")).toBeVisible();
     const inset = async () => page.evaluate(() => {
       const left = (element: Element | null | undefined) => element?.getBoundingClientRect().left ?? Number.NaN;
+      const rootValue = (name: string) => Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue(name));
       const scroll = document.querySelector(".session-detail.preview .detail-scroll")!;
       const scrollTop = scroll.getBoundingClientRect().top;
       const firstTurn = [...scroll.querySelectorAll(".tl-row")].find((row) => row.getBoundingClientRect().bottom > scrollTop);
+      const pane = document.querySelector(".inbox-preview-pane")!.getBoundingClientRect();
       return {
-        divider: left(document.querySelector(".inbox-preview-pane")),
-        space6: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--space-6")),
+        divider: pane.left,
+        space6: rootValue("--space-6"),
+        // The reading column's gutter: --space-6 at least, else half of what is left past --chat-max.
+        column: Math.max(rootValue("--space-6"), (pane.width - rootValue("--chat-max")) / 2),
         title: left(document.querySelector(".session-preview-bar .detail-bar-title")),
         meta: left(document.querySelector(".session-preview-facts > li")),
         dock: left(document.querySelector(".session-detail.preview .session-notice-slot .request-dock")),
@@ -240,15 +244,17 @@ test.describe("at 1440×900", () => {
     });
     const blocked = await inset();
     expect(blocked.space6).toBe(24);
-    for (const name of ["title", "meta", "dock"] as const) {
+    for (const name of ["title", "meta"] as const) {
       expectGeometry(Math.abs(blocked[name] - blocked.divider - blocked.space6), `the ${name} starts --space-6 from the divider`)
         .toBeLessThanOrEqual(0.61);
     }
+    expectGeometry(Math.abs(blocked.dock - blocked.divider - blocked.column), "the dock starts at the centered reading column")
+      .toBeLessThanOrEqual(0.61);
 
     await page.locator(".inbox-row").filter({ hasText: IDLE }).click();
     await expect(page.locator(".session-detail.preview .detail-scroll .tl-row").first()).toBeVisible();
     const idle = await inset();
-    expectGeometry(Math.abs(idle.turn - idle.divider - idle.space6), "the first transcript turn starts --space-6 from the divider")
+    expectGeometry(Math.abs(idle.turn - idle.divider - idle.column), "the first transcript turn starts at the centered reading column")
       .toBeLessThanOrEqual(0.61);
   });
 
