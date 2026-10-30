@@ -579,7 +579,7 @@ test("the removal confirmation names the account, the provider and the machine, 
     const dialog = ui.dialog()!;
     assert.equal(dialog.querySelector(".modal-title, h2")?.textContent, "Remove Account");
     assert.equal(dialog.querySelector(".confirmation-message")?.textContent,
-      "Work (Claude) is removed from Studio Mac, and the sign-in Wollipog stored for it is deleted. " +
+      "Work (Claude) is removed from Studio Mac. The sign-in Wollipog stored for it stays on this machine. " +
       "Sessions still using it keep working, and the Claude account itself isn't affected.");
     assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Cancel");
     assertNoDomNode(dialog.querySelector(".provider-account-remove-target"));
@@ -682,9 +682,9 @@ for (const [item, title] of [
   });
 }
 
-test("a removal that kept credentials says so in the toast's detail line; otherwise the toast is one line", async () => {
+test("a removal that kept the stored sign-in says so without inventing a reason; an unreported result is one line", async () => {
   for (const [credentialsRetained, expected] of [
-    [true, "Account removed.Its credentials were kept because a session on this machine still uses them."],
+    [true, "Account removed.The sign-in Wollipog stored for it was kept on this machine."],
     [false, "Account removed."],
   ] as const) {
     const api = client({ remove: async () => ({ removed: true, credentialsRetained }) });

@@ -378,12 +378,12 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const remove = async (account: ProviderAccountDefinition, reopen: () => void) => {
     const provider = providerName(account.provider);
     const sentence = (label: ReactNode) => (
-      <>{label} ({provider}) is removed from {machine}, and the sign-in Wollipog stored for it is deleted. Sessions still using it
-        keep working, and the {provider} account itself isn't affected.</>
+      <>{label} ({provider}) is removed from {machine}. The sign-in Wollipog stored for it stays on this machine. Sessions still
+        using it keep working, and the {provider} account itself isn't affected.</>
     );
     const approved = await confirm({
       title: "Remove Account",
-      message: `${masked(account.label)} (${provider}) is removed from ${machine}, and the sign-in Wollipog stored for it is deleted. ` +
+      message: `${masked(account.label)} (${provider}) is removed from ${machine}. The sign-in Wollipog stored for it stays on this machine. ` +
         `Sessions still using it keep working, and the ${provider} account itself isn't affected.`,
       messageContent: sentence(identifier(account)),
       confirmLabel: "Remove Account",
@@ -397,7 +397,8 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
         const result = await api.removeProviderAccount(runner.runnerId, account.id);
         showToast("Account removed.", {
           tone: "success",
-          ...(result.credentialsRetained ? { detail: "Its credentials were kept because a session on this machine still uses them." } : {}),
+          // Runners keep the stored sign-in on removal (#3157); a runner that doesn't report it gets no detail.
+          ...(result.credentialsRetained ? { detail: "The sign-in Wollipog stored for it was kept on this machine." } : {}),
         });
       } catch (cause) {
         setNotice({ title: <>Couldn't Remove {identifier(account)}</>, ...providerAccountRemovalRefusal(cause, runner.agents) });
