@@ -656,6 +656,13 @@ function capabilityFail<T>(
   return { ok: false, status: 409, error, capabilityRequirement };
 }
 
+/** A campaign refusal: a sentence, or an older runner's shared sentence with its versions (#3803). */
+type CampaignRefusal = string | ({ error: string } & RunnerCapabilityRequirementDetails);
+
+function campaignRefusalFail<T>(refusal: CampaignRefusal): ServiceResult<T> {
+  return typeof refusal === "string" ? fail(refusal, 409) : capabilityFail(refusal);
+}
+
 /** Rolls back a campaign child's creation when its work-item attempt cannot be recorded (#3106). */
 class CampaignAttemptRefusal extends Error {
   constructor(message: string, readonly status: number) { super(message); }
@@ -4240,7 +4247,9 @@ export class SessionsService {
     if (campaignController?.orchestratorPolicy?.control?.mode === "full_control") {
       const preflight = campaignAuthorityPreflight(campaignController.orchestratorPolicy.control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
-      if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) return fail(preflight.reason ?? "campaign authority boundary is stale", 409);
+      if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
+        return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
+      }
       if (req.runnerId !== campaignController.runnerId || req.workspaceId !== campaignController.workspaceId || req.workspacePath) {
         return fail("Full Control children must use the campaign's repository workspace and runner", 409);
       }
@@ -4594,7 +4603,7 @@ export class SessionsService {
         orchestratorPolicy.control = structuredClone(inheritedCampaign.control);
         const preflight = campaignAuthorityPreflight(orchestratorPolicy.control, launch.driver, runner.protocolVersion,
           this.pacedVideoInstallationContract(req.runnerId, req.agentId));
-        if (!preflight.supported) return fail(preflight.reason!, 409);
+        if (!preflight.supported) return campaignRefusalFail(preflight.requirement ?? preflight.reason!);
       }
       // A saved account default must remain portable across a mixed runner fleet. Capabilities
       // that predate the selected runner fail closed without turning an otherwise supported
@@ -4847,7 +4856,7 @@ export class SessionsService {
       const ceilingError = this.controlledReviewCeilingError(budgetRoot, campaignBudgetUserLimits);
       if (ceilingError) return fail(ceilingError, 409);
       const parentError=this.campaignBudgetConfigError(this.db.getSession(budgetSource!)!);
-      if(parentError) return fail(parentError,409);
+      if(parentError) return campaignRefusalFail(parentError);
       const view = this.db.campaignBudgets.view(budgetRoot)!;
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
       if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
@@ -4947,7 +4956,7 @@ export class SessionsService {
       }
       const authoritySupport = campaignAuthorityPreflight(control, launch.driver, runner.protocolVersion,
         this.pacedVideoInstallationContract(req.runnerId, req.agentId));
-      if (!authoritySupport.supported) return fail(authoritySupport.reason ?? "campaign authority is unsupported", 409);
+      if (!authoritySupport.supported) return campaignRefusalFail(authoritySupport.requirement ?? authoritySupport.reason ?? "campaign authority is unsupported");
       // A launch with no cost ceiling still meters cost, but only an explicit ceiling needs it priced.
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model,
         control.boundary.budgetAuthority?.costUsd !== undefined);
@@ -5658,13 +5667,13 @@ export class SessionsService {
     if (budgetError) return fail(budgetError, 409);
     const requestedConfig = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config : config;
     const budgetConfigError = this.campaignBudgetConfigError(session, requestedConfig);
-    if (budgetConfigError) return fail(budgetConfigError, 409);
+    if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before sending a message", 409);
     const configInputError = sessionGuardrailConfigError(requestedConfig);
     if (configInputError) return fail(configInputError, 400);
     if (!snapshotCommand) {
       const campaignBehaviorError = this.campaignChildBehaviorError(session, requestedConfig);
-      if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+      if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
@@ -6289,9 +6298,9 @@ export class SessionsService {
     const configInputError = sessionGuardrailConfigError(candidate.command.config);
     if (configInputError) return fail(configInputError, 400);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session, candidate.command.config);
-    if (budgetError) return fail(budgetError, 409);
+    if (budgetError) return campaignRefusalFail(budgetError);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, candidate.command.config);
-    if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+    if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, candidate.command.config);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
     const incomingMode = candidate.command.config?.permissionMode;
@@ -6426,9 +6435,9 @@ export class SessionsService {
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
     const budgetConfigError = this.campaignBudgetConfigError(session, config);
-    if (budgetConfigError) return fail(budgetConfigError, 409);
+    if (budgetConfigError) return campaignRefusalFail(budgetConfigError);
     const campaignBehaviorError = this.campaignChildBehaviorError(session, config);
-    if (campaignBehaviorError) return fail(campaignBehaviorError, 409);
+    if (campaignBehaviorError) return campaignRefusalFail(campaignBehaviorError);
     if (actor.kind === "agent" && actor.id === sessionId &&
         (config.maxChildSessions === undefined ||
           Object.keys(config).some((key) => key !== "maxChildSessions"))) {
@@ -7695,7 +7704,7 @@ export class SessionsService {
     if (!session) return fail("session not found", 404);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
-    if (budgetError) return fail(budgetError, 409);
+    if (budgetError) return campaignRefusalFail(budgetError);
     const budgetRoot = this.db.campaignBudgets.governingRoot(sessionId);
     const campaignBefore = this.campaignAttentionController(session);
     if (session.stopOperation?.status === "stop_failed") {
@@ -7928,7 +7937,7 @@ export class SessionsService {
     const priorBudgetDispatch = budgetRoot ? this.db.campaignBudgets.dispatchState(sessionId) : null;
     if (budgetRoot) {
       const unsupported = this.campaignBudgetConfigError(session, spec.config, launch.driver);
-      if (unsupported) return fail(unsupported, 409);
+      if (unsupported) return campaignRefusalFail(unsupported);
       try { this.db.campaignBudgets.admit(budgetRoot, this.db.campaignBudgets.allocation(sessionId)!, {}); }
       catch (error) { return fail((error as Error).message, 409); }
       spec.campaignBudgetDispatch = this.db.campaignBudgets.replaceDispatch(sessionId);
@@ -8908,7 +8917,7 @@ export class SessionsService {
         if (participant.runnerId !== session.runnerId || participant.workspaceId !== session.workspaceId) return fail("campaign participants must share the repository workspace and runner", 409);
         const preflight = campaignAuthorityPreflight(control, participant.driver, this.db.getRunner(participant.runnerId)?.protocolVersion,
           this.pacedVideoInstallationContract(participant.runnerId, participant.agentId));
-        if (!preflight.supported) return fail(preflight.reason!, 409);
+        if (!preflight.supported) return campaignRefusalFail(preflight.requirement ?? preflight.reason!);
         if (control.boundary.budgetAuthority) {
           const accountingError = this.db.campaignBudgetAccountingError(participant.driver, participant.model, control.boundary.budgetAuthority.costUsd !== undefined);
           if (accountingError || participant.adopted || this.activeAgentTuiGuardrailError(participant, { maxToolCalls: 1 })) return fail(accountingError ?? "Campaign allowance cannot cover an unmetered provider launch.", 409);
@@ -8989,7 +8998,7 @@ export class SessionsService {
         !this.db.campaignBudgets.active(member.id) || isTerminal(member.status) || hasBlockingPendingRequest(member.pendingApproval) ||
         member.runnerId !== root.runnerId || member.workspaceId !== root.workspaceId) return fail("review worker is not an active admitted participant in the current campaign boundary", 409);
     const accountingError = this.campaignBudgetConfigError(member);
-    if (accountingError) return fail(accountingError, 409);
+    if (accountingError) return campaignRefusalFail(accountingError);
     const error = this.db.campaignBudgets.admissionError(worker.sessionId);
     if (error) return fail(error, 409);
     const admission = { rootSessionId: campaignId, authorityRevision: control.boundary.revision,
@@ -9009,7 +9018,7 @@ export class SessionsService {
     const member = this.db.getSession(allocation.sessionId);
     if (!member) return fail("allocation worker not found", 404);
     const peerError = this.campaignBudgetConfigError(member);
-    if (peerError) return fail(peerError, 409);
+    if (peerError) return campaignRefusalFail(peerError);
     const prior = this.db.campaignBudgets.allocation(member.id)!;
     allocation = { ...prior, ...allocation };
     const active = this.db.campaignBudgets.active(member.id);
@@ -9624,7 +9633,7 @@ export class SessionsService {
         ...(allocation.toolCalls === undefined ? {} : { maxToolCalls: allocation.toolCalls }) }, ...(holdFor ? { holdFor } : {}) });
   }
 
-  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): string | null {
+  private campaignBudgetConfigError(session: SessionView, config?: SessionConfig, driver = session.driver): CampaignRefusal | null {
     const rootId = this.db.campaignBudgets.governingRoot(session.id);
     if (!rootId) return null;
     const view = this.db.campaignBudgets.view(rootId)!;
@@ -9632,7 +9641,7 @@ export class SessionsService {
     if (!controller || control?.mode !== "full_control" || !campaignBoundaryCurrent(controller)) return "campaign allowance boundary is stale or revoked";
     const preflight = campaignAuthorityPreflight(control, driver, this.db.getRunner(session.runnerId)?.protocolVersion,
       this.pacedVideoInstallationContract(session.runnerId, session.agentId));
-    if (!preflight.supported) return preflight.reason ?? "campaign allowance requires supported accounting peers";
+    if (!preflight.supported) return preflight.requirement ?? preflight.reason ?? "campaign allowance requires supported accounting peers";
     if (session.runnerId !== controller.runnerId || session.workspaceId !== controller.workspaceId) return "campaign allowance requires the original runner and workspace";
     if (view.state !== "active") return view.reason ?? "campaign allowance unavailable";
     if(view.authority.controlledReview) {
@@ -9667,7 +9676,7 @@ export class SessionsService {
     return true;
   }
 
-  private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): string | null {
+  private campaignChildBehaviorError(session: SessionView, config: SessionConfig | undefined): CampaignRefusal | null {
     if (!session.parentSessionId || !config) return null;
     const controller = this.orchestratorCampaignController(this.db.getSession(session.parentSessionId));
     if (controller === "refused") return MALFORMED_ANCESTRY_AUTHORITY_REFUSAL;
@@ -9675,7 +9684,7 @@ export class SessionsService {
       const preflight = campaignAuthorityPreflight(controller.orchestratorPolicy.control, session.driver,
         this.db.getRunner(session.runnerId)?.protocolVersion,
         this.pacedVideoInstallationContract(session.runnerId, session.agentId));
-      if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.reason ?? "campaign authority boundary is stale";
+      if (!preflight.supported || !campaignBoundaryCurrent(controller)) return preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale";
     }
     const behavior = controller?.orchestratorPolicy?.behavior;
     if (behavior && behavior.childModel !== null && config.model !== undefined && config.model !== behavior.childModel) {
@@ -15375,7 +15384,7 @@ export class SessionsService {
         if (ceilingError) throw new Error(ceilingError);
         const view = this.db.campaignBudgets.view(budgetRoot)!;
         const parentError=this.campaignBudgetConfigError(this.db.getSession(parentSessionId!)!);
-        if(parentError) throw new Error(parentError);
+        if(parentError) throw typeof parentError === "string" ? new Error(parentError) : new RunnerCapabilityRefusal(parentError);
         const peer = this.db.getRunner(req.runnerId)?.protocolVersion;
         if (!runnerSupportsProtocol(peer, "campaignBudgetAdmission")) {
           throw new RunnerCapabilityRefusal(runnerCapabilityRequirementError(peer, "campaignBudgetAdmission", "campaign run workers"));

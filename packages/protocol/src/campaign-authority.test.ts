@@ -67,6 +67,23 @@ test("exact private metadata is only a compatibility condition and ordinary auth
   assert.equal(campaignAuthorityPreflight({ mode: "custom" }, "acp", 1).supported, true);
 });
 
+test("older-runner preflight refusals use the shared sentence and return the versions beside it (#3803)", () => {
+  const older = (error: string, requiredRunnerProtocolVersion: number, runnerProtocolVersion: number | null) =>
+    ({ supported: false, reason: error, requirement: { error, requiredRunnerProtocolVersion, runnerProtocolVersion } });
+  const evidence = "This machine needs a newer runner for production evidence authority. Update and restart the runner.";
+  assert.deepEqual(campaignAuthorityPreflight(mediaControl, "codex-app-server", 222), older(evidence, 223, 222));
+  assert.deepEqual(campaignAuthorityPreflight(mediaControl, "codex-app-server", null), older(evidence, 223, null));
+  assert.deepEqual(campaignAuthorityPreflight(mediaControl, "codex-app-server", 223), { supported: false,
+    reason: "Production evidence authority requires the exact private media contract; compatibility metadata does not establish runtime readiness." },
+  "a current runner without the private contract is not told to update");
+  const budgetControl: CampaignControl = { ...control, boundary: { ...control.boundary, budgetAuthority: { version: 1,
+    accounting: "managed_workers_only", unpriced: "stop", toolCalls: 10, concurrency: 1 } } };
+  assert.ok(validCampaignControl(budgetControl));
+  assert.deepEqual(campaignAuthorityPreflight(budgetControl, "codex-app-server", 217),
+    older("This machine needs a newer runner for campaign limits. Update and restart the runner.", 218, 217));
+  assert.deepEqual(campaignAuthorityPreflight(budgetControl, "codex-app-server", 218), { supported: true });
+});
+
 test("Full Control planning uses trusted provenance; Custom preserves keyword-based protection", () => {
   for (const text of ["Which authentication library should we implement?", "Should the OAuth flow use PKCE?",
     "Which validation test should use sample@example.com?", "Which approach should the login component use?",

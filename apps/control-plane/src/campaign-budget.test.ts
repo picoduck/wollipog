@@ -248,6 +248,25 @@ test("a run on a runner without campaign budget admission is refused with the sh
   } finally {h.db.close();}
 });
 
+test("a campaign with limits on a downgraded runner refuses with the shared sentence and versions (#3803)",()=>{
+  const h=harness();
+  try {
+    assert.ok(h.enable(allowance({costUsd:100})).ok);
+    h.db.registerRunner(h.metadata,10,217);
+    const error="This machine needs a newer runner for campaign limits. Update and restart the runner.";
+    const versions={requiredRunnerProtocolVersion:218,runnerProtocolVersion:217};
+    const child=h.svc.createSession({runnerId:"r",workspaceId:"w",agentId:"claude",config:{model:"claude-opus-5-5"},prompt:"Implement authorized #2936"},
+      undefined,undefined,false,false,false,{parentSessionId:"root"});
+    const run=h.svc.createRun({runnerId:"r",workspaceId:"w",agentIds:["claude"],task:"Implement #2936",config:{model:"claude-opus-5-5"}},{parentSessionId:"root"});
+    const prompt=h.svc.prompt("root","continue");
+    for (const [label,refused] of [["child",child],["run",run],["prompt",prompt]] as const) {
+      assert.equal(refused.status,409,label);
+      assert.equal(refused.error,error,label);
+      assert.deepEqual(refused.capabilityRequirement,versions,label);
+    }
+  } finally {h.db.close();}
+});
+
 test("malformed control proposals refuse without changing the human revision",()=>{
   const h=harness();
   try {

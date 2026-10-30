@@ -1,6 +1,6 @@
-import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, supportsPacedVideoReviewPeer } from "./paced-video-review.js";
+import { supportsPacedVideoReviewPeer } from "./paced-video-review.js";
 import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "./campaign-evidence-authority.js";
-import { parentControlRequestEligible } from "./index.js";
+import { parentControlRequestEligible, runnerCapabilityRequirementError, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
 import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
@@ -435,13 +435,32 @@ export const FULL_CONTROL_EVIDENCE_EXCEPTIONS: ReadonlyArray<{ id: "video_eviden
   { id: "external_evidence", exception: "External Evidence Review", reason: "The Orchestrator can't open evidence stored outside private Session artifacts (links only), so it asks for screenshots or denies the claim as unproven." },
 ];
 
+/** When an older runner is why Full Control is unsupported, `requirement` holds the shared runner
+ * sentence (also `reason`) and the versions an HTTP 409 returns beside it (#3803). */
+export interface CampaignAuthorityPreflight {
+  supported: boolean;
+  reason?: string;
+  requirement?: { error: string } & RunnerCapabilityRequirementDetails;
+}
+
+function olderRunner(requirement: { error: string } & RunnerCapabilityRequirementDetails): CampaignAuthorityPreflight {
+  return { supported: false, reason: requirement.error, requirement };
+}
+
 export function campaignAuthorityPreflight(control: CampaignControl | undefined, driver: string, protocolVersion: number | null | undefined,
-  peerContract?: unknown): { supported: boolean; reason?: string } {
+  peerContract?: unknown): CampaignAuthorityPreflight {
   if (!control || control.mode === "custom") return { supported: true };
   if (!validCampaignControl(control)) return { supported: false, reason: "Full Control requires a valid human-authorized boundary." };
-  if (control.boundary.evidenceAuthority && !supportsPacedVideoReviewPeer(protocolVersion, peerContract)) return { supported: false,
-    reason: `Production evidence authority requires protocol v${PACED_VIDEO_REVIEW_MIN_PROTOCOL} and the exact private media contract; compatibility metadata does not establish runtime readiness.` };
-  if (control.boundary.budgetAuthority && (protocolVersion ?? 0) < 218) return { supported: false, reason: "Campaign limits require a protocol-v218 runner; unsupported peers cannot admit protected work." };
+  if (control.boundary.evidenceAuthority && !supportsPacedVideoReviewPeer(protocolVersion, peerContract)) {
+    if (!runnerSupportsProtocol(protocolVersion, "pacedVideoReview")) {
+      return olderRunner(runnerCapabilityRequirementError(protocolVersion, "pacedVideoReview", "production evidence authority"));
+    }
+    return { supported: false,
+      reason: "Production evidence authority requires the exact private media contract; compatibility metadata does not establish runtime readiness." };
+  }
+  if (control.boundary.budgetAuthority && !runnerSupportsProtocol(protocolVersion, "campaignBudgetAdmission")) {
+    return olderRunner(runnerCapabilityRequirementError(protocolVersion, "campaignBudgetAdmission", "campaign limits"));
+  }
   if ((protocolVersion ?? 0) < (control.boundary.issueAuthority ? 217 : 215) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
   return { supported: true };
 }
