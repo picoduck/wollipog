@@ -1,7 +1,7 @@
 /**
  * Codex's form of the managed-worktree guard (#1377), updated by #1488.
  *
- * Current trust contract (codex-cli 0.164.0, 2026-10-27): a matching trusted_hash runs the guard
+ * Current trust contract (codex-cli 0.166.0, 2026-10-30): a matching trusted_hash runs the guard
  * on the real TUI, exec and app-server without a trust bypass. A foreign untrusted hook stays
  * gated; a stale hash silently skips ours. scripts/codex-guard-hook-probe.ts records both hook
  * calls and execution outcomes. Provisioning reads currentHash, trusts only our hook key, then
@@ -37,8 +37,8 @@ export const CODEX_GUARD_DRIVERS: ReadonlySet<string> = new Set(["codex", "codex
 /** Invocation-wide trust, restricted to the verified TUI fallback. Inert on app-server. */
 export const CODEX_HOOK_TRUST_BYPASS_FLAG = "--dangerously-bypass-hook-trust";
 
-/** Full matrix measured at 0.155.1, 0.157.0, 0.158.0, 0.159.0, 0.159.2, 0.160.0, 0.162.1, 0.163.0, 0.164.0. */
-export const CODEX_GUARD_TRUST_VERSION_RANGE = ">=0.155.1 <0.164.1";
+/** Full matrix measured at 0.155.1, 0.157.0, 0.158.0, 0.159.0, 0.159.2, 0.160.0, 0.162.1, 0.163.0, 0.164.0, 0.165.0, 0.166.0. */
+export const CODEX_GUARD_TRUST_VERSION_RANGE = ">=0.155.1 <0.166.1";
 
 function hookTrustVersion(userAgent: unknown): string | undefined {
   // The originator can be overridden by Codex's caller; it is not part of the version proof.
@@ -51,8 +51,8 @@ export function codexGuardHashTrustVersionSupported(version: string | undefined)
   if (!version || !/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(version)) return false;
   const parts = version?.split(".").map(Number);
   return parts?.length === 3 && parts.every(Number.isSafeInteger) && parts[0] === 0 &&
-    parts[1]! >= 155 && parts[1]! <= 164 &&
-    (parts[1] !== 155 || parts[2]! >= 1) && (parts[1] !== 164 || parts[2] === 0);
+    parts[1]! >= 155 && parts[1]! <= 166 &&
+    (parts[1] !== 155 || parts[2]! >= 1) && (parts[1] !== 166 || parts[2] === 0);
 }
 
 const CODEX_GUARD_OVERRIDE_PREFIX = "hooks.PreToolUse=";

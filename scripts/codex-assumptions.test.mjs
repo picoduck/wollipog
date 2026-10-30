@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { acknowledgeUnavailable, collectResult, guardRangeResult, markdown, reportExit, reportFresh, parseVersion, PROBES, EXCLUSIONS } from "./codex-assumptions.mjs";
-import { isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
-import { CASES, fixtureHomeBase, hardeningRestorable, SANDBOX_CONTROL_ARGS, sandboxFailureDetail, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
+import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput } from "../apps/runner/scripts/codex-probe-support.ts";
+import { CASES, caseMatches, fixtureHomeBase, hardeningRestorable, SANDBOX_CONTROL_ARGS, sandboxFailureDetail, sandboxNamespaceUnavailable } from "../apps/runner/scripts/codex-escalation-probe.ts";
 import { withoutMcpApproval } from "../apps/runner/scripts/codex-mcp-wait-probe.ts";
 import { additiveCodexMcpServerArg, sessionCodexMcpServerArg, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC } from "../apps/runner/src/orchestrator-preset.ts";
 
@@ -141,27 +141,57 @@ test("sandbox startup failure is not mistaken for a measured filesystem denial",
 
 test("withheld hardening becomes re-enablable only with retained network and every denial/approval control", () => {
   const marker = "fixture-marker";
-  const outputs = new Map(CASES.map(c => [c.name, c.expect === "denied" ? "Permission denied" :
+  const outcome = (c, output) => ({ output, guardianRequests: c.guardian ? 1 : 0 });
+  const outputs = new Map(CASES.map(c => [c.name, outcome(c, c.expect === "denied" ? "Permission denied" :
     c.expect === "declined" ? "declined" : c.expect === "markerRead" ? marker :
-      c.expect === "network" || c.escalate ? "NETOK!!" : "NETBLOCKED"]));
+      c.expect === "network" || c.escalate ? "NETOK!!" : "NETBLOCKED")]));
   assert.equal(hardeningRestorable(outputs, marker), true);
   for (const c of CASES) {
     const incomplete = new Map(outputs); incomplete.delete(c.name);
     assert.equal(hardeningRestorable(incomplete, marker), false, `missing control ${c.name}`);
   }
   const denied = CASES.find(c => c.expect === "denied");
-  const namespaceFailure = new Map(outputs); namespaceFailure.set(denied.name, "bwrap: Operation not permitted");
+  const namespaceFailure = new Map(outputs); namespaceFailure.set(denied.name, outcome(denied, "bwrap: Operation not permitted"));
   assert.equal(hardeningRestorable(namespaceFailure, marker), false);
-  const approved = CASES.find(c => c.sandbox === "profile" && c.escalate && c.expect === "noNetwork");
-  const stillBroken = new Map(outputs); stillBroken.set(approved.name, "NETBLOCKED");
+  const approved = CASES.find(c => c.sandbox === "profile" && c.escalate && c.expect === "noNetwork" && !c.guardian);
+  const stillBroken = new Map(outputs); stillBroken.set(approved.name, outcome(approved, "NETBLOCKED"));
   assert.equal(hardeningRestorable(stillBroken, marker), false);
+  // A Guardian denial the fixture never answered is a failed review, not a measured control.
+  const guardianDenied = CASES.find(c => c.guardian === "deny");
+  const unreviewed = new Map(outputs); unreviewed.set(guardianDenied.name, { output: "declined", guardianRequests: 0 });
+  assert.equal(hardeningRestorable(unreviewed, marker), false);
+});
+
+test("Guardian requests are recognised by their subagent header or the auto-review model", () => {
+  // codex-cli 0.166.0 with a custom provider: the session's model, marked by the header.
+  assert.equal(isGuardianRequest({ "x-openai-subagent": "guardian" }, { model: "probe-model" }), true);
+  // codex-cli 0.155.1: the dedicated model, and the same header.
+  assert.equal(isGuardianRequest({ "x-openai-subagent": "guardian" }, { model: "codex-auto-review" }), true);
+  assert.equal(isGuardianRequest({}, { model: "codex-auto-review" }), true);
+  assert.equal(isGuardianRequest({}, { model: "probe-model" }), false);
+  assert.equal(isGuardianRequest({ "x-openai-subagent": "review" }, { model: "probe-model" }), false);
+});
+
+test("an escalation case routed through Guardian matches only when the fixture answered Guardian", () => {
+  const marker = "fixture-marker";
+  for (const c of CASES.filter(c => c.guardian)) {
+    const output = c.expect === "declined" ? "declined" : c.expect === "network" ? "NETOK!!" : "NETBLOCKED";
+    assert.equal(caseMatches(c, { output, guardianRequests: 1 }, marker), true, c.name);
+    // Codex 0.166.0 under the old fixture: Guardian's request went unrecognised, its review failed,
+    // and "Guardian denied" still read "declined". That must never count as a match.
+    assert.equal(caseMatches(c, { output, guardianRequests: 0 }, marker), false, c.name);
+  }
+  for (const c of CASES.filter(c => !c.guardian && c.expect === "declined")) {
+    assert.equal(caseMatches(c, { output: "declined", guardianRequests: 0 }, marker), true, c.name);
+    assert.equal(caseMatches(c, { output: "declined", guardianRequests: 1 }, marker), false, c.name);
+  }
 });
 
 test("a successful unknown-version guard measurement proposes widening without changing admission", () => {
-  assert.equal(guardRangeResult("0.164.0", { status: "unchanged" }).status, "unchanged");
-  assert.equal(guardRangeResult("0.164.1", { status: "unchanged" }).status, "measured OK, range can be widened");
-  assert.equal(guardRangeResult("0.164.1", { status: "changed" }).status, "changed");
-  assert.equal(guardRangeResult("0.164.1", { status: "could not run" }).status, "could not run");
+  assert.equal(guardRangeResult("0.166.0", { status: "unchanged" }).status, "unchanged");
+  assert.equal(guardRangeResult("0.166.1", { status: "unchanged" }).status, "measured OK, range can be widened");
+  assert.equal(guardRangeResult("0.166.1", { status: "changed" }).status, "changed");
+  assert.equal(guardRangeResult("0.166.1", { status: "could not run" }).status, "could not run");
 });
 
 test("missing, incomplete, future and stale reports cannot look fresh", () => {
