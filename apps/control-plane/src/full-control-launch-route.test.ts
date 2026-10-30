@@ -12,7 +12,9 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import { firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
+import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
+import { campaignBehaviorValues } from "./campaign-behavior.js";
+import { randomUUID } from "node:crypto";
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
@@ -1752,5 +1754,51 @@ test("a completed receipt arriving first settles the first message by its identi
       commandId: laterSent.commandId, sessionId: later, state: "completed", duplicate: true,
       revision: f.db.getSessionPromptCommand(laterSent.commandId)!.revision + 1 });
     assert.equal(f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Follow-Ups change while the first message is delivering keeps the launch's follow-up limit when that delivery fails and the next arrives (#3580 CR-1.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // A taskless Full Control launch with Recommend Only: it authorizes no follow-up without approval.
+    const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "recommend_only" } } } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "recommend-only-first", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const id = admitted.json().id as string;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 0);
+
+    // The owner's first message reaches the delivering state, exactly as the prompt path takes it there.
+    const launched = f.db.getSession(id)!.orchestratorPolicy!;
+    const waiting = launched.firstMessageScope as { state: "pending"; derivedLimits: { acceptedFollowUps: boolean; maxIssues: boolean } };
+    assert.deepEqual(waiting.derivedLimits, { acceptedFollowUps: true, maxIssues: true });
+    const revision = f.db.parentControlPolicy(id)!.revision;
+    const text = "Fix #12";
+    const now = Date.now();
+    const scope = { repository: launched.issueScope!.repository, issueNumbers: [12], revision: launched.issueScope!.revision + 1,
+      authorizedByUserId: f.human.userId, authorizedAt: now };
+    assert.equal(f.db.establishFirstMessageScope(id, { control: { mode: "full_control", boundary: firstMessageBoundary(boundaryOf(f, id),
+      launched.behavior.followUps, [12], firstMessageObjective(text), revision + 1, scope.revision, now, waiting.derivedLimits) },
+    scope, messageDigest: firstMessageDigest(text), deliveryId: `first_message_${randomUUID()}`, expectedRevision: revision, now }), true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering");
+
+    // While it is delivered, the person switches Follow-Ups to Execute Approved.
+    const edited = f.sessions.setCampaignBehavior(id, { expectedRevision: 0,
+      behavior: { ...campaignBehaviorValues(launched), followUps: "execute_approved" } }, { kind: "human", id: f.human.userId }, () => null);
+    assert.equal(edited.ok, true, edited.error ?? "");
+
+    // The delivery fails, and the next first message is admitted through the real prompt path.
+    assert.equal(f.db.settleFirstMessageDelivery(id, firstMessageDigest(text), false, Date.now()), true);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    const after = boundaryOf(f, id);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+    assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "the boundary keeps the follow-up limit the launch authorized");
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "and so does the campaign allowance");
+    assert.equal(after.issueAuthority!.maxIssues, 2, "Maximum Issues grows only with the issues, not with derived follow-ups");
   } finally { await server.close(); f.db.close(); }
 });

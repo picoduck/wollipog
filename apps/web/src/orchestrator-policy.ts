@@ -11,6 +11,7 @@ import {
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type ParentControlMode,
+  type RunnerView,
 } from "@wollipog/protocol";
 import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "./agent-presentation.js";
 import { SKILLS_UNAVAILABLE_ON_TARGET } from "./components/SkillsUnavailableNotice.js";
@@ -592,6 +593,32 @@ export function policySummaryFacts(draft: OrchestratorPolicyDraft, evaluation: O
       : delegated === 0 ? "No Decisions Delegated" : `${delegated} ${delegated === 1 ? "Decision" : "Decisions"} Delegated` },
   ];
 }
+
+/** A child model's name as the Child Model selector shows it (#3580): the display name the first
+ * connected installation advertises, preferring one of the campaign's fixed Child Harness. The id
+ * stands in only when no installation names the model. */
+export function childModelDisplayName(
+  runners: Iterable<RunnerView>,
+  modelId: string,
+  harness?: { driver: AgentDriverKind } | null,
+): string {
+  let other: string | undefined;
+  for (const runner of runners) {
+    for (const agent of runner.agents) {
+      const name = agent.capabilities?.models.find((model) => model.id === modelId)?.displayName;
+      if (!name) continue;
+      if (!harness || agent.driver === harness.driver) return name;
+      other ??= name;
+    }
+  }
+  return other ?? modelId;
+}
+
+/** Under Full Control, what Execute Approved means against the follow-up limit #3826 made an
+ * approval threshold, wherever Follow-Ups is chosen: the limit counts follow-ups that start without
+ * approval. */
+export const FULL_CONTROL_FOLLOW_UPS_NOTE = "Under Full Control, follow-ups up to Follow-Ups Without Approval start " +
+  "on their own. Past that limit, each waits for your approval. Change the limit in Campaign Status.";
 
 /** "1 change", "3 changes": the summary's count of what differs from the defaults. */
 export function changesLabel(count: number): string {

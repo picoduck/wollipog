@@ -55,8 +55,8 @@ only) establishes the boundary before the Orchestrator's first turn:
 - The next issue-scope revision, and the boundary revision that names it, commit together in one
   compare-and-set on the policy revision (`establishFirstMessageScope`). Every authorization
   (launch, enable or a later reauthorization) records which limits it derived (`derivedLimits`, no
-  Human override), replacing any earlier record. Only a derived Accepted Follow-Ups or
-  Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
+  Human override), replacing any earlier record. Only a derived Follow-Ups Without Approval (the
+  follow-up limit: past it, each follow-up waits for the person's approval) or Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
   explicit ceiling never changes, and an explicit Maximum Issues bounds how many referenced issues
   enter the scope. Operations, policy asks, evidence and cost or tool ceilings are unchanged.
 - The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
@@ -142,8 +142,8 @@ derives everything else:
   task (or the issue list); the root installation defaults to the controlled reviewer's Claude
   Code installation, else the first available native Claude Code or Codex App Server one, and
   the root joins the workspace's Project.
-- Concurrency from `behavior.maximumConcurrentChildren`; accepted follow-ups from the saved
-  follow-up policy (none for Recommend Only); closure reasons default to completed. Each of the
+- Concurrency from `behavior.maximumConcurrentChildren`; Follow-Ups Without Approval (the follow-up
+  limit, an approval threshold since #3826) from the saved follow-up policy (none for Recommend Only); closure reasons default to completed. Each of the
   cost and tool-call ceilings is this request's override, else the Human's saved Full Control
   campaign budget (`campaignBudget` in Orchestrator defaults; omitted by older clients, cleared by
   `null`), else absent. An absent ceiling is a first-class "no limit" state, never a fake large

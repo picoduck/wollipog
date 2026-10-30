@@ -62,10 +62,11 @@ const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnima
   .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
 /** Under Full Control the dialog shows only its mode, its line and its action (#2940): the boundary
- * owns every gate, so no Custom owner, request choice, evidence note or stored behavior is shown. */
-async function expectFullControlOnly(page: Page) {
+ * owns every gate, so no Custom owner, request choice or evidence note is shown. Once Full Control is
+ * in effect Campaign Behavior stays, since it governs every child the campaign creates (#3580). */
+async function expectFullControlOnly(page: Page, { inEffect }: { inEffect: boolean }) {
   const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
-  await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control"]);
+  await expect(dialog.locator(".section-title")).toHaveText(inEffect ? ["Orchestrator Control", "Campaign Behavior"] : ["Orchestrator Control"]);
   await expect(dialog.getByRole("radiogroup", { name: "PR Merge Approval", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("radiogroup", { name: "Child Session Requests", exact: true })).toHaveCount(0);
   await expect(dialog.getByText("The Orchestrator runs this campaign end to end.").first()).toBeVisible();
@@ -104,7 +105,7 @@ async function editSessionPolicy(page: Page, tab: "Behavior" | "Decisions", edit
 
 /** Full Control adds nothing to fill in or review (#2940): no task, issues, limits, readiness or summary. */
 async function expectNoFullControlForm(page: Page) {
-  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"]) {
+  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Follow-Ups Without Approval", "Maximum Issues"]) {
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
   }
   for (const copy of [/Authorize and Start/, /Describe the task/, /Ready to (?:Authorize|Enable)/, /Can't (?:Start|Enable) Yet/, /Campaign Limits/, /No Limit/]) {
@@ -250,7 +251,7 @@ for (const viewport of viewports) {
       await page.getByRole("radio", { name: "Full Control", exact: true }).click();
       await expect(page.getByText(FULL_CONTROL_LINE)).toBeVisible();
       await expectNoFullControlForm(page);
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: false });
       const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
       const footer = page.locator(".modal-foot");
       await expect(footer.getByRole("button")).toHaveText(["Done", "Enable Full Control"]);
@@ -261,7 +262,7 @@ for (const viewport of viewports) {
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: true });
       await expect(footer.getByRole("button")).toHaveText(["Done"]);
       await shoot(page, heading, `${prefix}-enabled.png`);
       expect(bodies).toEqual([{}]);
@@ -285,7 +286,7 @@ for (const viewport of viewports) {
       await expect(alert).toContainText("This campaign pauses new children; raise Live Child Limit in Guardrails to enable Full Control.");
       await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
       await expectNoFullControlForm(page);
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: false });
       await expect(enable).toBeInViewport();
       await shoot(page, alert, `${captures}/paused-${viewport.name}-${theme}-blocked.png`);
     });
@@ -301,7 +302,7 @@ for (const viewport of viewports) {
     await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
     const heading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
     await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
-    await expectFullControlOnly(page);
+    await expectFullControlOnly(page, { inEffect: true });
     await shoot(page, heading, `${captures}/revoke-${viewport.name}-${theme}-full.png`);
     await page.getByRole("button", { name: "Revoke Full Control", exact: true }).click();
     await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
@@ -410,3 +411,38 @@ test.describe("limit entry lifecycle", () => {
     await expect(cost).toHaveValue("40");
   });
 });
+
+/** #3580 with #3826: the follow-up limit is an approval threshold, so wherever Follow-Ups is chosen
+ * under Full Control it is named Follow-Ups Without Approval and explained, and the launch still adds
+ * no follow-up field to fill in (the old "Accepted Follow-Ups" field left with #3590). */
+for (const viewport of viewports) {
+  test(`follow-ups ${viewport.name}: under Full Control, Execute Approved explains Follow-Ups Without Approval`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const prefix = `${captures}/follow-ups-${viewport.name}`;
+    await routeSettings(page, []);
+    await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=dark`);
+    await openSessionOptions(page);
+    await page.getByRole("button", { name: "Customize…" }).click();
+    const policy = page.getByRole("dialog", { name: "Orchestrator Policy" });
+    await policy.getByRole("tab", { name: /^Decisions/ }).click();
+    await policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click();
+    await policy.getByRole("tab", { name: /^Behavior/ }).click();
+    await policy.locator('[aria-label^="Follow-Ups:"]').click();
+    await page.getByRole("option", { name: /^Execute Approved/ }).click();
+    const note = policy.getByText(/Under Full Control, follow-ups up to Follow-Ups Without Approval start on their own\. Past that limit, each waits for your approval\. Change the limit in Campaign Status\./);
+    await expect(note).toBeVisible();
+    await expect(policy).not.toContainText("Accepted Follow-Ups");
+    await note.scrollIntoViewIfNeeded();
+    await page.mouse.move(0, 0);
+    await settle(page);
+    await page.screenshot({ path: `${prefix}-policy.png` });
+
+    await policy.getByRole("button", { name: "Apply Policy" }).click();
+    await expect(policy).toHaveCount(0);
+    const control = page.locator(".orchestrator-policy-summary");
+    await expect(control).toContainText("Full Control");
+    await expect(control).toContainText("Executes Approved Follow-Ups");
+    await expectNoFullControlForm(page);
+    await shoot(page, control, `${prefix}-launch.png`);
+  });
+}

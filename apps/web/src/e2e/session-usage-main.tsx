@@ -2,6 +2,8 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import { campaignWorkflowOwner, PERSONAL_ORGANIZATION_ID, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
   type RunnerView, type SessionConfig, type SessionEvent, type SessionView } from "@wollipog/protocol";
+import { ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS, PROTOCOL_VERSION, type OrchestratorCampaignBehaviorView,
+  type OrchestratorSettingsCapabilities, type UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -29,6 +31,30 @@ declare global {
  * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
  * `?live=1` adds a live tail event during the first prepend. */
 const params = new URLSearchParams(window.location.search);
+const FIXTURE_CODEX_HARNESS = { agentId: "codex-app-server", driver: "codex-app-server" as const, context: { kind: "native" as const } };
+const FIXTURE_CLAUDE_HARNESS = { agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const } };
+/** What the fixture's two machines offer for children (#3580). */
+const FIXTURE_CHILD_CAPABILITIES: OrchestratorSettingsCapabilities = {
+  harnesses: [
+    { ...FIXTURE_CLAUDE_HARNESS, name: "Claude Code", installations: 2, machines: 2,
+      models: [{ id: "claude-opus-5-5", displayName: "Claude Opus 5.5", efforts: ["low", "medium", "high", "xhigh"] },
+        { id: "claude-sonnet-5-5", displayName: "Claude Sonnet 5.5", efforts: ["low", "medium", "high"] }],
+      effortLevels: ["low", "medium", "high", "xhigh"],
+      supportedPairs: [{ modelId: "claude-opus-5-5", effortLevels: ["low", "medium", "high", "xhigh"] },
+        { modelId: "claude-sonnet-5-5", effortLevels: ["low", "medium", "high"] }] },
+    { ...FIXTURE_CODEX_HARNESS, name: "Codex", installations: 1, machines: 1,
+      models: [{ id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["low", "medium", "high"] }],
+      effortLevels: ["low", "medium", "high"], supportedPairs: [{ modelId: "gpt-6.1-sol", effortLevels: ["low", "medium", "high"] }] },
+  ],
+  models: [], effortLevels: [], supportedPairs: [], installations: 3, compatibleInstallations: 3, status: "available",
+};
+const FIXTURE_CHILD_RUNNER = {
+  runnerId: "runner-children", hostname: "children-host", os: "linux", version: "1", status: "online",
+  agents: FIXTURE_CHILD_CAPABILITIES.harnesses!.map((harness) => ({ id: harness.agentId, name: harness.name,
+    command: harness.agentId, args: [], env: {}, driver: harness.driver, available: true,
+    capabilities: { models: harness.models, effortLevels: harness.effortLevels, slashCommands: [], supportsImages: true, supportsApprovals: true } })),
+  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 67,
+} as RunnerView;
 if (params.has("theme")) document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
@@ -415,6 +441,11 @@ if (composerFixture) {
         delete session.orchestratorCampaign.control;
       }
     }
+    // `childHarness=codex` (#3580): a campaign launched with fixed Codex children, as the live one was.
+    if (params.get("childHarness") === "codex") {
+      Object.assign(session.orchestratorPolicy.behavior, { childHarness: FIXTURE_CODEX_HARNESS, childModel: "gpt-6.1-sol", childEffort: "high",
+        followUps: "recommend_only", completion: "retain" });
+    }
   }
   session.serviceTier = serviceTiers ? "fast" : null;
   session.contextWindow = 1_000_000;
@@ -584,7 +615,9 @@ const snapshotMessage: ControlPlaneToUi = {
     paginatedSessionHistory: false,
     projects: true,
   },
-  runners: [runner],
+  // `childHarness=codex` (#3580): a second machine whose installations name the child models, as
+  // the Child Model selector and the Campaign Behavior facts both show them.
+  runners: params.get("childHarness") === "codex" ? [runner, FIXTURE_CHILD_RUNNER] : [runner],
   boxes: [],
   projects: [],
   sessions: [session],
@@ -720,6 +753,39 @@ const client = {
       throw new ApiError("Parent Control policy revision is stale", 409);
     }
     session.parentControlPolicy = { revision: expectedRevision + 1, decisions };
+    return { ...session };
+  },
+  // Campaign Behavior (#3580): the edit form's values and catalog, and a compare-and-set save that marks
+  // each changed value as changed after launch. Source UI fixture only.
+  campaignBehavior: async () => {
+    const policy = session.orchestratorPolicy!;
+    const pick = <T,>(record: Record<string, T>) => Object.fromEntries(ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS.map((key) => [key, record[key]]));
+    return {
+      revision: policy.behaviorRevision ?? 0,
+      behavior: pick(policy.behavior as unknown as Record<string, unknown>),
+      sources: pick(policy.sources.behavior as unknown as Record<string, string>),
+      // `childMachines=offline` (#3580): no machine offers the campaign's fixed children now.
+      capabilities: params.get("childMachines") === "offline" ? {
+        harnesses: [{ ...FIXTURE_CODEX_HARNESS, name: "Codex", models: [], effortLevels: [], supportedPairs: [], installations: 0, machines: 0 }],
+        models: [], effortLevels: [], supportedPairs: [], installations: 0, compatibleInstallations: 0, status: "unavailable",
+        reason: "No connected machine supports this Child Harness, Child Model and Child Effort combination.",
+      } : FIXTURE_CHILD_CAPABILITIES,
+      runnerProtocolVersion: PROTOCOL_VERSION,
+    } as unknown as OrchestratorCampaignBehaviorView;
+  },
+  setCampaignBehavior: async (_id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    const policy = session.orchestratorPolicy!;
+    if (request.expectedRevision !== (policy.behaviorRevision ?? 0)) throw new ApiError("Campaign behavior changed; refresh and try again.", 409);
+    const behavior = { ...policy.behavior };
+    const sources = { ...policy.sources.behavior };
+    for (const key of ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS) {
+      if (JSON.stringify(behavior[key]) === JSON.stringify(request.behavior[key])) continue;
+      (behavior as Record<string, unknown>)[key] = request.behavior[key];
+      sources[key] = "active_campaign";
+    }
+    session.orchestratorPolicy = { ...policy, behavior, sources: { ...policy.sources, behavior: sources },
+      behaviorRevision: request.expectedRevision + 1 };
     return { ...session };
   },
   // Model Settings' choices (#2191): each patch is recorded, in order, so a spec can read what a

@@ -19,6 +19,8 @@ import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef } fr
 
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
+import { applyCampaignBehavior, campaignBehaviorProjection, changedCampaignBehavior, inheritCampaignBehavior } from "./campaign-behavior.js";
+import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } from "@wollipog/protocol";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
@@ -20344,6 +20346,7 @@ export class ControlPlaneDb {
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
+      behavior: campaignBehaviorProjection(policy),
       ...(() => {
         const video = policy.control?.mode === "full_control"
           ? this.campaignVideoReview(resolvedCampaignId, effectiveOwners.ui_evidence_approval) : null;
@@ -20485,6 +20488,35 @@ export class ControlPlaneDb {
     }
     this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
       .run(JSON.stringify(policy), now, id);
+  }
+
+  /** A person's change to a root campaign's child behavior (#3580), compare-and-set on its own
+   * behavior revision, written to the root and every nested Orchestrator in one transaction so they
+   * never disagree. The Parent Control revision, a Full Control boundary and every decision stay as
+   * they are: none of these values is part of the boundary. Returns the values that changed, or
+   * null when `expectedRevision` is stale. An unchanged request writes nothing. */
+  updateCampaignBehavior(rootId: string, behavior: OrchestratorCampaignBehavior, expectedRevision: number, now: number):
+    { changed: OrchestratorCampaignBehaviorKey[]; memberIds: string[] } | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      if (!policy || (policy.behaviorRevision ?? 0) !== expectedRevision) { this.db.exec("ROLLBACK"); return null; }
+      const changed = changedCampaignBehavior(policy, behavior);
+      if (changed.length === 0) { this.db.exec("ROLLBACK"); return { changed, memberIds: [] }; }
+      applyCampaignBehavior(policy, behavior, expectedRevision + 1, changed);
+      const write = this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?");
+      write.run(JSON.stringify(policy), now, rootId);
+      const memberIds = [rootId];
+      for (const id of this.campaignDescendantIds(rootId)) {
+        const member = this.sessionOrchestratorPolicy(id);
+        if (!member) continue;
+        inheritCampaignBehavior(member, policy);
+        write.run(JSON.stringify(member), now, id);
+        memberIds.push(id);
+      }
+      this.db.exec("COMMIT");
+      return { changed, memberIds };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
   parentControlPolicy(id: string): ParentControlPolicy | null {
@@ -31549,6 +31581,9 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (value.control !== undefined && !validCampaignControl(value.control)) return null;
   // Anything but the known marker keeps the narrower exact-agent match a pre-#3247 campaign had.
   if (value.childHarnessMatch !== undefined && value.childHarnessMatch !== "harness") delete value.childHarnessMatch;
+  if (value.behaviorRevision !== undefined && (!Number.isSafeInteger(value.behaviorRevision) || value.behaviorRevision < 0)) {
+    delete value.behaviorRevision;
+  }
   // Pre-v157 policies had no harness bind. Preserve their automatic-harness semantics and mark
   // the source as legacy rather than silently making a fixed choice during migration.
   if (value.behavior.childHarness === undefined) value.behavior.childHarness = null;

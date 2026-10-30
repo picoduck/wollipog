@@ -18035,6 +18035,17 @@ button.setting-row { cursor: pointer; }
   color: var(--text-faint);
   font: var(--type-small);
 }
+/* Campaign Behavior's edit form (#3580): the settings group, then Cancel and Save Changes at its end. */
+.campaign-behavior-edit {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.campaign-behavior-edit > .actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-2);
+}
 @media (max-width: 559px) {
   .orchestrator-gate > .seg {
     grid-column: 1 / -1;

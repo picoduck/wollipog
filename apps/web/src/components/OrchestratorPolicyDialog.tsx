@@ -16,6 +16,7 @@ import {
   CONTROL_MODE_OPTIONS,
   FULL_CONTROL_LINE,
   FOLLOW_UP_OPTIONS,
+  FULL_CONTROL_FOLLOW_UPS_NOTE,
   HUMAN_ONLY_DECISIONS,
   INTEGRATION_ISOLATION_OPTIONS,
   ORCHESTRATOR_DECISION_LABELS,
@@ -256,7 +257,9 @@ export function OrchestratorPolicyDialog({
       />
       <SelectRow
         title="Follow-Ups"
-        description={FOLLOW_UP_OPTIONS.find((option) => option.value === behavior.followUps)?.description}
+        description={draft.controlMode === "full_control" && behavior.followUps === "execute_approved"
+          ? `${FOLLOW_UP_OPTIONS.find((option) => option.value === behavior.followUps)?.description} ${FULL_CONTROL_FOLLOW_UPS_NOTE}`
+          : FOLLOW_UP_OPTIONS.find((option) => option.value === behavior.followUps)?.description}
         badge={mark("behavior.followUps", resetLabels.followUps)}
         options={FOLLOW_UP_OPTIONS}
         value={behavior.followUps}

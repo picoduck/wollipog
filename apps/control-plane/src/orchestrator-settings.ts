@@ -13,6 +13,7 @@ import {
   type AgentCapabilities,
   type AgentHarnessIdentity,
   type AgentModel,
+  type OrchestratorCampaignBehavior,
   type OrchestratorCampaignOverrides,
   type OrchestratorCampaignPolicy,
   type OrchestratorChildHarnessAgent,
@@ -317,7 +318,9 @@ export function impliesIntegrationIsolation(
 export class OrchestratorSettings {
   constructor(private readonly db: ControlPlaneDb) {}
 
-  private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults): OrchestratorSettingsCapabilities {
+  /** `exactRow`: a campaign created before #3247 admits only this exact agent row of its harness, so
+   * that harness offers only what this row advertises; every other harness is unaffected. */
+  private capabilities(principal: HumanPrincipal, defaults: OrchestratorDefaults, exactRow?: AgentHarnessIdentity): OrchestratorSettingsCapabilities {
     const onlineRunners = this.db.listRunnersForPrincipal(principal).filter((runner) => runner.status === "online");
     const installations = onlineRunners.flatMap((runner) =>
       // A saved child harness on the restart-only exec row still renders through the stale entry below.
@@ -330,7 +333,8 @@ export class OrchestratorSettings {
           name: agent.name,
           capabilities: agent.capabilities!,
         })),
-    );
+    ).filter((installation) => !exactRow || !sameHarness(installation.identity, exactRow) ||
+      exactAgentHarnessIdentityKey(installation.identity) === exactAgentHarnessIdentityKey(exactRow));
     const harnesses = harnessCatalogs(installations);
     if (defaults.behavior.childHarness && !harnesses.some((harness) =>
       sameHarness(harness, defaults.behavior.childHarness!))) {
@@ -413,6 +417,24 @@ export class OrchestratorSettings {
     return capabilities.status === "unavailable"
       ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON
       : null;
+  }
+
+  /** The capability catalog New Session's Orchestrator Policy offers, evaluated against a running
+   * campaign's child behavior instead of the person's defaults (#3580). `exactRow` is the agent row
+   * an exact-matching campaign keeps for its harness (CR-2.1). */
+  campaignCapabilities(principal: HumanPrincipal, behavior: OrchestratorCampaignBehavior,
+    exactRow?: AgentHarnessIdentity): OrchestratorSettingsCapabilities {
+    return this.capabilities(principal, { ...DEFAULT_ORCHESTRATOR_DEFAULTS,
+      behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, ...behavior } }, exactRow);
+  }
+
+  /** Why a running campaign can't take these fixed child values, by the rule saving defaults uses:
+   * at least one connected installation must support the whole combination. For an exact-matching
+   * campaign that keeps its harness, that installation is the exact row child creation admits. */
+  campaignBehaviorError(principal: HumanPrincipal, behavior: OrchestratorCampaignBehavior, exactRow?: AgentHarnessIdentity): string | null {
+    if (behavior.childHarness === null && behavior.childModel === null && behavior.childEffort === null) return null;
+    const capabilities = this.campaignCapabilities(principal, behavior, exactRow);
+    return capabilities.compatibleInstallations === 0 ? capabilities.reason ?? UNSUPPORTED_COMBINATION_REASON : null;
   }
 
   update(principal: HumanPrincipal, request: unknown, now = Date.now()): OrchestratorSettingsView {

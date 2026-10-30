@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type OrchestratorSettingsView } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type OrchestratorSettingsView, type RunnerView } from "@wollipog/protocol";
 import {
+  childModelDisplayName,
   changesLabel,
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -115,4 +116,19 @@ test("review policy fields track overrides, reset individually, and validate onl
   delete settings.reviewPolicySupported;
   assert.equal(evaluateOrchestratorPolicy(context(settings), missing).problems.some(p => p.path === "behavior.reviewHarness"), false);
   assert.equal(resetField(draft, settings.defaults, "behavior.reviewRoundBudget").values.behavior.reviewRoundBudget, null);
+});
+
+test("a child model reads as the selector names it, preferring the fixed harness, and its id only when nothing names it (#3580)", () => {
+  const agent = (driver: "claude-code" | "codex-app-server", id: string, displayName?: string) => ({ id: driver, name: driver, command: driver,
+    args: [], env: {}, driver, available: true, capabilities: { models: [{ id, ...(displayName ? { displayName } : {}) }], effortLevels: [],
+      slashCommands: [], supportsImages: false, supportsApprovals: true } });
+  const runners = [
+    { runnerId: "a", agents: [agent("codex-app-server", "shared", "Shared via Codex"), agent("claude-code", "unnamed")] },
+    { runnerId: "b", agents: [agent("claude-code", "shared", "Shared via Claude"), agent("claude-code", "claude-opus-5-5", "Claude Opus 5.5")] },
+  ] as unknown as RunnerView[];
+  assert.equal(childModelDisplayName(runners, "claude-opus-5-5"), "Claude Opus 5.5");
+  assert.equal(childModelDisplayName(runners, "shared", { driver: "claude-code" }), "Shared via Claude", "the fixed harness's own name wins");
+  assert.equal(childModelDisplayName(runners, "shared", { driver: "pi" }), "Shared via Codex", "another harness's name beats the raw id");
+  assert.equal(childModelDisplayName(runners, "unnamed"), "unnamed");
+  assert.equal(childModelDisplayName(runners, "gpt-6.1-sol"), "gpt-6.1-sol");
 });
