@@ -2512,11 +2512,20 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "campaign_issue_scope": {
-      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg).then(sendUp));
+      // The Orchestrator's own forge login and environment, as its agent would read the issues (#3539).
+      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "github_issue_closure": {
-      runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg).then(sendUp));
+      runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "campaign_forge_observe": {

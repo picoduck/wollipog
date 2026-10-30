@@ -279,6 +279,7 @@ import {
   AGENT_SPAWN_OBSERVATION_CAP,
   SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   TERMINAL_STATUSES,
+  campaignRepositoryLocation,
 } from "@wollipog/protocol";
 
 function harnessInstallationFamily(driver: AgentDriverKind | undefined): HarnessInstallationSelection["family"] | null {
@@ -31342,7 +31343,7 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
-  if (value.issueScope && (typeof value.issueScope.repository !== "string" || !/^[\w.-]+\/[\w.-]+$/u.test(value.issueScope.repository) ||
+  if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
       value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||
       !Number.isSafeInteger(value.issueScope.revision) || value.issueScope.revision < 1 ||

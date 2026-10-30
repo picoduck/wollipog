@@ -1,3 +1,5 @@
+import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
+
 /** A narrowing disclosure envelope, never a second evidence-access authority. Only the
  * authenticated human campaign admission may construct it. Agents cannot mint it from prompts. */
 export interface CampaignEvidenceAuthority {
@@ -39,7 +41,7 @@ export function validCampaignEvidenceAuthority(value: unknown): value is Campaig
     "campaignRootSessionId", "repository", "objective", "issueScopeRevision", "scope", "destination", "providers"]) ||
     value.version !== 1 || !positive(value.revision) || !positive(value.authorizedAt) ||
     !positive(value.issueScopeRevision) || !text(value.authorizedByUserId) || !text(value.campaignRootSessionId) ||
-    !text(value.repository) || !/^[\w.-]+\/[\w.-]+$/u.test(value.repository) ||
+    !text(value.repository) || !campaignRepositoryLocation(value.repository) ||
     !text(value.objective, 4000) || value.scope !== "relevant_task_evidence_only") return false;
   const d = value.destination;
   if (!record(d) || !exact(d, ["kind", "configurationId", "organizationId", "privacy", "disclosureRevision"]) ||

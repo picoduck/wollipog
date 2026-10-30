@@ -751,6 +751,10 @@ import type { DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 //      `providerHomeWait` on the starting session, instead of failing the launch. A refused
 //      conversation fork's `fork_result` carries the typed `providerHomeRefusal`. The control plane
 //      sends the wait request only to a v248+ runner; older peers keep failing busy launches.
+// 249: GitLab campaign issues (#3539): issue closure and campaign issue scope accept a host-qualified
+//      GitLab project. The runner reads and closes the issue with `glab` (a not-planned closure
+//      states its reason in a note), and a GitLab epic is its member checklist only. The control
+//      plane refuses GitLab closure or scope work on a pre-v249 runner. Publication stays GitHub-only.
 // 252: a worktree switch a session made itself continues automatically (#3810). The control plane
 //      marks a create/attach/select that the session's own agent credential requested with
 //      `requestedBySession`, and the runner then submits one continuation turn once the relaunch the
@@ -785,7 +789,7 @@ export {
 export const SESSION_SUMMARY_UI_PROTOCOL = 212;
 export const SKILL_REPORT_REQUEST_LIFETIME_MS = 30_000;
 export const MAX_SKILL_REPORT_REQUESTS = 64;
-export { boundedIssueNumbers, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
+export { boundedIssueNumbers, campaignIssueForgeUrl, epicChecklistMembers, normalizeCampaignIssueScopeSnapshot, validIssueAdmission, validIssueLineage } from "./campaign-issue-scope.js";
 export const UNIVERSAL_QUESTION_TEXT_MIN_PROTOCOL = 202;
 
 export type ArtifactUploadPreference = "manual" | "wollipog_automatic" | "external_hosting";
@@ -1092,6 +1096,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   githubMergeClosingReferences: 242,
   /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
   gitlabReviewSessions: 244,
+  /** v249 runner inspects, closes and scopes GitLab issues with `glab` (#3539). */
+  gitlabCampaignIssues: 249,
   /** Control plane retains and delivers a resolver's child-facing workflow-decision message. */
   workflowDecisionChildMessage: 166,
   /** Read exact descendant decisions and enumerate pending/approved decisions. */
@@ -1651,6 +1657,11 @@ export function sessionRoleConversionRequirement(protocolVersion: number | null 
 /** Changing a campaign's authorized issue scope; every participating Orchestrator's runner needs it. */
 export function campaignIssueScopeChangesRequirement(protocolVersion: number | null | undefined) {
   return runnerCapabilityRequirementError(protocolVersion, "campaignIssueScopeChanges", "campaign issue scope changes");
+}
+
+/** Issue closure and campaign issue scope for a GitLab repository (#3539). */
+export function gitlabCampaignIssuesRequirement(protocolVersion: number | null | undefined) {
+  return runnerCapabilityRequirementError(protocolVersion, "gitlabCampaignIssues", "GitLab campaign issues");
 }
 
 /** Full Control issue writes within a human-set issue limit. */

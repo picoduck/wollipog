@@ -21,7 +21,7 @@ import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullContro
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
-import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope } from "./campaign-issue-scope.js";
+import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, reservedPublicationSlots, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPullRequestRef } from "@wollipog/protocol";
@@ -972,6 +972,8 @@ export function normalizeWorkflowDecisionSnapshot(
       dependentPullRequests: { checkedAt: checked, open: [] } });
   }
   if (category === "follow_up_issue_publication") {
+    // #3539: GitLab issues can be closed and scoped, but follow-up publication stays GitHub-only.
+    if (campaignRepositoryLocation(value.repository)?.forge === "gitlab") return fail("Campaign issue publication supports GitHub repositories only");
     const repo = repository();
     if (!repo || !boundedDecisionString(value.sanitizedTitle, 256) ||
         !boundedDecisionString(value.sanitizedBody, 65_536) || !Array.isArray(value.labels) ||
@@ -5440,7 +5442,8 @@ export class SessionsService {
       const response = await this.hub.requestFromRunner(root.runnerId, requestId,
         { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId }, 30_000);
       if (response.type === "campaign_issue_scope_result" && response.ok && response.sessionId === sessionId &&
-          typeof response.repository === "string" && /^[\w.-]+\/[\w.-]+$/u.test(response.repository)) repository = response.repository.toLowerCase();
+          typeof response.repository === "string" && campaignRepositoryLocation(response.repository) &&
+          !gitlabIssueCompatibility(this.db, root, response.repository)) repository = response.repository.toLowerCase();
     } catch { /* An unreachable runner verifies no repository. */ }
     if (!repository) return null;
     // Transcript messages record no author, and a restart backfill reads the transcript, so only
@@ -9983,15 +9986,18 @@ export class SessionsService {
       if (seed !== undefined && response.type === "campaign_issue_scope_result" && !response.ok) {
         const fallbackId = `issue_scope_repository_${randomUUID()}`;
         response = await this.hub.requestFromRunner(root.runnerId, fallbackId, { type: "campaign_issue_scope", operation: "inspect", requestId: fallbackId, sessionId: root.id }, 30_000);
-        candidateMessage = "Could not resolve the epic's members within the bounded inspection. Check GitHub access and the member list, or enter an explicit set of repository-qualified issues below.";
+        candidateMessage = "Could not resolve the epic's members within the bounded inspection. Check GitHub or GitLab access and the member list, or enter an explicit set of repository-qualified issues below.";
       }
       if (response.type === "campaign_issue_scope_result" && response.sessionId === root.id && !response.ok &&
           response.failure === "unsupported_execution_target") {
         return fail(campaignScopeTargetFailureMessage(response.targetFailureReason), 409);
       }
       if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
-          !response.repository || !/^[\w.-]+\/[\w.-]+$/u.test(response.repository) ||
-          stored && stored.repository.toLowerCase() !== response.repository.toLowerCase()) return fail("Cannot verify the campaign repository and members. Check the runner's GitHub origin and gh authentication, then retry.", 409);
+          !response.repository || !campaignRepositoryLocation(response.repository) ||
+          stored && stored.repository.toLowerCase() !== response.repository.toLowerCase()) return fail("Cannot verify the campaign repository and members. Check the runner's GitHub or GitLab origin and gh or glab authentication, then retry.", 409);
+      // #3539: a GitLab repository needs every participating runner to read GitLab issues.
+      const gitlab = gitlabIssueCompatibility(this.db, root, response.repository);
+      if (gitlab) return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), supported: false, ...compatibilityFields(gitlab) });
       return ok({ ...scopeView(this.db, root, response.repository.toLowerCase()), candidates: response.candidates ?? [], ...(candidateMessage ? {candidateMessage} : {}) });
     } catch { return fail("Campaign scope inspection requires an online runner with GitHub access. Reconnect the runner and retry.", 409); }
   }
@@ -10004,6 +10010,8 @@ export class SessionsService {
     if (unsupported) return capabilityFail(unsupported);
     const view = await this.campaignIssueScope(sessionId, undefined, canAccess, false);
     if (!view.ok || !view.data) return failAs(view);
+    const gitlab = gitlabIssueCompatibility(this.db, root, view.data.repository);
+    if (gitlab) return capabilityFail(gitlab);
     if (!view.data.supported) return fail(view.data.compatibilityMessage ?? "Campaign issue scope changes are unavailable.", 409);
     if (request?.expectedRevision !== view.data.revision) return fail("Campaign scope changed. Refresh and propose against the current revision.", 409);
     for (const member of scopeParticipants(this.db, root)) {
@@ -10019,7 +10027,7 @@ export class SessionsService {
         { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId, issues: snapshot.additions }, 60_000);
       if (response.type !== "campaign_issue_scope_result" || !response.ok || response.sessionId !== sessionId ||
           response.repository?.toLowerCase() !== snapshot.repository ||
-          !snapshot.additions.every((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository))) return fail("GitHub could not verify every proposed addition in the campaign repository.", 409);
+          !snapshot.additions.every((n) => response.candidates?.some((c) => c.issue.number === n && c.issue.repository.toLowerCase() === snapshot.repository))) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
       const latest = this.db.getSession(sessionId);
       if (!latest || (latest.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) return fail("Campaign scope changed during inspection; refresh and propose again.", 409);
       if (human) {
@@ -10131,6 +10139,9 @@ export class SessionsService {
     }
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
+    // #3539: closing a GitLab issue needs a runner that reads and closes GitLab issues.
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, session.orchestratorPolicy.issueScope?.repository);
+    if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (issueBoundary(session)) {
       const compatibility = scopeCompatibility(this.db, session);
       if (compatibility) return capabilityFail(compatibility);
@@ -10158,6 +10169,8 @@ export class SessionsService {
           ? inspected.error : "runner could not inspect the issue and its related open pull requests", 409);
       }
       if (session.orchestratorPolicy.issueScope && inspected.inspection.repository.toLowerCase() !== session.orchestratorPolicy.issueScope.repository) return fail("The runner repository changed from the authorized campaign scope; restore the repository and retry.", 409);
+      const inspectedGitlab = gitlabIssueCompatibility(this.db, session, inspected.inspection.repository);
+      if (inspectedGitlab) return capabilityFail(inspectedGitlab);
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
       const { state: _state, ...inspection } = inspected.inspection;
@@ -10233,6 +10246,8 @@ export class SessionsService {
     }
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
     if (unsupported) return unsupported;
+    const gitlabUnsupported = gitlabIssueCompatibility(this.db, session, snapshot.repository);
+    if (gitlabUnsupported) return capabilityFail(gitlabUnsupported);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline; no closure was attempted", 409);
     if (decision.authority === "orchestrator") await this.refreshClosureForge(sessionId, snapshot.issue);
     if (decision.authority === "orchestrator" && (!snapshot.issueAdmission || issueEvidenceDigest(closureEvidence(this.db, session, snapshot)) !== snapshot.issueAdmission.evidenceDigest)) return fail("Verified closure delivery or disposition changed; request a new exact closure", 409);
@@ -10680,7 +10695,7 @@ export class SessionsService {
       if (authority === "human" && (!actor.id || !audience || !this.db.isSessionOwner({ userId: actor.id, organizationId: audience.organizationId }, childSessionId))) {
         return fail("Only the campaign owner can approve changes to authorized issue scope", 403);
       }
-      const unsupported = scopeCompatibility(this.db, currentChild);
+      const unsupported = scopeCompatibility(this.db, currentChild, snapshot.repository);
       if (unsupported) return capabilityFail(unsupported);
       const request: CampaignIssueScopeRequest = { requestId: decision.requestId, expectedRevision: snapshot.expectedRevision,
         additions: snapshot.additions.map((number) => ({ repository: snapshot.repository, number })),

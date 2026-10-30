@@ -333,6 +333,9 @@ test("PROTOCOL_VERSION is 252", () => {
   // A v243 runner cannot bind a review session to a GitLab merge request (#3539).
   assert.equal(runnerSupportsProtocol(243, "gitlabReviewSessions"), false);
   assert.equal(runnerSupportsProtocol(244, "gitlabReviewSessions"), true);
+  // A v248 runner cannot inspect, close or scope GitLab issues (#3539).
+  assert.equal(runnerSupportsProtocol(248, "gitlabCampaignIssues"), false);
+  assert.equal(runnerSupportsProtocol(249, "gitlabCampaignIssues"), true);
   assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
   assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
   // A v238 runner cannot answer the GitLab merge preflight (#3602).
