@@ -87,8 +87,8 @@ export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
 export type CampaignScopeAdmissionFailure =
   | "capacity_exhausted" | "lineage_missing" | "epic_not_authorized" | "epic_members_unverified"
   | "follow_ups_not_authorized" | "follow_up_not_single" | "publication_not_found" | "publication_not_consumed"
-  | "publication_already_admitted" | "publication_unapproved" | "publication_approver_not_owner" | "publication_authority_changed"
-  | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch";
+  | "publication_already_admitted" | "publication_unapproved" | "publication_approved_under_earlier_boundary" | "publication_approver_not_owner"
+  | "publication_authority_changed" | "recommendation_not_found" | "recommendation_not_accepted" | "resulting_issue_mismatch" | "origin_outside_scope" | "payload_mismatch";
 
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
@@ -104,6 +104,8 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
   publication_not_consumed: { status: 409, message: "The named publication has not been consumed; publish its approved payload before admitting the issue." },
   publication_already_admitted: { status: 409, message: "The named publication was already used to admit an issue; each publication admits one issue once." },
   publication_unapproved: { status: 409, message: "The named publication has neither a bounded admission nor a recorded approval by a person; use fresh human scope review." },
+  publication_approved_under_earlier_boundary: { status: 403, message: "The named publication was approved before the current Full Control authorization, " +
+    `so its objective is unproven; ${HUMAN_SCOPE_ROUTE}.` },
   publication_approver_not_owner: { status: 403, message: "The named publication was approved by a person who is neither the Full Control boundary's author " +
     `nor an owner of this campaign; ${HUMAN_SCOPE_ROUTE}.` },
   publication_authority_changed: { status: 403, message: "The publication's original human/objective authority does not match the current boundary; use fresh human scope review" },

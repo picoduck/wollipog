@@ -5504,6 +5504,9 @@ export interface GovernanceAuditEntry {
     rationaleDigest?: string;
     /** v166: digest of the child-facing message; its text lives only on the decision. */
     childMessageDigest?: string;
+    /** #2940: the Full Control issue boundary a person's approval of a follow-up publication was
+     * made under, written by the server from the controller's boundary, never from a request. */
+    publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string };
   };
   timestamp: number;
 }

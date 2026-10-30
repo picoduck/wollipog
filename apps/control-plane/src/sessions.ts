@@ -10173,9 +10173,14 @@ export class SessionsService {
             if (this.db.admittedCampaignPublicationIssue(sessionId, grant.occurrenceId) !== null) return refuse("publication_already_admitted");
             const publication = grant.resourceSnapshot;
             // A bounded grant carries its own delegated authority. A publication without one counts
-            // only when a person approved its exact payload and could approve this scope directly:
-            // the boundary's author or a campaign owner. Any other approver grants nothing.
-            let approval: { kind: "human"; approvedByUserId: string; basis: "boundary_author" | "campaign_owner" } | undefined;
+            // only when a person approved its exact payload under the current objective and could
+            // approve this scope directly: the boundary's author or a campaign owner. The objective is
+            // proven when the approval followed the current authorization, or when the boundary the
+            // server recorded with it has the current author and objective, as publicationAuthority
+            // proves it for a bounded grant across a same-objective re-mint. Otherwise only fresh
+            // human scope review can admit the issue.
+            let approval: { kind: "human"; approvedByUserId: string; approvedAt: number; basis: "boundary_author" | "campaign_owner";
+              objective: "current_authorization" | "recorded_boundary" } | undefined;
             if (publication.issueAdmission) {
               const authority = publication.issueAdmission.publicationAuthority;
               if (publication.issueAdmission.boundaryRevision !== boundary.revision && (!authority || authority.authorizedByUserId !== boundary.authorizedByUserId ||
@@ -10183,9 +10188,13 @@ export class SessionsService {
             } else {
               const approver = this.db.workflowDecisionHumanApprover(grant);
               if (!approver) return refuse("publication_unapproved");
-              const basis = approver === boundary.authorizedByUserId ? "boundary_author" : this.db.campaignOwnerUser(sessionId, approver) ? "campaign_owner" : null;
+              const recorded = approver.publicationAuthority;
+              const objective = approver.approvedAt >= boundary.authorizedAt ? "current_authorization"
+                : recorded?.authorizedByUserId === boundary.authorizedByUserId && recorded.objectiveDigest === issueEvidenceDigest(boundary.objective) ? "recorded_boundary" : null;
+              if (!objective) return refuse("publication_approved_under_earlier_boundary");
+              const basis = approver.userId === boundary.authorizedByUserId ? "boundary_author" : this.db.campaignOwnerUser(sessionId, approver.userId) ? "campaign_owner" : null;
               if (!basis) return refuse("publication_approver_not_owner");
-              approval = { kind: "human", approvedByUserId: approver, basis };
+              approval = { kind: "human", approvedByUserId: approver.userId, approvedAt: approver.approvedAt, basis, objective };
             }
             const bound = scopePublicationRecommendation(this.db, sessionId, publication, snapshot.additions[0]!);
             if ("failure" in bound) return refuse(bound.failure);
@@ -10199,7 +10208,7 @@ export class SessionsService {
             evidence = { occurrenceId: grant.occurrenceId, payloadDigest: grant.resourceDigest, issue: snapshot.additions[0], ...(approval ? { approval } : {}) };
             this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
               boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: "follow_up", publicationOccurrenceId: grant.occurrenceId,
-              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis } : {}), outcome: "admitted" }));
+              publicationAuthority: approval ? "human_approval" : "bounded_admission", ...(approval ? { approvalBasis: approval.basis, approvalObjective: approval.objective } : {}), outcome: "admitted" }));
           }
         }
         snapshot.issueAdmission = { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest(evidence) };
@@ -12681,6 +12690,14 @@ export class SessionsService {
     const evidenceDigests = decision.resourceSnapshot.category === "ui_evidence_approval"
       ? decision.resourceSnapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, sha256: item.sha256 }))
       : undefined;
+    // A person's approval of a follow-up publication records the issue boundary it was made under
+    // (#2940), from the controller's current boundary, so a later same-author, same-objective
+    // re-mint can still prove that approval's objective when its issue is admitted to scope.
+    const controller = decision.category === "follow_up_issue_publication" && decision.authority === "human" &&
+      outcome === "allowed" && stage === "resolution" && actor.kind === "human" ? this.db.getSession(decision.controllingSessionId) : null;
+    const approvalBoundary = controller ? issueBoundary(controller) : null;
+    const publicationAuthority = approvalBoundary
+      ? { authorizedByUserId: approvalBoundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(approvalBoundary.objective) } : undefined;
     this.db.appendGovernanceAudit({
       requestId: decision.occurrenceId,
       approvalKind: "workflow_decision",
@@ -12712,6 +12729,7 @@ export class SessionsService {
         ...(resolvingRecord && decision.childMessage
           ? { childMessageDigest: auditDigest(decision.childMessage)! }
           : {}),
+        ...(publicationAuthority ? { publicationAuthority } : {}),
       },
       timestamp: now,
     });

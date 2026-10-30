@@ -15887,17 +15887,24 @@ export class ControlPlaneDb {
 
   /** The Human whose recorded approval allowed this human-owned decision: its single resolving
    * `allowed` governance audit, bound to the decision's occurrence, category and payload digest.
-   * A missing, pruned, ambiguous or non-human record proves no approval (#2940). */
-  workflowDecisionHumanApprover(decision: WorkflowDecisionView): string | null {
+   * A missing, pruned, ambiguous or non-human record proves no approval (#2940). `publicationAuthority`
+   * is the issue boundary the server recorded with that approval, when it recorded one. */
+  workflowDecisionHumanApprover(decision: WorkflowDecisionView): { userId: string; approvedAt: number;
+    publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string } } | null {
     if (decision.authority !== "human") return null;
-    const rows = this.stmt(`SELECT actor_kind, actor_id, content_digest, workflow_decision FROM governance_audit
+    const rows = this.stmt(`SELECT actor_kind, actor_id, content_digest, workflow_decision, created_at FROM governance_audit
       WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision' AND stage='resolution' AND outcome='allowed' LIMIT 2`)
-      .all(decision.sessionId, decision.occurrenceId) as Array<{ actor_kind: string; actor_id: string | null; content_digest: string | null; workflow_decision: string | null }>;
+      .all(decision.sessionId, decision.occurrenceId) as Array<{ actor_kind: string; actor_id: string | null; content_digest: string | null; workflow_decision: string | null; created_at: number }>;
     const row = rows.length === 1 ? rows[0]! : null;
     if (!row || row.actor_kind !== "human" || !row.actor_id || row.content_digest !== decision.resourceDigest) return null;
-    let recorded: { occurrenceId?: unknown; category?: unknown } | null;
+    let recorded: { occurrenceId?: unknown; category?: unknown; publicationAuthority?: { authorizedByUserId?: unknown; objectiveDigest?: unknown } } | null;
     try { recorded = JSON.parse(row.workflow_decision ?? "null") as typeof recorded; } catch { return null; }
-    return recorded?.occurrenceId === decision.occurrenceId && recorded.category === decision.category ? row.actor_id : null;
+    if (recorded?.occurrenceId !== decision.occurrenceId || recorded.category !== decision.category) return null;
+    const authority = recorded.publicationAuthority;
+    return { userId: row.actor_id, approvedAt: row.created_at,
+      ...(typeof authority?.authorizedByUserId === "string" && authority.authorizedByUserId && typeof authority.objectiveDigest === "string" &&
+        /^[0-9a-f]{64}$/u.test(authority.objectiveDigest)
+        ? { publicationAuthority: { authorizedByUserId: authority.authorizedByUserId, objectiveDigest: authority.objectiveDigest } } : {}) };
   }
 
   /** Whether the user owns this campaign for scope authority (#2940), as an active, non-viewer member

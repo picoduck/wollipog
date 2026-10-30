@@ -96,7 +96,14 @@ A follow-up publication is either a bounded grant, which carries its own `issueA
 person approved as a human-owned decision. The second kind counts only when that person's recorded
 approval of the exact payload names the boundary's author or a campaign owner: the root session's
 owning user, a member of its owning team or, for an organization-owned campaign, an active owner or
-admin of that organization. Such a publication carries no recommendation claim, so the server binds
+admin of that organization. It must also be tied to the current objective: either it was made at or
+after the current boundary's `authorizedAt`, or the boundary the server recorded with that approval
+(its author and objective digest, written into the resolving audit, never taken from a request)
+matches the current boundary's, so a Human scope approval that re-mints the boundary with the same
+author and objective keeps it valid. A changed objective or author, or an approval from before this
+record existed that precedes the current authorization, is refused as
+`publication_approved_under_earlier_boundary` and leaves the change to fresh human scope review.
+Such a publication carries no recommendation claim, so the server binds
 it to the one accepted, non-duplicate recommendation in this campaign that records the published
 issue as its result and has the payload's title subject. Every other check applies to both kinds:
 consumed, controlled by the root, in its repository, never used to admit an issue before, origins
