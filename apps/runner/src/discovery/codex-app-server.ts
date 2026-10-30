@@ -1,6 +1,7 @@
 import type { CodexAppServerCapabilities } from "@wollipog/protocol";
 import { run, type ResolvedLaunch } from "./resolve.js";
 import type { CodexProbeObserver } from "../codex-probe.js";
+import { classifyCodexSandboxProbe, codexSandboxProbeCommand } from "../codex-sandbox-probe-command.js";
 
 /** Oldest Codex build whose generated v2 schema is pinned in this repository. Official docs do
  * not publish a CLI minimum, so older builds remain an explicit exec fallback until verified. */
@@ -144,14 +145,52 @@ export function wslCodexAppServerProbeArgs(distro: string, launch: ResolvedLaunc
   return { command: "wsl.exe", args: ["-d", distro, "--exec", launch.command, ...launch.args, "app-server", "--help"] };
 }
 
+/** `codex sandbox` running the trusted probe command, or null when the host has none. */
+export function nativeCodexCommandSandboxProbeArgs(
+  launch: ResolvedLaunch,
+  probeCommand: string[] | null = codexSandboxProbeCommand()?.argv ?? null,
+): { command: string; args: string[] } | null {
+  return probeCommand ? { command: launch.command, args: [...launch.args, "sandbox", "--", ...probeCommand] } : null;
+}
+
+/** Fold the host's `codex sandbox` probe into a supported App Server row (#3843). Only bubblewrap's
+ * own namespace refusal, with the probe command never started, makes Codex unsupported: the runner
+ * can stand in for its sandbox only inside its own bubblewrap, which needs the same namespaces. Any
+ * other result, including a Codex whose `sandbox` subcommand has another shape, leaves the row as
+ * it was, and the launch probe still decides each session. */
+export function applyCodexCommandSandboxProbe(
+  compatibility: CodexAppServerCapabilities,
+  result: ProbeResult,
+): CodexAppServerCapabilities {
+  if (compatibility.status !== "supported" || result.timedOut || result.errorCode) return compatibility;
+  const probe = classifyCodexSandboxProbe(result.code, result.stdout, result.stderr);
+  if (probe.outcome !== "failed" || !probe.namespaceDenied) return compatibility;
+  return {
+    ...compatibility,
+    status: "unsupported",
+    failure: {
+      code: "codex_sandbox_unavailable",
+      message: "Codex can't sandbox its commands on this host because the kernel doesn't let unprivileged processes create user namespaces. Allow them, then rediscover.",
+      retryable: true,
+    },
+  };
+}
+
 export async function probeNativeCodexAppServer(
   launch: ResolvedLaunch,
   version: string | undefined,
   observer: CodexProbeObserver = {},
+  platform: NodeJS.Platform = process.platform,
 ): Promise<CodexAppServerCapabilities> {
   const probe = nativeCodexAppServerProbeArgs(launch);
   const result = await run(probe.command, probe.args, { timeoutMs: 8000, maxBuffer: 256 * 1024, trackDescendants: true, ...observer });
-  return interpretCodexAppServerProbe(version, result);
+  const compatibility = interpretCodexAppServerProbe(version, result);
+  if (platform !== "linux" || compatibility.status !== "supported") return compatibility;
+  const sandbox = nativeCodexCommandSandboxProbeArgs(launch);
+  if (!sandbox) return compatibility;
+  return applyCodexCommandSandboxProbe(compatibility, await run(sandbox.command, sandbox.args, {
+    timeoutMs: 8000, maxBuffer: 64 * 1024, trackDescendants: true, ...observer,
+  }));
 }
 
 export async function probeWslCodexAppServer(

@@ -6,6 +6,7 @@ import {
   validProviderHomeWait,
   validWorktreeSwitch,
   isProviderLoginFailureCode,
+  isSessionLaunchFailureCode,
   PROVIDER_LOGIN_FAILURE_CODES,
   queueHoldRecoveryAction,
   sessionHolds,
@@ -116,7 +117,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 258);
+  assert.equal(PROTOCOL_VERSION, 259);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -342,8 +343,13 @@ test("a worktree switch is accepted only as its exact display shape (#3810)", ()
   ]) assert.equal(validWorktreeSwitch(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 258", () => {
-  assert.equal(PROTOCOL_VERSION, 258);
+test("PROTOCOL_VERSION is 259", () => {
+  assert.equal(PROTOCOL_VERSION, 259);
+  // A v259 runner names a launch that failed because its command sandbox cannot start (#3843).
+  assert.equal(isSessionLaunchFailureCode("codex_sandbox_unavailable"), true);
+  for (const value of ["", "Command_Sandbox_Unavailable", "unknown_code", 1, null, undefined, {}]) {
+    assert.equal(isSessionLaunchFailureCode(value), false, JSON.stringify(value));
+  }
   // A v257 runner reports a refused Agent TUI open by its sentence alone (#3338).
   assert.equal(runnerSupportsProtocol(257, "providerHomeAgentTuiRefusals"), false);
   assert.equal(runnerSupportsProtocol(258, "providerHomeAgentTuiRefusals"), true);

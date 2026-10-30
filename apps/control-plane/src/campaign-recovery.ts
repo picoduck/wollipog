@@ -96,12 +96,17 @@ export class CampaignRecoveryService {
       if (session.id !== root.id && !this.db.campaignChildReportVerified(root.id, session.id) &&
           (session.status === "failed" || session.status === "stopped")) {
         const assignment = this.db.campaignWorkLedger.currentAssignment(session.id);
+        // A provider whose command sandbox cannot start on its host (#3843) fails the same way in
+        // every replacement there. Fixing the host, or the Child Harness, is the person's to do.
+        const hostBlocked = session.status === "failed" &&
+          this.db.sessionLaunchFailure(session.id) === "codex_sandbox_unavailable";
         // Ended attempts are historical, and must not race the replacement's current failure.
         if (assignment || !ledgerWorkers.has(session.id)) observations.push({ action: "replace_worker",
           resource: { kind: "worker", sessionId: session.id, occurrenceId: `epoch:${session.eventEpoch ?? 0}`,
             ...(assignment ? { workItemId: assignment.workItemId } : {}) },
-          reason: session.status === "stopped" ? "hard_denial" : "transient_failure",
-          owner: "orchestrator", signal: `${session.id}:${session.eventEpoch ?? 0}:${session.status}` });
+          reason: session.status === "stopped" ? "hard_denial" : hostBlocked ? "unsupported_capability" : "transient_failure",
+          owner: hostBlocked ? "human" : "orchestrator",
+          signal: `${session.id}:${session.eventEpoch ?? 0}:${session.status}${hostBlocked ? ":codex_sandbox_unavailable" : ""}` });
       }
     }
     for (const decision of this.db.campaignRecoverySettledDecisions(root.id)) {

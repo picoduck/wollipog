@@ -77,6 +77,7 @@ import {
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
+import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
 import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -242,6 +243,54 @@ function approvalCommand(value: Json): string | null {
   return value.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(" ");
 }
 
+/** The runner's bwrap boundary around a Codex process, as the turn policy needs it (#3843). */
+export interface CodexOuterSandbox {
+  network: "inherit" | "deny";
+}
+
+/** Codex's "already in an external sandbox" policy. Measured against codex-cli 0.165.0, it runs
+ * commands with no sandbox of Codex's own and does NOT enforce `networkAccess: "restricted"`; the
+ * value only tells the model what to expect. A boundary that denies the network enforces it with
+ * `--unshare-net`, and one that inherits the network allows it, so the value mirrors that. */
+function externalSandboxPolicy(outer: CodexOuterSandbox): Json {
+  return { type: "externalSandbox", networkAccess: outer.network === "deny" ? "restricted" : "enabled" };
+}
+
+/** Launch-probe result: whether Codex could run the trusted probe command under the sandbox a turn
+ * would use. */
+export type CodexCommandSandboxProbe =
+  | { outcome: "started" }
+  /** `namespaceDenied`: bubblewrap itself refused to create a user namespace before the command
+   * started, the one failure a runner bwrap boundary is known to stand in for. */
+  | { outcome: "failed"; reason: string; namespaceDenied: boolean }
+  | { outcome: "inconclusive" };
+
+/** Classify a `command/exec` response to the trusted probe (#3843; see
+ * `codex-sandbox-probe-command.ts`). The reason is a fixed sentence: provider stderr can carry
+ * paths and is never repeated. Exported for tests. */
+export function codexCommandSandboxProbe(response: Json): CodexCommandSandboxProbe {
+  const classified = classifyCodexSandboxProbe(response?.exitCode, response?.stdout, response?.stderr);
+  if (classified.outcome !== "failed") return classified;
+  return {
+    outcome: "failed",
+    namespaceDenied: classified.namespaceDenied,
+    reason: classified.namespaceDenied
+      ? "Codex's command sandbox cannot start here because this host does not let unprivileged processes create user namespaces"
+      : `Codex's command sandbox could not run a command here (exit ${classified.exitCode})`,
+  };
+}
+
+/** Codex's command sandbox cannot start, and no runner boundary encloses the process to stand in
+ * for it (#3843). Every command would need an approval to run outside any sandbox, so the launch
+ * fails instead, with a typed reason the control plane reports. */
+export class CodexCommandSandboxUnavailableError extends Error {
+  readonly launchFailure = "codex_sandbox_unavailable" as const;
+  constructor(reason: string) {
+    super(`${reason}, and no runner sandbox encloses this session to stand in for it`);
+    this.name = "CodexCommandSandboxUnavailableError";
+  }
+}
+
 /**
  * Build the turn/start params for a permission mode. Exported for tests.
  * - default / "auto-review": on-request + approvalsReviewer=auto_review (Guardian model review).
@@ -284,6 +333,14 @@ export function buildCodexTurnParams(
    */
   ownedWorktrees: readonly { path: string; gitAdmin: string }[] = [],
   projectSharedWritableRoots: readonly string[] = [],
+  /**
+   * The runner's bwrap boundary that encloses this process, set only once the launch probe has
+   * shown that Codex's own workspace sandbox cannot start inside it (#3843). That boundary already
+   * confines writes to the same roots, so it becomes the single sandbox: a workspace-write turn
+   * runs under `externalSandbox` with the boundary's network policy. A read-only turn keeps its
+   * policy, because the boundary would let it write.
+   */
+  outerSandbox: CodexOuterSandbox | null = null,
 ): Json {
   const protectManagedWorktrees = managedWorktreeProtections.length > 0;
   const selectedGitRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
@@ -304,7 +361,7 @@ export function buildCodexTurnParams(
       rules: false,
       sandbox_approval: false,
       skill_approval: false,
-    } }, approvalsReviewer: "auto_review", sandboxPolicy: {
+    } }, approvalsReviewer: "auto_review", sandboxPolicy: outerSandbox ? externalSandboxPolicy(outerSandbox) : {
       type: "workspaceWrite", writableRoots: [cwd, ...gitWritableRoots], networkAccess: true,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     }, cwd,
@@ -332,11 +389,13 @@ export function buildCodexTurnParams(
       ? { writableRoots: [cwd, ...gitWritableRoots, ...projectSharedWritableRoots] }
       : {}),
   };
+  // A profile carried by the launch cannot express the outer boundary, so this turn sends it.
+  const outerPolicy = outerSandbox && sandboxType === "workspaceWrite" ? externalSandboxPolicy(outerSandbox) : null;
   const params: Json = {
     threadId,
     input,
     approvalPolicy: autoReview ? "on-request" : askMode ?? "never",
-    ...(carriedByProfile ? {} : { sandboxPolicy }),
+    ...(outerPolicy ? { sandboxPolicy: outerPolicy } : carriedByProfile ? {} : { sandboxPolicy }),
     cwd,
   };
   // Guardian owns ordinary automatic review, but it cannot know which host paths belong to the
@@ -447,6 +506,8 @@ function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
  * Starting forever, holding every prompt admitted meanwhile. A discarded oversized record fails the
  * pending request at once instead of waiting for the bound. */
 export const CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS = 120_000;
+/** Codex's own bound on the launch probe's `true` (#3843); the request gets five seconds more. */
+const CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS = 10_000;
 
 /** A launch handshake request that will not settle. The message names only the method, never
  * provider payload, so it is safe to surface as the session's launch error. */
@@ -614,6 +675,13 @@ export class CodexAppServerDriver implements Driver {
    */
   private managedWorktreeGuardActive = false;
   /**
+   * The runner's bwrap boundary, once the launch probe found that Codex's own sandbox cannot start
+   * inside it (#3843); null while Codex sandboxes its own commands. Re-probed at every launch.
+   */
+  private outerSandbox: CodexOuterSandbox | null = null;
+  /** The trusted probe argv, or null when this host has none (#3843). */
+  private readonly sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
+  /**
    * Whether a legacy `sandboxPolicy` has already been sent on the CURRENT thread.
    *
    * `turn/start`'s policy is documented as applying to "this turn and subsequent turns", so once a
@@ -639,8 +707,10 @@ export class CodexAppServerDriver implements Driver {
       initializationRequestTimeoutMs: number;
       forkRequestTimeoutMs: number;
       archiveRequestTimeoutMs: number;
+      sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
     }> = {},
   ) {
+    this.sandboxProbeCommand = deps.sandboxProbeCommand ?? (() => codexSandboxProbeCommand());
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.cwd = opts.cwd;
     this.config = opts.config;
@@ -1083,11 +1153,77 @@ export class CodexAppServerDriver implements Driver {
     }
   }
 
+  /**
+   * Prove, before any thread exists, that Codex can sandbox a command the way this session's
+   * turns will ask it to (#3843). Inside the runner's own bwrap boundary, a host that restricts
+   * unprivileged user namespaces stops Codex's nested bubblewrap, and every command would then
+   * fail and escalate. There the boundary is already the sandbox, so turns hand it the job.
+   * Anywhere else the launch fails with a typed reason. Native Linux only: the nested case is
+   * bubblewrap's, and other contexts keep their behavior.
+   */
+  private async probeCommandSandbox(peer: JsonRpcPeer): Promise<void> {
+    this.outerSandbox = null;
+    if (process.platform !== "linux" || this.opts.context.kind !== "native" || this.opts.review) return;
+    const isolation = this.opts.isolation;
+    const bwrap = isolation?.backend === "bwrap" ? isolation : undefined;
+    const turn = buildCodexTurnParams(this.config, null, this.cwd, [], this.opts.capabilities,
+      this.opts.managedWorktreeProtections?.() ?? [], this.permissionProfileBase, this.managedWorktreeGuardActive,
+      bwrap?.protectedWorktree?.ownedWorktrees, bwrap?.projectSharedWritableRoots);
+    const policy = turn.sandboxPolicy;
+    // No sandbox of Codex's own to start; omitting the policy probes the profile the launch carries.
+    if (policy?.type === "dangerFullAccess") return;
+    // Nothing the session can write may decide the outcome: the probe is a root-owned system
+    // program by absolute path, outside every root this boundary makes writable, run with a fixed
+    // PATH and no loader overrides. Without one the probe does not run, and nothing changes.
+    const command = this.sandboxProbeCommand();
+    const writableRoots = bwrap ? [this.cwd, ...(bwrap.writableBinds ?? []).map((bind) => bind.target),
+      ...(bwrap.protectedWorktree ? [bwrap.protectedWorktree.path, ...bwrap.protectedWorktree.gitWritableRoots,
+        ...(bwrap.protectedWorktree.ownedWorktrees ?? []).flatMap((owned) => [owned.path, owned.gitAdmin])] : []),
+      ...(bwrap.projectSharedWritableRoots ?? [])] : [this.cwd];
+    // A host with no trusted `printf` (such as a runner inside a user namespace, where root's files
+    // read as unmapped) is a host property and stays quiet; a boundary that makes it writable is not.
+    if (!command) return;
+    if (command.visited.some((path) => probeExecutableWritable(path, writableRoots))) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "probe_command_writable" }));
+      return;
+    }
+    let probe: CodexCommandSandboxProbe;
+    try {
+      probe = codexCommandSandboxProbe(await peer.request<Json>("command/exec", {
+        command: command.argv, cwd: this.cwd, env: { ...CODEX_SANDBOX_PROBE_ENV }, timeoutMs: CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS,
+        ...(policy ? { sandboxPolicy: policy } : {}),
+      }, { deadlineAt: Date.now() + CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS + 5_000 }));
+    } catch (error) {
+      if (this.disposed) throw error;
+      // An App Server without `command/exec`, or one that stalls on it, proves nothing either way:
+      // the session keeps the behavior it had before this probe existed. Only a stall is unusual.
+      if ((error as RpcError | undefined)?.requestTimeout) {
+        this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "timeout" }));
+      }
+      return;
+    }
+    if (probe.outcome !== "failed") return;
+    // Any other failure is neither one the boundary is known to stand in for nor proof that the
+    // sandbox cannot start (the probe command itself could misbehave on an unusual host, CR-2.1), so
+    // the turns keep Codex's own policy, as before this probe existed, and it is only reported.
+    if (!probe.namespaceDenied) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_unavailable", reason: probe.reason }));
+      return;
+    }
+    if (!bwrap) throw new CodexCommandSandboxUnavailableError(probe.reason);
+    this.outerSandbox = { network: bwrap.network };
+    // A security-relevant downgrade of Codex's own sandbox, so it is always reported.
+    this.cb.onStderr(JSON.stringify({
+      event: "codex_command_sandbox_outer_boundary", reason: probe.reason, network: bwrap.network,
+    }));
+  }
+
   async newSession(cwd: string): Promise<string> {
     this.cwd = cwd;
     await this.reconcilePlugins("session_start");
     if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
     const peer = this.peer;
+    await this.probeCommandSandbox(peer);
     const resumeId = this.opts.resumeId;
     // Keep mutable upload authorization in each current turn, never in persisted developer
     // instructions. Codex may replay stale developer text after a cold resume/fork (#19045).
@@ -1411,6 +1547,7 @@ export class CodexAppServerDriver implements Driver {
         this.managedWorktreeGuardActive,
         this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.protectedWorktree?.ownedWorktrees : undefined,
         this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.projectSharedWritableRoots : undefined,
+        this.outerSandbox,
       );
       if (this.opts.review) {
         // A review turn is read-only with network access off, never asks, and must return the

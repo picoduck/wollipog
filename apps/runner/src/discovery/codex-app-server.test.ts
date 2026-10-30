@@ -5,7 +5,9 @@ import {
   MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION,
   MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION,
   MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION,
+  applyCodexCommandSandboxProbe,
   interpretCodexAppServerProbe,
+  nativeCodexCommandSandboxProbeArgs,
   supportsStructuredCodexDeviceLogin,
   unavailableCodexAppServer,
   versionAtLeast,
@@ -110,4 +112,30 @@ test("native and WSL probes preserve the resolved node-wrapped launch without sh
     command: "wsl.exe",
     args: ["-d", "Ubuntu Dev", "--exec", "/home/u/.nvm/node", "/home/u/lib/codex.js", "app-server", "--help"],
   });
+});
+
+test("only a host user-namespace denial marks a supported Codex unsupported (#3843)", () => {
+  const supported = interpretCodexAppServerProbe("0.165.0", { code: 0, stdout: compatibleHelp, stderr: "" });
+  const probe = ["/usr/bin/printf", "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED"];
+  assert.deepEqual(nativeCodexCommandSandboxProbeArgs({ command: "/bin/codex", args: ["--flag"] }, probe),
+    { command: "/bin/codex", args: ["--flag", "sandbox", "--", ...probe] });
+  // Without a trusted probe command discovery runs no sandbox probe at all.
+  assert.equal(nativeCodexCommandSandboxProbeArgs({ command: "/bin/codex", args: [] }, null), null);
+  for (const result of [
+    { code: 0, stdout: "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED", stderr: "" },
+    // The probe ran and then printed the refusal itself: not bubblewrap's.
+    { code: 1, stdout: "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED", stderr: "bwrap: No permissions to create new namespace" },
+    { code: 2, stdout: "", stderr: "error: unrecognized subcommand 'sandbox'" },
+    { code: null, stdout: "", stderr: "", timedOut: true },
+    { code: null, stdout: "", stderr: "", errorCode: "ENOENT" },
+  ]) assert.deepEqual(applyCodexCommandSandboxProbe(supported, result), supported);
+  const denied = { code: 1, stdout: "", stderr: "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces." };
+  const blocked = applyCodexCommandSandboxProbe(supported, denied);
+  assert.equal(blocked.status, "unsupported");
+  assert.equal(blocked.failure?.code, "codex_sandbox_unavailable");
+  assert.equal(blocked.failure?.retryable, true);
+  assert.doesNotMatch(blocked.failure?.message ?? "", /deb\.li|bwrap:/);
+  // An installation that is already unsupported keeps its own reason.
+  const old = interpretCodexAppServerProbe("0.100.0", { code: 0, stdout: compatibleHelp, stderr: "" });
+  assert.deepEqual(applyCodexCommandSandboxProbe(old, denied), old);
 });

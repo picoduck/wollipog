@@ -74,6 +74,7 @@ import type {
   ProviderHistoryQuarantineView,
   ProviderHistoryRecoveryMode,
   RunnerCapacityBlocker,
+  SessionLaunchFailureCode,
   SessionConfig,
   AcpSessionContextConfig,
   SessionEventPayload,
@@ -198,6 +199,8 @@ export interface SessionMeta {
   status: SessionStatus;
   /** Current durable admission wait explanation; cleared on every non-queued status. */
   capacityWait?: RunnerCapacityBlocker;
+  /** Typed reason the last launch failed (#3843); kept only while the status is `failed`. */
+  launchFailure?: SessionLaunchFailureCode;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
@@ -4302,6 +4305,7 @@ export function metaToSnapshot(
     capacityWait: runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")
       ? m.capacityWait
       : undefined,
+    ...(m.status === "failed" && m.launchFailure ? { launchFailure: m.launchFailure } : {}),
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,

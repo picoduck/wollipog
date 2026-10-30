@@ -495,6 +495,8 @@ export function codexAgentDefinitions(
     ...base,
     driver: "codex-app-server",
     available: supported && signedIn,
+    // The host fix is named where the Machine's agents are listed, before any session exists.
+    ...(compatibility.failure?.code === "codex_sandbox_unavailable" ? { unavailableReason: compatibility.failure.message } : {}),
     capabilities: verifiedCodexAppServerCapabilities(slashCommands, compatibility),
     codexAppServer: compatibility,
     ...(base.authStatus === "authenticated" ? { codexBillingSource: "provider_account" as const } : {}),

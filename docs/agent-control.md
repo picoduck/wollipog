@@ -848,6 +848,70 @@ root and admin directory of every worktree this launch's boundary binds, and onl
 turn can commit there too. Codex keeps each root's `.git` link read-only. A worktree retired since
 launch is left out of the turn's roots.
 
+### Codex's Sandbox Inside This Boundary
+
+Codex App Server's workspace sandbox starts its own bubblewrap. On a host that restricts
+unprivileged user namespaces, such as recent Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`
+and the stock `bwrap-userns-restrict` AppArmor profile, a bubblewrap started inside this boundary
+cannot create its namespace. Every command then fails before it runs and asks to run outside the
+sandbox (#3843).
+
+Before a native Linux Codex session starts its thread, the driver runs a probe through the App
+Server's `command/exec` under the same policy its turns will send. Nothing a session can write
+decides the result:
+
+- The probe is a system `printf` that prints a sentinel, by absolute path (`/usr/bin/printf` or
+  `/bin/printf`). At every launch the runner walks that path component by component as the kernel
+  does. It follows each symlink, intermediate directory links included, up to 16 links. Every
+  directory, link and the final file it visits must be owned by root, and every directory and
+  the file must be writable by no one else. None may lie under `/proc`, `/dev`, `/tmp` or `/sys`,
+  which the boundary mounts afresh. The final file must be an executable under `/usr` or `/bin`.
+  It runs the original path, not the resolved target, so a `printf` that links to a multicall
+  binary such as BusyBox still selects its `printf` applet.
+- No path the walk visits may lie under a root this boundary makes writable.
+- It runs with `PATH=/usr/bin:/bin` and with `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`
+  unset.
+- A failure counts only when the sentinel never printed (the command never started) and stderr,
+  apart from the Codex CLI's own `WARNING:` notices, is exactly one line: bubblewrap's namespace
+  refusal.
+
+Without a trusted `printf`, as for a runner that itself runs inside a user namespace, the probe
+does not run and nothing changes. Otherwise:
+
+- If the command runs, nothing changes.
+- If it fails because bubblewrap may not create a user namespace, and this boundary encloses the
+  process, the turns send `externalSandbox` in place of a workspace-write policy. This boundary is
+  then the single sandbox. It already limits writes to the roots described above and keeps the
+  runner's entries read-only. Network access follows the runner's `executionIsolation.network`:
+  `deny` keeps `--unshare-net`, and `inherit` allows it. Codex does not enforce
+  `networkAccess: "restricted"` itself (measured with codex-cli 0.165.0); the value only tells the
+  model what to expect. The approval policy, the reviewer, the guard hook and Full Control's tool
+  rules are unchanged, so an escalation or permission request still reaches them. A read-only
+  turn keeps its own policy, because this boundary would let it write. The runner logs the
+  switch as `codex_command_sandbox_outer_boundary`.
+- Under that fallback, and only then, Codex's commands can write everything this boundary binds
+  writable for the provider process, as Claude Code sessions' commands already can in this
+  boundary (`~/.claude` included). In the default `provider` isolation mode that is the whole Codex
+  credential directory (`~/.codex`, with its `auth.json` and `config.toml`) and the managed Linux
+  caches. In configured `bwrap` mode it is the per-session transcript directory. It also includes
+  `.git` or `.codex` entries inside the worktree that are not runner-owned, which Codex's own
+  sandbox kept read-only. A writable `config.toml` can change later sessions. Binding it read-only
+  is not done: the App Server writes it at runtime (`config/value/write`, `config/batchWrite`,
+  `skills/config/write`), and its temp-file-and-rename writes would fail on a bound file.
+- Any other probe failure keeps Codex's policy and is only logged, inside this boundary or not. It
+  is not proof that the sandbox cannot start.
+- On a namespace denial without this boundary, the launch fails. Its `failed` status carries `launchFailure:
+  "codex_sandbox_unavailable"` (protocol v259), and a campaign shows that child as blocked work
+  for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry. The
+  runner keeps the reason with the failed state and reports it in the session snapshot, so it
+  survives a runner restart and reconnect hydration. A failed status that arrives after
+  hydration has already marked the session failed still records it.
+
+Discovery runs the same probe through `codex sandbox` on the host as well. When it reports the same namespace
+denial, the Codex installation is unsupported with failure code `codex_sandbox_unavailable`. Its
+`unavailableReason` names the fix and appears in Machine settings and `get_agent_capabilities`,
+and `create_session` refuses it with that reason. Contexts other than native Linux are unchanged.
+
 ### Deleting the Session's Own Refs
 
 Git takes `packed-refs.lock` in the shared Git directory before it deletes any ref: a worktree's
