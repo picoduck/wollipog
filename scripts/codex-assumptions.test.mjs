@@ -188,10 +188,10 @@ test("an escalation case routed through Guardian matches only when the fixture a
 });
 
 test("a successful unknown-version guard measurement proposes widening without changing admission", () => {
-  assert.equal(guardRangeResult("0.164.0", { status: "unchanged" }).status, "unchanged");
-  assert.equal(guardRangeResult("0.164.1", { status: "unchanged" }).status, "measured OK, range can be widened");
-  assert.equal(guardRangeResult("0.164.1", { status: "changed" }).status, "changed");
-  assert.equal(guardRangeResult("0.164.1", { status: "could not run" }).status, "could not run");
+  assert.equal(guardRangeResult("0.166.0", { status: "unchanged" }).status, "unchanged");
+  assert.equal(guardRangeResult("0.166.1", { status: "unchanged" }).status, "measured OK, range can be widened");
+  assert.equal(guardRangeResult("0.166.1", { status: "changed" }).status, "changed");
+  assert.equal(guardRangeResult("0.166.1", { status: "could not run" }).status, "could not run");
 });
 
 test("missing, incomplete, future and stale reports cannot look fresh", () => {
