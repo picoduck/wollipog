@@ -15,7 +15,7 @@ let interrupted = false;
 
 export const PROBES = [
   { id: "network", minimum: 3, timeout: 4 * 60_000, documentation: `${DOCS}#network-isolation` },
-  { id: "rpc-contract", minimum: 6, timeout: 6 * 60_000, documentation: "apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs; apps/runner/src/discovery/pi-rpc.ts" },
+  { id: "rpc-contract", minimum: 7, timeout: 6 * 60_000, documentation: "apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs; apps/runner/src/discovery/pi-rpc.ts" },
   { id: "adr-0010", minimum: 3, timeout: 4 * 60_000, documentation: "docs/adr/0010-additive-orchestrator-role-for-pi.md" },
   { id: "sessions", minimum: 4, timeout: 4 * 60_000, documentation: `${DOCS}#session-store` },
   { id: "project-trust", minimum: 3, timeout: 4 * 60_000, documentation: "apps/runner/src/drivers/pi-rpc.ts; apps/runner/src/pi-agent-control-extension.ts" },
@@ -26,8 +26,9 @@ export function parseVersion(output) {
   return output.match(/^(\d+\.\d+\.\d+(?:[-+][\w.-]+)?)\s*$/m)?.[1] ?? null;
 }
 
-/** Same rules as the Codex suite: anything short of complete, well-formed, exit-consistent output
- * is "could not run", never a measurement. */
+/** Anything short of complete, well-formed, exit-consistent output is "could not run", never a
+ * measurement. Every group emits all of its assumptions, so the minimum holds even when one
+ * changed, and the exit must be exactly 1 with a change and 0 without. */
 export function collectResult(probe, execution) {
   const events = execution.stdout.split("\n").flatMap(line => {
     try { const value = JSON.parse(line); return value?.event === "pi_assumption" ? [value] : []; } catch { return []; }
@@ -35,8 +36,8 @@ export function collectResult(probe, execution) {
   const valid = events.length > 0 && events.every(e => STATUSES.includes(e.status) && typeof e.assumption === "string" &&
     typeof e.observed === "string" && typeof e.documentation === "string");
   const changed = events.some(e => e.status === "changed");
-  const status = execution.unavailable || !valid || (!changed && events.length < probe.minimum) || ![0, 1].includes(execution.code) ||
-    (execution.code === 1 && !changed) || events.some(e => e.status === "could not run") ? "could not run" : changed ? "changed" : "unchanged";
+  const status = execution.unavailable || !valid || events.length < probe.minimum || execution.code !== (changed ? 1 : 0) ||
+    events.some(e => e.status === "could not run") ? "could not run" : changed ? "changed" : "unchanged";
   return { probe: probe.id, status, assumptions: valid ? events.map(({ event, ...value }) => value) : [],
     observed: status === "could not run" ? "missing/incompatible binary, isolation, timeout, dependency or incomplete probe result" : "see measured assumptions",
     documentation: probe.documentation };
@@ -152,6 +153,8 @@ export async function main(args = process.argv.slice(2)) {
     const baseEnv = { PATH: [dirname(process.execPath), process.env.PATH ?? "/usr/bin:/bin"].join(delimiter), HOME: join(scratch, "home"), LANG: "C.UTF-8",
       TMPDIR: tmpdir(), ...(binary ? { PI_BIN: binary } : {}) };
     mkdirSync(baseEnv.HOME, { mode: 0o700 });
+    // Replace any earlier report before the first Pi process runs, so a hang never leaves it standing.
+    writeReport(reportDir, report);
     const versionEnv = { ...baseEnv, PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0" };
     const versionRun = binary ? await execute(binary, ["--version"], versionEnv, scratch, 30_000) : { code: null, stdout: "", unavailable: true };
     report.version = versionRun.code === 0 && !versionRun.unavailable ? parseVersion(versionRun.stdout) : null;

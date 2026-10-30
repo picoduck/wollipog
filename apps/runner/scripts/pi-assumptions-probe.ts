@@ -168,7 +168,7 @@ function seedUserResources(sandbox: PiSandbox): void {
   writeFixtureFile(join(sandbox.agentDir, "prompts", `${USER_PROMPT}.md`), "---\ndescription: Probe prompt template\n---\nProbe prompt.\n");
 }
 
-interface DiscoveryExchange { events: Json[]; state: Json; models: Json; commands: Json; entries?: Json; selected: Json; levels: Json; ready: boolean }
+interface DiscoveryExchange { events: Json[]; state: Json; models: Json; commands: Json; entries: Json; selected: Json; levels: Json; ready: boolean }
 
 /** Mirror probePiRpc (apps/runner/src/discovery/pi-rpc.ts) for one model. */
 async function discoveryExchange(fake: boolean): Promise<DiscoveryExchange> {
@@ -183,7 +183,8 @@ async function discoveryExchange(fake: boolean): Promise<DiscoveryExchange> {
     try {
       const [state, models, commands] = await Promise.all([
         client.request({ type: "get_state" }), client.request({ type: "get_available_models" }), client.request({ type: "get_commands" })]);
-      const entries = await client.request({ type: "get_entries" }, 2000).catch(() => undefined);
+      // An explicit refusal is a measurement; silence, exit or a broken stream is not, so it throws.
+      const entries = await client.request({ type: "get_entries" }, 10_000);
       const first = (models.data?.models ?? [])[0] as Json | undefined;
       if (!first) throw new CouldNotRun("get_available_models returned no model to select");
       const selected = await client.request({ type: "set_model", provider: first.provider, modelId: first.id });
@@ -278,6 +279,32 @@ async function sessionExchange(fake: boolean): Promise<SessionExchange> {
   });
 }
 
+interface InterruptExchange { events: Json[]; steer: Json; abort: Json; aborted: boolean }
+
+/** Mirror PiRpcDriver.steer and cancel against a turn the scripted provider holds open. */
+async function interruptExchange(fake: boolean): Promise<InterruptExchange> {
+  return withSandbox(fake ? "fake-interrupt" : "interrupt", async sandbox => {
+    const provider = await startScriptedProvider(() => ({ text: "Late reply", holdMs: 20_000 }));
+    writeProbeModels(sandbox, provider.port);
+    const client = launch(sandbox, ["--mode", "rpc", "--no-session", "--no-approve"], { fake, env: fake ? { WOLLIPOG_FAKE_PI_SCENARIO: "steer" } : {} });
+    try {
+      const start = client.events.length;
+      const prompt = await client.request({ type: "prompt", message: "Take your time" });
+      if (prompt.success !== true) throw new CouldNotRun("prompt was refused");
+      await client.waitFor(event => event.type === "agent_start" && client.events.indexOf(event) >= start, 15_000, "agent_start");
+      // Steer while the model request is genuinely in flight; the fixture has no provider.
+      const deadline = Date.now() + 15_000;
+      while (!fake && !provider.requests.length && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 100));
+      if (!fake && !provider.requests.length) throw new CouldNotRun("Pi never reached the scripted provider");
+      const steer = await client.request({ type: "steer", message: "Also mention the probe" });
+      const abort = await client.request({ type: "abort" });
+      await client.waitFor(event => event.type === "agent_settled" && client.events.indexOf(event) > start, 15_000, "agent_settled after abort");
+      const aborted = client.events.slice(start).some(event => event.type === "message_end" && event.message?.role === "assistant" && event.message?.stopReason === "aborted");
+      return { events: client.events, steer, abort, aborted };
+    } finally { await client.close(); await provider.close(); }
+  });
+}
+
 async function contractGroup(): Promise<PiProbeStatus[]> {
   const statuses: PiProbeStatus[] = [];
   let real: DiscoveryExchange | undefined;
@@ -321,8 +348,8 @@ async function contractGroup(): Promise<PiProbeStatus[]> {
   }));
   statuses.push(await measure("get_entries returns an empty entry list with leafId null under --no-session", "apps/runner/src/discovery/pi-rpc.ts", async () => {
     if (!real) throw new CouldNotRun("the discovery handshake did not run");
-    const data = real.entries?.data;
-    if (!real.entries) return { status: "changed", observed: "get_entries gave no response within 2 s; conversation fork would not be advertised" };
+    const data = real.entries.data;
+    if (real.entries.success !== true) return { status: "changed", observed: "get_entries was refused; conversation fork would not be advertised" };
     const types = Array.isArray(data?.entries) ? data.entries.map((entry: Json) => String(entry?.type)) : [];
     return outcome(Array.isArray(data?.entries) && data.entries.length === 0 && data.leafId === null ? [] :
       [`get_entries returned ${types.length} startup entries (${types.join(", ")}) and leafId ${data?.leafId === null ? "null" : typeof data?.leafId}; discovery would not advertise conversation fork`],
@@ -337,11 +364,20 @@ async function contractGroup(): Promise<PiProbeStatus[]> {
       ...(realSession.toolOutput.includes("WOLLIPOG_PROBE_README") && realSession.toolOutput.includes("partial") ? [] : ["a confirmed tool did not return its output to the model"]),
     ], "one tool_call confirm per tool call (read, bash); confirmed: true ran both and their output reached the provider");
   }));
+  let realInterrupt: InterruptExchange | undefined;
+  statuses.push(await measure("A mid-turn steer is acknowledged and abort settles the run with stopReason aborted", "apps/runner/src/drivers/pi-rpc.ts", async () => {
+    realInterrupt = await interruptExchange(false);
+    return outcome([
+      ...(realInterrupt.steer.success === true ? [] : ["steer during a running turn was refused"]),
+      ...(realInterrupt.abort.success === true ? [] : ["abort during a running turn was refused"]),
+      ...(realInterrupt.aborted ? [] : ["the aborted run settled without an assistant message_end carrying stopReason aborted"]),
+    ], "steer and abort answered success; the run settled with stopReason aborted");
+  }));
   statuses.push(await measure("RPC record shapes emitted by fake-pi-rpc.mjs match real Pi", "apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs", async () => {
-    if (!real || !realSession) throw new CouldNotRun("the real discovery or session exchange did not run");
-    const [fakeDiscovery, fakeSession] = [await discoveryExchange(true), await sessionExchange(true)];
-    const fixture = recordShapes([...fakeDiscovery.events, ...fakeSession.events]);
-    const differences = compareShapes(fixture, recordShapes([...real.events, ...realSession.events]), FIXTURE_SHAPE_EXCEPTIONS);
+    if (!real || !realSession || !realInterrupt) throw new CouldNotRun("a real discovery, session or interrupt exchange did not run");
+    const [fakeDiscovery, fakeSession, fakeInterrupt] = [await discoveryExchange(true), await sessionExchange(true), await interruptExchange(true)];
+    const fixture = recordShapes([...fakeDiscovery.events, ...fakeSession.events, ...fakeInterrupt.events]);
+    const differences = compareShapes(fixture, recordShapes([...real.events, ...realSession.events, ...realInterrupt.events]), FIXTURE_SHAPE_EXCEPTIONS);
     return outcome(differences.map(d => `fixture drift: ${d}`), `all ${fixture.size} fixture record kinds, fields, types and enum values were emitted by real Pi`);
   }));
   return statuses;

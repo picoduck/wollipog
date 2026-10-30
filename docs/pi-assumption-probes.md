@@ -120,6 +120,7 @@ reported every run until a reviewed change aligns the runner or the fixture with
 | `get_commands` `location` read by `commandSource()` | `rpc-contract` | **Absent.** Pi reports `sourceInfo.scope` (`"user"`, `"project"`, `"temporary"`) instead; its changelog records `location` being replaced by `sourceInfo` in an earlier release. `commandSource()` therefore never reports a project command. | Changed |
 | Optional `get_entries`: `entries: []` and `leafId: null` under `--no-session` | `rpc-contract` | **Not empty.** A fresh `--no-session` process already has `model_change` and `thinking_level_change` entries (only `thinking_level_change` with no provider configured), so `leafId` is a string. Discovery therefore stops advertising conversation fork. | Changed |
 | `extension_ui_request` / `extension_ui_response` round trip | `rpc-contract` | A tool call raises one nonce-bound `confirm` per call from the runner's Agent Control extension (kind `tool_call`). Answering `confirmed: true` runs the tool and returns its output to the model. | Unchanged |
+| `steer` and `abort` during a running turn | `rpc-contract` | With the model request held open, both answer `success: true`, and the run settles with an assistant `message_end` whose `stopReason` is `"aborted"`. | Unchanged |
 | `project_trust` reaches the driver as a nonce-bound security `select` that holds startup | `project-trust` | **Not delivered.** Pi dispatches `project_trust` to CLI extensions with `hasUI: false` and a no-op UI in RPC mode (`dist/main.js`: `hasUI` only for interactive mode). The runner extension declines, no `select` reaches the client, `get_state` answers and project resources are skipped. A verified Pi session can never ask to trust a project. | Changed |
 | Discovery probe extension sees `project_trust` before `session_start` | `rpc-contract` | Holds, because that extension decides without a UI. | Unchanged |
 | A CLI extension's remembered decision | `project-trust` | `{ trusted: "yes", remember: true }` loads `.pi/extensions` and writes the canonical project path to `<agent-dir>/trust.json`; a later launch applies it. | Unchanged |
@@ -139,12 +140,21 @@ fixtures use `.js` for that reason.
 ## Fixture Drift
 
 The `rpc-contract` group drives real Pi and `apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs`
-through the same discovery exchange and the same verified-session exchange: the startup trust
-request, one turn with `read` and `bash` tool calls, and the checkpoint reads. It then requires
-every record kind, field path, JSON type and selected enum value the fixture emits to appear in real
-Pi's records; real-only fields are not drift (`apps/runner/scripts/pi-rpc-shape.ts`). Any difference
-reports **changed**. `FIXTURE_SHAPE_EXCEPTIONS` in the probe lists deliberate exceptions; it is
-empty.
+through the same three exchanges:
+
+- **Discovery.**
+- **A verified session:** the startup trust request, one turn with `read` and `bash` tool calls, and
+  the checkpoint reads.
+- **An interrupted turn:** a mid-turn `steer`, then `abort`.
+
+It then requires every record kind, field path, JSON type and selected enum value the fixture emits
+to appear in real Pi's records; real-only fields are not drift (`apps/runner/scripts/pi-rpc-shape.ts`).
+Any difference reports **changed**. `FIXTURE_SHAPE_EXCEPTIONS` in the probe lists deliberate
+exceptions; it is empty.
+
+As in the production `PiRpcPeer`, a malformed stdout record, or stdout ending inside a record, is a
+transport failure. Every measurement on that process becomes could not run. A `get_entries` request
+that gets no answer within 10 seconds is could not run; an explicit refusal is changed.
 
 On 1.4.0 the comparison reports the three changed driver assumptions above: `location`, a `null`
 `leafId`, and the trust `select`. This change aligned the fixture's tool `content` with Pi's array

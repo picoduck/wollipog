@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { collectResult, freshReport, main, markdown, parseVersion, PROBES, reportExit, selectIsolation } from "./pi-assumptions.mjs";
-import { piProbeExit, verifyNetworkIsolation } from "../apps/runner/scripts/pi-probe-support.ts";
+import { piProbeExit, PiRpcClient, verifyNetworkIsolation } from "../apps/runner/scripts/pi-probe-support.ts";
 import { compareShapes, recordShapes } from "../apps/runner/scripts/pi-rpc-shape.ts";
 import { expectedSessionDirectory } from "../apps/runner/scripts/pi-assumptions-probe.ts";
 
@@ -36,7 +36,9 @@ test("changed and could-not-run stay distinct, and nothing short of a complete m
   }
   for (const code of [null, 137, 3, 1]) assert.equal(collectResult(probe, { ...execution(), code }).status, "could not run");
   assert.equal(collectResult({ ...probe, minimum: 2 }, execution()).status, "could not run");
-  assert.equal(collectResult({ ...probe, minimum: 2 }, execution("changed")).status, "changed");
+  // An incomplete group is never accepted as changed, and a change must exit exactly 1.
+  assert.equal(collectResult({ ...probe, minimum: 2 }, execution("changed")).status, "could not run");
+  for (const code of [0, 2, null]) assert.equal(collectResult(probe, { ...execution("changed"), code }).status, "could not run");
   // One could-not-run assumption fails the whole probe even beside matches.
   assert.equal(collectResult({ ...probe, minimum: 2 }, { code: 2, unavailable: false, stdout: [line("unchanged"), line("could not run")].join("\n") }).status, "could not run");
   assert.equal(reportExit([collectResult(probe, execution("changed")), collectResult(probe, execution("could not run"))]), 1);
@@ -102,6 +104,16 @@ test("fixture drift is reported for missing kinds, fields, types and enum values
     "response:get_commands data.commands[].source"])).filter(d => !d.startsWith("event:")), []);
 });
 
+test("a malformed or unfinished RPC stream fails the measurement instead of being skipped", async () => {
+  const respond = 'process.stdin.once("data", chunk => { const q = JSON.parse(chunk); process.stdout.write(JSON.stringify({ type: "response", id: q.id, command: q.type, success: true }) + "\\n" + TAIL); process.stdin.resume(); });';
+  const garbage = new PiRpcClient(process.execPath, ["-e", `const TAIL = ""; process.stdout.write("garbage\\n"); ${respond}`], { cwd: tmpdir(), env: { PATH: process.env.PATH } });
+  await assert.rejects(garbage.request({ type: "get_state" }, 10_000), /malformed JSON record/);
+  await assert.rejects(garbage.close(), /malformed JSON record/);
+  const unfinished = new PiRpcClient(process.execPath, ["-e", `const TAIL = "{unfinished"; ${respond}`], { cwd: tmpdir(), env: { PATH: process.env.PATH } });
+  assert.equal((await unfinished.request({ type: "get_state" }, 10_000)).success, true);
+  await assert.rejects(unfinished.close(), /unfinished record/);
+});
+
 test("the expected session directory encodes the working directory the way Pi 1.4.0 does", () => {
   assert.equal(expectedSessionDirectory("/h/.pi/agent", "/tmp/x/project"), "/h/.pi/agent/sessions/--tmp-x-project--");
 });
@@ -155,6 +167,21 @@ test("the suite fails closed for missing, non-RPC and mid-run-upgraded Pi binari
       }
       assert.equal(await main(["--report-dir", reportDir, "--check-fresh"]), 2);
     }
+    // A fresh passing report stops counting before the first Pi process starts, even if it hangs.
+    const reportDir = join(dir, "report-hanging");
+    writeFileSync(join(dir, "pi-hanging"), "#!/bin/sh\nsleep 3\n");
+    chmodSync(join(dir, "pi-hanging"), 0o755);
+    process.env.PI_BIN = join(dir, "pi-hanging");
+    const passing = { complete: true, completedAt: new Date().toISOString(), exitCode: 0, version: "1.4.0",
+      results: PROBES.map(p => ({ probe: p.id, status: "unchanged", observed: "", documentation: "", assumptions: [] })) };
+    mkdirSync(reportDir, { recursive: true });
+    writeFileSync(join(reportDir, "latest.json"), JSON.stringify(passing));
+    assert.equal(await main(["--report-dir", reportDir, "--check-fresh"]), 0);
+    const running = main(["--report-dir", reportDir]);
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    assert.equal(JSON.parse(readFileSync(join(reportDir, "latest.json"), "utf8")).complete, false);
+    assert.equal(await main(["--report-dir", reportDir, "--check-fresh"]), 2);
+    assert.equal(await running, 2);
   } finally {
     console.log = log;
     for (const [key, value] of Object.entries(previous)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }

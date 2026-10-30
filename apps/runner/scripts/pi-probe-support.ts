@@ -112,6 +112,8 @@ export async function startScriptedProvider(reply: (body: Json, index: number) =
     });
   });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", resolve); });
+  // A failed measurement may skip close(); the server must never keep the probe process alive.
+  server.unref();
   return {
     port: (server.address() as net.AddressInfo).port,
     requests,
@@ -126,13 +128,17 @@ export function systemPromptOf(body: Json): string {
     .join("\n");
 }
 
-/** Strict LF-framed JSONL client for a Pi-compatible RPC process (real Pi or fake-pi-rpc.mjs). */
+/** Strict LF-framed JSONL client for a Pi-compatible RPC process (real Pi or fake-pi-rpc.mjs). Like
+ * the production PiRpcPeer, a malformed record is a transport failure: it fails every pending and
+ * later wait, and close() throws, so no measurement built on that stream can count. */
 export class PiRpcClient {
   readonly events: Json[] = [];
   stderr = "";
   exitCode: number | null | undefined;
+  transportError: string | undefined;
   private readonly child: ChildProcessWithoutNullStreams;
   private readonly waiters = new Set<(event: Json) => void>();
+  private readonly failures = new Set<(error: Error) => void>();
   private buffer = Buffer.alloc(0);
   private seq = 0;
   private readonly closed: Promise<void>;
@@ -149,16 +155,24 @@ export class PiRpcClient {
         this.buffer = this.buffer.subarray(newline + 1);
         if (line.at(-1) === 0x0d) line = line.subarray(0, -1);
         if (!line.length) continue;
-        let event: Json;
-        try { event = JSON.parse(line.toString("utf8")); } catch { event = { type: "__unparsed__" }; }
-        this.events.push(event);
-        for (const waiter of [...this.waiters]) waiter(event);
+        let event: unknown;
+        try { event = JSON.parse(line.toString("utf8")); } catch { event = undefined; }
+        if (!event || typeof event !== "object" || Array.isArray(event)) { this.fail("malformed JSON record on stdout"); return; }
+        this.events.push(event as Json);
+        for (const waiter of [...this.waiters]) waiter(event as Json);
       }
     });
     this.closed = new Promise(resolve => {
       this.child.once("error", () => { this.exitCode = null; resolve(); });
       this.child.once("close", code => { this.exitCode = code; resolve(); });
     });
+  }
+
+  private fail(reason: string): void {
+    if (this.transportError) return;
+    this.transportError = reason;
+    this.buffer = Buffer.alloc(0);
+    for (const failure of [...this.failures]) failure(new Error(`Pi RPC transport failed: ${reason}`));
   }
 
   send(record: Json): void { if (this.child.stdin.writable) this.child.stdin.write(JSON.stringify(record) + "\n"); }
@@ -175,20 +189,23 @@ export class PiRpcClient {
   }
 
   waitFor(predicate: (event: Json) => boolean, timeoutMs: number, label = "event"): Promise<Json> {
+    if (this.transportError) return Promise.reject(new Error(`Pi RPC transport failed: ${this.transportError}`));
     const existing = this.events.find(predicate);
     if (existing) return Promise.resolve(existing);
     return new Promise((resolve, reject) => {
       const done = (error?: Error, event?: Json) => {
-        clearTimeout(timer); this.waiters.delete(waiter);
+        clearTimeout(timer); this.waiters.delete(waiter); this.failures.delete(done);
         if (error) reject(error); else resolve(event!);
       };
       const waiter = (event: Json) => { if (predicate(event)) done(undefined, event); };
       const timer = setTimeout(() => done(new Error(`timed out waiting for ${label}`)), timeoutMs);
       this.waiters.add(waiter);
+      this.failures.add(done);
       void this.closed.then(() => { if (this.waiters.has(waiter)) done(new Error(`process exited (${this.exitCode}) before ${label}`)); });
     });
   }
 
+  /** End the process; throws when its stdout was malformed or ended inside a record. */
   async close(): Promise<void> {
     this.child.stdin.end();
     const timer = setTimeout(() => {
@@ -198,6 +215,8 @@ export class PiRpcClient {
     await this.closed;
     clearTimeout(timer);
     if (this.child.pid && process.platform !== "win32") { try { process.kill(-this.child.pid, "SIGKILL"); } catch { /* group already gone */ } }
+    if (this.buffer.toString("utf8").trim()) this.fail("stdout ended inside an unfinished record");
+    if (this.transportError) throw new Error(`Pi RPC transport failed: ${this.transportError}`);
   }
 }
 
