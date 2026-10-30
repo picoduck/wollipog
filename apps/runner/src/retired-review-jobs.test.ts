@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import vm from "node:vm";
 import ts from "typescript";
-import { PROTOCOL_VERSION, REVIEW_JOBS_RETIRED_REASON, reviewRetirementPeerRefusal } from "@wollipog/protocol";
+import {
+  PROTOCOL_VERSION,
+  REVIEW_JOBS_RETIRED_REASON,
+  REVIEW_SESSION_ONLY_MIN_PROTOCOL,
+  reviewRetirementPeerRefusal,
+} from "@wollipog/protocol";
 import { assertLegacyReviewsDrained, retiredReviewReceipt } from "./retired-review-jobs.js";
 
 const campaignId = "review_12345678-1234-1234-1234-123456789abc";
@@ -35,7 +40,9 @@ test("a refused registration drops buffered commands before the socket close eve
     ws: { terminate: () => { closed++; } }, stagedRunnerCredential: { promote: () => { promoted++; } },
     sendUp: () => { throw Error("refused peer received a receipt"); },
     runCommandTask: () => { throw Error("refused peer resumed a command"); } });
-  receive({ type: "registered", protocolVersion: PROTOCOL_VERSION - 1 });
+  // The newest control plane that still predates review-session-only runners, not the current
+  // protocol minus one: later protocol bumps must not turn this refusal into an acceptance.
+  receive({ type: "registered", protocolVersion: REVIEW_SESSION_ONLY_MIN_PROTOCOL - 1 });
   for (const type of ["session_review_job", "campaign_review_job", "prompt_session", "invoke_session_command"]) {
     assert.doesNotThrow(() => receive({ type, jobId: bridgeId, nonce }));
   }
@@ -67,9 +74,11 @@ function fixture(kind: "bridge" | "campaign", content: unknown) {
 }
 
 test("old or unknown control planes are refused before a new runner can replay retired dispatch", () => {
-  for (const peer of [undefined, null, 223, 243, PROTOCOL_VERSION - 1, String(PROTOCOL_VERSION), NaN, PROTOCOL_VERSION + 0.5]) {
+  const boundary = REVIEW_SESSION_ONLY_MIN_PROTOCOL;
+  for (const peer of [undefined, null, 223, 243, boundary - 1, String(boundary), NaN, boundary + 0.5]) {
     assert.match(reviewRetirementPeerRefusal(peer)!, /requires.*control plane.*review sessions?/iu);
   }
+  assert.equal(reviewRetirementPeerRefusal(boundary), null);
   assert.equal(reviewRetirementPeerRefusal(PROTOCOL_VERSION), null);
 });
 

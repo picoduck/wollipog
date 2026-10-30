@@ -766,7 +766,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      `unrecognized` in place of any other, and dashboards fall back to matching the sentence only
 //      when the code is absent (an older runner or control plane).
 // 254: retire native review jobs; new runners require the retirement-aware control plane (#3371).
-export const PROTOCOL_VERSION = 254;
+// 255: a worktree switch a session made itself continues automatically (#3810). The control plane
+//      marks a create/attach/select that the session's own agent credential requested with
+//      `requestedBySession`, and the runner then submits one continuation turn once the relaunch the
+//      switch needs has run in the selected worktree. Every isolation notice says whether that
+//      continuation will follow (`continuesAfterRelaunch`), and create and select now return the
+//      notice as attach always has. An older runner gets no flag and goes idle after the relaunch.
+export const PROTOCOL_VERSION = 255;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1041,6 +1047,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerHomeWait: 248,
   /** v248 runner reports a refused fork's typed provider-HOME refusal in `fork_result` (#3240). */
   providerHomeForkRefusals: 248,
+  /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
+  worktreeSwitchContinuation: 255,
   authoritativeHistoryWindow: 213,
   promptImageReferences: 56,
   durableSessionShells: 57,
@@ -10481,8 +10489,13 @@ export type SessionWorktreeRequestMessage =
       branch: string;
       /** Protocol v113+: ask the runner for bounded, content-free phase heartbeats. */
       progress?: boolean;
+      /** Protocol v255: the session's own agent credential made this request (#3810). */
+      requestedBySession?: boolean;
     }
-  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select" | "retry_setup"; path: string }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "attach" | "select"; path: string;
+      /** Protocol v255: the session's own agent credential made this request (#3810). */
+      requestedBySession?: boolean }
+  | { type: "session_worktree"; requestId: string; sessionId: string; operation: "retry_setup"; path: string }
   | { type: "session_worktree"; requestId: string; sessionId: string; operation: "discard"; path: string;
       /** Protocol v193: require proof the exact checkout head was delivered before removal. */
       requireDelivered?: boolean }
@@ -10606,6 +10619,10 @@ export interface SessionWorktreeIsolationNotice {
   writableNow: boolean;
   /** True when the session's next launch binds the attached path into its writable boundary. */
   writableAtNextLaunch: boolean;
+  /** Protocol v255: the path is not writable now, the session asked for it from inside its own
+   * turn, and the runner continues that work by itself once the turn ends and the session has
+   * relaunched in the selected worktree (#3810). Absent from older runners. */
+  continuesAfterRelaunch?: boolean;
 }
 
 export interface SessionWorktreeRetirementResult {

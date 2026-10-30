@@ -824,6 +824,16 @@ worktree boundary is the read-only parent of that selected child. A newly reques
 therefore not writable during the current turn. Select it and relaunch before editing it. This
 keeps the selected root and Git registration intact; it does not preserve writable file contents.
 
+Create, attach, and select results report this as `isolation.writableNow`, read from the live
+process's boundary rather than the configured mode, so a `provider`-mode runner whose provider runs
+in this boundary reports it too. A worktree counts as writable only when its Git admin directory is,
+which this boundary grants only to the launch worktree and the worktrees bound with it. When the
+session's own turn makes such a switch, the result also reports `continuesAfterRelaunch` (protocol
+v255, #3810). The turn's end relaunches the session in that worktree, and the runner submits one
+automatic continuation turn there. It does not when a prompt is already waiting (that prompt runs
+instead), the turn was interrupted or stopped, the relaunch failed, or the session is held. A switch
+made by a person or another session relaunches the same way and then waits for the next prompt.
+
 ### Other Managed Worktrees of the Session
 
 A protected launch also binds every other runner-created worktree the session owns in the same

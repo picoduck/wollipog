@@ -3783,9 +3783,11 @@ test("a session attaches a worktree beside its repository and states the isolati
         cwd: string;
         context: { kind: "native" | "wsl" };
         seatbeltWritableRoots?: string[];
+        managedGitBoundary?: true;
+        boundOwnedWorktrees?: string[];
       }>;
       executionIsolation: { mode: string; network: string };
-      attachIsolationNotice(meta: unknown, path: string): Promise<unknown>;
+      worktreeIsolationNotice(meta: unknown, path: string): Promise<unknown>;
       requestedWorktreeIsolation(meta: unknown): Promise<string[]>;
     };
     internals.configuredProjectPaths = [repo];
@@ -3816,7 +3818,7 @@ test("a session attaches a worktree beside its repository and states the isolati
     // A live provider keeps the boundary it launched with, and the response says so rather than
     // letting the agent meet it as a mid-turn write denial.
     internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
-    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+    assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), beside), {
       writableNow: false,
       writableAtNextLaunch: true,
     });
@@ -3826,10 +3828,33 @@ test("a session attaches a worktree beside its repository and states the isolati
     // here — an agent that believed it would meet permission failures instead.
     const wslMeta = { ...store.readMeta("s_ext"), context: { kind: "wsl" } };
     internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "wsl" } });
-    assert.deepEqual(await internals.attachIsolationNotice(wslMeta, beside), {
+    assert.deepEqual(await internals.worktreeIsolationNotice(wslMeta, beside), {
       writableNow: false,
       writableAtNextLaunch: true,
     });
+
+    // A provider launched in a runner-created worktree runs in the managed-worktree bwrap boundary
+    // whatever mode the runner is configured with (#3810). That boundary binds Git admin
+    // directories only for its launch worktree and the owned worktrees bound with it, so a worktree
+    // inside the requested boundary — writable files, unwritable index and HEAD — is not writable,
+    // while the launch worktree and a bound sibling are.
+    const launched = join(boundary, "launched");
+    const sibling = join(boundary, "sibling");
+    const created = join(boundary, "created-since");
+    internals.executionIsolation = { mode: "provider", network: "inherit" };
+    internals.active.set("s_ext", {
+      sessionId: "s_ext", cwd: launched, context: { kind: "native" },
+      managedGitBoundary: true, boundOwnedWorktrees: [sibling],
+    });
+    for (const [path, writableNow] of [[launched, true], [sibling, true], [created, false], [beside, false]] as const) {
+      assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), path),
+        { writableNow, writableAtNextLaunch: true }, path);
+    }
+    // Without that boundary, a runner configured for no platform sandbox writes anywhere.
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
+    assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), beside),
+      { writableNow: true, writableAtNextLaunch: true });
+    internals.executionIsolation = { mode: "bwrap", network: "deny" };
 
     // Seatbelt grants the native temporary directory outright, so a worktree under it is writable
     // already and reporting otherwise would send the agent into a pointless relaunch.
@@ -3844,13 +3869,13 @@ test("a session attaches a worktree beside its repository and states the isolati
       seatbeltWritableRoots: [repo, dataDir, tmpdir(), join(providerHome, ".claude", "projects")],
     });
     internals.executionIsolation = { mode: "seatbelt", network: "deny" };
-    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+    assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), beside), {
       writableNow: true,
       writableAtNextLaunch: true,
     });
     const providerMeta = { ...store.readMeta("s_ext"), env: { HOME: providerHome } };
     assert.deepEqual(
-      await internals.attachIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),
+      await internals.worktreeIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),
       { writableNow: true, writableAtNextLaunch: true },
     );
     internals.executionIsolation = { mode: "bwrap", network: "deny" };

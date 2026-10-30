@@ -763,13 +763,23 @@ function mapWorktreeResult(data: Json): Json {
       pullRequest: item.pullRequest ?? null,
     },
     session: data?.session == null ? null : mapSession(data.session),
-    // Attach under platform isolation: null when the runner does not report it. `writableNow:
+    // A switch under platform isolation: null when the runner does not report it. `writableNow:
     // false` means the path is readable but not writable until this session relaunches, which a
     // worktree switch schedules on its own — so the agent waits rather than treating a write
-    // denial as a broken attach.
+    // denial as a broken switch. `continuesAfterRelaunch` (v255) means the runner then resumes the
+    // session's task by itself, so the agent should end its turn rather than ask for a message.
     isolation: data?.isolation == null ? null : {
       writableNow: data.isolation.writableNow === true,
       writableAtNextLaunch: data.isolation.writableAtNextLaunch === true,
+      continuesAfterRelaunch: data.isolation.continuesAfterRelaunch === true,
+      ...(data.isolation.writableNow === true ? {} : {
+        nextStep: data.isolation.continuesAfterRelaunch === true
+          ? "This session cannot write or commit in this worktree until it relaunches there. End your turn now " +
+            "with a short note. When the turn ends, Wollipog relaunches the session in this worktree and " +
+            "continues the task automatically, so do not ask the user to send a message."
+          : "The session cannot write or commit in this worktree until it relaunches there, which happens when " +
+            "its current turn ends. The next prompt to the session then runs in this worktree.",
+      }),
     },
     retirement: data?.retirement == null ? null : {
       status: data.retirement.status,
@@ -2829,7 +2839,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_worktree",
-    description: "Create and select a session worktree at an exact branch and optional base ref. Subject to session permissions and governance policies.",
+    description: "Create and select a session worktree at an exact branch and optional base ref. Under platform isolation the result reports whether the live provider process can already write and commit there; when it cannot, follow the result's nextStep. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2870,7 +2880,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "attach_worktree",
-    description: "Attach and select an existing worktree for a session. The path may live anywhere, including beside the checkout at ../<repo>-worktrees/<slug>, as long as the session repository registers it in `git worktree list`. Under platform isolation the result reports whether a live provider process can already write there, or whether that takes effect at the session's next launch. Subject to session permissions and governance policies.",
+    description: "Attach and select an existing worktree for a session. The path may live anywhere, including beside the checkout at ../<repo>-worktrees/<slug>, as long as the session repository registers it in `git worktree list`. Under platform isolation the result reports whether a live provider process can already write there, or whether that takes effect at the session's next launch; when it cannot, follow the result's nextStep. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2891,7 +2901,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "select_worktree",
-    description: "Select one of a session's attached worktrees for future turns. Subject to session permissions and governance policies.",
+    description: "Select one of a session's attached worktrees for future turns. Under platform isolation the result reports whether the live provider process can already write and commit there; when it cannot, follow the result's nextStep. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {

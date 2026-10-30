@@ -210,6 +210,14 @@ export function orchestratorSelfWorktreeAuthorizationError(
     : null;
 }
 
+/** Whether the session's own agent credential is switching its worktree, as opposed to a person,
+ * a parent Orchestrator, or another session acting on it. Only that switch may continue on its own
+ * after the relaunch it needs (#3810): anyone else's switch arrives with the next prompt anyway. */
+export function worktreeRequestedBySession(principal: AuthPrincipal | null, targetSessionId: string): boolean {
+  return principal?.kind === "agent" && !!principal.credentialSessionId &&
+    principal.credentialSessionId === targetSessionId;
+}
+
 export function forkSnapshotIdentityError(
   source: {
     agentId: string | null;

@@ -1848,7 +1848,10 @@ test("attach_worktree reports the platform-isolation boundary the runner returne
     },
   }));
   const attached = resultJson(await callTool(deps, "attach_worktree", { path: "/repos-worktrees/example" }));
-  assert.deepEqual(attached.isolation, { writableNow: false, writableAtNextLaunch: true });
+  assert.equal(attached.isolation.writableNow, false);
+  assert.equal(attached.isolation.writableAtNextLaunch, true);
+  assert.equal(attached.isolation.continuesAfterRelaunch, false);
+  assert.match(attached.isolation.nextStep, /next prompt to the session then runs in this worktree/);
   // A pre-v133 runner reports nothing, and the tool says unknown rather than inventing a claim.
   const { deps: older } = makeDeps(() => ({
     status: 200,
@@ -1859,6 +1862,35 @@ test("attach_worktree reports the platform-isolation boundary the runner returne
   }));
   const legacy = resultJson(await callTool(older, "attach_worktree", { path: "/repos-worktrees/example" }));
   assert.equal(legacy.isolation, null);
+});
+
+test("every worktree switch tells the agent to end its turn when the work continues after the relaunch (#3810)", async () => {
+  const worktree = { id: "wt_1", path: "/worktrees/example", branch: "fix/example", source: "created" };
+  const session = { id: SELF_ID, status: "running", runnerId: "r1" };
+  const { deps } = makeDeps(() => ({
+    status: 200,
+    body: {
+      operation: { id: "op_1", status: "completed" }, worktree, session,
+      isolation: { writableNow: false, writableAtNextLaunch: true, continuesAfterRelaunch: true },
+    },
+  }));
+  for (const [tool, input] of [
+    ["create_worktree", { branch: "fix/example" }],
+    ["select_worktree", { path: "/worktrees/example" }],
+    ["attach_worktree", { path: "/worktrees/example" }],
+  ] as const) {
+    const result = resultJson(await callTool(deps, tool, input));
+    assert.equal(result.isolation.continuesAfterRelaunch, true, tool);
+    assert.match(result.isolation.nextStep, /End your turn now/, tool);
+    assert.match(result.isolation.nextStep, /do not ask the user to send a message/, tool);
+  }
+  // A worktree the live sandbox can already write needs no next step.
+  const { deps: writable } = makeDeps(() => ({
+    status: 200,
+    body: { worktree, session, isolation: { writableNow: true, writableAtNextLaunch: true } },
+  }));
+  const result = resultJson(await callTool(writable, "select_worktree", { path: "/worktrees/example" }));
+  assert.deepEqual(result.isolation, { writableNow: true, writableAtNextLaunch: true, continuesAfterRelaunch: false });
 });
 
 test("create_session applies model and effort in the original create request and reports the effective pair", async () => {
