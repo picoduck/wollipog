@@ -293,7 +293,8 @@ export function ProviderLoginCard({ runnerId, login, revealScope = "", embedded 
 }
 
 /** The Request Card's and the recovery panel's sign-in body: the link, the device code and the code
- * field as they were before the shared steps (#2198). */
+ * field as they were before the shared steps (#2198). The device code sits in a code well (§11.7)
+ * with Copy Device Code, untitled like the card's other controls (#3521). */
 function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: ProviderLoginView; name: string }) {
   const api = useApi();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -329,7 +330,10 @@ function EmbeddedSignIn({ runnerId, login, name }: { runnerId: string; login: Pr
       {login.userCode && (
         <div className="provider-login-device-code">
           <span>Device Code</span>
-          <code>{login.userCode}</code>
+          <div className="code-well">
+            <code>{login.userCode}</code>
+            <CopyButton text={login.userCode} iconOnly ariaLabel="Copy Device Code" className="icon-btn sm" tooltip={false} />
+          </div>
         </div>
       )}
       {login.expectsCode && (

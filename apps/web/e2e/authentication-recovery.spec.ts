@@ -302,6 +302,45 @@ test("a code pasted into the sign-in card is never in the page, even after the p
   expect(await page.evaluate(() => document.documentElement.outerHTML.includes("rejected-code-3529"))).toBe(false);
 });
 
+/** The device code's well, its code and Copy Device Code: whether the code is painted whole and the
+ * button sits inside the card. */
+async function deviceCodeFit(card: Locator) {
+  return card.locator(".provider-login-device-code > .code-well").evaluate((well) => {
+    const code = well.querySelector("code")!;
+    const button = well.querySelector("button")!.getBoundingClientRect();
+    const body = well.closest(".request-card")!.getBoundingClientRect();
+    return {
+      clipped: code.scrollWidth > code.clientWidth + 0.5,
+      codeRight: code.getBoundingClientRect().right,
+      buttonLeft: button.left,
+      buttonRight: button.right,
+      bodyRight: body.right,
+    };
+  });
+}
+
+test("a device-code sign-in's Copy Device Code copies exactly the code, by keyboard too, and fits beside it (#3521)", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  for (const [width, height] of [[1440, 900], [390, 844]] as const) {
+    await page.setViewportSize({ width, height });
+    const card = await open(page, `scenario=signing-in&deviceCode=1&width=${width}&height=${height}`, "Signing In — Claude Code");
+    const well = card.locator(".provider-login-device-code > .code-well");
+    await expect(well.locator("code")).toHaveText("WOLL-IPOGS");
+    const copy = well.getByRole("button", { name: "Copy Device Code" });
+    await expect(copy).toBeVisible();
+    await expect(card.getByLabel("Authorization Code")).toHaveCount(0);
+    const fit = await deviceCodeFit(card);
+    expect(fit.clipped, `${width}: the code is painted whole`).toBe(false);
+    expect(fit.codeRight, `${width}: the button trails the code`).toBeLessThanOrEqual(fit.buttonLeft);
+    expect(fit.buttonRight, `${width}: the button is inside the card`).toBeLessThanOrEqual(fit.bodyRight);
+    await page.evaluate(() => navigator.clipboard.writeText(""));
+    await copy.focus();
+    await page.keyboard.press("Enter");
+    await expect(copy).toHaveClass(/copy-status-copied/);
+    expect(await page.evaluate(() => navigator.clipboard.readText()), `${width}: copies exactly the code`).toBe("WOLL-IPOGS");
+  }
+});
+
 test("a body cut by the dock's cap draws a hairline at its lower edge, never a fade, so a cut line never reads as a stray mark (#2715)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   for (const scenario of ["email", "older", "readonly", "methods"] as const) {
@@ -320,6 +359,19 @@ test("a body cut by the dock's cap draws a hairline at its lower edge, never a f
 
 test.describe("touch phone", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("Copy Device Code borrows a 44px hit area on a coarse pointer (#3521)", async ({ page }) => {
+    const card = await open(page, "scenario=signing-in&deviceCode=1&width=390&height=844", "Signing In — Claude Code");
+    const hit = await card.getByRole("button", { name: "Copy Device Code" }).evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      const after = getComputedStyle(element, "::after");
+      return { width: box.width, height: box.height, top: Number.parseFloat(after.top), bottom: Number.parseFloat(after.bottom),
+        left: Number.parseFloat(after.left), right: Number.parseFloat(after.right) };
+    });
+    expect(hit.height - hit.top - hit.bottom, "44px tall").toBeGreaterThanOrEqual(44);
+    expect(hit.width - hit.left - hit.right, "44px wide").toBeGreaterThanOrEqual(44);
+    expect((await deviceCodeFit(card)).clipped, "the code is painted whole").toBe(false);
+  });
 
   test("the footer stays one row, with Dismiss Recovery and Choose Another Account… in ⋯, so the body keeps its room", async ({ page }) => {
     for (const scenario of ["email", "signed-out", "readonly"] as const) {

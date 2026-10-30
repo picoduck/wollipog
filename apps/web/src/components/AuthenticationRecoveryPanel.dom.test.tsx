@@ -344,6 +344,40 @@ test("while a sign-in runs only the session's account is a fact, and the sign-in
   }
 });
 
+test("a device-code sign-in in the recovery panel copies exactly its code with Copy Device Code (#3521)", async () => {
+  const copied: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  const api = client();
+  const signingIn = { ...approval, title: "Signing In — Codex",
+    options: [{ optionId: "auth:cancel", name: "Cancel Sign-In", kind: "reject_once" }] } as PendingApproval;
+  const login = { operationId: "op-1", accountId: "codex-work", label: "Codex Work", provider: "codex",
+    status: "waiting_for_provider", verificationUrl: "https://auth.openai.com/codex/device", userCode: "ABCD-EFGH",
+    expectsCode: false, sessionId: "session-auth", startedAt: 1 };
+  const view = await render(
+    <AuthenticationRecoveryPanel session={session()} approval={signingIn}
+      runner={runner({ providerLogins: [login] } as unknown as Partial<RunnerView>)} runnerOnline />,
+    api.value,
+  );
+  try {
+    const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    assert.equal(card.querySelector(".provider-login-device-code > .code-well > code")?.textContent, "ABCD-EFGH");
+    assertNoDomNode(card.querySelector("input"), "a device-code sign-in has nothing to paste");
+    const copy = card.querySelector<HTMLButtonElement>('.code-well > button[aria-label="Copy Device Code"]');
+    assert.ok(copy?.matches(".icon-btn.sm"));
+    const buttons = card.querySelectorAll("button");
+    assert.ok(buttons.length === 1 && buttons[0] === copy, "Copy Device Code is the sign-in's only button");
+    await act(async () => { copy.click(); await tick(); await tick(); });
+    assert.deepEqual(copied, ["ABCD-EFGH"]);
+    assert.ok(copy.classList.contains("copy-status-copied"));
+  } finally {
+    await view.cleanup();
+    Reflect.deleteProperty(domWindow.navigator, "clipboard");
+  }
+});
+
 test("a code pasted into the recovery panel's sign-in is never in the DOM, before or after a failed request (#3529)", async () => {
   const submitted: string[] = [];
   const api = client();
