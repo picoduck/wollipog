@@ -190,6 +190,8 @@ const protectedActionBeyondLocalHandling = new RegExp(protectedAction.source.rep
  * outside the feature is disclosure, not design. */
 const designCredentialSink = new RegExp([
   String.raw`[a-z][a-z0-9+.-]*:\/\/`, String.raw`\bwww\.`, String.raw`[^\s@]+@[^\s@]+\.[a-z]{2,}`,
+  // Any host-shaped or IP token, even with no scheme; a file name such as auth.json voids it too.
+  String.raw`\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.[a-z]{2,}\b`, String.raw`\b\d{1,3}(?:\.\d{1,3}){3}\b`, String.raw`\[[0-9a-f:]*:[0-9a-f:]*\]`,
   String.raw`\b(?:third[ -]?part(?:y|ies)|external(?:ly)?|remote(?:ly)?|servers?|endpoints?|webhooks?|collectors?|logs?|logging|prs?|pull[ -]?requests?|issues?|comments?|chats?|transcripts?|public(?:ly)?|uploads?|gists?|paste(?:bin|s)?|slack|discord|e-?mails?)\b`,
 ].join("|"), "iu");
 /** Decline-only additions for design forms: none of these admits anything main declined. */
@@ -197,8 +199,13 @@ const designOnlyProtected = new RegExp([
   // An email value, or performing a sign-in at all.
   String.raw`[^\s@]+@[^\s@]+\.[a-z]{2,}`, String.raw`\b(?:sign|log)\s+(?:in|on)\b`,
   String.raw`\be-?mail(?:[ _-]?address(?:es)?)?\s+(?:values?\s+)?(?:should|shall|will|can|do|does|may)\s+(?:I|we|you|(?:the|our)\s+(?:app|application|client|provider))\s+(?:use|enter|provide|supply|send|paste|choose|select)\b`,
-  // An option granting wider provider access or a lasting permission.
-  String.raw`\b(?:give|widen|expand|extend|elevate|escalate|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox|polic(?:y|ies)|limits?|protections?)\b`,
+  // Disclosure to whoever answers, and a real identity's credential, beyond credentialIdentity.
+  String.raw`\b(?:paste|enter|provide|supply|reveal|share|give|tell)\b.{0,80}\be-?mail(?:[ _-]?address(?:es)?)?\b`,
+  String.raw`\b(?:tell|send\s+(?:me|us))\b.{0,80}\b(?:passwords?|passphrases?|secrets?|credentials?|tokens?|api[ _-]?keys?|access[ _-]?tokens?|private[ _-]?keys?|cookies?|bearer)\b`,
+  String.raw`\b(?:passwords?|passphrases?|secrets?|credentials?|tokens?|api[ _-]?keys?|cookies?)\b.{0,40}\bto\s+(?:me|us)\b`,
+  String.raw`\b(?:our|live|personal)\b.{0,50}\b(?:passwords?|passphrases?|secrets?|credentials?|api[ _-]?keys?|access[ _-]?tokens?|private[ _-]?keys?)\b`,
+  // An option granting access, wider provider access or a lasting permission, plural nouns included.
+  String.raw`\b(?:grant|give|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox(?:es)?|polic(?:y|ies)|limits?|protections?)\b`,
   String.raw`\b(?:wider|broader|more|additional|extra|elevated|admin)\s+(?:provider\s+)?(?:access|permissions?|scopes?)\b`,
   String.raw`\b(?:always|permanently|persistently|indefinitely)\s+(?:allow|approve|trust|grant|permit)\b`, String.raw`\ballow\s+(?:always|permanently)\b`,
   String.raw`\b(?:lasting|persistent|permanent|standing|durable)\s+(?:permissions?|access|grants?|approvals?)\b`,
@@ -209,10 +216,11 @@ const anyCredential = String.raw`(?:tokens?|(?:api[ _-]?)?keys?|secrets?|credent
 const credentialHandling = new RegExp(String.raw`\b${handlingVerb}\b.{0,80}\b${anyCredential}\b|\b${anyCredential}\b.{0,80}\b${handlingVerb}\b`, "iu");
 /** Quotes and backticks never hide a word or a path from these screens. */
 const withoutQuoting = (text: string) => text.replace(/[`'"‘’“”]/gu, " ");
-/** Credential-store paths, matched on path-like words of the quote-normalized text so that the
- * subject "credentials" stays discussable while `~/.codex/auth.json` or ".env" does not. */
-const namesCredentialPath = (text: string) => text.split(/\s+/u).some((word) => {
-  const path = word.replace(/[.,;:!?)\]]+$/u, "");
+/** Credential-store paths, matched on path-like words so that the subject "credentials" stays
+ * discussable while `~/.codex/auth.json` or ".env" does not. Every character that cannot be part
+ * of a path separates words, so no wrapper ((, [, <, «, *, fullwidth quotes) hides one. */
+const namesCredentialPath = (text: string) => text.replace(/[^\p{L}\p{N}._~\/\\-]/gu, " ").split(/\s+/u).some((word) => {
+  const path = word.replace(/\.+$/u, "");
   return /[\\/]|^[.~]/u.test(path) && protectedPath.test(path);
 });
 function designQuestionProtected(raw: string, verifiedPlanning: boolean): boolean {
@@ -222,7 +230,7 @@ function designQuestionProtected(raw: string, verifiedPlanning: boolean): boolea
   const localHandlingOnly = !any(protectedActionBeyondLocalHandling) && !sink;
   return (any(protectedAction) && !localHandlingOnly) || any(credentialIdentity) || any(credentialValueChoice) ||
     (any(sensitiveSubject) && (!verifiedPlanning || !planningIntent.test(raw))) || any(designOnlyProtected) ||
-    (sink && any(credentialHandling)) || namesCredentialPath(forms[1]!);
+    (sink && any(credentialHandling)) || namesCredentialPath(raw);
 }
 
 /** Exact finite operation selectors shared by the runner's evidence collector and resolver.

@@ -176,16 +176,18 @@ These design forms run the ordinary question screen unchanged, with one excusal:
 match whose only verb is a local "copy" or "use". Any other verb (send, upload, load, export,
 paste, share, read and the rest) still declines. So do a credential value, a real identity's
 credential and a sign-in, and so does an excused copy or use once the form names a destination:
-a URL, a `www.` host, an email, or a third-party, external, remote, server, endpoint, webhook,
+a URL, a `www.` host or any host-shaped or IP token, an email, or a third-party, external, remote, server, endpoint, webhook,
 collector, log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord
 or email sink. Design forms also decline, beyond the ordinary screen:
 - handling any credential, a bare token included, near such a sink;
-- an email value;
+- an email value, or disclosing a credential or email to whoever answers;
+- our, live or personal credentials;
 - signing in;
-- an option granting wider provider access or a lasting permission;
+- an option granting access, wider provider access or a lasting permission;
 - a credential-store path named in the form.
 
-Quotes and backticks are removed before these checks, so a quoted `.netrc` is still seen. A secret
+Quotes and backticks are removed before these checks. For paths, every character that cannot be
+part of a path separates words, so `(.netrc)`, `«.netrc»` or a quoted `.netrc` is still seen. A secret
 or email field always fails closed. A child's provider question can be answered with free text, so
 it keeps the ordinary screen without the excusal.
 

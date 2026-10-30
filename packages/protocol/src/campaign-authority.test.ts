@@ -206,6 +206,20 @@ test("a design question about credential handling is decided; one asking for a c
     // Only normalization reveals these: the quote is not a path boundary and hides the leading dot.
     ["backticked .netrc", option("Copy `.netrc` into the profile")],
     ["curly-quoted .git-credentials", option("Copy “.git-credentials” into the profile")],
+    // No wrapper hides a path, and a bare host or IP voids the local excusal.
+    ...["(.netrc)", "[.npmrc]", "<.pgpass>", "«.netrc»", "*.npmrc*", "＂.netrc＂"]
+      .map((wrapped): [string, WorkflowDecisionResourceSnapshot] => [`wrapped ${wrapped}`, option(`Copy ${wrapped} into the profile`)]),
+    ["bare host", option("Copy the API key to ingest.example.net")],
+    ["bare IP", option("Use the API key at 10.0.0.5")],
+    ["bracketed IPv6", option("Copy the API key to [2001:db8::1]")],
+    // Decline-only additions beyond main: plural grants, more identities, disclosure to the asker.
+    ["grant permissions", option("Grant the importer permissions for the import")],
+    ["broaden scopes", option("Broaden the importer's scopes for the import")],
+    ["our key", option("Copy our API key into the profile")],
+    ["personal token", option("Copy the personal access token into the profile")],
+    ["tell me", option("Tell me the API key for the import")],
+    ["key to me", option("Copy the API key to me for the import")],
+    ["provide an email", option("Provide the email address for the profile")],
   ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const root of [false, true]) declined(typed(snapshot, { root }), "secrets_and_sign_in", label);
   // A form that does carry a secret or email field fails closed on every path, root included.
   for (const field of [{ secret: true }, { inputFormat: "email" as const }]) for (const root of [false, true]) {
