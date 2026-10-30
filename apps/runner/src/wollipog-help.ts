@@ -29,7 +29,7 @@ export function rootHelp(): string {
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  pr                  Wait for a pull request's required checks or merge-queue outcome",
-    "  review              Run the cross-model review of this session's own pull request through the runner",
+    "  review              Start or inspect a review session for your own pushed pull request",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -154,11 +154,6 @@ Commands:
                                                  Record {disposition, reason, resultingWorkItemKey?,
                                                  resultingIssue?, publicationRequired?}
   allocate --input '<json>'                      Reserve a managed worker's allowance (protocol v218+)
-  review --input '<json>'                        Dispatch/read a bounded controlled native review job
-  review-job <job-id>                            Read a review receipt without new spending
-  review-jobs [--limit <n>] [--cursor <job-id>] [--item <work-item-id>]
-                                                 Read active and terminal recovery metadata
-  review-report <job-id>                         Read a validated report separately for adjudication
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
@@ -257,18 +252,7 @@ export function pullRequestHelp(): string {
 
 export function reviewHelp(): string {
   return [
-    "Usage: wollipog review <command> [options]",
-    "  review run --repo <owner/name> --pr <number> --head <sha> [--brief-file <path>]",
-    "             [--scope delta|full] [--full-reason <text>] [--json]",
-    "  review get <job-id> [--json]",
-    "  review list [--limit <1-100>] [--cursor <job-id>] [--json]",
-    "  review cancel <job-id> [--json]",
-    "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "The runner runs the installed cross-model review controller for this session's own open pull request at its pushed head, outside the session's sandbox, with the other model family as a read-only reviewer. It reviews a runner-private snapshot and never writes to the session's worktree.",
-    "Push first: --head must be the pull request's current head. The first round of a pull request needs --brief-file (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round unless --scope full is given with --full-reason.",
-    "review run returns a job id at once. Poll review get until terminal is true; it then prints the controller's summary, report and the runner-owned ledger. One review runs per session at a time.",
-    "Sessions in a campaign with an allowance are refused; their Orchestrator runs the campaign's controlled review job. Tools: request_cross_model_review, get_cross_model_review, list_cross_model_reviews, cancel_cross_model_review.",
-    "",
+    "Usage: wollipog review session <command> [options]",
     "  review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path>",
     "                     [--full-reason <text>] [--json]",
     "  review session get <review-session-id> [--json]",

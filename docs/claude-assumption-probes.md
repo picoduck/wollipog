@@ -140,7 +140,7 @@ Nothing outside the throwaway directories is read.
 | `steering` | A stream-json user message written mid-turn with a `uuid` is replayed (`isReplay`) and reaches the model, from `CLAUDE_STEERING_MIN_VERSION`. Below that floor it is an observation. | `discovery/claude-code.ts`; driver `steer()` |
 | `transcript` | The transcript is `CLAUDE_CONFIG_DIR/projects/<claudeProjectPathKey(cwd)>/<session-id>.jsonl`, `HOME/.claude` stays untouched, and `--resume` in a new process carries the earlier turn | `docs/DRIVERS.md`; `claude-background-work.ts` |
 | `discovery` | The runner's own `probeClaudeCode` reads the version and help. It finds stream-json input and the `acceptEdits`, `auto`, `bypassPermissions` and `plan` modes. It attests the control contract, steering and MCP image results exactly from their floors. | `discovery/claude-code.ts` |
-| `reviewer-pin` | Every flag both reviewers require is present. Under the production media reviewer arguments and environment, the events before the startup init match the pin's baseline, and init, scoped tool use and priced usage pass `ClaudeMediaReviewerStream`. | `campaign-review-jobs.ts`; `claude-media-reviewer.ts` (2.1.296) |
+| `reviewer-pin` | Every flag the media reviewer requires is present. Under the production media reviewer arguments and environment, the events before the startup init match the pin's baseline, and init, scoped tool use and priced usage pass `ClaudeMediaReviewerStream`. | `claude-media-reviewer.ts` (2.1.296) |
 
 Probes import the production code they rest on (`claudePermissionArgs`, `buildClaudeUserMessage`,
 the guard matcher, `claudeProjectPathKey`, discovery, the reviewer arguments, environment and
@@ -158,15 +158,17 @@ that the floor itself still holds.
 
 ### Reviewer Pin
 
-Both the controlled native reviewer and the media reviewer accept only Claude Code 2.1.296
-(`CONTROLLED_REVIEW_CLI_VERSION`, `CLAUDE_MEDIA_REVIEWER_CLI_VERSION`). The report's `reviewerPin`
+The media reviewer accepts only Claude Code 2.1.296
+(`CLAUDE_MEDIA_REVIEWER_CLI_VERSION`). The controlled native review job is retired; its former
+flag and pin comparison is removed rather than applied to managed review sessions, which have
+their own launch contract. The report's `reviewerPin`
 says whether the measured release behaves like the pin:
 
 - **at the pin:** the measured release is 2.1.296;
 - **matches the pinned behaviour:** every reviewer assumption matched, so the pin can move through a
   reviewed change;
 - **differs from the pinned behaviour;**
-- **below the pin:** the reviewers refuse this release, and it is never a candidate for the pin, so
+- **below the pin:** the media reviewer refuses this release, and it is never a candidate for the pin, so
   its reviewer measurements are recorded as observations ("same as the pin" or "differs from the
   pin") instead of failing every floor run;
 - **could not run**, which still fails the run below the pin.

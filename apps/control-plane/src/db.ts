@@ -1,3 +1,4 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
@@ -20090,20 +20091,11 @@ export class ControlPlaneDb {
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     const budget=this.campaignBudgets.view(resolvedCampaignId);
-    if(budget) {
-      const runner=this.getRunner(campaign.runner_id),profile=budget.authority.controlledReview,capability=runner?.runtime?.campaignReview;
-      const scope=this.sessionScope(resolvedCampaignId);
-      const tighter=this.campaignBudgets.members(resolvedCampaignId).some((id)=>{
-        const original=this.campaignBudgets.userLimits(id);return original?.costBudgetUsd!=null || original?.maxToolCalls!=null;
-      });
-      const supported=budget.state==="active" && Boolean(profile && capability && (runner?.protocolVersion??0)>=218 &&
-        controlledReviewCapabilityKey(profile)===controlledReviewCapabilityKey(capability)) && !tighter &&
-        scope?.owner.kind==="user" && this.getUsageDailyBudget(scope.organizationId).perUserUsd===null;
-      budget.requiredNativeReview={supported,reason:supported?
-        "Matching native reviewer capability is available; exact job admission and integrated live proof remain required.":
-        !profile?"Controlled review is not part of this campaign; it uses the regular cross-model review workflow.":
-        "Required native reviewer admission is unsupported or blocked by an additional accounting boundary; this campaign is not unattended-ready for that path."};
-    }
+    if (budget) budget.requiredNativeReview = {
+      supported: false,
+      reason: budget.authority.controlledReview ? REVIEW_JOBS_RETIRED_REASON
+        : "Use review sessions for each member's own pushed PR; native campaign review jobs are retired.",
+    };
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
     if (recovery) {
       recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);

@@ -20,7 +20,6 @@ import { capabilitiesFor } from "../src/catalog.js";
 import { claudeProjectPathKey } from "../src/claude-background-work.js";
 import { CLAUDE_MEDIA_REVIEWER_CLI_VERSION, CLAUDE_MEDIA_REVIEWER_ENV, CLAUDE_MEDIA_REVIEWER_REQUIRED_FLAGS, CLAUDE_MEDIA_REVIEWER_TOOLS, ClaudeMediaReviewerStream,
   claudeMediaReviewerArgs } from "../src/claude-media-reviewer.js";
-import { CONTROLLED_REVIEW_CLI_VERSION, CONTROLLED_REVIEW_REQUIRED_FLAGS } from "../src/campaign-review-jobs.js";
 import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION,
   claudeCapabilitiesFromProbe, claudeVersionAtLeast, probeClaudeCode } from "../src/discovery/claude-code.js";
 import type { ExecResult } from "../src/discovery/resolve.js";
@@ -673,11 +672,10 @@ async function probeDiscovery(context: Context): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// reviewer-pin: the behaviour the 2.1.296 reviewer pins rest on
+// reviewer-pin: the behaviour the 2.1.296 media reviewer pin rests on
 
-/** The release both reviewers accept; the suite compares the measured release with it. */
-export const REVIEWER_PIN = CONTROLLED_REVIEW_CLI_VERSION;
-if (REVIEWER_PIN !== CLAUDE_MEDIA_REVIEWER_CLI_VERSION) throw new Error("the native and media reviewer pins diverged; compare each separately");
+/** The release the media reviewer accepts; the suite compares the measured release with it. */
+export const REVIEWER_PIN = CLAUDE_MEDIA_REVIEWER_CLI_VERSION;
 /** Measured on 2.1.296 with this probe (2026-10-30): under `--bare` the CLI emits this before its
  * startup init. ClaudeMediaReviewerStream requires init first, so this is recorded as the pin's
  * baseline and reported separately rather than hidden (see docs/claude-assumption-probes.md). */
@@ -685,20 +683,20 @@ export const REVIEWER_PIN_PRE_INIT_EVENTS: readonly string[] = ["system/ui_inval
 
 async function probeReviewer(context: Context): Promise<void> {
   const help = await tracedExec(context, ["--help"]);
-  // Both reviewers refuse every release but the pin. A release below it is never a candidate to move
+  // The media reviewer refuses every release but the pin. A release below it is never a candidate to move
   // the pin to, so there the comparison is reported as an observation (could not run still fails).
   const candidate = claudeVersionAtLeast(context.version, REVIEWER_PIN);
   const compare = (assumption: string, documentation: string, body: () => Promise<string>) => candidate
     ? measure(assumption, documentation, body)
-    : measure(`${assumption} (observation below the ${REVIEWER_PIN} pin; reviewers refuse this release)`, documentation, async () => {
+    : measure(`${assumption} (observation below the ${REVIEWER_PIN} pin; the media reviewer refuses this release)`, documentation, async () => {
       try { return `same as the pin: ${await body()}`; } catch (error) {
         if (error instanceof AssumptionChanged) return `differs from the pin: ${error.message}`;
         throw error;
       }
     });
-  await compare("reviewer flag surface (controlled native reviewer and media reviewer)", "apps/runner/src/campaign-review-jobs.ts; apps/runner/src/claude-media-reviewer.ts", async () => {
+  await compare("reviewer flag surface (media reviewer)", "apps/runner/src/claude-media-reviewer.ts", async () => {
     if (help.code !== 0 || !help.stdout) throw new CouldNotRun("claude --help failed");
-    const missing = [...new Set([...CONTROLLED_REVIEW_REQUIRED_FLAGS, ...CLAUDE_MEDIA_REVIEWER_REQUIRED_FLAGS])].filter((flag) => !help.stdout.includes(flag));
+    const missing = CLAUDE_MEDIA_REVIEWER_REQUIRED_FLAGS.filter((flag) => !help.stdout.includes(flag));
     expect(!missing.length, `help lacks ${missing.join(", ")}`);
     return "every pinned reviewer flag is present";
   });

@@ -25,7 +25,7 @@ export const PROBES = [
   { id: "steering", minimum: 2, timeout: 5 * 60_000, documentation: "apps/runner/src/discovery/claude-code.ts" },
   { id: "transcript", minimum: 2, timeout: 6 * 60_000, documentation: "docs/DRIVERS.md" },
   { id: "discovery", minimum: 5, timeout: 3 * 60_000, documentation: "apps/runner/src/discovery/claude-code.ts" },
-  { id: "reviewer-pin", minimum: 4, timeout: 5 * 60_000, documentation: "apps/runner/src/campaign-review-jobs.ts; apps/runner/src/claude-media-reviewer.ts" },
+  { id: "reviewer-pin", minimum: 4, timeout: 5 * 60_000, documentation: "apps/runner/src/claude-media-reviewer.ts" },
 ];
 
 export const FLOORS = [
@@ -68,7 +68,7 @@ export function collectResult(probe, execution) {
 /** Whether the measured release behaves like the reviewer pin. Never moves the pin itself. */
 export function reviewerPinResult(version, reviewer) {
   const status = !version || !reviewer || reviewer.status === "could not run" ? "could not run"
-    : !claudeVersionAtLeast(version, REVIEWER_PIN) ? "below the pin; the reviewers refuse this release"
+    : !claudeVersionAtLeast(version, REVIEWER_PIN) ? "below the pin; the media reviewer refuses this release"
     : reviewer.status === "changed" ? "differs from the pinned behaviour"
       : version === REVIEWER_PIN ? "at the pin" : "matches the pinned behaviour; the pin can move through a reviewed change";
   return { pin: REVIEWER_PIN, version, status,

@@ -1,5 +1,11 @@
 # Full Control Launch Preparation
 
+Native code-review profile details below describe the historical launch schema. Protocol 254
+retires those jobs; campaign members use their own review sessions with managed Session accounting.
+Existing human grants retain their restrictions until a person replaces the obsolete boundary.
+The legacy launch-profile UI/schema needs a separate migration; its fields cannot establish
+native-review readiness. See [Retired Review Jobs](agent-control.md#retired-review-jobs).
+
 Issue #2940 offers Custom and Full Control in Orchestrator defaults, New Session, and active
 Orchestrator Controls. Full Control launches exactly like a Custom Orchestrator session: choose
 it in Orchestrator Policy, press the same Create Session, and write the first message in the
@@ -205,9 +211,9 @@ Enabling requires the exact reviewed digest, which also binds the campaign and i
 revision. It then runs the existing `setCampaignControl` operation. Revoke keeps using the ordinary
 control endpoint.
 
-In a campaign whose allowance includes controlled review, child creation refuses a resolved
-cost or tool-call ceiling (Orchestrator-supplied or from Project child-session defaults) with an
-actionable reason. Every admitted child therefore stays admissible for its required review.
+In a campaign retaining an obsolete controlled-review boundary, child creation still refuses a
+resolved cost or tool-call ceiling (Orchestrator-supplied or from Project child-session defaults).
+The reason requires human replacement of that boundary; it does not claim native-review admission.
 
 The paced-media evidence envelope (`evidenceAuthority`) is minted by the same launch only when
 every peer declares the private media contract. The hosting control plane supplies its disclosures:

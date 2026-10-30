@@ -246,9 +246,9 @@ their tracked trees to the owning discovery reference. Resolution utilities (`co
 inspection) and fixed native helpers are not providers. WSL probes retain their existing in-distro execution and do not acquire
 the unrelated native host HOME; WSL session isolation is handled separately.
 
-Detached session/campaign review controllers join provider cgroup leaves before exec. Their root
-closing triggers only a non-killing emptiness check, preserving detached review recovery. Empty
-leaves retire asynchronously. Runner shutdown additionally requires the entire provider parent
+Legacy detached review controllers must finish under their prior runner before the review-job
+retirement upgrade. New runners refuse unfinished legacy records and never launch those controllers.
+Existing provider cgroup leaves retire asynchronously after a non-killing emptiness check. Runner shutdown additionally requires the entire provider parent
 empty before releasing HOME leases. A surviving detached controller legitimately blocks handoff
 until its provider work finishes; shutdown and recovery guidance name this possibility.
 

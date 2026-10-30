@@ -86,17 +86,17 @@ test("normal terminal completion settles once; outstanding ownership fences supp
   } finally {h.cleanup();}
 });
 
-test("an existing native review lease survives unrelated admission waiters",()=>{
+test("media review admission retains fairness and refuses duplicate prepared-session dispatch",()=>{
   const h=harness();
   try {
-    (h.manager as any).executionIsolation={mode:"provider"};
-    assert.equal(h.manager.reserveControlledReviewAdmission("native","claude"),true);
+    assert.equal(h.manager.reserveMediaReviewAdmission("media:one","claude"),true);
     (h.manager as any).admissionQueue.push({});
-    assert.equal(h.manager.reserveControlledReviewAdmission("native","claude"),true);
-    assert.equal(h.manager.reserveControlledReviewAdmission("native","other"),false);
-    assert.equal(h.manager.reserveControlledReviewAdmission("new-native","claude"),false,"queue fairness still applies to new jobs");
+    assert.equal(h.manager.reserveMediaReviewAdmission("media:one","claude"),false);
+    assert.equal(h.manager.reserveMediaReviewAdmission("media:two","claude"),false);
     (h.manager as any).admissionQueue.length=0;
-    h.manager.releaseControlledReviewAdmission("native");
+    h.manager.releaseMediaReviewAdmission("media:one");
+    assert.equal(h.manager.reserveMediaReviewAdmission("media:two","claude"),true);
+    h.manager.releaseMediaReviewAdmission("media:two");
   } finally {h.cleanup();}
 });
 

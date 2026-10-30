@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import type { DatabaseSync } from "node:sqlite";
 import {
   SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_SUMMARY_LIMIT_BYTES, sanitizedSessionReviewReason,
@@ -24,9 +25,9 @@ function boundedText(text: string, limit: number, tail = false): { text: string;
 }
 
 /**
- * Durable session cross-model review jobs (#3306). The control plane records intent and the
- * runner's reports; the runner owns scope checks, rounds and attempts. Only the owning runner's
- * updates carrying the job's nonce are accepted, and a terminal state is final.
+ * Historical native review records. New admissions are retired; retained rows support archive
+ * reads and cancellation-only recovery. Only the owning runner's updates carrying the job's
+ * nonce are accepted, and a terminal state is final.
  */
 export class SessionReviewJobs {
   constructor(private readonly sql: DatabaseSync) {
@@ -51,11 +52,11 @@ export class SessionReviewJobs {
     return this.sql.prepare("SELECT * FROM session_review_jobs WHERE job_id=?").get(jobId) as Row | undefined;
   }
 
-  /** Record a new job, refusing while the session already has one that has not finished. */
+  /** Historical record constructor; retired service admission must never call this. */
   create(sessionId: string, runnerId: string, request: SessionReviewJobRequest, now: number): SessionReviewJobCommand {
     return this.atomic(() => {
       if (this.sql.prepare("SELECT 1 FROM session_review_jobs WHERE session_id=? AND state IN ('requested','running')").get(sessionId)) {
-        throw new Error("a review of this session is already running; wait for it, or cancel it with cancel_cross_model_review");
+        throw new Error("a historical review record for this session is still unsettled; retain it until the owning runner reports cancellation");
       }
       const command: SessionReviewJobCommand = {
         type: "session_review_job", jobId: `srj_${randomBytes(18).toString("base64url")}`, nonce: randomUUID(), sessionId, request,
@@ -75,7 +76,7 @@ export class SessionReviewJobs {
     return this.row(jobId)?.runner_id ?? null;
   }
 
-  /** Unfinished jobs on a runner, oldest first, for re-dispatch after it reconnects. */
+  /** Unfinished jobs on a runner, oldest first, for cancellation after it reconnects. */
   unfinished(runnerId: string): Array<{ command: SessionReviewJobCommand; state: SessionReviewJobView["state"]; cancelRequested: boolean }> {
     return (this.sql.prepare(`SELECT command,state,cancel_requested FROM session_review_jobs
       WHERE runner_id=? AND state IN ('requested','running') ORDER BY rowid`).all(runnerId) as Array<Pick<Row, "command" | "state" | "cancel_requested">>)
@@ -121,13 +122,13 @@ export class SessionReviewJobs {
 
   /** Mark an unfinished job for cancellation; false when it has already finished. */
   requestCancel(jobId: string, now: number): boolean {
-    return Number(this.sql.prepare(`UPDATE session_review_jobs SET cancel_requested=1,updated_at=?
-      WHERE job_id=? AND state IN ('requested','running')`).run(now, jobId).changes) > 0;
+    return Number(this.sql.prepare(`UPDATE session_review_jobs SET cancel_requested=1,reason=?,updated_at=?
+      WHERE job_id=? AND state IN ('requested','running')`).run(REVIEW_JOBS_RETIRED_REASON, now, jobId).changes) > 0;
   }
 
   /** Finish a job the runner can no longer report on (it lost support for session reviews). */
   abandon(jobId: string, reason: string, now: number): void {
-    this.sql.prepare(`UPDATE session_review_jobs SET state=CASE state WHEN 'requested' THEN 'not_launched' ELSE 'failed' END,
+    this.sql.prepare(`UPDATE session_review_jobs SET state='failed',
       reason=?,updated_at=? WHERE job_id=? AND state IN ('requested','running')`).run(reason, now, jobId);
   }
 

@@ -173,10 +173,6 @@ wollipog review session run --repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT --pr N -
 wollipog review session get REVIEW_SESSION_ID --json
 wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
 wollipog review session cancel REVIEW_SESSION_ID --json
-wollipog review run --repo OWNER/NAME --pr N --head SHA [--brief-file PATH] [--scope delta|full] [--full-reason TEXT] --json
-wollipog review get JOB_ID --json
-wollipog review list [--limit N] [--cursor JOB_ID] --json
-wollipog review cancel JOB_ID --json
 wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
 wollipog decision get OCCURRENCE_ID --json
 wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
@@ -239,98 +235,43 @@ fails or is canceled; `queue_ejected` when the car stays gone for 10 seconds wit
 the pipeline and train state, and GitLab's `detailed_merge_status`. A bare IID without `--repo` still
 resolves only a GitHub repository.
 
-Use [Review Sessions](#review-sessions) for required cross-model review of your own pushed pull
-request, including from an isolated campaign child. The bridge below is a compatibility fallback
-only for runners that predate review sessions or refuse them with a version reason. Missing
-reviewer/trust, budget, admission and review-limit refusals remain blockers.
+### Retired Review Jobs
 
-`wollipog review run` (MCP `request_cross_model_review`, #3330 bridge) asks the runner to run the installed
-cross-model review controller for the calling session's own pull request, outside the session's
-sandbox. A protected native Linux session cannot run the controller itself: its root is read-only and
-a reviewer's sandbox cannot nest inside the session's user namespace. The runner runs it instead, with
-the other model family as the reviewer (Codex for a Claude Code session, Claude Code for a Codex
-session) under that reviewer's normal read-only sandbox. The reviewer reads a snapshot checked out
-from a runner-owned mirror at the exact head, so nothing writes to the session's worktree or its Git
-metadata, and the session can keep working during the review. The runner refuses, and reports a fixed
-reason for, any request outside scope: the session must own a native managed worktree it created; the
-pull request must be open, from the same repository as the session's project (fork pull requests are
-refused), and on the worktree's branch; and `--head` must be its pushed head. The first round of a
-pull request needs `--brief-file` (MCP `brief`, at most 100 KiB: intent, acceptance criteria and
-verification); the runner keeps it, and later rounds review only the changes since the last valid
-round unless `--scope full` is given with `--full-reason`. The controller's limits apply per pull
-request: four valid rounds and two consumed attempts per round, with a rebase or force-push starting
-a new review epoch. A head that does not descend from the head the epoch was reviewed at (its last
-valid round's or, before any valid round, its most recent attempt's) counts as a rebase, so attempts
-spent before a rebase do not block the rebased head. One review runs per session at a time, and a runner at its review concurrency
-limit refuses a request as busy instead of queueing it.
+Use [Review Sessions](#review-sessions) for your own pushed PR, including from an isolated campaign
+child. Protocol 254 retires the runner-mediated review bridge and controlled campaign review job.
+Their MCP tools and CLI commands are no longer advertised or callable. Old tool names and command
+spellings receive an explicit migration refusal pointing to `request_review_session` and
+`wollipog review session run`; they are never silently forwarded or retried through another route.
+The legacy HTTP admission routes return 410 after their existing identity/audience checks.
 
-The request returns a job at once in state `requested`; the runner then reports `running` and finally
-`completed`, `failed`, or `not_launched` with a fixed reason. `review get` (`get_cross_model_review`)
-reads the job; once `terminal` is true it also returns the controller's one-line summary, its
-`report.json` and the tail of the runner-owned ledger (each at most 256 KiB, with `reportTruncated`
-and `ledgerTruncated`). Pass `include` to the MCP tool to fetch only the report or the ledger. The
-ledger is read-only to the session; adjudication stays in the pull request. `review list`
-(`list_cross_model_reviews`) pages the session's jobs newest first, and `review cancel`
-(`cancel_cross_model_review`) stops an unfinished one; a cancelled launched attempt still counts.
-Jobs are durable: a runner that reconnects receives every unfinished job again and reports its
-result, and it recovers a review that was running when it restarted.
+Upgrade in this order:
 
-The routes are `/api/sessions/:id/cross-model-reviews` (POST to request, GET to list),
-`.../:jobId`, `.../:jobId/artifacts` and `.../:jobId/cancel` (POST). Only the session's own credential
-may request or cancel; the session and people with access to it may read. Orchestrator sessions do not
-have these tools. A session in a campaign with an allowance is refused, so the allowance cannot be
-bypassed: its Orchestrator runs the campaign's controlled review job (`run_campaign_review_job`,
-[campaign limits](./campaign-limits.md)) instead. The feature needs protocol 223 on both the control
-plane and the runner, and a Linux runner that advertises `runtime.sessionReview`.
+1. Drain every legacy job's execution with its prior runner and retain its final receipt and usage,
+   including terminal `accounting_unavailable` receipts. These cannot be turned into priced
+   receipts by repeating cancellation; unknown cost remains unknown after execution has stopped.
+   Do not delete job records or infer zero cost from missing state. Unknown campaign usage keeps
+   its reservation and blocks protected admission until authenticated settlement.
+2. Upgrade the control plane. It admits no new legacy jobs; reconnect recovery sends only
+   cancellation, never a legacy dispatch. Older runners can still provide authenticated final
+   receipts to settle previously admitted work. Their cancel handlers do not re-send already-finished
+   or unknown jobs: a lost final update or never-delivered request stays pending until the runner is
+   upgraded to replay its historical receipt or explicitly refuse missing state. Existing archive
+   read routes retain their audience checks, bounded output, historical charges and deduplicated receipts.
+3. Upgrade the runner. A new runner refuses an older or unverified control plane at registration
+   with an actionable version error. Older servers sanitize unknown job refusal messages and can
+   replay dispatch, so silently accepting that pairing would hide the migration. Startup also
+   refuses unfinished, malformed or still-live/uninspectable local legacy execution without changing
+   records or launching a controller. A drained terminal unpriced receipt permits upgrade and replays
+   unchanged, retaining its unknown cost and reservation. Recorded process identities and surviving
+   controller groups must be gone; use the prior runner to drain them before upgrading.
+4. Request review sessions. Campaign members request their own sessions against the campaign
+   allowance. A human must replace any obsolete controlled-review profile boundary; no authority
+   or budget is silently converted. Missing reviewer/admission/budget support remains a blocker.
 
-The runner discovers the installation at each registration and runs only files no session can
-change. The controller is read from its installed skill directory (`~/.devbox/skills/cross-model-review`,
-or `WOLLIPOG_SESSION_REVIEW_SKILL_DIR` in the runner's environment), never through a provider home's
-`skills` link. The controller, `python3`, `git`, `gh` (which the runner itself runs to read the pull
-request), and the `codex` and `claude` reviewer CLIs found on the runner's `PATH` must each be owned
-by the runner's user or root, have no path component writable by other users, and lie outside every
-root a session can write: provider credential homes (`~/.codex` and `~/.claude`, every configured
-provider account's directory, provider homes an agent's or a session's environment names, and each
-session's current and pending credential homes), the shared package caches, temporary directories,
-project checkouts and worktrees, and the runner's data directory. The first trusted candidate on
-`PATH` is used and an untrusted one earlier on it is skipped, never run; without a trusted
-`python3`, `git` and `gh` nothing is advertised. A reviewer installed under `~/.codex` or `~/.claude`
-is therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix,
-and put that location on the runner's `PATH`. A reviewer that is a script run through `env` (npm's
-`#!/usr/bin/env node`, with Node from nvm or fnm, for example) also needs that program, `node`,
-on the runner's `PATH` and trusted by the same checks; otherwise the reviewer is unavailable and
-the reason says so. The runner advertises what it found and why anything is unavailable, and
-records a digest of the controller's files with each job. Reviewers use the runner's default Codex
-and Claude sign-ins.
-
-Nothing the runner runs for a review finds a program through the runner's own `PATH`, which could
-name a directory a session can write. The `git` and `gh` commands that read the pull request and
-build the snapshot, and the controller's recovery step, run with `PATH` set to a runner-private
-directory of links to the verified `git`, `gh` and `ssh`, followed by `/usr/bin:/bin`, and without
-the runner's `GIT_*` and `*ASKPASS` variables. `HOME` is kept, so your own git and GitHub CLI
-configuration and credentials still apply, but a credential helper must be named by an absolute
-path or live in a system directory. A fetch over SSH runs the verified `ssh` by its path
-(`GIT_SSH_COMMAND`); when no trusted `ssh` is found, the mirror is fetched over HTTPS only, whatever
-the origin's spelling. The controller's own `PATH` holds links to the verified reviewer, `git` and
-the reviewer's `env` program, then `/usr/bin:/bin`.
-
-The controller runs under `python3 -I`, with only its own installed directory added for its sibling
-modules. A controller preflight failure launches nothing and consumes no attempt: the job completes
-with the controller's summary (`attempt_consumed: false`, its `failure_class` and
-`validation_errors`), and the round's attempts are unchanged. A job stays running, with its snapshot
-and its share of the concurrency limit, until both the controller and the reviewer it started have
-exited, so a reviewer that outlives a killed controller is still supervised, cancelled through the
-controller's process group, and stopped by the time limit. When the controller dies without a
-result, its recovery step runs once; until it finishes, neither a repeated request nor a cancel
-ends the job, and its recovered result is what the job reports.
-
-Before the controller is spawned, the job is saved with a per-launch marker that the controller
-(and the reviewer it starts) carries in its environment. A runner that restarts before it recorded
-the controller's process looks for that marker: a live process is adopted and supervised as usual;
-an attempt directory or controller output with no live process is a controller that died, and is
-recovered; with neither, the job reports `not_launched` and the attempt is not charged. If the
-runner cannot record a controller it has just started, it stops that controller and reports the
-job failed.
+No controller discovery, native subprocess launcher or recovery executor remains. Compatibility
+message types and database ledgers remain only for refusal, cancellation and historical settlement.
+A new runner replays an exact settled legacy receipt; a missing receipt is an unknown outcome and
+never a zero-cost refund. See [ADR 0013](./adr/0013-review-sessions-replace-native-review-jobs.md).
 
 ### Review Sessions
 
@@ -349,7 +290,9 @@ requester to obtain and cite a valid review session for the exact head.
 `reviewEvidence`: `verified` with the reviewer, requester, PR, head, vote, epoch, round, attempt and
 completion time, or `refused` with its reason. Orchestrators read these facts from the server;
 `reviewResult` remains the requester's recommendation. Evidence is checked at request, approval,
-arming, and the correlated merge authorization boundary. A new vote can revoke a stale grant.
+arming, and the correlated merge authorization boundary. Record-only reconciliation and lifecycle
+settlement still require the exact armed command, current authority and forge proof of the merged
+head; a later vote cannot erase a completed action. A new vote can revoke a stale grant.
 The review records survive reconnect and restart; ordinary stop/restart decision revocation still
 applies. Review approval never grants human approval, merge authorization or passing CI checks.
 
@@ -401,7 +344,7 @@ snapshot with the child and parent session IDs, without exposing the user's othe
 session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
 **review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
 session, with a live and recorded transcript, instead of as an external controller. It reviews the
-calling session's own pull request at its pushed head, with the same scope as the bridge above: a
+calling session's own pull request at its pushed head. The scope is a
 native managed worktree the session created, an open pull request from the same repository on that
 worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
 100 KiB) is required and is the reviewer's only context besides the pinned patch.

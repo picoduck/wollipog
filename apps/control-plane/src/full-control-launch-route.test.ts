@@ -131,7 +131,7 @@ async function preflight(server: Awaited<ReturnType<typeof app>>["server"], body
 }
 const sessionCount = (f: ReturnType<typeof fixture>) => f.db.raw().prepare("SELECT count(*) AS n FROM sessions").get()!.n;
 
-test("a ready Human launch admits one Full Control root that owns every authorized decision and controlled review", async () => {
+test("a ready Human launch preserves its authority while retired native review stays unavailable", async () => {
   const f = fixture();
   const { server, logs } = await app(f);
   try {
@@ -194,7 +194,8 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     }
     assert.equal(f.db.campaignBudgets.view(root.id)!.state, "active");
     assert.deepEqual(f.db.campaignBudgets.view(root.id)!.authority.controlledReview, review);
-    assert.equal(projection.budget!.requiredNativeReview!.supported, true, "the launched campaign can actually admit controlled review");
+    assert.equal(projection.budget!.requiredNativeReview!.supported, false);
+    assert.match(projection.budget!.requiredNativeReview!.reason, /retired.*review session/u);
     assert.equal(f.starts.length, 1);
     const start = f.starts[0]! as Extract<ControlPlaneToRunner, { type: "start_session" }>;
     assert.deepEqual(start.spec.orchestrator!.control, control);
@@ -304,7 +305,7 @@ test("infrastructure gaps never block launch: each is informational and the camp
   }
 });
 
-test("with no budget the campaign launches unbounded, metered, and still charges controlled review per job", async () => {
+test("with no budget the campaign launches unbounded and metered without reviving native review", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
@@ -332,7 +333,7 @@ test("with no budget the campaign launches unbounded, metered, and still charges
     assert.deepEqual(f.db.campaignBudgets.allocation(root.id), { sessionId: root.id }, "the root holds no allocation ceiling");
     assert.equal(root.costBudgetUsd ?? null, null);
     assert.equal(root.maxToolCalls ?? null, null);
-    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, false);
     assert.equal(f.starts.length, 1);
   } finally { await server.close(); f.db.close(); }
 });
@@ -624,7 +625,7 @@ test("Project child-session ceilings route review to the regular workflow, and a
       projectLocationId: location.id, agentId: "claude" });
     assert.ok(ordinary.ok);
     assert.deepEqual(ordinary.scope, organizationScope);
-    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, false);
   } finally { await server.close(); f.db.close(); }
 });
 
