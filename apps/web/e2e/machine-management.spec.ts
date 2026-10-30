@@ -423,6 +423,9 @@ const accountRow = (page: import("@playwright/test").Page, label: string) =>
 /** A row's sign-in steps or ending, in the expansion under it (#2996). */
 const signInSteps = (page: import("@playwright/test").Page, label: string) =>
   accountRow(page, label).locator("xpath=following-sibling::*[1][contains(concat(' ', @class, ' '), ' provider-account-expansion ')]");
+/** Waits for finite animations, so a screenshot shows the dialog or toast instead of its fade. */
+const settleAnimations = (page: import("@playwright/test").Page) => page.evaluate(() => Promise.allSettled(document.getAnimations()
+  .filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity).map((animation) => animation.finished)));
 async function openAccountMenu(page: import("@playwright/test").Page, label: string) {
   await accountRow(page, label).getByRole("button", { name: `More Actions for ${label}` }).click();
   return page.getByRole("menu", { name: label });
@@ -460,9 +463,10 @@ test("Machine owners remove a provider account from its menu after confirming", 
   await menu.getByRole("menuitem", { name: "Remove Account…" }).click();
   const confirmation = page.getByRole("dialog", { name: "Remove Account" });
   await expect(confirmation).toContainText(
-    "Personal (Claude) is removed from Design Workstation, and the sign-in Wollipog stored for it is deleted. " +
+    "Personal (Claude) is removed from Design Workstation, and the sign-in Wollipog stored for it stays on this machine. " +
     "Sessions still using it keep working, and the Claude account itself isn't affected.");
   await expect(confirmation.getByRole("button", { name: "Cancel" })).toBeFocused();
+  await settleAnimations(page);
   await page.screenshot({ path: "test-results/provider-accounts/remove-account-confirm-desktop.png" });
   await confirmation.getByRole("button", { name: "Cancel" }).click();
   await expect(accountRow(page, "Personal")).toBeVisible();
@@ -472,17 +476,20 @@ test("Machine owners remove a provider account from its menu after confirming", 
   await expect(accountRow(page, "Personal")).toHaveCount(0);
   const toast = page.locator(".toast").filter({ hasText: "Account removed." });
   await expect(toast).toBeVisible();
-  await expect(toast).not.toContainText("credentials were kept");
+  await expect(toast).toContainText("The sign-in Wollipog stored for it was kept on this machine.");
   await expect(providerAccounts(page).getByRole("heading", { name: "Provider Accounts 3" })).toBeVisible();
+  await settleAnimations(page);
   await page.screenshot({ path: "test-results/provider-accounts/remove-account-toast-desktop.png" });
 });
 
-test("Removing an account whose credentials a session still uses says so in the toast", async ({ page }) => {
+test("A removal on a runner that doesn't report the kept sign-in shows a one-line toast", async ({ page }) => {
   await (await openAccountMenu(page, "Work")).getByRole("menuitem", { name: "Remove Account…" }).click();
   await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();
   const toast = page.locator(".toast").filter({ hasText: "Account removed." });
-  await expect(toast).toContainText("Its credentials were kept because a session on this machine still uses them.");
-  await page.screenshot({ path: "test-results/provider-accounts/remove-account-kept-toast-desktop.png" });
+  await expect(toast).toBeVisible();
+  await expect(toast).not.toContainText("was kept");
+  await settleAnimations(page);
+  await page.screenshot({ path: "test-results/provider-accounts/remove-account-unreported-toast-desktop.png" });
 });
 
 test("A removal refused for an agent default names the agent in a notice above the rows", async ({ page }) => {

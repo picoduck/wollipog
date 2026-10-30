@@ -1,7 +1,9 @@
 # Provider HOME Cleanup Status
 
 Provider-account removal forgets the configured account and reports `credentialsRetained: true`.
-Failed, cancelled, duplicate and spawn-failed sign-ins also retain their credential HOME, scratch
+The Remove Account confirmation says the stored sign-in stays on the machine, and the success toast
+says it was kept whenever the runner reports `credentialsRetained`; neither promises deletion or
+gives a reason the runner did not report. Failed, cancelled, duplicate and spawn-failed sign-ins also retain their credential HOME, scratch
 files and canonical lease evidence. Completed sign-ins keep their configured account as before.
 Profile grant settlement, process reaping, local reservations, skill serialization and configuration
 write protections remain in effect.
