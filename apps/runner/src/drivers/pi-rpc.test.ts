@@ -222,48 +222,6 @@ test("Pi RPC correlates extension dialogs to durable Wollipog questions", async 
   assert.equal(events.some((event) => event.kind === "agent_message" && event.text === "Selected Stable"), true);
 });
 
-test("Pi RPC separates durable project trust from ordinary extension questions", () => {
-  const events: SessionEventPayload[] = [];
-  const sent: Record<string, unknown>[] = [];
-  const nonce = "project-trust-nonce";
-  const driverOptions = options();
-  driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = nonce;
-  const driver = new PiRpcDriver(driverOptions, callbacks(events));
-  (driver as any).peer = {
-    send: (message: Record<string, unknown>) => { sent.push(message); return true; },
-    dispose: () => {},
-  };
-  (driver as any).onRpcEvent(trustRequest(nonce, "trust-1", "/workspace/project"));
-  const request = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
-    event.kind === "permission_request")!;
-  assert.equal(request.title, "Trust Pi Project Resources?");
-  assert.equal(request.context?.toolName, "pi.project_trust");
-  assert.equal(request.context?.input, "/workspace/project");
-  assert.deepEqual(request.options.map((option) => option.optionId), ["trust", "skip"]);
-  assert.equal(driver.resolvePermission("trust-1", "trust"), true);
-  assert.deepEqual(sent, [{ type: "extension_ui_response", id: "trust-1", value: "Trust This Project" }]);
-
-  (driver as any).onRpcEvent(trustRequest(nonce, "trust-2", "/workspace/project"));
-  assert.equal(driver.resolvePermission("trust-2", "skip"), true);
-  assert.deepEqual(sent.pop(), {
-    type: "extension_ui_response", id: "trust-2", value: "Skip Project Resources",
-  });
-
-  (driver as any).onRpcEvent(trustRequest(nonce, "trust-3", "/workspace/project"));
-  assert.equal(driver.resolvePermission("trust-3", null), true);
-  assert.deepEqual(sent.pop(), { type: "extension_ui_response", id: "trust-3", cancelled: true });
-
-  (driver as any).onRpcEvent({
-    type: "extension_ui_request",
-    id: "ordinary-1",
-    method: "confirm",
-    title: PI_SECURITY_REQUEST_TITLE,
-    message: "ordinary extension text",
-  });
-  assert.equal(events.some((event) => event.kind === "question_request" && event.requestId === "ordinary-1"), true);
-  driver.dispose();
-});
-
 test("Pi RPC enforces live pre-execution permission modes before answering the extension", async () => {
   const events: SessionEventPayload[] = [];
   const sent: Record<string, unknown>[] = [];
@@ -406,57 +364,6 @@ test("Pi RPC refuses safe permission modes when the Agent Control bridge is inco
   }
   await legacy.setConfig({ permissionMode: "bypassPermissions" });
   legacy.dispose();
-});
-
-test("Pi RPC can resolve project trust while provider initialization is waiting", async (t) => {
-  const events: SessionEventPayload[] = [];
-  const startup = options("startup-trust");
-  startup.env = {
-    ...startup.env,
-    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "startup-ready-nonce",
-    [PI_SECURITY_REQUEST_NONCE_ENV]: "startup-security-nonce",
-  };
-  let driver!: PiRpcDriver;
-  driver = new PiRpcDriver(startup, callbacks(events, {
-    onEvent: (event) => {
-      events.push(event);
-      if (event.kind === "permission_request") {
-        setImmediate(() => driver.resolvePermission(event.requestId, "trust"));
-      }
-    },
-  }));
-  t.after(() => driver.dispose());
-  await driver.initialize();
-  assert.equal(await driver.newSession(process.cwd()), "pi-session-1");
-  assert.equal(events.some((event) => event.kind === "permission_request" &&
-    event.context?.toolName === "pi.project_trust"), true);
-});
-
-test("Pi RPC startup watchdog pauses only for a pending project-trust decision", (t) => {
-  t.mock.timers.enable({ apis: ["setTimeout"] });
-  let disposedWith: string | undefined;
-  let kills = 0;
-  const driverOptions = options();
-  driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = "watchdog-nonce";
-  const driver = new PiRpcDriver(driverOptions, callbacks([]), undefined, (() => { kills++; }) as any);
-  (driver as any).peer = {
-    dispose: (reason: string) => { disposedWith = reason; },
-    send: () => true,
-  };
-  (driver as any).child = {};
-  try {
-    (driver as any).beginStartupStateWatchdog();
-    (driver as any).onRpcEvent(trustRequest("watchdog-nonce", "startup-trust", "/workspace/project"));
-    t.mock.timers.tick(15_000);
-    assert.equal(disposedWith, undefined, "a pending human trust decision is not timed out");
-    assert.equal(driver.resolvePermission("startup-trust", "trust"), true);
-    t.mock.timers.tick(15_000);
-    assert.equal(disposedWith, "Pi RPC get_state response timed out");
-    assert.equal(kills, 1);
-  } finally {
-    (driver as any).clearStartupStateWatchdog();
-    t.mock.timers.reset();
-  }
 });
 
 test("Pi RPC ignores user extension errors but fails startup for its exact Agent Control extension", async (t) => {
@@ -647,39 +554,6 @@ test("an additive Pi Orchestrator keeps the ordinary approval path and never aut
   presetDriver.dispose();
 });
 
-test("an additive Pi Orchestrator waits for project trust and is not launched with --no-approve", async (t) => {
-  // The preset always passes --no-approve and skips the project-trust wait, because it must never
-  // load repository-controlled Pi code. The additive launch keeps the user's extensions, skills,
-  // and context files, so it must take the ordinary path: wait for trust, and receive --no-approve
-  // only when a normal session of the same mode would.
-  const spawned: string[][] = [];
-  const additive = options("startup-trust");
-  additive.env[PI_SECURITY_REQUEST_NONCE_ENV] = "additive-trust-security";
-  additive.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE = "additive-trust-ready";
-  additive.env.WOLLIPOG_PERMISSION_PRESET = "orchestrator";
-  additive.config = { permissionMode: "default" };
-  const events: SessionEventPayload[] = [];
-  const driver = new PiRpcDriver(additive, callbacks(events));
-  t.after(() => driver.dispose());
-  const realSpawn = (driver as any).spawn.bind(driver);
-  (driver as any).spawn = (opts: { args: string[] }) => { spawned.push([...opts.args]); return realSpawn(opts); };
-  const started = driver.initialize();
-  // The startup-trust scenario blocks until project trust is resolved, proving the wait happened.
-  const trust = await new Promise<Extract<SessionEventPayload, { kind: "permission_request" }>>((resolve) => {
-    const poll = setInterval(() => {
-      const found = events.find((event): event is Extract<SessionEventPayload, { kind: "permission_request" }> =>
-        event.kind === "permission_request" && event.context?.toolName === "pi.project_trust");
-      if (found) { clearInterval(poll); resolve(found); }
-    }, 5);
-    poll.unref?.();
-  });
-  assert.equal(spawned.length, 1);
-  assert.equal(spawned[0]!.includes("--no-approve"), false,
-    "an additive Pi Orchestrator with a verified bridge takes the ordinary project-trust path");
-  driver.resolvePermission(trust.requestId, "trust");
-  await started;
-});
-
 test("Pi custom select text is delivered and boolean custom text never becomes false (#1595)", () => {
   const events: SessionEventPayload[] = [];
   const sent: Record<string, unknown>[] = [];
@@ -695,4 +569,223 @@ test("Pi custom select text is delivered and boolean custom text never becomes f
   assert.equal(driver.answerQuestion("custom-confirm", { "custom-confirm:value": "Maybe" }), false);
   assert.equal(driver.answerQuestion("custom-confirm", { "custom-confirm:value": "Yes" }), true);
   driver.dispose();
+});
+
+// Project trust on Pi 1.4.0: Pi resolves trust before RPC reads stdin, so the runner extension
+// declines it and reports the decline; the driver asks and relaunches with --approve on Trust.
+
+interface RecordedLaunch { args: string[]; requests: string[]; closed: boolean }
+
+function recordLaunches(driver: PiRpcDriver): RecordedLaunch[] {
+  const launches: RecordedLaunch[] = [];
+  const realSpawn = (driver as any).spawn;
+  (driver as any).spawn = (spawnOptions: { args: string[] }) => {
+    const child = realSpawn(spawnOptions);
+    const launch: RecordedLaunch = { args: [...spawnOptions.args], requests: [], closed: false };
+    child.on("close", () => { launch.closed = true; });
+    const write = child.stdin.write.bind(child.stdin);
+    child.stdin.write = (chunk: unknown, ...rest: unknown[]) => {
+      for (const line of String(chunk).split("\n").filter(Boolean)) launch.requests.push(JSON.parse(line).type);
+      return write(chunk, ...rest);
+    };
+    launches.push(launch);
+    return child;
+  };
+  return launches;
+}
+
+function verifiedOptions(scenario: string, resumeId?: string): DriverOptions {
+  const driverOptions = options(scenario, resumeId);
+  driverOptions.env = {
+    ...driverOptions.env,
+    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: "trust-ready-nonce",
+    [PI_SECURITY_REQUEST_NONCE_ENV]: "trust-security-nonce",
+  };
+  driverOptions.config = { permissionMode: "default", model: "openai/mini", effort: "off" };
+  return driverOptions;
+}
+
+type PermissionRequest = Extract<SessionEventPayload, { kind: "permission_request" }>;
+
+/** Initialize a verified session, answering the project-trust card with `answer`. */
+function trustRun(
+  t: { after(fn: () => void): void },
+  driverOptions: DriverOptions,
+  answer: string | null | "ignore",
+) {
+  const events: SessionEventPayload[] = [];
+  const exits: Array<number | null> = [];
+  let driver!: PiRpcDriver;
+  driver = new PiRpcDriver(driverOptions, callbacks(events, {
+    onEvent: (event) => {
+      events.push(event);
+      if (event.kind === "permission_request" && answer !== "ignore") {
+        setImmediate(() => driver.resolvePermission(event.requestId, answer));
+      }
+    },
+    onExit: (code) => exits.push(code),
+  }));
+  t.after(() => driver.dispose());
+  const launches = recordLaunches(driver);
+  const cards = () => events.filter((event): event is PermissionRequest => event.kind === "permission_request");
+  const commands = async () => ((await (driver as any).peer.request({ type: "get_commands" })).data.commands as Array<{ name: string }>)
+    .map((command) => command.name);
+  return { driver, events, exits, launches, cards, commands };
+}
+
+async function untilCard(cards: () => PermissionRequest[]): Promise<void> {
+  while (!cards().length) await new Promise((resolve) => setTimeout(resolve, 5));
+}
+
+test("Pi RPC asks for project trust after a declined launch and relaunches the same session with --approve only on Trust", async (t) => {
+  const run = trustRun(t, verifiedOptions("project-trust"), "trust");
+  await run.driver.initialize();
+  assert.equal(await run.driver.newSession(process.cwd()), "pi-session-1");
+  const [card] = run.cards();
+  assert.equal(run.cards().length, 1);
+  assert.equal(card!.title, "Trust Pi Project Resources?");
+  assert.deepEqual(card!.options, [
+    { optionId: "trust", name: "Trust This Project", kind: "allow_always" },
+    { optionId: "skip", name: "Skip Project Resources", kind: "reject_always" },
+  ]);
+  assert.deepEqual(card!.context, { toolName: "pi.project_trust", input: process.cwd() });
+
+  assert.equal(run.launches.length, 2);
+  const [declined, trusted] = run.launches;
+  assert.equal(declined!.args.some((arg) => arg === "--approve" || arg === "--no-approve"), false,
+    "the first launch lets Pi dispatch project_trust to the declining extension");
+  assert.deepEqual(declined!.requests, ["get_state"],
+    "the declined process does no turn or session-writing work before the decision");
+  assert.equal(declined!.closed, true, "the declined process exited before the relaunch was used");
+  assert.deepEqual(trusted!.args.slice(-3), ["--approve", "--session-id", "pi-session-1"],
+    "a new session has no file yet, so the relaunch claims the same id");
+  assert.deepEqual(trusted!.requests, ["get_state", "set_model", "set_thinking_level"]);
+  assert.ok((await run.commands()).includes("project-review"), "trusted project resources load");
+  assert.deepEqual(run.exits, [], "retiring the declined process is not a provider exit");
+});
+
+test("Pi RPC relaunches a resumed session by reopening it", async (t) => {
+  const run = trustRun(t, verifiedOptions("project-trust", "persisted-pi-session"), "trust");
+  await run.driver.initialize();
+  assert.equal(await run.driver.newSession(process.cwd()), "persisted-pi-session");
+  assert.equal(run.launches.length, 2);
+  assert.deepEqual(run.launches[0]!.args.slice(-2), ["--session", "persisted-pi-session"]);
+  assert.deepEqual(run.launches[1]!.args.slice(-3), ["--approve", "--session", "persisted-pi-session"]);
+  assert.equal(run.launches[1]!.args.includes("--session-id"), false);
+  assert.deepEqual(run.launches[0]!.requests, ["get_state"],
+    "the declined process never selects a model or thinking level, which Pi records as entries");
+});
+
+test("Pi RPC keeps project resources skipped on Skip, a dismissal, or a Pi that never asked", async (t) => {
+  for (const [scenario, answer] of [["project-trust", "skip"], ["project-trust", null], ["verified-launch", "trust"]] as const) {
+    const run = trustRun(t, verifiedOptions(scenario), answer);
+    await run.driver.initialize();
+    assert.equal(await run.driver.newSession(process.cwd()), "pi-session-1");
+    assert.equal(run.cards().length, scenario === "verified-launch" ? 0 : 1, `${scenario}/${answer}: card count`);
+    assert.equal(run.launches.length, 1, `${scenario}/${answer}: no relaunch`);
+    assert.equal(run.launches[0]!.args.includes("--approve"), false);
+    assert.equal((await run.commands()).includes("project-review"), false, `${scenario}/${answer}: project resources stay skipped`);
+    run.driver.dispose();
+  }
+});
+
+test("Pi RPC never asks for or grants trust on a mismatched, stale, or replayed trust report", async (t) => {
+  for (const scenario of ["project-trust-wrong-cwd", "project-trust-stale-nonce", "project-trust-replayed"]) {
+    const run = trustRun(t, verifiedOptions(scenario), "trust");
+    await run.driver.initialize();
+    assert.equal(run.cards().length, 0, `${scenario}: no trust question`);
+    assert.equal(run.launches.length, 1, `${scenario}: no --approve relaunch`);
+    assert.equal((await run.commands()).includes("project-review"), false, `${scenario}: project resources stay skipped`);
+    run.driver.dispose();
+  }
+});
+
+test("Pi RPC fails startup visibly, never trusted, when the trusted relaunch fails", async (t) => {
+  const run = trustRun(t, verifiedOptions("project-trust-relaunch-fails"), "trust");
+  await assert.rejects(run.driver.initialize());
+  assert.equal(run.launches.length, 2);
+  assert.equal(run.launches[0]!.closed, true, "the declined process is gone");
+  assert.equal((run.driver as any).peer, null, "no process serves the session");
+});
+
+test("Pi RPC fails startup when disposed or exited while the trust decision is pending", async (t) => {
+  const run = trustRun(t, verifiedOptions("project-trust"), "ignore");
+  const started = run.driver.initialize();
+  await untilCard(run.cards);
+  run.driver.dispose();
+  await assert.rejects(started, /project-trust decision was pending/);
+  assert.equal(run.launches.length, 1, "disposal never relaunches with --approve");
+  assert.equal(run.events.some((event) => event.kind === "permission_resolved" &&
+    event.requestId === run.cards()[0]!.requestId), true);
+
+  const exited = trustRun(t, verifiedOptions("project-trust"), "ignore");
+  const pending = exited.driver.initialize();
+  await untilCard(exited.cards);
+  (exited.driver as any).kill((exited.driver as any).child);
+  await assert.rejects(pending, /project-trust decision was pending/);
+  assert.equal(exited.launches.length, 1);
+  assert.equal(exited.exits.length, 1, "an unexpected exit of the declined process is reported");
+});
+
+test("Pi RPC refuses the trusted relaunch until the declined process tree is proven gone", async (t) => {
+  const { EventEmitter } = await import("node:events");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const stuck = Object.assign(new EventEmitter(), { exitCode: null, signalCode: null });
+  const driver = new PiRpcDriver(options(), callbacks([]), undefined, (() => {}) as any);
+  (driver as any).child = stuck;
+  const retired = (driver as any).retireProcess();
+  t.mock.timers.tick(10_000);
+  await assert.rejects(retired, /did not exit before its trusted relaunch/);
+  t.mock.timers.reset();
+
+  const unproven = Object.assign(new EventEmitter(), {
+    exitCode: null, signalCode: null, posixBoundary: { terminate: async () => false },
+  });
+  const killing = new PiRpcDriver(options(), callbacks([]), undefined,
+    ((child: InstanceType<typeof EventEmitter>) => setImmediate(() => child.emit("close", null))) as any);
+  (killing as any).child = unproven;
+  await assert.rejects((killing as any).retireProcess(), /did not exit before its trusted relaunch/,
+    "a surviving descendant (such as the Agent Control child) blocks the relaunch");
+  driver.dispose();
+  killing.dispose();
+});
+
+test("Pi RPC blocks an in-band project-trust select instead of turning it into a trust card", () => {
+  const events: SessionEventPayload[] = [];
+  const sent: Record<string, unknown>[] = [];
+  const nonce = "project-trust-nonce";
+  const driverOptions = options();
+  driverOptions.env[PI_SECURITY_REQUEST_NONCE_ENV] = nonce;
+  const driver = new PiRpcDriver(driverOptions, callbacks(events));
+  (driver as any).peer = {
+    send: (message: Record<string, unknown>) => { sent.push(message); return true; },
+    dispose: () => {},
+  };
+  (driver as any).onRpcEvent(trustRequest(nonce, "trust-1", "/workspace/project"));
+  assert.deepEqual(sent, [{ type: "extension_ui_response", id: "trust-1", cancelled: true }]);
+  assert.equal(events.some((event) => event.kind === "permission_request" || event.kind === "question_request"), false);
+
+  (driver as any).onRpcEvent({
+    type: "extension_ui_request",
+    id: "ordinary-1",
+    method: "confirm",
+    title: PI_SECURITY_REQUEST_TITLE,
+    message: "ordinary extension text",
+  });
+  assert.equal(events.some((event) => event.kind === "question_request" && event.requestId === "ordinary-1"), true);
+  driver.dispose();
+});
+
+test("an additive Pi Orchestrator takes the ordinary project-trust path and is not launched with --no-approve", async (t) => {
+  // The preset always passes --no-approve and never asks, because it must never load
+  // repository-controlled Pi code. The additive launch keeps the user's extensions, skills, and
+  // context files, so it takes the ordinary path: ask, and relaunch with --approve on Trust.
+  const additive = verifiedOptions("project-trust");
+  additive.env.WOLLIPOG_PERMISSION_PRESET = "orchestrator";
+  const run = trustRun(t, additive, "trust");
+  await run.driver.initialize();
+  assert.equal(run.cards().length, 1);
+  assert.equal(run.launches[0]!.args.includes("--no-approve"), false,
+    "an additive Pi Orchestrator with a verified bridge takes the ordinary project-trust path");
+  assert.equal(run.launches[1]!.args.includes("--approve"), true);
 });

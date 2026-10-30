@@ -10,6 +10,10 @@ import {
   PI_AGENT_CONTROL_PROBE_NONCE_ENV,
   PI_AGENT_CONTROL_PROBE_STATUS_KEY,
   PI_AGENT_CONTROL_STATUS_KEY,
+  PI_PROJECT_TRUST_DECLINED,
+  PI_PROJECT_TRUST_NONCE_ENV,
+  PI_PROJECT_TRUST_NOT_REQUESTED,
+  PI_PROJECT_TRUST_STATUS_KEY,
   PI_SECURITY_REQUEST_NONCE_ENV,
   PI_SECURITY_REQUEST_PREFIX,
   PI_SECURITY_REQUEST_TITLE,
@@ -30,7 +34,7 @@ const TURN_TIMEOUT_MS = 45_000;
 const USER_SKILL = "probe-skill";
 const USER_PROMPT = "probe-prompt";
 const PROJECT_EXTENSION_COMMAND = "wollipog-probe-project-extension";
-const TRUST_OPTIONS = ["Trust This Project", "Skip Project Resources"];
+const PROJECT_PROMPT = "wollipog-probe-project-prompt";
 
 /** Fixture fields the comparison deliberately does not hold real Pi to. Each needs a reason. */
 export const FIXTURE_SHAPE_EXCEPTIONS: ReadonlySet<string> = new Set<string>([]);
@@ -168,7 +172,9 @@ function seedUserResources(sandbox: PiSandbox): void {
   writeFixtureFile(join(sandbox.agentDir, "prompts", `${USER_PROMPT}.md`), "---\ndescription: Probe prompt template\n---\nProbe prompt.\n");
 }
 
-interface DiscoveryExchange { events: Json[]; state: Json; models: Json; commands: Json; entries: Json; selected: Json; levels: Json; ready: boolean }
+interface DiscoveryExchange {
+  events: Json[]; state: Json; models: Json; commands: Json; entries: Json; entriesSinceLeaf?: Json; selected: Json; levels: Json; ready: boolean;
+}
 
 /** Mirror probePiRpc (apps/runner/src/discovery/pi-rpc.ts) for one model. */
 async function discoveryExchange(fake: boolean): Promise<DiscoveryExchange> {
@@ -185,13 +191,17 @@ async function discoveryExchange(fake: boolean): Promise<DiscoveryExchange> {
         client.request({ type: "get_state" }), client.request({ type: "get_available_models" }), client.request({ type: "get_commands" })]);
       // An explicit refusal is a measurement; silence, exit or a broken stream is not, so it throws.
       const entries = await client.request({ type: "get_entries" }, 10_000);
+      // Discovery proves the checkpoint cursor at the reported leaf (supportsCheckpointCursor).
+      const entriesSinceLeaf = typeof entries.data?.leafId === "string"
+        ? await client.request({ type: "get_entries", since: entries.data.leafId }, 10_000)
+        : undefined;
       const first = (models.data?.models ?? [])[0] as Json | undefined;
       if (!first) throw new CouldNotRun("get_available_models returned no model to select");
       const selected = await client.request({ type: "set_model", provider: first.provider, modelId: first.id });
       const levels = await client.request({ type: "get_available_thinking_levels" });
       const ready = await client.waitFor(event => event.type === "extension_ui_request" && event.method === "setStatus" &&
         event.statusKey === PI_AGENT_CONTROL_PROBE_STATUS_KEY && event.statusText === nonce, 5000, "probe readiness").then(() => true, () => false);
-      return { events: client.events, state, models, commands, entries, selected, levels, ready };
+      return { events: client.events, state, models, commands, entries, entriesSinceLeaf, selected, levels, ready };
     } finally { await client.close(); await provider.close(); }
   });
 }
@@ -203,20 +213,37 @@ function sessionReply(body: Json): ScriptedTurn {
     : { reasoning: "Reason carefully", text: "Hello from Pi", toolCalls: [{ name: "read", arguments: { path: "README.md" } }, { name: "bash", arguments: { command: "printf partial" } }] };
 }
 
-interface TrustLaunch { client: PiRpcClient; nonce: string }
+interface TrustLaunch { client: PiRpcClient; nonce: string; trustNonce: string }
 
 /** Launch exactly as a verified ordinary driver session: the runner's Agent Control extension, its
- * readiness and security nonces, and no --no-approve unless asked for. */
+ * readiness and security nonces, a fresh project-trust nonce for this one launch, and no
+ * --no-approve unless asked for. */
 function agentControlLaunch(sandbox: PiSandbox, extraArgs: string[], fake: boolean, scenario?: string, leading: string[] = []): TrustLaunch {
   const nonce = randomBytes(24).toString("base64url");
+  const trustNonce = randomBytes(24).toString("base64url");
   const extension = writeFixtureFile(join(sandbox.root, "session.pi-agent-control.mjs"), piAgentControlExtensionSource());
   const stub = writeFixtureFile(join(sandbox.root, "agent-control-stub.mjs"), MCP_STUB);
   const client = launch(sandbox, [...leading, "-e", extension, "--mode", "rpc", ...extraArgs], { fake, env: {
     WOLLIPOG_PI_AGENT_CONTROL_COMMAND: process.execPath, WOLLIPOG_PI_AGENT_CONTROL_ARGS: JSON.stringify([stub]),
-    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: nonce, [PI_SECURITY_REQUEST_NONCE_ENV]: nonce,
+    WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE: nonce, [PI_SECURITY_REQUEST_NONCE_ENV]: nonce, [PI_PROJECT_TRUST_NONCE_ENV]: trustNonce,
     ...(scenario ? { WOLLIPOG_FAKE_PI_SCENARIO: scenario } : {}),
   } });
-  return { client, nonce };
+  return { client, nonce, trustNonce };
+}
+
+/** The runner extension's session_start trust report for this launch, decoded. */
+function trustReport(client: PiRpcClient, trustNonce: string): { state: string; cwd: string }[] {
+  return client.events.filter(event => event.type === "extension_ui_request" && event.method === "setStatus" &&
+    event.statusKey === PI_PROJECT_TRUST_STATUS_KEY && typeof event.statusText === "string" && event.statusText.startsWith(`${trustNonce}.`))
+    .map(event => {
+      const [, state = "", cwd = ""] = String(event.statusText).split(".");
+      return { state, cwd: Buffer.from(cwd, "base64url").toString("utf8") };
+    });
+}
+
+async function agentControlReady(client: PiRpcClient, nonce: string): Promise<boolean> {
+  return client.waitFor(event => event.type === "extension_ui_request" && event.method === "setStatus" &&
+    event.statusKey === PI_AGENT_CONTROL_STATUS_KEY && event.statusText === nonce, 30_000, "Agent Control readiness").then(() => true, () => false);
 }
 
 function trustEnvelope(event: Json, nonce: string): Json | undefined {
@@ -242,7 +269,9 @@ async function sessionExchange(fake: boolean): Promise<SessionExchange> {
     writeProbeModels(sandbox, provider.port);
     writeFixtureFile(join(sandbox.project, ".pi", "settings.json"), "{}\n");
     writeFixtureFile(join(sandbox.project, "README.md"), "WOLLIPOG_PROBE_README\n");
-    const { client, nonce } = agentControlLaunch(sandbox, [], fake, fake ? "startup-trust" : undefined);
+    // The project has protected resources, so the runner extension declines project_trust and
+    // reports it; this mirrors a session whose user then chose Skip (no relaunch).
+    const { client, nonce } = agentControlLaunch(sandbox, [], fake, fake ? "project-trust" : undefined);
     const approvals: Json[] = [];
     client.listen(event => {
       const payload = confirmEnvelope(event, nonce);
@@ -251,16 +280,8 @@ async function sessionExchange(fake: boolean): Promise<SessionExchange> {
       client.send({ type: "extension_ui_response", id: event.id, confirmed: true });
     });
     try {
-      // The driver answers a trust request if one arrives; whether it does is measured by the trust group.
-      const state = client.request({ type: "get_state" }, 30_000);
-      const trust = await Promise.race([
-        client.waitFor(event => trustEnvelope(event, nonce)?.kind === "project_trust", 30_000, "project_trust security request").catch(() => undefined),
-        state.then(() => undefined, () => undefined),
-      ]);
-      if (trust) client.send({ type: "extension_ui_response", id: trust.id, value: "Skip Project Resources" });
-      const established = await state;
-      await client.waitFor(event => event.type === "extension_ui_request" && event.method === "setStatus" &&
-        event.statusKey === PI_AGENT_CONTROL_STATUS_KEY && event.statusText === nonce, 30_000, "Agent Control readiness");
+      const established = await client.request({ type: "get_state" }, 30_000);
+      if (!await agentControlReady(client, nonce)) throw new CouldNotRun("Agent Control readiness was not reported");
       const model = established.data?.model as Json | undefined;
       if (!model?.provider || !model.id) throw new CouldNotRun("get_state reported no active model");
       await client.request({ type: "set_model", provider: model.provider, modelId: model.id });
@@ -334,26 +355,40 @@ async function contractGroup(): Promise<PiProbeStatus[]> {
     expect(PI_AGENT_CONTROL_PROBE_COMMAND, "extension");
     return outcome(problems, `handshake satisfied; skill:${USER_SKILL} source=skill, ${USER_PROMPT} source=prompt, probe command source=extension`);
   }));
-  statuses.push(await measure("get_commands reports each command's location (user/project) read by commandSource()", "apps/runner/src/discovery/pi-rpc.ts", async () => {
+  statuses.push(await measure("get_commands reports each command's scope as sourceInfo.scope (user/project) read by commandSource()", "apps/runner/src/discovery/pi-rpc.ts", async () => {
     if (!real) throw new CouldNotRun("the discovery handshake did not run");
     const skill = ((real.commands.data?.commands ?? []) as Json[]).find(c => c?.name === `skill:${USER_SKILL}`);
     if (!skill) throw new CouldNotRun(`get_commands omitted skill:${USER_SKILL}`);
-    return outcome(skill.location === "user" ? [] : [`a user skill reported location=${JSON.stringify(skill.location)} and sourceInfo.scope=${JSON.stringify(skill.sourceInfo?.scope)}; commandSource() can never classify a project command`],
-      "user skill reported location=user");
+    const project = await trustedProjectCommands();
+    const projectPrompt = project.find(c => c?.name === PROJECT_PROMPT);
+    if (!projectPrompt) throw new CouldNotRun(`a trusted launch did not list the project prompt ${PROJECT_PROMPT}`);
+    return outcome([
+      ...(skill.sourceInfo?.scope === "user" ? [] : [`a user skill reported sourceInfo.scope=${JSON.stringify(skill.sourceInfo?.scope)} and location=${JSON.stringify(skill.location)}`]),
+      ...(projectPrompt.sourceInfo?.scope === "project" ? [] : [`a project prompt reported sourceInfo.scope=${JSON.stringify(projectPrompt.sourceInfo?.scope)} and location=${JSON.stringify(projectPrompt.location)}`]),
+    ], "user skill reported sourceInfo.scope=user; a trusted project prompt reported sourceInfo.scope=project");
   }));
   statuses.push(await measure("Discovery probe extension receives project_trust and reports readiness", "apps/runner/src/discovery/pi-rpc.ts", async () => {
     if (!real) throw new CouldNotRun("the discovery handshake did not run");
     return outcome(real.ready ? [] : ["the probe extension never reported readiness, so project_trust was not delivered before session_start"],
       "project_trust reached the CLI extension before session_start; readiness status and probe command observed");
   }));
-  statuses.push(await measure("get_entries returns an empty entry list with leafId null under --no-session", "apps/runner/src/discovery/pi-rpc.ts", async () => {
+  statuses.push(await measure("get_entries under --no-session reports a leafId listed among its entries, and since=<leafId> answers with no entries and the same leaf", "apps/runner/src/discovery/pi-rpc.ts", async () => {
     if (!real) throw new CouldNotRun("the discovery handshake did not run");
     const data = real.entries.data;
     if (real.entries.success !== true) return { status: "changed", observed: "get_entries was refused; conversation fork would not be advertised" };
-    const types = Array.isArray(data?.entries) ? data.entries.map((entry: Json) => String(entry?.type)) : [];
-    return outcome(Array.isArray(data?.entries) && data.entries.length === 0 && data.leafId === null ? [] :
-      [`get_entries returned ${types.length} startup entries (${types.join(", ")}) and leafId ${data?.leafId === null ? "null" : typeof data?.leafId}; discovery would not advertise conversation fork`],
-      "entries=[], leafId=null; conversation fork stays advertised");
+    if (!Array.isArray(data?.entries)) return { status: "changed", observed: "get_entries returned no entry list; conversation fork would not be advertised" };
+    const types = data.entries.map((entry: Json) => String(entry?.type));
+    // Discovery also accepts the older empty list with a null leaf, which needs no cursor.
+    if (data.leafId === null) {
+      return outcome(data.entries.length === 0 ? [] : [`get_entries returned ${types.length} entries with a null leafId`], "entries=[], leafId=null; conversation fork stays advertised");
+    }
+    const listed = typeof data.leafId === "string" && data.entries.some((entry: Json) => entry?.id === data.leafId);
+    const since = real.entriesSinceLeaf;
+    return outcome([
+      ...(listed ? [] : [`leafId ${JSON.stringify(data.leafId)} is not one of the ${types.length} listed entries`]),
+      ...(since?.success === true && Array.isArray(since.data?.entries) && since.data.entries.length === 0 && since.data.leafId === data.leafId ? [] :
+        [`get_entries since the leaf answered ${JSON.stringify({ success: since?.success, entries: since?.data?.entries?.length, leafId: since?.data?.leafId }).slice(0, 160)}`]),
+    ], `${types.length} startup entries (${types.join(", ")}) ending at the string leafId; since=<leafId> returned no entries and the same leaf, so conversation fork is advertised`);
   }));
   let realSession: SessionExchange | undefined;
   statuses.push(await measure("Tool calls reach the driver as nonce-bound security confirms, and confirmed: true runs the tool", "apps/runner/src/drivers/pi-rpc.ts; apps/runner/src/pi-agent-control-extension.ts", async () => {
@@ -556,71 +591,133 @@ function recordedTrust(log: string): Json[] {
   try { return readFileSync(log, "utf8").split("\n").filter(Boolean).map(line => JSON.parse(line) as Json); } catch { return []; }
 }
 
+/** Protected project resources: an extension and a prompt template under .pi. */
+function seedProject(sandbox: PiSandbox): string {
+  writeFixtureFile(join(sandbox.project, ".pi", "extensions", "probe-project.js"), commandExtension(PROJECT_EXTENSION_COMMAND));
+  writeFixtureFile(join(sandbox.project, ".pi", "prompts", `${PROJECT_PROMPT}.md`), "---\ndescription: Probe project prompt\n---\nProbe.\n");
+  return realpathSync(sandbox.project);
+}
+
+/** get_commands from an --approve launch of a project with protected resources. */
+async function trustedProjectCommands(): Promise<Json[]> {
+  return withSandbox("project-commands", async sandbox => {
+    writeProbeModels(sandbox, 9);
+    seedProject(sandbox);
+    const client = launch(sandbox, ["--mode", "rpc", "--no-session", "--approve"]);
+    try {
+      const response = await client.request({ type: "get_commands" });
+      commandNames(response);
+      return response.data.commands as Json[];
+    } finally { await client.close(); }
+  });
+}
+
+function trustStore(sandbox: PiSandbox): string {
+  try { return readFileSync(join(sandbox.agentDir, "trust.json"), "utf8"); } catch { return ""; }
+}
+
 async function trustGroup(): Promise<PiProbeStatus[]> {
   const statuses: PiProbeStatus[] = [];
   const prepare = (sandbox: PiSandbox) => {
     writeProbeModels(sandbox, 9);
-    writeFixtureFile(join(sandbox.project, ".pi", "extensions", "probe-project.js"), commandExtension(PROJECT_EXTENSION_COMMAND));
-    return { project: realpathSync(sandbox.project), log: join(sandbox.root, "trust.log") };
+    return { project: seedProject(sandbox), log: join(sandbox.root, "trust.log") };
   };
-  statuses.push(await measure("project_trust reaches the driver as a nonce-bound security select that blocks startup", "apps/runner/src/drivers/pi-rpc.ts; apps/runner/src/pi-agent-control-extension.ts", () =>
+  statuses.push(await measure("The runner extension declines project_trust and reports it at session_start, bound to the launch nonce and canonical cwd, without remembering", "apps/runner/src/drivers/pi-rpc.ts; apps/runner/src/pi-agent-control-extension.ts", () =>
     withSandbox("trust", async sandbox => {
       const { project, log } = prepare(sandbox);
       const recorder = writeFixtureFile(join(sandbox.root, "trust-recorder.mjs"), trustRecorder(log));
-      const { client, nonce } = agentControlLaunch(sandbox, [], false, undefined, ["-e", recorder]);
+      const declinedLaunch = async () => {
+        const { client, nonce, trustNonce } = agentControlLaunch(sandbox, [], false, undefined, ["-e", recorder]);
+        try {
+          await client.request({ type: "get_state" }, 30_000);
+          const ready = await agentControlReady(client, nonce);
+          const names = commandNames(await client.request({ type: "get_commands" }));
+          const reportIndex = client.events.findIndex(event => event.statusKey === PI_PROJECT_TRUST_STATUS_KEY);
+          const readyIndex = client.events.findIndex(event => event.statusKey === PI_AGENT_CONTROL_STATUS_KEY);
+          return { ready, names, reports: trustReport(client, trustNonce), reportedFirst: reportIndex >= 0 && reportIndex < readyIndex,
+            inBand: client.events.some(event => trustEnvelope(event, nonce)) };
+        } finally { await client.close(); }
+      };
+      const first = await declinedLaunch();
+      const store = trustStore(sandbox);
+      const second = await declinedLaunch();
+      const dispatched = recordedTrust(log);
+      if (!first.ready) throw new CouldNotRun("Agent Control readiness was not reported");
+      const problems: string[] = [];
+      if (!dispatched.length) problems.push("project_trust was never dispatched to CLI extensions for a project with protected resources");
+      if (first.reports.length !== 1 || first.reports[0]!.state !== PI_PROJECT_TRUST_DECLINED) problems.push(`the launch reported ${JSON.stringify(first.reports)}`);
+      else if (first.reports[0]!.cwd !== project) problems.push("the declined report's cwd is not the canonical project directory");
+      if (!first.reportedFirst) problems.push("the trust report did not precede Agent Control readiness");
+      if (first.inBand) problems.push("a security select reached the client");
+      if (first.names.includes(PROJECT_EXTENSION_COMMAND) || first.names.includes(PROJECT_PROMPT)) problems.push("declined project resources loaded");
+      if (store.includes(JSON.stringify(project).slice(1, -1))) problems.push("the decline was saved in <agent-dir>/trust.json");
+      if (dispatched.length !== 2 || second.reports[0]?.state !== PI_PROJECT_TRUST_DECLINED) problems.push(`a second launch dispatched project_trust ${dispatched.length - 1} more time(s) and reported ${JSON.stringify(second.reports)}`);
+      return outcome(problems, `project_trust dispatched (hasUI=${String(dispatched[0]?.hasUI)}); one declined report with the canonical cwd before readiness; ` +
+        "no in-band select; project resources skipped; nothing saved, and the next launch asked again");
+    })));
+  statuses.push(await measure("--approve with the same --session-id loads project resources without dispatching project_trust", "apps/runner/src/drivers/pi-rpc.ts", () =>
+    withSandbox("trust-approve", async sandbox => {
+      const { log } = prepare(sandbox);
+      const recorder = writeFixtureFile(join(sandbox.root, "trust-recorder.mjs"), trustRecorder(log));
+      const declined = agentControlLaunch(sandbox, [], false, undefined, ["-e", recorder]);
+      let id: unknown;
+      try { id = (await declined.client.request({ type: "get_state" }, 30_000)).data?.sessionId; } finally { await declined.client.close(); }
+      if (typeof id !== "string") throw new CouldNotRun("the declined launch reported no session id");
+      const dispatchedBefore = recordedTrust(log).length;
+      const { client, nonce, trustNonce } = agentControlLaunch(sandbox, ["--approve", "--session-id", id], false, undefined, ["-e", recorder]);
       try {
-        let stateResolved = false;
-        const state = client.request({ type: "get_state" }, 30_000).then(value => { stateResolved = true; return value; });
-        const request = await Promise.race([
-          client.waitFor(event => trustEnvelope(event, nonce) !== undefined, 30_000, "project_trust security request").catch(() => undefined),
-          state.then(() => undefined),
-        ]);
-        let blockedStartup = false;
-        if (request) {
-          await new Promise(resolve => setTimeout(resolve, 300));
-          blockedStartup = !stateResolved;
-          client.send({ type: "extension_ui_response", id: request.id, value: "Skip Project Resources" });
-        }
-        await state;
-        const ready = await client.waitFor(event => event.type === "extension_ui_request" && event.method === "setStatus" &&
-          event.statusKey === PI_AGENT_CONTROL_STATUS_KEY && event.statusText === nonce, 30_000, "Agent Control readiness").then(() => true, () => false);
+        const state = await client.request({ type: "get_state" }, 30_000);
+        const ready = await agentControlReady(client, nonce);
         const names = commandNames(await client.request({ type: "get_commands" }));
-        const dispatched = recordedTrust(log);
-        if (!dispatched.length) return { status: "changed" as const, observed: "project_trust was never dispatched to CLI extensions for a project with .pi/extensions" };
-        if (!request) {
-          return { status: "changed" as const, observed: `project_trust was dispatched with hasUI=${dispatched[0]!.hasUI}; no security select reached the client, get_state answered and ` +
-            `the project extension ${names.includes(PROJECT_EXTENSION_COMMAND) ? "loaded" : "was skipped"}, so a verified session can never ask to trust a project` };
-        }
-        const payload = trustEnvelope(request, nonce);
-        const problems: string[] = [];
-        if (payload?.kind !== "project_trust") problems.push("payload kind is not project_trust");
-        if (payload?.cwd !== project) problems.push("payload cwd is not the canonical project directory");
-        if (JSON.stringify(request.options) !== JSON.stringify(TRUST_OPTIONS)) problems.push(`options were ${JSON.stringify(request.options)}`);
-        if (typeof request.id !== "string") problems.push("request has no string id");
-        if (!blockedStartup) problems.push("get_state answered before the trust decision");
-        if (!ready) problems.push("Agent Control readiness was not reported after the decision");
-        if (names.includes(PROJECT_EXTENSION_COMMAND)) problems.push("Skip Project Resources still loaded the project extension");
-        return outcome(problems, "select with the exact two options and canonical cwd held get_state until answered; Skip kept the project extension out");
+        return outcome([
+          ...(state.data?.sessionId === id ? [] : [`the relaunch reported session ${String(state.data?.sessionId)} instead of ${id}`]),
+          ...(ready ? [] : ["Agent Control readiness was not reported"]),
+          ...(names.includes(PROJECT_EXTENSION_COMMAND) && names.includes(PROJECT_PROMPT) ? [] : ["project resources did not load under --approve"]),
+          ...(recordedTrust(log).length === dispatchedBefore ? [] : ["project_trust was still dispatched under --approve"]),
+          ...(trustReport(client, trustNonce).some(report => report.state === PI_PROJECT_TRUST_DECLINED) ? ["the relaunch still reported a decline"] : []),
+        ], `same session id; project extension and prompt loaded; no project_trust dispatch; the extension reported ${PI_PROJECT_TRUST_NOT_REQUESTED}`);
       } finally { await client.close(); }
     })));
-  statuses.push(await measure("A CLI extension's remembered yes loads project extensions and is saved in <agent-dir>/trust.json", "apps/runner/src/pi-agent-control-extension.ts", () =>
-    withSandbox("trust-remember", async sandbox => {
-      const { project, log } = prepare(sandbox);
-      const decider = writeFixtureFile(join(sandbox.root, "trust-decider.mjs"), trustRecorder(log, { trusted: "yes", remember: true }));
-      const names = async (args: string[]) => {
-        const client = launch(sandbox, [...args, "--mode", "rpc", "--no-session"]);
-        try { return commandNames(await client.request({ type: "get_commands" })); } finally { await client.close(); }
-      };
-      const decided = await names(["-e", decider]);
-      if (!recordedTrust(log).length) throw new CouldNotRun("project_trust was not dispatched to the deciding extension");
-      let store = "";
-      try { store = readFileSync(join(sandbox.agentDir, "trust.json"), "utf8"); } catch { /* absent */ }
-      const remembered = await names([]);
-      return outcome([
-        ...(decided.includes(PROJECT_EXTENSION_COMMAND) ? [] : ["the project extension did not load after the extension trusted the project"]),
-        ...(store.includes(JSON.stringify(project).slice(1, -1)) ? [] : ["<agent-dir>/trust.json does not record the canonical project path"]),
-        ...(remembered.includes(PROJECT_EXTENSION_COMMAND) ? [] : ["a later launch without the extension did not apply the remembered decision"]),
-      ], "project extension loaded; trust.json recorded the canonical project path; a later launch applied it");
+  statuses.push(await measure("A declined launch writes nothing to a resumed session, and --session <id> --approve reopens the same file and leaf", "apps/runner/src/drivers/pi-rpc.ts", () =>
+    withSandbox("trust-resume", async sandbox => {
+      const provider = await startScriptedProvider(() => ({ text: "Hello from Pi" }));
+      try {
+        writeProbeModels(sandbox, provider.port);
+        seedProject(sandbox);
+        const source = launch(sandbox, ["--mode", "rpc", "--no-approve"]);
+        let id: unknown, file: unknown, leaf: unknown;
+        try {
+          const state = await source.request({ type: "get_state" });
+          await runTurn(source, "Say hello");
+          ({ sessionId: id, sessionFile: file } = state.data ?? {});
+          leaf = (await source.request({ type: "get_entries" })).data?.leafId;
+        } finally { await source.close(); }
+        if (typeof id !== "string" || typeof file !== "string" || typeof leaf !== "string" || !existsSync(file)) {
+          throw new CouldNotRun("the source session reported no id, file or leaf");
+        }
+        const before = readFileSync(file, "utf8");
+        const declined = agentControlLaunch(sandbox, ["--session", id], false);
+        let declinedReports: { state: string; cwd: string }[] = [];
+        try {
+          await declined.client.request({ type: "get_state" }, 30_000);
+          if (!await agentControlReady(declined.client, declined.nonce)) throw new CouldNotRun("Agent Control readiness was not reported");
+          declinedReports = trustReport(declined.client, declined.trustNonce);
+        } finally { await declined.client.close(); }
+        const afterDecline = readFileSync(file, "utf8");
+        const trusted = agentControlLaunch(sandbox, ["--approve", "--session", id], false);
+        try {
+          const state = await trusted.client.request({ type: "get_state" }, 30_000);
+          const resumedLeaf = (await trusted.client.request({ type: "get_entries" })).data?.leafId;
+          const names = commandNames(await trusted.client.request({ type: "get_commands" }));
+          return outcome([
+            ...(declinedReports[0]?.state === PI_PROJECT_TRUST_DECLINED ? [] : [`the resumed launch reported ${JSON.stringify(declinedReports)}`]),
+            ...(afterDecline === before ? [] : ["the declined launch changed the session file"]),
+            ...(state.data?.sessionId === id && state.data?.sessionFile === file ? [] : ["the --approve relaunch opened a different session or file"]),
+            ...(resumedLeaf === leaf ? [] : ["the --approve relaunch resumed a different leaf"]),
+            ...(names.includes(PROJECT_EXTENSION_COMMAND) ? [] : ["project resources did not load on the --approve resume"]),
+          ], "the declined resume left the session file byte-identical; --session <id> --approve reopened the same file and leaf with project resources");
+        } finally { await trusted.client.close(); }
+      } finally { await provider.close(); }
     })));
   statuses.push(await measure("--no-approve skips project resources without dispatching project_trust", "apps/runner/src/drivers/pi-rpc.ts", () =>
     withSandbox("trust-no-approve", async sandbox => {

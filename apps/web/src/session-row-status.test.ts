@@ -27,6 +27,18 @@ test("outstanding human results use the single row badge without overriding huma
     attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }))), "Answer Required");
 });
 
+test("a row switching worktrees says so instead of reading idle or ready for review (#3810)", () => {
+  const worktreeSwitch = { phase: "relaunching" as const, branch: "fix/issue-3810", since: 1 };
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  for (const status of ["idle", "starting"] as const) {
+    const row = sessionRowStatus(session({ status, worktreeSwitch, attention }));
+    assert.equal(label(row), "Switching Worktree", status);
+    assert.equal(row.badge?.ariaLabel, "Status: Switching Worktree");
+    assert.equal(row.badge?.title, "The session is relaunching in worktree fix/issue-3810.");
+  }
+});
+
 test("a verified-complete Full Control root shows an informational Campaign Complete, not Ready for Review (#2940)", () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };

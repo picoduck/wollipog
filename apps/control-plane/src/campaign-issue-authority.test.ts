@@ -1244,3 +1244,317 @@ test("#2940 an excluded pull request reopened during scope synchronization is ne
     assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "approved", "the approval stays unconsumed");
   } finally { h.db.close(); }
 });
+
+// #2940, observed live: before #3824 a child's in-boundary publication was routed to the person,
+// who approved its exact payload. The fallback strips the recommendation claim, so the Orchestrator
+// could never admit the published issue: the bounded path needed an issueAdmission it never got.
+type ScopeHarness = ReturnType<typeof harness>;
+
+function member(h: ScopeHarness, userId: string, role: "owner" | "admin" | "operator" | "viewer") {
+  h.db.raw().prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES (?,?,1,1)").run(userId, userId);
+  h.db.raw().prepare("INSERT INTO identity_memberships(organization_id,user_id,role,created_at,updated_at) VALUES (?,?,?,1,1)").run(h.principal.organizationId, userId, role);
+}
+
+async function humanApprovedPublication(h: ScopeHarness, options: { approver?: string; title?: string; issue?: number; accept?: boolean;
+  resolution?: Record<string, unknown> } = {}) {
+  const { approver = h.principal.userId, title = "Human approved repair", issue = 101, accept = true } = options;
+  const rec = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds:[h.item.id]}); assert.ok(rec.ok,rec.error ?? "record");
+  if (accept) assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Observed related work",publicationRequired:true}).ok);
+  // A failed inspection routes the child's request to the person, as #3814 and #3815 were.
+  h.state.publicationOk = false;
+  const created = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:`human-${title}`,resourceKey:`human-${title}`,resourceSnapshot:{category:"follow_up_issue_publication",
+    repository:"team/repo",sanitizedTitle:`[Feature]: ${title}`,sanitizedBody:body,labels:[],recommendationId:rec.data!.id}});
+  h.state.publicationOk = true;
+  assert.ok(created.ok,created.error ?? "publication"); const decision = created.data!;
+  assert.equal(decision.authority,"human");
+  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && !decision.resourceSnapshot.recommendationId);
+  const approved = h.svc.resolveWorkflowDecision("root","child",decision.occurrenceId,
+    { outcome: "approve", ...options.resolution } as import("@wollipog/protocol").ResolveWorkflowDecisionRequest,"human",{kind:"human",id:approver},()=>true);
+  assert.ok(approved.ok,approved.error ?? "human approval");
+  const consumed = await h.svc.consumeWorkflowDecision("child",decision.occurrenceId,{resourceSnapshot:decision.resourceSnapshot}); assert.ok(consumed.ok,consumed.error ?? "consume");
+  h.state.publicationTitles[issue] = `[Feature]: ${title}`;
+  if (accept) assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Published payload read back",
+    resultingWorkItemKey:`followup:${rec.data!.id}`,resultingIssue:{repository:"team/repo",number:issue}}).ok);
+  return { decision, recommendationId: rec.data!.id };
+}
+
+const followUpScope = (h: ScopeHarness, requestId: string, publicationOccurrenceId: string, issue = 101, expectedRevision = 1) =>
+  h.svc.proposeCampaignIssueScope("root",{requestId,expectedRevision,additions:[{repository:"team/repo",number:issue}],removals:[],
+    explanation:"Published follow-up of an accepted recommendation",lineage:{kind:"follow_up",publicationOccurrenceId}});
+
+const refusalCode = (result: { ok: boolean; errorDetails?: Record<string, string | number> }) => result.ok ? "admitted" : result.errorDetails?.code;
+
+const approvedAt = (h: ScopeHarness, decision: WorkflowDecisionView) =>
+  h.db.workflowDecisionHumanApprover(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!)!.approvedAt;
+
+type ScopeSnapshot = Extract<WorkflowDecisionView["resourceSnapshot"],{category:"campaign_issue_scope"}>;
+
+test("#2940 a person-approved consumed publication of an accepted recommendation admits exactly its issue, once", async () => {
+  const h = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(h);
+    const scope = await followUpScope(h, "human-approved", p.decision.occurrenceId);
+    assert.ok(scope.ok, scope.error ?? "scope"); assert.equal(scope.data!.authority, "orchestrator");
+    const snapshot = scope.data!.resourceSnapshot as ScopeSnapshot;
+    assert.deepEqual(snapshot.verifiedPublications, [{ publicationOccurrenceId: p.decision.occurrenceId, issue: 101 }]);
+    // The admission evidence names the person's approval, so it differs from a bounded grant's.
+    const bounded = { occurrenceId: p.decision.occurrenceId, payloadDigest: p.decision.resourceDigest, issue: 101 };
+    assert.equal(snapshot.issueAdmission!.evidenceDigest, issueEvidenceDigest({ ...bounded, approval: { kind: "human", approvedByUserId: h.principal.userId,
+      approvedAt: approvedAt(h, p.decision), basis: "boundary_author", objective: "current_authorization" } }));
+    assert.notEqual(snapshot.issueAdmission!.evidenceDigest, issueEvidenceDigest(bounded));
+    assert.ok(h.approve(scope.data!).ok);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101]);
+    assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), 101);
+    // The same grant cannot admit a second issue, even after the ledger names another one.
+    h.state.publicationTitles[102] = "[Feature]: Human approved repair";
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:p.recommendationId,disposition:"accepted",reason:"Copied payload claim",
+      resultingWorkItemKey:`copy:${p.recommendationId}`,resultingIssue:{repository:"team/repo",number:102}}).ok);
+    const reuse = await followUpScope(h, "human-approved-reuse", p.decision.occurrenceId, 102, 2);
+    assert.equal(refusalCode(reuse), "publication_already_admitted"); assert.equal(reuse.status, 409);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101]);
+  } finally { h.db.close(); }
+});
+
+test("#2940 a person-approved publication grants scope only when its approver is the boundary author or a campaign owner", async () => {
+  const h = harness(true, 3);
+  try {
+    member(h, "usr_operator", "operator");
+    const p = await humanApprovedPublication(h, { approver: "usr_operator" });
+    const refused = await followUpScope(h, "other-person", p.decision.occurrenceId);
+    assert.equal(refusalCode(refused), "publication_approver_not_owner"); assert.equal(refused.status, 403);
+    assert.match(refused.error!, /neither the Full Control boundary's author nor an owner of this campaign/);
+    assert.equal(JSON.stringify(refused).includes("usr_operator"), false, "the refusal names no person");
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+  } finally { h.db.close(); }
+  // Every member owns an organization-owned campaign's session, so only an active owner or admin of
+  // the organization counts there: not an operator (above), a viewer or a suspended administrator.
+  const shared = harness(true, 5);
+  try {
+    member(shared, "usr_viewer", "viewer"); member(shared, "usr_suspended", "admin"); member(shared, "usr_admin", "admin");
+    shared.db.raw().prepare("UPDATE identity_users SET status='suspended' WHERE user_id='usr_suspended'").run();
+    const viewer = await humanApprovedPublication(shared, { approver: "usr_viewer", title: "Viewer repair", issue: 101 });
+    assert.equal(refusalCode(await followUpScope(shared, "viewer", viewer.decision.occurrenceId, 101)), "publication_approver_not_owner");
+    const suspended = await humanApprovedPublication(shared, { approver: "usr_suspended", title: "Suspended repair", issue: 102 });
+    assert.equal(refusalCode(await followUpScope(shared, "suspended", suspended.decision.occurrenceId, 102)), "publication_approver_not_owner");
+    const owner = await humanApprovedPublication(shared, { approver: "usr_admin", title: "Owner repair", issue: 103 });
+    const admitted = await followUpScope(shared, "owner", owner.decision.occurrenceId, 103);
+    assert.ok(admitted.ok, admitted.error ?? "owner scope");
+    assert.equal((admitted.data!.resourceSnapshot as ScopeSnapshot).issueAdmission!.evidenceDigest, issueEvidenceDigest({ occurrenceId: owner.decision.occurrenceId,
+      payloadDigest: owner.decision.resourceDigest, issue: 103, approval: { kind: "human", approvedByUserId: "usr_admin", approvedAt: approvedAt(shared, owner.decision), basis: "campaign_owner", objective: "current_authorization" } }));
+  } finally { shared.db.close(); }
+  // A user-owned campaign is owned by that user alone; another administrator is not its owner.
+  const personal = harness(true, 5);
+  try {
+    member(personal, "usr_owner", "operator"); member(personal, "usr_admin", "admin");
+    personal.db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_owner' WHERE session_id='root'").run();
+    const other = await humanApprovedPublication(personal, { approver: "usr_admin", title: "Administrator repair", issue: 101 });
+    assert.equal(refusalCode(await followUpScope(personal, "administrator", other.decision.occurrenceId, 101)), "publication_approver_not_owner");
+    const owned = await humanApprovedPublication(personal, { approver: "usr_owner", title: "Owner repair", issue: 102 });
+    const admitted = await followUpScope(personal, "user-owner", owned.decision.occurrenceId, 102);
+    assert.ok(admitted.ok, admitted.error ?? "user owner scope");
+  } finally { personal.db.close(); }
+});
+
+test("#2940 a person-approved publication cannot exceed the human-set issue limit", async () => {
+  const h = harness(true, 1);
+  try {
+    const p = await humanApprovedPublication(h);
+    const refused = await followUpScope(h, "over-limit", p.decision.occurrenceId);
+    assert.equal(refusalCode(refused), "capacity_exhausted"); assert.equal(refused.status, 409);
+    assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+    // The limit is the campaign's, not the raw Maximum Issues: once the person admits a follow-up
+    // past the approval limit, its slot holds an issue here too (#3826).
+    const budgetAuthority = { version: 1 as const, concurrency: 3, acceptedFollowUps: 0, accounting: "managed_workers_only" as const, unpriced: "stop" as const };
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    if (policy.control?.mode === "full_control") policy.control.boundary.budgetAuthority = budgetAuthority;
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    h.db.campaignBudgets.authorize("root", budgetAuthority);
+    const other = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Other repair", originWorkItemIds: [h.item.id] });
+    assert.ok(other.ok, other.error ?? "record");
+    const accept = () => h.svc.adjudicateCampaignRecommendation("root", { recommendationId: other.data!.id, disposition: "accepted", reason: "Observed related work" });
+    const over = accept(); assert.equal(over.ok, false);
+    const admission = h.db.workflowDecisionByOccurrence(/decision (workflow_[a-f0-9]+)/u.exec(over.error ?? "")![1]!)!;
+    assert.ok(h.approve(admission).ok); assert.ok(accept().ok);
+    assert.equal(h.db.campaignIssueLimit("root", 1), 2);
+    const admitted = await followUpScope(h, "within-admitted-slot", p.decision.occurrenceId);
+    assert.ok(admitted.ok, admitted.error ?? "admitted slot");
+  } finally { h.db.close(); }
+});
+
+// CR-1.1: a person's approval proves the current objective only when it followed the current
+// authorization, or when the boundary the server recorded with it has the current author and
+// objective. A changed objective, or an approval recorded without its boundary, needs fresh review.
+test("#2940 a person-approved publication carries its approval only across a same-author, same-objective re-mint", async () => {
+  const reauthorize = (h: ScopeHarness, objective: string, expectedRevision = 2) => h.svc.setCampaignControl("root", { mode: "full_control", objective,
+    operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"], delegatablePolicyIds: [],
+    issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 3, closureReasons: ["completed", "not_planned"] } }, expectedRevision, h.principal);
+  const tick = () => new Promise((resolve) => setTimeout(resolve, 5));
+  const changed = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(changed);
+    await tick();
+    assert.ok(reauthorize(changed, "A different objective").ok);
+    const refused = await followUpScope(changed, "changed-objective", p.decision.occurrenceId);
+    assert.equal(refusalCode(refused), "publication_approved_under_earlier_boundary"); assert.equal(refused.status, 403);
+    assert.match(refused.error!, /approved before the current Full Control authorization.*Campaign Status/);
+    assert.deepEqual(changed.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+    assert.equal(changed.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
+    // A publication the person approves under the new authorization is admitted.
+    const fresh = await humanApprovedPublication(changed, { title: "Fresh repair", issue: 102 });
+    assert.ok((await followUpScope(changed, "fresh-objective", fresh.decision.occurrenceId, 102)).ok);
+  } finally { changed.db.close(); }
+  const remint = async (h: ScopeHarness) => {
+    await tick();
+    const added = await h.svc.proposeCampaignIssueScope("root",{requestId:"human-remint",expectedRevision:1,additions:[{repository:"team/repo",number:150}],removals:[],
+      explanation:"Owner adds separate scope"},()=>true,h.principal);
+    assert.ok(added.ok, added.error ?? "human scope"); assert.ok(h.approve(added.data!).ok);
+  };
+  const kept = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(kept);
+    await remint(kept);
+    const admitted = await followUpScope(kept, "same-objective-remint", p.decision.occurrenceId, 101, 2);
+    assert.ok(admitted.ok, admitted.error ?? "re-minted scope");
+    assert.equal((admitted.data!.resourceSnapshot as ScopeSnapshot).issueAdmission!.evidenceDigest, issueEvidenceDigest({ occurrenceId: p.decision.occurrenceId,
+      payloadDigest: p.decision.resourceDigest, issue: 101, approval: { kind: "human", approvedByUserId: kept.principal.userId, approvedAt: approvedAt(kept, p.decision),
+        basis: "boundary_author", objective: "recorded_boundary" } }));
+  } finally { kept.db.close(); }
+  // An approval whose audit carries no recorded boundary, as every one before this change, proves
+  // nothing once the boundary is re-minted after it.
+  const unrecorded = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(unrecorded);
+    unrecorded.db.raw().prepare(`UPDATE governance_audit SET workflow_decision=json_remove(workflow_decision, '$.publicationAuthority')
+      WHERE request_id=? AND stage='resolution' AND outcome='allowed'`).run(p.decision.occurrenceId);
+    await remint(unrecorded);
+    assert.equal(refusalCode(await followUpScope(unrecorded, "unrecorded-remint", p.decision.occurrenceId, 101, 2)), "publication_approved_under_earlier_boundary");
+    assert.deepEqual(unrecorded.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 150]);
+  } finally { unrecorded.db.close(); }
+});
+
+test("#2940 only the server records the boundary of a person's publication approval", async () => {
+  const h = harness(true, 3);
+  try {
+    // A resolution that names its own boundary is ignored: the record is the controller's.
+    const forged = { authorizedByUserId: "usr_forged", objectiveDigest: "1".repeat(64) };
+    const p = await humanApprovedPublication(h, { resolution: { publicationAuthority: forged } });
+    const boundary = (h.db.getSession("root")!.orchestratorPolicy!.control as Extract<CampaignControl,{mode:"full_control"}>).boundary;
+    assert.deepEqual(h.db.workflowDecisionHumanApprover(h.db.workflowDecisionByOccurrence(p.decision.occurrenceId)!)!.publicationAuthority,
+      { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) });
+  } finally { h.db.close(); }
+  const custom = harness(false, 3);
+  try {
+    const rec = custom.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title:"Custom repair",originWorkItemIds:[custom.item.id]}); assert.ok(rec.ok);
+    const publication = await custom.svc.createWorkflowDecisionWithVideo("child",{requestId:"custom-pub",resourceKey:"custom-pub",resourceSnapshot:{category:"follow_up_issue_publication",
+      repository:"team/repo",sanitizedTitle:"Custom repair",sanitizedBody:body,labels:[]}});
+    assert.ok(publication.ok);
+    assert.ok(custom.svc.resolveWorkflowDecision("root","child",publication.data!.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:custom.principal.userId},()=>true).ok);
+    assert.equal(custom.db.workflowDecisionHumanApprover(custom.db.workflowDecisionByOccurrence(publication.data!.occurrenceId)!)!.publicationAuthority, undefined,
+      "no Full Control issue boundary, nothing recorded");
+  } finally { custom.db.close(); }
+});
+
+test("#2940 a person-approved publication names the failed condition: removed origin, unaccepted recommendation, payload mismatch", async () => {
+  const removed = harness(true, 3);
+  try {
+    // The owner's removal re-mints the boundary with the same objective, so only the origin fails.
+    const p = await humanApprovedPublication(removed);
+    const swap = await removed.svc.proposeCampaignIssueScope("root",{requestId:"swap-origin",expectedRevision:1,additions:[{repository:"team/repo",number:150}],
+      removals:[{repository:"team/repo",number:100}],explanation:"Owner replaces the origin"},()=>true,removed.principal);
+    assert.ok(swap.ok, swap.error ?? "swap"); assert.ok(removed.approve(swap.data!).ok);
+    const refused = await followUpScope(removed, "removed-origin", p.decision.occurrenceId, 101, 2);
+    assert.equal(refusalCode(refused), "origin_outside_scope");
+    assert.equal(refused.error, "The published follow-up's authorized origins were removed from scope");
+  } finally { removed.db.close(); }
+  const unaccepted = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(unaccepted, { accept: false });
+    assert.equal(refusalCode(await followUpScope(unaccepted, "unaccepted", p.decision.occurrenceId)), "recommendation_not_accepted");
+  } finally { unaccepted.db.close(); }
+  const unrecorded = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(unrecorded);
+    unrecorded.state.publicationTitles[109] = "[Feature]: Human approved repair";
+    assert.equal(refusalCode(await followUpScope(unrecorded, "other-issue", p.decision.occurrenceId, 109)), "resulting_issue_mismatch");
+  } finally { unrecorded.db.close(); }
+  const mismatch = harness(true, 3);
+  try {
+    const p = await humanApprovedPublication(mismatch);
+    const runner = mismatch.hub.requestFromRunner.bind(mismatch.hub);
+    mismatch.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      const result = await runner(runnerId, requestId, message, timeout);
+      return message.type === "campaign_issue_scope" && message.operation === "inspect" && message.publication && result.type === "campaign_issue_scope_result"
+        ? { ...result, candidates: result.candidates?.map((c) => ({ ...c, title: "[Feature]: An edited title" })) } : result;
+    };
+    assert.equal(refusalCode(await followUpScope(mismatch, "payload-mismatch", p.decision.occurrenceId)), "payload_mismatch");
+    assert.equal(mismatch.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
+  } finally { mismatch.db.close(); }
+});
+
+test("#2940 Orchestrator scope refusals name their condition with a bounded code and no requested content", async () => {
+  const h = harness(true, 5);
+  try {
+    const propose = (requestId: string, change: Partial<import("@wollipog/protocol").CampaignIssueScopeRequest>) => h.svc.proposeCampaignIssueScope("root",
+      { requestId, expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Secret-looking explanation text", ...change });
+    const none = await propose("no-lineage", {});
+    assert.equal(refusalCode(none), "lineage_missing"); assert.equal(none.status, 403);
+    assert.match(none.error!, /incidental references cannot grant scope.*Campaign Status/);
+    assert.equal(JSON.stringify(none).includes("Secret-looking"), false);
+    assert.equal(refusalCode(await propose("other-epic", { lineage: { kind: "epic", epic: 999 } })), "epic_not_authorized");
+    assert.equal(refusalCode(await propose("unknown-publication", { lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "publication_not_found");
+    assert.equal(refusalCode(await propose("two-follow-ups", { additions: [{ repository: "team/repo", number: 101 }, { repository: "team/repo", number: 102 }],
+      lineage: { kind: "follow_up", publicationOccurrenceId: "missing" } })), "follow_up_not_single");
+    const pending = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:"pending-human",resourceKey:"pending-human",resourceSnapshot:{category:"follow_up_issue_publication",
+      repository:"team/repo",sanitizedTitle:"Pending repair",sanitizedBody:body,labels:[]}});
+    assert.ok(pending.ok, pending.error ?? "pending");
+    assert.equal(refusalCode(await propose("pending", { lineage: { kind: "follow_up", publicationOccurrenceId: pending.data!.occurrenceId } })), "publication_not_consumed");
+  } finally { h.db.close(); }
+  const noFollowUps = harness(true, 5);
+  try {
+    assert.ok(noFollowUps.svc.setCampaignControl("root",{mode:"full_control",objective:"Implement epic 100",operations:["campaign_issue_scope"],delegatablePolicyIds:[],
+      issueAuthority:{epics:[100],relatedFollowUps:false,maxIssues:5,closureReasons:[]}},2,noFollowUps.principal).ok);
+    assert.equal(refusalCode(await followUpScope(noFollowUps, "no-follow-ups", "missing")), "follow_ups_not_authorized");
+  } finally { noFollowUps.db.close(); }
+});
+
+test("#2940 the bounded publication path admits unchanged and refuses with the new codes", async () => {
+  const h = harness(true, 3);
+  try {
+    const p = await consumedPublication(h);
+    const scope = await followUpScope(h, "bounded", p.decision.occurrenceId);
+    assert.ok(scope.ok, scope.error ?? "bounded scope"); assert.equal(scope.data!.authority, "orchestrator");
+    assert.equal((scope.data!.resourceSnapshot as ScopeSnapshot).issueAdmission!.evidenceDigest,
+      issueEvidenceDigest({ occurrenceId: p.decision.occurrenceId, payloadDigest: p.decision.resourceDigest, issue: 101 }), "a bounded grant's admission evidence is exactly what it was");
+    assert.ok(h.approve(scope.data!).ok);
+    assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), 101);
+    assert.equal(refusalCode(await followUpScope(h, "bounded-again", p.decision.occurrenceId, 102, 2)), "publication_already_admitted");
+  } finally { h.db.close(); }
+});
+
+test("#2940 Custom campaigns and the owner's Campaign Status route treat a person-approved publication as before", async () => {
+  const custom = harness(false, 3);
+  try {
+    const rec = custom.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title:"Custom repair",originWorkItemIds:[custom.item.id]}); assert.ok(rec.ok);
+    const publication = await custom.svc.createWorkflowDecisionWithVideo("child",{requestId:"custom-pub",resourceKey:"custom-pub",resourceSnapshot:{category:"follow_up_issue_publication",
+      repository:"team/repo",sanitizedTitle:"Custom repair",sanitizedBody:body,labels:[],recommendationId:rec.data!.id}});
+    assert.ok(publication.ok); assert.equal(publication.data!.authority, "human");
+    assert.ok(custom.svc.resolveWorkflowDecision("root","child",publication.data!.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:custom.principal.userId},()=>true).ok);
+    assert.ok((await custom.svc.consumeWorkflowDecision("child",publication.data!.occurrenceId,{resourceSnapshot:publication.data!.resourceSnapshot})).ok);
+    const scope = await followUpScope(custom, "custom-follow-up", publication.data!.occurrenceId);
+    assert.ok(scope.ok, scope.error ?? "custom scope"); assert.equal(scope.data!.authority, "human");
+    const snapshot = scope.data!.resourceSnapshot as ScopeSnapshot;
+    assert.equal(snapshot.issueAdmission, undefined); assert.equal(snapshot.verifiedPublications, undefined);
+  } finally { custom.db.close(); }
+  const full = harness(true, 3);
+  try {
+    await humanApprovedPublication(full);
+    const direct = await full.svc.proposeCampaignIssueScope("root",{requestId:"owner-direct",expectedRevision:1,additions:[{repository:"team/repo",number:101}],removals:[],
+      explanation:"Owner adopts the published follow-up"},()=>true,full.principal);
+    assert.ok(direct.ok, direct.error ?? "owner proposal"); assert.equal(direct.data!.authority, "human");
+    const snapshot = direct.data!.resourceSnapshot as ScopeSnapshot;
+    assert.equal(snapshot.issueAdmission, undefined); assert.equal(snapshot.verifiedPublications, undefined, "the owner's route settles only bounded grants, as before");
+    assert.ok(full.approve(direct.data!).ok);
+    assert.deepEqual(full.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101]);
+  } finally { full.db.close(); }
+});

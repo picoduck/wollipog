@@ -82,9 +82,9 @@ configuration is disabled. The only model is `probe/probe-model`: an OpenAI-comp
 chat-completions server on `127.0.0.1`, configured through the throwaway `models.json` with the dummy
 key `scripted-local-provider`. The `PI_OFFLINE` control adds a dummy `ANTHROPIC_API_KEY` that exists
 only in that throwaway environment and that run, and only inside the verified namespace. No probe
-reads `~/.pi` or makes a paid or real model call. Pi creates `auth.json`, `models-store.json` and,
-when trust is remembered, `trust.json` in the throwaway agent directory; these are observations, not
-credentials.
+reads `~/.pi` or makes a paid or real model call. Pi creates `auth.json` and `models-store.json` in
+the throwaway agent directory; the trust probes check that `trust.json` stays absent. These are
+observations, not credentials.
 
 ## Feasibility Result
 
@@ -114,19 +114,28 @@ Measured on 2026-10-30 with `@earendil-works/pi-coding-agent` 1.4.0 (npm, publis
 **Changed** marks a result that differs from what the runner assumes today. Each changed result is
 reported every run until a reviewed change aligns the runner or the fixture with it.
 
+The first 1.4.0 measurement (hosted run `41065193101`) reported three changed results: `get_commands`
+no longer carried `location`, `get_entries` under `--no-session` already held startup entries with a
+string `leafId`, and `project_trust` reached the runner extension with `hasUI: false`, so no trust
+`select` could reach the driver. #3841 changed the runner to rely on what 1.4.0 does instead: command
+scope from `sourceInfo.scope` (falling back to `location`), fork from a working `since` cursor at the
+reported leaf, and project trust from a declined first launch plus an `--approve` relaunch (see
+[Pi Project Trust](DRIVERS.md#pi-project-trust)). The rows below are those new assumptions.
+
 | Assumption | Probe | Observed on 1.4.0 | Status |
 | --- | --- | --- | --- |
 | `--mode rpc` speaks LF-framed JSONL with `id`-correlated responses | every group | Holds for every request below. | Unchanged |
 | `get_state` | `rpc-contract`, `sessions` | Returns `model`, `thinkingLevel`, `isStreaming`, `sessionId` and `sessionFile`, plus more fields the runner ignores. | Unchanged |
 | `get_available_models`, `set_model`, `get_available_thinking_levels` | `rpc-contract` | Models carry `provider`, `id`, `name`, `input`, `contextWindow` and `reasoning`. `set_model` returns the selected model in `data`. Levels are a string array. | Unchanged |
 | `get_commands` command catalog | `rpc-contract` | Skills report `source: "skill"`, prompt templates `"prompt"`, extensions `"extension"`. | Unchanged |
-| `get_commands` `location` read by `commandSource()` | `rpc-contract` | **Absent.** Pi reports `sourceInfo.scope` (`"user"`, `"project"`, `"temporary"`) instead; its changelog records `location` being replaced by `sourceInfo` in an earlier release. `commandSource()` therefore never reports a project command. | Changed |
-| Optional `get_entries`: `entries: []` and `leafId: null` under `--no-session` | `rpc-contract` | **Not empty.** A fresh `--no-session` process already has `model_change` and `thinking_level_change` entries (only `thinking_level_change` with no provider configured), so `leafId` is a string. Discovery therefore stops advertising conversation fork. | Changed |
+| `get_commands` `sourceInfo.scope` read by `commandSource()` | `rpc-contract` | A user skill reports `sourceInfo.scope: "user"` and a trusted project prompt `"project"` (`"temporary"` marks CLI and built-in extensions). `location` is absent; Pi's changelog records it being replaced by `sourceInfo` in an earlier release, and `commandSource()` still reads it when `sourceInfo` is missing. `sourceInfo.source` is provenance (`cli`, `auto`, `builtin`), so the command kind still comes from the top-level `source`. | Unchanged (new baseline) |
+| Optional `get_entries` cursor under `--no-session` | `rpc-contract` | A fresh process already holds `model_change` and `thinking_level_change` entries (only `thinking_level_change` with no provider configured), so `leafId` is a string naming the last of them. `get_entries` with `since` that leaf answers with no entries and the same leaf, which is the cursor the driver's checkpoint and fork use. Discovery also accepts the older empty list with a `null` leaf. | Unchanged (new baseline) |
 | `extension_ui_request` / `extension_ui_response` round trip | `rpc-contract` | A tool call raises one nonce-bound `confirm` per call from the runner's Agent Control extension (kind `tool_call`). Answering `confirmed: true` runs the tool and returns its output to the model. | Unchanged |
 | `steer` and `abort` during a running turn | `rpc-contract` | With the model request held open, both answer `success: true`, and the run settles with an assistant `message_end` whose `stopReason` is `"aborted"`. | Unchanged |
-| `project_trust` reaches the driver as a nonce-bound security `select` that holds startup | `project-trust` | **Not delivered.** Pi dispatches `project_trust` to CLI extensions with `hasUI: false` and a no-op UI in RPC mode (`dist/main.js`: `hasUI` only for interactive mode). The runner extension declines, no `select` reaches the client, `get_state` answers and project resources are skipped. A verified Pi session can never ask to trust a project. | Changed |
+| The runner extension declines `project_trust` and reports it | `project-trust` | Pi dispatches `project_trust` to CLI extensions with `hasUI: false` and a no-op UI in RPC mode (`dist/main.js`: `hasUI` only for interactive mode). The runner extension declines without remembering: project resources are skipped, no `select` reaches the client, and `trust.json` stays absent. At `session_start`, before Agent Control readiness, it reports `<launch nonce>.declined.<canonical cwd>`. A second launch dispatches `project_trust` again. | Unchanged (new baseline) |
+| `--approve` relaunch with the same `--session-id` | `project-trust` | Reports the same session id, loads the project extension and prompt, and never dispatches `project_trust`; the extension reports `not_requested`. A new session has no file before its first message, so `--session <id>` would fail here. | Unchanged (new baseline) |
+| A declined resume, then `--session <id> --approve` | `project-trust` | The declined launch leaves the session file byte-identical; the `--approve` relaunch reopens the same file and leaf with project resources. | Unchanged (new baseline) |
 | Discovery probe extension sees `project_trust` before `session_start` | `rpc-contract` | Holds, because that extension decides without a UI. | Unchanged |
-| A CLI extension's remembered decision | `project-trust` | `{ trusted: "yes", remember: true }` loads `.pi/extensions` and writes the canonical project path to `<agent-dir>/trust.json`; a later launch applies it. | Unchanged |
 | `--no-approve` | `project-trust` | Project resources are skipped and `project_trust` is never dispatched. | Unchanged |
 | Session store location | `sessions` | `<agent-dir>/sessions/--<cwd with path separators replaced by ->--/<ISO timestamp>_<uuid>.jsonl`; the first line is `{"type":"session","id":<uuid>}`. `<agent-dir>` is `~/.pi/agent`. | Unchanged |
 | Project `sessionDir` under `--no-approve` | `sessions` | Ignored; the session stays in the agent directory. Pi's security documentation says a project `sessionDir` is read before trust is resolved, so this is measured rather than assumed. | Unchanged |
@@ -146,8 +155,8 @@ The `rpc-contract` group drives real Pi and `apps/runner/src/drivers/fixtures/fa
 through the same three exchanges:
 
 - **Discovery.**
-- **A verified session:** the startup trust request, one turn with `read` and `bash` tool calls, and
-  the checkpoint reads.
+- **A verified session:** the declined project-trust report, one turn with `read` and `bash` tool
+  calls, and the checkpoint reads.
 - **An interrupted turn:** a mid-turn `steer`, then `abort`.
 
 It then requires every record kind, field path, JSON type and selected enum value the fixture emits
@@ -159,10 +168,12 @@ As in the production `PiRpcPeer`, a malformed stdout record, or stdout ending in
 transport failure. Every measurement on that process becomes could not run. A `get_entries` request
 that gets no answer within 10 seconds is could not run; an explicit refusal is changed.
 
-On 1.4.0 the comparison reports the three changed driver assumptions above: `location`, a `null`
-`leafId`, and the trust `select`. This change aligned the fixture's tool `content` with Pi's array
-of text parts, because the driver serializes that field either way and nothing depends on the old
-string form.
+The first 1.4.0 comparison reported `location`, a `null` `leafId`, and the trust `select`. #3841
+aligned the fixture with 1.4.0: commands carry `sourceInfo` (a `legacy-location` scenario keeps the
+older shape for tests), `get_entries` starts from the startup entries with a string leaf, and the
+`project-trust` scenarios emit the extension's declined report instead of a `select`. Earlier, the
+fixture's tool `content` was aligned with Pi's array of text parts, because the driver serializes
+that field either way and nothing depends on the old string form.
 
 ## Hosted Workflow
 
@@ -179,8 +190,8 @@ source pins or gates a Pi version. The suite follows that workflow's shared cont
   namespaces and checks `bwrap --unshare-net` before any release code runs. A preparation failure
   makes the run could not run; the probe user's namespace is still verified inside each group.
 
-While the 1.4.0 divergences above stand, every full run exits 1 (changed) and is re-measured the
-next day, because only a fully matched measurement is recorded.
+A run whose results are not all unchanged exits non-zero and is re-measured the next day, because
+only a fully matched measurement is recorded.
 
 To measure Pi on demand, including on a branch before merge:
 
