@@ -378,12 +378,12 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
   const remove = async (account: ProviderAccountDefinition, reopen: () => void) => {
     const provider = providerName(account.provider);
     const sentence = (label: ReactNode) => (
-      <>{label} ({provider}) is removed from {machine}. The sign-in Wollipog stored for it stays on this machine. Sessions still
+      <>{label} ({provider}) is removed from {machine}, and the sign-in Wollipog stored for it stays on this machine. Sessions still
         using it keep working, and the {provider} account itself isn't affected.</>
     );
     const approved = await confirm({
       title: "Remove Account",
-      message: `${masked(account.label)} (${provider}) is removed from ${machine}. The sign-in Wollipog stored for it stays on this machine. ` +
+      message: `${masked(account.label)} (${provider}) is removed from ${machine}, and the sign-in Wollipog stored for it stays on this machine. ` +
         `Sessions still using it keep working, and the ${provider} account itself isn't affected.`,
       messageContent: sentence(identifier(account)),
       confirmLabel: "Remove Account",

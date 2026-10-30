@@ -463,7 +463,7 @@ test("Machine owners remove a provider account from its menu after confirming", 
   await menu.getByRole("menuitem", { name: "Remove Account…" }).click();
   const confirmation = page.getByRole("dialog", { name: "Remove Account" });
   await expect(confirmation).toContainText(
-    "Personal (Claude) is removed from Design Workstation. The sign-in Wollipog stored for it stays on this machine. " +
+    "Personal (Claude) is removed from Design Workstation, and the sign-in Wollipog stored for it stays on this machine. " +
     "Sessions still using it keep working, and the Claude account itself isn't affected.");
   await expect(confirmation.getByRole("button", { name: "Cancel" })).toBeFocused();
   await settleAnimations(page);

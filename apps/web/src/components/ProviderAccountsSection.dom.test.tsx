@@ -579,7 +579,7 @@ test("the removal confirmation names the account, the provider and the machine, 
     const dialog = ui.dialog()!;
     assert.equal(dialog.querySelector(".modal-title, h2")?.textContent, "Remove Account");
     assert.equal(dialog.querySelector(".confirmation-message")?.textContent,
-      "Work (Claude) is removed from Studio Mac. The sign-in Wollipog stored for it stays on this machine. " +
+      "Work (Claude) is removed from Studio Mac, and the sign-in Wollipog stored for it stays on this machine. " +
       "Sessions still using it keep working, and the Claude account itself isn't affected.");
     assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Cancel");
     assertNoDomNode(dialog.querySelector(".provider-account-remove-target"));
