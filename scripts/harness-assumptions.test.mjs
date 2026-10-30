@@ -5,7 +5,7 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
   baselineVersions, combinedExit, decide, detect, EXIT, fingerprint, forced, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
-  newestRelease, paths, recordKey, RECORD_VERSION, sourceFiles, suiteEnv, targetsFor, validRecord,
+  newestRelease, paths, recordKey, RECORD_VERSION, sourceFiles, suiteArgv, suiteEnv, targetsFor, validRecord,
 } from "./harness-assumptions.mjs";
 import { CODEX_GUARD_TRUST_VERSION_RANGE } from "../apps/runner/src/codex-managed-worktree-guard.ts";
 
@@ -79,12 +79,32 @@ test("the workflow publishes every outcome and records only a matched measuremen
 });
 
 test("no harness ever runs a probe that needs real credentials or a real model", () => {
-  const text = JSON.stringify(HARNESSES.map(h => ({ ...h, baselines: [] }))) + workflow + readFileSync(new URL("./harness-assumptions-prepare-codex.sh", import.meta.url), "utf8");
+  const prepareScripts = HARNESSES.filter(h => h.prepare).map(h => readFileSync(new URL(`../${h.prepare.command.at(-1)}`, import.meta.url), "utf8")).join("\n");
+  const text = JSON.stringify(HARNESSES.map(h => ({ ...h, baselines: [] }))) + workflow + prepareScripts;
   assert.doesNotMatch(text, /inference-transport|ANTHROPIC_API_KEY|OPENAI_API_KEY|CLAUDE_CONFIG_DIR|\.codex\b|\.claude\b/);
   const env = suiteEnv(codex, "/opt/codex", "/tmp/home", { PATH: "/bin", GITHUB_TOKEN: "x", ACTIONS_RUNTIME_TOKEN: "x", OPENAI_API_KEY: "x", CODEX_ASSUMPTION_ACKNOWLEDGED_UNAVAILABLE: "escalation", HOME: "/home/runner", RUNNER_TEMP: "/r" });
   assert.deepEqual(Object.keys(env).sort(), ["CI", "CODEX_BIN", "HOME", "LANG", "PATH", "TMPDIR"]);
   assert.equal(env.HOME, "/tmp/home");
   assert.equal(env.CODEX_BIN, "/opt/codex");
+});
+
+test("Pi measures only the newest release, prepares bubblewrap network namespaces and hashes its whole probe set", () => {
+  const pi = harnessById("pi");
+  assert.equal(pi.npmPackage, "@earendil-works/pi-coding-agent");
+  assert.deepEqual(baselineVersions(pi), []);
+  assert.deepEqual(targetsFor("1.4.0", baselineVersions(pi)), [{ label: "newest release", version: "1.4.0" }]);
+  assert.deepEqual(suiteArgv(pi, "/r", "/n/node"), ["/n/node", "--import", "tsx", "scripts/pi-assumptions.mjs", "--report-dir", "/r"]);
+  const env = suiteEnv(pi, "/opt/pi", "/tmp/home", { PATH: "/bin", GITHUB_TOKEN: "x", ANTHROPIC_API_KEY: "x", HOME: "/home/runner" });
+  assert.deepEqual(Object.keys(env).sort(), ["CI", "HOME", "LANG", "PATH", "PI_BIN", "TMPDIR"]);
+  const prepare = readFileSync(new URL("./harness-assumptions-prepare-pi.sh", import.meta.url), "utf8");
+  assert.match(prepare, /bash scripts\/configure-ci-bubblewrap\.sh/);
+  assert.match(prepare, /--unshare-net/);
+  const files = sourceFiles(pi);
+  for (const file of ["scripts/pi-assumptions.mjs", "scripts/harness-assumptions-prepare-pi.sh", "apps/runner/scripts/pi-assumptions-probe.ts",
+    "apps/runner/scripts/pi-probe-support.ts", "apps/runner/scripts/pi-rpc-shape.ts", "apps/runner/scripts/pi-net-observer.mjs",
+    "apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs"]) assert.ok(files.includes(file), file);
+  assert.match(fingerprint(pi), /^[0-9a-f]{64}$/);
+  assert.match(readFileSync(new URL("../docs/harness-assumption-probes.md", import.meta.url), "utf8"), /pnpm probe:pi-assumptions/);
 });
 
 test("the Codex lower bound is read from CODEX_GUARD_TRUST_VERSION_RANGE and measured with the newest release", () => {

@@ -102,8 +102,11 @@ observations were made on that host:
 - Under the observer, a `fetch` of `https://example.com/` and a TCP connect to `1.1.1.1:443` both
   failed visibly, were logged as refused, and never reached the kernel.
 
-Neither is isolation. The isolated measurement is expected from a host with passwordless `sudo`,
-such as a GitHub-hosted runner.
+Neither is isolation. The isolated measurement came from the hosted workflow on 2026-10-30 (run
+`41065193101`). Every group ran as the unprivileged probe user inside `bwrap --unshare-net`: the
+namespace differed from the suite's, `lo` was the only interface, the TEST-NET connect failed with
+`ENETUNREACH`, DNS failed with `EAI_AGAIN`, and loopback worked. Pi completed the scripted turn with
+one provider request and no non-loopback attempt.
 
 ## Baseline: pi 1.4.0
 
@@ -129,7 +132,7 @@ reported every run until a reviewed change aligns the runner or the fixture with
 | Project `sessionDir` under `--no-approve` | `sessions` | Ignored; the session stays in the agent directory. Pi's security documentation says a project `sessionDir` is read before trust is resolved, so this is measured rather than assumed. | Unchanged |
 | `--session <id>` | `sessions` | Resumes the same id, file and leaf. | Unchanged |
 | `--fork <id> --session-id <uuid>` | `sessions` | Creates `<timestamp>_<uuid>.jsonl` beside the source, reports the requested id, and keeps the source leaf for `get_entries` with `since`. | Unchanged |
-| `PI_OFFLINE=1` and `--offline` | `network` | Needs the verified namespace, so it is **could not run** on the development host. Observer-only on that host: with a dummy built-in key and no `PI_OFFLINE`, Pi tried `pi.dev:443` three times (catalog refresh); with `PI_OFFLINE=1` it tried nothing. | Pending isolated run |
+| `PI_OFFLINE=1` and `--offline` | `network` | Measured in the hosted namespace (run `41065193101`): with a dummy built-in key and no `PI_OFFLINE`, Pi tried `pi.dev` (its catalog refresh, refused inside the namespace); with `PI_OFFLINE=1` or `--offline` it attempted nothing. The development host, without namespaces, reports **could not run**. | Unchanged |
 | ADR 0010: repeated `--append-system-prompt` | `adr-0010` | Both values reach the system prompt in order, separated by one blank line. | Unchanged |
 | ADR 0010: `--append-system-prompt=TEXT` | `adr-0010` | Pi exits 1 with `Unknown option: --append-system-prompt`; 0.85.0 handed it to extensions. It still never appends, so the resume strip is unaffected. The probe expects the 1.4.0 refusal. | Unchanged (new baseline) |
 | ADR 0010: `-e` under `--no-extensions` | `adr-0010` | The explicit extension loads; the user extension in `<agent-dir>/extensions` and the built-in `llama` and `mcp` extensions do not. | Unchanged |
@@ -163,13 +166,24 @@ string form.
 
 ## Hosted Workflow
 
-The scheduled hosted workflow from #3796 will run this suite against the newest
-`@earendil-works/pi-coding-agent` release once that workflow exists. Until then the suite runs only
-by hand. The suite already fits that workflow's shared harness contract:
+[Harness Assumption Probes](harness-assumption-probes.md) runs this suite daily, as the `pi`
+harness, against the newest `@earendil-works/pi-coding-agent` release only, because no repository
+source pins or gates a Pi version. The suite follows that workflow's shared contract:
 
 - **Report.** `latest.json` names exactly the installed version, sets `complete` and an `exitCode`
   equal to the process exit, and its results use only `unchanged`, `changed` and `could not run`.
 - **Environment.** It needs only `PATH`, `HOME`, `TMPDIR`, `LANG`, `CI` and `PI_BIN`. It runs from a
-  read-only checkout as an unprivileged user and writes only under its report directory, `HOME`
-  and `TMPDIR`.
-- **Preparation.** Host setup happens in `scripts/harness-assumptions-prepare-pi.sh`.
+  read-only checkout as the unprivileged probe user, without sudo, and writes only under its report
+  directory, `HOME` and `TMPDIR`.
+- **Preparation.** `scripts/harness-assumptions-prepare-pi.sh` installs bubblewrap, grants it user
+  namespaces and checks `bwrap --unshare-net` before any release code runs. A preparation failure
+  makes the run could not run; the probe user's namespace is still verified inside each group.
+
+While the 1.4.0 divergences above stand, every full run exits 1 (changed) and is re-measured the
+next day, because only a fully matched measurement is recorded.
+
+To measure Pi on demand, including on a branch before merge:
+
+```sh
+gh workflow run harness-assumptions.yml --ref <branch> -f harness=pi
+```

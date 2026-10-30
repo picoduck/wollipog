@@ -9,8 +9,9 @@ withheld hardening automatically.
 | Harness | Probe Set | Targets Each Full Run |
 | --- | --- | --- |
 | Codex | `pnpm probe:codex-assumptions` ([Codex Assumption Probes](codex-assumption-probes.md)) | Newest `@openai/codex` release and the lower bound of `CODEX_GUARD_TRUST_VERSION_RANGE` |
+| Pi | `pnpm probe:pi-assumptions` ([Pi Assumption Probes](pi-assumption-probes.md)) | Newest `@earendil-works/pi-coding-agent` release |
 
-Claude Code (#3797) and Pi (#3798) add their probe sets to the same workflow.
+Claude Code (#3797) adds its probe set to the same workflow.
 
 ## Workflow
 

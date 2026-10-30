@@ -61,6 +61,35 @@ export const HARNESSES = [
       { dir: "apps/runner/scripts", prefix: "codex-" },
     ],
   },
+  {
+    id: "pi",
+    name: "Pi",
+    npmPackage: "@earendil-works/pi-coding-agent",
+    bin: "pi",
+    binaryEnv: "PI_BIN",
+    // Only the newest release: no repository source pins or gates a Pi version.
+    baselines: [],
+    prepare: {
+      command: ["bash", "scripts/harness-assumptions-prepare-pi.sh"],
+      purpose: "Every probe group runs in a bubblewrap network namespace, which needs user namespaces (scripts/configure-ci-bubblewrap.sh)",
+    },
+    suite: ["node", "--import", "tsx", "scripts/pi-assumptions.mjs"],
+    reportDirArg: "--report-dir",
+    timeoutMinutes: 45,
+    documentation: "docs/pi-assumption-probes.md",
+    sources: [
+      "scripts/pi-assumptions.mjs",
+      "scripts/codex-assumptions.mjs",
+      "scripts/configure-ci-bubblewrap.sh",
+      "scripts/harness-assumptions-prepare-pi.sh",
+      "apps/runner/scripts/codex-probe-support.ts",
+      "apps/runner/src/drivers/fixtures/fake-pi-rpc.mjs",
+      "apps/runner/src/drivers/pi-rpc.ts",
+      "apps/runner/src/discovery/pi-rpc.ts",
+      "apps/runner/src/pi-agent-control-extension.ts",
+      { dir: "apps/runner/scripts", prefix: "pi-" },
+    ],
+  },
 ];
 
 export function harnessById(id) {
