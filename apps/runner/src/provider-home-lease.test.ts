@@ -735,7 +735,67 @@ test("one fixed successor elects exactly one of two concurrent same-owner reclai
   winner.releaseAll();
 });
 
+// The race's fixed allowance for work other than lease helper calls: process scheduling, IPC and the
+// fixture's own barriers. Before readiness no helper call has been measured, so this is the whole
+// deadline then.
 const SUCCESSOR_REPORT_MS = 10_000;
+const SUCCESSOR_CLEANUP_MS = 5_000;
+// Each lease helper call is a separate process. On Linux and macOS it takes milliseconds; on
+// windows-latest it starts powershell.exe and takes about half a second, more under load, so a
+// fixed deadline there covered only about twenty calls (#3859). Each contender measures one call
+// before it reports ready, and every helper-call allowance below scales with the slower of the two.
+// The allowances are fixed counts, so a contender looping on helper calls still misses its budget.
+// Measured on windows-latest: a winning acquisition makes 11 calls (5 before and 8 after a
+// catch-up refusal), a losing one 2, and the loser's verification 1.
+const SUCCESSOR_HELPER_CALLS = { acquisition: 16, catchUpRetry: 12, publication: 4, release: 12 } as const;
+// Phases in the critical path share the fixed allowance; each still gets its own slack so a single
+// slow phase is named in the failure.
+const SUCCESSOR_PHASE_SLACK_MS = 3_000;
+// Caps the measured call, so a broken helper cannot stretch one race past 58 seconds or its
+// cleanup past 23. verify-successor-election-load.mjs sizes its enclosing timeouts from these.
+const SUCCESSOR_HELPER_CALL_CEILING_MS = 1_500;
+
+type SuccessorBudget = {
+  helperCallMs: number; reportMs: number; cleanupMs: number;
+  acquisitionMs: number; catchUpRetryMs: number; publicationMs: number;
+};
+
+function successorBudget(measuredCallMs: number): SuccessorBudget {
+  const helperCallMs = Math.min(measuredCallMs, SUCCESSOR_HELPER_CALL_CEILING_MS);
+  const calls = (count: number) => Math.ceil(count * helperCallMs);
+  const { acquisition, catchUpRetry, publication, release } = SUCCESSOR_HELPER_CALLS;
+  return {
+    helperCallMs: Math.ceil(helperCallMs),
+    reportMs: SUCCESSOR_REPORT_MS + calls(acquisition + catchUpRetry + publication),
+    cleanupMs: SUCCESSOR_CLEANUP_MS + calls(release),
+    acquisitionMs: SUCCESSOR_PHASE_SLACK_MS + calls(acquisition),
+    catchUpRetryMs: SUCCESSOR_PHASE_SLACK_MS + calls(catchUpRetry),
+    publicationMs: SUCCESSOR_PHASE_SLACK_MS + calls(publication),
+  };
+}
+
+type SuccessorPhaseState = {
+  phase: string; phaseAt: number; spawnedAt: number; ready: boolean; timings: Record<string, number>;
+};
+
+/** Names each phase of one contender that ran past its budget, finished or still running at `now`. */
+function successorOverruns(state: SuccessorPhaseState, budget: SuccessorBudget, readinessMs: number, now: number): string[] {
+  const overruns: string[] = [];
+  const running = (...phases: string[]) => phases.includes(state.phase) ? now - state.phaseAt : undefined;
+  const check = (label: string, ms: number | undefined, budgetMs: number, calls?: number) => {
+    if (ms === undefined || ms <= budgetMs) return;
+    overruns.push(`${label} ${Math.round(ms)}ms > ${budgetMs}ms${calls === undefined ? " (running)" : ` (${calls} helper calls)`}`);
+  };
+  const { timings } = state;
+  if (!state.ready) check("startup", now - state.spawnedAt, readinessMs);
+  check("acquisition", timings.initialAcquisitionMs ?? running("acquiring"), budget.acquisitionMs, timings.initialAcquisitionHelperCalls);
+  check("catch-up retry", timings.catchUpRetryMs ?? running("catching-up"), budget.catchUpRetryMs, timings.catchUpRetryHelperCalls);
+  // A losing contender's wait for the winner's claim is the winner's time, not its own publication.
+  const publication = timings.publicationMs === undefined ? running("publishing", "verifying") : timings.publicationMs - (timings.peerWaitMs ?? 0);
+  check("publication", publication, budget.publicationMs, timings.publicationHelperCalls);
+  check("release", running("releasing"), budget.cleanupMs);
+  return overruns;
+}
 
 type SuccessorRaceOptions = {
   startupDelayMs?: number;
@@ -745,7 +805,7 @@ type SuccessorRaceOptions = {
   signal?: AbortSignal;
   onReady?: () => void;
   beforeRemoveRoot?: (root: string) => void;
-  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse" | "transient-catch-up";
+  fault?: "before-ready" | "hang-before-ready" | "hang-in-publication" | "hang-after-report" | "both-refuse" | "both-win" | "transient-catch-up";
 };
 
 async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOptions = {}) {
@@ -761,8 +821,15 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     child: AgentProcess; name: string; phase: string; phaseAt: number; spawnedAt: number;
     ready: boolean; reported: boolean; closed: boolean; code: number | null;
     signal: NodeJS.Signals | null; stderr: string; error?: string;
-    timings: Record<string, number>; outcome?: string; checkpointFailures: string[];
+    timings: Record<string, number>; outcome?: string; checkpointFailures: string[]; overBudget?: string[];
   }> = [];
+  const readinessMs = options.readinessMs ?? 10_000;
+  // Fixed when the start barrier is published, from the helper calls measured during readiness.
+  let budget = successorBudget(0);
+  const recordOverruns = () => {
+    const now = performance.now();
+    for (const state of states) state.overBudget = successorOverruns(state, budget, readinessMs, now);
+  };
   let failure: string | undefined;
   let cleanupProved = true;
   const cleanupFailures: string[] = [];
@@ -775,7 +842,8 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     contender: state.name, phase: state.phase,
     elapsedMs: Math.round(performance.now() - state.spawnedAt),
     phaseElapsedMs: Math.round(performance.now() - state.phaseAt),
-    timings: state.timings, outcome: sanitize(state.outcome ?? outcomes[states.indexOf(state)] ?? "unreported"),
+    timings: state.timings, ...(state.overBudget && { overBudget: state.overBudget }),
+    outcome: sanitize(state.outcome ?? outcomes[states.indexOf(state)] ?? "unreported"),
     exitCode: state.code, signal: state.signal, closed: state.closed,
     stderr: sanitize(state.stderr), error: state.error,
     checkpointFailures: state.checkpointFailures.map(sanitize),
@@ -812,17 +880,27 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     mkdirSync(staging, { mode: 0o700 });
     writeLegacyLease(home, { pid: 2_147_483_647 });
     writeFileSync(helper, `
-      import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+      import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
       import { ProviderHomeLeaseRegistry } from ${JSON.stringify(moduleUrl)};
-      import { ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
+      import { ensureLeaseIoAvailable, observeLeaseIoRunsForTest, readLeaseIoSnapshot, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
       const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
       const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
       const checkpointFailures = [];
+      // Fixed-helper calls since the last phase boundary, so each phase reports the calls it made.
+      const helper = { calls: 0, ms: 0, slowestMs: 0 };
+      observeLeaseIoRunsForTest((run) => { helper.calls++; helper.ms += run.durationMs; helper.slowestMs = Math.max(helper.slowestMs, run.durationMs); });
+      const helperWork = (name) => {
+        const work = { [name + "HelperCalls"]: helper.calls, [name + "HelperMs"]: helper.ms, [name + "SlowestHelperMs"]: helper.slowestMs };
+        helper.calls = 0; helper.ms = 0; helper.slowestMs = 0;
+        return work;
+      };
       const phase = (name, timings = {}, outcome) => new Promise((resolve, reject) => {
         process.send({ phase: name, timings, outcome, checkpointFailures }, (error) => error ? reject(error) : resolve());
       });
+      // Outlasts the parent's race deadline, so a slow winner is reported by the parent's
+      // phase budgets rather than as a loser's barrier timeout.
       const waitFor = (path) => {
-        const deadline = performance.now() + 20_000;
+        const deadline = performance.now() + ${successorBudget(SUCCESSOR_HELPER_CALL_CEILING_MS).reportMs + 5_000};
         while (!existsSync(path)) {
           if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
           pause(5);
@@ -841,16 +919,27 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         const initializedAt = performance.now();
         withLeaseIoOptions({ providerHome: home }, ensureLeaseIoAvailable);
         const initializationMs = performance.now() - initializedAt;
+        // Measure one read-only helper call on this host and load, against a private empty root.
+        // Canonical like a leased HOME: the helper refuses symlinked ancestry such as macOS /var.
+        mkdirSync(result + ".calibration", { mode: 0o700 });
+        const calibration = realpathSync(result + ".calibration");
+        helperWork("initialization");
+        withLeaseIoOptions({ providerHome: home }, () => readLeaseIoSnapshot(calibration));
+        const helperCallMs = helper.slowestMs;
+        if (helper.calls !== 1) throw new Error("helper calibration made " + helper.calls + " calls");
+        helperWork("calibration");
         registry = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, {
           hostname: "host-a",
           disableCompactionForTest: fault === "transient-catch-up",
           onCheckpointFailureForTest: (error) => checkpointFailures.push(error instanceof Error ? error.message : String(error)),
         });
         pause(${options.startupDelayMs ?? 0});
-        await phase("ready", { initializationMs });
+        await phase("ready", { initializationMs, helperCallMs });
         waitFor(start);
         await phase("acquiring");
         const acquisitionAt = performance.now();
+        let catchUpAt;
+        const acquisitionTimings = {};
         let outcome;
         let catchUpRetries = 0;
         for (;;) {
@@ -864,6 +953,11 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
             // product keeps its reservation and asks the runner to retry with the same registry,
             // as a runner does; the retry count and checkpoint failures stay in the diagnostics.
             if (catchUpRetries < 3 && /bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry/.test(message)) {
+              if (catchUpAt === undefined) {
+                catchUpAt = performance.now();
+                Object.assign(acquisitionTimings, { initialAcquisitionMs: catchUpAt - acquisitionAt }, helperWork("initialAcquisition"));
+                await phase("catching-up", acquisitionTimings);
+              }
               catchUpRetries++;
               // The fault fails only the first catch-up: re-enable the checkpoint this registry disabled.
               if (fault === "transient-catch-up") registry.disableCompactionForTest = false;
@@ -878,22 +972,31 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
           }
         }
         if (fault === "both-refuse") outcome = "lost:synthetic refusal after acquisition";
-        const acquisitionMs = performance.now() - acquisitionAt;
+        if (fault === "both-win") outcome = "won";
+        const acquiredAt = performance.now();
+        const acquisitionMs = acquiredAt - acquisitionAt;
+        if (catchUpAt === undefined) Object.assign(acquisitionTimings, { initialAcquisitionMs: acquisitionMs }, helperWork("initialAcquisition"));
+        else Object.assign(acquisitionTimings, { catchUpRetryMs: acquiredAt - catchUpAt }, helperWork("catchUpRetry"));
         writeFileSync(result + ".claim.tmp", JSON.stringify({ outcome, pid: process.pid }));
         renameSync(result + ".claim.tmp", result + ".claim");
-        await phase("publishing", { acquisitionMs, catchUpRetries }, outcome);
+        await phase("publishing", { acquisitionMs, catchUpRetries, ...acquisitionTimings }, outcome);
         if (fault === "hang-in-publication") await hang();
         const publicationAt = performance.now();
         pause(${options.publicationDelayMs ?? 0});
         let verificationMs = 0;
+        let peerWaitMs = 0;
         if (outcome.startsWith("lost:")) {
           // A transient verification refusal is a valid losing outcome, but after the
           // winner publishes, its canonical lease must be readable and exclude us.
+          await phase("awaiting-winner");
+          const peerWaitAt = performance.now();
           waitFor(peerResult + ".claim");
           const peer = JSON.parse(readFileSync(peerResult + ".claim", "utf8"));
           if (peer.outcome !== "won") throw new Error("both contenders refused; no winning claim");
           if (!Number.isInteger(peer.pid) || peer.pid === process.pid) throw new Error("invalid winning process claim");
           waitFor(peerResult);
+          peerWaitMs = performance.now() - peerWaitAt;
+          await phase("verifying", { peerWaitMs });
           const verificationAt = performance.now();
           const verifier = new ProviderHomeLeaseRegistry(${JSON.stringify(OWNER_A)}, { hostname: "host-a" });
           let excluded = false;
@@ -909,11 +1012,12 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
           verificationMs = performance.now() - verificationAt;
         }
         writeFileSync(result, outcome);
-        await phase("reported", { publicationMs: performance.now() - publicationAt, verificationMs });
+        await phase("reported", { publicationMs: performance.now() - publicationAt, peerWaitMs, verificationMs, ...helperWork("publication") });
         if (fault === "hang-after-report") await hang();
         if (outcome === "won") {
           await phase("holding");
           waitFor(release);
+          await phase("releasing");
         }
       } catch (error) {
         console.error(error instanceof Error ? error.message : String(error));
@@ -927,7 +1031,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     for (const [index, result] of results.entries()) {
       const spawnedAt = performance.now();
       // Either contender may win, so faults that model the election itself reach both of them.
-      const bothFault = options.fault === "both-refuse" || options.fault === "transient-catch-up";
+      const bothFault = options.fault === "both-refuse" || options.fault === "both-win" || options.fault === "transient-catch-up";
       const child = spawn(process.execPath, ["--import", "tsx", helper, home, result, start, release, (index === 0 || bothFault) ? options.fault ?? "" : "", results[1 - index]!], {
         env: { ...process.env, TMPDIR: staging, TMP: staging, TEMP: staging },
         detached: process.platform !== "win32", stdio: ["ignore", "ignore", "pipe", "ipc"],
@@ -965,13 +1069,21 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       }));
     }
     // Windows measurements exceeded five seconds during both setup and actual
-    // acquisition/verification. Each phase gets a separate finite ten-second bound;
-    // no production deadline changes.
-    assert.ok(await waitUntil(() => states.every((state) => state.ready), options.readinessMs ?? 10_000, true), "contender readiness timed out");
+    // acquisition/verification. Readiness keeps its own finite bound, and the race's bound
+    // scales with the helper calls measured during readiness; no production deadline changes.
+    if (!await waitUntil(() => states.every((state) => state.ready), readinessMs, true)) {
+      recordOverruns();
+      assert.fail("contender readiness timed out");
+    }
     options.onReady?.();
     if (t.signal.aborted || options.signal?.aborted) throw new Error("successor election cancelled");
+    budget = successorBudget(Math.max(0, ...states.map((state) => state.timings.helperCallMs ?? 0)));
+    t.diagnostic(`successor election budget: ${JSON.stringify(budget)}`);
     writeFileSync(start, "go");
-    assert.ok(await waitUntil(() => states.every((state) => state.reported), SUCCESSOR_REPORT_MS, true), "both contenders report before the race deadline");
+    if (!await waitUntil(() => states.every((state) => state.reported), budget.reportMs, true)) {
+      recordOverruns();
+      assert.fail("both contenders report before the race deadline");
+    }
     outcomes = results.map((result) => readFileSync(result, "utf8"));
     assert.equal(outcomes.filter((outcome) => outcome === "won").length, 1, "exactly one winner");
     assert.equal(outcomes.filter((outcome) => outcome.startsWith("lost:")).length, 1, "exactly one refusal");
@@ -979,7 +1091,8 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     failure = sanitize(error instanceof Error ? error.message : String(error));
   } finally {
     try { writeFileSync(release, "done"); } catch { cleanupFailures.push("fixture release publication failed"); }
-    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? 5_000)) {
+    if (!await waitUntil(() => states.every((state) => state.closed), options.cleanupGraceMs ?? budget.cleanupMs)) {
+      if (!failure) recordOverruns();
       failure ??= "contenders required forced cleanup";
       const cleaned = await Promise.all(states.map((state) => forceCleanup(state)));
       cleanupProved = cleaned.every(Boolean);
@@ -1045,7 +1158,8 @@ test("successor election uses its load harness's owned fixture parent", async (t
 
 test("successor election keeps slow startup out of the result deadline", async (t) => {
   // Startup must exceed the reporting window: removing only the readiness wait
-  // must expire reporting before either contender can publish. Keep two seconds
+  // must expire reporting before either contender can publish. Without readiness no
+  // helper call has been measured, so that window is SUCCESSOR_REPORT_MS. Keep two seconds
   // of separation plus the normal ten-second setup margin for native initialization.
   const startupDelayMs = SUCCESSOR_REPORT_MS + 2_000;
   await runSuccessorElectionRace(t, { startupDelayMs, readinessMs: startupDelayMs + 10_000 });
@@ -1066,10 +1180,15 @@ test("successor election bounds a hung readiness phase and reaps owned contender
   }), (error) => assertSuccessorFailureClosed(error, /contender readiness timed out/));
 });
 
-test("successor election keeps its result deadline and reaps a stalled publisher", { timeout: 30_000 }, async (t) => {
+// Readiness, the measured race deadline at its ceiling, and forced cleanup.
+test("successor election keeps its result deadline and reaps a stalled publisher", { timeout: 90_000 }, async (t) => {
   await assert.rejects(runSuccessorElectionRace(t, {
     fault: "hang-in-publication", cleanupGraceMs: 50,
-  }), (error) => assertSuccessorFailureClosed(error, /both contenders report before the race deadline;.*"phase":"publishing"/));
+  }), (error: Error) => {
+    // The stalled contender is the one named over its publication budget.
+    assert.match(error.message, /"contender":"contender-a","phase":"publishing",[^\]]*"overBudget":\["publication \d+ms > \d+ms \(running\)"\]/);
+    return assertSuccessorFailureClosed(error, /both contenders report before the race deadline;.*"phase":"publishing"/);
+  });
 });
 
 test("successor election rejects a contender that reports but cannot exit", async (t) => {
@@ -1085,6 +1204,45 @@ test("successor election diagnoses two refusals without a publication timeout", 
     assert.equal((error.message.match(/"outcome":"lost:/g) ?? []).length, 2);
     return assertSuccessorFailureClosed(error, /contender failed before publishing/);
   });
+});
+
+test("successor election rejects two contenders that both claim the win", async (t) => {
+  await assert.rejects(runSuccessorElectionRace(t, { fault: "both-win" }), (error: Error) => {
+    assert.equal((error.message.match(/"outcome":"won"/g) ?? []).length, 2);
+    return assertSuccessorFailureClosed(error, /exactly one winner/);
+  });
+});
+
+test("successor election budget scales its helper-call allowances with the measured call", () => {
+  const fast = successorBudget(4);
+  assert.equal(fast.reportMs, SUCCESSOR_REPORT_MS + 4 * 32, "a millisecond-scale helper leaves the fixed allowance in charge");
+  const windows = successorBudget(500);
+  assert.deepEqual(windows, {
+    helperCallMs: 500, reportMs: 26_000, cleanupMs: 11_000, acquisitionMs: 11_000, catchUpRetryMs: 9_000, publicationMs: 5_000,
+  });
+  assert.deepEqual(successorBudget(10_000), successorBudget(SUCCESSOR_HELPER_CALL_CEILING_MS), "a broken helper cannot stretch the race past its ceiling");
+  assert.equal(successorBudget(10_000).reportMs, 58_000);
+  assert.equal(successorBudget(10_000).cleanupMs, 23_000);
+  assert.equal(successorBudget(0).reportMs, SUCCESSOR_REPORT_MS, "an unmeasured race keeps the fixed deadline");
+});
+
+test("successor election names the phase that ran past its budget", () => {
+  const budget = successorBudget(500);
+  const at = (phase: string, phaseAt: number, timings: Record<string, number> = {}, ready = true) =>
+    successorOverruns({ phase, phaseAt, spawnedAt: 0, ready, timings }, budget, 10_000, 40_000);
+  assert.deepEqual(at("initializing", 100, {}, false), ["startup 40000ms > 10000ms (running)"]);
+  assert.deepEqual(at("acquiring", 28_000, { helperCallMs: 500 }), ["acquisition 12000ms > 11000ms (running)"]);
+  assert.deepEqual(at("acquiring", 30_000, { helperCallMs: 500 }), [], "an acquisition inside its budget is not named");
+  assert.deepEqual(at("catching-up", 30_000, { initialAcquisitionMs: 9_850, initialAcquisitionHelperCalls: 19 }),
+    ["catch-up retry 10000ms > 9000ms (running)"]);
+  assert.deepEqual(at("holding", 39_000, {
+    initialAcquisitionMs: 12_500, initialAcquisitionHelperCalls: 25, catchUpRetryMs: 1_000, catchUpRetryHelperCalls: 2, publicationMs: 1,
+  }), ["acquisition 12500ms > 11000ms (25 helper calls)"]);
+  // A loser's wait for the winner's claim is the winner's time, not its own publication.
+  assert.deepEqual(at("reported", 39_000, { initialAcquisitionMs: 2_000, publicationMs: 8_539, peerWaitMs: 7_600, verificationMs: 892 }), []);
+  assert.deepEqual(at("verifying", 34_000), ["publication 6000ms > 5000ms (running)"]);
+  assert.deepEqual(at("awaiting-winner", 0), [], "waiting for the winner names the winner's phase instead");
+  assert.deepEqual(at("releasing", 28_000), ["release 12000ms > 11000ms (running)"]);
 });
 
 test("successor election lets the winning reservation finish a transient catch-up refusal", async (t) => {
