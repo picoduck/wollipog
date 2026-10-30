@@ -495,8 +495,13 @@ test("message and turn actions use the shared small icon button and never size t
 });
 
 test("hover clusters take no height and show on hover, focus within or an open menu", () => {
-  const user = soleRuleBody(".tl-user-actions, .tl-user-menu");
-  assert.match(user, /position: absolute;/, "the user cluster sits beside the bubble, not under it");
+  const user = soleRuleBody(".tl-user-actions");
+  assert.match(user, /position: absolute;/, "the desktop user cluster sits beside the bubble");
+  const touch = soleRuleBody(".tl-user-menu");
+  assert.doesNotMatch(touch, /position: absolute;/, "touch controls keep their own row below the bubble");
+  assert.match(touch, /justify-self: end;/);
+  assert.match(touch, /gap: var\(--space-2\);/, "touch targets have room between controls");
+  assert.match(touch, /padding: var\(--space-1\);/, "the row reserves room for extended hit areas");
   assert.match(user, /bottom: 0;/, "bottom-aligned with the bubble");
   assert.match(user, /inset-inline-end: calc\(100% \+ var\(--space-1\)\);/, "to the bubble's left");
   assert.match(soleRuleBody(".tl-user-actions, .tl-hover-action"), /opacity: 0;/);
