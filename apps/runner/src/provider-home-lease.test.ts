@@ -878,7 +878,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
     mkdirSync(staging, { mode: 0o700 });
     writeLegacyLease(home, { pid: 2_147_483_647 });
     writeFileSync(helper, `
-      import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+      import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
       import { ProviderHomeLeaseRegistry } from ${JSON.stringify(moduleUrl)};
       import { ensureLeaseIoAvailable, observeLeaseIoRunsForTest, readLeaseIoSnapshot, withLeaseIoOptions, LeaseIoError } from ${JSON.stringify(ioUrl)};
       const [home, result, start, release, fault, peerResult] = process.argv.slice(2);
@@ -918,8 +918,9 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
         withLeaseIoOptions({ providerHome: home }, ensureLeaseIoAvailable);
         const initializationMs = performance.now() - initializedAt;
         // Measure one read-only helper call on this host and load, against a private empty root.
-        const calibration = result + ".calibration";
-        mkdirSync(calibration, { mode: 0o700 });
+        // Canonical like a leased HOME: the helper refuses symlinked ancestry such as macOS /var.
+        mkdirSync(result + ".calibration", { mode: 0o700 });
+        const calibration = realpathSync(result + ".calibration");
         helperWork("initialization");
         withLeaseIoOptions({ providerHome: home }, () => readLeaseIoSnapshot(calibration));
         const helperCallMs = helper.slowestMs;
