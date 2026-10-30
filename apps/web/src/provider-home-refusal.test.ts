@@ -102,6 +102,20 @@ test("a refused fork has the session launch's state and a fork's next step (#324
     /Codex sign-in, so the fork didn't start\. Try again once it's free\./u);
 });
 
+test("a refused Agent TUI has the session launch's state and is opened again (#3338)", () => {
+  for (const code of PROVIDER_HOME_LAUNCH_REFUSAL_CODES) {
+    const session = providerHomeRefusalCopy({ code, provider: "claude" }, "Work");
+    const tui = providerHomeRefusalCopy({ code, provider: "claude" }, "Work", { launch: "agent_tui", canWait: true });
+    assert.equal(tui.title, session.title, `${code}: the same state`);
+    assert.ok(!tui.actions.includes("wait"), `${code}: an Agent TUI is opened again, never waited for`);
+    assert.doesNotMatch(tui.body, /restart the session|this session didn't start|start the session|fork/iu, `${code}: ${tui.body}`);
+  }
+  assert.match(providerHomeRefusalCopy({ code: "busy", provider: "codex" }, "Work", { launch: "agent_tui" }).body,
+    /using Work, so the Agent TUI didn't open\. Try again once it's free, or switch the session to another account\./u);
+  assert.match(providerHomeRefusalCopy({ code: "unverifiable", provider: "claude" }, undefined, { launch: "agent_tui" }).body,
+    /Claude sign-in, so the Agent TUI didn't open\./u);
+});
+
 test("a waiting session names the account, the holder and how long it waits (#3240)", () => {
   const base = { provider: "claude" as const, waitingSince: 0, waitUntil: 8 * 3_600_000 };
   const copy = providerHomeWaitCopy(base, "Work");

@@ -185,18 +185,6 @@ test("startup tool or server surface wider than the two media tools refuses befo
   }
 });
 
-test("only the pinned CLI's own pre-init notice may precede startup init; any other event refuses before a frame (#3849)", async (t) => {
-  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace preparation required"); return; }
-  // The ok fake emits the 2.1.296 `--bare` notice before init, and the first test above completes with it.
-  const h = await harness(t, { mode: "pre-init-other" });
-  await h.dispatcher.dispatch(h.dispatch);
-  const [result] = finished(h.sent);
-  assert.equal(result.outcome, "failed");
-  assert.match(result.reason, /first provider event is not its startup init/u);
-  assert.equal(h.cp.requests.length, 0, "no media route is reached");
-  assert.equal(result.priced, false);
-});
-
 test("a tool outside the media set, a skipped frame or invalid notes fail the window instead of truncating", async (t) => {
   if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace preparation required"); return; }
   for (const [mode, reason] of [["use-bash", /outside the scoped media set/u], ["skip-frame", /before every frame/u],

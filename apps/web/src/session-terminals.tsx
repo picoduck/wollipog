@@ -7,8 +7,15 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { isTerminal, type ShellKind, type ShellOutputChunk, type ShellView } from "@wollipog/protocol";
-import type { ApiClient } from "./api.js";
+import {
+  isTerminal,
+  validProviderHomeLaunchRefusal,
+  type ProviderHomeLaunchRefusalView,
+  type ShellKind,
+  type ShellOutputChunk,
+  type ShellView,
+} from "@wollipog/protocol";
+import { ApiError, type ApiClient } from "./api.js";
 import { useApi } from "./api-context.js";
 import { useStoreActions, useStoreSelector } from "./store.js";
 import {
@@ -58,6 +65,9 @@ export interface SessionTerminalsState {
   readonly busy: boolean;
   /** The last failed terminal action, shown as the terminal's notice until dismissed. */
   readonly error: string | null;
+  /** The Agent TUI open that `error` reports was refused by its provider account's lease (#3338):
+   * the notice shows the session's state and recovery for it instead of the server's words. */
+  readonly errorRefusal: ProviderHomeLaunchRefusalView | null;
   readonly searchOpen: boolean;
   readonly searchTerm: string;
   /** The selected terminal's match count for `searchTerm`. */
@@ -91,6 +101,7 @@ const INITIAL_STATE: SessionTerminalsState = {
   input: "",
   busy: false,
   error: null,
+  errorRefusal: null,
   searchOpen: false,
   searchTerm: "",
   searchResults: null,
@@ -211,7 +222,7 @@ export class SessionTerminals {
 
   setInput = (input: string): void => this.setState({ input });
 
-  dismissError = (): void => this.setState({ error: null });
+  dismissError = (): void => this.setState({ errorRefusal: null, error: null });
 
   openSearch = (): void => this.setState({ searchOpen: true });
 
@@ -223,7 +234,7 @@ export class SessionTerminals {
   closeSearch = (): void => this.setState({ searchOpen: false, searchTerm: "", searchResults: null });
 
   newShell = async (kind: ShellKind = "shell"): Promise<void> => {
-    this.setState({ busy: true, error: null });
+    this.setState({ busy: true, error: null, errorRefusal: null });
     const outputDrops = this.outputDrops;
     try {
       const { shell } = await this.api.openShell(this.sessionId, { cols: 120, rows: 30, kind });
@@ -246,7 +257,11 @@ export class SessionTerminals {
         void this.loadShells({ reconcile: true });
       }
     } catch (e) {
-      this.setState({ error: (e as Error).message });
+      this.setState({
+        error: (e as Error).message,
+        errorRefusal: kind === "agent_tui" && e instanceof ApiError
+          ? validProviderHomeLaunchRefusal(e.details?.providerHomeRefusal) : null,
+      });
     } finally {
       this.setState({ busy: false });
     }
@@ -271,7 +286,7 @@ export class SessionTerminals {
     if (listDropped && this.hosts > 0) void this.loadShells({ reconcile: true });
     void this.api.closeShell(this.sessionId, shellId).catch((e: unknown) => {
       this.closingShellIds.delete(shellId);
-      this.setState({ error: (e as Error).message });
+      this.setState({ errorRefusal: null, error: (e as Error).message });
       void this.loadShells({ reconcile: true });
     });
     return nextActive;
@@ -332,7 +347,7 @@ export class SessionTerminals {
         await this.api.shellInput(this.sessionId, active, chunk);
       }
     } catch (e) {
-      this.setState({ error: (e as Error).message, input: line });
+      this.setState({ errorRefusal: null, error: (e as Error).message, input: line });
     }
   };
 
@@ -443,7 +458,7 @@ export class SessionTerminals {
     // dock did.
     this.initialShellLoadSettled = false;
     this.autoOpened = false;
-    this.setState({ error: null });
+    this.setState({ errorRefusal: null, error: null });
     this.everOpened = true;
     void this.loadShells({ reconcile: this.state.shells !== null });
   }
@@ -521,7 +536,7 @@ export class SessionTerminals {
     } catch (e) {
       if (this.loadSeq !== seq) return;
       this.listPending = false;
-      this.setState({ error: (e as Error).message, listUnreadable: true });
+      this.setState({ errorRefusal: null, error: (e as Error).message, listUnreadable: true });
     }
   }
 
@@ -590,7 +605,7 @@ export class SessionTerminals {
         truncated,
       );
     } catch (e) {
-      if (this.loadSeq === seq) this.setState({ error: `Couldn't restore the history of ${shell.name}: ${(e as Error).message}` });
+      if (this.loadSeq === seq) this.setState({ errorRefusal: null, error: `Couldn't restore the history of ${shell.name}: ${(e as Error).message}` });
     }
   }
 
@@ -602,7 +617,7 @@ export class SessionTerminals {
         await this.api.shellInput(this.sessionId, shellId, chunk); // sequential — order is the contract
       }
     } catch (e) {
-      this.setState({ error: `Some input may not have reached the shell: ${(e as Error).message}` });
+      this.setState({ errorRefusal: null, error: `Some input may not have reached the shell: ${(e as Error).message}` });
     }
   }
 }

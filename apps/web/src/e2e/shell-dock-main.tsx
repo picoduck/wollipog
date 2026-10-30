@@ -7,7 +7,7 @@ import {
   type SessionView,
   type ShellView,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { ShellDock } from "../components/ShellDock.js";
@@ -29,6 +29,9 @@ import "../styles.css";
  * Shell 1's oldest output; `?status=completed` ends the session, so an empty dock opens no shell itself.
  * For #2867: `?toggle=1` makes Hide Terminal hide the dock, as the app does, with a Show Terminal button
  * to reopen it under the same session terminals.
+ * For #3338: `?tui=refused` makes New Agent TUI fail as the account's provider-HOME lease refuses it,
+ * with `?lease=` naming the refusal code (`busy` by default) and `?lease-account=none` refusing the
+ * Machine's own sign-in rather than the session's Work Account.
  */
 const params = new URLSearchParams(window.location.search);
 const theme = params.get("theme") === "light" ? "light" : "dark";
@@ -126,6 +129,17 @@ const client: ApiClient = {
   openShell: async (_sessionId, request) => {
     openRequests += 1;
     await new Promise((resolve) => window.setTimeout(resolve, 600));
+    if (tui === "refused" && request?.kind === "agent_tui") {
+      const machineHome = params.get("lease-account") === "none";
+      throw new ApiError("provider-HOME lease refused", 502, undefined, {
+        providerHomeRefusal: {
+          code: params.get("lease") ?? "busy",
+          provider: "claude",
+          ...(machineHome ? {} : { providerAccountId: "work", providerAccountLabel: "Work Account" }),
+          detectedAt: Date.now(),
+        },
+      });
+    }
     opened += 1;
     const created = shell(opened, request?.kind === "agent_tui"
       ? { shellId: `agent-tui-${opened}`, name: "Agent TUI", kind: "agent_tui", outputEndSeq: 0 }

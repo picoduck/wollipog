@@ -116,7 +116,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 256);
+  assert.equal(PROTOCOL_VERSION, 258);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -342,8 +342,11 @@ test("a worktree switch is accepted only as its exact display shape (#3810)", ()
   ]) assert.equal(validWorktreeSwitch(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 256", () => {
-  assert.equal(PROTOCOL_VERSION, 256);
+test("PROTOCOL_VERSION is 258", () => {
+  assert.equal(PROTOCOL_VERSION, 258);
+  // A v257 runner reports a refused Agent TUI open by its sentence alone (#3338).
+  assert.equal(runnerSupportsProtocol(257, "providerHomeAgentTuiRefusals"), false);
+  assert.equal(runnerSupportsProtocol(258, "providerHomeAgentTuiRefusals"), true);
   // A v255 runner never says that a session is switching worktrees (#3810).
   assert.equal(runnerSupportsProtocol(255, "worktreeSwitchStatus"), false);
   assert.equal(runnerSupportsProtocol(256, "worktreeSwitchStatus"), true);

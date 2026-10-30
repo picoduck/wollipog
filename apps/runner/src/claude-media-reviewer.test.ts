@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { claudeMediaReviewerArgs, claudeMediaReviewerInitRefusal, claudeMediaReviewerPreInitNotice, ClaudeMediaReviewerStream, CLAUDE_MEDIA_REVIEWER_TOOLS,
+import { claudeMediaReviewerArgs, claudeMediaReviewerInitRefusal, ClaudeMediaReviewerStream, CLAUDE_MEDIA_REVIEWER_TOOLS,
   mediaReviewerCredentialPath, readMediaReviewerCredential } from "./claude-media-reviewer.js";
 
 // Shape captured from the pinned 2.1.296 CLI started with --bare --tools "" --strict-mcp-config and
@@ -71,46 +71,6 @@ test("the provider stream refuses non-media tool use and re-verifies every per-t
     modelUsage: { "claude-opus-5-5": { inputTokens: 1, outputTokens: 1, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.4 } } }));
   assert.equal(unpriced.result.turns, 2);
   assert.equal(unpriced.result.priced, false, "pricing failure is latched for the whole window");
-});
-
-test("the pinned CLI's single pre-init UI notice is tolerated in exactly its measured shape, and nothing else is (#3849)", () => {
-  // Measured on 2.1.296 and 2.1.314 under the reviewer's --bare argv: one notice, then init, same session.
-  const sid = "cf08b4b2-74a9-40e6-807d-7520e14f81a7";
-  const notice = { type: "system", subtype: "ui_invalidate", event: "ui.render", uuid: "e8818344-f227-44cb-9b01-35f117a6151f", session_id: sid };
-  const started = { ...init, session_id: sid };
-  const line = (value: unknown) => JSON.stringify(value) + "\n";
-  assert.equal(claudeMediaReviewerPreInitNotice(notice), sid);
-
-  const ok = new ClaudeMediaReviewerStream(expected);
-  assert.equal(ok.push(line(notice)), null);
-  assert.equal(ok.result.initialized, false, "the notice proves nothing; init is still the startup proof");
-  assert.equal(ok.push(line(started)), null);
-  assert.equal(ok.push(line({ type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: CLAUDE_MEDIA_REVIEWER_TOOLS[0] }] } })), null);
-  assert.equal(ok.push(line({ type: "result", session_id: sid, total_cost_usd: 0.5, is_error: false, result: "{}",
-    modelUsage: { "claude-opus-5-5": { inputTokens: 10, outputTokens: 2, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: 0.5 } } })), null);
-  assert.deepEqual({ ...ok.result }, { initialized: true, toolCalls: 1, priced: true, turns: 1, costUsd: 0.5, finalText: "{}" });
-  // Releases that emit no notice (2.1.277 and below) still start directly with init.
-  assert.equal(new ClaudeMediaReviewerStream(expected).push(line(started)), null);
-
-  for (const [label, events] of [
-    ["a second notice", [notice, notice, started]],
-    ["a notice for another session", [notice, init]],
-    ["a notice with content", [{ ...notice, message: { content: [{ type: "text", text: "x" }] } }, started]],
-    ["a notice with tools", [{ ...notice, tools: ["Bash"] }, started]],
-    ["a notice missing its uuid", [{ type: "system", subtype: "ui_invalidate", event: "ui.render", session_id: sid }, started]],
-    ["another UI event", [{ ...notice, event: "ui.prompt" }, started]],
-    ["another system subtype", [{ ...notice, subtype: "status" }, started]],
-    ["an unbounded identifier", [{ ...notice, session_id: "x".repeat(4096) }, { ...init, session_id: "x".repeat(4096) }]],
-    ["an assistant turn before init", [{ type: "assistant", message: { content: [{ type: "tool_use", id: "t", name: CLAUDE_MEDIA_REVIEWER_TOOLS[0] }] } }, started]],
-    ["a result before init", [notice, { type: "result", session_id: sid, total_cost_usd: 0, modelUsage: {} }, started]],
-    ["a widened init after the notice", [notice, { ...started, tools: [...init.tools, "Read"] }]],
-  ] as const) {
-    const stream = new ClaudeMediaReviewerStream(expected);
-    const refusal = (events as readonly unknown[]).map((event) => stream.push(line(event))).find(Boolean);
-    assert.ok(refusal, label);
-    assert.equal(stream.result.toolCalls, 0, label);
-  }
-  for (const value of [null, [], "ui_invalidate", { ...notice, type: "user" }]) assert.equal(claudeMediaReviewerPreInitNotice(value), null);
 });
 
 test("provider argv disables built-in tools and loads only the relay, with no credential", () => {

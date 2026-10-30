@@ -87,14 +87,14 @@ detectors do see outbound attempts, and the quiet result is a measured zero.
 `auto`. The probes use `claude-sonnet-4-6` and check the mode the init event reports; a different
 mode is "could not run".
 
-**The flagless default differs on 2.1.296.** With an auto-capable model and no `--permission-mode`,
-2.1.296 started in `auto`, while 2.1.277 and 2.1.314 started in `default`. With `claude-sonnet-4-5` all
-three started in `default`. Until #3849 the driver launched `default` without the flag, so on 2.1.296
-a runner's `default` (Ask) session could run under the auto classifier. The driver now passes
-`--permission-mode default` explicitly. On 2026-10-30 that argument set started `claude-sonnet-4-6`,
-`claude-opus-4-6` and `claude-sonnet-4-5` in `default` on 2.1.205, 2.1.241, 2.1.277, 2.1.296 and
-2.1.314. Help lists `manual`, not `default`, among the choices in every measured release, yet
-`default` is accepted; discovery attests `default` from the control-contract floor, not from help.
+**The flagless default differs on 2.1.296.** The driver launches `default` without a
+`--permission-mode` flag. With an auto-capable model and no flag, 2.1.296 started in `auto`, while
+2.1.277 and 2.1.314 started in `default`. With `claude-sonnet-4-5` all three started in `default`, and
+an explicit `--permission-mode default` started `default` on all three. On 2.1.296 a runner's
+`default` (ask) session can therefore run under the auto classifier. The `control-channel` probe
+reports this as changed, and it names the mode explicitly for its envelope cases so the envelope is
+still measured. Help lists `manual`, not `default`, among the choices in every measured release,
+yet `default` is accepted.
 
 **Throwaway leftovers (observation only).** A quiet turn leaves these in the config directory:
 
@@ -135,12 +135,12 @@ Nothing outside the throwaway directories is read.
 | `isolation` | Detector positive control through the CLI's Bash tool; a quiet turn contacts only `POST /v1/messages` and never names the real `HOME`; throwaway leftovers (observation) | Feasibility above |
 | `hooks` | A `PreToolUse` hook supplied by inline `--settings` with the runner's `MANAGED_WORKTREE_GUARD_MATCHER` fires once per Bash call, with `tool_name`, `tool_input.command`, an absolute `cwd`, `permission_mode` and `hook_event_name`, in `auto`, `acceptEdits` and `bypassPermissions`. Allowed calls run. A JSON `deny` blocks the call, and so does exit 2. Either way the reason reaches the model. A subagent's call is covered too and carries `agent_id` and `agent_type`. | ADR 0012, 2.1.270 and 2.1.277 |
 | `settings` | Inline JSON `--settings` is accepted; of two `--settings` (file/file, file/inline, inline/file) only the last applies | ADR 0012, 2.1.270 and 2.1.278 |
-| `control-channel` | The driver's `default` launch (`claudePermissionArgs("default")`) names `--permission-mode default` and starts the CLI in `default`. With those arguments and the driver's stream-json prompt, a Bash call produces exactly one `can_use_tool` frame. Its envelope is exactly `{type, request_id, request}`. The frame carries the issued command and `tool_use_id`, and has no `cwd` or `parent_tool_use_id`. Only a subagent's frame carries `request.agent_id`, and any `blocked_path` is absolute. Allow and deny responses shaped like `resolvePermission`'s are honoured. Request keys are compared with the recorded fixture and reported. | `claude-can-use-tool-subagent.json` (2.1.277); ADR 0012 |
+| `control-channel` | The driver's flagless `default` launch (`claudePermissionArgs("default")` passes no `--permission-mode`) starts the CLI in `default`. With those arguments plus an explicit `--permission-mode default`, and the driver's stream-json prompt, a Bash call produces exactly one `can_use_tool` frame. Its envelope is exactly `{type, request_id, request}`. The frame carries the issued command and `tool_use_id`, and has no `cwd` or `parent_tool_use_id`. Only a subagent's frame carries `request.agent_id`, and any `blocked_path` is absolute. Allow and deny responses shaped like `resolvePermission`'s are honoured. Request keys are compared with the recorded fixture and reported. | `claude-can-use-tool-subagent.json` (2.1.277); ADR 0012 |
 | `mcp-image` | An MCP tool's image result reaches the next model request, checked at the stub, from `CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION`. Below that floor it is an observation. | `discovery/claude-code.ts` (2.1.277 to 2.1.281, real model) |
 | `steering` | A stream-json user message written mid-turn with a `uuid` is replayed (`isReplay`) and reaches the model, from `CLAUDE_STEERING_MIN_VERSION`. Below that floor it is an observation. | `discovery/claude-code.ts`; driver `steer()` |
 | `transcript` | The transcript is `CLAUDE_CONFIG_DIR/projects/<claudeProjectPathKey(cwd)>/<session-id>.jsonl`, `HOME/.claude` stays untouched, and `--resume` in a new process carries the earlier turn | `docs/DRIVERS.md`; `claude-background-work.ts` |
 | `discovery` | The runner's own `probeClaudeCode` reads the version and help. It finds stream-json input and the `acceptEdits`, `auto`, `bypassPermissions` and `plan` modes. It attests the control contract, steering and MCP image results exactly from their floors. | `discovery/claude-code.ts` |
-| `reviewer-pin` | Every flag the media reviewer requires is present. Under the production media reviewer arguments and environment, the events before the startup init match the pin's baseline, and the whole stream, pre-init events included, passes `ClaudeMediaReviewerStream`: startup, scoped tool use and priced usage. | `claude-media-reviewer.ts` (2.1.296) |
+| `reviewer-pin` | Every flag the media reviewer requires is present. Under the production media reviewer arguments and environment, the events before the startup init match the pin's baseline, and init, scoped tool use and priced usage pass `ClaudeMediaReviewerStream`. | `claude-media-reviewer.ts` (2.1.296) |
 
 Probes import the production code they rest on (`claudePermissionArgs`, `buildClaudeUserMessage`,
 the guard matcher, `claudeProjectPathKey`, discovery, the reviewer arguments, environment and
@@ -182,14 +182,11 @@ version in the init event before it runs the production check. Every other check
 `system/ui_invalidate` before its startup `system/init`. The same arguments without `--bare` start
 with init, and 2.1.277 emits nothing before init even with `--bare`.
 
-The notice is exactly `{type: "system", subtype: "ui_invalidate", event: "ui.render", uuid,
-session_id}`, carries the session id the init then reports, and appears once. Until #3849,
-`ClaudeMediaReviewerStream` required init to be the first event, so a production media reviewer
-window was refused on its own pinned release. It now accepts at most one notice of exactly that
-shape before init, and only when init names the same session. Init stays the startup proof:
-nothing before it is counted or trusted, and any other pre-init event is still refused. The probe
-records `system/ui_invalidate` as the pin's baseline (`REVIEWER_PIN_PRE_INIT_EVENTS`), reports any
-difference as changed, and feeds the whole stream, notice included, to the production parser.
+`ClaudeMediaReviewerStream` requires init to be the first event, so a production media reviewer
+window would be refused on its own pinned release. The probe records `system/ui_invalidate` as the
+pin's baseline (`REVIEWER_PIN_PRE_INIT_EVENTS`) and reports any difference as changed. It measures
+the production parser from init onward, and that part passes on both releases. Whether the reviewer
+should accept or reject the pre-init event is a reviewed decision outside this suite.
 
 ## Excluded Probes
 
@@ -227,6 +224,10 @@ package's native binary (`binPath` in the registry), never the placeholder `.bin
 `scripts/harness-assumptions-prepare-claude.sh` installs `strace` before privileges are dropped. The
 suite still proves the detector itself with its canary as the unprivileged `harness-probe` user, so
 a host where `strace` cannot trace there reports could not run.
+
+The 2.1.296 pin target reports **changed** while the driver's flagless `default` launch starts that
+release in `auto` (see Feasibility). That is a real defect in the runner, not in the probe, and it
+stays visible until a reviewed change fixes it.
 
 Dispatch one harness on a branch with
 `gh workflow run harness-assumptions.yml --ref <branch> -f harness=claude`.

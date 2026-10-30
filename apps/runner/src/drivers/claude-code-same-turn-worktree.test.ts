@@ -362,7 +362,7 @@ test("a mediated child keeps emulating its launched mode when its last worktree 
   // No runner-owned settings: an unguardable launch, mediated exactly as #1256 did it.
   const run = startTurn([], "bypassPermissions", () => [...protections]);
   t.after(() => run.driver.dispose());
-  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio", "--permission-mode", "default"]);
+  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio"]);
   protections.length = 0;
   run.child.stdout.write(JSON.stringify({
     type: "control_request",
