@@ -10799,8 +10799,11 @@ textarea {
   gap: var(--space-2);
 }
 .provider-login-card[data-embedded] :is(p, form) { margin: 0; }
+/* The device code is a code well (§11.7) with Copy Device Code centered on it (#3521). On a narrow
+   card the well drops under its label, and a code too long for the row wraps rather than clipping. */
 .provider-login-card[data-embedded] .provider-login-device-code {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2);
 }
@@ -10808,13 +10811,8 @@ textarea {
   color: var(--text-dim);
   font-size: var(--text-sm);
 }
-.provider-login-card[data-embedded] .provider-login-device-code > code {
-  padding: var(--space-1) var(--space-2);
-  border-radius: var(--radius-xs);
-  background: var(--bg-elev-3);
-  font-size: var(--text-md);
-  letter-spacing: 0.08em;
-}
+.provider-login-card[data-embedded] .provider-login-device-code > .code-well { align-items: center; }
+.provider-login-card[data-embedded] .provider-login-device-code > .code-well > code { letter-spacing: 0.08em; }
 /* Meta chips (§11.3): a fact you can click or remove, never coloured. Neighbours sit 8px apart so a
    chip's touch hit area (the coarse-pointer block) never overlaps the next one. A pressed chip is
    the one chosen, in the selected-row fill. */

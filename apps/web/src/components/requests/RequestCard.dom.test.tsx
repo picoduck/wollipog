@@ -608,6 +608,47 @@ test("a device-code sign-in in the Request Card shows the provider's link and it
   }
 });
 
+test("a device-code sign-in in the Request Card copies exactly its code with Copy Device Code (#3521)", async () => {
+  const copied: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  const request = recovery([AUTH.cancel], "Signing In — Claude Code");
+  const view = await renderWithRunner(
+    <RequestCard session={signInSession(request)} request={request} runnerOnline presentation="dock" />,
+    {
+      providerLogins: [{
+        operationId: "login_device", accountId: "claude-work", label: "Claude Work", provider: "codex",
+        status: "waiting_for_provider", verificationUrl: "https://auth.example.com/device", userCode: "WOLL-IPOGS",
+        expectsCode: false, sessionId: "session-dock", startedAt: 1,
+      }],
+    },
+  );
+  try {
+    const well = view.container.querySelector(".provider-login-card .provider-login-device-code > .code-well");
+    assert.ok(well, "the device code is a code well beside its label");
+    assert.equal(well.querySelector("code")?.textContent, "WOLL-IPOGS");
+    const copy = well.querySelector<HTMLButtonElement>("button");
+    assert.ok(copy, "the code's copy button trails it in the well");
+    assert.equal(copy.getAttribute("aria-label"), "Copy Device Code");
+    assert.equal(copy.type, "button");
+    assert.ok(copy.matches(".icon-btn.sm"), "the 28px icon button that borrows a 44px hit area on a coarse pointer");
+    assert.equal(copy.getAttribute("title"), null, "untitled like the card's other controls");
+    assert.equal(copy.tabIndex, 0, "reachable by keyboard");
+    await act(async () => { copy.click(); await tick(); await tick(); });
+    assert.deepEqual(copied, ["WOLL-IPOGS"], "copies exactly the code");
+    assert.ok(copy.classList.contains("copy-status-copied"), "the shared copy confirmation");
+    assert.ok(copy.querySelector("svg.copy-status-icon-copied"));
+    assert.equal(well.querySelector("[aria-live=polite]")?.textContent, "Copied to clipboard");
+    assert.equal(copy.getAttribute("aria-label"), "Copy Device Code", "the name stays the action");
+    assert.deepEqual(footer(view.container), ["Cancel Sign-In"], "the footer is unchanged");
+  } finally {
+    await view.unmount();
+    Reflect.deleteProperty(domWindow.navigator, "clipboard");
+  }
+});
+
 test("a code pasted into the Request Card's sign-in is never in the DOM, before or after a rejected submit (#3529)", async () => {
   const request = recovery([AUTH.cancel], "Signing In — Claude Code");
   const submitted: string[] = [];
@@ -629,6 +670,8 @@ test("a code pasted into the Request Card's sign-in is never in the DOM, before 
   );
   try {
     const card = view.container.querySelector<HTMLElement>(".provider-login-card")!;
+    assertNoDomNode(card.querySelector(".provider-login-device-code"), "no device code, so no Copy Device Code (#3521)");
+    assert.deepEqual([...card.querySelectorAll("button")].map((button) => button.textContent), ["Submit Code"]);
     const input = card.querySelector<HTMLInputElement>('input[type="password"]')!;
     const submit = [...card.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Submit Code")!;
     await act(async () => { fireDomEvent.change(input, { target: { value: "request-card-secret" } }); });
