@@ -7908,6 +7908,9 @@ export class SessionManager {
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
+    // Every provider replacement ends here, success or failure — an account switch or a restart as
+    // much as a worktree rebind — so this is where a relaunch reported for the switch is settled.
+    this.syncWorktreeSwitch(sessionId);
     // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
     // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
     if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId) ||
@@ -7925,6 +7928,7 @@ export class SessionManager {
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
+    this.syncWorktreeSwitch(sessionId);
     return activePreparation || queuedPreparation || setupActive;
   }
 

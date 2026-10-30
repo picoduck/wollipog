@@ -388,3 +388,62 @@ test("a session reports Switching Worktree from its switch until the relaunch en
     assert.equal(first?.snapshot.worktreeSwitch?.since, since, "one switch keeps one start time across phases");
   });
 });
+
+test("a switch landed by another provider replacement, such as an account switch, clears too (#3810)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-continuation-account-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    const sessionId = "s_continuation_account";
+    let switched: Switched | undefined;
+    let accountSwitch: unknown;
+    const fake = fakeProvider({
+      during: async (text) => {
+        if (text !== "start the fix") return;
+        switched = await manager!.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/account" });
+        accountSwitch = await manager!.switchProviderAccount(sessionId, "claude-personal");
+      },
+    });
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const accounts = [
+      { id: "claude-work", label: "work@example.test", provider: "claude" as const, credentialHome: "/claude/work" },
+      { id: "claude-personal", label: "personal@example.test", provider: "claude" as const, credentialHome: "/claude/personal" },
+    ];
+    const internals = manager as unknown as {
+      resolveProviderAccount: (spec: { providerAccountId?: string }) => unknown;
+      transferAccountTranscript: () => Promise<void>;
+    };
+    internals.resolveProviderAccount = (spec) => accounts.find((account) => account.id === spec.providerAccountId);
+    internals.transferAccountTranscript = async () => {};
+    assert.equal(await manager.start({ ...claudeSpec(sessionId, repo), providerAccountId: "claude-work" }), true);
+
+    manager.prompt(sessionId, "start the fix");
+    await waitFor(() => fake.launches() >= 2 && store.readMeta(sessionId)?.status === "idle" &&
+      !(manager as unknown as { launchGenerations: Map<string, number> }).launchGenerations.has(sessionId),
+    "the replacement did not settle");
+    await settle();
+    assert.deepEqual(accountSwitch, { ok: true, scheduled: true });
+    assert.equal(store.readMeta(sessionId)?.providerAccountId, "claude-personal");
+    const switches = publishedSwitches(sent, sessionId);
+    assert.ok(switches.some((value) => JSON.stringify(value) === JSON.stringify({ phase: "pending", branch: "fix/account" })),
+      "the switch was reported while it waited");
+    assert.equal(switches.at(-1), null, "whichever replacement landed it, the switch is cleared");
+    const last = [...sent].reverse().find((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === sessionId) as Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>;
+    assert.equal(last.snapshot.worktreeSwitch, null, "later idle snapshots stay clear");
+    assert.ok(switched);
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
