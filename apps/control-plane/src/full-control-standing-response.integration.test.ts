@@ -4,13 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, FULL_CONTROL_ROOT_QUESTION_MESSAGE, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
   type ControlPlaneToRunner, type RunnerMetadata, type RunnerToControlPlane,
 } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks } from "../../runner/src/drivers/driver.js";
 import type { ProviderAuthRecoveryController } from "../../runner/src/provider-auth-recovery.js";
 import { SessionManager } from "../../runner/src/session-manager.js";
 import { SessionStore } from "../../runner/src/session-store.js";
+import { recoveryCoordinate } from "./campaign-recovery.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -335,6 +336,54 @@ test("an async credential question is dismissed at once and recorded as blocked 
     assert.equal(h.svc.descendantRequests("root", () => true).data!.requests.length, 0);
   } finally { h.close(); }
 });
+
+/** The live shape of #2940's deadlock: a root that has just requested its own typed decision asks
+ * the person to approve it. The pending decision once blocked the standing response, leaving an
+ * Orchestrator-owned question only the parked root itself could answer. */
+for (const ownDecisionPending of [true, false]) {
+  test(`a Full Control root's own question is dismissed at once with guidance, never answered for it or left waiting${ownDecisionPending ? " (own typed decision pending)" : ""}`, async () => {
+    const h = bridge();
+    try {
+      assert.ok(h.enable().ok);
+      const toRunner: ControlPlaneToRunner[] = [];
+      const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+      (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+      if (ownDecisionPending) {
+        const own = h.svc.createWorkflowDecision("root", { requestId: "own-question", resourceKey: "own-question", resourceSnapshot: {
+          category: "implementation_question", question: "Which layout should the status page use?",
+          options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
+        assert.ok(own.ok, own.error ?? "own decision");
+        assert.equal(own.data!.authority, "orchestrator");
+        assert.equal(own.data!.status, "pending");
+        assert.ok(JSON.stringify(h.db.getSession("root")!.pendingApproval).includes(own.data!.occurrenceId), "the root holds its own pending typed decision");
+      }
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: "ask-person", occurrenceId: "request_ask_person",
+        requestSource: "provider_question", questions: [{ id: "close", header: "Close #2940", question: "Close #2940 as completed? Approve it in Campaign Status, then pick an option.",
+          options: [{ label: "Approved in Wollipog", description: "I approved the pending closure" }, { label: "Leave it open" }] }] });
+      for (let index = 0; index < 4; index += 1) await tick();
+
+      const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+      assert.deepEqual(answers.map((message) => [message.requestId, message.action]), [["ask-person", "dismiss"]],
+        "the server dismisses it once and never submits an option such as 'Approved in Wollipog'");
+      const root = h.db.getSession("root")!;
+      assert.ok(!JSON.stringify(root.pendingApproval ?? null).includes("ask-person"), "the question is no longer pending");
+      // What stays pending is only the root's own typed decision, which it resolves itself.
+      assert.deepEqual(pendingRequests(root.pendingApproval).map((request) => request.kind), ownDecisionPending ? ["workflow_decision"] : []);
+      if (!ownDecisionPending) assert.notEqual(root.status, "input_required");
+      const records = h.db.campaignProjection("root")!.recovery!.records;
+      assert.equal(records.filter((record) => record.action === "answer_request" && record.state !== "resolved" && record.resource.sessionId === "root" &&
+        record.resource.occurrenceId === recoveryCoordinate("request_ask_person")).length, 0, "no Orchestrator-owned request the root would wait on");
+      assert.equal(records.filter((record) => record.reason === "request_declined").length, 0, "a root's own question is not blocked work");
+      assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0, "the person is never asked");
+      const guidance = toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" && message.text === FULL_CONTROL_ROOT_QUESTION_MESSAGE);
+      assert.equal(guidance.length, 1, "the root is told nobody saw the question and how to decide it");
+      if (!ownDecisionPending) {
+        assert.notEqual(h.db.campaignContinuationAdmission("root").reason,
+          "Automatic continuation is held by the campaign's current lifecycle or pending recovery.", "the question no longer holds the campaign");
+      }
+    } finally { h.close(); }
+  });
+}
 
 test("a queued ordinary hook ask promoted after a person resolves the gate ahead of it gets the standing decline", () => {
   const h = bridge();

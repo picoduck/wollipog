@@ -558,9 +558,19 @@ a prompt that mentions the issue does not bind an unassigned child by itself.
 Custom campaigns require a human-owned typed decision. Full Control delegates only when the server
 confirms a human-established issue boundary, verified delivered report and actual default-branch
 merges, or a supported recorded not-planned disposition. Never infer this authority from a prompt.
-Read the exact decision and effective owner with
-`get_workflow_decision`, then use `close_github_issue` with its exact `occurrenceId` and
-`resourceDigest`. The CLI equivalents are:
+The closure is created `pending`, and `close_github_issue` refuses a pending closure. The exact
+sequence is:
+
+1. `request_github_issue_closure`.
+2. Read the exact decision and its effective owner (`authority`) with `get_workflow_decision`.
+3. Approve it. When `authority` is `orchestrator` (Full Control's standing authorization), the
+   root approves it itself: call `resolve_descendant_workflow_decision` with `sessionId` set to
+   its own session ID, the `occurrenceId`, and `outcome: "approve"`. No person will approve it,
+   so do not ask one. When `authority` is `human`, a person approves it in Wollipog; wait
+   for that, and never approve it yourself.
+4. Execute it with `close_github_issue` with its exact `occurrenceId` and `resourceDigest`.
+
+The CLI equivalents of steps 1, 2 and 4 are:
 
 ```text
 wollipog issue-closure request --proposal '<json>' --json
@@ -572,7 +582,9 @@ Approval expires 30 minutes after resolution. Changed issue evidence, policy, or
 work requires renewed review, as does a child moving into or out of the included set.
 Never substitute a shell command or generic approval, and never
 approve a human-owned request. A root may resolve an eligible Full Control occurrence only from
-its server-recorded standing authorization. Read `issueClosureResult`: `closed` and `already_closed`
+its server-recorded standing authorization; the server rechecks it when the root resolves. Under
+Full Control nobody sees the root's own questions: the server dismisses them unanswered and tells
+the root to decide with these typed tools. Read `issueClosureResult`: `closed` and `already_closed`
 are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
 accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
 Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
@@ -595,7 +607,9 @@ human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` 
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 The server refuses incidental references, foreign repositories and changes beyond human-set limits.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve
-only an eligible occurrence backed by its standing human authorization.
+only an eligible occurrence backed by its standing human authorization: when the effective owner is
+`orchestrator`, resolve it with `resolve_descendant_workflow_decision` and its own session ID as
+`sessionId`; nobody else will.
 Pending, denied, stale and replayed proposals leave scope unchanged. After approval, re-read the scope.
 Humans can inspect, resolve epic candidates, and request changes in Campaign Status's Authorized Issue Scope.
 

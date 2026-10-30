@@ -769,6 +769,60 @@ test("#2940 a verified issue delivered through a consumed merge gate gets Orches
   } finally { h.db.close(); }
 });
 
+test("#2940 a Full Control root's pending own closure names the self-approval step; resolve-self then execute closes it once", async () => {
+  const { h, observe, close } = delivery({ gate: "consumed" });
+  try {
+    observe(10, "merged");
+    const c = await close("self-owned");
+    assert.ok(c.ok, c.error ?? "closure");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.equal(d.status, "pending");
+    // Executing straight after the request, as the role prompt once described, refuses with the step.
+    const early = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(early.ok, false);
+    assert.equal(early.status, 409);
+    assert.match(early.error!, /no person will approve it/u);
+    assert.match(early.error!, /resolve_descendant_workflow_decision \(sessionId "root", your own session; occurrenceId "[^"]+"; outcome "approve"\)/u);
+    assert.ok(early.error!.includes(d.occurrenceId), "the refusal names the exact occurrence");
+    assert.equal(h.state.executes, 0, "nothing reached the forge");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)!.status, "pending", "the refusal does not revoke the request");
+    // The named step: the root approves its own occurrence through the descendant-resolution route.
+    const resolved = h.svc.resolveDescendantRequest("root", "root", d.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.ok(resolved.ok, resolved.error ?? "self-resolve");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.equal(h.state.executes, 1);
+    const replay = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(replay.ok, false);
+    assert.equal(h.state.executes, 1, "the closure executes exactly once");
+  } finally { h.db.close(); }
+});
+
+test("#2940 a pending human-owned closure tells an agent a person must approve it, and the agent cannot", async () => {
+  for (const full of [false, true]) {
+    const h = harness(full);
+    try {
+      // Custom keeps closure human-owned; under Full Control an unverified delivery does too.
+      const c = await h.svc.requestGithubIssueClosure("root", { requestId: `human-${full}`, issue: 100, reason: "completed",
+        explanation: "Claimed delivery", evidence: ["Claim"] });
+      assert.ok(c.ok, c.error ?? "closure");
+      const d = c.data!.decision!;
+      assert.equal(d.authority, "human");
+      const early = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+      assert.equal(early.ok, false);
+      assert.equal(early.status, 409);
+      assert.match(early.error!, /a person must approve this human-owned closure in Wollipog first\. Never approve it yourself/u);
+      assert.doesNotMatch(early.error!, /resolve_descendant_workflow_decision/u, "an agent is never pointed at self-approval");
+      const self = h.svc.resolveDescendantRequest("root", "root", d.occurrenceId, { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.equal(self.ok, false, "an agent cannot approve a human-owned closure");
+      assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)!.status, "pending");
+      assert.equal(h.state.executes, 0);
+    } finally { h.db.close(); }
+  }
+});
+
 test("#2940 a stale fact that no refresh renews still retains human closure review", async () => {
   for (const hook of [false, true]) {
     const { h, observe, close } = delivery({ gate: "consumed" });

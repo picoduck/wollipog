@@ -19,7 +19,7 @@ import type { HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, standingRootQuestionAnswers, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
@@ -712,6 +712,21 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
   ].join("\n");
+}
+
+/** Why an issue closure cannot execute yet, naming the next step (#2940). A pending closure the
+ * root owns under its standing authorization is approved by that root itself, never by a person:
+ * a bare "pending" refusal once left a Full Control root asking a person who could not answer. */
+function issueClosureNotApprovedMessage(decision: WorkflowDecisionView): string {
+  if (decision.status !== "pending") return `issue closure cannot execute from ${decision.status} state`;
+  if (decision.authority === "human") {
+    return "issue closure cannot execute from pending state: a person must approve this human-owned closure " +
+      "in Wollipog first. Never approve it yourself; read it again with get_workflow_decision before retrying.";
+  }
+  return "issue closure cannot execute from pending state: you own this closure under your standing Full Control " +
+    "authorization, and no person will approve it. Approve it yourself with resolve_descendant_workflow_decision " +
+    `(sessionId ${decisionLiteral(decision.sessionId)}, your own session; occurrenceId ${decisionLiteral(decision.occurrenceId)}; ` +
+    "outcome \"approve\"), then call close_github_issue again with the same occurrenceId and resourceDigest.";
 }
 
 /** Why a session whose ancestry the campaign walk refuses can neither request nor keep a typed
@@ -8742,20 +8757,19 @@ export class SessionsService {
     if (full && evaluation.owner === "orchestrator" && evaluation.disposition === "decline") {
       return this.declineStandingRequest(controller, session, request, evaluation);
     }
-    if (declineOnly || controller.id !== sessionId || !request.occurrenceId ||
-        pendingRequests(session.pendingApproval).some((candidate) =>
-          isPolicyApproval(candidate) && candidate.requestId !== request.requestId)) return false;
+    // The root's own typed workflow decisions never park its provider, so they cannot stand between
+    // it and a standing response: counting them once left a root waiting on itself (#2940).
+    if (declineOnly || controller.id !== sessionId || !request.occurrenceId || request.kind === "question" ||
+        pendingRequests(session.pendingApproval).some((candidate) => isPolicyApproval(candidate) &&
+          candidate.kind !== "workflow_decision" && candidate.requestId !== request.requestId)) return false;
     if (evaluation.owner !== "orchestrator" || evaluation.basis !== "standing_authorization") return false;
     const actor: GovernanceActor = { kind: "system", id: "campaign-standing-authorization" };
-    const answers = request.kind === "question" ? standingRootQuestionAnswers(request) : null;
     const optionId = request.options.find((option) => option.kind === "allow_once")?.optionId;
-    if (!(request.kind === "question" ? answers : optionId)) return false;
+    if (!optionId) return false;
     // At most once per exact occurrence: a card a snapshot restores is never answered again.
     const fence = this.standingResponseFence(controller, session, request);
     if (!fence.claimed) return true;
-    const result = request.kind === "question" && answers
-      ? this.answerQuestion(sessionId, request.requestId, answers, actor, "submit", sessionId, request.occurrenceId)
-      : this.approve(sessionId, request.requestId, optionId!, actor, sessionId);
+    const result = this.approve(sessionId, request.requestId, optionId, actor, sessionId);
     if (!result?.ok) {
       fence.release();
       const pending = this.db.getSession(sessionId)?.pendingApproval;
@@ -8841,6 +8855,21 @@ export class SessionsService {
           if (!delivered.ok) this.log.warn(`unresolved-effect decline guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
           this.log.warn(`unresolved-effect decline guidance failed for ${session.id}: ${(error as Error).message}`);
+        }
+      });
+    } else if (evaluation.requestClass === "root_questions" && session.id === controller.id) {
+      // The question was observed as an Orchestrator-owned request just before it was dismissed;
+      // settle that record now rather than show the root a request it can no longer answer.
+      this.campaignRecovery.synchronize(this.db.getSession(controller.id) ?? controller, now);
+      // A bare dismissal reads as a person declining (#2940). Tell the root that nobody saw the
+      // question and how to decide it itself, after this event settles; a root that ended its turn
+      // on the dismissal is woken by this message rather than left idle.
+      setImmediate(() => {
+        try {
+          const delivered = this.prompt(session.id, FULL_CONTROL_ROOT_QUESTION_MESSAGE);
+          if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);
+        } catch (error) {
+          this.log.warn(`root question guidance failed for ${session.id}: ${(error as Error).message}`);
         }
       });
     }
@@ -10134,7 +10163,7 @@ export class SessionsService {
     }
     // Consumption is a durable dispatch fence, not proof the forge operation succeeded.
     // A replay never dispatches again; read get_workflow_decision for its recorded result.
-    if (decision.status !== "approved") return fail(`issue closure cannot execute from ${decision.status} state`, 409);
+    if (decision.status !== "approved") return fail(issueClosureNotApprovedMessage(decision), 409);
     const session = this.db.getSession(sessionId);
     const snapshot = decision.resourceSnapshot;
     const now = Date.now();

@@ -130,6 +130,12 @@ branch and containment of every merge commit there. An enqueued PR, a reported s
 stale forge fact, feature-branch merge or open related PR refuses closure. Not-planned closure requires
 a recorded cancellation/scope-removal rationale with no active attempt; an optional rejected/duplicate
 recommendation must reference the affected work. Both reasons must be in the human-established contract.
+A delegated closure is still created `pending`: the root approves it itself with
+`resolve_descendant_workflow_decision` and its own session ID (the server rechecks the standing
+authorization there), then executes it with `close_github_issue`. Executing it while pending refuses
+with that exact step; a pending human-owned closure refuses with a statement that a person must
+approve it. Approval at creation was considered and rejected, because it would bypass the
+resolution-time authority recheck and start the 30-minute expiry before the root acts.
 Existing issue/PR inspection, audience, assignment digests, exact snapshot, expiry, scope synchronization,
 guardrails, durable dispatch fence and uncertain-result reconciliation continue to apply. Changed
 delivery/disposition invalidates execution. Inspect uncertain outcomes; never replay a close or comment.

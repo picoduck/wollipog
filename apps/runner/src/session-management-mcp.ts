@@ -1196,7 +1196,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "close_github_issue",
-    description: "Execute one exact human-approved issue closure using its occurrenceId and resourceDigest from get_workflow_decision. Checks current child assignments and GitHub or GitLab evidence, consumes approval once, and verifies the final state. Read issueClosureResult: uncertain means the mutation may have succeeded and must not be replayed. Changed, denied, expired, revoked, consumed, or superseded approvals fail closed. Never use a shell command as a substitute.",
+    description: "Execute one exact approved issue closure using its occurrenceId and resourceDigest from get_workflow_decision. A human-owned closure needs a person's approval first; an Orchestrator-owned one is approved by this root itself with resolve_descendant_workflow_decision using its own session ID. Checks current child assignments and GitHub or GitLab evidence, consumes approval once, and verifies the final state. Read issueClosureResult: uncertain means the mutation may have succeeded and must not be replayed. Changed, denied, expired, revoked, consumed, or superseded approvals fail closed. Never use a shell command as a substitute.",
     inputSchema: { type: "object", properties: {
       occurrenceId: { type: "string" }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
     }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
