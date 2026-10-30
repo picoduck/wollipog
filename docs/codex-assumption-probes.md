@@ -4,7 +4,9 @@ Run `pnpm probe:codex-assumptions` on a Linux machine with an installed standalo
 the repository dependencies, Git, `/bin/sh`, Bash, curl and Python 3. Set `CODEX_BIN` to test another
 installed executable. This is an operator maintenance command, independent of provider discovery
 and launch eligibility. It never changes permission profiles, withheld hardening, or trust ranges.
-Hosted CI runs fixture tests only; it must not run the real probe suite.
+The scheduled Harness Assumption Probes workflow runs this suite on a hosted Ubuntu 24.04 runner
+against each new npm release; see [Hosted Measurement](#hosted-measurement). Pull request CI runs
+fixture tests only.
 
 The command measures the installed CLI version, executes every safe probe sequentially, and writes
 `latest.json` and `latest.md` atomically under `$XDG_STATE_HOME/wollipog-codex-probes` (default
@@ -51,10 +53,38 @@ ordinary-network and approval-refusal controls still hold, the escalation report
 the **provider-mode permission-profile deny withheld by #1336** as re-enablable through a reviewed
 code change. It still exits nonzero because the old recorded behavior changed. No hardening is
 automatically restored. This re-enablement detection requires a host that permits unprivileged user
-namespaces. The dogfood host has `apparmor_restrict_unprivileged_userns=1` and `unshare -Ur true`
-fails with EPERM (operator measurement, 2026-10-26). The #1336 re-enablement measurement therefore
-stays manual on a namespace-capable host; acknowledging this host limitation supplies no evidence
-that upstream has retained network access.
+namespaces. The hosted workflow grants them to bubblewrap with `scripts/configure-ci-bubblewrap.sh`,
+so it measures escalation on every full run; if that preparation fails, the report names the failed
+step and escalation reports could not run. The dogfood host has
+`apparmor_restrict_unprivileged_userns=1` and `unshare -Ur true` fails with EPERM (operator
+measurement, 2026-10-26); acknowledging that host limitation supplies no evidence that upstream has
+retained network access.
+
+## Hosted Measurement
+
+`.github/workflows/harness-assumptions.yml` is the primary visibility for this suite. It follows the
+harness-neutral contract in [Harness Assumption Probes](harness-assumption-probes.md): daily
+detection of the newest `@openai/codex` release, and a full run only for target versions not yet
+measured matched with the current probe sources, or on manual dispatch. Each full run measures:
+
+- the newest stable release from the npm `latest` dist-tag;
+- the lower bound of `CODEX_GUARD_TRUST_VERSION_RANGE`, read from
+  `apps/runner/src/codex-managed-worktree-guard.ts`, so a range change moves the measurement with it.
+
+Each target is installed with `npm install --ignore-scripts` into a disposable prefix and measured
+with `CODEX_BIN` pointing at it, a throwaway `HOME` and no acknowledgement, so the namespace
+acknowledgement below never applies in CI. `probe:codex-inference-transport` is never run.
+Before the suite, `scripts/harness-assumptions-prepare-codex.sh` installs bubblewrap and runs
+`scripts/configure-ci-bubblewrap.sh`. Two targets take about twice the 47-minute suite. The report is
+the job summary and the `harness-assumptions-codex` artifact; it embeds each target's `latest.md`,
+including the guard trust classification, so **measured OK, range can be widened** appears there
+for review without failing the run. Changed or could-not-run results fail it.
+
+Dispatch a measurement by hand with:
+
+```sh
+gh workflow run harness-assumptions.yml --ref main -f harness=codex
+```
 
 ## Account Isolation and Cleanup Limits
 
@@ -72,11 +102,13 @@ fresh configuration. Its existing default-daemon TUI matrix remains useful but d
 those stronger lifetime properties. A race-free daemon attribution/reuse test is not a cheap
 addition to this maintenance slice; never scan or kill unrelated Codex/provider processes.
 
-## Automatic Visibility on the Dogfood Host
+## Optional Local Timer
 
-The approved design is a dedicated daily systemd user timer, not a background job inside the
-runner. GitHub had no registered self-hosted runners at preflight; existing hosted schedules do
-not have Codex. Runner state/provider-home doctors do not execute CLI maintenance probes.
+The hosted workflow above replaces the local timer as the primary visibility. The timer remains an
+optional way to measure the exact `codex` installed on one host, for example a dogfood machine
+pinned to an older release. It is a dedicated systemd user timer, not a background job inside the
+runner; runner state/provider-home doctors do not execute CLI maintenance probes. Nothing here is
+required for the hosted workflow.
 
 The timer runs at 15:00 UTC with up to 15 minutes jitter and catches a missed run after downtime.
 **Changed and unacknowledged could-not-run results fail the service** and appear in
@@ -102,7 +134,7 @@ journalctl --user -u wollipog-codex-probes.service -n 80 --no-pager
 systemctl --user list-timers wollipog-codex-probes.timer
 ```
 
-## Operator Activation Handoff
+### Operator Activation Handoff
 
 These commands are for a human terminal or an operator proven outside the hosting stack. This
 implementation session does not install/activate units, update the installation, or restart any

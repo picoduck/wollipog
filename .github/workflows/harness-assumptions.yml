@@ -1,0 +1,97 @@
+name: Harness Assumption Probes
+
+# Re-measures the undocumented CLI behaviour Wollipog depends on whenever a supported harness
+# publishes a release. Credential-free: throwaway homes and scripted loopback model servers only.
+# A changed or could-not-run result fails the run. Contract: docs/harness-assumption-probes.md.
+on:
+  schedule:
+    # Avoids 00:00-02:00 UTC.
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      harness:
+        description: Harness to measure in full even if already measured ("all" or one harness id)
+        required: true
+        default: all
+        type: string
+
+permissions:
+  contents: read
+
+# One run at a time on the shared runner pool; a queued run waits instead of cancelling a measurement.
+concurrency:
+  group: harness-assumption-probes
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    name: ${{ matrix.harness }} Assumptions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      matrix:
+        # One entry per HARNESSES id in scripts/harness-assumptions.mjs.
+        harness: [codex]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+
+      - name: Detect Releases
+        id: detect
+        run: node scripts/harness-assumptions.mjs detect --harness "${{ matrix.harness }}"
+
+      - name: Restore Measurement Record
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/harness-assumption-record/${{ matrix.harness }}
+          key: ${{ steps.detect.outputs.key }}
+
+      - name: Decide Whether to Measure
+        id: decide
+        env:
+          DISPATCH_HARNESS: ${{ inputs.harness }}
+        run: node scripts/harness-assumptions.mjs decide --harness "${{ matrix.harness }}"
+
+      - name: Setup pnpm
+        if: steps.decide.outputs.measure == 'true'
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24 With pnpm Cache
+        if: steps.decide.outputs.measure == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Dependencies
+        if: steps.decide.outputs.measure == 'true'
+        run: pnpm install --frozen-lockfile
+
+      - name: Measure Assumptions
+        id: measure
+        if: steps.decide.outputs.measure == 'true'
+        run: node scripts/harness-assumptions.mjs measure --harness "${{ matrix.harness }}"
+
+      - name: Upload Report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: harness-assumptions-${{ matrix.harness }}
+          path: ${{ runner.temp }}/harness-assumptions/${{ matrix.harness }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # Only a fully matched measurement is recorded, so changed or could-not-run re-measures next time.
+      - name: Save Measurement Record
+        if: steps.measure.outcome == 'success' && steps.measure.outputs.exit == '0'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/harness-assumption-record/${{ matrix.harness }}
+          key: ${{ steps.detect.outputs.key }}
