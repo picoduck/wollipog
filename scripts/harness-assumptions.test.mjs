@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
-  baselineVersions, combinedExit, decide, detect, EXIT, fingerprint, forced, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
+  baselineVersions, combinedExit, decide, detect, executablePath, EXIT, fingerprint, forced, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
   newestRelease, paths, recordKey, RECORD_VERSION, sourceFiles, suiteArgv, suiteEnv, targetsFor, validRecord,
 } from "./harness-assumptions.mjs";
 import { CODEX_GUARD_TRUST_VERSION_RANGE } from "../apps/runner/src/codex-managed-worktree-guard.ts";
+import { CLAUDE_MEDIA_REVIEWER_CLI_VERSION } from "../apps/runner/src/claude-media-reviewer.ts";
+import { CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION } from "../apps/runner/src/discovery/claude-code.ts";
 
 const workflow = readFileSync(new URL("../.github/workflows/harness-assumptions.yml", import.meta.url), "utf8");
 const codex = harnessById("codex");
@@ -38,7 +40,8 @@ test("the workflow matrix lists exactly the registered harnesses", () => {
     assert.match(harness.id, /^[a-z][a-z0-9-]*$/);
     for (const field of ["name", "npmPackage", "bin", "binaryEnv", "reportDirArg", "documentation"]) assert.equal(typeof harness[field], "string", `${harness.id}.${field}`);
     assert.ok(Array.isArray(harness.suite) && harness.suite.length > 0);
-    assert.ok(harness.timeoutMinutes > 0 && harness.timeoutMinutes * 2 + 30 <= 340, "two targets must fit inside the job timeout");
+    const targets = harness.baselines.length + 1;
+    assert.ok(harness.timeoutMinutes > 0 && harness.timeoutMinutes * targets + 30 <= 340, `${harness.id}: ${targets} targets must fit inside the job timeout`);
     assert.ok(existsSync(new URL(`../${harness.documentation}`, import.meta.url)));
     assert.ok(sourceFiles(harness).length > 1);
   }
@@ -313,10 +316,16 @@ function fakeExec(temp, plan) {
       const prefix = argv[argv.indexOf("--prefix") + 1];
       const version = argv.at(-1).split("@").at(-1);
       if (plan.install?.[version] === false) return { code: 1, tail: "" };
-      mkdirSync(join(prefix, "node_modules/@openai/codex"), { recursive: true });
+      const pkg = argv.at(-1).slice(0, argv.at(-1).lastIndexOf("@"));
+      mkdirSync(join(prefix, "node_modules", pkg), { recursive: true });
       mkdirSync(join(prefix, "node_modules/.bin"), { recursive: true });
-      writeFileSync(join(prefix, "node_modules/@openai/codex/package.json"), JSON.stringify({ version: plan.installedVersion ?? version }));
-      writeFileSync(join(prefix, "node_modules/.bin/codex"), "");
+      writeFileSync(join(prefix, "node_modules", pkg, "package.json"), JSON.stringify({ version: plan.installedVersion ?? version }));
+      // Like the real packages: a .bin entry always; Claude's native binary only when its platform package installed.
+      writeFileSync(join(prefix, "node_modules/.bin", HARNESSES.find(h => h.npmPackage === pkg).bin), "");
+      if (pkg === "@anthropic-ai/claude-code" && plan.nativeBinary !== false) {
+        const native = executablePath(harnessById("claude"), prefix);
+        mkdirSync(dirname(native), { recursive: true }); writeFileSync(native, "");
+      }
       return { code: 0, tail: "" };
     }
     return suite(argv, options.env);
@@ -473,4 +482,43 @@ test("documentation states the shared contract and that a new harness adds its p
   assert.doesNotMatch(codexDoc, /must not run the real probe suite/);
   assert.match(codexDoc, /## Optional Local Timer/);
   assert.match(codexDoc, /## Hosted Measurement/);
+});
+
+test("Claude Code targets the newest release, the three floors and the reviewer pin, all read from source", () => {
+  const claude = harnessById("claude");
+  assert.deepEqual(baselineVersions(claude).map(b => b.version),
+    [CLAUDE_CONTROL_CONTRACT_MIN_VERSION, CLAUDE_STEERING_MIN_VERSION, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, CLAUDE_MEDIA_REVIEWER_CLI_VERSION]);
+  assert.deepEqual(targetsFor("2.1.314", baselineVersions(claude)).map(t => t.version), ["2.1.314", "2.1.205", "2.1.241", "2.1.277", "2.1.296"]);
+  assert.ok(sourceFiles(claude).includes("scripts/harness-assumptions-prepare-claude.sh"));
+  assert.ok(sourceFiles(claude).includes("apps/runner/scripts/claude-assumption-probes.ts"));
+});
+
+test("Claude Code runs the native platform binary, never the placeholder .bin entry --ignore-scripts leaves", () => {
+  assert.equal(executablePath(harnessById("claude"), "/p", "linux", "x64"), "/p/node_modules/@anthropic-ai/claude-code-linux-x64/claude");
+  assert.equal(executablePath(harnessById("claude"), "/p", "linux", "arm64"), "/p/node_modules/@anthropic-ai/claude-code-linux-arm64/claude");
+  assert.equal(executablePath(codex, "/p"), "/p/node_modules/.bin/codex");
+});
+
+test("a Claude Code target without its native binary is could not run, never measured through the placeholder", async (t) => {
+  const claude = harnessById("claude");
+  const run = async plan => {
+    const temp = scratch(t);
+    const env = ciEnv(temp);
+    assert.equal(await detect(claude, { env, fetchImpl: registry("2.1.314", { name: "@anthropic-ai/claude-code" }) }), EXIT.matched);
+    rmSync(join(temp, "output"));
+    assert.equal(decide(claude, { env }), EXIT.matched);
+    const exit = await measure(claude, { env, exec: fakeExec(temp, plan).exec });
+    return { exit, report: JSON.parse(readFileSync(join(paths(claude, temp).reportDir, "latest.json"), "utf8")) };
+  };
+  const matched = {};
+  const ok = await run(matched);
+  assert.equal(ok.exit, EXIT.matched);
+  assert.equal(ok.report.targets.length, 5);
+  assert.ok(matched.suites.every(s => s.env.CLAUDE_BIN === executablePath(claude, dirname(dirname(dirname(dirname(s.env.CLAUDE_BIN))))) &&
+    s.env.CLAUDE_BIN.endsWith(`/node_modules/@anthropic-ai/claude-code-${process.platform}-${process.arch}/claude`)));
+  assert.deepEqual(matched.suites[0].argv.slice(0, 4), [process.execPath, "--import", "tsx", "scripts/claude-assumptions.mjs"]);
+  const missing = await run({ nativeBinary: false });
+  assert.equal(missing.exit, EXIT.couldNotRun);
+  assert.ok(missing.report.targets.every(target => target.status === "could not run" &&
+    target.reason === `the installed release has no executable at node_modules/@anthropic-ai/claude-code-${process.platform}-${process.arch}/claude`));
 });
