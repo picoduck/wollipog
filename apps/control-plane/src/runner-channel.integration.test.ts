@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
@@ -496,6 +496,52 @@ function waitForClose(socket: StrictSocket, timeoutMs = 5_000): Promise<{ code: 
   });
 }
 
+// Upgrades a raw TCP socket to /runner, sends only the header of a masked binary frame declaring
+// `payloadBytes`, and returns the code of the close frame the server sent before dropping it.
+async function closeCodeForDeclaredFrame(port: number, payloadBytes: number, timeoutMs = 5_000): Promise<number> {
+  const key = randomBytes(16).toString("base64");
+  const accept = createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+  const socket = connect(port, "127.0.0.1");
+  try {
+    const received = await new Promise<Buffer>((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for the server to drop the socket")), timeoutMs);
+      let buffered = Buffer.alloc(0);
+      let upgraded = false;
+      socket.on("data", (chunk: Buffer) => {
+        buffered = Buffer.concat([buffered, chunk]);
+        if (upgraded) return;
+        const end = buffered.indexOf("\r\n\r\n");
+        if (end < 0) return;
+        const head = buffered.subarray(0, end).toString("latin1");
+        if (!head.startsWith("HTTP/1.1 101 ") || !head.includes(`\r\nSec-WebSocket-Accept: ${accept}`)) {
+          reject(new Error(`unexpected upgrade response\n${head}`));
+          return;
+        }
+        upgraded = true;
+        buffered = buffered.subarray(end + 4);
+        const header = Buffer.alloc(14);
+        header[0] = 0x82; // FIN, binary
+        header[1] = 0x80 | 127; // masked, 64-bit length
+        header.writeBigUInt64BE(BigInt(payloadBytes), 2);
+        randomBytes(4).copy(header, 10); // masking key; no payload follows
+        socket.write(header);
+      });
+      socket.once("error", (error) => { clearTimeout(timer); reject(error); });
+      socket.once("close", () => {
+        clearTimeout(timer);
+        if (upgraded) resolvePromise(buffered);
+        else reject(new Error("socket closed before the upgrade completed"));
+      });
+      socket.write(`GET /runner HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n`
+        + `Sec-WebSocket-Key: ${key}\r\nSec-WebSocket-Version: 13\r\n\r\n`);
+    });
+    assert.ok(received.length >= 4 && received[0] === 0x88, `expected a close frame, received ${received.toString("hex")}`);
+    return received.readUInt16BE(2);
+  } finally {
+    socket.destroy();
+  }
+}
+
 async function stopChild(child: ChildProcess): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return;
   child.kill("SIGTERM");
@@ -591,12 +637,13 @@ test("the real /runner route bounds unauthenticated sockets and payloads", { tim
   sockets.clear();
   await delay(100);
 
-  const oversized = await openSocket(runnerUrl);
-  sockets.add(oversized);
-  const oversizedClosed = waitForClose(oversized);
-  oversized.send(Buffer.alloc(MAX_RUNNER_CLIENT_MESSAGE_BYTES + 1));
-  assert.equal((await oversizedClosed).code, 1009, "ws rejects an oversized frame while assembling it");
-  sockets.delete(oversized);
+  // ws rejects an oversized frame from its header and queues a 1009 close, then @fastify/websocket's
+  // default error handler terminates the socket. Streaming the real payload left unread bytes in the
+  // server's receive buffer, so that terminate could reset the connection and discard the close
+  // frame (#3774: 1006, not 1009). Declaring the length without sending a payload byte makes the drop
+  // a clean FIN behind the close frame, and a 1009 then proves the declared length alone was refused.
+  assert.equal(await closeCodeForDeclaredFrame(port, MAX_RUNNER_CLIENT_MESSAGE_BYTES + 1), 1009,
+    "ws rejects an oversized frame from its declared length");
 
   const idle = await openSocket(runnerUrl);
   sockets.add(idle);
