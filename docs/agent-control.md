@@ -870,12 +870,15 @@ Server's `command/exec` under the same policy its turns will send:
   rules are unchanged, so an escalation or permission request still reaches them. A read-only
   turn keeps its own policy, because this boundary would let it write. The runner logs the
   switch as `codex_command_sandbox_outer_boundary`.
-- Everything else this boundary binds writable for the provider process becomes writable to its
-  commands, as it already is to Claude Code sessions in this boundary. In the default `provider`
-  isolation mode that includes the whole provider credential directory (`~/.codex`, with its
-  `auth.json` and `config.toml`) and the managed Linux caches; otherwise it includes the provider
-  transcript directory. It also includes `.git` or `.codex` entries inside the worktree that are
-  not runner-owned, which Codex's own sandbox kept read-only.
+- Under that fallback, and only then, Codex's commands can write everything this boundary binds
+  writable for the provider process, as Claude Code sessions' commands already can in this
+  boundary (`~/.claude` included). In the default `provider` isolation mode that is the whole Codex
+  credential directory (`~/.codex`, with its `auth.json` and `config.toml`) and the managed Linux
+  caches. In configured `bwrap` mode it is the per-session transcript directory. It also includes
+  `.git` or `.codex` entries inside the worktree that are not runner-owned, which Codex's own
+  sandbox kept read-only. A writable `config.toml` can change later sessions. Binding it read-only
+  is not done: the App Server writes it at runtime (`config/value/write`, `config/batchWrite`,
+  `skills/config/write`), and its temp-file-and-rename writes would fail on a bound file.
 - Any other failure inside this boundary keeps Codex's policy and is only logged.
 - Without this boundary, the launch fails. Its `failed` status carries `launchFailure:
   "codex_sandbox_unavailable"` (protocol v257), and a campaign shows that child as blocked work
