@@ -751,20 +751,22 @@ const SUCCESSOR_HELPER_CALLS = { acquisition: 16, catchUpRetry: 12, publication:
 // Phases in the critical path share the fixed allowance; each still gets its own slack so a single
 // slow phase is named in the failure.
 const SUCCESSOR_PHASE_SLACK_MS = 3_000;
-// Bounds the measured scaling so a broken helper cannot stretch one race past a minute.
-const SUCCESSOR_REPORT_CEILING_MS = 60_000;
+// Caps the measured call, so a broken helper cannot stretch one race past 58 seconds or its
+// cleanup past 23. verify-successor-election-load.mjs sizes its enclosing timeouts from these.
+const SUCCESSOR_HELPER_CALL_CEILING_MS = 1_500;
 
 type SuccessorBudget = {
   helperCallMs: number; reportMs: number; cleanupMs: number;
   acquisitionMs: number; catchUpRetryMs: number; publicationMs: number;
 };
 
-function successorBudget(helperCallMs: number): SuccessorBudget {
+function successorBudget(measuredCallMs: number): SuccessorBudget {
+  const helperCallMs = Math.min(measuredCallMs, SUCCESSOR_HELPER_CALL_CEILING_MS);
   const calls = (count: number) => Math.ceil(count * helperCallMs);
   const { acquisition, catchUpRetry, publication, release } = SUCCESSOR_HELPER_CALLS;
   return {
     helperCallMs: Math.ceil(helperCallMs),
-    reportMs: Math.min(SUCCESSOR_REPORT_CEILING_MS, SUCCESSOR_REPORT_MS + calls(acquisition + catchUpRetry + publication)),
+    reportMs: SUCCESSOR_REPORT_MS + calls(acquisition + catchUpRetry + publication),
     cleanupMs: SUCCESSOR_CLEANUP_MS + calls(release),
     acquisitionMs: SUCCESSOR_PHASE_SLACK_MS + calls(acquisition),
     catchUpRetryMs: SUCCESSOR_PHASE_SLACK_MS + calls(catchUpRetry),
@@ -898,7 +900,7 @@ async function runSuccessorElectionRace(t: TestContext, options: SuccessorRaceOp
       // Outlasts the parent's race deadline, so a slow winner is reported by the parent's
       // phase budgets rather than as a loser's barrier timeout.
       const waitFor = (path) => {
-        const deadline = performance.now() + ${SUCCESSOR_REPORT_CEILING_MS + 5_000};
+        const deadline = performance.now() + ${successorBudget(SUCCESSOR_HELPER_CALL_CEILING_MS).reportMs + 5_000};
         while (!existsSync(path)) {
           if (performance.now() >= deadline) throw new Error("fixture barrier timed out");
           pause(5);
@@ -1218,7 +1220,9 @@ test("successor election budget scales its helper-call allowances with the measu
   assert.deepEqual(windows, {
     helperCallMs: 500, reportMs: 26_000, cleanupMs: 11_000, acquisitionMs: 11_000, catchUpRetryMs: 9_000, publicationMs: 5_000,
   });
-  assert.equal(successorBudget(10_000).reportMs, 60_000, "a broken helper cannot stretch the race past its ceiling");
+  assert.deepEqual(successorBudget(10_000), successorBudget(SUCCESSOR_HELPER_CALL_CEILING_MS), "a broken helper cannot stretch the race past its ceiling");
+  assert.equal(successorBudget(10_000).reportMs, 58_000);
+  assert.equal(successorBudget(10_000).cleanupMs, 23_000);
   assert.equal(successorBudget(0).reportMs, SUCCESSOR_REPORT_MS, "an unmeasured race keeps the fixed deadline");
 });
 
