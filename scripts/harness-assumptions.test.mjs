@@ -162,7 +162,8 @@ test("only an exact matched record skips the suite; a lost, unreadable or mismat
   assert.equal(decide(codex, { env }), EXIT.matched);
   assert.equal(outputs(temp).measure, "true", "no record measures");
   for (const bad of ["{not json", { ...matchedRecord(state), exitCode: 1 }, { ...matchedRecord(state), key: "other" }, { ...matchedRecord(state), sourceHash: "other" },
-    { ...matchedRecord(state), targets: [state.targets[0]] }, { ...matchedRecord(state), recordVersion: RECORD_VERSION + 1 }, { ...matchedRecord(state), completedAt: "never" }]) {
+    { ...matchedRecord(state), targets: [state.targets[0]] }, { ...matchedRecord(state), recordVersion: RECORD_VERSION + 1 }, { ...matchedRecord(state), completedAt: "never" },
+    { ...matchedRecord(state), targets: {} }, { ...matchedRecord(state), targets: [null, null] }, { ...matchedRecord(state), targets: null }, "[]", "null"]) {
     writeRecord(temp, bad);
     rmSync(join(temp, "output"));
     assert.equal(decide(codex, { env }), EXIT.matched);

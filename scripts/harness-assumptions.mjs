@@ -150,9 +150,10 @@ export function recordKey(harness, targets, sourceHash) {
 
 /** A record only counts when it is exactly the matched measurement of this key. */
 export function validRecord(record, state) {
+  const versions = targets => Array.isArray(targets) && targets.every(t => typeof t?.version === "string") ? JSON.stringify(targets.map(t => t.version)) : null;
   return record?.recordVersion === RECORD_VERSION && record.harness === state.harness && record.key === state.key &&
     record.exitCode === EXIT.matched && record.sourceHash === state.sourceHash &&
-    JSON.stringify(record.targets?.map(t => t.version)) === JSON.stringify(state.targets.map(t => t.version)) &&
+    versions(record.targets) !== null && versions(record.targets) === versions(state.targets) &&
     typeof record.completedAt === "string" && Number.isFinite(Date.parse(record.completedAt));
 }
 
