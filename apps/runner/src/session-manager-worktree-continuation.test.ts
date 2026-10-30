@@ -341,3 +341,109 @@ test("a selection made while the relaunch runs supersedes the switch, even one b
     ), "the relaunch notice's promise is withdrawn plainly");
   });
 });
+
+/** Every distinct `worktreeSwitch` the runner published for the session, in order. */
+function publishedSwitches(sent: RunnerToControlPlane[], sessionId: string): unknown[] {
+  const values: unknown[] = [];
+  for (const message of sent) {
+    if (message.type !== "session_runtime_updated" || message.snapshot.id !== sessionId ||
+        !("worktreeSwitch" in message.snapshot)) continue;
+    const value = message.snapshot.worktreeSwitch ?? null;
+    const shape = value && { phase: value.phase, branch: value.branch };
+    if (JSON.stringify(values.at(-1)) !== JSON.stringify(shape)) values.push(shape);
+  }
+  return values;
+}
+
+test("a session reports Switching Worktree from its switch until the relaunch ends, then clears it (#3810)", { skip: !haveGit() }, async () => {
+  const relaunch = gate();
+  let since: number | undefined;
+  await withSession("status", {
+    beforeInitialize: async (launch) => { if (launch === 2) await relaunch.wait(); },
+    during: async ({ manager, sessionId }, text) => {
+      if (text !== "start the fix") return;
+      await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/status" }, undefined,
+        { requestedBySession: true });
+    },
+  }, async ({ manager, store, sessionId, fake, sent }) => {
+    manager.prompt(sessionId, "start the fix");
+    await relaunch.arrived;
+    assert.deepEqual(publishedSwitches(sent, sessionId).slice(-2), [
+      { phase: "pending", branch: "fix/status" },
+      { phase: "relaunching", branch: "fix/status" },
+    ], "pending from the switch, relaunching once the old provider is retired");
+    const latest = [...sent].reverse().find((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === sessionId && message.snapshot.worktreeSwitch) as
+      Extract<RunnerToControlPlane, { type: "session_runtime_updated" }> | undefined;
+    since = latest?.snapshot.worktreeSwitch?.since;
+    assert.ok(since, "the switch says when it began");
+    relaunch.open();
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(sessionId)?.status === "idle",
+      "the continuation did not run");
+    await settle();
+    assert.equal(publishedSwitches(sent, sessionId).at(-1), null, "the relaunch's end clears it explicitly");
+    const first = sent.find((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === sessionId && message.snapshot.worktreeSwitch) as
+      Extract<RunnerToControlPlane, { type: "session_runtime_updated" }> | undefined;
+    assert.equal(first?.snapshot.worktreeSwitch?.since, since, "one switch keeps one start time across phases");
+  });
+});
+
+test("a switch landed by another provider replacement, such as an account switch, clears too (#3810)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-worktree-continuation-account-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = join(root, "repo");
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    const sessionId = "s_continuation_account";
+    let switched: Switched | undefined;
+    let accountSwitch: unknown;
+    const fake = fakeProvider({
+      during: async (text) => {
+        if (text !== "start the fix") return;
+        switched = await manager!.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/account" });
+        accountSwitch = await manager!.switchProviderAccount(sessionId, "claude-personal");
+      },
+    });
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const accounts = [
+      { id: "claude-work", label: "work@example.test", provider: "claude" as const, credentialHome: "/claude/work" },
+      { id: "claude-personal", label: "personal@example.test", provider: "claude" as const, credentialHome: "/claude/personal" },
+    ];
+    const internals = manager as unknown as {
+      resolveProviderAccount: (spec: { providerAccountId?: string }) => unknown;
+      transferAccountTranscript: () => Promise<void>;
+    };
+    internals.resolveProviderAccount = (spec) => accounts.find((account) => account.id === spec.providerAccountId);
+    internals.transferAccountTranscript = async () => {};
+    assert.equal(await manager.start({ ...claudeSpec(sessionId, repo), providerAccountId: "claude-work" }), true);
+
+    manager.prompt(sessionId, "start the fix");
+    await waitFor(() => fake.launches() >= 2 && store.readMeta(sessionId)?.status === "idle" &&
+      !(manager as unknown as { launchGenerations: Map<string, number> }).launchGenerations.has(sessionId),
+    "the replacement did not settle");
+    await settle();
+    assert.deepEqual(accountSwitch, { ok: true, scheduled: true });
+    assert.equal(store.readMeta(sessionId)?.providerAccountId, "claude-personal");
+    const switches = publishedSwitches(sent, sessionId);
+    assert.ok(switches.some((value) => JSON.stringify(value) === JSON.stringify({ phase: "pending", branch: "fix/account" })),
+      "the switch was reported while it waited");
+    assert.equal(switches.at(-1), null, "whichever replacement landed it, the switch is cleared");
+    const last = [...sent].reverse().find((message) => message.type === "session_runtime_updated" &&
+      message.snapshot.id === sessionId) as Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>;
+    assert.equal(last.snapshot.worktreeSwitch, null, "later idle snapshots stay clear");
+    assert.ok(switched);
+    manager.stop(sessionId);
+    await manager.delete(sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

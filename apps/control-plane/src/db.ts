@@ -23,7 +23,10 @@ import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
-import { isProviderLoginFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait } from "@wollipog/protocol";
+import {
+  isProviderLoginFailureCode, PROJECT_CREATION_REQUEST_WINDOW_MS, validProviderHomeLaunchRefusal, validProviderHomeWait,
+  validWorktreeSwitch,
+} from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
@@ -774,6 +777,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_profile_id TEXT,
   provider_home_refusal TEXT,
   provider_home_wait TEXT,
+  worktree_switch TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
   semantic_title INTEGER NOT NULL DEFAULT 0,
@@ -3182,6 +3186,7 @@ interface SessionRow {
   provider_profile_id: string | null;
   provider_home_refusal: string | null;
   provider_home_wait: string | null;
+  worktree_switch: string | null;
   title: string;
   title_source: string | null;
   semantic_title: number;
@@ -7109,6 +7114,8 @@ export class ControlPlaneDb {
       "provider_home_refusal TEXT",
       // The busy provider HOME a starting session's launch is waiting for (#3240).
       "provider_home_wait TEXT",
+      // The worktree relaunch a session is waiting for or running (#3810).
+      "worktree_switch TEXT",
     ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
     }
@@ -11938,7 +11945,7 @@ export class ControlPlaneDb {
     const userId = principal?.kind === "human" ? principal.userId : null;
     const columns = `id runner_id workspace_id project_id project_location_id agent_id
       provider_account_id provider_account_label provider_account_automatically_selected provider_profile_id
-      provider_home_wait title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
+      provider_home_wait worktree_switch title title_source provider_updated_at background_work_state background_follow_up background_work_tracking
       history_quarantine worktree_recovery queue_hold capacity_wait status board_column run_id
       use_worktree worktree_path archived preview pending_approval parent_control
       parent_control_policy parent_control_policy_revision orchestrator_policy session_role
@@ -13255,6 +13262,15 @@ export class ControlPlaneDb {
     const wait = value === null ? null : validProviderHomeWait(value);
     this.stmt("UPDATE sessions SET provider_home_wait=? WHERE id=?")
       .run(wait ? JSON.stringify(wait) : null, sessionId);
+  }
+
+  /** Undefined (a pre-v256 runner) keeps the stored switch; null clears it; a malformed one is
+   * dropped, so the session shows only its lifecycle (#3810). */
+  private writeSessionWorktreeSwitch(sessionId: string, value: unknown): void {
+    if (value === undefined) return;
+    const worktreeSwitch = value === null ? null : validWorktreeSwitch(value);
+    this.stmt("UPDATE sessions SET worktree_switch=? WHERE id=?")
+      .run(worktreeSwitch ? JSON.stringify(worktreeSwitch) : null, sessionId);
   }
 
   private writeSessionProviderProfileId(sessionId: string, value: string | null | undefined): void {
@@ -15885,6 +15901,42 @@ export class ControlPlaneDb {
     return row?.issue ?? null;
   }
 
+  /** The Human whose recorded approval allowed this human-owned decision: its single resolving
+   * `allowed` governance audit, bound to the decision's occurrence, category and payload digest.
+   * A missing, pruned, ambiguous or non-human record proves no approval (#2940). `publicationAuthority`
+   * is the issue boundary the server recorded with that approval, when it recorded one. */
+  workflowDecisionHumanApprover(decision: WorkflowDecisionView): { userId: string; approvedAt: number;
+    publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string } } | null {
+    if (decision.authority !== "human") return null;
+    const rows = this.stmt(`SELECT actor_kind, actor_id, content_digest, workflow_decision, created_at FROM governance_audit
+      WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision' AND stage='resolution' AND outcome='allowed' LIMIT 2`)
+      .all(decision.sessionId, decision.occurrenceId) as Array<{ actor_kind: string; actor_id: string | null; content_digest: string | null; workflow_decision: string | null; created_at: number }>;
+    const row = rows.length === 1 ? rows[0]! : null;
+    if (!row || row.actor_kind !== "human" || !row.actor_id || row.content_digest !== decision.resourceDigest) return null;
+    let recorded: { occurrenceId?: unknown; category?: unknown; publicationAuthority?: { authorizedByUserId?: unknown; objectiveDigest?: unknown } } | null;
+    try { recorded = JSON.parse(row.workflow_decision ?? "null") as typeof recorded; } catch { return null; }
+    if (recorded?.occurrenceId !== decision.occurrenceId || recorded.category !== decision.category) return null;
+    const authority = recorded.publicationAuthority;
+    return { userId: row.actor_id, approvedAt: row.created_at,
+      ...(typeof authority?.authorizedByUserId === "string" && authority.authorizedByUserId && typeof authority.objectiveDigest === "string" &&
+        /^[0-9a-f]{64}$/u.test(authority.objectiveDigest)
+        ? { publicationAuthority: { authorizedByUserId: authority.authorizedByUserId, objectiveDigest: authority.objectiveDigest } } : {}) };
+  }
+
+  /** Whether the user owns this campaign for scope authority (#2940), as an active, non-viewer member
+   * of its organization: its owning user, a member of its owning team or, because every member owns
+   * an organization-owned session, only an owner or admin of that organization. */
+  campaignOwnerUser(rootId: string, userId: string): boolean {
+    const scope = this.sessionScope(rootId);
+    if (!scope) return false;
+    const role = (this.stmt(`SELECT membership.role FROM identity_memberships membership
+      JOIN identity_users user ON user.user_id=membership.user_id AND user.status='active'
+      WHERE membership.organization_id=? AND membership.user_id=?`).get(scope.organizationId, userId) as { role: string } | undefined)?.role;
+    if (!role || role === "viewer") return false;
+    if (scope.owner.kind === "organization") return role === "owner" || role === "admin";
+    return this.isSessionOwner({ userId, organizationId: scope.organizationId }, rootId);
+  }
+
   campaignSharesRepositoryWorkspace(root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">): boolean {
     const path = (s: Pick<SessionView, "id" | "runnerId" | "workspaceId">) => this.getAdHocWorkspacePath(s.id) ??
       (s.workspaceId ? this.getWorkspacePath(s.runnerId, s.workspaceId) : null);
@@ -16545,6 +16597,7 @@ export class ControlPlaneDb {
       this.writeSessionProviderProfileId(snap.id, snap.providerProfileId);
       this.writeSessionProviderHomeRefusal(snap.id, snap.providerHomeRefusal);
       this.writeSessionProviderHomeWait(snap.id, snap.providerHomeWait);
+      this.writeSessionWorktreeSwitch(snap.id, snap.worktreeSwitch);
       if (snap.executionTarget) {
         this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
           .run(JSON.stringify(snap.executionTarget), snap.id);
@@ -16878,6 +16931,7 @@ export class ControlPlaneDb {
     this.writeSessionProviderProfileId(id, snap.providerProfileId);
     this.writeSessionProviderHomeRefusal(id, snap.providerHomeRefusal);
     this.writeSessionProviderHomeWait(id, snap.providerHomeWait);
+    this.writeSessionWorktreeSwitch(id, snap.worktreeSwitch);
     if (snap.providerAccountSwitchFailure !== undefined) {
       this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
         .run(snap.providerAccountSwitchFailure
@@ -25196,6 +25250,7 @@ export class ControlPlaneDb {
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
       ...providerHomeWaitField(status, row.provider_home_wait),
+      ...worktreeSwitchField(status, row.worktree_switch),
       title: row.title, titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
       backgroundWorkState: row.background_work_state ? parseBackgroundWorkState(row.background_work_state) : undefined,
@@ -25354,6 +25409,7 @@ export class ControlPlaneDb {
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
       ...providerHomeRefusalField(row.provider_home_refusal),
       ...providerHomeWaitField(status, row.provider_home_wait),
+      ...worktreeSwitchField(status, row.worktree_switch),
       title: row.title,
       titleSource: (row.title_source as SessionTitleSource | null) ?? "generated",
       providerUpdatedAt: row.provider_updated_at ?? undefined,
@@ -31910,6 +31966,15 @@ function validBackgroundTerminalStatus(
 
 /** The stored launch refusal (#3240), re-validated as it is projected. */
 /** Only a starting session waits for its account: a stale wait never outlives the launch. */
+/** A finished session is switching nothing, whatever a lost clearing snapshot left stored (#3810). */
+function worktreeSwitchField(status: SessionStatus, value: string | null): Pick<SessionView, "worktreeSwitch"> {
+  if (isTerminal(status) || !value) return {};
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return {}; }
+  const worktreeSwitch = validWorktreeSwitch(parsed);
+  return worktreeSwitch ? { worktreeSwitch } : {};
+}
+
 function providerHomeWaitField(status: SessionStatus, value: string | null): Pick<SessionView, "providerHomeWait"> {
   if (status !== "starting" || !value) return {};
   let parsed: unknown;

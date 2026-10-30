@@ -236,3 +236,35 @@ test("every condition says what it means in one sentence", () => {
     assert.match(condition.description, /^[A-Z0-9].*\.$/u, condition.meta.label);
   }
 });
+
+test("a session relaunching in the worktree it switched to reads Switching Worktree (#3810)", () => {
+  const pending = { phase: "pending" as const, branch: "fix/issue-3810", since: 1_000 };
+  const idle = sessionStatusSummary(session({ status: "idle", worktreeSwitch: pending }));
+  assert.equal(idle.primary.meta.label, "Switching Worktree");
+  assert.equal(idle.primary.meta.tone, "info");
+  assert.equal(idle.primary.meta.pulse, true);
+  assert.equal(idle.primary.needsYou, false);
+  assert.equal(idle.more, 0);
+  assert.equal(idle.primary.description, "The session is about to relaunch in worktree fix/issue-3810.");
+  assert.deepEqual(idle.conditions.map((condition) => condition.kind), ["worktree_switch", "lifecycle"],
+    "the lifecycle is still listed behind it");
+
+  const relaunching = sessionStatusSummary(session({ status: "starting", worktreeSwitch: { ...pending, phase: "relaunching" } }));
+  assert.equal(relaunching.primary.meta.label, "Switching Worktree");
+  assert.equal(relaunching.primary.description, "The session is relaunching in worktree fix/issue-3810.");
+
+  // The turn that made the switch is still the session's news while it runs.
+  assert.equal(sessionStatusSummary(session({ status: "running", worktreeSwitch: pending })).primary.meta.label, "Running");
+  // A request still comes first, with the switch behind it.
+  const asking = sessionStatusSummary(session({ status: "input_required", pendingApproval: question, worktreeSwitch: pending }));
+  assert.equal(asking.primary.kind, "attention");
+  assert.ok(asking.conditions.some((condition) => condition.meta.label === "Switching Worktree"));
+  // A prompt held behind the handoff already says why it waits.
+  const held = session({ status: "queued", worktreeSwitch: pending,
+    queueHold: { kind: "worktree_rebind", holdId: "worktree-rebind:1", since: 1, target: "/w", queuedPrompts: 1,
+      unfinishedBackgroundJobs: 1, restartKeepsQueue: true } } as Partial<SessionStatusSource>);
+  assert.equal(labels(held).includes("Switching Worktree"), false);
+  assert.ok(labels(held).includes("Worktree Handoff"));
+  // A finished session is switching nothing.
+  assert.equal(labels(session({ status: "stopped", worktreeSwitch: pending })).includes("Switching Worktree"), false);
+});

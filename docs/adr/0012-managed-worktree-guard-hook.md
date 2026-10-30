@@ -318,6 +318,35 @@ than live, and it is closed by requiring the runner's own hook to come back trus
 This measurement did not cover hash trust alone on TUI/exec. The 2026-10-25 measurement below
 settles #1488 and supersedes the earlier bypass requirement on those entry points.
 
+## Re-Measurement: codex-cli 0.165.0 and 0.166.0 (Linux, 2026-10-30)
+
+The scheduled Harness Assumption Probes workflow measured the full guard suite on **codex-cli
+0.166.0** in hosted run [41047827949](https://github.com/picoduck/wollipog/actions/runs/41047827949)
+(#3834) and reported **measured OK, range can be widened**: every guard assumption was unchanged,
+outside the then range `>=0.155.1 <0.164.1`. The range was not widened on that report alone. The
+same run reported two other 0.166.0 changes, and #3834 traced both to the probe fixtures rather
+than to Codex: 0.166.0 sends Guardian's review request under the session's configured model
+instead of `codex-auto-review`, so the scripted model server answered Guardian as if it were the
+agent, Guardian rejected the answer as invalid JSON, and Codex declined the action. See
+"Re-Measurement: codex-cli 0.166.0 Guardian Requests" below. Neither affects this suite: the
+guard's denial lands before any approval is raised, so no case here reaches Guardian.
+
+To make that explicit, the app-server cases now count Guardian requests by the
+`x-openai-subagent: guardian` header as well as the model name, and require none. Rerun locally
+with `CODEX_BIN=/path/to/codex pnpm probe:codex-guard-hook` at
+`f70f975e3415a4a309bd41871c9df9d7975ad28d` on standalone **0.165.0** and **0.166.0**, plus 0.155.1 as
+the control, every version exited 0: **All CLI cases and 8 app-server checks matched the recorded
+measurement**, with all 26 `codex_assumption` events `unchanged` and zero Guardian requests in every
+app-server case. Hosted run [41068427136](https://github.com/picoduck/wollipog/actions/runs/41068427136)
+at that commit matched the full suite on 0.166.0 and 0.155.1, again with zero Guardian requests in
+every guard app-server case. 0.165.0 is the only stable release between 0.164.0 and 0.166.0. As before, HOME,
+CODEX_HOME and XDG roots were throwaway directories, host Git configuration was disabled, the
+provider was scripted on loopback, and no real provider homes or credentials were read.
+
+This widens the TUI range to **`>=0.155.1 <0.166.1`**; 0.166.1 and later, malformed and prerelease
+versions retain the verified legacy fallback. The daemon-lifetime and legacy-fallback measurement
+limits remain unchanged.
+
 ## Re-Measurement: codex-cli 0.164.0 (Linux, 2026-10-27)
 
 `CODEX_BIN=/path/to/codex pnpm probe:codex-guard-hook` passed on standalone **codex-cli 0.164.0**
@@ -339,9 +368,9 @@ The existing daemon-lifetime and legacy-fallback measurement limits remain uncha
 ## Measurements: Hash Trust Without a TUI or Exec Bypass (codex-cli 0.155.1–0.163.0, Linux, 2026-10-25)
 
 The complete hash-trust matrix passed on installed releases **0.155.1, 0.157.0, 0.158.0, 0.159.0,
-0.159.2, 0.160.0, 0.162.1 and 0.163.0**. Together with the 0.164.0 re-measurement above, these
-measurements support the TUI preference range
-`>=0.155.1 <0.164.1`. Versions outside it use the verified legacy TUI fallback below rather than
+0.159.2, 0.160.0, 0.162.1 and 0.163.0**. Together with the 0.164.0, 0.165.0 and 0.166.0
+re-measurements above, these measurements support the TUI preference range
+`>=0.155.1 <0.166.1`. Versions outside it use the verified legacy TUI fallback below rather than
 turning a routine CLI upgrade into a TUI outage. No real provider homes or credentials were used.
 
 `pnpm probe:codex-guard-hook` now measures all three entry points. `--cli-only`, `--exec-only`,
@@ -383,7 +412,7 @@ No-escalation cases use a sandbox-free fixture so host namespace availability ca
 as hook denial; escalated cases still exercise approval.
 
 **Decision:** a TUI prefers trust for the runner's key alone by hash on
-**`>=0.155.1 <0.164.1`**, read from the inventory connection's `initialize.userAgent` independently
+**`>=0.155.1 <0.166.1`**, read from the inventory connection's `initialize.userAgent` independently
 of its caller-selected originator prefix. The hook must read back **enabled and trusted** on the
 second inventory pass, and the launch carries no bypass. Ordinary foreign untrusted hooks keep
 Codex's own gate. Orchestrator launches still disable every foreign hook and verify that isolation.
@@ -590,8 +619,8 @@ Measured with `pnpm probe:codex-escalation`
 from and is kept runnable so a future codex-cli is re-measured rather than re-argued. Nothing in it
 reaches the internet or a model: "the network" is a loopback HTTP server, and "the model" is a
 scripted OpenAI Responses-API server behind a throwaway `CODEX_HOME` that emits exactly one
-`exec_command` tool call per case — and, for the Guardian cases, answers Codex's own
-`codex-auto-review` request with a scripted verdict. Every case is one real `codex app-server`
+`exec_command` tool call per case — and, for the Guardian cases, answers Codex's own Guardian
+request with a scripted verdict (see the 0.166.0 re-measurement below for how it is recognised). Every case is one real `codex app-server`
 process, one real turn, one real command. The sandbox blocks loopback exactly as it blocks the
 internet, which is what makes a local reply a faithful stand-in.
 
@@ -668,6 +697,33 @@ nothing in the directory decides the guard's verdict any more.
 
 A silently network-less approval is worse than a documented gap. The gap is visible in the docs and
 in the veto's behaviour; the network-less approval looked to the operator like GitHub being down.
+
+### Re-Measurement: codex-cli 0.166.0 Guardian Requests (Hosted CI, 2026-10-30)
+
+Hosted run [41047827949](https://github.com/picoduck/wollipog/actions/runs/41047827949) reported the
+two Guardian-allowed network rows above as changed on 0.166.0 ("unexpected command result"), and
+the MCP wait control without the per-tool approval as changed too (#3834). Neither was a Codex
+behaviour change. codex-cli 0.166.0 sends Guardian's review request under the session's configured
+model; 0.155.1 sends it as `codex-auto-review`. Both mark it with the `x-openai-subagent: guardian`
+header. The scripted model servers recognised Guardian by model name only, so on 0.166.0 they
+answered Guardian with an agent message. Guardian rejected it as invalid JSON, and Codex declined
+the action. That failure also let **Guardian deny** pass for the wrong reason: a failed review
+declines the command too.
+
+The fixtures now recognise Guardian by that header (`isGuardianRequest`, keeping the model name as
+a fallback) and count Guardian requests per case. A Guardian row matches only when the scripted
+Guardian actually answered, and a client row only when Guardian was never asked. The same rule
+gates the #1336 re-enablement report, so a failed review can never make it fire. Hosted run
+[41068427136](https://github.com/picoduck/wollipog/actions/runs/41068427136), at
+`f70f975e3415a4a309bd41871c9df9d7975ad28d`, then matched all 13 cases on both 0.166.0 and 0.155.1.
+The matrix above is unchanged on both versions: Guardian-allowed legacy retained the network,
+Guardian-allowed profile blocked it, and Guardian deny declined, each with exactly one Guardian
+request. The client-approved profile rows ("escalation accepted" and "Allow for Session") still
+blocked the network.
+
+So the 0.166.0 report was unrelated to the #1336 re-enablement signal, which reads only those
+client-approved profile rows. The signal did not fire, and the deny and an approved network
+escalation remain mutually exclusive on 0.166.0.
 
 ## Measurements (claude 2.1.278 and codex-cli 0.155.1, this machine, 2026-09-19): the Orchestrator preset
 
@@ -1342,7 +1398,7 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   - The inventory-to-launch bypass window, group-shared-writer limitation and authenticated TUI
     evidence gap remain on the legacy fallback, and are gone on the hash-trust path. See the
     three residual dispositions in the 2026-10-25 measurement above.
-  - TUI hash trust is preferred on codex-cli `>=0.155.1 <0.164.1`. Other versions require verified
+  - TUI hash trust is preferred on codex-cli `>=0.155.1 <0.166.1`. Other versions require verified
     legacy fallback isolation; if both mechanisms fail, guarded TUI launch is refused.
 
   Amended by #1473: **the Orchestrator preset is guarded, for both providers, and its list is

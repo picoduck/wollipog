@@ -39,7 +39,7 @@ import { createServer, type Server } from "node:http";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { isolatedProbeEnv, unavailableProbeOutput, probeResult, GUARD_DOCUMENTATION, ownProbeProcess, RecordedAssumptionChanged } from "./codex-probe-support.js";
+import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput, probeResult, GUARD_DOCUMENTATION, ownProbeProcess, RecordedAssumptionChanged } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 const TURN_TIMEOUT_MS = 90_000;
@@ -93,15 +93,16 @@ function message(text: string): Json {
 }
 
 /** One scripted agent turn, plus scripted Guardian verdicts on the same provider. */
-function modelServer(state: { tool: Json | null; calls: number; input: string }): Server {
+function modelServer(state: { tool: Json | null; calls: number; input: string; guardianRequests: number }): Server {
   return createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       let body: Json = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Json; } catch { /* keep {} */ }
-      const guardian = String(body.model ?? "").startsWith("codex-auto-review");
-      if (!guardian) state.input += JSON.stringify(body.input);
+      const guardian = isGuardianRequest(request.headers, body);
+      if (guardian) state.guardianRequests++;
+      else state.input += JSON.stringify(body.input);
       const step = guardian ? -1 : state.calls++;
       const item: Json = guardian
         ? message(JSON.stringify({ outcome: "allow", risk_level: "low", user_authorization: "high", rationale: "scripted" }))
@@ -440,7 +441,7 @@ async function main(): Promise<number> {
     hookLog: join(root, "hook-calls.log"),
     modelPort: 0,
   };
-  const model = { tool: null as Json | null, calls: 0, input: "" };
+  const model = { tool: null as Json | null, calls: 0, input: "", guardianRequests: 0 };
   const models = modelServer(model);
   let failures = 0;
   let couldNotRun = false;
@@ -542,6 +543,7 @@ async function main(): Promise<number> {
       };
       model.calls = 0;
       model.input = "";
+      model.guardianRequests = 0;
       const args = testCase.trust === "none"
         ? []
         : testCase.trust === "bypass"
@@ -559,13 +561,17 @@ async function main(): Promise<number> {
       const denied = model.input.includes("MANAGED_WORKTREE_REFUSAL") &&
         (output === "declined" || output === "no command ran");
       const ran = output === (testCase.protected ? MARKER : "BENIGN-OK");
-      const ok = (testCase.expect === "denied" ? denied : ran) && calls === testCase.hookCalls && model.calls >= 2;
+      // No case asks Guardian: the hook's denial lands before any approval is raised (measured on
+      // 0.155.1 and 0.166.0), and the other cases are approved by this client.
+      const ok = (testCase.expect === "denied" ? denied : ran) && calls === testCase.hookCalls && model.calls >= 2 &&
+        model.guardianRequests === 0;
       if (!ok) failures++;
       probeResult(`app-server hook: ${testCase.name}`, unavailableProbeOutput(output) && !(testCase.expect === "denied" && denied)
-        ? "could not run" : ok ? "unchanged" : "changed", `hookCalls=${calls}; denied=${denied}; executed=${ran}; modelRequests=${model.calls}`, GUARD_DOCUMENTATION);
+        ? "could not run" : ok ? "unchanged" : "changed",
+        `hookCalls=${calls}; denied=${denied}; executed=${ran}; modelRequests=${model.calls}; guardianRequests=${model.guardianRequests}`, GUARD_DOCUMENTATION);
       process.stdout.write(
         `${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(50)} ` +
-        `${testCase.expect.padEnd(7)} hook×${calls} ${JSON.stringify(output.slice(0, 40))}\n`);
+        `${testCase.expect.padEnd(7)} hook×${calls} guardian×${model.guardianRequests} ${JSON.stringify(output.slice(0, 40))}\n`);
     }
   } finally {
     models.close();

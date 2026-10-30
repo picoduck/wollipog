@@ -120,6 +120,7 @@ import {
   worktreeRecoveryAction,
   type SessionQueueHoldKind,
   type SessionQueueHoldView,
+  type SessionWorktreeSwitchView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
@@ -1649,6 +1650,8 @@ export class SessionManager {
   /** The queue hold last published for each session (#1651), kept apart from the active entry so
    * a replacement provider still clears the hold its predecessor reported. */
   private readonly publishedQueueHolds = new Map<string, SessionQueueHoldView>();
+  /** The worktree relaunch each session last reported (#3810), kept so its start time is stable. */
+  private readonly publishedWorktreeSwitches = new Map<string, SessionWorktreeSwitchView>();
   /** When a hold began (#1778). A turn in between — one the provider starts on its own, or a
    * continuation that crosses the barrier — interrupts the published hold but not the wait, so the
    * bound keeps counting from here rather than restarting. It starts only once a hold exists, so a
@@ -3271,6 +3274,7 @@ export class SessionManager {
     // relaunch already under way is dropped if anyone selects again before it is queued — even back
     // to the same path.
     this.worktreeSelectionRevisions.set(meta.sessionId, (this.worktreeSelectionRevisions.get(meta.sessionId) ?? 0) + 1);
+    this.refreshWorktreeSwitch(meta.sessionId);
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
     if (resumeAfterRecovery) this.emitStatus(meta.sessionId, "idle", undefined, worktree.path);
@@ -3806,6 +3810,8 @@ export class SessionManager {
       this.releaseActiveTurn(sessionId);
       if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);
       this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider exit");
+      // A stopped or replaced provider no longer has a switch pending; a rebind keeps relaunching.
+      this.syncWorktreeSwitch(sessionId);
     }
     return deleted;
   }
@@ -5701,7 +5707,51 @@ export class SessionManager {
         ? { backgroundFollowUp: this.backgroundFollowUp(meta) } : {}),
       ...(runnerSupportsProtocol(protocolVersion, "providerHomeWait")
         ? { providerHomeWait: this.providerHomeWaits.get(meta.sessionId)?.view ?? null } : {}),
+      ...(runnerSupportsProtocol(protocolVersion, "worktreeSwitchStatus")
+        ? { worktreeSwitch: this.publishedWorktreeSwitches.get(meta.sessionId) ?? null } : {}),
     };
+  }
+
+  /** The worktree relaunch a session is waiting for or running (#3810). A rebind that only drops a
+   * retired sibling keeps the selection, so it is not a switch a person needs to see. */
+  private worktreeSwitchFor(sessionId: string): SessionWorktreeSwitchView | null {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return null;
+    const branchOf = (path: string | undefined) =>
+      path ? this.attributedWorktreeForPath(meta, path)?.branch : undefined;
+    const published = this.publishedWorktreeSwitches.get(sessionId);
+    const view = (phase: SessionWorktreeSwitchView["phase"], branch: string | undefined) => !branch ? null : {
+      phase, branch, since: published?.branch === branch ? published.since : Date.now(),
+    };
+    const rebinding = this.worktreeRebindings.get(sessionId);
+    if (rebinding) {
+      return this.retirementRebindPending(rebinding.entry) ? null
+        : view("relaunching", branchOf(rebinding.launchingWorktreePath ?? meta.worktreePath ?? undefined));
+    }
+    const entry = this.active.get(sessionId);
+    // A rebind starts its launch generation and retires the old provider before it registers itself,
+    // so in that window a switch already reported is relaunching, not over.
+    if (!entry) return published && this.launchGenerations.has(sessionId) ? { ...published, phase: "relaunching" } : null;
+    if (!entry.pendingWorktreeRebind || this.retirementRebindPending(entry)) return null;
+    return view("pending", branchOf(entry.pendingWorktreeRebind));
+  }
+
+  /** Record the current worktree switch; returns whether it changed. */
+  private refreshWorktreeSwitch(sessionId: string): boolean {
+    const next = this.worktreeSwitchFor(sessionId);
+    if (isDeepStrictEqual(next ?? undefined, this.publishedWorktreeSwitches.get(sessionId))) return false;
+    if (next) this.publishedWorktreeSwitches.set(sessionId, next);
+    else this.publishedWorktreeSwitches.delete(sessionId);
+    return true;
+  }
+
+  /** Publish both edges of a worktree switch, so the control plane never keeps a stale one. */
+  private syncWorktreeSwitch(sessionId: string): void {
+    if (!this.refreshWorktreeSwitch(sessionId)) return;
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "worktreeSwitchStatus")) return;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || this.store.isDeleted(sessionId)) return;
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(meta) });
   }
 
   /** Project execution evidence, never infer it from the session lifecycle alone. */
@@ -7884,6 +7934,9 @@ export class SessionManager {
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
+    // Every provider replacement ends here, success or failure — an account switch or a restart as
+    // much as a worktree rebind — so this is where a relaunch reported for the switch is settled.
+    this.syncWorktreeSwitch(sessionId);
     // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
     // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
     if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId) ||
@@ -7901,6 +7954,7 @@ export class SessionManager {
     this.launchGenerations.delete(sessionId);
     this.providerHomeWaitLaunches.delete(sessionId);
     this.forgetLaunchingWorktreePath(sessionId, generation);
+    this.syncWorktreeSwitch(sessionId);
     return activePreparation || queuedPreparation || setupActive;
   }
 
@@ -13986,9 +14040,11 @@ export class SessionManager {
     promise = this.performSelectedWorktreeRebind(sessionId, entry).finally(() => {
       if (this.worktreeRebindings.get(sessionId)?.promise === promise) {
         this.worktreeRebindings.delete(sessionId);
+        this.syncWorktreeSwitch(sessionId);
       }
     });
     this.worktreeRebindings.set(sessionId, { entry, promise });
+    this.syncWorktreeSwitch(sessionId);
     return promise;
   }
 
@@ -16701,6 +16757,7 @@ export class SessionManager {
       if (!closing && !rebinding && !accountSwitching) this.releaseAdmissionIfInactive(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
       this.worktreeSelectionRevisions.delete(sessionId);
+      this.publishedWorktreeSwitches.delete(sessionId);
       if (entry) {
         this.deleteActiveSession(sessionId, entry, false);
         this.rejectQueued(entry.queue, "session was deleted before queued command started");
