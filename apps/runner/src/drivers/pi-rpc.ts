@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { posix, win32 } from "node:path";
 import {
@@ -18,11 +19,21 @@ import { runContextCommand } from "../context-command.js";
 import {
   PI_AGENT_CONTROL_EXTENSION_SUFFIX,
   PI_AGENT_CONTROL_STATUS_KEY,
+  PI_PROJECT_TRUST_DECLINED,
+  PI_PROJECT_TRUST_NONCE_ENV,
+  PI_PROJECT_TRUST_STATUS_KEY,
   PI_SECURITY_REQUEST_NONCE_ENV,
   PI_SECURITY_REQUEST_PREFIX,
   PI_SECURITY_REQUEST_TITLE,
 } from "../pi-agent-control-extension.js";
-import { killTree, ProviderProcessLedger, spawnAgent, terminateDescendantBoundaries, type AgentProcess } from "../spawn.js";
+import {
+  killTree,
+  provenProcessTreeExit,
+  ProviderProcessLedger,
+  spawnAgent,
+  terminateDescendantBoundaries,
+  type AgentProcess,
+} from "../spawn.js";
 import type {
   Driver,
   DriverCallbacks,
@@ -48,16 +59,14 @@ interface PendingAgentControlBridge {
   timer?: NodeJS.Timeout;
 }
 
-interface PendingPiPermission {
-  responses: ReadonlyMap<string, Json>;
-  fallback: Json;
-  startupTrust?: boolean;
-}
+/** Either answered back to the extension over RPC, or decided by the driver itself. */
+type PendingPiPermission =
+  | { responses: ReadonlyMap<string, Json>; fallback: Json; decide?: undefined }
+  | { decide(optionId: string | null): void };
 
 const MAX_PENDING_PI_QUESTIONS = 128;
 const PI_AGENT_CONTROL_READY_TIMEOUT_MS = 30_000;
-const PI_TRUST_STARTUP_TIMEOUT_MS = 2_000_000_000;
-const PI_STARTUP_PROGRESS_TIMEOUT_MS = 15_000;
+const PI_RELAUNCH_EXIT_TIMEOUT_MS = 10_000;
 const PI_APPROVAL_INPUT_LIMIT = 16_000;
 const PI_APPROVAL_INPUT_TRUNCATED = "\n… [truncated by Wollipog]";
 
@@ -160,8 +169,11 @@ export class PiRpcDriver implements Driver {
   /** Every process this instance starts; its owner is each spawn's descendantOwner. */
   private readonly processes: ProviderProcessLedger;
   private agentControlBridge: PendingAgentControlBridge | null = null;
-  private startupStateTimer: NodeJS.Timeout | undefined;
-  private startupStatePending = false;
+  /** Minted per launch that lets Pi dispatch project_trust; null for --approve/--no-approve. */
+  private projectTrustNonce: string | null = null;
+  /** The current launch's validated project-trust report; null until one arrives. */
+  private projectTrustStatus: string | null = null;
+  private readonly retiredChildren = new WeakSet<AgentProcess>();
 
   constructor(
     private readonly opts: DriverOptions,
@@ -199,6 +211,33 @@ export class PiRpcDriver implements Driver {
     if (!trustBridgeReady && permissionModeRequiresAgentControl(configuredMode)) {
       throw new Error(`Pi permission mode ${JSON.stringify(configuredMode || "default")} requires the verified Agent Control bridge`);
     }
+    // Unverified bridges and strict Orchestrators must never load repository-controlled Pi code.
+    // Verified ordinary sessions let Pi dispatch project_trust, which the runner extension always
+    // declines: Pi resolves trust before RPC mode reads stdin, so no client UI can answer it.
+    const asksForProjectTrust = trustBridgeReady && this.config.permissionMode !== "orchestrator";
+    await this.launch(asksForProjectTrust ? [] : ["--no-approve"], this.opts.resumeId);
+    if (asksForProjectTrust && this.projectTrustStatus === PI_PROJECT_TRUST_DECLINED) {
+      // The declined process has done nothing that writes its session: not even the model and
+      // thinking selection below, which Pi records as session entries.
+      const decision = await this.askProjectTrust();
+      if (this.disposed || !this.peer) throw new Error("Pi exited while its project-trust decision was pending");
+      if (decision === "trust") {
+        // A new session has no file until its first message, so the relaunch claims the same id
+        // with --session-id; a resumed one reopens its file.
+        const sessionId = this.sessionId!;
+        await this.retireProcess();
+        await this.launch(["--approve"], this.opts.resumeId ? sessionId : undefined, this.opts.resumeId ? undefined : sessionId);
+      }
+    }
+    await this.applyConfig(this.config);
+  }
+
+  private async launch(trustArgs: string[], resumeId?: string, newSessionId?: string): Promise<void> {
+    this.projectTrustStatus = null;
+    this.projectTrustNonce = trustArgs.length ? null : randomBytes(24).toString("base64url");
+    this.sessionId = null;
+    this.sessionFile = null;
+    const bridgeNonce = this.opts.env.WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE;
     let bridgeReady: Promise<void> | undefined;
     if (bridgeNonce) {
       let resolve!: () => void;
@@ -214,17 +253,18 @@ export class PiRpcDriver implements Driver {
     const args = [
       ...this.opts.args,
       "--mode", "rpc",
-      // Unverified bridges and strict Orchestrators must never load repository-controlled Pi code.
-      // Verified ordinary sessions resolve Pi's project_trust event through a durable approval.
-      ...(!trustBridgeReady || this.config.permissionMode === "orchestrator" ? ["--no-approve"] : []),
-      ...(this.opts.resumeId ? ["--session", this.opts.resumeId] : []),
+      ...trustArgs,
+      ...(resumeId ? ["--session", resumeId] : []),
+      ...(newSessionId ? ["--session-id", newSessionId] : []),
     ];
     this.processes.assertOpen();
     const child = this.processes.launch(this.spawn, {
       command: this.opts.command,
       args,
       cwd: this.cwd,
-      env: this.opts.env,
+      env: this.projectTrustNonce
+        ? { ...this.opts.env, [PI_PROJECT_TRUST_NONCE_ENV]: this.projectTrustNonce }
+        : this.opts.env,
       context: this.opts.context,
       isolation: this.opts.isolation,
       containerAgentLaunch: true,
@@ -238,7 +278,7 @@ export class PiRpcDriver implements Driver {
       child.stdout,
       (event) => this.onRpcEvent(event),
       (error) => {
-        if (this.disposed) return;
+        if (this.disposed || this.retiredChildren.has(child)) return;
         this.cb.onStderr(`Pi RPC transport: ${error.message}`);
         if (this.child === child) this.kill(child);
         this.reportExit(null);
@@ -257,7 +297,7 @@ export class PiRpcDriver implements Driver {
       if (this.peer === peer) this.peer = null;
       if (this.child === child) this.child = null;
       peer.dispose(detail?.message ?? "Pi exited");
-      this.clearStartupStateWatchdog();
+      if (this.retiredChildren.has(child)) return;
       this.dismissQuestions("provider_resolved");
       this.rejectAgentControlBridge(detail ?? new Error("Pi exited before Agent Control became ready"));
       this.reportExit(code);
@@ -266,23 +306,13 @@ export class PiRpcDriver implements Driver {
     child.on("error", (error: Error) => finish(null, error));
     child.on("close", (code) => finish(code));
 
-    const waitsForProjectTrust = trustBridgeReady && this.config.permissionMode !== "orchestrator";
-    if (waitsForProjectTrust) this.beginStartupStateWatchdog();
-    let state: Json;
-    try {
-      state = await peer.request<Json>(
-        { type: "get_state" },
-        waitsForProjectTrust ? PI_TRUST_STARTUP_TIMEOUT_MS : undefined,
-      );
-    } finally {
-      this.clearStartupStateWatchdog();
-    }
+    const state = await peer.request<Json>({ type: "get_state" });
     this.applyState(object(state.data));
     if (!this.sessionId) throw new Error("Pi RPC did not establish a persistent session id");
-    if (this.opts.resumeId && this.sessionId !== this.opts.resumeId) {
-      throw new Error(`Pi resumed session ${this.sessionId} instead of ${this.opts.resumeId}`);
+    const expectedSessionId = resumeId ?? newSessionId;
+    if (expectedSessionId && this.sessionId !== expectedSessionId) {
+      throw new Error(`Pi resumed session ${this.sessionId} instead of ${expectedSessionId}`);
     }
-    await this.applyConfig(this.config);
     if (this.agentControlBridge) {
       const timer = setTimeout(() => this.rejectAgentControlBridge(
         new Error("Pi Agent Control extension did not become ready"),
@@ -291,6 +321,51 @@ export class PiRpcDriver implements Driver {
       this.agentControlBridge.timer = timer;
     }
     await bridgeReady;
+  }
+
+  /** Present the declined project trust as a durable security approval. Only an explicit Trust
+   * resolves "trust"; Skip, a dismissal, an exited provider, or disposal all resolve "skip". */
+  private askProjectTrust(): Promise<"trust" | "skip"> {
+    const requestId = `pi-project-trust-${randomUUID()}`;
+    return new Promise((resolve) => {
+      this.pendingPermissions.set(requestId, {
+        decide: (optionId) => resolve(optionId === "trust" ? "trust" : "skip"),
+      });
+      this.cb.onEvent({
+        kind: "permission_request",
+        requestId,
+        title: "Trust Pi Project Resources?",
+        options: [
+          { optionId: "trust", name: "Trust This Project", kind: "allow_always" },
+          { optionId: "skip", name: "Skip Project Resources", kind: "reject_always" },
+        ],
+        context: { toolName: "pi.project_trust", input: this.cwd.slice(0, 4096) },
+      });
+    });
+  }
+
+  /** Stop the declined process before the trusted relaunch, so two Pi processes never hold the same
+   * session. Its exit is expected and is not reported as the provider's exit. */
+  private async retireProcess(): Promise<void> {
+    const child = this.child;
+    if (!child) throw new Error("Pi exited before its trusted relaunch");
+    this.retiredChildren.add(child);
+    const closed = child.closeObserved || child.exitCode !== null || child.signalCode !== null
+      ? Promise.resolve(true)
+      : new Promise<boolean>((resolve) => {
+          const timer = setTimeout(() => resolve(false), PI_RELAUNCH_EXIT_TIMEOUT_MS);
+          timer.unref?.();
+          child.once("close", () => { clearTimeout(timer); resolve(true); });
+        });
+    this.peer?.dispose("Pi relaunching with project trust");
+    this.peer = null;
+    this.child = null;
+    this.kill(child);
+    // Where the launch has a POSIX boundary, require proof that its whole tree (including the Agent
+    // Control child) is gone; elsewhere the provider's own close is the strongest available signal.
+    const exited = await closed && (!child.posixBoundary || await provenProcessTreeExit(child));
+    if (!exited) throw new Error("the declined Pi process did not exit before its trusted relaunch");
+    if (this.disposed) throw new Error("session disposed before the trusted Pi relaunch");
   }
 
   async newSession(cwd: string): Promise<string> {
@@ -514,10 +589,12 @@ export class PiRpcDriver implements Driver {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending || !this.peer) return false;
     this.pendingPermissions.delete(requestId);
+    if (pending.decide) {
+      pending.decide(optionId);
+      return true;
+    }
     const response = optionId == null ? pending.fallback : pending.responses.get(optionId) ?? pending.fallback;
-    const sent = this.peer.send({ type: "extension_ui_response", id: requestId, ...response });
-    if (pending.startupTrust) this.resumeStartupStateWatchdog();
-    return sent;
+    return this.peer.send({ type: "extension_ui_response", id: requestId, ...response });
   }
 
   answerQuestion(
@@ -544,7 +621,6 @@ export class PiRpcDriver implements Driver {
     if (this.disposed) return;
     this.disposed = true;
     this.cancelled = true;
-    this.clearStartupStateWatchdog();
     this.dismissQuestions("replaced");
     this.settleTurn("cancelled");
     this.rejectAgentControlBridge(new Error("Pi driver disposed before Agent Control became ready"));
@@ -617,6 +693,7 @@ export class PiRpcDriver implements Driver {
         return;
       case "extension_ui_request":
         if (this.acceptAgentControlReady(event)) return;
+        if (this.acceptProjectTrustStatus(event)) return;
         if (this.onSecurityApprovalRequest(event)) return;
         this.onExtensionUiRequest(event);
         return;
@@ -653,30 +730,42 @@ export class PiRpcDriver implements Driver {
     pending.reject(error);
   }
 
-  private beginStartupStateWatchdog(): void {
-    this.startupStatePending = true;
-    this.resumeStartupStateWatchdog();
+  /** Accept only the first report bound to this launch's nonce. A decline counts only for this
+   * session's working directory; any other report, a second one, or none at all never asks the
+   * user, which leaves project resources skipped. */
+  private acceptProjectTrustStatus(event: Json): boolean {
+    if (event.method !== "setStatus" || event.statusKey !== PI_PROJECT_TRUST_STATUS_KEY) return false;
+    const nonce = this.projectTrustNonce;
+    const text = typeof event.statusText === "string" ? event.statusText : "";
+    if (!nonce || this.projectTrustStatus !== null) {
+      this.projectTrustStatus = "replayed";
+      return true;
+    }
+    const [eventNonce, state, encodedCwd, ...rest] = text.split(".");
+    let cwd: string | undefined;
+    try {
+      if (encodedCwd !== undefined && Buffer.from(encodedCwd, "base64url").toString("base64url") === encodedCwd) {
+        cwd = Buffer.from(encodedCwd, "base64url").toString("utf8");
+      }
+    } catch {
+      cwd = undefined;
+    }
+    this.projectTrustStatus = eventNonce === nonce && !rest.length && cwd !== undefined &&
+        (state !== PI_PROJECT_TRUST_DECLINED || this.isSessionCwd(cwd))
+      ? state ?? "invalid"
+      : "invalid";
+    return true;
   }
 
-  private pauseStartupStateWatchdog(): void {
-    if (this.startupStateTimer) clearTimeout(this.startupStateTimer);
-    this.startupStateTimer = undefined;
-  }
-
-  private resumeStartupStateWatchdog(): void {
-    if (!this.startupStatePending || [...this.pendingPermissions.values()].some((pending) => pending.startupTrust)) return;
-    this.pauseStartupStateWatchdog();
-    this.startupStateTimer = setTimeout(() => {
-      this.startupStateTimer = undefined;
-      this.peer?.dispose("Pi RPC get_state response timed out");
-      if (this.child) this.kill(this.child);
-    }, PI_STARTUP_PROGRESS_TIMEOUT_MS);
-    this.startupStateTimer.unref?.();
-  }
-
-  private clearStartupStateWatchdog(): void {
-    this.startupStatePending = false;
-    this.pauseStartupStateWatchdog();
+  /** Pi reports the realpath of its working directory; the driver may hold the unresolved one. */
+  private isSessionCwd(cwd: string): boolean {
+    if (cwd === this.cwd) return true;
+    if (this.opts.context.kind !== "native") return false;
+    try {
+      return cwd === realpathSync(this.cwd);
+    } catch {
+      return false;
+    }
   }
 
   private agentControlExtensionPath(): string | undefined {
@@ -883,35 +972,7 @@ export class PiRpcDriver implements Driver {
       this.peer?.send({ type: "extension_ui_response", id: requestId, ...blockedResponse });
       return true;
     }
-    if (payload.kind === "project_trust") {
-      if (event.method !== "select" || !Array.isArray(event.options) ||
-          event.options.length !== 2 || event.options[0] !== "Trust This Project" ||
-          event.options[1] !== "Skip Project Resources") {
-        this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
-        return true;
-      }
-      const cwd = typeof payload.cwd === "string" ? payload.cwd.slice(0, 4096) : "";
-      this.pendingPermissions.set(requestId, {
-        responses: new Map([
-          ["trust", { value: "Trust This Project" }],
-          ["skip", { value: "Skip Project Resources" }],
-        ]),
-        fallback: { cancelled: true },
-        startupTrust: this.startupStatePending,
-      });
-      if (this.startupStatePending) this.pauseStartupStateWatchdog();
-      this.cb.onEvent({
-        kind: "permission_request",
-        requestId,
-        title: "Trust Pi Project Resources?",
-        options: [
-          { optionId: "trust", name: "Trust This Project", kind: "allow_always" },
-          { optionId: "skip", name: "Skip Project Resources", kind: "reject_always" },
-        ],
-        context: { toolName: "pi.project_trust", ...(cwd ? { input: cwd } : {}) },
-      });
-      return true;
-    }
+    // Project trust is never answered in-band: the extension declines it and the driver relaunches.
     if (payload.kind !== "tool_call") {
       this.peer?.send({ type: "extension_ui_response", id: requestId, ...blockedResponse });
       return true;
@@ -1031,12 +1092,13 @@ export class PiRpcDriver implements Driver {
   }
 
   private dismissQuestions(resolutionReason: "replaced" | "provider_resolved"): void {
-    for (const [requestId] of this.pendingPermissions) {
-      this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
+    const pendingPermissions = [...this.pendingPermissions];
+    this.pendingPermissions.clear();
+    for (const [requestId, pending] of pendingPermissions) {
+      if (pending.decide) pending.decide(null);
+      else this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });
       this.cb.onEvent({ kind: "permission_resolved", requestId, optionId: null, resolutionReason });
     }
-    this.pendingPermissions.clear();
-    this.resumeStartupStateWatchdog();
     for (const [requestId, pending] of this.pendingQuestions) {
       if (pending.timer) clearTimeout(pending.timer);
       this.peer?.send({ type: "extension_ui_response", id: requestId, cancelled: true });

@@ -92,6 +92,40 @@ test("Pi discovery does not advertise forks without authoritative entry cursors"
   assert.equal(result.capabilities.supportsConversationFork, false);
 });
 
+async function discoverScenario(scenario: string) {
+  const result = await probePiRpc(
+    { command: process.execPath, args: [fixture] },
+    { kind: "native" },
+    { cwd: process.cwd(), timeoutMs: 2_000, env: { WOLLIPOG_FAKE_PI_SCENARIO: scenario } },
+  );
+  assert.equal(result.available, true, result.unavailableReason);
+  return result.capabilities;
+}
+
+test("Pi discovery advertises fork exactly when the entry cursor answers at the reported leaf", async () => {
+  // Pi 1.4.0 already records startup model and thinking-level entries under --no-session.
+  assert.equal((await discoverScenario("normal")).supportsConversationFork, true,
+    "startup entries with a string leaf and a working since-cursor advertise fork");
+  assert.equal((await discoverScenario("legacy-null-leaf")).supportsConversationFork, true,
+    "an older empty list with a null leaf still advertises fork");
+  assert.equal((await discoverScenario("entries-dangling-leaf")).supportsConversationFork, false,
+    "a leaf that is not one of the listed entries cannot bind a checkpoint");
+  assert.equal((await discoverScenario("entries-cursor-unsupported")).supportsConversationFork, false,
+    "a since-cursor that does not answer from the leaf cannot bind a checkpoint");
+});
+
+test("Pi discovery classifies commands by sourceInfo.scope and falls back to location", async () => {
+  const expected = [
+    { name: "skill:review", description: "Review code", source: "user" },
+    { name: "ship", description: "Ship it", source: "user" },
+    { name: "project-review", description: "Review this project", source: "project" },
+    { name: "skill:project-skill", description: "Project skill", source: "project" },
+  ];
+  assert.deepEqual((await discoverScenario("project-commands")).slashCommands, expected);
+  assert.deepEqual((await discoverScenario("legacy-location-project-commands")).slashCommands, expected,
+    "releases that still report location keep their classification");
+});
+
 test("Pi discovery keeps RPC available without advertising an unproved extension bridge", async () => {
   const result = await probePiRpc(
     { command: process.execPath, args: [fixture] },

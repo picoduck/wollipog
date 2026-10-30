@@ -183,8 +183,8 @@ exposes the campaign tools on the Agent Control extension every verified Pi sess
 Nothing else is injected — no `--no-extensions`, `--no-skills`, `--no-prompt-templates`,
 `--no-context-files`, or `--exclude-tools`. Crucially the approval path is the ordinary one: every
 permission branch in `pi-rpc.ts` keys on the coupled preset literal, so an additive Orchestrator
-waits for Pi's `project_trust` event, receives `--no-approve` only when a normal session of that
-mode would, and is **never** blanket auto-confirmed — the preset's auto-confirm is safe only because
+takes the ordinary project-trust path (see [Pi Project Trust](#pi-project-trust)), receives
+`--no-approve` only when a normal session of that mode would, and is **never** blanket auto-confirmed — the preset's auto-confirm is safe only because
 the preset also excludes `bash`, `edit`, and `write`. Measured against pi 0.85.0, repeated
 `--append-system-prompt` values accumulate rather than displace one another, and the flag is matched
 by exact equality (so `--append-system-prompt=TEXT` is an extension flag, not an append, and the
@@ -1514,6 +1514,32 @@ Native MCP enum/boolean forms and Pi boolean confirmations cannot represent arbi
 provider schema. Their questions expose `customAnswerError`: entering custom text shows that limitation
 and retains the question, instead of converting it into an enum, a boolean, or a cancellation.
 These form responses grant no tool or governance authorization.
+
+### Pi Project Trust
+
+Pi resolves project trust while it builds its runtime, before RPC mode reads stdin, and offers
+command-line extensions no UI there (`hasUI: false`). No RPC client can answer it in-band, so a
+verified ordinary Pi session (both Agent Control nonces present, not the coupled Orchestrator preset)
+obtains the decision in two steps:
+
+1. The first launch passes neither `--approve` nor `--no-approve` and a fresh per-launch nonce. When
+   the project has protected resources, Pi dispatches `project_trust`; the runner extension always
+   declines it without remembering, so project resources are skipped and Pi's `trust.json` is never
+   written. At `session_start` the extension reports `<launch nonce>.declined.<canonical cwd>` (or
+   `not_requested`) before Agent Control readiness.
+2. Only for a `declined` report that carries this launch's nonce and this session's working
+   directory does the driver hold `initialize()` and show **Trust Pi Project Resources?** The
+   declined process does no turn or session-writing work meanwhile; even the model and thinking-level
+   selection waits. **Trust This Project** stops that process, requires proof that its tree exited,
+   and relaunches the same session with `--approve` (`--session-id <id>` for a new session, whose
+   file does not exist yet; `--session <id>` for a resumed one). **Skip Project Resources**, a
+   dismissal, or disposal keeps the declined process.
+
+Every other path stays skipped: a missing, mismatched, stale, or repeated report never asks, a
+relaunch failure fails startup visibly, and a Pi exit while the question is open fails startup.
+Strict Orchestrators and unverified bridges keep `--no-approve`. The decision applies to one launch;
+the next launch asks again. A nonce-bound `select` envelope claiming project trust is cancelled
+rather than shown. `pnpm probe:pi-assumptions` re-measures each Pi behavior this relies on.
 
 
 ## Provider Failure Categories and Background Retry Exhaustion
