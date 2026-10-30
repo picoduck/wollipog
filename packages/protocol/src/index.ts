@@ -4877,6 +4877,10 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
+  /** Duplicate inspection searched and compared titles by their subject, without a type tag
+   * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an
+   * existing issue that differs only by it, and no bounded publication is admitted through them. */
+  duplicateSearch?: "subject";
 }
 
 export interface GithubIssueClosureInspection {

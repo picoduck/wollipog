@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { campaignPublicationSafe, campaignPublicationTitle, type SessionView, type GithubIssueClosureSnapshot,
+import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
   type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
@@ -50,24 +50,34 @@ export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number):
 
 export function publicationEvidence(db: ControlPlaneDb, root: SessionView,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>) {
+  const checked = publicationEvidenceCheck(db, root, snapshot);
+  return "evidence" in checked ? checked.evidence : null;
+}
+
+/** The same proof, naming the first condition that failed so a human fallback is never silent. */
+export function publicationEvidenceCheck(db: ControlPlaneDb, root: SessionView,
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>) {
+  const failed = (failure: CampaignPublicationAdmissionFailure) => ({ failure });
   const boundary = issueBoundary(root);
   if (!boundary?.issueAuthority?.relatedFollowUps || !boundary.operations.includes(snapshot.category) ||
-      snapshot.repository !== boundary.repository.toLowerCase() || !snapshot.recommendationId ||
-      !campaignPublicationSafe(snapshot.sanitizedTitle, snapshot.sanitizedBody, snapshot.labels)) return null;
+      snapshot.repository !== boundary.repository.toLowerCase()) return failed("no_issue_boundary");
+  if (!snapshot.recommendationId) return failed("recommendation_not_found");
+  if (!campaignPublicationSafe(snapshot.sanitizedTitle, snapshot.sanitizedBody, snapshot.labels)) return failed("unsafe_payload");
   const recommendation = db.campaignWorkLedger.recommendation(root.id, snapshot.recommendationId);
-  if (!recommendation || recommendation.disposition !== "accepted" || recommendation.duplicateOfId ||
-      recommendation.publication !== "awaiting_publication" || !recommendation.dispositionReason ||
-      recommendation.repository.toLowerCase() !== snapshot.repository ||
-      campaignPublicationTitle(recommendation.title) !== campaignPublicationTitle(snapshot.sanitizedTitle) || !recommendation.originWorkItemIds.length) return null;
+  if (!recommendation || recommendation.repository.toLowerCase() !== snapshot.repository) return failed("recommendation_not_found");
+  if (recommendation.disposition !== "accepted" || recommendation.duplicateOfId || !recommendation.dispositionReason) return failed("recommendation_not_accepted");
+  if (recommendation.publication !== "awaiting_publication") return failed("recommendation_spent");
+  if (campaignPublicationTitle(recommendation.title) !== campaignPublicationTitle(snapshot.sanitizedTitle)) return failed("title_mismatch");
+  if (!recommendation.originWorkItemIds.length) return failed("origin_outside_scope");
   const origins = recommendation.originWorkItemIds.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now())?.issue);
-  if (origins.some((issue) => !issue || issue.repository.toLowerCase() !== snapshot.repository || !root.orchestratorPolicy?.issueNumbers?.includes(issue.number))) return null;
+  if (origins.some((issue) => !issue || issue.repository.toLowerCase() !== snapshot.repository || !root.orchestratorPolicy?.issueNumbers?.includes(issue.number))) return failed("origin_outside_scope");
   // Scope capacity includes every outstanding publication reservation, so concurrent approvals
   // cannot consume the same final slot. This hook composes with aggregate campaign limits.
   const grants = db.campaignPublicationReservations(root.id);
-  if (grants.some((d) => d.status === "consumed" && d.resourceSnapshot.category === snapshot.category && d.resourceSnapshot.recommendationId === snapshot.recommendationId)) return null;
+  if (grants.some((d) => d.status === "consumed" && d.resourceSnapshot.category === snapshot.category && d.resourceSnapshot.recommendationId === snapshot.recommendationId)) return failed("recommendation_spent");
   const reservations = reservedPublicationSlots(db, root, undefined, snapshot.recommendationId);
-  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= boundary.issueAuthority.maxIssues) return null;
-  return { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision };
+  if ((root.orchestratorPolicy?.issueNumbers?.length ?? 0) + reservations >= boundary.issueAuthority.maxIssues) return failed("capacity_exhausted");
+  return { evidence: { recommendation, origins, scopeRevision: boundary.issueScopeRevision, boundaryRevision: boundary.revision } };
 }
 
 /** The publications a scope change admits: its follow-up lineage and the exact payloads it verified. */

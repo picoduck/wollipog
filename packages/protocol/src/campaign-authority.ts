@@ -3,6 +3,7 @@ import { campaignEvidenceAuthorityBound, type CampaignEvidenceAuthority } from "
 import { parentControlRequestEligible, runnerCapabilityRequirementError, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails } from "./index.js";
 import { validCampaignBudgetAuthority, type CampaignBudgetAuthority } from "./campaign-budget.js";
 import { campaignRepositoryLocation } from "./campaign-work-ledger.js";
+import type { CampaignPublicationAdmissionFailure } from "./campaign-issue-publication.js";
 import type { ApprovalContext, GovernancePolicy, ParentControlDecisionPolicy, ParentControlMode, PendingApproval, WorkflowDecisionCategory, WorkflowDecisionResourceSnapshot } from "./index.js";
 
 export type CampaignControlMode = "custom" | "full_control";
@@ -62,6 +63,8 @@ export interface CampaignAuthorityEvaluation {
   /** The server answers this occurrence itself with its one-time reject or dismissal. A
    * declined occurrence can never be approved or answered by anyone acting for the campaign. */
   disposition?: "decline";
+  /** A publication that named a recommendation the server could not admit (#2940). */
+  admissionFailure?: CampaignPublicationAdmissionFailure;
 }
 
 const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",

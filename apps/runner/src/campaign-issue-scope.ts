@@ -1,4 +1,4 @@
-import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationTitle, campaignRepositoryLocation, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationSubject, campaignPublicationTitle, campaignRepositoryLocation, type CampaignIssueScopeView } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
 import { githubSlug } from "./git-ops.js";
 import { gitlabIssueOrigin, readGitlabIssue, readGitlabProject } from "./gitlab-issue-closure.js";
@@ -104,13 +104,14 @@ async function inspectGitlabIssueScope(run: Run, origin: { host: string; project
 
 /** Search both states and the latest issue page; bounded overflow cannot prove deduplication.
  * GitHub only: a GitLab repository is refused with a fixed sentence (#3539). */
-export async function inspectCampaignPublication(run: Run, publication: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; publicationDigest: string }> {
+export async function inspectCampaignPublication(run: Run, publication: { sanitizedTitle: string; sanitizedBody: string; labels: string[] }): Promise<{ repository: string; publicationDigest: string; duplicateSearch: "subject" }> {
   if (!campaignPublicationSafe(publication.sanitizedTitle, publication.sanitizedBody, publication.labels)) throw new Error("Publication requires sanitized issue-reporting content");
   const { repository } = await inspectCampaignIssueScope(run);
   if (campaignRepositoryLocation(repository)?.forge !== "github") throw new CampaignIssueScopeRefusal(GITLAB_PUBLICATION_REFUSAL);
   const recent = JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/issues?state=all&sort=created&direction=desc&per_page=100`]));
   const search = JSON.parse(await run("gh", ["api", "--hostname", "github.com", "search/issues", "-X", "GET", "-f",
-    `q=repo:${repository} is:issue in:title ${publication.sanitizedTitle}`, "-f", "per_page=100"]));
+    // Search the subject: a type tag's terms would filter out an older untagged duplicate.
+    `q=repo:${repository} is:issue in:title ${campaignPublicationSubject(publication.sanitizedTitle)}`, "-f", "per_page=100"]));
   if (!Array.isArray(recent) || !Array.isArray(search.items) || search.incomplete_results !== false || !Number.isSafeInteger(search.total_count) || search.total_count > 100) throw new Error("Duplicate inspection is incomplete");
   const matches = [...recent, ...search.items].filter((row) => !row.pull_request);
   if (matches.some((row) => typeof row.title !== "string" || !Number.isSafeInteger(row.number) || typeof row.html_url !== "string" ||
@@ -118,5 +119,5 @@ export async function inspectCampaignPublication(run: Run, publication: { saniti
   if (matches.some((row) => campaignPublicationTitle(row.title) === campaignPublicationTitle(publication.sanitizedTitle))) throw new Error("An issue already has this normalized title");
   // Bind the payload, not volatile unrelated tracker rows. Inspection is repeated at consumption.
   const payload = { sanitizedTitle: publication.sanitizedTitle, sanitizedBody: publication.sanitizedBody, labels: publication.labels };
-  return { repository, publicationDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex") };
+  return { repository, publicationDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex"), duplicateSearch: "subject" };
 }

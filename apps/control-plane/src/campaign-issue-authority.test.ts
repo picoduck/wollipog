@@ -29,11 +29,12 @@ function harness(full = true, maximum = 5) {
   }
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
-  const state = { publicationOk: true, executes: 0, openPR: false, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
+  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
-        ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }) };
+        ok: state.publicationOk, repository: "team/repo", publicationDigest: issueEvidenceDigest({ sanitizedTitle: message.sanitizedTitle, sanitizedBody: message.sanitizedBody, labels: message.labels }),
+        ...(state.subjectSearch ? { duplicateSearch: "subject" as const } : {}) };
       return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
         ...(message.operation === "synchronize" ? { revision: message.scope.revision } : { candidates: (message.issues ?? [100, 101]).map((number) =>
           ({ issue: { repository: "team/repo", number }, title: message.publication?.sanitizedTitle ?? state.publicationTitles[number] ?? `Issue ${number}`, source: "sub_issue" as const })) }) };
@@ -363,6 +364,112 @@ test("publication requires an accepted unique related recommendation, exact sani
     const replay=await h.svc.createWorkflowDecisionWithVideo("root",{requestId:"replay-pub",resourceKey:"pub",resourceSnapshot:snapshot});
     assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","spent recommendations never mint another standing grant");
   } finally { h.db.close(); }
+});
+
+const bugBody = "## Problem\nRelated failure\n## Reproduction Steps\n1. Run it\n## Actual Behavior\nFails\n## Expected Behavior\nPasses\n## Environment\nLinux\n## Acceptance Criteria\n- Verified repair";
+
+function acceptedRecommendation(h: ReturnType<typeof harness>, title = "Related repair") {
+  const record = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds:[h.item.id]});
+  assert.ok(record.ok,record.error ?? "record");
+  assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:record.data!.id,disposition:"accepted",reason:"Observed related work",publicationRequired:true}).ok);
+  return record.data!.id;
+}
+
+// #2940, observed live: Full Control children drafted accepted follow-ups and requested them with
+// their recommendationId. The issue-form "[Bug]: " prefix and the child requester each refused
+// admission silently, so the person was asked to approve in-boundary publications.
+test("a child's accepted, in-scope publication with an issue-form title prefix is Orchestrator-owned and consumable (#2940)", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    for (const [requestId, title, issueBody, labels] of [["feature-form", "[Feature]: Related repair", body, ["enhancement", "UI"]], ["bug-form", "[Bug]: Related repair", bugBody, ["bug"]]] as const) {
+      const snapshot = {category:"follow_up_issue_publication" as const,repository:"team/repo",sanitizedTitle:title,sanitizedBody:issueBody,labels:[...labels],recommendationId};
+      const p = await h.svc.createWorkflowDecisionWithVideo("child",{requestId,resourceKey:requestId,resourceSnapshot:snapshot});
+      assert.ok(p.ok,p.error ?? requestId);
+      const decision = p.data!;
+      assert.equal(decision.controllingSessionId,"root");
+      assert.equal(decision.authority,"orchestrator",JSON.stringify(decision.authorityEvaluation));
+      assert.deepEqual([decision.authorityEvaluation?.basis,decision.authorityEvaluation?.reason],["campaign_delegation","authorized_operation"]);
+      assert.equal(decision.authorityEvaluation?.admissionFailure,undefined);
+      assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && decision.resourceSnapshot.recommendationId === recommendationId &&
+        decision.resourceSnapshot.issueAdmission, "the recommendation lineage and server admission are retained");
+      if (requestId === "bug-form") {
+        assert.ok(h.svc.resolveWorkflowDecision("root","child",decision.occurrenceId,{outcome:"approve"},"orchestrator",{kind:"agent",id:"root"},()=>true).ok);
+        const consumed = await h.svc.consumeWorkflowDecision("child",decision.occurrenceId,{resourceSnapshot:decision.resourceSnapshot});
+        assert.ok(consumed.ok,consumed.error ?? "consume");
+      }
+    }
+    const replay = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:"replay",resourceKey:"replay",
+      resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:"Related repair",sanitizedBody:body,labels:[],recommendationId}});
+    assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","a consumed recommendation never mints a second standing grant");
+    assert.equal(replay.data!.authorityEvaluation?.admissionFailure,"recommendation_spent");
+  } finally { h.db.close(); }
+});
+
+test("every bounded publication needs a runner whose duplicate search and comparison ignore the tag (#2940)", async () => {
+  // An older runner keeps the tag on both sides of its duplicate check. A tagged title can hide an
+  // older untagged issue from its search; an untagged one misses an existing "[Bug]: Subject"
+  // issue in its comparison. Either way its successful inspection proves no deduplication.
+  for (const [recommendationTitle, payloadTitle] of [["Related repair", "[Bug]: Related repair"], ["[Bug]: Related repair", "Related repair"]] as const) {
+    const h = harness();
+    try {
+      const recommendationId = acceptedRecommendation(h, recommendationTitle);
+      const request = (requestId: string) => h.svc.createWorkflowDecisionWithVideo("child",{requestId,resourceKey:requestId,
+        resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:payloadTitle,sanitizedBody:body,labels:[],recommendationId}});
+      h.state.subjectSearch = false;
+      const older = await request("older-runner");
+      assert.ok(older.ok,payloadTitle); assert.equal(older.data!.authority,"human",payloadTitle);
+      assert.equal(older.data!.authorityEvaluation?.admissionFailure,"inspection_failed",payloadTitle);
+      h.state.subjectSearch = true;
+      const current = await request("subject-runner");
+      assert.ok(current.ok,payloadTitle); assert.equal(current.data!.authority,"orchestrator",payloadTitle);
+      assert.ok(h.svc.resolveWorkflowDecision("root","child",current.data!.occurrenceId,{outcome:"approve"},"orchestrator",{kind:"agent",id:"root"},()=>true).ok);
+      h.state.subjectSearch = false;
+      assert.equal((await h.svc.consumeWorkflowDecision("child",current.data!.occurrenceId,{resourceSnapshot:current.data!.resourceSnapshot})).ok,false,
+        `${payloadTitle}: consumption after a runner downgrade repeats the requirement`);
+      h.state.subjectSearch = true;
+      assert.ok((await h.svc.consumeWorkflowDecision("child",current.data!.occurrenceId,{resourceSnapshot:current.data!.resourceSnapshot})).ok,payloadTitle);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a child's publication outside the proof routes to the person with a visible admission failure (#2940)", async () => {
+  const cases: Array<{ name: string; expected: string; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
+    change?: (snapshot: { sanitizedTitle: string; sanitizedBody: string; labels: string[]; recommendationId: string }) => void }> = [
+    { name: "forged", expected: "recommendation_not_found", setup: () => "followup_forged" },
+    { name: "unaccepted", expected: "recommendation_not_accepted", setup: (h) => {
+      const record = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title:"Related repair",originWorkItemIds:[h.item.id]});
+      assert.ok(record.ok); return record.data!.id;
+    } },
+    { name: "other title", expected: "title_mismatch", change: (s) => { s.sanitizedTitle = "[Bug]: A different repair"; } },
+    { name: "unsafe", expected: "unsafe_payload", change: (s) => { s.sanitizedBody += "\napi_key=secret-value"; } },
+    { name: "duplicate labels", expected: "unsafe_payload", change: (s) => { s.labels = ["bug", "bug"]; } },
+    { name: "over cap", expected: "capacity_exhausted", maximum: 1 },
+  ];
+  for (const c of cases) {
+    const h = harness(true, c.maximum ?? 5);
+    try {
+      const recommendationId = c.setup ? c.setup(h) : acceptedRecommendation(h);
+      const snapshot = { sanitizedTitle: "[Feature]: Related repair", sanitizedBody: body, labels: ["enhancement"], recommendationId };
+      c.change?.(snapshot);
+      const p = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:c.name,resourceKey:c.name,
+        resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",...snapshot}});
+      assert.ok(p.ok,`${c.name}: ${p.error}`);
+      assert.equal(p.data!.authority,"human",c.name);
+      assert.equal(p.data!.authorityEvaluation?.admissionFailure,c.expected,c.name);
+      assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && !p.data!.resourceSnapshot.recommendationId &&
+        !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim carries no lineage or admission`);
+    } finally { h.db.close(); }
+  }
+  const failedInspection = harness();
+  try {
+    const recommendationId = acceptedRecommendation(failedInspection);
+    failedInspection.state.publicationOk = false;
+    const p = await failedInspection.svc.createWorkflowDecisionWithVideo("child",{requestId:"duplicate",resourceKey:"duplicate",
+      resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:"Related repair",sanitizedBody:body,labels:[],recommendationId}});
+    assert.ok(p.ok); assert.equal(p.data!.authority,"human");
+    assert.equal(p.data!.authorityEvaluation?.admissionFailure,"inspection_failed");
+  } finally { failedInspection.db.close(); }
 });
 
 test("bounded not-planned closure needs a recorded supported disposition and keeps uncertain dispatch unreplayable", async () => {

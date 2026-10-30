@@ -94,6 +94,36 @@ test("publication duplicate inspection covers open, closed, newest issues and se
   }
 });
 
+test("a tagged publication searches by its subject and finds an older untagged duplicate (#2940)", async () => {
+  const publication = {sanitizedTitle:"[Bug]: Related repair",sanitizedBody:"## Problem\nFailure\n## Proposed Behavior\nRepair\n## Acceptance Criteria\n- Works\n## Security and Compatibility\nNone",labels:[]};
+  const queries: string[] = [];
+  for (const existing of [true, false]) {
+    const duplicate={number:123,title:"Related repair",html_url:"https://github.com/team/repo/issues/123"};
+    // GitHub matches every search term, so a query carrying the tag's "Bug" term filters out the untagged issue.
+    const run=async (command:string,args:string[]) => {
+      if(command==="git") return "https://github.com/team/repo.git";
+      if(args.some((arg)=>arg.includes("sort=created"))) return "[]";
+      const query=args.find((arg)=>arg.startsWith("q="))!; queries.push(query);
+      const items=existing && !/\bbug\b/iu.test(query) ? [duplicate] : [];
+      return JSON.stringify({items,total_count:items.length,incomplete_results:false});
+    };
+    if(existing) await assert.rejects(inspectCampaignPublication(run,publication),/normalized title/u);
+    else assert.equal((await inspectCampaignPublication(run,publication)).duplicateSearch,"subject");
+  }
+  assert.deepEqual(queries,Array(2).fill("q=repo:team/repo is:issue in:title Related repair"));
+});
+
+test("an untagged publication matches an existing tagged issue with the same subject (#2940)", async () => {
+  const publication = {sanitizedTitle:"Related repair",sanitizedBody:"## Problem\nFailure\n## Proposed Behavior\nRepair\n## Acceptance Criteria\n- Works\n## Security and Compatibility\nNone",labels:[]};
+  const tagged={number:123,title:"[Bug]: Related repair",html_url:"https://github.com/team/repo/issues/123"};
+  const run=async (command:string,args:string[]) => {
+    if(command==="git") return "https://github.com/team/repo.git";
+    if(args.some((arg)=>arg.includes("sort=created"))) return "[]";
+    return JSON.stringify({items:[tagged],total_count:1,incomplete_results:false});
+  };
+  await assert.rejects(inspectCampaignPublication(run,publication),/normalized title/u);
+});
+
 test("follow-up scope inspects exact title, body and labels rather than trusting its issue number", async () => {
   const publication={sanitizedTitle:"Exact",sanitizedBody:"Exact body",labels:["feature"]};
   for(const changed of ["none","title","body","labels"]) {
