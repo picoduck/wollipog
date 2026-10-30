@@ -107,9 +107,13 @@ export function sandboxFailureDetail(result: { error?: unknown; status: number |
     result.status === 0 ? "exited 0 without the ready marker" : `exited ${result.status}`;
   const lines = (result.stderr ?? "").split("\n").map(l => l.replace(/[^\x20-\x7e]/gu, "").trim()).filter(Boolean);
   // Prefer the failure itself over a leading warning, such as Codex's PATH-alias notice.
-  const line = lines.find(l => /panicked|error|bwrap:|denied|not permitted|refus/iu.test(l) && !/^WARNING:/u.test(l)) ??
-    lines.findLast(l => !/^WARNING:/u.test(l)) ?? lines[0];
-  return line ? `${outcome}: ${line.length > 200 ? `${line.slice(0, 200)}...` : line}` : `${outcome} with no stderr`;
+  const index = lines.findIndex(l => /panicked|error|bwrap:|denied|not permitted|refus/iu.test(l) && !/^WARNING:/u.test(l));
+  const fallback = lines.findLastIndex(l => !/^WARNING:/u.test(l));
+  const at = index >= 0 ? index : fallback >= 0 ? fallback : 0;
+  // A Rust panic prints its location first and its message on the following lines.
+  const picked = lines.slice(at, /panicked at/u.test(lines[at] ?? "") ? at + 3 : at + 1)
+    .filter(l => !/^note: run with `RUST_BACKTRACE/u.test(l)).join(" ");
+  return picked ? `${outcome}: ${picked.length > 400 ? `${picked.slice(0, 400)}...` : picked}` : `${outcome} with no stderr`;
 }
 
 /** Stands in for the network: reachable outside the sandbox, refused inside it. */

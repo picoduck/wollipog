@@ -60,9 +60,11 @@ test("a failed sandbox control reports its exact cause, bounded and printable", 
   assert.equal(sandboxFailureDetail(null), "no Linux sandbox on this platform");
   assert.equal(sandboxFailureDetail({ status: 101, stderr: 'WARNING: proceeding, even though we could not create PATH aliases: Refusing to create helper binaries under temporary dir "/tmp"\nthread main panicked at sandbox.rs: could not exec helper\n' }),
     "exited 101: thread main panicked at sandbox.rs: could not exec helper");
+  assert.equal(sandboxFailureDetail({ status: 101, stderr: "thread 'main' (2) panicked at linux-sandbox/src/linux_run_main.rs:1193:5:\nfailed to apply sandbox: Permission denied (os error 13)\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\n" }),
+    "exited 101: thread 'main' (2) panicked at linux-sandbox/src/linux_run_main.rs:1193:5: failed to apply sandbox: Permission denied (os error 13)");
   assert.equal(sandboxFailureDetail({ status: 1, stderr: "WARNING: only a warning\n" }), "exited 1: WARNING: only a warning");
   const long = sandboxFailureDetail({ status: 2, stderr: `\u001b[31m${"x".repeat(500)}` });
-  assert.ok(long.length < 230 && !long.includes("\u001b"));
+  assert.ok(long.length < 430 && !long.includes("\u001b"));
 });
 
 test("acknowledged namespace unavailability succeeds operationally with visible unmeasured evidence; every other failure remains failing", () => {
