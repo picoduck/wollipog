@@ -7,6 +7,7 @@ import {
 } from "../instance-pairing.js";
 import { useInstances } from "../instances-context.js";
 import { Modal } from "./common.js";
+import { useSecretInput } from "./ui/secret-input.js";
 
 type RemoteInstanceDialogProps =
   | { mode: "add"; onClose: () => void }
@@ -36,8 +37,9 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
   const profile = props.mode === "add" ? null : props.profile;
   const [label, setLabel] = useState(profile?.label ?? "");
   const [origin, setOrigin] = useState(profile?.origin ?? "");
-  const [pairingLink, setPairingLink] = useState("");
-  const [pairingCode, setPairingCode] = useState("");
+  // Pairing secrets stay out of the DOM (#3814): read on submit, and cleared once accepted.
+  const pairingLink = useSecretInput();
+  const pairingCode = useSecretInput();
   const [advanced, setAdvanced] = useState(props.mode === "edit");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -62,7 +64,7 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
         if (!parsed.ok) throw new Error(parsed.error.message);
         let replacementToken: string | undefined;
         if (parsed.value.httpOrigin !== props.profile.origin) {
-          const replacement = parseRemoteInstancePairingLink(pairingLink);
+          const replacement = parseRemoteInstancePairingLink(pairingLink.read());
           if (!replacement.ok) throw new Error(replacement.error.message);
           if (replacement.value.endpoint.httpOrigin !== parsed.value.httpOrigin) {
             throw new Error("The pairing link must match the new server address.");
@@ -77,8 +79,8 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
         });
       } else {
         const parsed = advanced
-          ? parseRemoteInstanceAdvanced(origin, pairingCode)
-          : parseRemoteInstancePairingLink(pairingLink);
+          ? parseRemoteInstanceAdvanced(origin, pairingCode.read())
+          : parseRemoteInstancePairingLink(pairingLink.read());
         if (!parsed.ok) throw new Error(parsed.error.message);
         if (props.mode === "repair") {
           if (parsed.value.endpoint.httpOrigin !== props.profile.origin) {
@@ -93,8 +95,8 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
           });
         }
       }
-      setPairingLink("");
-      setPairingCode("");
+      pairingLink.clear();
+      pairingCode.clear();
       props.onClose();
     } catch (cause) {
       setError((cause as Error).message);
@@ -154,14 +156,14 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
               <label className="field">
                 <span>Pairing Link for New Address</span>
                 <input
+                  ref={pairingLink.ref}
                   type="password"
-                  value={pairingLink}
                   disabled={busy}
                   autoComplete="off"
                   spellCheck={false}
                   aria-invalid={Boolean(error)}
                   aria-describedby={error ? `${formId}-error` : undefined}
-                  onChange={(event) => setPairingLink(event.target.value)}
+                  onChange={pairingLink.remember}
                   placeholder="https://new-host/#pair=…"
                 />
                 <small>Changing the address requires a fresh pairing link so the saved credential is never sent to an unverified server.</small>
@@ -175,14 +177,14 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
                 <span>Pairing Link</span>
                 <input
                   autoFocus={props.mode === "repair"}
+                  ref={pairingLink.ref}
                   type="password"
-                  value={pairingLink}
                   disabled={busy}
                   autoComplete="off"
                   spellCheck={false}
                   aria-invalid={Boolean(error)}
                   aria-describedby={error ? `${formId}-error` : undefined}
-                  onChange={(event) => setPairingLink(event.target.value)}
+                  onChange={pairingLink.remember}
                   placeholder="https://host/#pair=…"
                 />
               </label>
@@ -207,12 +209,12 @@ export function RemoteInstanceDialog(props: RemoteInstanceDialogProps) {
                 <label className="field">
                   <span>Pairing Code</span>
                   <input
+                    ref={pairingCode.ref}
                     type="password"
-                    value={pairingCode}
                     disabled={busy}
                     autoComplete="off"
                     spellCheck={false}
-                    onChange={(event) => setPairingCode(event.target.value)}
+                    onChange={pairingCode.remember}
                   />
                 </label>
               </div>

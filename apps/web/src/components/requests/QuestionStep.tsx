@@ -9,6 +9,7 @@ import {
 import { FieldError } from "../FieldError.js";
 import { StructuredQuestionText } from "../StructuredQuestionText.js";
 import { ChoiceRows, type ChoiceRowOption } from "../ui/ChoiceControls.js";
+import { secretValueRef } from "../ui/secret-input.js";
 
 /**
  * The question card's own words (§17; #2196), in one table the copy test classifies: labels and
@@ -245,7 +246,26 @@ export function QuestionStep({
             onChoose={onChoose}
           />
         )}
-        {textField && (
+        {textField && question.secret && (
+          // A secret is uncontrolled, so it never reaches the value attribute (#3814); the draft
+          // reaches the field through its ref.
+          <input
+            ref={secretValueRef(textValue)}
+            className="input question-input"
+            data-session-request-control={`question:${question.id}:input`}
+            aria-labelledby={choices ? `${names} ${ids.somethingElse}` : names}
+            aria-describedby={descriptions(error ? ids.error : null)}
+            aria-invalid={error ? true : undefined}
+            aria-required={choices ? undefined : question.required !== false}
+            disabled={inputDisabled}
+            type="password"
+            minLength={question.minLength}
+            maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+            autoComplete="off"
+            onChange={(event) => onText(event.target.value)}
+          />
+        )}
+        {textField && !question.secret && (
           <input
             className="input question-input"
             data-session-request-control={`question:${question.id}:input`}
@@ -254,13 +274,11 @@ export function QuestionStep({
             aria-invalid={error ? true : undefined}
             aria-required={choices ? undefined : question.required !== false}
             disabled={inputDisabled}
-            type={question.secret
-              ? "password"
-              : question.inputFormat === "date-time"
-                ? "datetime-local"
-                : question.inputFormat === "integer" || question.inputFormat === "number"
-                  ? "number"
-                  : question.inputFormat ?? "text"}
+            type={question.inputFormat === "date-time"
+              ? "datetime-local"
+              : question.inputFormat === "integer" || question.inputFormat === "number"
+                ? "number"
+                : question.inputFormat ?? "text"}
             inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
             step={question.inputFormat === "integer" ? 1 : question.inputFormat === "number" ? "any" : undefined}
             min={question.minimum}
