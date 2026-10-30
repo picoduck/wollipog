@@ -35,9 +35,21 @@ chmod -R go-w "$root/repo"
 install -m 755 "$(readlink -f "$(command -v node)")" "$root/node/bin/node"
 command -v setfacl > /dev/null || sudo DEBIAN_FRONTEND=noninteractive apt-get install -y acl
 sudo setfacl -m "u:$user:---" "$HOME"
-if [ -d /opt/hostedtoolcache ]; then sudo setfacl -m "u:$user:---" /opt/hostedtoolcache; fi
+# Preinstalled trees under /opt (tool cache, pipx and others) include world-writable entries.
+for entry in /opt/*; do
+  if [ "$entry" != "$root" ]; then sudo setfacl -m "u:$user:---" "$entry"; fi
+done
 
 as_user() { sudo -n -u "$user" -- "$@"; }
+IFS=: read -r -a search <<< "$PATH"
+# Remove write access, for this user alone, from anything else on the runner's PATH it can write.
+for dir in "${search[@]}"; do
+  [ -d "$dir" ] || continue
+  while IFS= read -r -d '' path; do
+    echo "Denying $user write access to $path"
+    sudo setfacl -m "u:$user:rX" "$path"
+  done < <(as_user find "$dir" -maxdepth 1 -writable -print0 2> /dev/null || true)
+done
 as_user test -r "$root/repo/package.json"
 as_user "$root/node/bin/node" --version > /dev/null
 for path in "$root/repo" "$root/repo/scripts" "$root/repo/node_modules" "$root/install" "$root/work" "$root/node/bin" "$root/node/bin/node"; do
@@ -46,7 +58,6 @@ done
 writable="$(find "$root/repo" ! -type l -perm /o+w -print -quit)"
 if [ -n "$writable" ]; then echo "$user can write $writable" >&2; exit 1; fi
 # Nothing the runner user later executes from PATH may be writable by the probe user.
-IFS=: read -r -a search <<< "$PATH"
 for dir in "${search[@]}"; do
   [ -d "$dir" ] || continue
   writable="$(as_user find "$dir" -maxdepth 1 -writable -print -quit 2> /dev/null || true)"

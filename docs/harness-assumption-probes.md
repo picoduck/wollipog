@@ -65,8 +65,9 @@ cron, at or privileged groups, stages a copy of the checkout (`git archive HEAD`
 --frozen-lockfile`, then `chmod -R go-w`) under `/opt/harness-probe/repo` that the user can read
 but not write, and denies the user traversal of the runner's home with an ACL. The hosted tool
 cache is writable by every user (the measured Node binary there is mode 777), so the user is also
-denied `/opt/hostedtoolcache` and runs a private, unwritable copy of Node placed first on its
-`PATH`. The script verifies each property, including that nothing in the copy, its Node, or any
+denied every `/opt` tree other than its own (the tool cache, pipx and other preinstalled tools,
+several of them world-writable) and runs a private, unwritable copy of Node placed first on its
+`PATH`; any other entry on the runner's `PATH` it could write gets an ACL removing that access. The script verifies each property, including that nothing in the copy, its Node, or any
 directory on the runner's `PATH` is writable by the user, and fails closed. Each suite runs through
 `sudo -n -u harness-probe -- /usr/bin/env -i ...` from the staged copy; its throwaway home and
 report directory are owned by the probe user. After each suite every process of that user is
