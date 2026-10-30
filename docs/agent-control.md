@@ -860,12 +860,15 @@ Before a native Linux Codex session starts its thread, the driver runs a probe t
 Server's `command/exec` under the same policy its turns will send. Nothing a session can write
 decides the result:
 
-- The probe is a system `printf` that prints a sentinel. The runner resolves it once by absolute
-  path (`/usr/bin/printf` or `/bin/printf`). It accepts the path only when the entry itself, what it
-  resolves to, and every directory above both are owned by root and writable by no one else. It
-  runs that path, not its resolved target, so a `printf` that links to a multicall binary such as
-  BusyBox still selects its `printf` applet.
-- Neither the path nor its target may lie under a root this boundary makes writable.
+- The probe is a system `printf` that prints a sentinel, by absolute path (`/usr/bin/printf` or
+  `/bin/printf`). At every launch the runner walks that path component by component as the kernel
+  does. It follows each symlink, intermediate directory links included, up to 16 links. Every
+  directory, link and the final file it visits must be owned by root, and every directory and
+  the file must be writable by no one else. None may lie under `/proc`, `/dev`, `/tmp` or `/sys`,
+  which the boundary mounts afresh. The final file must be an executable under `/usr` or `/bin`.
+  It runs the original path, not the resolved target, so a `printf` that links to a multicall
+  binary such as BusyBox still selects its `printf` applet.
+- No path the walk visits may lie under a root this boundary makes writable.
 - It runs with `PATH=/usr/bin:/bin` and with `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`
   unset.
 - A failure counts only when the sentinel never printed (the command never started) and stderr,

@@ -64,7 +64,7 @@ test("a Codex launch whose command sandbox cannot start fails with a typed launc
     assert.equal(kind, "codex-app-server");
     return new CodexAppServerDriver(options, callbacks, undefined, {
       spawn: () => namespaceRestrictedAppServer(methods), kill: () => {},
-      sandboxProbeCommand: () => ["/usr/bin/printf", "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED"],
+      sandboxProbeCommand: () => ({ argv: ["/usr/bin/printf", "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED"], visited: ["/", "/usr", "/usr/bin", "/usr/bin/printf"] }),
     });
   };
   const manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner", undefined, factory);

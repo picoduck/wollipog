@@ -1,13 +1,21 @@
 /**
  * The command a Codex command-sandbox probe runs (#3843). The probe decides whether Codex's own
  * sandbox is replaced by the runner's boundary, so nothing a session can write may decide its
- * outcome: not a `true` earlier on PATH, not a preloaded library, not a program the session can
- * replace. It is a system `printf`, resolved by absolute path and checked once, that prints a
- * sentinel; only a run that never printed it and failed with bubblewrap's own namespace error
+ * outcome: not a `true` earlier on PATH, not a preloaded library, not a program or a link the
+ * session can replace. It is a system `printf`, invoked by its absolute candidate path, that prints
+ * a sentinel; only a run that never printed it and failed with bubblewrap's own namespace error
  * reads as a sandbox that could not start.
+ *
+ * Trust is established for the whole path the kernel will follow, not its endpoints (CR-3.1):
+ * every directory, every symlink (intermediate directory links included) and the final file must be
+ * root's and writable by no one else, and none may lie under a file system the runner's boundary
+ * mounts afresh. Then only root can change what that path names between this check and the exec,
+ * and the caller additionally refuses a path that crosses a root the runner's boundary makes
+ * writable. The resolution runs again at every launch. Any doubt skips the probe; it never refuses
+ * a launch.
  */
-import { lstatSync, realpathSync, statSync } from "node:fs";
-import { dirname, posix } from "node:path";
+import { lstatSync, readlinkSync } from "node:fs";
+import { posix } from "node:path";
 
 export const CODEX_SANDBOX_PROBE_SENTINEL = "WOLLIPOG_CODEX_SANDBOX_PROBE_STARTED";
 
@@ -20,75 +28,104 @@ export const CODEX_SANDBOX_PROBE_ENV: Readonly<Record<string, string | null>> = 
 };
 
 const CANDIDATES = ["/usr/bin/printf", "/bin/printf"];
-const TRUSTED_PREFIXES = ["/usr/", "/bin/"];
+const TRUSTED_TARGET_PREFIXES = ["/usr/", "/bin/"];
+/** Linux's own limit on symlinks followed in one resolution is 40; a system printf needs a few. */
+const MAX_SYMLINK_HOPS = 16;
+/** Mounted afresh inside the runner's bubblewrap boundary (and `/proc/self` names a different
+ * process there), so what the runner validates under them is not what the probe would run. */
+const REMOUNTED_IN_SANDBOX = ["/proc", "/dev", "/tmp", "/sys"];
 
-export interface ProbeFileStat { isFile(): boolean; isDirectory(): boolean; uid: number; mode: number }
+export interface ProbeEntry {
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymbolicLink(): boolean;
+  uid: number;
+  mode: number;
+}
 export interface ProbeFileSystem {
-  realpath(path: string): string;
-  stat(path: string): ProbeFileStat;
-  /** The entry itself, not what a symlink names. */
-  lstat(path: string): ProbeFileStat;
+  /** The entry itself, never what a symlink names. */
+  lstat(path: string): ProbeEntry;
+  readlink(path: string): string;
 }
 
 const nativeFileSystem: ProbeFileSystem = {
-  realpath: (path) => realpathSync(path), stat: (path) => statSync(path), lstat: (path) => lstatSync(path),
+  lstat: (path) => lstatSync(path),
+  readlink: (path) => readlinkSync(path, "utf8"),
 };
 
-/** Root owns the directory and every one above it, and no one else can write any of them, so no
- * entry in it can be replaced or retargeted except by root. */
-function trustedDirectoryChain(directory: string, fs: ProbeFileSystem): boolean {
-  for (; ; directory = dirname(directory)) {
-    const entry = fs.stat(directory);
-    if (!entry.isDirectory() || entry.uid !== 0 || (entry.mode & 0o022) !== 0) return false;
-    if (directory === "/") return true;
-  }
+/** Root's, and no one else can write it. Group bits also carry a POSIX ACL's mask. */
+function rootOwnedUnwritable(entry: ProbeEntry): boolean {
+  return entry.uid === 0 && (entry.mode & 0o022) === 0;
 }
 
-/** The candidate path when both it and what it resolves to are root's and unwritable by anyone
- * else (CR-2.1). The candidate path itself is what runs, never its canonical target: a multicall
- * binary such as BusyBox picks its applet from the name it was invoked by, so `/usr/bin/printf ->
- * /bin/busybox` must stay `/usr/bin/printf`. */
-function trustedSystemExecutable(path: string, fs: ProbeFileSystem): string | null {
+/** Resolve `path` component by component, as the kernel does, validating every entry visited:
+ * each directory entered and each symlink followed must be root's and unwritable by others, and
+ * the final entry a root-owned executable regular file under `/usr` or `/bin`. Returns every path
+ * visited, or null on any doubt: a missing entry, a loop or too many links, an untrusted entry, or
+ * a final file elsewhere. `..` climbs only to a directory this walk already validated. */
+export function resolveTrustedExecutable(path: string, fs: ProbeFileSystem = nativeFileSystem): { target: string; visited: string[] } | null {
   try {
-    if (fs.lstat(path).uid !== 0 || !trustedDirectoryChain(dirname(path), fs)) return null;
-    const real = fs.realpath(path);
-    if (!TRUSTED_PREFIXES.some((prefix) => real.startsWith(prefix))) return null;
-    const file = fs.stat(real);
-    if (!file.isFile() || file.uid !== 0 || (file.mode & 0o022) !== 0 || (file.mode & 0o111) === 0) return null;
-    return trustedDirectoryChain(dirname(real), fs) ? path : null;
+    if (!posix.isAbsolute(path)) return null;
+    const root = fs.lstat("/");
+    if (!root.isDirectory() || !rootOwnedUnwritable(root)) return null;
+    const visited = ["/"];
+    let pending = path.split("/").filter(Boolean);
+    let current = "/";
+    let hops = 0;
+    while (pending.length) {
+      const name = pending.shift()!;
+      if (name === ".") continue;
+      if (name === "..") {
+        current = posix.dirname(current);
+        continue;
+      }
+      const next = posix.join(current, name);
+      if (REMOUNTED_IN_SANDBOX.some((mount) => next === mount || next.startsWith(`${mount}/`))) return null;
+      const entry = fs.lstat(next);
+      if (!rootOwnedUnwritable(entry) && !(entry.isSymbolicLink() && entry.uid === 0)) return null;
+      visited.push(next);
+      if (entry.isSymbolicLink()) {
+        // A link's own mode bits mean nothing; its owner and its (validated) directory decide who
+        // can replace it. Its target is spliced in and walked like any other path.
+        if (++hops > MAX_SYMLINK_HOPS) return null;
+        const target = fs.readlink(next);
+        if (!target) return null;
+        if (posix.isAbsolute(target)) current = "/";
+        pending = [...target.split("/").filter(Boolean), ...pending];
+        continue;
+      }
+      if (pending.length) {
+        if (!entry.isDirectory()) return null;
+        current = next;
+        continue;
+      }
+      if (!entry.isFile() || (entry.mode & 0o111) === 0) return null;
+      if (!TRUSTED_TARGET_PREFIXES.some((prefix) => next.startsWith(prefix))) return null;
+      return { target: next, visited };
+    }
+    return null;
   } catch {
     return null;
   }
 }
 
-/** The probe executable and what it resolves to, for the writable-root check: neither may lie
- * under a root the session can write. */
-export function probeExecutablePaths(executable: string, fs: Pick<ProbeFileSystem, "realpath"> = nativeFileSystem): string[] {
-  try {
-    const real = fs.realpath(executable);
-    return real === executable ? [executable] : [executable, real];
-  } catch {
-    return [executable];
+/** The probe argv and every path its resolution crosses, or null when no candidate passes, in which
+ * case the probe does not run. Resolved afresh on every call: there is no cache to go stale. The
+ * candidate path itself is what runs, never its target, so a multicall binary such as BusyBox picks
+ * its applet from the name it was invoked by (CR-2.1). */
+export function codexSandboxProbeCommand(fs: ProbeFileSystem = nativeFileSystem): { argv: string[]; visited: string[] } | null {
+  for (const candidate of CANDIDATES) {
+    const resolved = resolveTrustedExecutable(candidate, fs);
+    if (resolved) return { argv: [candidate, CODEX_SANDBOX_PROBE_SENTINEL], visited: resolved.visited };
   }
+  return null;
 }
 
-let resolved: string | null | undefined;
-
-/** The probe argv, or null when no trusted system `printf` exists, in which case no probe result
- * may enable the fallback. Resolved once per runner process unless a file system is injected. */
-export function codexSandboxProbeCommand(fs?: ProbeFileSystem): string[] | null {
-  const executable = fs
-    ? CANDIDATES.map((path) => trustedSystemExecutable(path, fs)).find((path) => path !== null) ?? null
-    : resolved !== undefined ? resolved
-      : (resolved = CANDIDATES.map((path) => trustedSystemExecutable(path, nativeFileSystem)).find((path) => path !== null) ?? null);
-  return executable ? [executable, CODEX_SANDBOX_PROBE_SENTINEL] : null;
-}
-
-/** Whether a writable root of the enclosing boundary contains the probe executable, which would
- * let the session replace it. */
-export function probeExecutableWritable(executable: string, writableRoots: readonly string[]): boolean {
+/** Whether a writable root of the enclosing boundary contains `path`, which would let the session
+ * replace what it names. */
+export function probeExecutableWritable(path: string, writableRoots: readonly string[]): boolean {
   return writableRoots.some((root) => {
-    const relative = posix.relative(root, executable);
+    const relative = posix.relative(root, path);
     return relative === "" || (!relative.startsWith("..") && !posix.isAbsolute(relative));
   });
 }

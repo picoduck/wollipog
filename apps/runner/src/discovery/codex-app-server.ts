@@ -148,7 +148,7 @@ export function wslCodexAppServerProbeArgs(distro: string, launch: ResolvedLaunc
 /** `codex sandbox` running the trusted probe command, or null when the host has none. */
 export function nativeCodexCommandSandboxProbeArgs(
   launch: ResolvedLaunch,
-  probeCommand: string[] | null = codexSandboxProbeCommand(),
+  probeCommand: string[] | null = codexSandboxProbeCommand()?.argv ?? null,
 ): { command: string; args: string[] } | null {
   return probeCommand ? { command: launch.command, args: [...launch.args, "sandbox", "--", ...probeCommand] } : null;
 }

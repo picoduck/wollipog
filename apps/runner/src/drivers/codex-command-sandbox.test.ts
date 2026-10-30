@@ -22,6 +22,7 @@ import {
   CODEX_SANDBOX_PROBE_SENTINEL,
   codexSandboxProbeCommand,
   probeExecutableWritable,
+  resolveTrustedExecutable,
   type ProbeFileSystem,
 } from "../codex-sandbox-probe-command.js";
 import type { SpawnIsolation } from "../spawn.js";
@@ -29,6 +30,7 @@ import type { SpawnIsolation } from "../spawn.js";
 const linuxOnly = process.platform === "linux" ? false : "the launch probe runs on native Linux only";
 const nextTask = () => new Promise<void>((resolve) => setImmediate(resolve));
 const PROBE = ["/usr/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL];
+const PROBE_COMMAND = { argv: PROBE, visited: ["/", "/usr", "/usr/bin", "/usr/bin/printf"] };
 
 /** codex-cli 0.165.0's `command/exec` response when its nested bubblewrap cannot start. */
 const NESTED_BWRAP_FAILURE = {
@@ -40,18 +42,35 @@ const NESTED_BWRAP_FAILURE = {
 /** The same probe when the sandbox starts: the command ran and printed the sentinel. */
 const STARTED = { exitCode: 0, stdout: CODEX_SANDBOX_PROBE_SENTINEL, stderr: "" };
 
-type Overrides = Record<string, Partial<{ uid: number; mode: number; file: boolean }>>;
-/** A file system in the probe's trust model: every entry root-owned and 0755 unless overridden,
- * `links` overriding what `lstat` reports for a symlink itself. */
-function fs(overrides: Overrides, real = (p: string) => p, links: Overrides = {}): ProbeFileSystem {
-  const view = (p: string, extra: Overrides) => {
-    const entry = { uid: 0, mode: 0o755, file: p.endsWith("printf") || p.endsWith("busybox"), ...overrides[p], ...extra[p] };
-    return { isFile: () => entry.file, isDirectory: () => !entry.file, uid: entry.uid, mode: entry.mode };
+type FakeEntry = { type: "dir" | "file" | "link"; uid?: number; mode?: number; target?: string };
+/** A file system in the probe's trust model: entries are root's and 0755 unless stated, links
+ * 0777 as on Linux. Anything not listed does not exist. */
+function fakeFs(entries: Record<string, FakeEntry>): ProbeFileSystem {
+  const base: Record<string, FakeEntry> = { "/": { type: "dir" }, "/usr": { type: "dir" }, "/usr/bin": { type: "dir" }, ...entries };
+  const lookup = (path: string) => {
+    const entry = base[path];
+    if (!entry) throw Object.assign(new Error(`ENOENT ${path}`), { code: "ENOENT" });
+    return entry;
   };
-  return { realpath: real, stat: (p) => view(p, {}), lstat: (p) => view(p, links) };
+  return {
+    lstat: (path) => {
+      const entry = lookup(path);
+      return { isFile: () => entry.type === "file", isDirectory: () => entry.type === "dir",
+        isSymbolicLink: () => entry.type === "link", uid: entry.uid ?? 0, mode: entry.mode ?? (entry.type === "link" ? 0o777 : 0o755) };
+    },
+    readlink: (path) => {
+      const entry = lookup(path);
+      if (entry.type !== "link") throw Object.assign(new Error("EINVAL"), { code: "EINVAL" });
+      return entry.target!;
+    },
+  };
 }
-/** `/usr/bin/printf -> /bin/busybox`, as on BusyBox-based systems. */
-const busyboxLink = (p: string) => p === "/usr/bin/printf" ? "/bin/busybox" : p;
+const PRINTF = { "/usr/bin/printf": { type: "file" } } as const;
+/** `/usr/bin/printf -> /bin/busybox` with merged-usr `/bin -> usr/bin`, as on BusyBox systems. */
+const BUSYBOX = {
+  "/bin": { type: "link", target: "usr/bin" }, "/usr/bin/busybox": { type: "file" },
+  "/usr/bin/printf": { type: "link", target: "/bin/busybox" },
+} as const;
 
 function bwrap(network: "inherit" | "deny", extra: Partial<Extract<SpawnIsolation, { backend: "bwrap" }>> = {}): SpawnIsolation {
   return { backend: "bwrap", command: "/usr/bin/bwrap", args: [], network, ...extra };
@@ -60,7 +79,7 @@ function bwrap(network: "inherit" | "deny", extra: Partial<Extract<SpawnIsolatio
 /* eslint-disable @typescript-eslint/no-explicit-any */
 function driverWith(options: {
   isolation?: SpawnIsolation; config?: SessionConfig; probe: (params: any) => unknown;
-  probeCommand?: string[] | null;
+  probeCommand?: { argv: string[]; visited: string[] } | null;
 }) {
   const stderr: string[] = [];
   const sandboxEvents = () => stderr.map((line) => JSON.parse(line)).filter((event) => event.event.startsWith("codex_command_sandbox"));
@@ -71,7 +90,7 @@ function driverWith(options: {
     config: options.config ?? {}, context: { kind: "native" },
     ...(options.isolation ? { isolation: options.isolation } : {}),
   }, { onEvent() {}, onStderr: (line) => stderr.push(line), onExit() {} }, undefined, {
-    sandboxProbeCommand: () => options.probeCommand === undefined ? PROBE : options.probeCommand,
+    sandboxProbeCommand: () => options.probeCommand === undefined ? PROBE_COMMAND : options.probeCommand,
   }) as any;
   driver.peer = {
     request: async (method: string, params: any) => {
@@ -138,13 +157,15 @@ test("output a started command prints cannot pass for a sandbox that never start
   }
 });
 
-test("without a trusted probe command, or with one the boundary makes writable, nothing changes", { skip: linuxOnly }, async () => {
-  const cases: Array<[{ probeCommand: string[] | null; isolation?: SpawnIsolation }, string[][]]> = [
+test("without a trusted probe command, or with one whose path crosses a writable root, nothing changes", { skip: linuxOnly }, async () => {
+  const writable = [["codex_command_sandbox_probe_inconclusive", "probe_command_writable"]];
+  const cases: Array<[{ probeCommand: { argv: string[]; visited: string[] } | null; isolation?: SpawnIsolation }, string[][]]> = [
     [{ probeCommand: null }, []],
-    [{ probeCommand: ["/repo/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL] },
-      [["codex_command_sandbox_probe_inconclusive", "probe_command_writable"]]],
-    [{ probeCommand: PROBE, isolation: bwrap("inherit", { writableBinds: [{ source: "/usr/bin", target: "/usr/bin" }] }) },
-      [["codex_command_sandbox_probe_inconclusive", "probe_command_writable"]]],
+    [{ probeCommand: { argv: ["/repo/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL], visited: ["/", "/repo", "/repo/bin", "/repo/bin/printf"] } }, writable],
+    [{ probeCommand: PROBE_COMMAND, isolation: bwrap("inherit", { writableBinds: [{ source: "/usr/bin", target: "/usr/bin" }] }) }, writable],
+    // CR-3.1: an intermediate hop under a root the boundary makes writable, even though both
+    // endpoints are system paths.
+    [{ probeCommand: { argv: PROBE, visited: ["/", "/usr", "/usr/bin", "/usr/bin/printf", "/repo", "/repo/probe-link", "/usr/lib", "/usr/lib/trusted-printf"] } }, writable],
   ];
   for (const [options, events] of cases) {
     const h = driverWith({ isolation: bwrap("inherit"), ...options, probe: () => NESTED_BWRAP_FAILURE });
@@ -184,12 +205,12 @@ test("a session with no sandbox of Codex's own is not probed", { skip: linuxOnly
   assert.deepEqual((await h.firstTurn()).sandboxPolicy, { type: "dangerFullAccess" });
   assert.deepEqual(h.probes, []);
 });
-/* eslint-enable @typescript-eslint/no-explicit-any */
 
 test("a printf symlinked to a BusyBox-style multicall binary probes a healthy sandbox as healthy (CR-2.1)", { skip: linuxOnly }, async () => {
-  const command = codexSandboxProbeCommand(fs({}, busyboxLink));
+  const command = codexSandboxProbeCommand(fakeFs(BUSYBOX));
   // The validated link runs by its own name, so the multicall binary still selects `printf`.
-  assert.deepEqual(command, ["/usr/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL]);
+  assert.deepEqual(command?.argv, ["/usr/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL]);
+  assert.deepEqual(command?.visited, ["/", "/usr", "/usr/bin", "/usr/bin/printf", "/bin", "/usr", "/usr/bin", "/usr/bin/busybox"]);
   /** Answers as a multicall binary does: the applet is the name it was invoked by. */
   const multicall = (params: any) => params.command[0].endsWith("/printf")
     ? { exitCode: 0, stdout: params.command[1], stderr: "" }
@@ -202,16 +223,18 @@ test("a printf symlinked to a BusyBox-style multicall binary probes a healthy sa
   // Had the canonical target run instead, the probe would fail without a namespace denial; that
   // keeps today's policy, inside a boundary or not, and never refuses the launch.
   for (const isolation of [undefined, bwrap("inherit")]) {
-    const h = driverWith({ ...(isolation ? { isolation } : {}), probeCommand: ["/bin/busybox", CODEX_SANDBOX_PROBE_SENTINEL],
+    const h = driverWith({ ...(isolation ? { isolation } : {}),
+      probeCommand: { argv: ["/usr/bin/busybox", CODEX_SANDBOX_PROBE_SENTINEL], visited: ["/", "/usr", "/usr/bin", "/usr/bin/busybox"] },
       probe: multicall });
     assert.deepEqual((await h.firstTurn()).sandboxPolicy, { type: "workspaceWrite" });
     assert.deepEqual(h.sandboxEvents(), ["codex_command_sandbox_unavailable"]);
   }
 });
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
-test("the probe command is a root-owned system printf, never one found on PATH (CR-1.1)", { skip: linuxOnly }, () => {
+test("the probe command is resolved by absolute path, never from PATH (CR-1.1)", { skip: linuxOnly }, () => {
   // A session-writable directory first on PATH holding fake `true` and `printf` that imitate
-  // bubblewrap's refusal changes nothing: the command is resolved by absolute path.
+  // bubblewrap's refusal changes nothing: the command is a fixed absolute candidate.
   const fake = mkdtempSync(join(tmpdir(), "wollipog-fake-probe-"));
   const path = process.env.PATH;
   try {
@@ -222,25 +245,71 @@ test("the probe command is a root-owned system printf, never one found on PATH (
     process.env.PATH = `${fake}:${path}`;
     const command = codexSandboxProbeCommand();
     if (command) {
-      assert.ok(command[0] === "/usr/bin/printf" || command[0] === "/bin/printf", String(command[0]));
-      assert.deepEqual(command.slice(1), [CODEX_SANDBOX_PROBE_SENTINEL]);
+      assert.ok(command.argv[0] === "/usr/bin/printf" || command.argv[0] === "/bin/printf", String(command.argv[0]));
+      assert.deepEqual(command.argv.slice(1), [CODEX_SANDBOX_PROBE_SENTINEL]);
+      assert.equal(command.visited.some((visited) => visited.startsWith(fake)), false);
     }
   } finally {
     process.env.PATH = path;
     rmSync(fake, { recursive: true, force: true });
   }
-  assert.deepEqual(codexSandboxProbeCommand(fs({})), ["/usr/bin/printf", CODEX_SANDBOX_PROBE_SENTINEL]);
-  // Not root-owned, group-writable, under a writable directory, or resolving outside /usr and /bin.
-  const bads: Overrides[] = [{ "/usr/bin/printf": { uid: 1000 } }, { "/usr/bin/printf": { mode: 0o775 } }, { "/usr/bin": { mode: 0o777 } }];
-  for (const bad of bads) {
-    assert.deepEqual(codexSandboxProbeCommand(fs({ ...bad, "/bin/printf": { uid: 1000 } })), null, JSON.stringify(bad));
-  }
-  assert.equal(codexSandboxProbeCommand(fs({}, () => "/home/u/printf")), null);
-  // A symlink a non-root user owns is refused even when its target is trusted.
-  assert.equal(codexSandboxProbeCommand(fs({ "/bin/printf": { uid: 1000 } }, busyboxLink, { "/usr/bin/printf": { uid: 1000 } })), null);
-  assert.equal(probeExecutableWritable("/usr/bin/printf", ["/repo", "/usr"]), true);
-  assert.equal(probeExecutableWritable("/usr/bin/printf", ["/repo", "/usr/bin/printf"]), true);
+});
+
+test("the whole resolution of the probe path is validated, hop by hop (CR-3.1)", () => {
+  const resolve = (entries: Record<string, FakeEntry>, path = "/usr/bin/printf") =>
+    resolveTrustedExecutable(path, fakeFs(entries));
+  assert.deepEqual(resolve(PRINTF), { target: "/usr/bin/printf", visited: ["/", "/usr", "/usr/bin", "/usr/bin/printf"] });
+  // Merged /usr: `/bin -> usr/bin`.
+  assert.equal(resolve({ ...PRINTF, "/bin": { type: "link", target: "usr/bin" } }, "/bin/printf")?.target, "/usr/bin/printf");
+  assert.equal(resolve(BUSYBOX)?.target, "/usr/bin/busybox");
+
+  const trustedFinal = { "/usr/lib": { type: "dir" }, "/usr/lib/trusted-printf": { type: "file" } } as const;
+  const rejected: Array<[string, Record<string, FakeEntry>, string?]> = [
+    // A link through a session-writable directory, even when both endpoints are trusted.
+    ["intermediate link in a writable directory", { ...trustedFinal, "/repo": { type: "dir", uid: 1000 },
+      "/repo/probe-link": { type: "link", target: "/usr/lib/trusted-printf" },
+      "/usr/bin/printf": { type: "link", target: "/repo/probe-link" } }],
+    ["intermediate link in a world-writable directory", { ...trustedFinal, "/repo": { type: "dir", mode: 0o1777 },
+      "/repo/probe-link": { type: "link", target: "/usr/lib/trusted-printf" },
+      "/usr/bin/printf": { type: "link", target: "/repo/probe-link" } }],
+    // An intermediate DIRECTORY symlink, owned by someone else or leading somewhere writable.
+    ["intermediate directory link not owned by root", { ...trustedFinal, "/usr/libx": { type: "link", uid: 1000, target: "/usr/lib" },
+      "/usr/bin/printf": { type: "link", target: "/usr/libx/trusted-printf" } }],
+    ["intermediate directory link into a writable directory", { "/home": { type: "dir" }, "/home/u": { type: "dir", uid: 1000 },
+      "/home/u/printf": { type: "file", uid: 0 }, "/usr/lib": { type: "link", target: "/home/u" },
+      "/usr/bin/printf": { type: "link", target: "/usr/lib/printf" } }],
+    // A relative link that climbs out of the trusted tree.
+    ["relative link escaping upwards", { "/home": { type: "dir" }, "/home/u": { type: "dir", uid: 1000 },
+      "/home/u/printf": { type: "file" }, "/usr/bin/printf": { type: "link", target: "../../../../home/u/printf" } }],
+    ["link not owned by root", { "/usr/bin/real": { type: "file" }, "/usr/bin/printf": { type: "link", uid: 1000, target: "real" } }],
+    ["group-writable file", { "/usr/bin/printf": { type: "file", mode: 0o775 } }],
+    ["file not owned by root", { "/usr/bin/printf": { type: "file", uid: 1000 } }],
+    ["not executable", { "/usr/bin/printf": { type: "file", mode: 0o644 } }],
+    ["final file outside /usr and /bin", { "/opt": { type: "dir" }, "/opt/printf": { type: "file" },
+      "/usr/bin/printf": { type: "link", target: "/opt/printf" } }],
+    ["writable /usr/bin", { ...PRINTF, "/usr/bin": { type: "dir", mode: 0o777 } }],
+    ["link loop", { "/usr/bin/a": { type: "link", target: "b" }, "/usr/bin/b": { type: "link", target: "a" },
+      "/usr/bin/printf": { type: "link", target: "a" } }],
+    ["dangling link", { "/usr/bin/printf": { type: "link", target: "/usr/bin/missing" } }],
+    ["final entry a directory", { "/usr/bin/printf": { type: "dir" } }],
+    ["relative candidate", PRINTF, "usr/bin/printf"],
+    // Mounted afresh inside the boundary, and /proc/self names another process there.
+    ["hop through /proc", { "/proc": { type: "dir" }, "/proc/self": { type: "link", target: "1" }, "/proc/1": { type: "dir" },
+      "/proc/1/exe": { type: "file" }, "/usr/bin/printf": { type: "link", target: "/proc/self/exe" } }],
+    ["hop through /tmp", { "/tmp": { type: "dir" }, "/tmp/printf": { type: "file" },
+      "/usr/bin/printf": { type: "link", target: "/tmp/printf" } }],
+  ];
+  for (const [name, entries, path] of rejected) assert.equal(resolve(entries, path), null, name);
+
+  // A root-owned intermediate hop the outer boundary makes writable passes the resolver, and its
+  // visited path is what the driver checks against the boundary's writable roots.
+  const throughRepo = resolve({ ...trustedFinal, "/repo": { type: "dir" },
+    "/repo/probe-link": { type: "link", target: "/usr/lib/trusted-printf" },
+    "/usr/bin/printf": { type: "link", target: "/repo/probe-link" } });
+  assert.ok(throughRepo?.visited.includes("/repo/probe-link"));
+  assert.equal(throughRepo!.visited.some((path) => probeExecutableWritable(path, ["/repo"])), true);
   assert.equal(probeExecutableWritable("/usr/bin/printf", ["/repo", "/usr/binx"]), false);
+  assert.equal(probeExecutableWritable("/usr/bin/printf", ["/usr"]), true);
 });
 
 test("the probe reads a failure only when the command never started and bubblewrap refused", () => {

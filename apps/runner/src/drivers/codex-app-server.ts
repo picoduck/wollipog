@@ -77,7 +77,7 @@ import {
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
-import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutablePaths, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
+import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
 import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -680,7 +680,7 @@ export class CodexAppServerDriver implements Driver {
    */
   private outerSandbox: CodexOuterSandbox | null = null;
   /** The trusted probe argv, or null when this host has none (#3843). */
-  private readonly sandboxProbeCommand: () => string[] | null;
+  private readonly sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
   /**
    * Whether a legacy `sandboxPolicy` has already been sent on the CURRENT thread.
    *
@@ -707,7 +707,7 @@ export class CodexAppServerDriver implements Driver {
       initializationRequestTimeoutMs: number;
       forkRequestTimeoutMs: number;
       archiveRequestTimeoutMs: number;
-      sandboxProbeCommand: () => string[] | null;
+      sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
     }> = {},
   ) {
     this.sandboxProbeCommand = deps.sandboxProbeCommand ?? (() => codexSandboxProbeCommand());
@@ -1183,14 +1183,14 @@ export class CodexAppServerDriver implements Driver {
     // A host with no trusted `printf` (such as a runner inside a user namespace, where root's files
     // read as unmapped) is a host property and stays quiet; a boundary that makes it writable is not.
     if (!command) return;
-    if (probeExecutablePaths(command[0]!).some((path) => probeExecutableWritable(path, writableRoots))) {
+    if (command.visited.some((path) => probeExecutableWritable(path, writableRoots))) {
       this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "probe_command_writable" }));
       return;
     }
     let probe: CodexCommandSandboxProbe;
     try {
       probe = codexCommandSandboxProbe(await peer.request<Json>("command/exec", {
-        command, cwd: this.cwd, env: { ...CODEX_SANDBOX_PROBE_ENV }, timeoutMs: CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS,
+        command: command.argv, cwd: this.cwd, env: { ...CODEX_SANDBOX_PROBE_ENV }, timeoutMs: CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS,
         ...(policy ? { sandboxPolicy: policy } : {}),
       }, { deadlineAt: Date.now() + CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS + 5_000 }));
     } catch (error) {
