@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 import {
-  baselineVersions, combinedExit, decide, detect, executablePath, EXIT, fingerprint, forced, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
-  newestRelease, paths, recordKey, RECORD_VERSION, sourceFiles, suiteArgv, suiteEnv, targetsFor, validRecord,
+  baselineVersions, combinedExit, decide, detect, dispatchScope, executablePath, EXIT, fingerprint, HARNESSES, harnessById, isolationFrom, judgeSuite, markdown, measure,
+  newestRelease, paths, recordKey, RECORD_VERSION, runOutcome, sourceFiles, suiteArgv, suiteEnv, summarize, targetsFor, validRecord,
 } from "./harness-assumptions.mjs";
 import { CODEX_GUARD_TRUST_VERSION_RANGE } from "../apps/runner/src/codex-managed-worktree-guard.ts";
 import { CLAUDE_MEDIA_REVIEWER_CLI_VERSION } from "../apps/runner/src/claude-media-reviewer.ts";
@@ -35,6 +35,8 @@ const silent = async () => { throw new Error("offline"); };
 test("the workflow matrix lists exactly the registered harnesses", () => {
   const matrix = workflow.match(/^ {8}harness: \[([^\]]*)\]$/m)?.[1].split(",").map(s => s.trim());
   assert.deepEqual(matrix, HARNESSES.map(h => h.id));
+  const options = workflow.match(/^ {8}type: choice\n(?: {8}#.*\n)* {8}options: \[([^\]]*)\]$/m)?.[1].split(",").map(s => s.trim());
+  assert.deepEqual(options, ["all", ...HARNESSES.map(h => h.id)], "a dispatch can choose exactly all or one registered harness");
   assert.equal(new Set(HARNESSES.map(h => h.id)).size, HARNESSES.length);
   for (const harness of HARNESSES) {
     assert.match(harness.id, /^[a-z][a-z0-9-]*$/);
@@ -47,7 +49,7 @@ test("the workflow matrix lists exactly the registered harnesses", () => {
   }
 });
 
-test("the workflow is scheduled outside 00:00-02:00 UTC, single-flight, read-only and secret-free", () => {
+test("the workflow is scheduled outside 00:00-02:00 UTC, one job per harness at a time, read-only and secret-free", () => {
   const crons = [...workflow.matchAll(/cron: "([^"]+)"/g)].map(m => m[1]);
   assert.equal(crons.length, 1);
   for (const cron of crons) {
@@ -58,7 +60,16 @@ test("the workflow is scheduled outside 00:00-02:00 UTC, single-flight, read-onl
   assert.match(workflow, /^ {2}workflow_dispatch:$/m);
   assert.match(workflow, /^permissions:\n {2}contents: read\n\n/m);
   assert.equal(workflow.match(/permissions:/g).length, 1, "no job widens the permissions");
-  assert.match(workflow, /^concurrency:\n {2}group: harness-assumption-probes\n {2}cancel-in-progress: false$/m);
+  // No workflow-wide group: GitHub would cancel a whole pending run, jobs and reports included.
+  assert.doesNotMatch(workflow, /^concurrency:/m);
+  // A measured harness shares its group with every other run's job of that harness; an excluded one
+  // is alone in its run's group. The condition mirrors dispatchScope for the choice input.
+  const groups = [...workflow.matchAll(/^ {4}concurrency:\n {6}group: (.+)\n {6}cancel-in-progress: (\w+)$/gm)];
+  assert.equal(groups.length, 1, "only the probe job takes a concurrency group");
+  assert.equal(groups[0][1], "${{ (github.event_name != 'workflow_dispatch' || inputs.harness == 'all' || inputs.harness == matrix.harness) && " +
+    "format('harness-assumption-probes-{0}', matrix.harness) || format('harness-assumption-probes-{0}-excluded-{1}', matrix.harness, github.run_id) }}");
+  assert.equal(groups[0][2], "false", "a waiting job never cancels a running measurement");
+  assert.ok(workflow.indexOf("    concurrency:") > workflow.indexOf("  probe:") && workflow.indexOf("    concurrency:") < workflow.indexOf("  summarize:"));
   assert.doesNotMatch(workflow, /secrets\.|github\.token|GH_TOKEN|GITHUB_TOKEN/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /runs-on: ubuntu-24\.04/);
@@ -79,6 +90,17 @@ test("the workflow publishes every outcome and records only a matched measuremen
   for (const name of ["Setup pnpm", "Setup Node 24 With pnpm Cache", "Measure Assumptions"]) assert.match(step(name), /if: steps\.decide\.outputs\.measure == 'true'/);
   assert.ok(workflow.indexOf("Detect Releases") < workflow.indexOf("Setup pnpm"), "detection needs no dependency install");
   assert.match(step("Measure Assumptions"), /HARNESS_PROBE_USER: harness-probe\n {10}HARNESS_PROBE_ROOT: \/opt\/harness-probe/);
+  // An excluded harness restores no record and never reaches decide; both steps see the dispatch.
+  for (const name of ["Detect Releases", "Decide Whether to Measure"]) assert.match(step(name), /DISPATCH_HARNESS: \$\{\{ inputs\.harness \}\}/);
+  for (const name of ["Restore Measurement Record", "Decide Whether to Measure"]) assert.match(step(name), /if: steps\.detect\.outputs\.excluded != 'true'/);
+});
+
+test("every run ends with a summary that fails on a dropped or interrupted harness", () => {
+  const job = workflow.slice(workflow.indexOf("\n  summarize:"));
+  assert.match(job, /^ {4}needs: probe\n {4}if: always\(\)$/m, "the summary runs after cancelled and failed harness jobs too");
+  assert.match(job, /uses: actions\/download-artifact@[0-9a-f]{40} # v\S+\n {8}with:\n {10}pattern: harness-assumptions-\*\n {10}path: \$\{\{ runner\.temp \}\}\/harness-assumption-reports\n/);
+  assert.match(job, /- name: Summarize\n {8}if: always\(\)\n {8}run: node scripts\/harness-assumptions\.mjs summarize --reports "\$\{\{ runner\.temp \}\}\/harness-assumption-reports"/);
+  assert.doesNotMatch(job, /concurrency:/, "the summary never waits behind a measurement");
 });
 
 test("no harness ever runs a probe that needs real credentials or a real model", () => {
@@ -156,12 +178,15 @@ test("the record key changes with each target version and with the probe set", (
   assert.ok(sourceFiles(codex).includes("apps/runner/scripts/codex-escalation-probe.ts"));
 });
 
-test("a dispatch forces only the requested harness and rejects an unknown one", () => {
-  assert.equal(forced(codex, "schedule", "codex"), false);
-  assert.equal(forced(codex, "workflow_dispatch", "all"), true);
-  assert.equal(forced(codex, "workflow_dispatch", ""), true);
-  assert.equal(forced(codex, "workflow_dispatch", "codex"), true);
-  assert.throws(() => forced(codex, "workflow_dispatch", "codx"), /Unknown harness/);
+test("a dispatch forces only the requested harness, excludes the others and rejects an unknown one", () => {
+  assert.equal(dispatchScope(codex, "schedule", "codex"), "due");
+  assert.equal(dispatchScope(codex, "schedule", "pi"), "due", "a scheduled run never excludes a harness");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", "all"), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", ""), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", "codex"), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", " codex "), "forced");
+  assert.equal(dispatchScope(codex, "workflow_dispatch", "pi"), "excluded");
+  assert.throws(() => dispatchScope(codex, "workflow_dispatch", "codx"), /Unknown harness/);
 });
 
 async function detected(t, extra = {}) {
@@ -210,6 +235,96 @@ test("a dispatch measures even with a matched record; an unknown dispatch harnes
   rmSync(join(temp, "output"));
   assert.equal(decide(codex, { env: { ...env, DISPATCH_HARNESS: "codx" } }), EXIT.couldNotRun);
   assert.equal(outputs(temp).measure, undefined);
+  rmSync(join(temp, "output"), { force: true });
+  assert.equal(await detect(codex, { env: { ...env, DISPATCH_HARNESS: "codx" }, fetchImpl: registry("0.166.0") }), EXIT.couldNotRun);
+  assert.equal(outputs(temp).key, undefined);
+  assert.match(readFileSync(join(paths(codex, temp).reportDir, "latest.md"), "utf8"), /: could not run$[\s\S]*Unknown harness "codx"/m);
+});
+
+function assertNotMeasured(temp, harness = codex) {
+  const report = JSON.parse(readFileSync(join(paths(harness, temp).reportDir, "latest.json"), "utf8"));
+  assert.equal(report.selected, false);
+  assert.equal(report.measured, false);
+  assert.equal(report.complete, true);
+  assert.equal(report.exitCode, null, "not measured has no exit code, so it can never read as matched");
+  assert.equal(report.record, undefined, "a matched record of an excluded harness is never reported");
+  assert.match(report.reason, /measures only pi; no suite ran and nothing was recorded/);
+  const md = readFileSync(join(paths(harness, temp).reportDir, "latest.md"), "utf8");
+  assert.match(md, /^# Codex Assumption Probes: not measured$/m);
+  assert.doesNotMatch(md, /matched|no new release|Last matched measurement/);
+  assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /^# Codex Assumption Probes: not measured$/m, "the job summary says not measured");
+  assert.deepEqual(runOutcome(harness, report), { verdict: "not measured", failed: false, detail: "this dispatch named another harness" });
+}
+
+test("a dispatch naming another harness never detects, measures, records or passes this one", async (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp, { GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "pi" });
+  // A stale state from an earlier step must not survive into decide or measure.
+  mkdirSync(dirname(paths(codex, temp).statePath), { recursive: true });
+  writeFileSync(paths(codex, temp).statePath, "{}");
+  const fetchImpl = async () => { throw new Error("an excluded harness must not query the registry"); };
+  assert.equal(await detect(codex, { env, fetchImpl }), EXIT.matched);
+  assert.deepEqual(outputs(temp), { excluded: "true", measure: "false" }, "no key, so no record is restored or saved");
+  assert.ok(!existsSync(paths(codex, temp).statePath));
+  assertNotMeasured(temp);
+});
+
+test("decide never measures or passes an excluded harness, even beside a matched record", async (t) => {
+  const { temp, env, state } = await detected(t);
+  writeRecord(temp, matchedRecord(state));
+  rmSync(join(temp, "output"));
+  const dispatch = { ...env, GITHUB_EVENT_NAME: "workflow_dispatch", DISPATCH_HARNESS: "pi" };
+  assert.equal(decide(codex, { env: dispatch }), EXIT.matched);
+  assert.deepEqual(outputs(temp), { excluded: "true", measure: "false" });
+  assertNotMeasured(temp);
+  // Even if a workflow condition broke and measure ran, detect left an excluded harness no state,
+  // so it is could not run and writes no record.
+  rmSync(paths(codex, temp).statePath);
+  rmSync(join(temp, "output"));
+  assert.equal(await measure(codex, { env: dispatch, exec: async () => { throw new Error("must not run"); } }), EXIT.couldNotRun);
+  assert.ok(!existsSync(join(paths(codex, temp).recordDir, "record.json")));
+  assert.equal(JSON.parse(readFileSync(join(paths(codex, temp).reportDir, "latest.json"), "utf8")).exitCode, EXIT.couldNotRun);
+});
+
+function writeReport(dir, harness, report) {
+  mkdirSync(join(dir, `harness-assumptions-${harness}`), { recursive: true });
+  writeFileSync(join(dir, `harness-assumptions-${harness}`, "latest.json"), typeof report === "string" ? report : JSON.stringify(report));
+}
+
+test("the run summary lists not measured harnesses and fails on a dropped or interrupted one", (t) => {
+  const temp = scratch(t);
+  const env = ciEnv(temp);
+  const reports = join(temp, "reports");
+  writeReport(reports, "pi", { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0 });
+  writeReport(reports, "codex", { harness: "codex", complete: true, selected: false, measured: false, exitCode: null });
+  // claude: the job was cancelled while waiting for its group, so it uploaded nothing.
+  const lines = [];
+  t.mock.method(console, "log", line => lines.push(line));
+  assert.equal(summarize(reports, { env }), EXIT.couldNotRun);
+  const summary = readFileSync(join(temp, "summary.md"), "utf8");
+  assert.match(summary, /\| Pi \| matched \| measured in this run \|/);
+  assert.match(summary, /\| Codex \| not measured \| this dispatch named another harness \|/);
+  assert.match(summary, /\| Claude Code \| dropped \| no report: the job was cancelled while waiting/);
+  assert.ok(lines.some(line => /^::error title=Claude Code Assumptions dropped::/.test(line)), "a dropped harness is annotated");
+  assert.ok(!lines.some(line => /^::error title=(Pi|Codex)/.test(line)));
+
+  writeReport(reports, "claude", { harness: "claude", complete: false, selected: true, measured: true, exitCode: 2 });
+  assert.equal(summarize(reports, { env }), EXIT.couldNotRun, "an interrupted measurement fails the run");
+  writeReport(reports, "claude", { harness: "claude", complete: true, selected: true, measured: false, exitCode: 0 });
+  assert.equal(summarize(reports, { env }), EXIT.matched, "only when every harness reported does the summary pass");
+  assert.match(readFileSync(join(temp, "summary.md"), "utf8"), /\| Claude Code \| no new release \|/);
+});
+
+test("a run outcome is matched only for a complete, measured, matched report of that harness", () => {
+  const pi = harnessById("pi");
+  const base = { harness: "pi", complete: true, selected: true, measured: true, exitCode: 0 };
+  assert.equal(runOutcome(pi, base).verdict, "matched");
+  for (const [report, verdict] of [[null, "dropped"], [{ ...base, harness: "codex" }, "interrupted"], [{ ...base, complete: false }, "interrupted"],
+    [{ ...base, selected: false }, "not measured"], [{ ...base, selected: false, exitCode: 0 }, "not measured"], [{ ...base, measured: false }, "no new release"],
+    [{ ...base, exitCode: 1 }, "changed"], [{ ...base, exitCode: 2 }, "could not run"], [{ ...base, exitCode: null }, "could not run"], [{ ...base, exitCode: "0" }, "could not run"]]) {
+    assert.equal(runOutcome(pi, report).verdict, verdict, JSON.stringify(report));
+    assert.equal(runOutcome(pi, report).failed, !["matched", "not measured", "no new release"].includes(verdict));
+  }
 });
 
 test("decide without detection state is could not run", (t) => {
@@ -482,6 +597,14 @@ test("documentation states the shared contract and that a new harness adds its p
   assert.doesNotMatch(codexDoc, /must not run the real probe suite/);
   assert.match(codexDoc, /## Optional Local Timer/);
   assert.match(codexDoc, /## Hosted Measurement/);
+});
+
+test("documentation describes the implemented dispatch scope and queueing", () => {
+  const doc = readFileSync(new URL("../docs/harness-assumption-probes.md", import.meta.url), "utf8").replace(/\s+/g, " ");
+  assert.doesNotMatch(doc, /waits rather than cancelling|runs never overlap/, "the retired single-group promise is gone");
+  assert.doesNotMatch(workflow, /waits instead of cancelling/);
+  for (const phrase of ["Every other harness reports **not measured**", "`harness-assumption-probes-<harness>`", "GitHub keeps only one waiting job per group",
+    "**Summarize Measurements**", "**dropped**", "fails the run", "the shared runner pool never holds more probe jobs than one run's matrix"]) assert.ok(doc.includes(phrase), phrase);
 });
 
 test("Claude Code targets the newest release, the three floors and the reviewer pin, all read from source", () => {

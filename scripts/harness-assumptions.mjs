@@ -232,12 +232,16 @@ export function validRecord(record, state) {
     typeof record.completedAt === "string" && Number.isFinite(Date.parse(record.completedAt));
 }
 
-/** Whether this dispatch forces a full run for the harness; an unknown requested harness throws. */
-export function forced(harness, event, requested) {
-  if (event !== "workflow_dispatch") return false;
+/**
+ * How this run treats the harness: "due" measures it unless a matched record covers it (scheduled
+ * runs), "forced" measures it in full, and "excluded" never measures or records it because the
+ * dispatch named another harness. An unknown requested harness throws.
+ */
+export function dispatchScope(harness, event, requested) {
+  if (event !== "workflow_dispatch") return "due";
   const value = (requested ?? "all").trim() || "all";
   if (value !== "all") harnessById(value);
-  return value === "all" || value === harness.id;
+  return value === "all" || value === harness.id ? "forced" : "excluded";
 }
 
 /**
@@ -295,9 +299,10 @@ function runUrl(env = process.env) {
 
 const SUMMARY_LIMIT = 900_000;
 export function markdown(report, suiteMarkdown = {}) {
-  const verdict = { 0: report.measured ? "matched" : "no new release", 1: "changed", 2: "could not run" }[report.exitCode] ?? "could not run";
+  const verdict = report.selected === false ? "not measured"
+    : { 0: report.measured ? "matched" : "no new release", 1: "changed", 2: "could not run" }[report.exitCode] ?? "could not run";
   const lines = [`# ${report.name} Assumption Probes: ${verdict}`, "",
-    `Harness: ${report.harness} (\`${report.npmPackage}\`); exit=${report.exitCode}; event=${report.event ?? "unknown"}`,
+    `Harness: ${report.harness} (\`${report.npmPackage}\`); exit=${report.exitCode ?? "none"}; event=${report.event ?? "unknown"}`,
     `Run: ${report.runUrl ?? "local"}; completed ${report.completedAt}`, ""];
   if (report.reason) lines.push(`**${report.measured ? "Reason" : "Not measured"}:** ${report.reason}`, "");
   if (report.targets?.length) {
@@ -332,12 +337,35 @@ function output(values, env = process.env) {
 
 function baseReport(harness, env = process.env) {
   return { harness: harness.id, name: harness.name, npmPackage: harness.npmPackage, event: env.GITHUB_EVENT_NAME ?? null, runUrl: runUrl(env),
-    measured: false, complete: true, exitCode: EXIT.couldNotRun, completedAt: new Date().toISOString(), documentation: harness.documentation };
+    selected: true, measured: false, complete: true, exitCode: EXIT.couldNotRun, completedAt: new Date().toISOString(), documentation: harness.documentation };
+}
+
+/**
+ * Resolve the dispatch scope, publishing the report itself when the harness is not measured: an
+ * excluded harness has no exit code, so it can never read as matched, and an unknown dispatched
+ * harness is could not run. Returns the scope, or null once a could-not-run report is published.
+ */
+function scopeOrPublish(harness, env) {
+  let scope;
+  try { scope = dispatchScope(harness, env.GITHUB_EVENT_NAME, env.DISPATCH_HARNESS); } catch (error) {
+    publish(harness, { ...baseReport(harness, env), reason: error.message }, {}, env);
+    return null;
+  }
+  if (scope === "excluded") {
+    publish(harness, { ...baseReport(harness, env), selected: false, exitCode: null,
+      reason: `this dispatch measures only ${env.DISPATCH_HARNESS.trim()}; no suite ran and nothing was recorded for ${harness.id}` }, {}, env);
+    output({ excluded: "true", measure: "false" }, env);
+  }
+  return scope;
 }
 
 export async function detect(harness, { env = process.env, root = ROOT, fetchImpl = fetch, delayMs } = {}) {
   const location = paths(harness, env.RUNNER_TEMP);
   rmSync(location.statePath, { force: true });
+  const scope = scopeOrPublish(harness, env);
+  if (scope === null) return EXIT.couldNotRun;
+  // An excluded harness needs no release detection, so an unrelated registry failure cannot fail it.
+  if (scope === "excluded") return EXIT.matched;
   try {
     const sourceHash = fingerprint(harness, root);
     const targets = targetsFor(await newestRelease(harness, { fetchImpl, delayMs }), baselineVersions(harness, root));
@@ -355,14 +383,15 @@ export async function detect(harness, { env = process.env, root = ROOT, fetchImp
 
 export function decide(harness, { env = process.env } = {}) {
   const location = paths(harness, env.RUNNER_TEMP);
+  // The workflow skips this step for an excluded harness; resolving the scope again keeps a
+  // condition mistake from ever measuring it or reading its record as matched.
+  const scope = scopeOrPublish(harness, env);
+  if (scope === null) return EXIT.couldNotRun;
+  if (scope === "excluded") return EXIT.matched;
+  const force = scope === "forced";
   const state = readJson(location.statePath);
   if (!state || state.harness !== harness.id) {
     publish(harness, { ...baseReport(harness, env), reason: "Release detection state is missing" }, {}, env);
-    return EXIT.couldNotRun;
-  }
-  let force;
-  try { force = forced(harness, env.GITHUB_EVENT_NAME, env.DISPATCH_HARNESS); } catch (error) {
-    publish(harness, { ...baseReport(harness, env), reason: error.message, targets: state.targets }, {}, env);
     return EXIT.couldNotRun;
   }
   const recordPath = join(location.recordDir, "record.json");
@@ -576,10 +605,46 @@ async function measureTarget(harness, target, { box, env, exec, suiteMarkdown })
   }
 }
 
+/**
+ * One harness's outcome in a run, from the report its job uploaded. Only a complete report of a
+ * measured, fully matched run is "matched"; no report means the job never reported, which is how a
+ * job cancelled while pending in its concurrency group looks.
+ */
+export function runOutcome(harness, report) {
+  if (!report) return { verdict: "dropped", failed: true, detail: "no report: the job was cancelled while waiting for its concurrency group, or failed before reporting; dispatch it again" };
+  if (report.harness !== harness.id || report.complete !== true) return { verdict: "interrupted", failed: true, detail: "the report is incomplete; the measurement did not finish" };
+  if (report.selected === false) return { verdict: "not measured", failed: false, detail: "this dispatch named another harness" };
+  if (report.exitCode === EXIT.matched) return report.measured === true
+    ? { verdict: "matched", failed: false, detail: "measured in this run" }
+    : { verdict: "no new release", failed: false, detail: "already measured matched; no suite ran" };
+  if (report.exitCode === EXIT.changed) return { verdict: "changed", failed: true, detail: "see the harness job summary" };
+  return { verdict: "could not run", failed: true, detail: "see the harness job summary" };
+}
+
+/**
+ * Summarize every harness job of a run from the downloaded report artifacts, so a dropped or
+ * interrupted measurement is listed and annotated instead of disappearing. Exits could not run
+ * when any harness has no complete report; changed and could-not-run already fail their own jobs.
+ */
+export function summarize(reportsDir, { env = process.env } = {}) {
+  const rows = HARNESSES.map(harness => {
+    const report = readJson(join(reportsDir, `harness-assumptions-${harness.id}`, "latest.json"));
+    return { harness, ...runOutcome(harness, report) };
+  });
+  const text = ["# Harness Assumption Probes", "", "| Harness | Result | Detail |", "| --- | --- | --- |",
+    ...rows.map(r => `| ${r.harness.name} | ${r.verdict} | ${r.detail} |`), ""].join("\n");
+  if (env.GITHUB_STEP_SUMMARY) appendFileSync(env.GITHUB_STEP_SUMMARY, text + "\n");
+  console.log(text);
+  const lost = rows.filter(r => r.verdict === "dropped" || r.verdict === "interrupted");
+  for (const r of lost) console.log(`::error title=${r.harness.name} Assumptions ${r.verdict}::${r.harness.name}: ${r.detail}`);
+  return lost.length ? EXIT.couldNotRun : EXIT.matched;
+}
+
 export async function main(args = process.argv.slice(2)) {
   const [command, flag, id, ...rest] = args;
+  if (command === "summarize" && flag === "--reports" && id && !rest.length) return summarize(id);
   if (!["detect", "decide", "measure"].includes(command) || flag !== "--harness" || !id || rest.length) {
-    throw new Error("Usage: node scripts/harness-assumptions.mjs detect|decide|measure --harness <id>");
+    throw new Error("Usage: node scripts/harness-assumptions.mjs detect|decide|measure --harness <id> | summarize --reports <dir>");
   }
   const harness = harnessById(id);
   return command === "detect" ? detect(harness) : command === "decide" ? decide(harness) : measure(harness);
