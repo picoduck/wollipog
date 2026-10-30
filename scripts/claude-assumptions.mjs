@@ -68,7 +68,7 @@ export function collectResult(probe, execution) {
 /** Whether the measured release behaves like the reviewer pin. Never moves the pin itself. */
 export function reviewerPinResult(version, reviewer) {
   const status = !version || !reviewer || reviewer.status === "could not run" ? "could not run"
-    : !claudeVersionAtLeast(version, REVIEWER_PIN) ? "below the pin; the reviewers refuse this release"
+    : !claudeVersionAtLeast(version, REVIEWER_PIN) ? "below the pin; the media reviewer refuses this release"
     : reviewer.status === "changed" ? "differs from the pinned behaviour"
       : version === REVIEWER_PIN ? "at the pin" : "matches the pinned behaviour; the pin can move through a reviewed change";
   return { pin: REVIEWER_PIN, version, status,
