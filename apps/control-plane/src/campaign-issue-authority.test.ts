@@ -1363,6 +1363,22 @@ test("#2940 a person-approved publication cannot exceed the human-set issue limi
     assert.equal(refusalCode(refused), "capacity_exhausted"); assert.equal(refused.status, 409);
     assert.equal(h.db.admittedCampaignPublicationIssue("root", p.decision.occurrenceId), null);
     assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+    // The limit is the campaign's, not the raw Maximum Issues: once the person admits a follow-up
+    // past the approval limit, its slot holds an issue here too (#3826).
+    const budgetAuthority = { version: 1 as const, concurrency: 3, acceptedFollowUps: 0, accounting: "managed_workers_only" as const, unpriced: "stop" as const };
+    const policy = h.db.getSession("root")!.orchestratorPolicy!;
+    if (policy.control?.mode === "full_control") policy.control.boundary.budgetAuthority = budgetAuthority;
+    h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+    h.db.campaignBudgets.authorize("root", budgetAuthority);
+    const other = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Other repair", originWorkItemIds: [h.item.id] });
+    assert.ok(other.ok, other.error ?? "record");
+    const accept = () => h.svc.adjudicateCampaignRecommendation("root", { recommendationId: other.data!.id, disposition: "accepted", reason: "Observed related work" });
+    const over = accept(); assert.equal(over.ok, false);
+    const admission = h.db.workflowDecisionByOccurrence(/decision (workflow_[a-f0-9]+)/u.exec(over.error ?? "")![1]!)!;
+    assert.ok(h.approve(admission).ok); assert.ok(accept().ok);
+    assert.equal(h.db.campaignIssueLimit("root", 1), 2);
+    const admitted = await followUpScope(h, "within-admitted-slot", p.decision.occurrenceId);
+    assert.ok(admitted.ok, admitted.error ?? "admitted slot");
   } finally { h.db.close(); }
 });
 
