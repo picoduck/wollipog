@@ -8,6 +8,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { formatDuration, formatRecordedRelativeTime } from "../format.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import {
   BACKGROUND_DELIVERY_STATUS,
@@ -351,6 +352,42 @@ export function BackgroundWorkPanel({
             </dl>
           )}>
           {backgroundLostSentence(machine, lostJobs)}
+        </Notice>
+      ),
+    });
+  }
+
+  // A handoff hold waiting on work no row below shows (#3752): name it here, where people look.
+  const unlistedHold = session.status === "queued" && !session.capacityWait ? session.queueHold : undefined;
+  if (unlistedHold?.unlistedJobs?.length) {
+    const unlisted = unlistedHold.unlistedJobs;
+    const title = "Handoff Waiting on Unlisted Work";
+    // An account label may be an email address (§11.8), so the account is not named.
+    const handoff = unlistedHold.kind === "worktree_rebind"
+      ? `The move to worktree ${unlistedHold.target}`
+      : "The switch to the selected provider account";
+    const canRelease = unlistedHold.canRelease === true && sessionCommandRefusal(session, "stopBackgroundJob") === null;
+    notices.push({
+      key: "background-work-unlisted-hold",
+      severity: "warning",
+      rank: PANEL_NOTICE_RANK.backgroundWorkUnlisted,
+      title,
+      render: ({ trailing }) => (
+        <Notice tone="warning" title={title} trailing={trailing} dataState="unlisted-hold"
+          details={(
+            <dl className="facts">
+              {unlisted.map((job) => (
+                <div key={job.id}>
+                  <dt>{job.kind === "provisional" ? "Unconfirmed Launch" : "Unregistered Task"}</dt>
+                  <dd><code>{job.id}</code></dd>
+                </div>
+              ))}
+            </dl>
+          )}>
+          {`${handoff} waits for ${unlisted.length === 1 ? "a task that has" : `${unlisted.length} tasks that have`} no job in this list. `}
+          {canRelease
+            ? "Proceed Now in the queued messages ends it with the rest of this session's background work."
+            : "It ends when the provider reports it finished, or when the hold's deadline passes."}
         </Notice>
       ),
     });

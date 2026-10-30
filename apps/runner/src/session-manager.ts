@@ -1225,6 +1225,8 @@ function restartBackgroundNotice(
 const MAX_TIMER_MS = 0x7fffffff;
 /** How many unconfirmed stops per session keep their requester, as the Claude driver bounds its own. */
 const MAX_UNCONFIRMED_JOB_STOPS = 64;
+/** How many unlisted ids a queue hold names (#3752); its count still covers all of them. */
+const MAX_UNLISTED_HOLD_JOBS = 20;
 
 /** A request to end a session's unfinished background work (#1778). */
 export interface BackgroundJobEndRequest {
@@ -11671,6 +11673,13 @@ export class SessionManager {
     const bounded = bound > 0 && unfinishedBackgroundJobs > 0 && live;
     // What the bound would end, someone may end now (#3752), whether or not the bound is enabled.
     const releasable = !!entry.client.endBackgroundWork && unfinishedBackgroundJobs > 0 && live;
+    // Work the hold waits on that Background Work has no unfinished row for (#3752): a launch the
+    // provider has not confirmed yet (`tool:<tool-use-id>`), or a task id the runner tracks without a
+    // job record. Named so the session can show it, since nothing else lists it.
+    const listed = new Set(unfinished.flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]));
+    const unlistedJobs = [...new Set(meta.pendingBackgroundTaskIds ?? [])]
+      .filter((id) => !listed.has(id)).sort().slice(0, MAX_UNLISTED_HOLD_JOBS)
+      .map((id) => ({ id, kind: id.startsWith("tool:") ? "provisional" as const : "unregistered" as const }));
     return {
       kind,
       holdId: `${kind.replaceAll("_", "-")}:${since}`,
@@ -11682,6 +11691,7 @@ export class SessionManager {
       ...(bounded ? { endsAt: since + bound } : {}),
       ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
       ...(releasable ? { canRelease: true as const } : {}),
+      ...(unlistedJobs.length > 0 ? { unlistedJobs } : {}),
       restartKeepsQueue: true,
     };
   }
@@ -18892,7 +18902,10 @@ export class SessionManager {
       (update.terminalJobs ?? []).filter((job) => job.status === "killed").map((job) => job.id),
     );
     const recovered = new Set(recoveredBackgroundTaskIds);
-    const eligiblePendingTaskIds = update.pendingTaskIds.filter((id) => !recovered.has(id));
+    // A job this conversation's ledger already records as ended cannot be running (#3752): whatever
+    // the provider still reports for it, it holds no handoff and no queued prompt.
+    const ended = new Set(endedBackgroundTaskIds({ ...current, backgroundJobs }));
+    const eligiblePendingTaskIds = update.pendingTaskIds.filter((id) => !recovered.has(id) && !ended.has(id));
     const durableRecoveredTaskIds = current.orphanedWork?.recoveryAttemptedAt && update.state !== null
       ? mergeRecoveredBackgroundTaskIds(
           recoveredBackgroundTaskIds,

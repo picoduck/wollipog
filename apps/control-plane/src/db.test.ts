@@ -2663,6 +2663,26 @@ test("a queue hold keeps the runner's word that it can be released now (#3752)",
   assert.doesNotMatch(unreleasable.holds?.[0]?.recoveryAction ?? "", /release_queue_hold/u);
 });
 
+test("a queue hold keeps the unlisted work it waits on, dropping malformed entries (#3752)", () => {
+  const db = withRunner();
+  const unlistedJobs = [{ id: "tool:toolu_watch", kind: "provisional" as const }, { id: "b5p3g2lyb", kind: "unregistered" as const }];
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 2, unlistedJobs,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "unlisted-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("unlisted-hold")!;
+  assert.deepEqual(held.queueHold?.unlistedJobs, unlistedJobs);
+  assert.match(held.holds?.[0]?.reason ?? "", /none of which Background Work lists\.$/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "malformed-unlisted-hold", status: "queued",
+    queueHold: { ...queueHold, unlistedJobs: [{ id: "", kind: "provisional" }, { id: "x", kind: "other" }, unlistedJobs[0]] as never },
+  }), "runner-1", 6_000);
+  const malformed = db.getSession("malformed-unlisted-hold")!;
+  assert.equal(malformed.queueHold?.holdId, "worktree-rebind:5000", "the hold itself is kept");
+  assert.deepEqual(malformed.queueHold?.unlistedJobs, [unlistedJobs[0]]);
+});
+
 test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {
   const db = withRunner();
   const queueHold = {
