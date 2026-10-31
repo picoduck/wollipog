@@ -2273,9 +2273,10 @@ export class Store {
     return { view, activation: false };
   }
   navigate = (view: View, options?: NavigateOptions): void => {
+    if (view.name === "archived") view = { ...view, browseVisit: { restore: false, activationId: ++this.attentionActivation } };
     const { view: activated, activation } = this.activate(view);
     if (sameView(this.state.view, activated)) {
-      if (activation) this.dispatch({ type: "navigate", view: activated });
+      if (activation || activated.name === "archived") this.dispatch({ type: "navigate", view: activated });
       return;
     }
     // An editor with unsaved changes asks first (leave-guard.ts), and navigates here itself if the
@@ -2285,6 +2286,7 @@ export class Store {
     this.onNavigate?.(activated, options);
   };
   navigateFromHistory = (view: View, traversal?: HistoryTraversal): void => {
+    if (view.name === "archived") view = { name: "archived", browseVisit: { restore: true, activationId: ++this.attentionActivation } };
     const { view: activated, activation } = this.activate(view);
     const leaving = !sameView(this.state.view, activated);
     // An editor with unsaved changes asks first, as in-app navigation does (#3218): the move is

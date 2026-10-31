@@ -678,7 +678,7 @@ test("the close confirmation's Show Sessions opens the local instance's Sessions
   assert.equal(links.current().showSessions, undefined, "an unmounted provider offers nothing");
 });
 
-test("an instance's old Keyboard address opens Behavior with its focus target, at startup and on Back (#3023)", async () => {
+test("instance arrivals retain Settings focus and cross-instance archive Back intents", async () => {
   let manager!: InstanceManager;
   const closes: string[] = [];
   const desktop = {
@@ -732,6 +732,17 @@ test("an instance's old Keyboard address opens Behavior with its focus target, a
     assert.equal(manager.activeProfile.id, profiles[1]!.id);
     assert.equal(domWindow.location.pathname, instanceViewPath(profiles[1]!.id, behavior));
     assert.deepEqual(manager.navigation!.current(), keyboard);
+    // Back to another instance's archive entry rebuilds its store, but is still a history visit.
+    const context = { filters: { query: "private transcript" } };
+    domWindow.history.pushState({ wollipogArchiveBrowse: context }, "", instanceViewPath("local", { name: "archived" }));
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.PopStateEvent("popstate"));
+      await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    });
+    const archive = manager.navigation!.current();
+    assert.ok(archive.name === "archived" && archive.browseVisit?.restore === true);
+    assert.deepEqual((domWindow.history.state as { wollipogArchiveBrowse?: unknown } | null)?.wollipogArchiveBrowse, context);
+    assert.deepEqual(manager.navigation!.current(), { name: "archived" }, "the history intent is held for one read");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

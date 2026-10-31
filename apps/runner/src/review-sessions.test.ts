@@ -9,7 +9,7 @@ import {
 } from "@wollipog/protocol";
 import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
-  defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
+  defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
   type ReviewSessionDependencies,
 } from "./review-sessions.js";
 import type { SessionMeta } from "./session-store.js";
@@ -632,6 +632,19 @@ test("a head that no longer descends from the reviewed one starts an epoch that 
   const full = await g.launcher.prepare("s_review", g.policy({ history: reviewed(g, "DOWNVOTE") }), CODEX, "b");
   assert.deepEqual([full.round.epoch, full.round.mode, full.round.rebasedFrom], [2, "full", undefined]);
   g.launcher.release("s_review");
+});
+
+test("Codex discovery directories are retired with their checkout, including repeated release", async (t) => {
+  const f = fixture(t);
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "b");
+  assert.ok(prepared.prompt.includes(JSON.stringify(prepared.checkout)));
+  assert.ok(!prepared.prompt.includes("The working directory is a checkout"));
+  const cwd = prepareCodexReviewWorkingDirectory(prepared.checkout);
+  assert.ok(existsSync(join(cwd, ".git")));
+  f.launcher.release("s_review");
+  assert.ok(!existsSync(cwd));
+  assert.ok(!existsSync(prepared.checkout));
+  f.launcher.release("s_review");
 });
 
 test("an attempt is judged against its pinned head and scope, on a checkout nothing changed", async (t) => {

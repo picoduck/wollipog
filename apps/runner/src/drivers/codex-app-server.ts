@@ -78,7 +78,7 @@ import {
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
 import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
-import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
+import { codexReviewThreadParams, prepareCodexReviewWorkingDirectory, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -712,7 +712,7 @@ export class CodexAppServerDriver implements Driver {
   ) {
     this.sandboxProbeCommand = deps.sandboxProbeCommand ?? (() => codexSandboxProbeCommand());
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
-    this.cwd = opts.cwd;
+    this.cwd = opts.review ? prepareCodexReviewWorkingDirectory(opts.cwd) : opts.cwd;
     this.config = opts.config;
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
@@ -1219,7 +1219,7 @@ export class CodexAppServerDriver implements Driver {
   }
 
   async newSession(cwd: string): Promise<string> {
-    this.cwd = cwd;
+    this.cwd = this.opts.review ? prepareCodexReviewWorkingDirectory(cwd) : cwd;
     await this.reconcilePlugins("session_start");
     if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
     const peer = this.peer;
@@ -1256,9 +1256,9 @@ export class CodexAppServerDriver implements Driver {
         });
       } else {
         res = await this.initializationRequest<Json>(peer, "thread/start", {
-          cwd,
+          cwd: this.cwd,
           ...configuredServiceTier(this.config, this.opts.capabilities),
-          ...(this.opts.review ? CODEX_REVIEW_THREAD_PARAMS : {}),
+          ...(this.opts.review ? codexReviewThreadParams(cwd) : {}),
         });
       }
     } catch (caught) {
