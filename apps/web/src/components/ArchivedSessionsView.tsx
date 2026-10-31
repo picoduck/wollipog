@@ -1,5 +1,5 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isTerminal, type ArchiveSessionMetadata, type SessionStatus, type SessionView } from "@wollipog/protocol";
+import { isTerminal, type ArchiveSessionMetadata, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ARCHIVE_SEARCH_EVENT, pendingArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
@@ -23,7 +23,7 @@ import { destination, viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
+import { BotIcon, HistoryIcon, InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
@@ -51,12 +51,9 @@ function facetName(value: string): string {
   return decodeURIComponent(value.slice(FACET_VALUE_PREFIX.length));
 }
 
-function LifecycleBadge({ status }: { status: SessionStatus }) {
-  return <StatusBadge meta={statusMeta("session", status)} />;
-}
-
-function plainSnippet(snippet: string | undefined): string | null {
-  return snippet ? snippet.replace(/[⟪⟫]/g, "") : null;
+function HighlightedSnippet({ snippet }: { snippet: string }) {
+  return <>{snippet.split(/(⟪[^⟫]*⟫)/g).map((part, index) => part.startsWith("⟪")
+    ? <mark key={index}>{part.slice(1, -1)}</mark> : part)}</>;
 }
 
 function locallyMatches(
@@ -374,7 +371,7 @@ export function ArchivedSessionsView() {
         await refreshCatalogRef.current();
       });
     } catch (cause) {
-      showToast(`Could not unarchive session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't unarchive “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
@@ -390,7 +387,9 @@ export function ArchivedSessionsView() {
       navigate({ name: "session", id: restarted.id });
     } catch (cause) {
       const failure = unarchiveAndRestartFailureMessage(cause);
-      showToast(failure.message, { tone: "error" });
+      showToast(failure.ambiguous ? failure.message : `Couldn't unarchive “${session.title || session.id}”.`, {
+        tone: "error", detail: (cause as Error).message,
+      });
       if (failure.ambiguous) void refreshCatalogRef.current();
     } finally {
       setBusy(session.id, false);
@@ -406,19 +405,20 @@ export function ArchivedSessionsView() {
       updateSession(updated);
       showToast("Stop retry requested.");
     } catch (cause) {
-      showToast(`Could not retry stopping session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't retry the stop for “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
   };
 
-  const stop = async (session: SessionView) => {
+  const stop = async (session: SessionView, back?: ConfirmBack) => {
     // The live copy carries the runner's queue, which the archive page's REST rows can lack (a steer
     // converted to a queued prompt exists only on the runner), and it is what the session header counts.
     const queued = (liveSessionsRef.current.get(session.id) ?? session).queued;
     const approved = await confirm({
       title: "Stop Session",
-      message: stopArchivedSessionMessage(session.title, pendingQueuedPromptCount(queued)),
+      message: stopArchivedSessionMessage(session.title, pendingQueuedPromptCount(queued), session.archived),
+      back,
       confirmLabel: "Stop Session",
       tone: "danger",
     });
@@ -428,16 +428,17 @@ export function ArchivedSessionsView() {
       updateSession(await api.stop(session.id));
       showToast("Session stopped.");
     } catch (cause) {
-      showToast(`Could not stop session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't stop “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
   };
 
-  const deleteSession = async (session: SessionView) => {
+  const deleteSession = async (session: SessionView, back?: ConfirmBack) => {
     const approved = await confirm({
       title: "Delete Session",
       message: deleteSessionMessage(session.title),
+      back,
       confirmLabel: "Delete Session",
       tone: "danger",
     });
@@ -456,15 +457,15 @@ export function ArchivedSessionsView() {
       dispatch({ type: "msg", msg: { type: "session_removed", sessionId: session.id } });
       showToast("Session deleted.");
     } catch (cause) {
-      showToast(`Could not delete session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't delete “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
   };
 
   return (
-    <section className="page wide archive-view" aria-labelledby="page-title">
-      <PageHeader title={destination("archived").name} />
+    <section className="page archive-view" aria-labelledby="page-title">
+      <PageHeader title={destination("archived").name} description={destination("archived").description} />
       <div className="toolbar">
         <label className="archive-search">
           <span>Search Sessions and Transcripts</span>
@@ -566,86 +567,63 @@ export function ArchivedSessionsView() {
             : "Archived sessions will appear here with their lifecycle state and transcript."}
         </State>
       ) : (
-        <div className="table-wrap archive-table-wrap" role="region" aria-label="Archived Sessions Table" tabIndex={0}>
-          <table className="table archive-table">
-            <thead><tr>
-              <th scope="col">Session</th>
-              <th scope="col" className="col-state">State</th>
-              <th scope="col" className="col-project">Project</th>
-              <th scope="col" className="col-location">Location</th>
-              <th scope="col" className="col-agent">Agent</th>
-              <th scope="col" className="col-created">Created</th>
-              <th scope="col" className="col-actions actions-cell">Actions</th>
-            </tr></thead>
-            <tbody>
-              {pageSessions.map((session) => {
-                const rowMetadata = pageMetadata[session.id] ?? archiveSessionMetadata(session, locationNames);
-                const timestamp = formatRecordedTimestamp(session.createdAt);
-                const busy = busyIds.has(session.id);
-                const snippet = plainSnippet(transcriptHits.get(session.id));
-                const target = { name: "session" as const, id: session.id };
-                const stopPending = (session as SessionView & { archiveStatus?: string }).archiveStatus === "stop_pending";
-                const stopFailed = session.archiveStatus === "stop_failed";
-                const showStop = stopPending || stopFailed || !isTerminal(session.status);
-                // A row action the server would refuse this person stays listed but disabled, and
-                // the row describes why once for every such action.
-                const unarchiveRefusal = session.archived ? sessionCommandRefusal(session, "unarchive") : null;
-                const stopRefusal = showStop ? sessionCommandRefusal(session, "stop") : null;
-                const deleteRefusal = session.archived ? sessionCommandRefusal(session, "delete") : null;
-                // §14: one inline action and ⋯ for the rest; the title link is the row's open target.
-                const actions: ArchiveRowAction[] = [];
-                if (session.archived) {
-                  actions.push(sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)
-                    ? { label: "Unarchive and Restart", refusal: unarchiveRefusal, run: () => void unarchiveAndRestart(session) }
-                    : { label: "Unarchive", refusal: unarchiveRefusal, run: () => void unarchive(session) });
-                }
-                if (stopPending || stopFailed) actions.push({ label: "Retry Stop", refusal: stopRefusal, run: () => void retryStop(session) });
-                else if (showStop) actions.push({ label: "Stop", refusal: stopRefusal, run: () => void stop(session) });
-                actions.push({ label: "Open", refusal: null, run: () => { loadSession(session); navigate(target); } });
-                if (session.archived) actions.push({ label: "Delete", refusal: deleteRefusal, danger: true, run: () => void deleteSession(session) });
-                return (
-                  <tr key={session.id}>
-                    <td className="archive-session-cell">
-                      <a href={viewPath(target)} onClick={(event) => {
-                        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                        event.preventDefault();
-                        loadSession(session);
-                        navigate(target);
-                      }}>{session.title || session.id}</a>
-                      {/* The compact tier (§15.2) folds the Project, Location and Agent columns into
-                          this line; elsewhere it is not rendered and those columns show. */}
-                      <span className="archive-session-meta">
-                        <span><span className="sr-only">Project: </span><ProjectsIcon size={14} /> {rowMetadata.project}</span>
-                        {" · "}<span><span className="sr-only">Location: </span>{rowMetadata.location}</span>
-                        {" · "}<span><span className="sr-only">Agent: </span>{rowMetadata.agent}</span>
-                      </span>
-                      {snippet && filters.query.trim().length >= 3 && <small>{snippet}</small>}
-                    </td>
-                    <td className="cell-status"><div className="archive-state-badges">
-                      {session.archived
-                        ? <StatusBadge meta={statusMeta("session", "archived")} />
-                        : <StatusBadge tone="neutral" noDot label="Not Archived" />}
-                      <LifecycleBadge status={session.status} />
-                      {session.historyPruned && <StatusBadge tone="neutral" noDot label="History Pruned"
-                        title={historyPrunedTitle(session.historyPruned)} />}
-                      {stopFailed && <StatusBadge meta={statusMeta("session", "stop_failed")}
-                        title={session.archiveOperation?.failure?.message} />}
-                      {stopPending && <StatusBadge meta={statusMeta("session", runners.get(session.runnerId)?.status === "offline"
-                        ? "stop_waiting_for_runner"
-                        : "stop_pending")} />}
-                    </div></td>
-                    <td className="col-project cell-meta cell-fill cell-dim" title={rowMetadata.project}><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
-                    <td className="col-location cell-extra cell-dim">{rowMetadata.location}</td>
-                    <td className="col-agent cell-extra cell-dim">{rowMetadata.agent}</td>
-                    <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Created </span><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>
-                    <td className="actions-cell">
-                      <ArchiveRowActions sessionId={session.id} title={session.title || session.id} actions={actions} busy={busy} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
+        <div className="surface archive-list" role="region" aria-label="Archived Sessions">
+          {pageSessions.map((session) => {
+            const metadata = pageMetadata[session.id] ?? archiveSessionMetadata(session, locationNames);
+            const title = session.title || session.id;
+            const timestamp = formatRecordedTimestamp(session.createdAt);
+            const snippet = transcriptHits.get(session.id);
+            const target = { name: "session" as const, id: session.id };
+            const openSession = () => { loadSession(session); navigate(target); };
+            const stopPending = session.archiveStatus === "stop_pending";
+            const stopFailed = session.archiveStatus === "stop_failed";
+            const showStop = stopPending || stopFailed || !isTerminal(session.status);
+            const badge = stopFailed ? statusMeta("session", "stop_failed")
+              : stopPending ? statusMeta("session", runners.get(session.runnerId)?.status === "offline" ? "stop_waiting_for_runner" : "stop_pending")
+              : !session.archived ? statusMeta("session", session.status)
+              : filters.archive === "all" ? statusMeta("session", "archived") : null;
+            const restore: ArchiveRowAction | null = session.archived ? {
+              label: sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) ? "Unarchive and Restart" : "Unarchive",
+              refusal: sessionCommandRefusal(session, "unarchive"),
+              run: () => void (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) ? unarchiveAndRestart(session) : unarchive(session)),
+            } : null;
+            const retry: ArchiveRowAction = {
+              label: "Retry Stop", refusal: sessionCommandRefusal(session, "stop"),
+              description: stopFailed ? `The last stop attempt failed, so archiving is paused.${session.archiveOperation?.failure?.message ? ` ${session.archiveOperation.failure.message}` : ""}` : undefined,
+              run: () => void retryStop(session),
+            };
+            const prunedDetail = session.historyPruned ? historyPrunedTitle(session.historyPruned) : undefined;
+            const actions: ArchiveRowAction[] = [{ label: "Open Session", refusal: null, description: prunedDetail, run: openSession }];
+            if (restore) actions.push(restore);
+            if (stopPending || stopFailed) actions.push(retry);
+            else if (showStop) actions.push({ label: "Stop Session…", refusal: sessionCommandRefusal(session, "stop"), run: (back) => void stop(session, back) });
+            if (session.archived) actions.push({ label: "Delete Session…", danger: true, refusal: sessionCommandRefusal(session, "delete"), run: (back) => void deleteSession(session, back) });
+            return <div key={session.id} className={`row row-2 archive-item${snippet ? " has-snippet" : ""}`}
+              tabIndex={0} role="group" aria-label={title}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || window.getSelection()?.toString()) return;
+                if (!(event.target as HTMLElement).closest("a, button")) openSession();
+              }}
+              onKeyDown={(event) => { if (event.key === "Enter" && event.target === event.currentTarget) { event.preventDefault(); openSession(); } }}>
+              <div className="archive-item-content">
+                <div className="archive-item-heading">
+                  <a id={`archive-title-${session.id}`} href={viewPath(target)} title={title} tabIndex={-1} onClick={(event) => {
+                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault(); openSession();
+                  }}>{title}</a>
+                  {badge && <span className="archive-item-badge"><StatusBadge meta={badge} /></span>}
+                </div>
+                {snippet && <div className="archive-item-snippet">Transcript: <HighlightedSnippet snippet={snippet} /></div>}
+                <div className="archive-item-meta">
+                  <span className="archive-project" title={metadata.project === metadata.location ? metadata.project : `${metadata.project} › ${metadata.location}`}><ProjectsIcon size={14} /> <span>{metadata.project}{metadata.project !== metadata.location && ` › ${metadata.location}`}</span></span>
+                  <span className="archive-agent"><BotIcon size={14} />{metadata.agent}</span>
+                  {prunedDetail && <span className="archive-history" role="img" aria-label="History Pruned" title={prunedDetail}><HistoryIcon size={14} /><span>History Pruned</span></span>}
+                </div>
+              </div>
+              <time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time>
+              <ArchiveRowActions sessionId={session.id} title={title} actions={actions} inline={stopFailed ? retry : restore} busy={busyIds.has(session.id)} />
+            </div>;
+          })}
         </div>
       )}
 
@@ -664,92 +642,41 @@ export function ArchivedSessionsView() {
   );
 }
 
+type ConfirmBack = { label: string; run: () => void };
 interface ArchiveRowAction {
   label: string;
-  /** Why the server would refuse this person the action; the action stays listed but disabled. */
   refusal: string | null;
+  description?: string;
   danger?: boolean;
-  run: () => void;
+  run: (back?: ConfirmBack) => void;
 }
 
-/**
- * A table row's actions (docs/design-system.md §14): the first action inline as a small ghost
- * button, the rest in ⋯, destructive last after a separator. A refused action keeps its label and
- * carries its reason: as the inline button's description, or as the menu item's second line.
- */
-function ArchiveRowActions({ sessionId, title, actions, busy }: {
-  sessionId: string;
-  title: string;
-  actions: ArchiveRowAction[];
-  busy: boolean;
+function ArchiveRowActions({ sessionId, title, actions, inline, busy }: {
+  sessionId: string; title: string; actions: ArchiveRowAction[]; inline: ArchiveRowAction | null; busy: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "archive-row-menu");
-  const [inline, ...rest] = actions.filter((action) => !action.danger).concat(actions.filter((action) => action.danger));
-  const inlineReasonId = `archive-row-refusal-${sessionId}`;
-  const firstDanger = rest.findIndex((action) => action.danger);
+  const reasonId = `archive-refusal-${sessionId}`;
+  const firstDanger = actions.findIndex((action) => action.danger);
   const choose = (action: ArchiveRowAction) => {
     menu.close(false);
     menu.triggerRef.current?.focus();
-    action.run();
+    action.run({ label: "Back to More Actions", run: () => setOpen(true) });
   };
-  return (
-    <div className="archive-row-actions">
-      {inline && (
-        <button
-          type="button"
-          className="btn ghost sm"
-          disabled={busy || inline.refusal !== null}
-          title={inline.refusal ?? undefined}
-          aria-describedby={inline.refusal ? inlineReasonId : undefined}
-          onClick={inline.run}
-        >
-          {inline.label}
-        </button>
-      )}
-      {inline?.refusal && <span className="sr-only" id={inlineReasonId}>{inline.refusal}</span>}
-      {rest.length > 0 && (
-        <button
-          ref={menu.triggerRef}
-          type="button"
-          className="icon-btn sm"
-          disabled={busy}
-          onClick={menu.toggle}
-          onKeyDown={menu.onTriggerKeyDown}
-          title="More Actions"
-          aria-label={`More Actions for ${title}`}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          aria-controls={menu.menuId}
-        >
-          <MoreHorizontalIcon />
-        </button>
-      )}
-      {open && (
-        <MenuSurface
-          surfaceRef={menu.menuRef}
-          anchor={{ trigger: menu.triggerRef }}
-          id={menu.menuId}
-          label={title}
-          align="end"
-          onDismiss={() => menu.close(true)}
-          onKeyDown={menu.onMenuKeyDown}
-        >
-          {rest.map((action, index) => (
-            <Fragment key={action.label}>
-              {index === firstDanger && index > 0 && <MenuSeparator />}
-              <MenuItem
-                danger={action.danger}
-                disabled={action.refusal !== null}
-                description={action.refusal ?? undefined}
-                onClick={() => choose(action)}
-              >
-                {action.label}
-              </MenuItem>
-            </Fragment>
-          ))}
-        </MenuSurface>
-      )}
-    </div>
-  );
+  return <div className={`archive-item-actions${inline?.label === "Retry Stop" ? " retry-visible" : ""}`} onClick={(event) => event.stopPropagation()}>
+    {inline && <button type="button" className="btn ghost sm archive-inline" disabled={busy || inline.refusal !== null} title={inline.refusal ?? undefined}
+      aria-describedby={`archive-title-${sessionId}${inline.refusal ? ` ${reasonId}` : ""}`} onClick={() => inline.run()}>{inline.label}</button>}
+    {inline?.refusal && <span id={reasonId} className="sr-only">{inline.refusal}</span>}
+    <button ref={menu.triggerRef} type="button" className="icon-btn sm" disabled={busy} onClick={menu.toggle}
+      onKeyDown={menu.onTriggerKeyDown} title="More Actions" aria-label={`More Actions for ${title}`}
+      aria-haspopup="menu" aria-expanded={open} aria-controls={menu.menuId}><MoreHorizontalIcon /></button>
+    {open && <MenuSurface surfaceRef={menu.menuRef} anchor={{ trigger: menu.triggerRef }} id={menu.menuId} label={title}
+      align="end" onDismiss={() => menu.close(true)} onKeyDown={menu.onMenuKeyDown}>
+      {actions.map((action, index) => <Fragment key={action.label}>
+        {index === firstDanger && index > 0 && <MenuSeparator />}
+        <MenuItem danger={action.danger} disabled={action.refusal !== null} description={action.refusal ?? action.description}
+          onClick={() => choose(action)}>{action.label}</MenuItem>
+      </Fragment>)}
+    </MenuSurface>}
+  </div>;
 }

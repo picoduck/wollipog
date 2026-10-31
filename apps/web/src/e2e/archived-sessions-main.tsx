@@ -11,8 +11,7 @@ import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import "../styles.css";
 
 /**
- * Real-browser Archived Sessions harness (#2777): archived sessions, two of them pruned by
- * archived-history retention, so the archive shows its History Pruned badge beside the lifecycle.
+ * Real-browser Archived Sessions harness: retained rows, stop recovery and search context.
  * `?theme=light|dark` picks the theme.
  */
 const params = new URLSearchParams(window.location.search);
@@ -40,6 +39,12 @@ const sessions = [
     { status: "failed", historyPruned: { prunedAt: NOW - 2 * DAY, eventCount: 6_215, retentionDays: 90 } }),
   session(3, "Add Keyboard Shortcuts to the Board"),
   session(4, "Draft the Release Notes for v0.33", { status: "stopped" }),
+  ...(params.has("rows") ? [
+    session(5, "Fix the Half-Cent Rounding Bug", { status: "stopped", archiveStatus: "stop_failed",
+      archiveOperation: { operationId: "stop-5", status: "stop_failed", requestedAt: NOW, lastAttemptAt: NOW, attemptCount: 3,
+        capacityReleased: false, failure: { code: "retry_exhausted", message: "The machine could not stop the session.", failedAt: NOW } } }),
+    session(6, "Review the Active Release", { archived: false, status: "running" }),
+  ] : []),
 ];
 
 class FixtureSocket implements UiSocket {
@@ -72,7 +77,7 @@ const connection: UiConnectionRuntime = {
 
 const navigation: ViewNavigation = {
   current: () => ({ name: "archived" }),
-  push() {},
+  push(view) { document.title = view.name === "session" ? `Session ${view.id}` : "Archived Sessions E2E"; },
   listen: () => () => {},
 };
 
@@ -80,14 +85,16 @@ const client = {
   ...api,
   listAllSessions: async () => ({ sessions }),
   search: async () => ({ results: [] }),
-  archiveSessionPage: async () => ({
-    sessions,
-    snippets: {},
-    metadata: Object.fromEntries(sessions.map((item) => [item.id, { project: "Wollipog", location: "wollipog", agent: "Claude Code" }])),
+  archiveSessionPage: async (input: Parameters<ApiClient["archiveSessionPage"]>[0]) => ({
+    sessions: sessions.filter((item) => input.archive === "all" || (input.archive === "unarchived" ? !item.archived : item.archived)),
+    snippets: input.q ? { "archived-1": "The ⟪UI⟫ now groups usage by day." } : {},
+    metadata: Object.fromEntries(sessions.map((item, index) => [item.id, { project: "Wollipog", location: index % 2 === 0 ? "Wollipog" : "Release Checkout", agent: "Claude Code" }])),
     nextCursor: null,
     hasMore: false,
     facets: { projects: ["Wollipog"], locations: ["wollipog"], agents: ["Claude Code"] },
   }),
+  stop: async (id: string) => ({ ...sessions.find((item) => item.id === id)!, status: "stopped" }),
+  deleteSession: async () => { throw new Error("The server refused this deletion."); },
 } as unknown as ApiClient;
 
 createRoot(document.getElementById("root")!).render(

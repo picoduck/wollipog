@@ -19179,83 +19179,49 @@ a.tab { text-decoration: none; }
   min-width: 0;
   width: 100%;
 }
-.archive-results-summary,
-.archive-table-wrap {
+.archive-list { min-width: 0; }
+.archive-results-summary { color: var(--text-dim); font: var(--type-small); }
+.archive-list .archive-item {
+  height: 56px;
   min-width: 0;
-  overflow-x: auto;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
+  gap: var(--space-3);
+  cursor: pointer;
 }
-/* Declared widths (§14): the Session column takes what is left. */
-.archive-table .col-state { width: 250px; }
-.archive-table .col-project,
-.archive-table .col-location { width: 140px; }
-.archive-table .col-agent { width: 120px; }
-.archive-table .col-created { width: 110px; }
-/* One inline action ("Unarchive and Restart" at the longest) and ⋯ (§14). */
-.archive-table .col-actions { width: 210px; }
-.archive-session-cell > a {
-  display: block;
-  overflow: hidden;
-  color: var(--text);
-  font: var(--type-body-strong);
-  text-decoration: none;
-  text-overflow: ellipsis;
+.archive-list .archive-item.has-snippet { height: 76px; }
+.archive-item-content { flex: 1; min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-2); }
+.archive-item-heading { display: contents; }
+.archive-item-badge { grid-column: 2; grid-row: 1; }
+.archive-item-meta { display: flex; align-items: center; gap: var(--space-2); min-width: 0; grid-column: 1 / -1; }
+.archive-item-heading > a { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font: var(--type-body-strong); text-decoration: none; }
+.archive-item-heading > a:hover { color: var(--accent); text-decoration: underline; }
+.archive-item-meta, .archive-item-snippet { font: var(--type-small); color: var(--text-dim); }
+.archive-item-snippet { grid-column: 1 / -1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-item-snippet mark { background: color-mix(in srgb, var(--amber) 24%, transparent); color: var(--text); }
+.archive-project { display: flex; align-items: center; gap: var(--space-1); min-width: 0; }
+.archive-project > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-project > svg, .archive-agent { flex-shrink: 0; }
+.archive-agent { display: flex; align-items: center; gap: var(--space-1); }
+.archive-history { display: flex; align-items: center; gap: var(--space-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-history > svg { flex-shrink: 0; }
+.archive-item > time { flex-shrink: 0; color: var(--text-faint); font: var(--type-small); font-variant-numeric: tabular-nums; }
+.archive-item-actions { width: 180px; flex-shrink: 0; display: flex; justify-content: flex-end; align-items: center; gap: var(--space-2); position: relative; }
+.archive-inline { visibility: hidden; }
+.archive-item:hover .archive-inline, .archive-item:focus-within .archive-inline, .retry-visible .archive-inline { visibility: visible; }
+@media (pointer: coarse) {
+  .archive-item-actions { width: 188px; }
+  .archive-inline { display: none; }
+  .retry-visible .archive-inline { display: inline-flex; }
 }
-.archive-session-cell > a:hover { color: var(--accent); text-decoration: underline; }
-.archive-session-cell small {
-  display: block;
-  overflow: hidden;
-  color: var(--text-faint);
-  text-overflow: ellipsis;
-}
-.archive-session-meta { display: none; }
-/* Folded (§14): the six declared columns need 970px, so until the table also has 200px for the
-   Session column, Project, Location and Agent fold into a meta line under the session's title, and
-   the State badges stack. That is the whole compact tier (§15.2) and, with the rail and any docked
-   panel taken out, desktop widths up to where the full layout fits: a main column of 1220px is the
-   970px, the 200px, the table's 2px border and the page's 2 × 24px gutter. A phone has no `app`
-   container, so its rows (§14) are untouched. The line wraps between values rather than
-   truncating, so every value stays on screen. State keeps room for its longest badge ("Stop
-   Waiting for Runner", about 157px), which leaves the Session column about 150px at the 761px
-   floor. */
-@container app (max-width: 1219px) {
-  .archive-table :is(.col-project, .col-location, .col-agent) { display: none; }
-  .archive-table .col-state { width: 188px; }
-  .archive-table .col-created { width: 100px; }
-  .archive-table .archive-session-cell { padding-block: var(--space-1); }
-  .archive-session-meta {
-    display: block;
-    color: var(--text-dim);
-    font: var(--type-small);
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
-  /* Each value moves to the next line whole; one wider than the cell breaks inside. */
-  .archive-session-meta > span { display: inline-block; max-width: 100%; }
-  .archive-session-meta .app-icon {
-    display: inline-block;
-    vertical-align: -2px;
-  }
-}
-/* The State cell is a badge list: its badges are whole words, so a rare third one (a stop in
-   progress) wraps inside the cell rather than being cut mid-word. */
-.archive-state-badges {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--space-1);
-  padding-block: var(--space-1);
-  white-space: normal;
-}
-/* 8px apart, so on touch the two small controls' borrowed hit areas meet rather than overlap
-   (§2.8), and nothing clips those hit areas. */
-.archive-row-actions {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: var(--space-2);
+@media (max-width: 760px) {
+  .archive-item > time, .archive-item-actions .archive-inline { display: none; }
+  .archive-item-content { display: flex; flex-wrap: wrap; align-items: center; }
+  .archive-item-heading > a { flex-basis: 100%; }
+  .archive-item-badge { order: 3; flex-shrink: 0; }
+  .archive-item-snippet { order: 2; width: 100%; }
+  .archive-item-meta { order: 4; flex: 1; }
+  .archive-history { flex-shrink: 0; }
+  .archive-history > span { display: none; }
+  .archive-item-actions { width: auto; }
 }
 .archive-pagination {
   display: flex;
@@ -19576,7 +19542,7 @@ a.tab { text-decoration: none; }
   --green: #98c379;
   --teal: #56b6c2;
   --red: #e06c75;
-  --amber: #d19a66;
+  --amber: #d09966;
   --blue: #61afef;
   --code-bg: #2d313a;
   --code-text: #abb2bf;
