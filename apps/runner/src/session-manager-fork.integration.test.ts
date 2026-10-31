@@ -8,6 +8,7 @@ import { PROTOCOL_VERSION, type AgentDefinition, type AgentDriverKind, type Runn
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import { anchorForkRef, captureWorktreeTree } from "./git-ops.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
+import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import { type LaunchPreparationCancellation, SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
@@ -448,6 +449,8 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     let preparationWait: (() => Promise<void>) | undefined;
     // Stands in for the `index.ts` adapter's account-HOME acquisition (#3238).
     let preparationHook: ((cancellation?: LaunchPreparationCancellation) => Promise<void>) | undefined;
+    // The launch environment the adapter resolves for a temporary provider, when a test sets one.
+    let preparedEnvironment: Record<string, string> | undefined;
     // What the fake Claude fork reports to forkSession's process observer (#3238): a tree proof,
     // or nothing at all, as a driver without the observer would.
     let claudeForkProcessReport: boolean | "none" = "none";
@@ -538,6 +541,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       async (launchMeta, cancellation) => {
         await preparationWait?.();
         await preparationHook?.(cancellation);
+        if (preparedEnvironment) launchMeta.env = { ...preparedEnvironment };
         if (launchMeta.driver === "codex-app-server") {
           return { codexLaunchArgs: ["-c", "plugins.review@local.enabled=true"] };
         }
@@ -1156,6 +1160,64 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
           open();
           preparationHook = undefined;
           if (store.has(targetId)) await manager.delete(targetId);
+        }
+      }
+      // Each fork lease is keyed on the home its provider process uses (#3858): the runner's own
+      // provider home without a binding, the credential home with one. A live source client forks
+      // under its own launch environment, never the empty durable one.
+      {
+        const homes: string[] = [];
+        leaseInternals.providerHomeLeases = {
+          acquire: async () => { throw new Error("no plain reference below the handle budget"); },
+          // The fixture's bwrap boundary redirects HOME, so select the target as a shared launch would.
+          acquireReference: async (request: unknown) => {
+            homes.push(providerHomeLeaseTarget({ ...(request as ProviderHomeLeaseRequest), isolation: undefined })!.home);
+            return null;
+          },
+        };
+        const runnerInternals = manager as unknown as {
+          runnerEnvironment: NodeJS.ProcessEnv;
+          active: Map<string, unknown>;
+        };
+        const originalRunnerEnvironment = runnerInternals.runnerEnvironment;
+        runnerInternals.runnerEnvironment = { CLAUDE_CONFIG_DIR: "/runner/claude", HOME: "/runner" };
+        try {
+          for (const [label, environment, expected] of [
+            ["unbound", { HOME: "/agent" }, "/runner/claude"],
+            ["bound", { HOME: "/agent", CLAUDE_CONFIG_DIR: "/accounts/work" }, "/accounts/work"],
+          ] as const) {
+            homes.length = 0;
+            preparedEnvironment = environment;
+            const targetId = `s_claude_fork_home_${label}`;
+            try {
+              const forked = await manager.forkConversation("s_claude_source", targetId, 2, "Fork Home");
+              assert.equal(forked.ok, true, forked.error);
+              assert.deepEqual(homes, [expected, expected], `${label}: the temporary driver and the target fork`);
+              assert.deepEqual(new SessionStore(storeRoot).readMeta("s_claude_source")?.env, {}, "the resolved environment is never persisted");
+              assert.deepEqual(store.readMeta(targetId)?.env, {});
+            } finally {
+              preparedEnvironment = undefined;
+              if (store.has(targetId)) await manager.delete(targetId);
+            }
+          }
+          homes.length = 0;
+          const liveClient = factory("claude-code", { resumeId: "claude-source-uuid" } as DriverOptions, {} as DriverCallbacks);
+          const constructionsBefore = constructions;
+          runnerInternals.active.set("s_claude_source", {
+            running: false, queue: [], client: liveClient, launchEnv: { CLAUDE_CONFIG_DIR: "/accounts/live" },
+          });
+          const targetId = "s_claude_fork_home_live";
+          try {
+            const forked = await manager.forkConversation("s_claude_source", targetId, 2, "Fork Home Live");
+            assert.equal(forked.ok, true, forked.error);
+            assert.equal(constructions, constructionsBefore, "the live client forks; no temporary driver starts");
+            assert.deepEqual(homes, ["/accounts/live"], "the fork leases the live client's credential home");
+          } finally {
+            runnerInternals.active.delete("s_claude_source");
+            if (store.has(targetId)) await manager.delete(targetId);
+          }
+        } finally {
+          runnerInternals.runnerEnvironment = originalRunnerEnvironment;
         }
       }
     } finally {
