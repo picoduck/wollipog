@@ -361,6 +361,29 @@ test("chips remove one filter and Clear Filters preserves search; Clear Search p
   await fixture.unmount();
 });
 
+test("Filters applies choices immediately, includes searchable long facets, and returns focus on Done", async () => {
+  const fixture = await mount(Array.from({ length: 13 }, (_, i) => session(i, { projectName: `Project ${i}` })));
+  const trigger = button(fixture.container, "Filters");
+  trigger.focus();
+  await act(async () => { fireDomEvent.click(trigger); });
+  const dialog = fixture.container.querySelector<HTMLElement>('[role="dialog"]')!;
+  assert.ok(dialog);
+  await act(async () => { fireDomEvent.click(dialog.querySelector<HTMLButtonElement>('[aria-label="Project: All Projects"]')!); });
+  const filter = dialog.querySelector<HTMLInputElement>('[role="combobox"][aria-label="Search Project Options"]')!;
+  assert.ok(filter, "long facets expose a filter field");
+  await act(async () => { filter.value = "Project 12"; fireDomEvent.change(filter); });
+  const options = dialog.querySelectorAll<HTMLButtonElement>('[role="option"]');
+  assert.equal(options.length, 1);
+  await act(async () => { fireDomEvent.click(options[0]!); });
+  assert.equal(dialog.querySelector('[role="status"]')?.textContent, "1 session");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Project 12");
+  await act(async () => { fireDomEvent.click(button(dialog, "Done")); });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertNoDomNode(fixture.container.querySelector('[role="dialog"]'), "Done dismisses Filters");
+  assert.equal(domWindow.document.activeElement === trigger, true);
+  await fixture.unmount();
+});
+
 test("search input debounces to one request and preserves server row order", async () => {
   const fixture = await mount([
     session(1, { id: "older", title: "Older", createdAt: 1, updatedAt: 999 }),

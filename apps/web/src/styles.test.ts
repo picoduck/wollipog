@@ -261,8 +261,7 @@ test("a Sessions row's selection, unread state and focus are three different tre
 /** The rule that lets a container's gap space a `.field-label`, and the field label rule (§8.1). */
 const STACKED_FIELD_LABELS = [".field > .field-label"];
 /** Labels of a form that stacks them over the control outside a `.field` (#2366). */
-const OUTSIDE_FIELD_LABELS: string[] = [];
-const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ...OUTSIDE_FIELD_LABELS, ".new-session-field-label"].join(",\n");
+const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ".new-session-field-label"].join(",\n");
 
 /** The line under a field's control (§8.1): the helper, the error that replaces it, or a `.field-foot`. */
 const FIELD_LINE = ".field > :is(.field-helper, .field-error, .field-foot)";
