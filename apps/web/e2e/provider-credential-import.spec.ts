@@ -122,3 +122,40 @@ test("capture unavailable and refused evidence", async ({ page }) => {
     }
   }
 });
+
+/**
+ * #3719: under Hide Account Emails, email-labelled sources stay distinct (numbered) and Emails
+ * reveals them. With CAPTURE_DIR set it also captures the hidden and revealed list.
+ */
+test("hidden email sources are numbered and revealable before copying", async ({ page }) => {
+  await page.addInitScript(() => window.localStorage.setItem("wollipog.hide-account-emails", "true"));
+  const directory = process.env.CAPTURE_DIR;
+  const variants = directory
+    ? [["desktop", { width: 1280, height: 900 }], ["phone", { width: 390, height: 844 }]] as const
+    : [["desktop", { width: 1280, height: 900 }]] as const;
+  for (const [viewport, size] of variants) {
+    for (const theme of directory ? ["dark", "light"] as const : ["dark"] as const) {
+      await page.setViewportSize(size);
+      await page.emulateMedia({ reducedMotion: "reduce" });
+      const dialog = await openAddAccount(page, "credentialImport=emails");
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await dialog.getByRole("radio", { name: "Codex" }).click();
+      await dialog.getByRole("radio", { name: "Copy Existing Sign-In" }).click();
+      const sources = dialog.getByRole("radiogroup", { name: "Copy From" });
+      await expect(sources.getByRole("radio", { name: "Hidden Account 1" })).toBeVisible();
+      await expect(sources.getByRole("radio", { name: "Hidden Account 2" })).toBeVisible();
+      await expect(dialog).not.toContainText("@example.com");
+      if (directory) {
+        await page.waitForTimeout(500);
+        await page.screenshot({ path: `${directory}/hidden-sources-${viewport}-${theme}.png` });
+      }
+      await dialog.getByRole("button", { name: /Emails/ }).click();
+      await expect(sources).toContainText("team@example.com");
+      await expect(sources).toContainText("solo@example.com");
+      if (directory) {
+        await page.waitForTimeout(500);
+        await page.screenshot({ path: `${directory}/revealed-sources-${viewport}-${theme}.png` });
+      }
+    }
+  }
+});

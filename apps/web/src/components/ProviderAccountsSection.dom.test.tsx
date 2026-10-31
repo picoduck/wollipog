@@ -1709,3 +1709,52 @@ test("where copying isn't available an Owner sees why, and a member sees only th
     await ui.unmount();
   }
 });
+
+test("under Hide Account Emails two email sources stay distinct and revealable, and the chosen one is what is copied", async () => {
+  await withHiddenEmails(async () => {
+    const api = importClient();
+    const accounts: ProviderAccountDefinition[] = [
+      { id: "alice", label: "alice@example.com", provider: "codex", authStatus: "authenticated" },
+      { id: "bob", label: "bob@example.com", provider: "codex", authStatus: "authenticated" },
+    ];
+    const ui = await render({ runner: runnerView({ protocolVersion: IMPORTING, runtime: IMPORT_RUNTIME, providerAccounts: accounts }), api: api.client });
+    try {
+      const add = await openAdd(ui);
+      await chooseRadio(ui, add.dialog, "Codex");
+      await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+      const list = () => add.dialog.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Copy From"]')!.textContent ?? "";
+      assert.match(list(), /Hidden Account 1/);
+      assert.match(list(), /Hidden Account 2/);
+      assert.equal(/@example\.com/.test(add.dialog.textContent ?? ""), false, "no email before reveal");
+      await chooseRadio(ui, add.dialog, "Hidden Account 2");
+      await add.type("Copied");
+      await act(async () => { ui.button(add.dialog, "Copy Sign-In").click(); });
+      await ui.settle();
+      const confirmation = dialogs().at(-1)!;
+      assert.match(confirmation.textContent ?? "", /from Hidden Account 2 into the new profile Copied/);
+      assert.equal(/@example\.com/.test(confirmation.textContent ?? ""), false, "the confirmation stays masked too");
+      await act(async () => { ui.button(confirmation, "Copy Sign-In").click(); });
+      await ui.settle();
+      assert.deepEqual(api.imports, [{ provider: "codex", label: "Copied", source: { kind: "account", accountId: "bob" }, sourceLabel: "bob@example.com" }]);
+    } finally {
+      await ui.unmount();
+    }
+
+    // Emails is the explicit way to identify the source before choosing it.
+    const again = await render({ runner: runnerView({ protocolVersion: IMPORTING, runtime: IMPORT_RUNTIME, providerAccounts: accounts }), api: importClient().client });
+    try {
+      const add = await openAdd(again);
+      await chooseRadio(again, add.dialog, "Codex");
+      await chooseRadio(again, add.dialog, "Copy Existing Sign-In");
+      const reveal = [...add.dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => /Emails/.test(button.textContent ?? "") || /Emails/.test(button.getAttribute("aria-label") ?? ""));
+      assert.ok(reveal, "an Emails reveal control is offered");
+      await act(async () => { reveal.click(); });
+      await again.settle();
+      const text = add.dialog.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Copy From"]')!.textContent ?? "";
+      assert.match(text, /alice@example\.com/);
+      assert.match(text, /bob@example\.com/);
+    } finally {
+      await again.unmount();
+    }
+  });
+});

@@ -167,3 +167,16 @@ test("a copied account is published through the fenced configuration write", asy
   assert.deepEqual(JSON.parse(readFileSync(f.configPath, "utf8")).providerAccounts.map((a: { id: string }) => a.id),
     [first.accountId, second.accountId]);
 });
+
+test("an import records the account under the id the control plane chose, and refuses one that is taken or malformed", async (t) => {
+  const f = importFixture(t, { accounts: [{ id: "taken", label: "Taken", provider: "codex", directory: "/taken" }] });
+  const result = await f.supervisor.importAccount({ provider: "codex", label: "Work", source: { kind: "default_home" },
+    profileGrantId: GRANT, accountId: "import-1a2b3c4d" });
+  assert.equal(result.accountId, "import-1a2b3c4d");
+  assert.ok(f.accounts.some((account) => account.id === "import-1a2b3c4d"));
+  for (const accountId of ["taken", "import-1a2b3c4d", "../escape", ""]) {
+    await assert.rejects(f.supervisor.importAccount({ provider: "codex", label: `Other ${accountId}`, source: { kind: "default_home" },
+      profileGrantId: GRANT, accountId }), refused("FAILED"), accountId);
+  }
+  assert.equal(f.copies.length, 1, "a refused id copies nothing");
+});

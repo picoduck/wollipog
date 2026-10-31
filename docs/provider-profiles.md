@@ -401,13 +401,16 @@ Sign-In") and the new profile's label; a stale or different name is 409 `CONFIRM
 
 The route needs a human Owner or Admin who can access the Machine, so the central gate confines it
 to the personal control-plane organization; members, agent credentials and other organizations'
-Owners and Admins are refused. The control plane records the new profile's pending grant as Add
-Account does (`origin = 'created'`, with the authorizer's role), and an audit row in
+Owners and Admins are refused. The control plane chooses the new account's id
+(`import-<random>`), records the new profile's pending grant for that account (`origin =
+'created'`, with the authorizer's role) before sending `import_provider_credential` with that id,
+and an audit row in
 `provider_credential_imports`: the authorizer and role, the source kind (and, for an account
 source, its opaque account id), the grant, and, once the runner answers, the new account and
 profile ids or the refusal code. It holds no credential content or path. A refusal spends the grant;
-a lost reply leaves it pending and the audit `unknown`, and the account report completes the grant
-if the import ran.
+a lost reply leaves it pending and the audit `unknown`. Because the grant is bound to the named
+account from the start, a later report of that account with its profile (after the runner's next
+registration lists the pending grant) completes it if the import ran.
 
 The runner records the new account through the same fenced configuration publication as Add
 Account (#3506): it captures the configuration's preimage, then publishes. Only a confirmed
@@ -415,7 +418,7 @@ publication is a success. A publication that definitely did not happen is a refu
 drops this control plane's grant from the new HOME's marker. One whose outcome is unknown (including
 one published but not confirmed) answers `PUBLICATION_UNKNOWN`: the runner stops using the grant
 without removing it from the marker, the control plane leaves the grant pending and the audit
-`unknown`, and an account report that names the profile completes it. Neither case is reported as a
+`unknown`, and a later report of the named account with its profile completes it. Neither case is reported as a
 copied account.
 
 ### Compatibility

@@ -7,7 +7,7 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { agentDisplayName } from "../agent-presentation.js";
-import { accountLabelText } from "../personal-identifiers.js";
+import { accountLabelText, maskedAccountTitles } from "../personal-identifiers.js";
 import { runnerDisplay } from "../runners.js";
 import type { MachineAccountsIntent } from "../navigation.js";
 import { providerHomeBlockingProcessCopy, providerHomeRecoveryCauseCopy } from "../provider-home-refusal.js";
@@ -50,18 +50,21 @@ export const IMPORT_UNAVAILABLE = {
 
 /** #3719: what Add Account offers an Owner or Admin besides a new sign-in. Only a Codex API-key
  * sign-in on a native Linux or macOS machine can be copied; the runner reports the capability. */
-export function providerCredentialImportOffer(runner: RunnerView, online: boolean, accounts: readonly ProviderAccountDefinition[],
-  mask: (label: string) => string): ProviderCredentialImportOffer {
+export function providerCredentialImportOffer(runner: RunnerView, online: boolean, accounts: readonly ProviderAccountDefinition[]): ProviderCredentialImportOffer {
   if (runner.os === "windows") return { available: false, reason: IMPORT_UNAVAILABLE.windows };
   if (!runnerSupportsProtocol(runner.protocolVersion, "providerCredentialImport")) return { available: false, reason: IMPORT_UNAVAILABLE.update };
   if (!runnerSupportsProviderCredentialImport(runner)) return { available: false, reason: IMPORT_UNAVAILABLE.context };
   if (!online) return { available: false, reason: IMPORT_UNAVAILABLE.offline };
+  const codex = accounts.filter((account) => account.provider === "codex");
+  // Hidden identifiers are numbered in list order, so two email labels stay distinct before reveal.
+  const masked = maskedAccountTitles(codex.map((account) => account.label));
   return {
     available: true,
     sources: [
-      { key: "default", source: { kind: "default_home" }, name: PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL, display: PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL },
-      ...accounts.filter((account) => account.provider === "codex").map((account) => ({
-        key: `account:${account.id}`, source: { kind: "account" as const, accountId: account.id }, name: account.label, display: mask(account.label),
+      { key: "default", source: { kind: "default_home" }, name: PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL,
+        masked: PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL },
+      ...codex.map((account, index) => ({
+        key: `account:${account.id}`, source: { kind: "account" as const, accountId: account.id }, name: account.label, masked: masked[index]!,
       })),
     ],
   };
@@ -833,7 +836,7 @@ export function ProviderAccountsSection({ runner, online, machineName, canManage
           accounts={accounts}
           logins={logins}
           initialProvider={adding}
-          {...(canManageProfiles && canManage ? { importOffer: providerCredentialImportOffer(runner, online, accounts, masked) } : {})}
+          {...(canManageProfiles && canManage ? { importOffer: providerCredentialImportOffer(runner, online, accounts) } : {})}
           onStarted={(login) => setStarted({ operationId: login.operationId, accountId: login.accountId, provider: login.provider })}
           onImported={(account) => setStarted({ operationId: "", accountId: account.accountId, provider: account.provider })}
           onClose={() => setAdding(null)}

@@ -2,7 +2,8 @@ import React, { useId, useRef, useState, type ReactNode } from "react";
 import type { ProviderAccountDefinition, ProviderCredentialImportSource, ProviderLoginView } from "@wollipog/protocol";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useApi } from "../api-context.js";
-import { AccountIdentifier } from "./AccountIdentifier.js";
+import { AccountIdentifier, AccountIdentifierRevealButton, useAccountIdentifierReveal } from "./AccountIdentifier.js";
+import { isPersonalIdentifier } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { FieldError } from "./FieldError.js";
@@ -32,12 +33,13 @@ function runnerLabelError(message: string, provider: Provider, label: string): L
 }
 
 /** #3719: one existing sign-in an import can copy. `name` is the exact text the confirmation names
- * (the account's label, or the Machine's own sign-in); `display` is what the list shows. */
+ * (the account's label, or the Machine's own sign-in); `masked` is what shows until account emails
+ * are revealed, numbered so that hidden labels stay distinct. */
 export interface ProviderCredentialImportChoice {
   key: string;
   source: ProviderCredentialImportSource;
   name: string;
-  display: string;
+  masked: string;
 }
 
 /** #3719: what Add Account can offer an Owner or Admin besides a new sign-in. Absent for anyone
@@ -97,6 +99,11 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
   const copyOffered = provider === "codex" && importOffer?.available === true && importOffer.sources.length > 0;
   const copying = copyOffered && method === "copy";
   const source = copying ? importOffer.sources.find((choice) => choice.key === sourceKey) ?? importOffer.sources[0] : undefined;
+  // A hidden email label shows numbered until the person reveals emails, so they can tell which
+  // account's key and billing they are copying without exposing it before reveal (#3719).
+  const sources = importOffer?.available ? importOffer.sources : [];
+  const [revealed, toggleReveal] = useAccountIdentifierReveal(JSON.stringify([runnerId, sources.map((choice) => [choice.key, choice.name])]));
+  const shown = (choice: ProviderCredentialImportChoice) => revealed ? choice.name : choice.masked;
   // Owners and Admins learn why copying isn't offered here; members never see it.
   const unavailable = !importOffer ? undefined
     : provider === "claude" ? CLAUDE_IMPORT_UNAVAILABLE
@@ -131,9 +138,9 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
       submittingRef.current = true;
       const approved = await confirm({
         title: "Copy Sign-In",
-        message: `Only the API key is copied from ${source.display} into the new profile ${trimmed} on ${machineName}; ` +
+        message: `Only the API key is copied from ${shown(source)} into the new profile ${trimmed} on ${machineName}; ` +
           "settings, history, plugins and skills aren't. The original stays signed in, and both share one key's billing and limits.",
-        detailRows: [{ label: source.display, meta: "Copy From" }, { label: trimmed, meta: "New Profile" }],
+        detailRows: [{ label: shown(source), meta: "Copy From" }, { label: trimmed, meta: "New Profile" }],
         confirmLabel: "Copy Sign-In",
       });
       submittingRef.current = false;
@@ -227,11 +234,16 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
         )}
         {copying && (
           <div className="field">
-            <div className="field-head"><span id={`${ids}-source`}>Copy From</span></div>
+            <div className="field-head">
+              <span id={`${ids}-source`}>Copy From</span>
+              {importOffer.sources.some((choice) => isPersonalIdentifier(choice.name)) && (
+                <AccountIdentifierRevealButton label="Emails" revealed={revealed} onToggle={toggleReveal} withText />
+              )}
+            </div>
             <ChoiceList<string>
               label="Copy From"
               value={source?.key ?? null}
-              options={importOffer.sources.map((choice) => ({ value: choice.key, label: choice.display }))}
+              options={importOffer.sources.map((choice) => ({ value: choice.key, label: shown(choice) }))}
               onChange={setSourceKey}
             />
             <p className="field-helper">

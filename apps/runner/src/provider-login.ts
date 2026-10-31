@@ -534,7 +534,11 @@ export class ProviderLoginSupervisor {
    * one, with this control plane's grant; a copied key is the same account as its source by
    * design, so the duplicate-identity check of a sign-in does not apply.
    */
-  async importAccount(input: { provider: "claude" | "codex"; label: string; source: ProviderCredentialImportSource; profileGrantId: string }): Promise<{ accountId: string; profileId: string }> {
+  async importAccount(input: {
+    provider: "claude" | "codex"; label: string; source: ProviderCredentialImportSource; profileGrantId: string;
+    /** The id the control plane chose and bound the grant to; generated here when absent. */
+    accountId?: string;
+  }): Promise<{ accountId: string; profileId: string }> {
     const imports = this.options.imports;
     const profiles = this.options.profiles;
     if (this.stopped) throw new ProviderCredentialImportError("FAILED", "The provider sign-in supervisor has stopped.");
@@ -574,7 +578,11 @@ export class ProviderLoginSupervisor {
     try { label = this.newAccountLabel("codex", input.label); } catch (error) {
       throw new ProviderCredentialImportError("LABEL_IN_USE", error instanceof Error ? error.message : "The account label is unavailable.");
     }
-    const accountId = this.newAccountId(label);
+    if (input.accountId !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.accountId) ||
+        this.options.accounts.some((candidate) => candidate.id === input.accountId) || this.importing.has(input.accountId))) {
+      throw new ProviderCredentialImportError("FAILED", "The new account's id is unavailable on this Machine.");
+    }
+    const accountId = input.accountId ?? this.newAccountId(label);
     const profileId = randomUUID();
     const account: RunnerProviderAccount = { id: accountId, label, provider: "codex", directory: join(profiles.root, profileId), profileId };
     // Reserved with no await before it, so overlapping imports of one source or label are refused.

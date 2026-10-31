@@ -3204,7 +3204,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         break;
       }
       runCommandTask("import_provider_credential", providerLoginSupervisor.importAccount({
-        provider: msg.provider, label: msg.label, source: msg.source, profileGrantId: msg.profileGrantId,
+        provider: msg.provider, label: msg.label, source: msg.source, accountId: msg.accountId, profileGrantId: msg.profileGrantId,
       }).then(({ accountId, profileId }) => sendUp({
         type: "import_provider_credential_result", requestId: msg.requestId, ok: true, accountId, profileId,
       })).catch((error) => error instanceof ProviderCredentialImportError

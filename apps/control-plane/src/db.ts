@@ -13606,7 +13606,7 @@ export class ControlPlaneDb {
   settleProviderCredentialImport(importId: string, outcome:
     | { status: "imported"; accountId: string; profileId: string }
     | { status: "refused"; code: string; accountId?: undefined; profileId?: undefined }
-    | { status: "unknown"; accountId?: undefined; profileId?: undefined; code?: undefined }, now: number): boolean {
+    | { status: "unknown"; accountId?: string; profileId?: undefined; code?: undefined }, now: number): boolean {
     return this.stmt(
       `UPDATE provider_credential_imports SET status=?, destination_account_id=?, destination_profile_id=?, result_code=?, completed_at=?
         WHERE import_id=? AND status='pending'`,

@@ -33,7 +33,7 @@ async function fixture(options: { protocolVersion?: number; runtime?: RunnerMeta
   const sent: ControlPlaneToRunner[] = [];
   let handler: Handler = options.handler ?? ((_runnerId, message) => {
     const m = message as Extract<ControlPlaneToRunner, { type: "import_provider_credential" }>;
-    return { type: "import_provider_credential_result", requestId: m.requestId, ok: true, accountId: "work-1a2b3c4d", profileId: PROFILE };
+    return { type: "import_provider_credential_result", requestId: m.requestId, ok: true, accountId: m.accountId, profileId: PROFILE };
   });
   const hub = {
     isRunnerOnline: () => true,
@@ -67,20 +67,20 @@ test("an Owner's confirmed import records its audit and grant, sends no path, an
     const response = await f.app.inject({ method: "POST", url: IMPORT, payload: body() });
     assert.equal(response.statusCode, 201, response.body);
     const message = f.sent[0] as Extract<ControlPlaneToRunner, { type: "import_provider_credential" }>;
-    assert.deepEqual(Object.keys(message).sort(), ["label", "profileGrantId", "provider", "requestId", "runnerId", "source", "type"]);
+    assert.deepEqual(Object.keys(message).sort(), ["accountId", "label", "profileGrantId", "provider", "requestId", "runnerId", "source", "type"]);
     assert.deepEqual(message.source, { kind: "default_home" });
     assert.equal(response.json().profileId, PROFILE);
     const [row] = importsOf(f.db);
     assert.deepEqual({ ...row, import_id: undefined }, {
       import_id: undefined, organization_id: PERSONAL_ORGANIZATION_ID, owner_kind: "organization", owner_id: PERSONAL_ORGANIZATION_ID,
       runner_id: "runner-a", provider: "codex", source_kind: "default_home", source_account_id: null, grant_id: message.profileGrantId,
-      destination_account_id: "work-1a2b3c4d", destination_profile_id: PROFILE, status: "imported", result_code: null,
+      destination_account_id: message.accountId, destination_profile_id: PROFILE, status: "imported", result_code: null,
       authorized_by: "user-1", authorized_role: "owner", created_at: 100, completed_at: 100,
     });
     const grant = f.db.getProviderProfileGrant(message.profileGrantId);
     assert.equal(grant?.status, "pending");
     assert.equal(grant?.grantedRole, "owner");
-    reconcileProviderProfileGrants(f.db, "runner-a", [{ ...codexAccount("work-1a2b3c4d", "Work"), profile: { id: PROFILE, access: "granted" } }], 101);
+    reconcileProviderProfileGrants(f.db, "runner-a", [{ ...codexAccount(message.accountId, "Work"), profile: { id: PROFILE, access: "granted" } }], 101);
     assert.equal(f.db.getProviderProfileGrant(message.profileGrantId)?.status, "active");
   } finally { await f.close(); }
 });
@@ -179,5 +179,40 @@ test("an import whose account publication is unknown is never a success and leav
     assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "pending", "not revoked: the account may have been recorded");
     const [row] = importsOf(f.db);
     assert.deepEqual([row!.status, row!.destination_profile_id, row!.result_code], ["unknown", null, null]);
+  } finally { await f.close(); }
+});
+
+test("an uncertain import's grant is bound to the named account, so a later report of it completes the grant", async () => {
+  const unknown: Handler = (_runnerId, message) => ({ type: "import_provider_credential_result",
+    requestId: (message as { requestId: string }).requestId, ok: false, code: "PUBLICATION_UNKNOWN", error: "publication is unknown" });
+  for (const [name, handler] of [
+    ["publication unknown", unknown],
+    ["lost reply", () => { throw new Error("runner request timed out"); }],
+  ] as const) {
+    const f = await fixture({ handler });
+    try {
+      const response = await f.app.inject({ method: "POST", url: IMPORT, payload: body() });
+      assert.ok([409, 504].includes(response.statusCode), name);
+      const message = f.sent[0] as Extract<ControlPlaneToRunner, { type: "import_provider_credential" }>;
+      assert.match(message.accountId, /^import-[0-9a-f]{8}$/u, name);
+      const grant = f.db.getProviderProfileGrant(message.profileGrantId);
+      assert.deepEqual([grant?.status, grant?.providerAccountId], ["pending", message.accountId], `${name}: bound before dispatch`);
+      assert.deepEqual([importsOf(f.db)[0]!.status, importsOf(f.db)[0]!.destination_account_id], ["unknown", message.accountId], name);
+      // The runner later reports the account it did publish, with its new profile.
+      const completed = reconcileProviderProfileGrants(f.db, "runner-a",
+        [{ ...codexAccount(message.accountId, "Work"), profile: { id: PROFILE, access: "pending" } }], 101);
+      assert.deepEqual(completed, [message.profileGrantId], name);
+      assert.deepEqual([f.db.getProviderProfileGrant(message.profileGrantId)?.status, f.db.getProviderProfileGrant(message.profileGrantId)?.profileId],
+        ["active", PROFILE], name);
+    } finally { await f.close(); }
+  }
+});
+
+test("a success that names another account than the one proposed is not trusted", async () => {
+  const f = await fixture({ handler: (_runnerId, message) => ({ type: "import_provider_credential_result",
+    requestId: (message as { requestId: string }).requestId, ok: true, accountId: "someone-else", profileId: PROFILE }) });
+  try {
+    assert.equal((await f.app.inject({ method: "POST", url: IMPORT, payload: body() })).statusCode, 502);
+    assert.equal(importsOf(f.db)[0]!.status, "unknown");
   } finally { await f.close(); }
 });

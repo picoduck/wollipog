@@ -272,6 +272,11 @@ if (fixtureParams.has("credentialImport") && runner) {
   runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
   runner.runtime = { dataDir: "/home/misko/.agent-manager", worktreeRoot: "/home/misko/.agent-manager/worktrees", maxConcurrentSessions: 8,
     ...(fixtureParams.get("credentialImport") === "unsupported" ? {} : { providerCredentialImport: { version: 1 as const, providers: ["codex" as const] } }) };
+  // `credentialImport=emails`: both Codex accounts are labelled with email addresses.
+  if (fixtureParams.get("credentialImport") === "emails") {
+    const emails: Record<string, string> = { "codex-team": "team@example.com", "codex-solo": "solo@example.com" };
+    runner.providerAccounts = runner.providerAccounts?.map((account) => ({ ...account, label: emails[account.id] ?? account.label }));
+  }
 }
 // `capacity=waiting` is Design Workstation before its first live report (#2989).
 if (fixtureParams.get("capacity") === "waiting" && runner?.capacity) {

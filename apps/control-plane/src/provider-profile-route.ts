@@ -541,13 +541,15 @@ export function registerProviderProfileRoutes(
       return reply.code(409).send({ error: "The confirmation names a different source. Review the source and confirm again.", code: "CONFIRMATION_MISMATCH" });
     }
     const requestId = `provider_credential_import_${randomUUID()}`;
-    // The new profile is granted to this control plane like an Add Account profile: a pending
-    // grant under a placeholder account key until the runner names the new account.
-    const newGrantId = randomUUID();
+    // The control plane names the new account, and the new profile's pending grant is bound to that
+    // account from the start. However the reply goes (lost, or a publication whose outcome is
+    // unknown), a later account report that names the account and its profile completes the grant,
+    // as for an adopted account.
+    const accountId = `import-${randomUUID().slice(0, 8)}`;
     let authorized;
     try {
       authorized = deps.db.authorizeAndEnrollProviderProfileDispatch({
-        grantId: newGrantId, runnerId: id, providerAccountId: createdGrantPlaceholder(newGrantId), provider: parsed.provider, origin: "created",
+        grantId: randomUUID(), runnerId: id, providerAccountId: accountId, provider: parsed.provider, origin: "created",
         grantedBy: principal.userId, grantedRole: principal.role, now: now(), requestId, kind: "login",
       });
     } catch (error) {
@@ -559,10 +561,10 @@ export function registerProviderProfileRoutes(
     const importId = randomUUID();
     const audit = deps.db.authorizeProviderCredentialImport({ importId, runnerId: id, provider: parsed.provider, source, grantId,
       authorizedBy: principal.userId, authorizedRole: principal.role, now: now() });
-    const settleGrant = (outcome: Parameters<typeof settleCreatedProviderProfileGrantStart>[2]) =>
-      settleCreatedProviderProfileGrantStart(deps.db, grantId, outcome, principal, now());
+    // Only an outcome that proves the account was not recorded spends the grant.
+    const spendGrant = () => deps.db.revokeProviderProfileGrant({ grantId, revokedBy: principal.userId, revokedRole: principal.role, now: now() });
     if (!audit) {
-      settleGrant({ started: false });
+      spendGrant();
       return reply.code(404).send({ error: "runner not found" });
     }
     const observe = (observation: PublicationObservation) => {
@@ -575,49 +577,50 @@ export function registerProviderProfileRoutes(
     let result;
     try {
       result = await deps.hub.requestFromRunner(id, requestId, {
-        type: "import_provider_credential", requestId, runnerId: id, provider: parsed.provider, label: parsed.label, source, profileGrantId: grantId,
+        type: "import_provider_credential", requestId, runnerId: id, provider: parsed.provider, label: parsed.label, source,
+        accountId, profileGrantId: grantId,
       });
     } catch (error) {
       const notSent = isRunnerRequestNotSentError(error);
       observe(notSent ? "not_sent" : "uncertain");
       if (notSent) {
-        settleGrant({ started: false });
+        spendGrant();
         deps.db.settleProviderCredentialImport(importId, { status: "refused", code: "FAILED" }, now());
       } else {
-        // A lost reply leaves the grant pending; the account report completes it if the import ran.
-        deps.db.settleProviderCredentialImport(importId, { status: "unknown" }, now());
+        // A lost reply leaves the grant pending and bound to the named account; its report completes it.
+        deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
       }
       return reply.code(504).send({ error: (error as Error).message });
     }
     observe("reply");
     if (result.type !== "import_provider_credential_result") {
-      settleGrant({ started: false });
-      deps.db.settleProviderCredentialImport(importId, { status: "unknown" }, now());
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
       return reply.code(502).send({ error: "unexpected runner reply" });
     }
     if (!result.ok && result.code === "PUBLICATION_UNKNOWN") {
       // The runner copied the credential but cannot say whether its configuration recorded the
-      // account (#3506). Like a lost reply, the grant stays pending: an account report naming the
-      // profile completes it. Never reported as a success.
-      deps.db.settleProviderCredentialImport(importId, { status: "unknown" }, now());
+      // account (#3506). The grant stays pending and bound to the named account, so a report of
+      // that account and its profile completes it. Never reported as a success.
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
       return reply.code(409).send({
         error: boundedRunnerText(result.error) ?? "The sign-in was copied, but whether the account was recorded is unknown.",
         code: "PUBLICATION_UNKNOWN", status: "pending", grantId,
       });
     }
-    if (!result.ok || typeof result.accountId !== "string" || !ACCOUNT_ID.test(result.accountId) ||
-        typeof result.profileId !== "string" || !PROFILE_ID.test(result.profileId)) {
-      settleGrant({ started: false });
-      const code = result.ok ? "FAILED" : typeof result.code === "string" && IMPORT_CODES.has(result.code) ? result.code : "FAILED";
+    if (!result.ok) {
+      spendGrant();
+      const code = typeof result.code === "string" && IMPORT_CODES.has(result.code) ? result.code : "FAILED";
       deps.db.settleProviderCredentialImport(importId, { status: "refused", code }, now());
-      return reply.code(result.ok ? 502 : 409).send({
-        error: result.ok ? "unexpected runner reply" : boundedRunnerText(result.error) ?? "The sign-in could not be copied.", code,
-      });
+      return reply.code(409).send({ error: boundedRunnerText(result.error) ?? "The sign-in could not be copied.", code });
     }
-    settleGrant({ started: true, accountId: result.accountId });
-    deps.db.settleProviderCredentialImport(importId, { status: "imported", accountId: result.accountId, profileId: result.profileId }, now());
+    if (result.accountId !== accountId || typeof result.profileId !== "string" || !PROFILE_ID.test(result.profileId)) {
+      // A success naming another account or no profile cannot be trusted; its account report decides.
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    deps.db.settleProviderCredentialImport(importId, { status: "imported", accountId, profileId: result.profileId }, now());
     deps.hub.runnerChanged(id);
-    return reply.code(201).send({ accountId: result.accountId, profileId: result.profileId, grantId });
+    return reply.code(201).send({ accountId, profileId: result.profileId, grantId });
   });
 
   /** The online v229+ runner and configured account a lease route acts on, or the reply already sent. */

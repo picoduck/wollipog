@@ -11056,9 +11056,11 @@ export type ProviderCredentialImportSource = { kind: "default_home" } | { kind: 
 
 /** Protocol v260 (#3719): create a managed provider profile from an existing sign-in on the same
  * Machine, after an Owner or Admin confirmed the source and the new profile. Only Codex API-key
- * sign-ins on native Linux and macOS runners are importable. `profileGrantId` is the pending grant
- * the control plane recorded for the new profile, as for Add Account. Sent only to a runner that
- * reports `runtime.providerCredentialImport`. */
+ * sign-ins on native Linux and macOS runners are importable. `accountId` is the id the new account
+ * must be recorded under: the control plane chose it and bound the new profile's pending grant
+ * (`profileGrantId`) to it before sending, so a report of that account completes the grant even
+ * when the reply is lost or the publication outcome is unknown. Sent only to a runner that reports
+ * `runtime.providerCredentialImport`. */
 export interface ImportProviderCredentialMessage {
   type: "import_provider_credential";
   requestId: string;
@@ -11066,6 +11068,7 @@ export interface ImportProviderCredentialMessage {
   provider: "codex";
   label: string;
   source: ProviderCredentialImportSource;
+  accountId: string;
   profileGrantId: string;
 }
 
@@ -11084,7 +11087,7 @@ export interface ImportProviderCredentialMessage {
  * - `SOURCE_NOT_GRANTED`: it is a provider profile this control plane may not use.
  * - `PUBLICATION_UNKNOWN`: the credential was copied, but whether the runner configuration recorded
  *   the new account is unknown (#3506). Not a success: the runner stops using the grant without
- *   revoking it, and an account report that names the profile completes the grant.
+ *   revoking it, and a later report of the named account with its profile completes the grant.
  * - `FAILED`: anything else. */
 export type ProviderCredentialImportCode =
   | "UNSUPPORTED" | "LABEL_IN_USE" | "SOURCE_NOT_FOUND" | "SOURCE_MISSING" | "SOURCE_IN_USE" | "SOURCE_UNSAFE"
