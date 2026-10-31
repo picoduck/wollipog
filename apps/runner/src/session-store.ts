@@ -353,6 +353,8 @@ export interface SessionMeta {
   backgroundJobs?: DurableBackgroundJob[];
   /** Provider task ids retained across runner restarts for automatic recovery. */
   pendingBackgroundTaskIds?: string[];
+  /** First observation of each currently pending id without an unfinished ledger row. */
+  unlistedBackgroundTaskStarts?: Record<string, number>;
   /** Task ids whose latest orphan artifact already received one unattended recovery attempt.
    * They suppress replay of the same markerless artifact until a live provider re-observes it. */
   recoveredBackgroundTaskIds?: string[];
@@ -2175,6 +2177,15 @@ export class SessionStore {
     const cur = this.readMeta(id);
     if (!cur) return null;
     const next: SessionMeta = { ...cur, ...patch, sessionId: cur.sessionId, updatedAt: Date.now() };
+    if ("pendingBackgroundTaskIds" in patch || "backgroundJobs" in patch) {
+      const listed = new Set((next.backgroundJobs ?? []).filter((job) => !job.terminalStatus)
+        .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]));
+      next.unlistedBackgroundTaskStarts = Object.fromEntries(
+        [...new Set(next.pendingBackgroundTaskIds ?? [])].filter((taskId) => !listed.has(taskId))
+          .map((taskId) => [taskId, cur.unlistedBackgroundTaskStarts && Object.hasOwn(cur.unlistedBackgroundTaskStarts, taskId)
+            ? cur.unlistedBackgroundTaskStarts[taskId]! : next.updatedAt]));
+      patch = { ...patch, unlistedBackgroundTaskStarts: next.unlistedBackgroundTaskStarts };
+    }
     if (Object.keys(patch).every((k) => LAZY_META_KEYS.has(k))) {
       this.patchMetaLazy(id, { ...patch, updatedAt: next.updatedAt });
     } else {

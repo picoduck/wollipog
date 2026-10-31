@@ -1838,7 +1838,7 @@ test("a handoff hold waiting on work no row shows is named in a notice, with Pro
     assert.doesNotMatch(noDeadline, /deadline/u);
 
     const account = { ...queueHold, kind: "provider_account_switch" as const, holdId: "provider-account-switch:1",
-      target: "dev@example.com", unlistedJobs: [queueHold.unlistedJobs[1]!] };
+      target: "dev@example.com", unfinishedBackgroundJobs: 1, unlistedJobs: [queueHold.unlistedJobs[1]!] };
     await panel.render({ session: managedSession({ status: "queued", queueHold: account, commandPermissions: owner } as Partial<SessionView>) });
     const accountBody = unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "";
     assert.match(accountBody, /^The switch to the selected provider account waits for a task that has no job in this list\./u);
@@ -1849,4 +1849,55 @@ test("a handoff hold waiting on work no row shows is named in a notice, with Pro
   } finally {
     await panel.dispose();
   }
+});
+
+test("unlisted-only hold timestamps update while the panel stays open (#3894)", async (t) => {
+  const startedAt = Date.now() - 2 * MINUTE;
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobs: [], backgroundDeliveries: [],
+    queueHold: { kind: "worktree_rebind", holdId: "clock", since: startedAt, target: "/worktree",
+      queuedPrompts: 1, unfinishedBackgroundJobs: 1, unlistedJobCount: 1,
+      oldestUnfinishedJob: { launchType: "provisional", startedAt },
+      unlistedJobs: [{ id: "pending", kind: "provisional", startedAt }] } }) });
+  try {
+    const notice = panel.container.querySelector('[data-state="unlisted-hold"]')!;
+    const before = notice.querySelector("time")!.textContent;
+    await act(async () => { t.mock.timers.tick(2 * MINUTE); });
+    assert.notEqual(notice.querySelector("time")!.textContent, before);
+  } finally { await panel.dispose(); t.mock.timers.reset(); }
+});
+
+test("older holds with truncated ledgers show a lower bound rather than invent an unlisted count (#3894)", async () => {
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobsTruncated: true,
+    queueHold: { kind: "worktree_rebind", holdId: "legacy", since: 1, target: "/worktree",
+      queuedPrompts: 1, unfinishedBackgroundJobs: 30, unlistedJobs: [{ id: "pending", kind: "unregistered" }] } }) });
+  try {
+    const notice = panel.container.querySelector('[data-state="unlisted-hold"]')!;
+    assert.match(notice.textContent ?? "", /waits for at least 1 task that has no job in this list/u);
+    assert.doesNotMatch(notice.textContent ?? "", /Showing/u);
+  } finally { await panel.dispose(); }
+});
+
+for (const count of [1, 25]) test(`unlisted-only hold shows timestamps, oldest item and full ${count}-id count (#3894)`, async () => {
+  const startedAt = Date.UTC(2026, 9, 30, 12);
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "hold-times", since: startedAt + 60_000,
+    target: "/worktree", queuedPrompts: 1, unfinishedBackgroundJobs: count, unlistedJobCount: count,
+    oldestUnfinishedJob: { launchType: "unregistered" as const, startedAt },
+    unlistedJobs: Array.from({ length: Math.min(count, 20) }, (_, i) => ({
+      id: `pending-${i}`, kind: "unregistered" as const, startedAt: startedAt + i * 1000,
+    })),
+  };
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", queueHold, backgroundJobs: [] }) });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('[data-state="unlisted-hold"]')!;
+    assert.ok(notice);
+    assert.match(notice.textContent ?? "", /The oldest blocking item, an unregistered task, started/u);
+    assert.equal(notice.querySelector("time")?.getAttribute("datetime"), new Date(startedAt).toISOString());
+    if (count > 20) assert.match(notice.textContent ?? "", /waits for 25 tasks.*Showing 20 of 25/u);
+    await act(async () => notice.querySelector<HTMLButtonElement>(".notice-details-toggle")!.click());
+    const times = [...notice.querySelectorAll(".facts time")];
+    assert.equal(times.length, Math.min(count, 20));
+    times.forEach((time, i) => assert.equal(time.getAttribute("datetime"), new Date(startedAt + i * 1000).toISOString()));
+  } finally { await panel.dispose(); }
 });
