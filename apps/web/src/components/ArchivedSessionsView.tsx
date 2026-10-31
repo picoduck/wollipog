@@ -567,7 +567,7 @@ export function ArchivedSessionsView() {
             : "Archived sessions will appear here with their lifecycle state and transcript."}
         </State>
       ) : (
-        <div className="surface archive-list" role="region" aria-label="Archived Sessions">
+        <div className="surface archive-list" role="region" aria-label="Archived Session Results">
           {pageSessions.map((session) => {
             const metadata = pageMetadata[session.id] ?? archiveSessionMetadata(session, locationNames);
             const title = session.title || session.id;
