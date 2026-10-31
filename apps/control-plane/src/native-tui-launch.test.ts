@@ -27,10 +27,7 @@ function fakeDb(overrides: {
         : [],
     }),
     getAgentLaunch: () => ({ driver: overrides.driver ?? "claude-code" }),
-    sessionScope: () => overrides.dailyBudgetUsd === undefined ? null : ({
-      organizationId: "org",
-      owner: { kind: "user", userId: "user" },
-    }),
+    sessionBudgetUser: () => overrides.dailyBudgetUsd === undefined ? null : ({ organizationId: "org", userId: "user" }),
     getUsageDailyBudget: () => ({ perUserUsd: overrides.dailyBudgetUsd ?? null, updatedAt: 1 }),
   } as unknown as ControlPlaneDb;
 }

@@ -22505,6 +22505,72 @@ test("a daily-budget breach parks every live session the owner has, not only the
   assert.equal(db.getSession(b)!.status, "input_required");
 });
 
+test("a member's daily budget covers the organization-owned sessions they launch in a shared organization (#3840)", () => {
+  const { db, hub, svc } = makeHarness();
+  const sql = db.raw();
+  sql.prepare("INSERT INTO identity_organizations VALUES ('org_team','Team',1,1)").run();
+  for (const user of ["usr_member", "usr_other"]) {
+    sql.prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES (?,?,1,1)").run(user, user);
+    sql.prepare("INSERT INTO identity_memberships VALUES ('org_team',?,'operator',1,1)").run(user);
+  }
+  // The shared runner and workspace belong to the organization, so new sessions inherit its ownership.
+  sql.prepare("UPDATE runner_ownership SET organization_id='org_team', owner_kind='organization', owner_id='org_team' WHERE runner_id=?").run(RUNNER_ID);
+  sql.prepare("UPDATE workspace_ownership SET organization_id='org_team', owner_kind='organization', owner_id='org_team' WHERE runner_id=?").run(RUNNER_ID);
+  const launch = (userId?: string) => {
+    hub.online = true;
+    return svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false },
+      undefined, undefined, false, false, false, userId ? { defaultOwnerUserId: userId } : undefined);
+  };
+  const launched = (result: ReturnType<typeof launch>) => {
+    assert.ok(result.ok && result.data, result.error);
+    return result.data.id;
+  };
+  const spender = launched(launch("usr_member"));
+  const sibling = launched(launch("usr_member"));
+  const child = db.createSession({ id: "s_child_3840", parentSessionId: spender, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID, title: "Child", useWorktree: false, driver: "claude-code", config: {}, now: Date.now() }).id;
+  const other = launched(launch("usr_other"));
+  const legacy = launched(launch());
+  assert.deepEqual(db.sessionScope(spender), { organizationId: "org_team", owner: { kind: "organization", organizationId: "org_team" } },
+    "the launcher is attribution only; the organization still owns the session");
+  assert.deepEqual([spender, sibling, child, other, legacy].map((id) => db.sessionLauncherUserId(id)),
+    ["usr_member", "usr_member", "usr_member", "usr_other", null]);
+  for (const id of [sibling, child, other, legacy]) db.updateSessionStatus(id, "idle", Date.now());
+
+  db.setUsageDailyBudget("org_team", 2, Date.now());
+  db.appendEvent(spender, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  assert.equal(db.userCostWindows("org_team", "usr_member").todayUsd, 2.5, "the launched session's spend counts toward its launcher");
+  assert.equal(db.userCostWindows("org_team", "usr_other").todayUsd, 0);
+  svc.onSessionStatus(spender, "idle");
+  assert.equal(db.getSession(spender)!.pendingApproval?.kind, "daily_budget");
+  assert.equal(db.getSession(sibling)!.pendingApproval?.kind, "daily_budget", "the launcher's other sessions are parked too");
+  assert.equal(db.getSession(child)!.pendingApproval?.kind, "daily_budget", "a child counts against its parent's launcher");
+  assert.equal(db.getSession(other)!.pendingApproval, null, "another member's allowance is untouched");
+  assert.equal(db.getSession(legacy)!.pendingApproval, null, "a session with no launcher keeps no per-user budget");
+
+  const refused = launch("usr_member");
+  assert.equal(refused.ok, false);
+  assert.equal(refused.status, 409);
+  assert.match(refused.error ?? "", /daily budget reached/);
+  assert.ok(launch("usr_other").ok, "another member still launches");
+  assert.ok(launch().ok, "a launch with no human attribution keeps today's behavior");
+  const runsBefore = db.listRuns().length;
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" },
+    { launcherUserId: "usr_member" });
+  assert.match(run.error ?? "", /daily budget reached/);
+  const workflow = svc.createWorkflowRun({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review",
+    task: "spend more", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+  }, { kind: "human", id: "usr_member" }, undefined, { launcherUserId: "usr_member" });
+  assert.equal(workflow.status, 409);
+  assert.match(workflow.error ?? "", /daily budget reached/);
+  assert.equal(db.listRuns().length, runsBefore, "neither fan-out persisted a run");
+  const nativeTui = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, launchSurface: "native_tui" },
+    undefined, undefined, false, false, false, { defaultOwnerUserId: "usr_other" });
+  assert.equal(nativeTui.status, 409);
+  assert.match(nativeTui.error ?? "", /daily cost budget/, "an untracked surface cannot bypass the launcher's budget");
+});
+
 test("a daily-budget breach parks a sibling with an unanswered async question", () => {
   const { db, hub, svc } = makeHarness();
   const a = seedSession(svc, hub, { prompt: "Spend" });

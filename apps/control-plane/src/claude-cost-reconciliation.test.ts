@@ -16,12 +16,13 @@ const principal: HumanPrincipal = {
   deviceId: "device", localBootstrap: false,
 };
 
-function fixture(path = ":memory:", hostBootId?: string) {
+function fixture(path = ":memory:", hostBootId?: string, launched = false) {
   const db = ControlPlaneDb.open(path, hostBootId === undefined ? {} : { hostBootId });
   db.registerRunner({ runnerId: "runner", hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now(), 210);
   const now = Date.now();
   db.createSession({ id: "session", runnerId: "runner", workspaceId: null, agentId: "claude",
-    driver: "claude-code", title: "Fixture", useWorktree: false, config: { model: "claude-test" }, now });
+    driver: "claude-code", title: "Fixture", useWorktree: false, config: { model: "claude-test" }, now,
+    ...(launched ? { launcherUserId: db.localIdentityContext().userId } : {}) });
   const first = db.appendEvent("session", { kind: "token_usage", model: "claude-test", inputTokens: 100, outputTokens: 10, costUsd: 0.01 }, now, { accrueUsage: true, runnerSeq: 1, historyEpoch: 1 });
   const second = db.appendEvent("session", { kind: "token_usage", model: "claude-test", inputTokens: 200, outputTokens: 20, costUsd: 0.02 }, now + 1, { accrueUsage: true, runnerSeq: 2, historyEpoch: 1 });
   const evidence = { sessionId: "session", eventEpoch: 0, historyEpoch: 1,
@@ -57,6 +58,21 @@ test("Claude reconciliation previews and corrects a verified restored prefix exa
       { kind: "token_usage", model: "claude-test", inputTokens: 100, outputTokens: 10, costUsd: 0.01 },
       { kind: "token_usage", model: "claude-test", inputTokens: 200, outputTokens: 20, costUsd: 0.02 },
     ], "original accounting events are immutable");
+  } finally { db.close(); }
+});
+
+test("a correction to an organization-owned session moves its launcher's daily spend too (#3840)", () => {
+  const { db, now, evidence } = fixture(":memory:", undefined, true);
+  try {
+    const launcher = db.localIdentityContext().userId;
+    assert.equal(db.sessionScope("session")?.owner.kind, "organization");
+    assert.equal(db.userCostWindows("org_personal", launcher, now).todayUsd, 0.03, "the launched session's spend is the launcher's");
+    // An ownership change after the observations does not change whose day they were booked to.
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id=? WHERE session_id='session'").run(launcher);
+    applyClaudeReconciliation(db, principal, evidence, previewClaudeReconciliation(db, principal, evidence).digest);
+    assert.equal(db.raw().prepare("SELECT SUM(cost_microusd) AS cost FROM usage_launcher_daily").get()?.cost, 20_000);
+    assert.equal(db.raw().prepare("SELECT SUM(cost_microusd) AS cost FROM usage_hourly").get()?.cost, 20_000);
+    assert.equal(db.userCostWindows("org_personal", launcher, now).todayUsd, 0.02);
   } finally { db.close(); }
 });
 

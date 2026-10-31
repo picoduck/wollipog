@@ -2509,6 +2509,17 @@ CREATE TABLE IF NOT EXISTS session_ownership (
 CREATE INDEX IF NOT EXISTS idx_session_ownership_scope
   ON session_ownership(organization_id, owner_kind, owner_id, session_id);
 
+-- The human who launched a session, or the root of its parent chain (#3840). Attribution only:
+-- ownership, access and sharing stay in session_ownership. Older sessions record no launcher.
+CREATE TABLE IF NOT EXISTS session_launchers (
+  session_id TEXT PRIMARY KEY,
+  user_id    TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_session_launchers_user ON session_launchers(user_id, session_id);
+
 -- Immutable, least-data transcript snapshots addressed by hashed bearer capabilities. Revocation
 -- and expiry erase projection_json while retaining small management/audit metadata. title is the
 -- redacted session title a sharer opted into (#2189); it can exist only beside the projection, so
@@ -2764,6 +2775,17 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
 );
 CREATE INDEX IF NOT EXISTS idx_usage_hourly_scope ON usage_hourly(organization_id, bucket_ts);
 CREATE INDEX IF NOT EXISTS idx_usage_hourly_owner_scope ON usage_hourly(organization_id, owner_kind, owner_id, bucket_ts);
+
+-- Spend of organization- and team-owned sessions by the user who launched them, per UTC day
+-- (#3840). usage_hourly books that spend to the owner; this is what the launcher's daily budget
+-- adds. User-owned sessions are already in usage_hourly under their user and never appear here.
+CREATE TABLE IF NOT EXISTS usage_launcher_daily (
+  organization_id TEXT NOT NULL,
+  user_id         TEXT NOT NULL,
+  bucket_ts       INTEGER NOT NULL,
+  cost_microusd   INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (organization_id, user_id, bucket_ts)
+);
 
 CREATE TABLE IF NOT EXISTS usage_daily (
   bucket_ts           INTEGER NOT NULL,
@@ -4625,7 +4647,20 @@ type UsageDimensions = {
   agentId: string;
   driver: AgentDriverKind;
   model: string;
+  /** The launching user of an organization- or team-owned session (#3840), else null. */
+  launcherUserId: string | null;
 };
+
+/** The sessions one user's daily budget governs in an organization: the ones they own, and the
+ * organization- and team-owned ones they launched (#3840). Bind `dailyBudgetSessionIdParams`. */
+const DAILY_BUDGET_SESSION_IDS_SQL = `
+  SELECT session_id FROM session_ownership WHERE organization_id=? AND owner_kind='user' AND owner_id=?
+  UNION ALL
+  SELECT launcher.session_id FROM session_launchers launcher
+    JOIN session_ownership ownership ON ownership.session_id=launcher.session_id
+   WHERE launcher.user_id=? AND ownership.organization_id=? AND ownership.owner_kind<>'user'`;
+const dailyBudgetSessionIdParams = (organizationId: string, userId: string) =>
+  [organizationId, userId, userId, organizationId] as const;
 
 export interface UsageAggregationQuery {
   since: number;
@@ -4648,6 +4683,9 @@ export interface NewSessionInput {
   reviewPolicyCapture?: ReviewPolicyCapture;
   /** Authenticated launching user for personal review settings, including shared Projects. */
   reviewSettingsUserId?: string;
+  /** The authenticated human launching this session (#3840), never from request JSON. A child or
+   * review session inherits its parent's or requester's launcher instead. */
+  launcherUserId?: string;
   /** Trusted pre-allocation session ceilings, never from request JSON. */
   campaignBudgetUserLimits?: { costUsd?: number; toolCalls?: number };
   /** Internal review attribution: share an allowance without granting child-session authority. */
@@ -5834,7 +5872,7 @@ export class ControlPlaneDb {
         budget && this.campaignBudgetAccountingError(row.driver, row.model, budget.authority.costUsd !== undefined)) {
       return { state: "unsupported_capability", reason: "Required native accounting or reviewer capability is unavailable; recovery cannot bypass it." };
     }
-    const owner = this.sessionOwnerUser(campaignId);
+    const owner = this.sessionBudgetUser(campaignId);
     const daily = owner ? this.getUsageDailyBudget(owner.organizationId).perUserUsd : null;
     const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+MAX(0,child_cost_reserved_usd) AS cost,
       MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+MAX(0,child_tool_calls_reserved) AS tools
@@ -11435,13 +11473,18 @@ export class ControlPlaneDb {
     return row?.preference ?? "manual";
   }
 
-  /** Whose Artifact Uploads preference governs a session: its user owner, else the local owner when
-   * the personal organization owns it, as sessions inherit from the default runner (#3811). Teams and
-   * other organizations record no launching user, so they resolve to none and stay Manual. */
+  /** Whose Artifact Uploads preference governs a session: its user owner, else the user who launched
+   * it (#3840). A session with neither, such as one created before launchers were recorded, falls
+   * back to the local owner when the personal organization owns it, as sessions inherit from the
+   * default runner (#3811); a team or another organization resolves to none and stays Manual. */
   artifactUploadPreferenceUser(sessionId: string): string | undefined {
-    const row = this.stmt("SELECT owner_kind, owner_id FROM session_ownership WHERE session_id=?").get(sessionId) as
-      { owner_kind: string; owner_id: string } | undefined;
+    const row = this.stmt(
+      `SELECT ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
+         FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id
+        WHERE ownership.session_id=?`,
+    ).get(sessionId) as { owner_kind: string; owner_id: string; launcher_id: string | null } | undefined;
     if (row?.owner_kind === "user") return row.owner_id;
+    if (row?.launcher_id) return row.launcher_id;
     return row?.owner_kind === "organization" && row.owner_id === PERSONAL_ORGANIZATION_ID ? LOCAL_OWNER_USER_ID : undefined;
   }
 
@@ -14588,6 +14631,8 @@ export class ControlPlaneDb {
           .run(policy.organization_id, hourlyCutoff);
         this.stmt("DELETE FROM usage_daily WHERE organization_id=? AND bucket_ts < ?")
           .run(policy.organization_id, dailyCutoff);
+        this.stmt("DELETE FROM usage_launcher_daily WHERE organization_id=? AND bucket_ts < ?")
+          .run(policy.organization_id, dailyCutoff);
         this.stmt(`DELETE FROM usage_cost_receipts
           WHERE json_extract(attribution_json,'$.organizationId')=?
             AND json_extract(attribution_json,'$.bucketTs')<?`).run(policy.organization_id, dailyCutoff);
@@ -14614,12 +14659,13 @@ export class ControlPlaneDb {
     const row = this.stmt(
       `SELECT s.event_epoch, s.runner_id, s.workspace_id, s.agent_id, s.driver,
               COALESCE(NULLIF(s.resolved_model, ''), s.model) AS model,
-              o.organization_id, o.owner_kind, o.owner_id
-         FROM sessions s JOIN session_ownership o ON o.session_id=s.id WHERE s.id=?`,
+              o.organization_id, o.owner_kind, o.owner_id, l.user_id AS launcher_id
+         FROM sessions s JOIN session_ownership o ON o.session_id=s.id
+         LEFT JOIN session_launchers l ON l.session_id=s.id WHERE s.id=?`,
     ).get(sessionId) as {
       event_epoch: number; runner_id: string; workspace_id: string | null; agent_id: string | null;
       driver: string; model: string | null; organization_id: string;
-      owner_kind: "organization" | "user" | "team"; owner_id: string;
+      owner_kind: "organization" | "user" | "team"; owner_id: string; launcher_id: string | null;
     } | undefined;
     if (!row) return null;
     return {
@@ -14630,6 +14676,7 @@ export class ControlPlaneDb {
       agentId: (row.agent_id ?? "").slice(0, 256),
       driver: row.driver as AgentDriverKind,
       model: (row.model ?? "").slice(0, 128),
+      launcherUserId: row.owner_kind === "user" ? null : row.launcher_id,
     };
   }
 
@@ -14657,17 +14704,17 @@ export class ControlPlaneDb {
     return { costUsd: Number(row.live_cost_usd), unpriced: Number(row.live_unpriced_records) > 0 };
   }
 
-  /** The open live estimates of one user's live sessions, which their daily budget adds to today's
-   * settled spend (#3196), on the same terms as `sessionLiveGuardrail`. A window counts on the UTC
-   * day it last saw a request: an interrupted turn's window stays open until the next process
-   * accounts it, and the ledger books it on that later day, so it must not spend every day in
-   * between. A terminal session runs no turn and is accounted only if it is relaunched. */
+  /** The open live estimates of the live sessions one user's daily budget governs, which it adds to
+   * today's settled spend (#3196), on the same terms as `sessionLiveGuardrail`. A window counts on
+   * the UTC day it last saw a request: an interrupted turn's window stays open until the next
+   * process accounts it, and the ledger books it on that later day, so it must not spend every day
+   * in between. A terminal session runs no turn and is accounted only if it is relaunched. */
   ownerLiveCostUsd(organizationId: string, userId: string, now = Date.now()): number {
     const row = this.stmt(
-      `SELECT COALESCE(SUM(s.live_cost_usd), 0) AS usd FROM sessions s JOIN session_ownership o ON o.session_id=s.id
-        WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=? AND s.live_settling=0 AND s.live_cost_usd>0
+      `SELECT COALESCE(SUM(s.live_cost_usd), 0) AS usd FROM sessions s
+        WHERE s.id IN (${DAILY_BUDGET_SESSION_IDS_SQL}) AND s.live_settling=0 AND s.live_cost_usd>0
           AND s.live_observed_at>=? AND s.status NOT IN ('completed','failed','stopped')`,
-    ).get(organizationId, userId, Math.floor(now / 86_400_000) * 86_400_000) as { usd: number };
+    ).get(...dailyBudgetSessionIdParams(organizationId, userId), Math.floor(now / 86_400_000) * 86_400_000) as { usd: number };
     return Number(row.usd);
   }
 
@@ -14682,6 +14729,22 @@ export class ControlPlaneDb {
   sessionCostUsd(sessionId: string): number {
     const row = this.stmt("SELECT cost_usd FROM sessions WHERE id=?").get(sessionId) as { cost_usd: number } | undefined;
     return Number(row?.cost_usd ?? 0);
+  }
+
+  /** Moves an approved reconciliation's change to one observation into its launcher's daily spend
+   * (#3840). The receipt's owner says whether the observation was booked to the launcher: only an
+   * organization- or team-owned observation was, and a session's launcher never changes. A day
+   * already pruned has nothing left to correct. */
+  correctLauncherDailyCostInTransaction(sessionId: string, organizationId: string, ownerKind: string, bucketTs: number, deltaMicrousd: number): void {
+    if (!(this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("historical correction requires an existing write transaction");
+    }
+    if (ownerKind === "user" || deltaMicrousd === 0) return;
+    const launcherUserId = this.sessionLauncherUserId(sessionId);
+    if (!launcherUserId) return;
+    this.stmt(`UPDATE usage_launcher_daily SET cost_microusd=MAX(0, cost_microusd+?)
+      WHERE organization_id=? AND user_id=? AND bucket_ts=?`)
+      .run(deltaMicrousd, organizationId, launcherUserId, Math.floor(bucketTs / 86_400_000) * 86_400_000);
   }
 
   /** Only an approved reconciliation may release a proven overcount from a child's peak. */
@@ -14744,6 +14807,13 @@ export class ControlPlaneDb {
       dimensions.model,
       ...ledgerValues,
     );
+    if (dimensions.launcherUserId && amount.costMicrousd !== 0) {
+      this.stmt(
+        `INSERT INTO usage_launcher_daily (organization_id, user_id, bucket_ts, cost_microusd) VALUES (?, ?, ?, ?)
+         ON CONFLICT(organization_id, user_id, bucket_ts) DO UPDATE SET cost_microusd=cost_microusd+excluded.cost_microusd`,
+      ).run(dimensions.scope.organizationId, dimensions.launcherUserId,
+        Math.floor(bucketTs / 86_400_000) * 86_400_000, amount.costMicrousd);
+    }
     this.stmt(
       `INSERT INTO usage_session_state
          (session_id, input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}, revision, updated_at)
@@ -15840,6 +15910,19 @@ export class ControlPlaneDb {
     ).run(sessionId, scope.organizationId, scope.owner.kind, ownerId, now, now);
   }
 
+  /** The human who launched a session or the root of its parent chain (#3840), if recorded. */
+  sessionLauncherUserId(sessionId: string): string | null {
+    const row = this.stmt("SELECT user_id FROM session_launchers WHERE session_id=?").get(sessionId) as
+      { user_id: string } | undefined;
+    return row?.user_id ?? null;
+  }
+
+  /** An unknown user records nothing rather than failing the session's creation. */
+  private insertSessionLauncher(sessionId: string, userId: string, now: number): void {
+    this.stmt(`INSERT INTO session_launchers (session_id, user_id, created_at)
+      SELECT ?, user_id, ? FROM identity_users WHERE user_id=?`).run(sessionId, now, userId);
+  }
+
   /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
   isSessionDescendant(ancestorId: string, targetId: string): boolean {
     // Reviewer parentage is for display/history and grants no descendant mutation authority.
@@ -16622,6 +16705,9 @@ export class ControlPlaneDb {
           .run(JSON.stringify(handoffRequest), input.id);
       }
       this.insertSessionOwnership(input.id, scope, input.now);
+      const launcherSource = input.reviewRequesterSessionId ?? input.parentSessionId;
+      const launcherUserId = launcherSource ? this.sessionLauncherUserId(launcherSource) : input.launcherUserId;
+      if (launcherUserId) this.insertSessionLauncher(input.id, launcherUserId, input.now);
       if (input.automationOrigin) {
         const execution = this.stmt(
           "SELECT automation_id FROM automation_executions WHERE execution_id=?",
@@ -16684,7 +16770,9 @@ export class ControlPlaneDb {
     now: number,
     explicitScope?: ResourceScope,
     explicitProject?: { projectId: string | null; projectLocationId: string | null },
-    fork?: { sourceSessionId: string; sourceTurn: number },
+    /** A fork records the authenticated human forking it as its launcher (#3840), else it inherits
+     * the source's launcher. */
+    fork?: { sourceSessionId: string; sourceTurn: number; launcherUserId?: string },
   ): SessionView {
     // An adopted session's snapshot carries no workspaceId (CLI sessions know nothing of our
     // workspaces) — resolve the exact workspace whose path contains its cwd, then infer the stable
@@ -16830,6 +16918,8 @@ export class ControlPlaneDb {
           `INSERT INTO session_forks (target_session_id, source_session_id, source_turn, created_at)
            VALUES (?, ?, ?, ?)`,
         ).run(snap.id, fork.sourceSessionId, fork.sourceTurn, now);
+        const launcherUserId = fork.launcherUserId ?? this.sessionLauncherUserId(fork.sourceSessionId);
+        if (launcherUserId) this.insertSessionLauncher(snap.id, launcherUserId, now);
       }
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${snap.id}`,
@@ -19145,8 +19235,8 @@ export class ControlPlaneDb {
    * 200-result limit, or newer parked sessions can hide an older sibling with an async question. */
   listOpenSessionIdsForOwner(organizationId: string, userId: string): string[] {
     const rows = this.stmt(
-      `SELECT s.id FROM sessions s JOIN session_ownership o ON o.session_id=s.id
-        WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=?
+      `SELECT s.id FROM sessions s
+        WHERE s.id IN (${DAILY_BUDGET_SESSION_IDS_SQL})
           AND s.status NOT IN ('completed','failed','stopped')
           AND CASE
             WHEN s.pending_approval IS NULL THEN 1
@@ -19161,7 +19251,7 @@ export class ControlPlaneDb {
             ELSE 0
           END
         ORDER BY s.updated_at DESC LIMIT 200`,
-    ).all(organizationId, userId) as unknown as Array<{ id: string }>;
+    ).all(...dailyBudgetSessionIdParams(organizationId, userId)) as unknown as Array<{ id: string }>;
     return rows.map((row) => row.id);
   }
 
@@ -19174,17 +19264,34 @@ export class ControlPlaneDb {
     return row && row.owner_kind === "user" ? { organizationId: row.organization_id, userId: row.owner_id } : null;
   }
 
+  /** Whose per-user daily budget governs a session: its user owner, else the user who launched an
+   * organization- or team-owned session (#3840). A session with neither has no daily allowance. */
+  sessionBudgetUser(sessionId: string): { organizationId: string; userId: string } | null {
+    const row = this.stmt(
+      `SELECT ownership.organization_id, ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
+         FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id
+        WHERE ownership.session_id=?`,
+    ).get(sessionId) as { organization_id: string; owner_kind: string; owner_id: string; launcher_id: string | null } | undefined;
+    if (!row) return null;
+    const userId = row.owner_kind === "user" ? row.owner_id : row.launcher_id;
+    return userId ? { organizationId: row.organization_id, userId } : null;
+  }
+
   /** A user's cost since a UTC instant, summed from the owner-scoped buckets (hourly rows plus any
-   * daily rollups that start inside the window). Cost only; the ledger is content-free. */
+   * daily rollups that start inside the window) and the organization- and team-owned sessions they
+   * launched (#3840). Cost only; the ledger is content-free. */
   private userCostSinceMicrousd(organizationId: string, userId: string, since: number): number {
     const row = this.stmt(
       `SELECT COALESCE((SELECT SUM(cost_microusd) FROM usage_hourly
                          WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0)
             + COALESCE((SELECT SUM(cost_microusd) FROM usage_daily
                          WHERE organization_id=? AND owner_kind='user' AND owner_id=? AND bucket_ts>=?), 0)
+            + COALESCE((SELECT SUM(cost_microusd) FROM usage_launcher_daily
+                         WHERE organization_id=? AND user_id=? AND bucket_ts>=?), 0)
             + COALESCE((SELECT SUM(cost)*1000000 FROM campaign_review_daily_cost
                          WHERE organization_id=? AND user_id=? AND day>=?),0) AS microusd`,
-    ).get(organizationId, userId, since, organizationId, userId, since,organizationId,userId,new Date(since).toISOString().slice(0,10)) as { microusd: number };
+    ).get(organizationId, userId, since, organizationId, userId, since, organizationId, userId, since,
+      organizationId,userId,new Date(since).toISOString().slice(0,10)) as { microusd: number };
     return Number(row.microusd ?? 0);
   }
 
@@ -19238,6 +19345,8 @@ export class ControlPlaneDb {
            UNION ALL
            SELECT owner_id, bucket_ts, cost_microusd FROM usage_daily WHERE organization_id=? AND owner_kind='user' AND bucket_ts>=?
            UNION ALL
+           SELECT user_id AS owner_id, bucket_ts, cost_microusd FROM usage_launcher_daily WHERE organization_id=? AND bucket_ts>=?
+           UNION ALL
            SELECT user_id AS owner_id, CAST(strftime('%s',day) AS INTEGER)*1000 AS bucket_ts,
                   cost*1000000 AS cost_microusd FROM campaign_review_daily_cost
             WHERE organization_id=? AND day>=?
@@ -19245,7 +19354,7 @@ export class ControlPlaneDb {
         GROUP BY owner_id
         ORDER BY today DESC, month DESC, owner_id ASC
         LIMIT 500`,
-    ).all(dayStart, since7, organizationId, since30, organizationId, since30,
+    ).all(dayStart, since7, organizationId, since30, organizationId, since30, organizationId, since30,
       organizationId, new Date(since30).toISOString().slice(0,10)) as unknown as Array<{
       owner_id: string; today: number; week: number; month: number;
     }>;
