@@ -14,6 +14,11 @@ recovers it.
   hold the write lock. A statement that meets that lock now waits up to 250 ms instead of failing
   at once with `SQLITE_BUSY`. The wait blocks the event loop, so it stays short: a lock held longer
   still fails fast, and periodic work defers its tick as before.
+- A second connection beside a running control plane, such as a test that inspects or adjusts its
+  database, uses `ControlPlaneDb.attach`, never `open` (#3789). `open` applies the schema and runs
+  startup work, so it takes the write lock repeatedly. An attached connection applies no schema,
+  can be read-only, and waits up to 10 s (`ATTACHED_DB_BUSY_TIMEOUT_MS`) for the server's lock.
+  Its own commits skip the WAL sync, so they release the lock well within the server's 250 ms wait.
 - `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
   control-plane decision is durable once it has been acknowledged.
 - Live runtime snapshots (`session_runtime_updated`) stay `FULL` but are grouped. After
