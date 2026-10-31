@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { PROVIDER_HOME_RECOVERY_CAUSES } from "@wollipog/protocol";
@@ -306,7 +307,7 @@ test("an import carries the source's dispatch-time profile context and its typed
   let port!: Port;
   const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
     controlPlaneInstanceId: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", profileAccess: () => access,
-    expectedProfileIdForHome: (home) => home === "/private/account" ? PROFILE : home === "/private/home/.codex" ? OTHER_PROFILE : undefined,
+    expectedProfileIdForHome: (home) => home === "/private/account" ? PROFILE : home === join("/private/home", ".codex") ? OTHER_PROFILE : undefined,
     workerFactoryForTest: value => port = new Port(value.epoch as string),
   });
   const imported = registry.importCodexCredential("/private/account", "codex_home", "/private/profiles", OTHER_PROFILE, GRANT);
