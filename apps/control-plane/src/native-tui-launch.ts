@@ -165,8 +165,8 @@ export function nativeTuiSessionError(
   if (nativeTuiHasTrackedGuardrails(session)) {
     return { status: 409, error: NATIVE_TUI_TRACKED_GUARDRAILS_ERROR };
   }
-  const scope = db.sessionScope(session.id);
-  if (scope?.owner.kind === "user" && db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null) {
+  const budgetUser = db.sessionBudgetUser(session.id);
+  if (budgetUser && db.getUsageDailyBudget(budgetUser.organizationId).perUserUsd !== null) {
     return { status: 409, error: NATIVE_TUI_DAILY_BUDGET_ERROR };
   }
   if (sessionRole(session) === "orchestrator") {
