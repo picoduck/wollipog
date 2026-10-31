@@ -367,6 +367,7 @@ test("no results: the sentence, Clear Search and Search Archived Sessions", asyn
   await act(async () => { ui.doc.querySelectorAll<HTMLButtonElement>(".palette-empty button")[1]!.click(); });
   assertNoDomNode(ui.palette());
   const view = ui.view();
+  assert.ok(view);
   assert.equal(view.name, "archived");
   assert.equal(view.name === "archived" ? view.archiveSearch : undefined, "zzzz", "Archived Sessions opens searching for the same words");
 });
