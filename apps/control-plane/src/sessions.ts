@@ -4994,8 +4994,7 @@ export class SessionsService {
       : creationContext?.launcherUserId ?? creationContext?.defaultOwnerUserId ?? null;
     const admissionDenied = this.dailyBudgetAdmissionError(effectiveSessionScope, launcherUserId);
     if (admissionDenied) return fail(admissionDenied, 409);
-    const budgetUserId = effectiveSessionScope?.owner.kind === "user" ? effectiveSessionScope.owner.userId : launcherUserId;
-    if (req.launchSurface === "native_tui" && effectiveSessionScope && budgetUserId &&
+    if (req.launchSurface === "native_tui" && effectiveSessionScope && this.scopeBudgetUserId(effectiveSessionScope, launcherUserId) &&
         this.db.getUsageDailyBudget(effectiveSessionScope.organizationId).perUserUsd !== null) {
       return fail(NATIVE_TUI_DAILY_BUDGET_ERROR, 409);
     }
@@ -14583,7 +14582,7 @@ export class SessionsService {
     if (delivery) {
       return this.createPreStagedWorkflowRun(
         req, actor, definition, workspacePath, members, delivery, orchestratorScope,
-        workerSessionScope.data, requestedProject.data, orchestratorProject,
+        workerSessionScope.data, requestedProject.data, orchestratorProject, launcherUserId,
       );
     }
 
@@ -14747,6 +14746,7 @@ export class SessionsService {
     workerSessionScope: ResourceScope,
     requestedProject: { projectId?: string | null; projectLocationId?: string | null },
     orchestratorProject: { projectId?: string | null; projectLocationId?: string | null },
+    launcherUserId: string | null,
   ): ServiceResult<CreateWorkflowRunResult> {
     const invalidId = (value: string | undefined): boolean =>
       value !== undefined && (!value.trim() || value.length > 256);
@@ -14906,6 +14906,7 @@ export class SessionsService {
         config: item.config,
         scope: item.member.orchestrator ? orchestratorScope! : workerSessionScope,
         automationOrigin: delivery.automationOrigin,
+        ...(launcherUserId ? { launcherUserId } : {}),
         now,
       });
       if (req.costBudgetUsd && req.costBudgetUsd > 0) {
@@ -16006,15 +16007,22 @@ export class SessionsService {
    * organization- or team-owned session (#3840), in an organization that set one. Four statements
    * at most on the ingestion path: budget user, budget, today's sum, and the open live estimates. */
   private dailyBudgetFor(sessionId: string): DailyBudget | null {
-    const owner = this.db.sessionBudgetUser(sessionId);
+    const owner = this.db.sessionPersonalUser(sessionId);
     return owner ? this.dailyBudgetForOwner(owner.organizationId, owner.userId) : null;
+  }
+
+  /** Whose daily allowance a new session in a scope meets: its user owner, else its launcher (#3840)
+   * while they are a member of the scope's organization, as only a member is recorded (#3898). */
+  private scopeBudgetUserId(scope: ResourceScope, launcherUserId?: string | null): string | null {
+    if (scope.owner.kind === "user") return scope.owner.userId;
+    return launcherUserId && this.db.isOrganizationMember(scope.organizationId, launcherUserId) ? launcherUserId : null;
   }
 
   /** The 409 message when the daily allowance of a scope's user owner, or else of the session's
    * launcher (#3840), is spent; otherwise null. */
   private dailyBudgetAdmissionError(scope: ResourceScope | null | undefined, launcherUserId?: string | null): string | null {
     if (!scope) return null;
-    const userId = scope.owner.kind === "user" ? scope.owner.userId : launcherUserId;
+    const userId = this.scopeBudgetUserId(scope, launcherUserId);
     if (!userId) return null;
     const daily = this.dailyBudgetForOwner(scope.organizationId, userId);
     if (!daily || daily.spentUsd < daily.budgetUsd) return null;
@@ -16155,7 +16163,7 @@ export class SessionsService {
     // The daily allowance is the owner's, not this session's: every other live session they own or
     // launched (#3840) is parked now, before a queued turn elsewhere can dequeue behind the breach.
     if (ask.rule.kind === "daily_budget" && fanOut) {
-      const owner = this.db.sessionBudgetUser(sessionId);
+      const owner = this.db.sessionPersonalUser(sessionId);
       if (owner) {
         // One bounded pass from the session that crossed the line; siblings never fan out again.
         for (const siblingId of this.db.listOpenSessionIdsForOwner(owner.organizationId, owner.userId)) {
@@ -16983,7 +16991,8 @@ export class SessionsService {
         this.hub.sessionChangedById(sessionId);
         return;
       }
-      const automatic = questionPolicyAnswers(payload.questions, this.db.listGovernancePolicies(), this.db.sessionOwnerUser(sessionId), session());
+      // An organization- or team-owned session is answered by its launcher's policies (#3899).
+      const automatic = questionPolicyAnswers(payload.questions, this.db.listGovernancePolicies(), this.db.sessionPersonalUser(sessionId), session());
       if (automatic) {
         const policySummary = this.questionAnswerSummary(sessionId, payload.questions, automatic.answers);
         const sent = this.hub.sendToRunner(head.runnerId, {

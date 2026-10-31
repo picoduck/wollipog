@@ -395,7 +395,7 @@ test("a fork records the human who forked it as its launcher, else the source's 
   fork("s_forked_by_owner", local.userId);
   assert.equal(db.sessionLauncherUserId("s_inherited"), "usr_operator");
   assert.equal(db.sessionLauncherUserId("s_forked_by_owner"), local.userId);
-  assert.equal(db.sessionBudgetUser("s_inherited")?.userId, "usr_operator", "an organization-owned fork keeps a budget user");
+  assert.equal(db.sessionPersonalUser("s_inherited")?.userId, "usr_operator", "an organization-owned fork keeps a budget user");
   assert.equal(db.sessionScope("s_inherited")?.owner.kind, "organization");
   db.close();
 });

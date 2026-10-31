@@ -118,10 +118,13 @@ function harness(
   const workflows: CreateWorkflowRunRequest[] = [];
   const failures = { create: false, throwCreate: false, throwAfterStage: false };
   const recoveredSnapshots: DurableSessionCommand[][] = [];
+  const launchers: Array<{ action: string; launcherUserId?: string }> = [];
   let nextSession = 1;
   const sessions = {
-    createSession(request: CreateSessionRequest, delivery?: PreStagedDeliveryOptions) {
+    createSession(request: CreateSessionRequest, delivery?: PreStagedDeliveryOptions, _scope?: unknown,
+      _cleanup?: boolean, _archived?: boolean, _projectWithoutLocation?: boolean, context?: { launcherUserId?: string }) {
       created.push(request);
+      launchers.push({ action: "create_session", ...(context?.launcherUserId ? { launcherUserId: context.launcherUserId } : {}) });
       if (delivery?.commandSnapshots) recoveredSnapshots.push(delivery.commandSnapshots);
       if (failures.throwCreate) throw new Error("sensitive simulated exception");
       if (failures.create) return { ok: false, status: 409, error: "simulated launch rejection" };
@@ -157,8 +160,10 @@ function harness(
       if (plan) delivery!.activate(plan);
       return { ok: true, status: 200, data: db.getSession(id)! };
     },
-    createWorkflowRun(request: CreateWorkflowRunRequest, _actor: unknown, delivery?: PreStagedDeliveryOptions) {
+    createWorkflowRun(request: CreateWorkflowRunRequest, _actor: unknown, delivery?: PreStagedDeliveryOptions,
+      context?: { launcherUserId?: string }) {
       workflows.push(request);
+      launchers.push({ action: "workflow_run", ...(context?.launcherUserId ? { launcherUserId: context.launcherUserId } : {}) });
       const runId = delivery?.runId ?? "run-auto";
       const instanceId = delivery?.workflowInstanceId ?? "instance-auto";
       const memberIds = delivery
@@ -200,7 +205,7 @@ function harness(
   const restartService = () => new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
   return { db, hub, online, service, restartService, created, prompted, workflows, notifications, failures,
-    delivered, recoveredSnapshots };
+    delivered, recoveredSnapshots, launchers };
 }
 
 function receiveSignedTrigger(
@@ -3184,4 +3189,24 @@ test("a transient-refusal replacement that never reaches its runner settles the 
 
   online.add("runner-1");
   assert.equal(service.tick(33 * 60_000), 1);
+});
+
+test("an automation launches its sessions as its human creator, never as a system actor (#3898)", () => {
+  const { db, service, launchers } = harness();
+  try {
+    installCapabilityWorkflow(db, "wf-1");
+    const workflow = { kind: "workflow_run" as const, request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+    } };
+    service.create(baseSpec(), { kind: "human", id: "usr_creator" }, 0);
+    service.create(baseSpec({ name: "Workflow", action: workflow }), { kind: "human", id: "usr_creator" }, 0);
+    service.create(baseSpec({ name: "System" }), { kind: "system", id: "seed" }, 0);
+    service.tick(60_000);
+    assert.deepEqual(launchers.map((entry) => JSON.stringify(entry)).sort(), [
+      { action: "create_session" },
+      { action: "create_session", launcherUserId: "usr_creator" },
+      { action: "workflow_run", launcherUserId: "usr_creator" },
+    ].map((entry) => JSON.stringify(entry)).sort());
+  } finally { db.close(); }
 });

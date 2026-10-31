@@ -5872,7 +5872,7 @@ export class ControlPlaneDb {
         budget && this.campaignBudgetAccountingError(row.driver, row.model, budget.authority.costUsd !== undefined)) {
       return { state: "unsupported_capability", reason: "Required native accounting or reviewer capability is unavailable; recovery cannot bypass it." };
     }
-    const owner = this.sessionBudgetUser(campaignId);
+    const owner = this.sessionPersonalUser(campaignId);
     const daily = owner ? this.getUsageDailyBudget(owner.organizationId).perUserUsd : null;
     const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+MAX(0,child_cost_reserved_usd) AS cost,
       MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+MAX(0,child_tool_calls_reserved) AS tools
@@ -15924,10 +15924,17 @@ export class ControlPlaneDb {
     return row?.user_id ?? null;
   }
 
-  /** An unknown user records nothing rather than failing the session's creation. */
-  private insertSessionLauncher(sessionId: string, userId: string, now: number): void {
+  isOrganizationMember(organizationId: string, userId: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM identity_memberships WHERE organization_id=? AND user_id=?").get(organizationId, userId));
+  }
+
+  /** Only a member of the session's organization is recorded (#3898): an unknown user, or one who
+   * left it, such as an automation's departed creator, records nothing rather than failing the
+   * session's creation. */
+  private insertSessionLauncher(sessionId: string, organizationId: string, userId: string, now: number): void {
     this.stmt(`INSERT INTO session_launchers (session_id, user_id, created_at)
-      SELECT ?, user_id, ? FROM identity_users WHERE user_id=?`).run(sessionId, now, userId);
+      SELECT ?, user_id, ? FROM identity_memberships WHERE organization_id=? AND user_id=?`)
+      .run(sessionId, now, organizationId, userId);
   }
 
   /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
@@ -16714,7 +16721,7 @@ export class ControlPlaneDb {
       this.insertSessionOwnership(input.id, scope, input.now);
       const launcherSource = input.reviewRequesterSessionId ?? input.parentSessionId;
       const launcherUserId = launcherSource ? this.sessionLauncherUserId(launcherSource) : input.launcherUserId;
-      if (launcherUserId) this.insertSessionLauncher(input.id, launcherUserId, input.now);
+      if (launcherUserId) this.insertSessionLauncher(input.id, scope.organizationId, launcherUserId, input.now);
       if (input.automationOrigin) {
         const execution = this.stmt(
           "SELECT automation_id FROM automation_executions WHERE execution_id=?",
@@ -16926,7 +16933,7 @@ export class ControlPlaneDb {
            VALUES (?, ?, ?, ?)`,
         ).run(snap.id, fork.sourceSessionId, fork.sourceTurn, now);
         const launcherUserId = fork.launcherUserId ?? this.sessionLauncherUserId(fork.sourceSessionId);
-        if (launcherUserId) this.insertSessionLauncher(snap.id, launcherUserId, now);
+        if (launcherUserId) this.insertSessionLauncher(snap.id, scope.organizationId, launcherUserId, now);
       }
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${snap.id}`,
@@ -19271,9 +19278,10 @@ export class ControlPlaneDb {
     return row && row.owner_kind === "user" ? { organizationId: row.organization_id, userId: row.owner_id } : null;
   }
 
-  /** Whose per-user daily budget governs a session: its user owner, else the user who launched an
-   * organization- or team-owned session (#3840). A session with neither has no daily allowance. */
-  sessionBudgetUser(sessionId: string): { organizationId: string; userId: string } | null {
+  /** Whose per-user daily budget and question policies govern a session: its user owner, else the
+   * user who launched an organization- or team-owned session (#3840, #3899). A session with neither
+   * has no daily allowance and no policy answers. */
+  sessionPersonalUser(sessionId: string): { organizationId: string; userId: string } | null {
     const row = this.stmt(
       `SELECT ownership.organization_id, ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
          FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id

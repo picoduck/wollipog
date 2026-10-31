@@ -165,7 +165,7 @@ export function nativeTuiSessionError(
   if (nativeTuiHasTrackedGuardrails(session)) {
     return { status: 409, error: NATIVE_TUI_TRACKED_GUARDRAILS_ERROR };
   }
-  const budgetUser = db.sessionBudgetUser(session.id);
+  const budgetUser = db.sessionPersonalUser(session.id);
   if (budgetUser && db.getUsageDailyBudget(budgetUser.organizationId).perUserUsd !== null) {
     return { status: 409, error: NATIVE_TUI_DAILY_BUDGET_ERROR };
   }

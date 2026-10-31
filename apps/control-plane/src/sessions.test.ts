@@ -7592,6 +7592,42 @@ test("question policy answers avoid input state, record provenance, and survive 
   assert.equal(db.questionPolicyAnswer(requests[1]!), null, "identical later request IDs/text do not inherit the prior answer");
 });
 
+test("a member's question policies answer only in the organization-owned sessions they launched (#3899)", () => {
+  const { db, svc, hub } = makeHarness();
+  const sql = db.raw();
+  sql.prepare("INSERT INTO identity_organizations VALUES ('org_team','Team',1,1)").run();
+  for (const user of ["usr_member", "usr_other"]) {
+    sql.prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES (?,?,1,1)").run(user, user);
+    sql.prepare("INSERT INTO identity_memberships VALUES ('org_team',?,'operator',1,1)").run(user);
+  }
+  sql.prepare("UPDATE runner_ownership SET organization_id='org_team', owner_kind='organization', owner_id='org_team' WHERE runner_id=?").run(RUNNER_ID);
+  sql.prepare("UPDATE workspace_ownership SET organization_id='org_team', owner_kind='organization', owner_id='org_team' WHERE runner_id=?").run(RUNNER_ID);
+  const launch = (userId?: string, scope?: ResourceScope) => {
+    hub.online = true;
+    const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }, undefined, scope,
+      false, false, false, userId ? { defaultOwnerUserId: userId } : undefined);
+    assert.ok(created.ok && created.data, created.error);
+    db.updateSessionStatus(created.data.id, "running", Date.now());
+    return created.data.id;
+  };
+  const mine = launch("usr_member");
+  const theirs = launch("usr_other");
+  const legacy = launch();
+  const ownedByOther = launch("usr_member", { organizationId: "org_team", owner: { kind: "user", userId: "usr_other" } });
+  assert.ok(svc.upsertGovernancePolicy({ policyId: "routine", name: "Routine Review", enabled: true, effect: "allow", priority: 1,
+    ownerUserId: "usr_member", scope: {}, questionRule: { headerPattern: "Review", answer: { option: "Proceed" } } }).ok);
+  const answered = [mine, theirs, legacy, ownedByOther].map((id) => {
+    const before = hub.sentOfType("answer_question").length;
+    svc.onSessionEvent(id, { kind: "question_request", requestId: `ask-${id}`,
+      questions: [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }] });
+    return hub.sentOfType("answer_question").length > before;
+  });
+  assert.deepEqual(answered, [true, false, false, false],
+    "the launcher's policy answers its organization-owned session; another member's, a legacy and a user-owned session ask a human");
+  assert.equal(svc.governanceAudit(mine).find((entry) => entry.actor.kind === "policy")?.governancePolicyId, "routine");
+  assert.equal(db.getSession(theirs)?.pendingApproval?.kind, "question");
+});
+
 for (const ordering of ["before", "after"] as const) {
   test(`a policy attribution recorded ${ordering} the runner's history epoch is adopted survives a cache reset (#2529)`, async () => {
     const { db, svc, hub } = makeHarness();
@@ -22569,6 +22605,39 @@ test("a member's daily budget covers the organization-owned sessions they launch
     undefined, undefined, false, false, false, { defaultOwnerUserId: "usr_other" });
   assert.equal(nativeTui.status, 409);
   assert.match(nativeTui.error ?? "", /daily cost budget/, "an untracked surface cannot bypass the launcher's budget");
+});
+
+test("an automation's creator launches its sessions only while a member, and meets their allowance (#3898)", () => {
+  const { db, hub, svc } = makeHarness();
+  const sql = db.raw();
+  sql.prepare("INSERT INTO identity_organizations VALUES ('org_team','Team',1,1)").run();
+  for (const user of ["usr_creator", "usr_departed"]) {
+    sql.prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES (?,?,1,1)").run(user, user);
+  }
+  sql.prepare("INSERT INTO identity_memberships VALUES ('org_team','usr_creator','operator',1,1)").run();
+  sql.prepare("UPDATE runner_ownership SET organization_id='org_team', owner_kind='organization', owner_id='org_team' WHERE runner_id=?").run(RUNNER_ID);
+  sql.prepare("UPDATE workspace_ownership SET organization_id='org_team', owner_kind='organization', owner_id='org_team' WHERE runner_id=?").run(RUNNER_ID);
+  // The automation path: no authenticated human, only the stored creator as launcher context.
+  const launch = (launcherUserId: string) => {
+    hub.online = true;
+    return svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, useWorktree: false },
+      undefined, undefined, false, false, false, { launcherUserId });
+  };
+  const created = launch("usr_creator");
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(db.sessionLauncherUserId(created.data.id), "usr_creator");
+  const departed = launch("usr_departed");
+  assert.ok(departed.ok && departed.data, departed.error);
+  assert.equal(db.sessionLauncherUserId(departed.data.id), null, "a creator who left the organization launches nothing");
+
+  db.setUsageDailyBudget("org_team", 1, Date.now());
+  db.appendEvent(created.data.id, { kind: "token_usage", inputTokens: 1, costUsd: 1.5 }, Date.now(), { accrueUsage: true });
+  const refused = launch("usr_creator");
+  assert.equal(refused.status, 409);
+  assert.match(refused.error ?? "", /daily budget reached/, "the creator's exhausted allowance refuses the automation's launch");
+  // A departed creator's earlier spend in the organization no longer governs its automations.
+  sql.prepare("DELETE FROM identity_memberships WHERE organization_id='org_team' AND user_id='usr_creator'").run();
+  assert.ok(launch("usr_creator").ok, "once the creator leaves, the automation keeps today's unattributed behavior");
 });
 
 test("a daily-budget breach parks a sibling with an unanswered async question", () => {
