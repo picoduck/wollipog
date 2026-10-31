@@ -416,7 +416,7 @@ export function ArchivedSessionsView() {
   const reconnectingStatus = "Reconnecting…";
   const resultSummary = offline ? (pageSessions.length > 0 ? reconnectingStatus : "") : pending ? (pageSessions.length > 0 ? searchingStatus : "") : error ? ""
     : page > 1 || nextCursor ? `Page ${page}`
-    : `${pageSessions.length} session${pageSessions.length === 1 ? "" : "s"}${filters.query.trim() ? ` match “${filters.query.trim()}”` : ""}`;
+    : `${pageSessions.length} session${pageSessions.length === 1 ? "" : "s"}${filters.query.trim() ? ` ${pageSessions.length === 1 ? "matches" : "match"} “${filters.query.trim()}”` : ""}`;
 
   const setBusy = (id: string, value: boolean) => {
     setBusyIds((current) => {

@@ -343,6 +343,18 @@ test("unchanged revalidation preserves the count and does not announce a replace
   await fixture.unmount();
 });
 
+test("search counts use singular and plural grammar in the same visible live announcement", async () => {
+  for (const count of [1, 2]) {
+    const rows = Array.from({ length: count }, (_, index) => session(index, { title: `Usage ${index}` }));
+    const fixture = await mount(rows);
+    await searchFor(fixture.container, "Usage");
+    const expected = count === 1 ? "1 session matches “Usage”" : "2 sessions match “Usage”";
+    assert.equal(fixture.container.querySelector(".count")?.textContent, expected);
+    assert.equal(fixture.container.querySelector('[role="status"]')?.textContent, expected);
+    await fixture.unmount();
+  }
+});
+
 test("spaces-only search keeps the empty state and its clear control", async () => {
   const fixture = await mount([]);
   await searchFor(fixture.container, "   ");
