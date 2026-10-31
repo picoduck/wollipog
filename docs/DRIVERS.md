@@ -1569,3 +1569,26 @@ The new runner fact requires protocol v221. Current HTTP clients advertise their
 `x-wollipog-ui-protocol`; WebSockets use the existing `protocolVersion` negotiation. Older UI clients
 receive the legacy view without the new enum or fields, retaining history/log diagnostics. This
 display downgrade does not mutate canonical evidence or create retry authority.
+# Review Session Skill Isolation
+
+Codex discovers `.agents/skills` along cwd's ancestor chain and `.codex/skills` through
+project configuration layers. Disabling project instructions does not disable that discovery;
+`skip_host_skill_discovery` also still loads both locations on 0.165.0. Per-skill enablement
+settings leave disabled entries visible in the catalog, so they cannot meet the review contract.
+
+Codex review sessions therefore launch, list skills, start threads and send turns from an empty
+runner-owned sibling directory with a local `.git` root marker. Developer instructions identify
+the absolute reviewed checkout. Its files, including changed skill files, remain intact and
+readable with absolute paths or an explicit command workdir. Snapshot verification still checks
+the original checkout. Session release and startup reconciliation remove the discovery directory.
+Claude Code's preset and discovery protections are unchanged. This is runner-local; no wire
+format or protocol version changes.
+
+Run `node --import tsx apps/runner/scripts/codex-review-skills-probe.mjs` with `CODEX_BIN` selecting
+the CLI. This credential-free probe reuses the original #3368 canaries and loopback Responses
+provider through the real app-server driver, checking its catalog and two model turns against a
+positive control. It fails on missing requests, timeouts, launch errors or a broken control.
+`--verify-sandbox-read` additionally scripts a real read of both skill files under the review
+sandbox and requires their contents in tool output. It requires working user namespaces on Linux;
+a sandbox failure is a failed probe. CI runs this mode in the Codex Sandbox version matrix.
+The normal probe also runs in the Codex assumptions suite used for supported-range measurements.

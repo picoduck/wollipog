@@ -60,6 +60,8 @@ export const HARNESSES = [
       "scripts/configure-ci-bubblewrap.sh",
       "scripts/harness-assumptions-prepare-codex.sh",
       "apps/runner/src/codex-managed-worktree-guard.ts",
+      "apps/runner/src/review-sessions.ts",
+      "apps/runner/src/drivers/codex-app-server.ts",
       "apps/runner/src/discovery/fixtures/codex-app-server-required-contract.json",
       { dir: "apps/runner/scripts", prefix: "codex-" },
     ],

@@ -10,6 +10,7 @@ const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const runner = "apps/runner/scripts/";
 let interrupted = false;
 export const PROBES = [
+  { id: "review-skills", script: runner + "codex-review-skills-probe.mjs", minimum: 1, timeout: 210_000, documentation: "docs/DRIVERS.md#review-session-skill-isolation" },
   { id: "schema", script: "scripts/check-codex-app-server-schema.mjs", minimum: 1, timeout: 120_000, documentation: "docs/DRIVERS.md; apps/runner/src/discovery/fixtures/codex-app-server-required-contract.json" },
   { id: "escalation", script: runner + "codex-escalation-probe.ts", minimum: 13, timeout: 25 * 60_000, documentation: "docs/adr/0012-managed-worktree-guard-hook.md" },
   { id: "guard", script: runner + "codex-guard-hook-probe.ts", minimum: 26, timeout: 40 * 60_000, documentation: "docs/adr/0012-managed-worktree-guard-hook.md" },

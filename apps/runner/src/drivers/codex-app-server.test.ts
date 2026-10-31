@@ -28,6 +28,7 @@ import {
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
+import { codexReviewWorkingDirectory } from "../review-sessions.js";
 import type { AgentProcess } from "../spawn.js";
 
 function fakeAgentProcess(): AgentProcess {
@@ -1363,6 +1364,36 @@ test("newSession starts a fresh thread and requires the server's actual id", asy
   assert.deepEqual(h.serviceTiers, ["flex"]);
   assert.equal((h.driver as any).config.serviceTier, "flex");
   assert.equal(h.driver.agentSessionId(), "fresh-1");
+});
+
+test("Codex reviews keep discovery and every turn outside the reviewed checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "review-skills-driver-"));
+  const checkout = join(root, "checkout");
+  mkdirSync(checkout);
+  const h = makeHarness({ cwd: checkout, review: true });
+  const calls: Array<{ method: string; params: any }> = [];
+  const request = async (method: string, params: any) => {
+    calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "review" } };
+    if (method === "turn/start") {
+      setImmediate(() => (h.driver as any).settleTurn("end_turn"));
+      return { turn: { id: "turn" } };
+    }
+    return { data: [] };
+  };
+  (h.driver as any).peer = { request, requestWithDeadline: request };
+  try {
+    const cwd = codexReviewWorkingDirectory(checkout);
+    assert.equal((h.driver as any).cwd, cwd, "spawn uses the neutral cwd");
+    await h.driver.newSession(checkout);
+    const thread = calls.find(call => call.method === "thread/start")!;
+    assert.equal(thread.params.cwd, cwd);
+    assert.ok(thread.params.developerInstructions.includes(JSON.stringify(checkout)));
+    assert.deepEqual(calls.find(call => call.method === "skills/list")!.params, { cwds: [cwd] });
+    assert.equal(await h.driver.prompt("review"), "end_turn");
+    assert.equal(calls.find(call => call.method === "turn/start")!.params.cwd, cwd);
+    assert.equal(calls.some(call => call.method === "plugin/reconcile"), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("newSession validates then resumes the exact persisted thread without replaying history", async () => {
