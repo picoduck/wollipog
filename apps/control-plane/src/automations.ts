@@ -64,13 +64,12 @@ function automationDeliveryWindowMs(schedule: AutomationSchedule, scheduledFor: 
   return Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
 }
 
-/** The sessions an automation creates are launched by its human creator (#3898), from the stored
- * definition and never its action payload, and only while no one else has changed the definition or
- * its triggers. Creation records them only while a member. */
+/** The sessions an automation creates are launched by its human creator (#3898), from its durable
+ * audit trail and never its action payload or the execution's schedule, and only while no one else
+ * has changed the definition or its triggers. Creation records them only while a member. */
 function automationLauncher(db: ControlPlaneDb, automation: AutomationSchedule): { launcherUserId: string } | undefined {
-  const creator = automation.createdBy;
-  return creator.kind === "human" && creator.id && db.automationAuthoredSolelyBy(automation.automationId, creator.id)
-    ? { launcherUserId: creator.id } : undefined;
+  const creator = db.automationSoleHumanAuthor(automation.automationId);
+  return creator ? { launcherUserId: creator } : undefined;
 }
 
 type Logger = { info: (message: string) => void; warn: (message: string) => void };

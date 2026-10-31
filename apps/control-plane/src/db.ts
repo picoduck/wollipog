@@ -15933,18 +15933,20 @@ export class ControlPlaneDb {
     return Boolean(this.stmt("SELECT 1 FROM identity_memberships WHERE organization_id=? AND user_id=?").get(organizationId, userId));
   }
 
-  /** True while no one but this human has changed an automation's definition or its triggers since
-   * creating it (#3898). Another member's edit, toggle, or trigger credential would otherwise make
-   * the creator answer for sessions whose instructions or callers they never authorized. */
-  automationAuthoredSolelyBy(automationId: string, userId: string): boolean {
-    const row = this.stmt(`SELECT
-        EXISTS(SELECT 1 FROM automation_events WHERE automation_id=? AND kind='created'
-          AND actor_kind='human' AND actor_id=?) AS created,
-        EXISTS(SELECT 1 FROM automation_events WHERE automation_id=?
-          AND kind IN ('updated','enabled','disabled','trigger_created','trigger_rotated')
-          AND (actor_kind<>'human' OR actor_id IS NOT ?)) AS changed`)
-      .get(automationId, userId, automationId, userId) as { created: number; changed: number };
-    return row.created === 1 && row.changed === 0;
+  /** The human who created an automation, from its durable creation event, while no one else has
+   * changed its definition or its triggers since (#3898); else null. Another member's edit, toggle,
+   * or trigger credential would otherwise make the creator answer for sessions whose instructions or
+   * callers they never authorized. Read from the audit trail rather than an execution's schedule,
+   * which a trigger invocation attributes to its trigger. */
+  automationSoleHumanAuthor(automationId: string): string | null {
+    const created = this.stmt(`SELECT actor_id FROM automation_events WHERE automation_id=? AND kind='created'
+        AND actor_kind='human' AND actor_id IS NOT NULL ORDER BY event_id LIMIT 1`).get(automationId) as
+      { actor_id: string } | undefined;
+    if (!created) return null;
+    const changed = this.stmt(`SELECT 1 FROM automation_events WHERE automation_id=?
+        AND kind IN ('updated','enabled','disabled','trigger_created','trigger_rotated')
+        AND (actor_kind<>'human' OR actor_id IS NOT ?) LIMIT 1`).get(automationId, created.actor_id);
+    return changed ? null : created.actor_id;
   }
 
   /** Only a member of the session's organization is recorded (#3898): an unknown user, or one who

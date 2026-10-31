@@ -3191,6 +3191,30 @@ test("a transient-refusal replacement that never reaches its runner settles the 
   assert.equal(service.tick(33 * 60_000), 1);
 });
 
+test("a webhook invocation launches an automation's sessions as its sole human author (#3898)", () => {
+  const { db, service, launchers } = harness();
+  try {
+    installCapabilityWorkflow(db, "wf-1");
+    const creator = { kind: "human" as const, id: "usr_creator" };
+    const actions = [baseSpec().action, { kind: "workflow_run" as const, request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+    } }];
+    actions.forEach((action, index) => {
+      const automation = service.create(baseSpec({ name: `Hook ${index}`, action }), creator, 0).data!;
+      const credential = service.createTrigger(automation.automationId, { kind: "webhook", name: "Hook" }, creator, 1_000);
+      assert.ok(credential.ok && credential.data, credential.error);
+      const invoked = receiveSignedTrigger(service, credential.data.trigger.triggerId, credential.data.secret,
+        Buffer.from(`{"eventId":"delivery-${index}"}`), 2_000 + index);
+      assert.equal(invoked.data?.invocation.state, "dispatched", invoked.error);
+    });
+    assert.deepEqual(launchers, [
+      { action: "create_session", launcherUserId: "usr_creator" },
+      { action: "workflow_run", launcherUserId: "usr_creator" },
+    ], "the trigger-attributed schedule does not hide the automation's creator");
+  } finally { db.close(); }
+});
+
 test("an automation launches its sessions as its human creator, never as a system actor (#3898)", () => {
   const { db, service, launchers } = harness();
   try {
