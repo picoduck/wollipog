@@ -132,64 +132,22 @@ for (const width of [761, 834, 940, 1099]) {
 }
 
 /**
- * The Archived Sessions table, measured with the longest State badge in its first row: nothing
- * scrolls sideways or is cut off, the Session column keeps `minSession` for a title, and Project,
- * Location and Agent show either as columns or, `folded`, in the meta line under the title.
+ * Fixed archive rows never scroll sideways, and their native title links keep readable width.
  */
-async function checkArchivedTable(page: Page, where: string, { folded, minSession }: { folded: boolean; minSession: number }) {
-  await expect(page.locator(".archive-table tbody tr").first()).toBeVisible();
-  // The fixture has no stop in progress, so give the first row the longest State badge a session
-  // can show beside Archived and its lifecycle (§11.1: a badge keeps its own width).
-  await page.locator(".archive-state-badges").first().evaluate((badges) => {
-    const longest = badges.querySelector(".status")!.cloneNode() as HTMLElement;
-    longest.className = "status sm t-warning";
-    longest.textContent = "Stop Waiting for Runner";
-    badges.append(longest);
-  });
-  const archive = await page.evaluate(() => {
-    const box = (element: Element) => element.getBoundingClientRect();
-    const wrap = document.querySelector(".archive-table-wrap")!;
-    const edge = box(wrap);
-    return {
-      scroll: wrap.scrollWidth - wrap.clientWidth,
-      sessionColumn: box(document.querySelector(".archive-table thead th")!).width,
-      rows: [...wrap.querySelectorAll("tbody tr")].map((row) => {
-        const hidden = [".col-project", ".col-location", ".col-agent"].map((selector) => row.querySelector(selector)!);
-        const meta = row.querySelector(".archive-session-meta")!;
-        const cell = box(row.querySelector(".archive-session-cell")!);
-        // Everything the row shows, cut off by its cell or by the wrapper.
-        const clipped = [...row.querySelectorAll(".archive-session-meta > span, .archive-session-cell > a, .status, .actions-cell button, time")]
-          .filter((element) => element.getClientRects().length > 0)
-          .filter((element) => {
-            const own = box(element);
-            const td = box(element.closest("td")!);
-            return own.left < Math.max(td.left, edge.left) - 0.5 || own.right > Math.min(td.right, edge.right) + 0.5;
-          })
-          .map((element) => element.textContent);
-        return {
-          columnsShown: hidden.map((element) => element.getClientRects().length > 0),
-          values: hidden.map((element) => element.textContent),
-          meta: meta.getClientRects().length > 0 ? (meta as HTMLElement).innerText : null,
-          metaInside: box(meta).right <= cell.right + 0.5,
-          clipped,
-        };
-      }),
-    };
-  });
-  expect(archive.scroll, `${where}: the Archived Sessions table scrolls sideways`).toBeLessThanOrEqual(0);
-  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(minSession);
-  expect(archive.rows.length).toBeGreaterThan(0);
-  for (const row of archive.rows) {
-    if (folded) {
-      expect(row.columnsShown, `${where}: Project, Location and Agent fold into the Session cell`).toEqual([false, false, false]);
-      for (const value of row.values) expect(row.meta, `${where}: the Session cell shows ${value}`).toContain(value);
-      expect(row.metaInside, `${where}: the meta line stays inside its cell`).toBe(true);
-    } else {
-      expect(row.columnsShown, `${where}: Project, Location and Agent keep their columns`).toEqual([true, true, true]);
-      expect(row.meta, `${where}: no meta line repeats the columns`).toBeNull();
-    }
-    expect(row.clipped, `${where}: row content cut off`).toEqual([]);
+async function checkArchivedTable(page: Page, where: string, { minSession }: { folded: boolean; minSession: number }) {
+  await expect(page.locator(".archive-item").first()).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  const rows = await page.locator(".archive-item").evaluateAll((items) => items.map((row) => ({
+    height: row.getBoundingClientRect().height,
+    title: row.querySelector("a")!.getBoundingClientRect().width,
+    overflow: row.scrollWidth - row.clientWidth,
+  })));
+  for (const row of rows) {
+    expect(row.height, where).toBe(56);
+    expect(row.title, where).toBeGreaterThanOrEqual(minSession);
+    expect(row.overflow, where).toBeLessThanOrEqual(0);
   }
+  await expect(page.locator(".archive-table")).toHaveCount(0);
 }
 
 /**
@@ -198,7 +156,7 @@ async function checkArchivedTable(page: Page, where: string, { folded, minSessio
  */
 async function checkPageContent(page: Page, where: string) {
   await open(page, "path=%2Farchived", "Archived Sessions");
-  await checkArchivedTable(page, where, { folded: true, minSession: 145 });
+  await checkArchivedTable(page, where, { folded: true, minSession: 200 });
 
   await open(page, "path=%2Fusage", "Usage and Cost");
   const usage = await page.evaluate(() => {
@@ -252,19 +210,15 @@ async function expandRail(page: Page) {
 test("a phone keeps the Archived Sessions table's own rows, with the project on line 2", async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 860 });
   await open(page, "path=%2Farchived", "Archived Sessions");
-  const row = page.locator(".archive-table tbody tr").first();
-  await expect(row.locator(".archive-session-meta")).toBeHidden();
-  // The phone rows show the project as line-2 meta and leave Location and Agent to the detail (§14).
-  await expect(row.locator(".col-project")).toBeVisible();
+  const row = page.locator(".archive-item").first();
+  await expect(row.locator(".archive-item-meta")).toBeVisible();
+  await expect(row.locator(".archive-project")).toBeVisible();
+  await expect(row.locator("time")).toBeHidden();
 });
 
-/**
- * Above the tier the table folds the same way until the main column fits its full layout with 200px
- * for the Session column (§14, #2114): a 1220px column, which the labelled rail's extra width pushes
- * from a 1284px window to 1428px.
- */
-test.describe("the Archived Sessions table from 1100px", () => {
+test.describe("Archived Sessions rows across compact and desktop widths", () => {
   const cases = [
+    ...[761, 834, 940, 1099].flatMap((width) => [false, true].map((labelled) => ({ width, labelled, folded: false }))),
     { width: 1100, labelled: false, folded: true },
     { width: 1280, labelled: false, folded: true },
     { width: 1439, labelled: false, folded: false },
@@ -280,6 +234,17 @@ test.describe("the Archived Sessions table from 1100px", () => {
       await checkArchivedTable(page, `at ${width}px, labelled rail ${labelled ? "on" : "off"}`, { folded, minSession: 200 });
     });
   }
+
+  test("a wider timestamp font still leaves the title 200px at the labelled-rail floor", async ({ page }) => {
+    await page.setViewportSize({ width: 761, height: 860 });
+    await open(page, "path=%2Farchived", "Archived Sessions");
+    await expandRail(page);
+    // CI's DejaVu Sans timestamp is wider than this workstation's Noto Sans fallback.
+    await page.locator(".archive-item > time").evaluateAll((times) => times.forEach((time) => {
+      (time as HTMLElement).style.fontFamily = '"DejaVu Sans", sans-serif';
+    }));
+    await checkArchivedTable(page, "wide timestamp font at 761px with labelled rail", { folded: false, minSession: 200 });
+  });
 
   test("the full layout returns exactly where it fits", async ({ page }) => {
     await open(page, "path=%2Farchived", "Archived Sessions");

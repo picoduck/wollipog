@@ -9,7 +9,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { deleteSessionMessage, stopArchivedSessionMessage } from "../session-confirmation-copy.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { ArchivedSessionsView } from "./ArchivedSessionsView.js";
@@ -251,8 +251,8 @@ async function eachRowAction(
   container: HTMLElement,
   visit: (action: HTMLButtonElement, label: string, inMenu: boolean) => Promise<void> | void,
 ): Promise<void> {
-  for (const row of container.querySelectorAll("tbody tr")) {
-    for (const inline of row.querySelectorAll<HTMLButtonElement>(".archive-row-actions > .btn")) {
+  for (const row of container.querySelectorAll(".archive-item")) {
+    for (const inline of row.querySelectorAll<HTMLButtonElement>(".archive-item-actions > .btn")) {
       await visit(inline, inline.textContent!.trim(), false);
     }
     const trigger = row.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]');
@@ -267,7 +267,7 @@ async function eachRowAction(
 
 /** The row action with this label, inline or in ⋯; a menu item is returned with its menu open. */
 async function rowAction(container: HTMLElement, label: string): Promise<HTMLButtonElement> {
-  const inline = [...container.querySelectorAll<HTMLButtonElement>(".archive-row-actions > .btn")]
+  const inline = [...container.querySelectorAll<HTMLButtonElement>(".archive-item-actions > .btn")]
     .find((candidate) => candidate.textContent?.trim() === label);
   if (inline) return inline;
   for (const trigger of container.querySelectorAll<HTMLButtonElement>('button[aria-label^="More Actions for"]')) {
@@ -296,23 +296,19 @@ test("empty archives expose labelled choice filters and a screen-reader status",
 test("large archives paginate, deep-link, filter, and accept live lifecycle updates", async () => {
   const sessions = Array.from({ length: 55 }, (_, index) => session(index));
   const fixture = await mount(sessions);
-  assert.equal(fixture.container.querySelectorAll("tbody tr").length, 50);
-  assert.match(fixture.container.textContent ?? "", /Archived.*Awaiting Prompt/s,
-    "archive and canonical lifecycle labels are both text-backed");
-  assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1"), true);
-  assert.ok(await rowAction(fixture.container, "Stop"), "ordinary nonterminal archived sessions retain the Stop action");
-  const tableRegion = fixture.container.querySelector<HTMLElement>('[role="region"][aria-label="Archived Sessions Table"]');
-  assert.equal(tableRegion?.tabIndex, 0, "the horizontally scrolling table is keyboard reachable");
-  assert.equal(fixture.container.querySelectorAll('th[scope="col"]').length, 7,
-    "every table header declares its column scope");
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 50);
+  assert.equal(fixture.container.querySelectorAll(".status").length, 0, "ordinary archived rows need no badge");
+  assert.ok(await rowAction(fixture.container, "Stop Session…"));
+  assert.equal(fixture.container.querySelector('[role="region"][aria-label="Archived Session Results"]')?.hasAttribute("tabindex"), false);
+  assert.equal(fixture.container.querySelectorAll('.archive-item[tabindex="0"]').length, 50);
 
-  const firstLink = fixture.container.querySelector<HTMLAnchorElement>('tbody a[href^="/sessions/"]');
+  const firstLink = fixture.container.querySelector<HTMLAnchorElement>('a[href^="/sessions/"]');
   assert.ok(firstLink, "session titles are direct links");
   await act(async () => { fireDomEvent.click(firstLink!, { button: 0 }); });
   assert.equal(fixture.navigated.at(-1)?.name, "session");
 
   await act(async () => { fireDomEvent.click(button(fixture.container, "Next Page")); });
-  assert.equal(fixture.container.querySelectorAll("tbody tr").length, 5);
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 5);
   assert.match(fixture.container.textContent ?? "", /Page 2/);
 
   const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Lifecycle State:"]');
@@ -322,7 +318,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
     .find((option) => option.textContent?.trim() === "Awaiting Input");
   assert.ok(inputRequired);
   await act(async () => { inputRequired.click(); });
-  assert.equal(fixture.container.querySelectorAll("tbody tr").length, 1);
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 1);
   assert.match(fixture.container.textContent ?? "", /Awaiting Input/);
 
   await act(async () => {
@@ -340,7 +336,7 @@ test("search input debounces to one request and preserves server row order", asy
     session(2, { id: "newer", title: "Newer", createdAt: 2, updatedAt: 1 }),
   ]);
   const initialCalls = fixture.archivePageCalls();
-  const links = [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")];
+  const links = [...fixture.container.querySelectorAll<HTMLAnchorElement>(".archive-item-heading a")];
   assert.deepEqual(links.map((link) => link.textContent), ["Newer", "Older"],
     "the browser preserves the server's immutable createdAt cursor order");
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
@@ -460,8 +456,7 @@ test("an Unarchive and Restart preflight refusal keeps the row archived with an 
     await Promise.resolve();
   });
 
-  assert.match(fixture.container.textContent ?? "",
-    /Could not unarchive and restart session: runner is offline\. The session is still archived\./);
+  assert.match(fixture.container.querySelector(".toast")?.textContent ?? "", /Couldn't unarchive “Archived Session 1”\..*runner is offline/s);
   assert.equal(button(fixture.container, "Unarchive and Restart").disabled, false, "the action can be retried");
   assert.deepEqual(fixture.navigated, []);
   assert.equal(fixture.archivePageCalls(), loadsBefore, "a definite refusal needs no reconciliation");
@@ -483,7 +478,18 @@ test("an ambiguous Unarchive and Restart failure reconciles the row against the 
   });
 
   assert.match(fixture.container.textContent ?? "", /Could not confirm Unarchive and Restart: Failed to fetch\./);
+  assert.doesNotMatch(fixture.container.querySelector(".toast-message")?.textContent ?? "", /Couldn't unarchive/);
   assert.ok(fixture.archivePageCalls() > loadsBefore, "delivery uncertainty is resolved from the server");
+  await fixture.unmount();
+});
+
+test("an already-restored receipt does not claim that Unarchive failed", async () => {
+  const fixture = await mount([session(1, { status: "completed" })], {
+    unarchiveAndRestart: async () => { throw new ApiError("already restored", 409, undefined, { archived: false }); },
+  }, { unarchiveAndRestart: true });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Unarchive and Restart")); await Promise.resolve(); });
+  assert.match(fixture.container.querySelector(".toast-message")?.textContent ?? "", /^This session was already restored\./);
+  assert.equal(fixture.container.querySelector(".toast-detail")?.textContent, "already restored");
   await fixture.unmount();
 });
 
@@ -523,7 +529,7 @@ test("Stopping sessions keep their Stop recovery path instead of Unarchive and R
   const fixture = await mount([pending], {}, { unarchiveAndRestart: true });
 
   assert.equal(hasButton(fixture.container, "Unarchive and Restart"), false);
-  assert.ok(button(fixture.container, "Retry Stop"));
+  assert.ok(await rowAction(fixture.container, "Retry Stop"));
   await fixture.unmount();
 });
 
@@ -546,8 +552,8 @@ test("Stopping sessions fall back to the legacy idempotent archive mutation", as
 
   // The Stop is still being delivered to a connected runner, so it reads Stop Pending (#208).
   assert.match(fixture.container.textContent ?? "", /Stop Pending/);
-  const retry = button(fixture.container, "Retry Stop");
-  assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"), false,
+  const retry = await rowAction(fixture.container, "Retry Stop");
+  assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop Session…"), false,
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
   await act(async () => { fireDomEvent.click(retry); await Promise.resolve(); });
 
@@ -584,31 +590,53 @@ test("Stop Failed sessions disclose bounded failure detail and expose Retry Stop
     },
   });
 
-  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".archive-state-badges .status")]
+  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".status")]
     .find((candidate) => candidate.textContent?.trim() === "Stop Failed");
-  assert.equal(badge?.title, "Automatic retries were exhausted.");
+  assert.equal(badge?.hasAttribute("title"), false);
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector('button[aria-label^="More Actions"]')!); });
+  assert.match(domWindow.document.querySelector('[role="menu"]')?.textContent ?? "", /The last stop attempt failed, so archiving is paused.*Automatic retries were exhausted/s);
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector('button[aria-label^="More Actions"]')!); });
   await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); await Promise.resolve(); });
   assert.deepEqual(calls, [failed.id]);
   await fixture.unmount();
 });
 
-test("a pruned session keeps its row and says its history was pruned, when and by which policy (#2777)", async () => {
+test("a pruned session stays openable without adding an extra row badge", async () => {
   const prunedAt = Date.UTC(2026, 9, 15, 12);
   const pruned = session(4, { archived: true, status: "completed",
     historyPruned: { prunedAt, eventCount: 2_400, retentionDays: 90 } });
   const kept = session(5, { archived: true, status: "completed" });
   const fixture = await mount([pruned, kept]);
   const badges = (title: string) => {
-    const row = [...fixture.container.querySelectorAll<HTMLTableRowElement>("tbody tr")]
-      .find((candidate) => candidate.querySelector(".archive-session-cell a")?.textContent === title)!;
-    return [...row.querySelectorAll<HTMLElement>(".archive-state-badges .status")];
+    const row = [...fixture.container.querySelectorAll<HTMLTableRowElement>(".archive-item")]
+      .find((candidate) => candidate.querySelector(".archive-item-heading a")?.textContent === title)!;
+    return [...row.querySelectorAll<HTMLElement>(".status")];
   };
-  const badge = badges(pruned.title).find((candidate) => candidate.textContent?.trim() === "History Pruned");
-  assert.ok(badge, "the pruned row carries History Pruned beside its lifecycle");
-  assert.match(badge.title, /^Pruned .* by the 90-day retention policy$/);
-  assert.equal(badges(kept.title).some((candidate) => candidate.textContent?.trim() === "History Pruned"), false);
+  assert.equal(badges(pruned.title).length, 0, "history metadata does not add a second status badge");
+  assert.equal(badges(kept.title).length, 0);
+  const history = fixture.container.querySelector<HTMLElement>(".archive-history")!;
+  assert.equal(history.textContent, "History Pruned");
+  assert.match(history.title, /^Pruned .* by the 90-day retention policy$/);
+  await act(async () => { fireDomEvent.click(history.closest(".archive-item")!.querySelector('button[aria-label^="More Actions"]')!); });
+  assert.match(domWindow.document.querySelector('[role="menuitem"] .menu-desc')?.textContent ?? "", /^Pruned .* by the 90-day retention policy$/);
   assert.ok(hasButton(fixture.container, "Unarchive") || buttons(fixture.container, "Unarchive and Restart").length > 0,
     "a pruned session can still be unarchived");
+  await fixture.unmount();
+});
+
+test("rows open on click and Enter while inline actions describe their session", async () => {
+  const target = session(7, { title: "Fix the Half-Cent Rounding Bug" });
+  const fixture = await mount([target]);
+  const row = fixture.container.querySelector<HTMLElement>(".archive-item")!;
+  const restore = row.querySelector<HTMLButtonElement>(".archive-inline")!;
+  assert.equal(domWindow.document.getElementById(restore.getAttribute("aria-describedby")!)?.textContent, target.title);
+  await act(async () => { row.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, ctrlKey: true }) as unknown as MouseEvent); });
+  assert.equal(fixture.navigated.length, 0, "a modified row click does not replace the current tab");
+  await act(async () => { fireDomEvent.keyDown(row, { key: "Enter" }); });
+  assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id });
+  await act(async () => { fireDomEvent.click(row); });
+  assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id });
+  assert.equal(row.querySelector("a")?.getAttribute("href"), viewPath({ name: "session", id: target.id }));
   await fixture.unmount();
 });
 
@@ -619,12 +647,12 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
     deleteSession: async (id) => { deleted.push(id); },
   });
 
-  const open = await rowAction(fixture.container, "Open");
+  const open = await rowAction(fixture.container, "Open Session");
   await act(async () => {
     fireDomEvent.click(open);
     await Promise.resolve();
   });
-  const remove = await rowAction(fixture.container, "Delete");
+  const remove = await rowAction(fixture.container, "Delete Session…");
   await act(async () => {
     fireDomEvent.click(remove);
     await Promise.resolve();
@@ -669,7 +697,7 @@ const MULTI_LINE_TITLE = "Fix the half-cent rounding bug\nRequirements:\n- keep 
 test("Delete Session names the session by its one-line title in the session header's words (#2278)", async () => {
   const fixture = await mount([session(6, { title: MULTI_LINE_TITLE, status: "stopped" })]);
 
-  const body = await confirmationBody(fixture.container, "Delete");
+  const body = await confirmationBody(fixture.container, "Delete Session…");
   assert.equal(body, deleteSessionMessage(MULTI_LINE_TITLE));
   assert.equal(body, "“Fix the half-cent rounding bug” and its history are removed from Wollipog. This can't be undone.");
   assert.ok(!body.includes("\n") && !body.includes("Requirements"), "only the title's first line is quoted");
@@ -689,7 +717,7 @@ test("Stop Session names the session by its one-line title and mentions queued m
       ...(count ? { queued: queued(count) } : {}),
     })]);
 
-    const body = await confirmationBody(fixture.container, "Stop");
+    const body = await confirmationBody(fixture.container, "Stop Session…");
     assert.equal(body, expected);
     assert.equal(body, stopArchivedSessionMessage(MULTI_LINE_TITLE, count));
     assert.ok(!body.includes("\n") && !body.includes("Requirements"), "only the title's first line is quoted");
@@ -709,7 +737,7 @@ test("Stop Session counts only queued messages still waiting, not settled delive
     ],
   })]);
 
-  const body = await confirmationBody(fixture.container, "Stop");
+  const body = await confirmationBody(fixture.container, "Stop Session…");
   assert.equal(body, "“Settled Receipts” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript.");
   await fixture.unmount();
 });
@@ -724,7 +752,7 @@ test("Stop Session counts the live queue the session header counts, even when th
     await Promise.resolve();
   });
 
-  const body = await confirmationBody(fixture.container, "Stop");
+  const body = await confirmationBody(fixture.container, "Stop Session…");
   assert.equal(body, "“Runner Queue” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript.");
   await fixture.unmount();
 });
@@ -974,11 +1002,11 @@ test("Undo restores an unarchived row in server cursor order", async () => {
       return updated;
     },
   });
-  const rowTitles = () => [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")]
+  const rowTitles = () => [...fixture.container.querySelectorAll<HTMLAnchorElement>(".archive-item-heading a")]
     .map((link) => link.textContent);
   assert.deepEqual(rowTitles(), ["Newest", "Middle", "Oldest"]);
 
-  const newestRow = [...fixture.container.querySelectorAll<HTMLElement>("tbody tr")]
+  const newestRow = [...fixture.container.querySelectorAll<HTMLElement>(".archive-item")]
     .find((row) => row.textContent?.includes("Newest"));
   assert.ok(newestRow);
   await act(async () => {
@@ -1095,7 +1123,7 @@ test("a REST mutation preserves an unreproducible server search match until boun
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   const callsBeforeMutation = calls;
 
-  const stopAction = await rowAction(fixture.container, "Stop");
+  const stopAction = await rowAction(fixture.container, "Stop Session…");
   await act(async () => { fireDomEvent.click(stopAction); });
   await act(async () => {
     fireDomEvent.click(button(fixture.container, "Stop Session"));
@@ -1285,7 +1313,7 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
       const restore = unarchiveAndRestart ? "Unarchive and Restart" : "Unarchive";
       const refused: string[] = [];
       await eachRowAction(fixture.container, async (action, label, inMenu) => {
-        if (label === "Open") {
+        if (label === "Open Session") {
           assert.equal(action.disabled, false, "Open still works");
           return;
         }
@@ -1296,11 +1324,11 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
         else assert.equal(action.title, VIEWER, `${label} states the reason on hover`);
         const describedBy = action.getAttribute("aria-describedby");
         assert.ok(describedBy, `${label} is described by its reason`);
-        assert.equal(domWindow.document.getElementById(describedBy)?.textContent, VIEWER);
+        assert.ok(describedBy.split(" ").some((id) => domWindow.document.getElementById(id)?.textContent === VIEWER));
         await act(async () => { fireDomEvent.click(action); await Promise.resolve(); });
       });
       assert.deepEqual(refused.sort(),
-        [restore, restore, "Delete", "Delete", "Retry Stop", "Stop"].sort(), "every refused action stays listed");
+        [restore, restore, restore, restore, "Delete Session…", "Delete Session…", "Retry Stop", "Retry Stop", "Stop Session…"].sort(), "every refused action stays listed");
       assert.deepEqual(calls, [], "nothing is sent");
       assert.doesNotMatch(domWindow.document.body.textContent ?? "", /Stop this session\?|Delete this session\?/u,
         "no confirmation opens");
@@ -1313,7 +1341,7 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
 test("each row has one inline action and ⋯ for the rest, with Delete last after a separator (§14)", async () => {
   const fixture = await mount([session(7, { title: "Archived Running", status: "running" })]);
   try {
-    const cell = fixture.container.querySelector("tbody tr .actions-cell")!;
+    const cell = fixture.container.querySelector(".archive-item-actions")!;
     assert.deepEqual([...cell.querySelectorAll(".btn")].map((candidate) => candidate.textContent?.trim()), ["Unarchive"],
       "one small ghost button, never a row of text buttons");
     const trigger = cell.querySelector<HTMLButtonElement>('button[aria-label="More Actions for Archived Running"]');
@@ -1322,7 +1350,7 @@ test("each row has one inline action and ⋯ for the rest, with Delete last afte
     const doc = domWindow.document as unknown as Document;
     const menu = doc.querySelector('[role="menu"]')!;
     assert.deepEqual([...menu.querySelectorAll('[role="menuitem"], [role="separator"]')]
-      .map((node) => node.getAttribute("role") === "separator" ? "—" : itemLabel(node)), ["Stop", "Open", "—", "Delete"]);
+      .map((node) => node.getAttribute("role") === "separator" ? "—" : itemLabel(node)), ["Open Session", "Unarchive", "Stop Session…", "—", "Delete Session…"]);
     assert.ok(menu.querySelector('[role="menuitem"]:last-of-type')?.classList.contains("danger"));
     await act(async () => { fireDomEvent.keyDown(menu.querySelector('[role="menuitem"]')!, { key: "Escape" }); });
     // The trigger takes focus back on the next task, after the menu has unmounted.
@@ -1355,11 +1383,11 @@ test("every row action behind ⋯ is reachable from the keyboard: Stop, Open, th
     };
 
     await openMenu();
-    assert.equal(focused(), "Stop", "ArrowDown on ⋯ opens it on its first item");
+    assert.equal(focused(), "Open Session", "ArrowDown on ⋯ opens it on its first item");
     await key("ArrowDown");
-    assert.equal(focused(), "Open");
+    assert.equal(focused(), "Unarchive");
     await key("End");
-    assert.equal(focused(), "Delete", "Delete is last");
+    assert.equal(focused(), "Delete Session…", "Delete is last");
     const items = [...doc.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="separator"]')];
     assert.equal(items.at(-2)?.getAttribute("role"), "separator", "after a separator");
 
@@ -1372,8 +1400,7 @@ test("every row action behind ⋯ is reachable from the keyboard: Stop, Open, th
     await settle();
 
     await openMenu();
-    await key("ArrowDown");
-    assert.equal(focused(), "Open");
+    assert.equal(focused(), "Open Session");
     await act(async () => { (doc.activeElement as HTMLButtonElement).click(); await Promise.resolve(); });
     assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id }, "Open opens the session");
   } finally {
@@ -1393,7 +1420,7 @@ test("a person the server allows keeps every row action as before", async () => 
     try {
       await eachRowAction(fixture.container, (action, label) => {
         assert.equal(action.disabled, false, `${label} stays enabled`);
-        assert.equal(action.getAttribute("aria-describedby"), null);
+        if (action.classList.contains("archive-inline")) assert.ok(action.getAttribute("aria-describedby")?.includes("archive-title-"));
       });
       await act(async () => { fireDomEvent.click(buttons(fixture.container, "Retry Stop")[0]!); await Promise.resolve(); });
       assert.deepEqual(calls, ["retry-stop:viewer-stop-failed"]);
