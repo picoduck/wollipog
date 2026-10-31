@@ -9360,9 +9360,16 @@ export class ControlPlaneDb {
     ).run(now, runnerId);
   }
 
+  /** Records a runner heartbeat without a WAL flush (#3874). A heartbeat arrives every few seconds
+   * on the event loop, and a flush per heartbeat stalled HTTP behind it under disk contention. The
+   * liveness sweep also reads in-memory frame activity, and the next heartbeat rewrites this value,
+   * so an OS crash that rolls it back loses nothing that matters
+   * (docs/control-plane-database-durability.md). */
   touch(runnerId: string, now: number): void {
-    this.stmt("UPDATE runners SET last_seen=?, updated_at=? WHERE runner_id=?")
-      .run(now, now, runnerId);
+    this.relaxedCommit(() => this.atomic(() => {
+      this.stmt("UPDATE runners SET last_seen=?, updated_at=? WHERE runner_id=?")
+        .run(now, now, runnerId);
+    }));
   }
 
   markOffline(runnerId: string, now: number): void {

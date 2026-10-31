@@ -380,7 +380,7 @@ function parseUiProtocolVersion(query: unknown): number | null {
 }
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
 const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
-// Heartbeats refresh durable last_seen; accepted traffic and replay progress also keep it active.
+// Heartbeats refresh last_seen (committed without a flush, #3874); accepted traffic and replay progress also keep it active.
 // If neither arrives within three intervals the socket is presumed half-open (sleep / NAT rebind leaves it
 // readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
 // runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.

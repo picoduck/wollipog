@@ -499,6 +499,36 @@ test("archived-history prune removals commit without a WAL flush, and closing a 
   }
 });
 
+test("a runner heartbeat's last_seen commits without a WAL flush (#3874)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-heartbeat-durability-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(join(root, "control-plane.db"));
+    db.registerRunner(meta(), 1);
+    const levels = recordCommitSynchronousLevels(db);
+    db.touch("runner-1", 2);
+    db.touch("runner-1", 3);
+    // The next heartbeat rewrites last_seen and liveness also reads in-memory frame activity, so a
+    // heartbeat an OS crash rolls back loses nothing.
+    assert.deepEqual(levels, [1, 1]);
+    assert.equal(Object.values(db.raw().prepare("PRAGMA synchronous").get()!)[0], 2,
+      "the connection returns to FULL after each heartbeat");
+    assert.equal(db.getRunner("runner-1")?.lastSeen, 3);
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const memory = withRunner();
+  try {
+    const levels = recordCommitSynchronousLevels(memory);
+    memory.touch("runner-1", 2);
+    assert.deepEqual(levels, [2], "NORMAL is only corruption-safe under WAL, so any other journal keeps FULL");
+  } finally {
+    memory.close();
+  }
+});
+
 test("startup indexes prompt-image references from previously committed user messages", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-steering-image-backfill-"));
   const path = join(root, "control-plane.db");
