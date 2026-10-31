@@ -100,6 +100,10 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 - Shared SSH reconnect handling, bounded bundled-runner setup waits, and clearer rejected async
   question feedback improve recovery and diagnostics.
 
-This candidate is published as a prerelease, never as the latest stable release. All six native
-platforms use the normal signing and verification gates, including the complete 47-asset inventory,
-updater signatures, checksum manifest, and matching compatibility runner copies.
+The release workflow builds all six supported native targets. Its base draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and
+`SHA256SUMS`. A signed tag run adds 12 updater signatures and `latest.json` for exactly 47 assets.
+The final workflow verifies inventory, signatures, byte-identical compatibility copies, and
+publisher digests. Publishing the verified draft remains a manual operator step.
+This release is intended for publication as a prerelease, never as the latest stable release.
