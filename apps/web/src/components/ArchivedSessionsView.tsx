@@ -591,11 +591,11 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
           expanded={filtersOpen} onClick={() => setFiltersOpen(true)} /></div>
       </div>
       {appliedFilters.length > 0 && <div className="chips" aria-label="Applied Filters">
-        {appliedFilters.map(({ key, label, value }) => <span className="chip" key={key}>
-          {label}: {value}
-          <button type="button" className="icon-btn sm" aria-label={`Remove ${label}: ${value}`}
-            onClick={() => { searchRef.current?.focus(); changeFilter(key, DEFAULT_FILTERS[key]); }}><CloseIcon size={14} /></button>
-        </span>)}
+        {appliedFilters.map(({ key, label, value }) => <button type="button" className="chip" key={key}
+          aria-label={`Remove ${label}: ${value}`}
+          onClick={() => { searchRef.current?.focus(); changeFilter(key, DEFAULT_FILTERS[key]); }}>
+          {label}: {value} <CloseIcon size={14} />
+        </button>)}
         <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>
       </div>}
       {filtersOpen && <Modal title="Filters" size="sm" onClose={() => setFiltersOpen(false)}
@@ -639,7 +639,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
           actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
             if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
             else navigate({ name: "inbox" });
-          }}>{hasActiveFilters ? "Reset Filters" : "Go to Sessions"}</button>}
+          }}>{hasActiveFilters ? "Clear Search and Filters" : "Go to Sessions"}</button>}
         >
           {hasActiveFilters
             ? "Try clearing search text or changing a filter."

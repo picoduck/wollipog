@@ -13931,7 +13931,10 @@ export class SessionsService {
       return fail("An active media review Session cannot be archived yet: Stop it and let authenticated reconciliation " +
         "settle it first; capacity is retained.", 409);
     }
-    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
+    // A disconnected side chat is already hidden and provisionally stopped. An explicit
+    // Archive must still record a durable Stop, rather than becoming a visibility-only no-op.
+    const stoppedSideChat = session.status === "stopped" && this.db.sideChatParent(sessionId) !== null;
+    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId) || stoppedSideChat) {
       const media = this.mediaSessionPurposes.owns(session.id);
       // A dedicated media Stop records no archive intent and settles nothing, so archival cannot be
       // scheduled for an active or ambiguous media Session (#3365). Refuse before any effect rather
@@ -17044,6 +17047,17 @@ export class SessionsService {
     }
   }
 
+  /** Side chats use archived only to stay out of ordinary lists, not as a Stop intent.
+   * A provisional disconnect may recover, but an ended child must not come back to life.
+   * Pending explicit Stops are enforced separately, until terminal evidence confirms them. */
+  private archivedSessionRequiresStop(session: SessionView): boolean {
+    if (!session.archived) return false;
+    if (this.db.sideChatParent(session.id) === null) return true;
+    return session.status === "stopped"
+      ? this.db.sessionStopProvenance(session.id)?.confirmation != null
+      : isTerminal(session.status);
+  }
+
   /**
    * On runner reconnect, reconcile DB session state with the processes the runner
    * still has alive: restore sessions that were only marked stopped because of a
@@ -17066,7 +17080,7 @@ export class SessionsService {
         }
         continue;
       }
-      if (liveSet.has(s.id) && s.archived) {
+      if (liveSet.has(s.id) && this.archivedSessionRequiresStop(s)) {
         this.requestStop(s, now, true);
         continue;
       }
@@ -17343,7 +17357,7 @@ export class SessionsService {
         if (changedSinceInventory(snap.id)) continue;
         const existing = this.db.getSession(snap.id);
         campaignBefore(existing);
-        if (existing?.archived && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
+        if (existing && this.archivedSessionRequiresStop(existing) && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
           this.requestStop(existing, now, true);
           recordAppliedVersion(snap.id);
           continue;
@@ -17498,7 +17512,7 @@ export class SessionsService {
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
     const campaignBefore = this.runtimeCampaignBefore(existing, runtimeSnapshot, batch);
-    if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
+    if (this.archivedSessionRequiresStop(existing) && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
     }
@@ -17582,7 +17596,7 @@ export class SessionsService {
     const existing = this.db.getSession(sessionId);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(sessionId) ||
         this.pendingMediaLifecycle(existing) || this.db.hasSessionStopIntent(sessionId) ||
-        (existing.archived && !isTerminal(snapshot.status))) return null;
+        (this.archivedSessionRequiresStop(existing) && !isTerminal(snapshot.status))) return null;
     // Role-conversion reconciliation acts only on an unapplied conversion, and it can publish.
     const conversion = this.db.sessionRoleConversion(sessionId);
     if (conversion && conversion.state !== "applied") return null;

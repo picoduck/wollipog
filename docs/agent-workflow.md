@@ -16,8 +16,9 @@ Never overwrite a dirty primary checkout or update a checkout hosting the live s
 Protocol-v220 clients can pass `campaignWorkItemId` at child creation. Verify the actual tool
 schema as well as the runner version. If the active host lacks this input, a Custom campaign may
 create a read-only bootstrap child, verify its effective configuration, bind the original work
-item through the supported assignment operation, and select its dedicated fresh-main worktree
-before releasing implementation. A bootstrap prompt is not a recorded work-item assignment.
+item through the supported assignment operation, and select its dedicated worktree based on the
+fetched remote default branch before releasing implementation. A bootstrap prompt is not a
+recorded work-item assignment.
 Do not claim atomic creation, omit required protected admission, or update the hosting stack to
 make an unavailable interface appear. Report an unsupported mandatory path during preflight.
 
@@ -29,6 +30,29 @@ require user payload review. Those instructions are not changed by this reposito
 policy. Do not edit installed skills or live provider configuration to remove the conflict.
 Explicitly authorized repository policy alignment must itself pass normal review and merge gates.
 Committed wording never overrides the current session's higher-priority instructions.
+
+## Worktree Bases and Checkout Maintenance
+
+Create new issue worktrees with `wollipog worktree create --branch <branch>` and omit `--base`.
+Wollipog fetches the remote default branch and uses it as the base, independently of the primary
+checkout's HEAD. Use an explicit base for intentional stacks or another task-specific starting
+point; that path uses the supplied ref without the default-branch fetch, so verify its freshness
+when the task requires it. Resuming an existing worktree preserves its work rather than rebasing
+it automatically.
+
+Do not pull or fast-forward the primary checkout as post-merge cleanup. Delivery requires the
+verified merge, tracker updates, and appropriate session-owned cleanup, not a current local
+`main`. Do not report a stale primary checkout or the sandbox's refusal to update it as an
+unfinished delivery step.
+
+Primary-checkout maintenance is a separate, explicitly requested operation. Preserve local work
+and check whether a running process uses the checkout before updating it; never update a checkout
+hosting the live stack. Runtime updates remain a separately authorized deployment operation.
+
+For reviews, maintenance sweeps, or tools that read the primary checkout directly, establish the
+required baseline explicitly. Fetch the remote default branch and inspect its files, or run code
+in a separate worktree pinned to the required commit. Record that commit and do not assume the
+primary checkout is current or change it merely to obtain fresh input.
 
 ## Decisions and Delivery
 

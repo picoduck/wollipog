@@ -10,9 +10,11 @@ const RUNNER_ID = "delegated-ui-evidence-e2e";
 const WORKSPACE_ID = "evidence-workspace";
 const AGENT_ID = "image-orchestrator";
 
-/** Seed a real control-plane database. The live HTTP routes and browser use it in the spec. */
-export function seedDelegatedUiEvidence(databasePath: string, workspacePath: string, authority: "human" | "orchestrator" = "orchestrator") {
-  const db = ControlPlaneDb.open(databasePath);
+/** Seed a real control-plane database. The live HTTP routes and browser use it in the spec. Pass
+ * `live` when its control plane is already running, so the seed attaches beside it (#3789). */
+export function seedDelegatedUiEvidence(databasePath: string, workspacePath: string, authority: "human" | "orchestrator" = "orchestrator",
+  options: { live?: boolean } = {}) {
+  const db = options.live ? ControlPlaneDb.attach(databasePath) : ControlPlaneDb.open(databasePath);
   const runner: RunnerMetadata = {
     runnerId: RUNNER_ID,
     hostname: "test-host",

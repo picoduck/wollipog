@@ -89,7 +89,11 @@ export class FollowUpApprovalRequired extends Error {
  * Usage is each session's own monotonic peak, never the recursively reserved child charge. */
 export class CampaignBudgetLedger {
   get database(): DatabaseSync { return this.sql; }
-  constructor(private readonly sql: DatabaseSync) {
+  constructor(private readonly sql: DatabaseSync) {}
+
+  /** Create or upgrade the ledger's tables and triggers. Only ControlPlaneDb.open installs them; a
+   * connection attached beside a running control plane never rewrites its schema (#3789). */
+  static install(sql: DatabaseSync): void {
     sql.exec(`CREATE TABLE IF NOT EXISTS campaign_budgets (
       root_id TEXT PRIMARY KEY, authority TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'active', reason TEXT,
       accepted_follow_ups INTEGER NOT NULL DEFAULT 0
@@ -153,7 +157,7 @@ export class CampaignBudgetLedger {
       sql.exec("ALTER TABLE campaign_budgets ADD COLUMN cost_unpriced INTEGER NOT NULL DEFAULT 0");
     }
     // Usage recorded before this marker existed.
-    this.noteUnpriced();
+    new CampaignBudgetLedger(sql).noteUnpriced();
   }
 
   /** Persist that a campaign (every campaign when omitted) has unpriced usage, from its members'
