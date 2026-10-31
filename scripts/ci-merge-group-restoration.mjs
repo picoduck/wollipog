@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { REQUIRED } from "./main-rolling-validation.mjs";
+import { REQUIRED, UNIT_SHARDS } from "./main-rolling-validation.mjs";
 
 // Read-only rollback proof for the disabled merge-group gate (docs/ci-aggregation.md). After the
 // gate is switched back, it proves that the newest merge-group runs executed today's complete full
@@ -25,19 +25,20 @@ const time = (value) => typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d
 
 // The rolling worker's full inventory, named as merge-group jobs (no reusable-call prefix).
 export const FULL_JOBS = REQUIRED.map((name) => name.replace(/^Full Validation \/ /, ""));
-const CHECKS = "Typecheck, Unit Tests & Bundles";
+const CHECKS = "Typecheck & Bundles";
 const SHARDS = FULL_JOBS.filter((name) => /^Browser End-to-End Tests \(\d+\)$/.test(name));
 const WEBKIT = "WebKit End-to-End Tests";
 const DETECT = "Settings-Rows win32 Baselines / Detect Settings-Rows Changes";
 const COMPARE = "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines";
-// The checks job's Node partitions, engine boundaries, containment and bundles; all must succeed.
-export const CHECK_STEPS = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+// The checks job's engine boundaries, containment and bundles; all must succeed. Every unit
+// shard must run its Unit Tests step (#3770).
+export const CHECK_STEPS = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const STEPS = new Map([[CHECKS, CHECK_STEPS], [WEBKIT, ["WebKit Browser End-to-End Tests"]],
   [DETECT, ["Compare the Diff Against the Settings-Rows Paths"]], [COMPARE, ["Compare Against the Committed win32 Baselines"]],
   ["Delegated Pipeline Recovery", ["Verify Recorded-Boundary Pipeline Recovery"]],
-  [REQUIRED_CONTEXT, ["Require Every Job to Have Succeeded"]],
+  [REQUIRED_CONTEXT, ["Require Every Job to Have Succeeded"]], ...UNIT_SHARDS.map((name) => [name, ["Unit Tests"]]),
   ...SHARDS.map((name, index) => [name, ["Remote-Instance Browser End-to-End Tests", ...(index ? [] : ["Rendered Production Browser Smoke"])]])]);
 
 /** Pure: Git blob SHAs of the workflow files from a contents listing of `.github/workflows`, or null. */

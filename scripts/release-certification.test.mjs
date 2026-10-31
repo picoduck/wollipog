@@ -8,7 +8,7 @@ const repository = "example/project";
 const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40), D = "d".repeat(40);
 const claim = "12345678-1234-1234-1234-123456789012";
 const at = (minute = 0) => new Date(Date.UTC(2026, 9, 25, 10, minute)).toISOString();
-const core = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+const core = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const worker = (overrides = {}) => ({ id: 10, run_attempt: 1, run_number: 50, display_title: `Rolling ${A} ${claim}`,
@@ -17,13 +17,14 @@ const worker = (overrides = {}) => ({ id: 10, run_attempt: 1, run_number: 50, di
   run_started_at: at(1), updated_at: at(30), ...overrides });
 const jobs = () => REQUIRED.map((name, i) => ({ id: i + 1, name, run_id: 10, run_attempt: 1, head_sha: C,
   status: "completed", conclusion: "success", created_at: at(), started_at: at(1), completed_at: at(29),
-  steps: [...(i < 10 ? ["Verify Rolling Checkout"] : []), ...(i === 0 ? core : []),
+  steps: [...(i < REQUIRED.length - 1 ? ["Verify Rolling Checkout"] : []), ...(i === 0 ? core : []),
     ...(i >= 1 && i <= 5 ? ["Remote-Instance Browser End-to-End Tests"] : []),
     ...(i === 1 ? ["Rendered Production Browser Smoke"] : []), ...(i === 6 ? ["WebKit Browser End-to-End Tests"] : []),
     ...(i === 7 ? ["Compare the Diff Against the Settings-Rows Paths"] : []),
     ...(i === 8 ? ["Compare Against the Committed win32 Baselines"] : []),
     ...(i === 9 ? ["Verify Recorded-Boundary Pipeline Recovery"] : []),
-    ...(i === 10 ? ["Require Every Job to Have Succeeded"] : [])].map((name, n) => ({ name, number: n + 1,
+    ...(/ \/ Unit Tests \(\d\)$/.test(name) ? ["Unit Tests"] : []),
+    ...(i === REQUIRED.length - 1 ? ["Require Every Job to Have Succeeded"] : [])].map((name, n) => ({ name, number: n + 1,
       conclusion: "success", started_at: at(1), completed_at: at(2) })) }));
 
 function forge() {
@@ -95,12 +96,13 @@ test("an incompatible workflow suite rejects exact-SHA green", async () => {
 });
 
 test("missing, skipped, duplicate, cancelled and incomplete jobs cannot certify", async () => {
-  for (const change of ["missing", "duplicate", "checkout", "test", "cancelled", "run-cancelled"]) {
+  for (const change of ["missing", "duplicate", "checkout", "test", "typecheck", "cancelled", "run-cancelled"]) {
     const f = forge();
     if (change === "missing") f.data.jobs.pop();
     if (change === "duplicate") f.data.jobs.push({ ...structuredClone(f.data.jobs[0]), id: 99 });
     if (change === "checkout") f.data.jobs[0].steps[0].conclusion = "skipped";
-    if (change === "test") f.data.jobs[0].steps.find((s) => s.name === "Unit Tests").conclusion = "skipped";
+    if (change === "test") f.data.jobs.at(-2).steps.find((s) => s.name === "Unit Tests").conclusion = "skipped";
+    if (change === "typecheck") f.data.jobs[0].steps.find((s) => s.name === "Typecheck").conclusion = "skipped";
     if (change === "cancelled") f.data.jobs[1].conclusion = "cancelled";
     if (change === "run-cancelled") f.data.runs[0].conclusion = "cancelled";
     assert.notEqual((await f.collect()).status, "certified", change);

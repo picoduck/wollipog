@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  applyTimingContext, attemptRecord, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
+  applyTimingContext, attemptRecord, dependencyCandidates, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
   AGGREGATOR, compareReports, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
 } from "./merge-queue-wait-report.mjs";
 
@@ -150,6 +150,20 @@ test("skipped routing anchors delayed full work without counting its API start p
   assert.equal(collected.jobs[0].executionMinutes, null, "anchor is never charged runner minutes");
 });
 
+test("the split checks job and each unit shard wait for routing like the job they replaced (#3770)", () => {
+  const work = (checks) => [job(checks, 1, 2, 6), job("Unit Tests (2)", 1, 3, 15), job("Browser End-to-End Tests (1)", 1, 2, 9),
+    job(AGGREGATOR, 15, 15, 16)];
+  const routing = job("PR Suite Routing", 0, 0, 1, "skipped");
+  for (const name of ["Typecheck & Bundles", "Typecheck, Unit Tests & Bundles"]) {
+    const metrics = runMetrics(run(10, 1, 16), [routing, ...work(name)]);
+    assert.equal(metrics.criticalExecutionMinutes, 13, `${name}: 12 unit-shard + 1 aggregate`);
+    assert.equal(metrics.criticalWaitMinutes, 3);
+  }
+  for (const name of ["Typecheck & Bundles", "Unit Tests (1)", "Unit Tests (3)", "Typecheck, Unit Tests & Bundles"])
+    assert.deepEqual(dependencyCandidates({ name }, [routing, { name: "Merge Group Gate" }], null).map((item) => item.name),
+      ["PR Suite Routing", "Merge Group Gate"], name);
+});
+
 test("an executed merge-group gate is critical-path execution, not waiting (#3637)", () => {
   const work = [job("Typecheck, Unit Tests & Bundles", 2, 2, 10), job("Browser End-to-End Tests (1)", 2, 3, 9),
     job(AGGREGATOR, 10, 10, 11)];
@@ -218,9 +232,10 @@ test("the assumed dependency structure matches the CI workflow files", () => {
   // result. Advisory shadows never supply one.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
   assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
-    "needs: suite_plan", "needs: [suite_plan, merge_group_gate]", "needs: [checks, browser, win32, webkit]",
-    "needs: [checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
+    "needs: [suite_plan, merge_group_gate]", "needs: suite_plan", "needs: [suite_plan, merge_group_gate]",
+    "needs: [checks, unit, browser, win32, webkit]",
+    "needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);

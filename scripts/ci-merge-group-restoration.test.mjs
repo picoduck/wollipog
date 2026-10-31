@@ -23,7 +23,8 @@ function fullRun(id, createdAt = "2026-10-27T13:00:00Z", headSha = "d".repeat(40
   const job = (name, steps, conclusion = "success") => ({ name, run_id: id, run_attempt: 1, status: "completed", conclusion, steps });
   const jobs = [
     job("PR Suite Routing", [], "skipped"),
-    job("Typecheck, Unit Tests & Bundles", CHECK_STEPS.map((name) => step(name))),
+    job("Typecheck & Bundles", CHECK_STEPS.map((name) => step(name))),
+    ...[1, 2, 3].map((shard) => job(`Unit Tests (${shard})`, [step("Unit Tests")])),
     ...[1, 2, 3, 4, 5].map((shard) => job(`Browser End-to-End Tests (${shard})`, [step("Remote-Instance Browser End-to-End Tests"),
       step("Rendered Production Browser Smoke", shard === 1 ? "success" : "skipped")])),
     job("WebKit End-to-End Tests", [step("WebKit Browser End-to-End Tests")]),
@@ -45,11 +46,12 @@ const edit = (fixture, change) => {
 const named = (fixture, name) => fixture.listing.jobs.find((job) => job.name === name);
 
 test("the verifier's job inventory is the rolling full inventory and its steps exist in ci.yml", () => {
-  assert.equal(FULL_JOBS.length, 11);
+  assert.equal(FULL_JOBS.length, 14);
+  assert.deepEqual(FULL_JOBS.filter((name) => name.startsWith("Unit Tests")), ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)"]);
   assert.ok(FULL_JOBS.includes("Delegated Pipeline Recovery"));
   assert.ok(FULL_JOBS.includes(REQUIRED_CONTEXT));
   const workflow = readFileSync(".github/workflows/ci.yml", "utf8");
-  for (const name of [...CHECK_STEPS, "Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke",
+  for (const name of [...CHECK_STEPS, "Unit Tests", "Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke",
     "WebKit Browser End-to-End Tests", "Verify Recorded-Boundary Pipeline Recovery", "Require Every Job to Have Succeeded", "Record Reduced Merge Group Coverage"]) {
     assert.ok(workflow.includes(`      - name: ${name}\n`), name);
   }
@@ -85,8 +87,14 @@ test("reduced, partial, unfinished, gate-active or mis-identified runs are never
   refuse((copy) => { named(copy, "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines").conclusion = "failure"; },
     "job-not-successful:Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines");
   for (const name of CHECK_STEPS) {
-    refuse((copy) => { named(copy, "Typecheck, Unit Tests & Bundles").steps.find((item) => item.name === name).conclusion = "skipped"; },
-      `step-not-successful:Typecheck, Unit Tests & Bundles/${name}`);
+    refuse((copy) => { named(copy, "Typecheck & Bundles").steps.find((item) => item.name === name).conclusion = "skipped"; },
+      `step-not-successful:Typecheck & Bundles/${name}`);
+  }
+  for (const shard of [1, 2, 3]) {
+    refuse((copy) => { named(copy, `Unit Tests (${shard})`).steps[0].conclusion = "skipped"; },
+      `step-not-successful:Unit Tests (${shard})/Unit Tests`);
+    refuse((copy) => { copy.listing.jobs = copy.listing.jobs.filter((job) => job.name !== `Unit Tests (${shard})`); },
+      `job-missing:Unit Tests (${shard})`);
   }
   refuse((copy) => { named(copy, "Browser End-to-End Tests (1)").steps[1].conclusion = "skipped"; },
     "step-not-successful:Browser End-to-End Tests (1)/Rendered Production Browser Smoke");

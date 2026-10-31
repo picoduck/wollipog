@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { budgetApi, FULL_COVERAGE } from "./main-ci-health.mjs";
-import { candidateSuiteVersion, REQUIRED, validationRecord, workerIdentity, WORKER } from "./main-rolling-validation.mjs";
+import { candidateSuiteVersion, REQUIRED, UNIT_SHARDS, validationRecord, workerIdentity, WORKER } from "./main-rolling-validation.mjs";
 import { isSupersededWorkerAttempt } from "./main-rolling-outcomes.mjs";
 import { listJobs } from "./merge-queue-wait-report.mjs";
 
@@ -10,7 +10,7 @@ export const CERTIFICATION_SCHEMA = "exact-full-regression-v1";
 const SHA = /^[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9_.-]*$/;
 const ACTIVE = ["queued", "in_progress", "waiting", "pending", "requested"];
-const CORE_STEPS = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+const CORE_STEPS = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const fail = (reason) => { const error = new Error(reason); error.reason = reason; throw error; };
@@ -33,6 +33,7 @@ export function fullTestStepsPassed(jobs) {
     passed(required[6], "WebKit Browser End-to-End Tests") &&
     passed(required[7], "Compare the Diff Against the Settings-Rows Paths") &&
     passed(required[8], "Compare Against the Committed win32 Baselines") &&
+    UNIT_SHARDS.every((name) => passed(required.find((job) => job?.name === `Full Validation / ${name}`), "Unit Tests")) &&
     passed(required.find((job) => job?.name === "Full Validation / Delegated Pipeline Recovery"), "Verify Recorded-Boundary Pipeline Recovery") &&
     passed(required.at(-1), "Require Every Job to Have Succeeded");
 }

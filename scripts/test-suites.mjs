@@ -54,10 +54,10 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   const { values } = parseArgs({ options: {
     suite: { type: "string", default: "full" }, ci: { type: "boolean", default: false },
     list: { type: "boolean", default: false }, base: { type: "string" }, head: { type: "string" },
-    "node-only": { type: "boolean", default: false }, groups: { type: "string" },
+    "node-only": { type: "boolean", default: false }, groups: { type: "string" }, shard: { type: "string" },
   } });
   if (values["node-only"]) {
-    const { discoverNodeTests, planNodeTests, profile } = await import("./node-test-plan.mjs");
+    const { discoverNodeTests, planNodeTests, profile, shardNodeTests } = await import("./node-test-plan.mjs");
     const { runNodeTests } = await import("./test-node.mjs");
     const groups = values.groups?.split(",") ?? [];
     if (!groups.length || groups.some((group) => !Object.hasOwn(GROUPS, group))) throw new Error("Invalid suite groups");
@@ -66,7 +66,8 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     if (!full && ([...profile.fastFiles, ...FAST_API_FILES].some((file) => !discovered.includes(file)) ||
         CRITICAL_BROWSER_FILES.some((file) => !existsSync(`apps/web/e2e/${file}`))))
       throw new Error("Mandatory fast inventory missing; full coverage required");
-    const files = planNodeTests(discovered).filter((file) => groups.includes(nodeGroup(file, profile.fastFiles)));
+    const selected = planNodeTests(discovered).filter((file) => groups.includes(nodeGroup(file, profile.fastFiles)));
+    const files = values.shard === undefined ? selected : shardNodeTests(selected, values.shard);
     if (values.list) console.log(JSON.stringify(files, null, 2));
     else await runNodeTests(files, { ci: values.ci });
   } else {

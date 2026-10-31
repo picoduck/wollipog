@@ -1,9 +1,10 @@
 # Required CI Aggregation
 
 `Typecheck, Test & Sidecar Bundle` is the protected required context in
-`.github/workflows/ci.yml`. Its `check` job waits for `checks`, `browser`, the
-`win32` reusable workflow, `webkit`, the optional PR `suite_plan`, and the
-[disabled merge-group gate](#disabled-merge-group-gate) `merge_group_gate`. The four
+`.github/workflows/ci.yml`. Its `check` job waits for `checks`, the sharded
+[`unit`](#unit-test-shards-and-step-budgets) job, `browser`, the `win32` reusable
+workflow, `webkit`, `delegated_pipeline`, the optional PR `suite_plan`, and the
+[disabled merge-group gate](#disabled-merge-group-gate) `merge_group_gate`. The six
 work results must be `success`. With the routing variable absent or ordinarily off,
 the plan must be `skipped` with no output; an activated PR requires a successful
 plan with an explicit `full` or `fast` output. Failure, cancellation, missing or
@@ -43,6 +44,42 @@ validation now uses the separate rolling worker's native active/pending lane; it
 reusable CI call does not share ordinary CI's concurrency group.
 Merge-group runs retain the same cancellation admission, dependency checks and required name.
 The separate obsolete-merge-group monitor and CI permissions are unchanged.
+
+## Unit-Test Shards and Step Budgets
+
+Refs #3770. The full Node suite grew to 1,816–1,896 seconds by 2026-10-30, inside the
+35-minute `Typecheck, Unit Tests & Bundles` job. Merge groups were cancelled during the web
+build after every test had passed, and a cancelled job names no step. The work is now split:
+
+- `checks` (**Typecheck & Bundles**) keeps typecheck, the Node engine boundaries, delegated
+  containment and the bundles, about five minutes.
+- `unit` (**Unit Tests (1)**, **(2)**, **(3)**) runs one shard each of the same planned
+  suite. `scripts/node-test-plan.mjs` deals the cost-ordered plan back and forth across the
+  shards, so every discovered file runs in exactly one shard and the measured long files
+  spread evenly. Each shard installs the video decoder it needs; `fail-fast` is off.
+
+Coverage is unchanged: each shard runs the same discovery and plan as `pnpm test:ci`, and
+`scripts/node-test-plan.test.mjs` proves the shards are disjoint and their union is the
+plan, for every suite and shard count. The PR fast path and the disabled merge-group gate
+shard their `node-fast` selection the same way. The `unit` job uses the same guard and
+`needs` as `checks`, and the aggregator requires `needs.unit.result` to be `success`: one
+failed, cancelled or skipped shard fails the required check under the name **Unit Tests**.
+Main-push validation reuses this workflow, so the rolling inventory, release
+certification, main health and the restoration verifier require all three shard jobs and
+their `Unit Tests` steps.
+
+Every `run:` step in these two jobs has its own `timeout-minutes`, and the job budget
+covers all of those bounds at once, both decoder install attempts included, plus five
+minutes for the pinned setup actions. A step that overruns therefore fails under its own
+name before the job budget can cancel the job. The **Unit Tests** step allows 18 minutes
+against about eleven expected; the jobs allow 50 and 35 minutes. To add a shard, extend
+the matrix list and the `/3` denominators together. The workflow contract test requires
+them to agree, and pins each job's shape as it does the browser shards.
+
+Merge groups run the workflow file from the group's own merge commit, so a pull request
+changing this layout is validated by its own new jobs in the queue. Main-health and
+certification records from before the split lack the shard jobs and stay unverified;
+the first rolling run after the merge provides new full evidence.
 
 ## Same-Head Runs
 
@@ -175,8 +212,8 @@ four for the default single run), never dispatches or writes, and exits 0 only w
 the newest `--runs` completed merge-group runs created after the switch-back each
 prove full coverage on their exact attempt: the trusted workflow blobs; a successful
 queue run of `ci.yml`; the rolling full
-inventory (`Typecheck, Unit Tests & Bundles` with every Node, engine, containment and
-bundle step, all five browser shards and no extra leg, shard 1's production smoke,
+inventory (`Typecheck & Bundles` with every engine, containment and bundle step, the
+three `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
 WebKit, the win32 change detection, the aggregator); the path-scoped win32 comparison
 succeeded or was skipped; and `Merge Group Gate` absent or skipped with no reduced-coverage
 record. A failing, in-progress, partial or gate-active run is a refusal, not a pass. The

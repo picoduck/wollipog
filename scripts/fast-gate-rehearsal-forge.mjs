@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { REQUIRED, WORKER } from "./main-rolling-validation.mjs";
+import { REQUIRED, UNIT_SHARDS, WORKER } from "./main-rolling-validation.mjs";
 
 /** Inert in-process forge for the fast-gate cutover rehearsal (#3637). It is a
  * fixture transport, never a decision maker: delivered modules read it as they
@@ -27,19 +27,19 @@ const WORKFLOWS = {
     'run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"\n',
 };
 const workflowText = (file, edition) => WORKFLOWS[file] + (edition && file === "ci.yml" ? `# suite edition ${edition}\n` : "");
-const CORE = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+const CORE = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const STEPS = [CORE, ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"],
   ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]), ["WebKit Browser End-to-End Tests"],
   ["Compare the Diff Against the Settings-Rows Paths"], ["Compare Against the Committed win32 Baselines"],
-  ["Verify Recorded-Boundary Pipeline Recovery"],
+  ["Verify Recorded-Boundary Pipeline Recovery"], ...UNIT_SHARDS.map(() => ["Unit Tests"]),
   ["Require Every Job to Have Succeeded"]];
 
 function jobs(run) {
   if (run.status === "queued") return [];
   return REQUIRED.map((name, index) => {
-    const done = run.status === "completed", red = done && run.conclusion === "failure" && (index === 0 || index === REQUIRED.length - 1);
+    const done = run.status === "completed", red = done && run.conclusion === "failure" && (name.endsWith(UNIT_SHARDS[0]) || index === REQUIRED.length - 1);
     return { id: run.id * 100 + index, name, status: done ? "completed" : "in_progress", conclusion: done ? red ? "failure" : "success" : null,
       started_at: run.run_started_at, steps: ["Verify Rolling Checkout", ...(done ? STEPS[index] : [])].map(step => ({ name: step,
         conclusion: red && (step === "Unit Tests" || step === "Require Every Job to Have Succeeded") ? "failure" : "success",
