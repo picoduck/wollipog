@@ -23,14 +23,15 @@ import { destination, viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { BotIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, HistoryIcon, InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
+import { ArchiveIcon, BotIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, HistoryIcon, SearchOffIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
 import { PageHeader } from "./PageHeader.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
-import { State, stateVariant } from "./State.js";
+import { State } from "./State.js";
+import { StaleContent } from "./StaleContent.js";
 import { Select, SegmentedControl } from "./ui/ChoiceControls.js";
 import { FilterButton } from "./FilterButton.js";
 import { Modal } from "./Modal.js";
@@ -151,6 +152,10 @@ export function ArchivedSessionsView() {
   const [pageMetadata, setPageMetadata] = useState<Record<string, ArchiveSessionMetadata>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState(false);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loadedKeyRef = useRef<string | null>(null);
+  const [showSkeleton, setShowSkeleton] = useState(false);
   const [busyIds, setBusyIds] = useState(() => new Set<string>());
   const [transcriptHits, setTranscriptHits] = useState(() => new Map<string, string>());
   const locationNames = useMemo(() => new Map(
@@ -161,9 +166,13 @@ export function ArchivedSessionsView() {
 
   const catalogRef = useRef(catalog);
   catalogRef.current = catalog;
+  const requestKey = JSON.stringify([filters, page, cursors[page - 1] ?? null]);
   const refreshCatalog = useCallback(async () => {
     const requestSequence = ++requestSequenceRef.current;
+    const replacement = loadedKeyRef.current !== requestKey;
     setLoading(true);
+    setError(null);
+    setRefreshError(false);
     try {
       const response = await api.archiveSessionPage({
         cursor: cursors[page - 1] ?? undefined,
@@ -202,14 +211,21 @@ export function ArchivedSessionsView() {
       setPageMetadata(response.metadata);
       setNextCursor(response.nextCursor);
       setFacets(response.facets);
+      loadedKeyRef.current = requestKey;
+      setLoadedKey(requestKey);
       setError(null);
     } catch (cause) {
       if (requestSequence !== requestSequenceRef.current) return;
-      setError(`Could not load archived sessions: ${(cause as Error).message}`);
+      if (!replacement && catalogRef.current.size > 0) setRefreshError(true);
+      else {
+        setCatalog(new Map());
+        setNextCursor(null);
+        setError((cause as Error).message);
+      }
     } finally {
       if (requestSequence === requestSequenceRef.current) setLoading(false);
     }
-  }, [api, cursors, filters, page]);
+  }, [api, cursors, filters, page, requestKey]);
   refreshCatalogRef.current = refreshCatalog;
 
   const scheduleLiveRevalidation = useCallback(() => {
@@ -335,6 +351,17 @@ export function ArchivedSessionsView() {
   const pageSessions = useMemo(() => [...catalog.values()], [catalog]);
   const hasActiveFilters = Boolean(queryInput) || filters.project !== null || filters.location !== null ||
     filters.agent !== null || filters.lifecycle !== "all" || filters.archive !== "archived";
+  const offline = conn === "offline" || conn === "unauthorized" || (conn === "connecting" && hasBeenOnlineRef.current);
+  // Mark rows as stale immediately, including the search debounce interval.
+  const replacing = loadedKey !== null && (loadedKey !== requestKey || queryInput !== filters.query);
+  const pending = loading || replacing && !error;
+  const noMatches = !offline && !pending && !error && pageSessions.length === 0 && hasActiveFilters;
+  useEffect(() => {
+    setShowSkeleton(false);
+    if (!pending || pageSessions.length > 0 || offline) return;
+    const timer = window.setTimeout(() => setShowSkeleton(true), 300);
+    return () => window.clearTimeout(timer);
+  }, [pending, pageSessions.length, offline]);
 
   const changeFilter = <K extends keyof ArchiveBrowserFilters>(key: K, value: ArchiveBrowserFilters[K]) => {
     setFilters((current) => ({ ...current, [key]: value }));
@@ -385,7 +412,10 @@ export function ArchivedSessionsView() {
         onChange={(value) => changeFilter("lifecycle", value)} />
     </div>
   </>;
-  const resultSummary = page > 1 || nextCursor ? `Page ${page}`
+  const searchingStatus = "Searching…";
+  const reconnectingStatus = "Reconnecting…";
+  const resultSummary = offline ? (pageSessions.length > 0 ? reconnectingStatus : "") : pending ? (pageSessions.length > 0 ? searchingStatus : "") : error ? ""
+    : page > 1 || nextCursor ? `Page ${page}`
     : `${pageSessions.length} session${pageSessions.length === 1 ? "" : "s"}${filters.query.trim() ? ` match “${filters.query.trim()}”` : ""}`;
 
   const setBusy = (id: string, value: boolean) => {
@@ -522,7 +552,7 @@ export function ArchivedSessionsView() {
           <SearchIcon size={16} aria-hidden="true" />
           <input ref={searchRef} type="search" aria-label="Search Titles and Transcripts" value={queryInput}
             onChange={(event) => setQueryInput(event.target.value)} placeholder="Search titles and transcripts" />
-          {queryInput && <button type="button" className="icon-btn sm" aria-label="Clear Search"
+          {queryInput && !noMatches && <button type="button" className="icon-btn sm" aria-label="Clear Search"
             onClick={() => { setQueryInput(""); searchRef.current?.focus(); }}><CloseIcon size={14} /></button>}
         </div>
         <div className="archive-show"><span className="field-label">Show:</span>{showSegments}</div>
@@ -536,56 +566,61 @@ export function ArchivedSessionsView() {
           <button type="button" className="icon-btn sm" aria-label={`Remove ${label}: ${value}`}
             onClick={() => { searchRef.current?.focus(); changeFilter(key, DEFAULT_FILTERS[key]); }}><CloseIcon size={14} /></button>
         </span>)}
-        <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>
+        {!noMatches && <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>}
       </div>}
       {filtersOpen && <Modal title="Filters" size="sm" onClose={() => setFiltersOpen(false)}
         tertiary={appliedFilters.length > 0 ? <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button> : undefined}
         footer={<button ref={filtersDoneRef} type="button" className="btn primary" onClick={() => setFiltersOpen(false)}>Done</button>}>
-        <p role="status" aria-live="polite">{resultSummary}</p>
+        <p>{resultSummary}</p>
         <div className="archive-sheet-show field"><span>Show</span>{showSegments}</div>
         {filterFields(false)}
       </Modal>}
 
-      <div className="count" role="status" aria-live="polite">{resultSummary}</div>
+      <div role="status" aria-live="polite" aria-atomic="true">
+        {resultSummary && <div className="count">{resultSummary}</div>}
+      </div>
 
-      {error && pageSessions.length > 0 && (
-        <Notice tone="danger" compact role="alert"
-          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Try Again</button>}>
-          {error}
+      {refreshError && !offline && !pending && pageSessions.length > 0 && (
+        <Notice tone="warning" compact
+          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Retry</button>}>
+          Couldn't refresh archived sessions. Showing the last results.
         </Notice>
       )}
-      {pageSessions.length === 0 && stateVariant({
-        // A cold load's first attempt is not a lost connection; a retry after one is (§12.5).
-        offline: conn === "offline" || conn === "unauthorized" || (conn === "connecting" && hasBeenOnlineRef.current),
-        loading: loading,
-        error: Boolean(error),
-      }) === "offline" ? (
+      <div role="region" aria-label="Archived Session Results" aria-busy={pending}>
+      {offline && pageSessions.length === 0 ? (
         <State variant="offline">Reconnecting…</State>
-      ) : loading && pageSessions.length === 0 ? (
-        <State variant="loading">Loading archived sessions…</State>
+      ) : pending && pageSessions.length === 0 ? (
+        showSkeleton && <>
+          <div className="surface skeleton archive-skeleton" aria-hidden="true">
+            {Array.from({ length: 5 }, (_, index) => <div className="row row-2 archive-skeleton-row" key={index}>
+              <span className="skeleton-bar" /><span className="skeleton-bar" />
+            </div>)}
+          </div>
+          <p role="status">Loading archived sessions…</p>
+        </>
       ) : error && pageSessions.length === 0 ? (
         <State variant="error" title="Couldn't Load Archived Sessions"
-          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Try Again</button>}>
-          {error}
+          details={error}
+          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Retry</button>}>
+          Wollipog didn't answer. Your archived sessions are unchanged.
         </State>
       ) : pageSessions.length === 0 ? (
         <State
           variant={hasActiveFilters ? "no-results" : "empty"}
-          title={hasActiveFilters
-            ? "No Matching Sessions"
-            : `No ${destination("archived").name}`}
-          icon={<InboxIcon />}
-          actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
-            if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
-            else navigate({ name: "inbox" });
-          }}>{hasActiveFilters ? "Reset Filters" : "Go to Sessions"}</button>}
+          live={false}
+          title={hasActiveFilters ? undefined : `No ${destination("archived").name}`}
+          icon={hasActiveFilters ? <SearchOffIcon /> : <ArchiveIcon />}
+          actions={hasActiveFilters ? <>
+            {queryInput.trim() && <button type="button" className="btn ghost sm" onClick={() => { setQueryInput(""); searchRef.current?.focus(); }}>Clear Search</button>}
+            {appliedFilters.length > 0 && <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>}
+          </> : <button type="button" className="btn sm" onClick={() => navigate({ name: "inbox" })}>Go to Sessions</button>}
         >
           {hasActiveFilters
-            ? "Try clearing search text or changing a filter."
-            : "Archived sessions will appear here with their lifecycle state and transcript."}
+            ? `No archived sessions match${queryInput.trim() ? ` “${queryInput.trim()}”` : ""}${filters.project ? ` in ${filters.project}` : ""}${filters.location ? ` at ${filters.location}` : ""}${filters.agent ? ` with ${filters.agent}` : ""}${filters.lifecycle !== "all" ? ` with status ${canonicalLifecycleLabel(filters.lifecycle)}` : ""}${filters.archive !== "archived" ? ` in ${filters.archive === "all" ? "All" : "Not Archived"}` : ""}.`
+            : "Sessions you archive are kept here with their transcripts. Open one to read it, or restore it to keep working."}
         </State>
       ) : (
-        <div className="surface archive-list" role="region" aria-label="Archived Session Results">
+        <StaleContent stale={offline || replacing} className="surface archive-list">
           {pageSessions.map((session) => {
             const metadata = pageMetadata[session.id] ?? archiveSessionMetadata(session, locationNames);
             const title = session.title || session.id;
@@ -642,10 +677,11 @@ export function ArchivedSessionsView() {
               <ArchiveRowActions sessionId={session.id} title={title} actions={actions} inline={stopFailed ? retry : restore} busy={busyIds.has(session.id)} />
             </div>;
           })}
-        </div>
+        </StaleContent>
       )}
+      </div>
 
-      {(page > 1 || nextCursor) && (
+      {!error && !offline && (page > 1 || nextCursor) && (
         <nav className="archive-pager" aria-label="Archived Sessions Pagination">
           <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}><ChevronLeftIcon size={14} />Previous</button>
           <span>Page {page}</span>

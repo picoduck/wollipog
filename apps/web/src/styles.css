@@ -4144,6 +4144,20 @@ textarea {
 .agents-panel[hidden] { display: none; }
 /* The roster's first read (#2861, §12.3): skeleton rows at the roster's two-line row height, flush
    with the list, instead of a "Loading" sentence. */
+.skeleton.archive-skeleton {
+  gap: 0;
+  min-height: 0;
+  padding: 0;
+}
+.archive-skeleton-row {
+  height: 56px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-2);
+}
+.archive-skeleton-row > .skeleton-bar:first-child { width: 60%; }
+.archive-skeleton-row > .skeleton-bar:last-child { width: 40%; }
 .skeleton.agents-skeleton {
   gap: 0;
   min-height: 0;

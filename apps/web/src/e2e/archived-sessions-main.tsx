@@ -15,6 +15,7 @@ import "../styles.css";
  * `?theme=light|dark` picks the theme.
  */
 const params = new URLSearchParams(window.location.search);
+const scenario = params.get("state");
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
 const DAY = 86_400_000;
@@ -62,6 +63,7 @@ class FixtureSocket implements UiSocket {
     setTimeout(() => {
       this.onopen?.();
       this.onmessage?.({ data: JSON.stringify(snapshot) });
+      if (scenario === "offline") setTimeout(() => this.onclose?.({ code: 1006 }), 500);
     }, 0);
   }
   send() {}
@@ -85,8 +87,17 @@ const client = {
   ...api,
   listAllSessions: async () => ({ sessions }),
   search: async () => ({ results: [] }),
-  archiveSessionPage: async (input: Parameters<ApiClient["archiveSessionPage"]>[0]) => ({
-    sessions: sessions.filter((item) => (input.archive === "all" || (input.archive === "unarchived" ? !item.archived : item.archived))
+  archiveSessionPage: async (input: Parameters<ApiClient["archiveSessionPage"]>[0]) => {
+    if (scenario === "loading") await new Promise((resolve) => setTimeout(resolve, 30_000));
+    if (scenario === "error") throw new Error("The archive service is unavailable.");
+    if (input.q && (scenario === "replacement" || scenario === "failure")) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      if (scenario === "failure") throw new Error("The replacement search failed.");
+    }
+    if (scenario === "revalidation" && document.visibilityState === "visible" && refreshRequested) throw new Error("Refresh unavailable.");
+    return {
+    sessions: scenario === "empty" || scenario === "no-matches" ? [] : sessions.filter((item) => (input.archive === "all" || (input.archive === "unarchived" ? !item.archived : item.archived))
+      && (!input.q || scenario !== "replacement" || item.title.toLowerCase().includes(input.q.toLowerCase()))
       && (!input.project || input.project === "Wollipog")
       && (!input.location || input.location === "wollipog")
       && (!input.agent || input.agent === "Claude Code")
@@ -96,10 +107,13 @@ const client = {
     nextCursor: params.has("paged") && !input.cursor ? "page-2" : null,
     hasMore: params.has("paged") && !input.cursor,
     facets: { projects: ["Wollipog", ...(params.has("toolbar") ? Array.from({ length: 13 }, (_, i) => `Project ${i + 1}`) : [])], locations: ["wollipog"], agents: ["Claude Code"] },
-  }),
+  }; },
   stop: async (id: string) => ({ ...sessions.find((item) => item.id === id)!, status: "stopped" }),
   deleteSession: async () => { throw new Error("The server refused this deletion."); },
 } as unknown as ApiClient;
+
+let refreshRequested = false;
+document.addEventListener("visibilitychange", () => { refreshRequested = true; });
 
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
