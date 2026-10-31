@@ -199,7 +199,7 @@ export function recordPlanOffline(databasePath: string, rootId: string, items: A
 
 /** Startup marks sessions without a connected runner stopped. Put the live children back. */
 export function restoreCampaignStatuses(databasePath: string, seeded: ReturnType<typeof seedCampaignStatus>) {
-  const db = ControlPlaneDb.open(databasePath);
+  const db = ControlPlaneDb.attach(databasePath);
   try {
     const now = Date.now();
     db.updateSessionStatus(seeded.rootId, "running", now);

@@ -165,7 +165,7 @@ async function startControlPlane(t: TestContext) {
 }
 
 function campaign(database: string, id: string) {
-  const db = ControlPlaneDb.open(database);
+  const db = ControlPlaneDb.attach(database, { readOnly: true });
   try { return db.getSession(id)!; } finally { db.close(); }
 }
 
@@ -214,7 +214,7 @@ test("a stale boundary no approval explains refuses the owner's message and rest
 });
 
 function budgetState(database: string, id: string) {
-  const db = ControlPlaneDb.open(database);
+  const db = ControlPlaneDb.attach(database);
   try { return db.campaignBudgets.view(id)?.state; } finally { db.close(); }
 }
 

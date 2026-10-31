@@ -113,7 +113,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       await delay(50);
     }
     assert.ok(healthy, logs);
-    liveDb = ControlPlaneDb.open(database);
+    liveDb = ControlPlaneDb.attach(database);
     for (const mode of ["normal", "orchestrator", "orchestrator-provider", "orchestrator-child", "policy-agent"]) {
       liveDb.updateSessionStatus(mode, "running", Date.now());
       assert.equal(liveDb.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
@@ -141,7 +141,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     };
     const ordinary = ["fixture-global", "fixture-same-org", "fixture-foreign-org"];
     const humanQuestions = ["fixture-owner-question", "fixture-admin-question", "fixture-other-question"];
-    const ownerDb = ControlPlaneDb.open(database);
+    const ownerDb = ControlPlaneDb.attach(database, { readOnly: true });
     const ownerId = ownerDb.localIdentityContext().userId;
     ownerDb.close();
     // #1448: steering recovery reads and mutations have prompt's descendant scope, even when

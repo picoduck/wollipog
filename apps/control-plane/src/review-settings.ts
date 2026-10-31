@@ -50,7 +50,10 @@ export function parseReviewSettings(value: unknown): ReviewSettings | null {
 }
 
 export class ReviewSettingsStore {
-  constructor(private readonly sql: DatabaseSync) {
+  constructor(private readonly sql: DatabaseSync) {}
+
+  /** Only ControlPlaneDb.open installs these tables; an attached connection never does (#3789). */
+  static install(sql: DatabaseSync): void {
     sql.exec(`CREATE TABLE IF NOT EXISTS review_settings (
       user_id TEXT NOT NULL REFERENCES identity_users(user_id) ON DELETE CASCADE,
       project_id TEXT NOT NULL DEFAULT '', settings TEXT NOT NULL, updated_at INTEGER NOT NULL,

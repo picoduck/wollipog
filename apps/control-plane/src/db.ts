@@ -38,7 +38,7 @@ import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./cla
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
-import { mkdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { open as openFile } from "node:fs/promises";
 import { uptime } from "node:os";
 import { dirname, resolve as resolvePath } from "node:path";
@@ -5362,6 +5362,9 @@ const CAMPAIGN_HELD_CHILDREN_LIMIT = 32;
  * wait blocks the event loop, so it only rides out a brief lock; a lock held longer still fails
  * fast and periodic work defers its tick. */
 export const CONTROL_PLANE_DB_BUSY_TIMEOUT_MS = 250;
+/** How long a connection attached beside a running control plane (ControlPlaneDb.attach) waits for
+ * the server's lock. It blocks no server, so it can outlast the server's slowest commit. */
+export const ATTACHED_DB_BUSY_TIMEOUT_MS = 10_000;
 
 /** How far a boot time derived from uptime may drift with clock adjustments and still name the
  * same boot. A reboot moves it by at least the previous boot's uptime. */
@@ -5552,7 +5555,16 @@ export class ControlPlaneDb {
     /** The write-ahead log file, or null outside WAL journaling (where every commit is FULL). */
     private readonly walPath: string | null,
     hostRebooted: boolean,
+    /** False for an attached connection, which must not rewrite the owner's tables or triggers. */
+    installStores: boolean,
   ) {
+    if (installStores) {
+      CampaignBudgetLedger.install(db);
+      CampaignReviewJobs.install(db);
+      SessionReviewJobs.install(db);
+      ReviewSessions.install(db);
+      ReviewSettingsStore.install(db);
+    }
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
     this.campaignBudgets = new CampaignBudgetLedger(db);
     this.campaignReviewJobs = new CampaignReviewJobs(db,this.campaignBudgets,(rootId)=>{
@@ -7530,7 +7542,7 @@ export class ControlPlaneDb {
           /* column already present */
         }
       }
-      new ReviewSessions(db);
+      ReviewSessions.install(db);
       if (addedChildCharges) settleLegacyChildCharges(db);
       db.exec(CHILD_CHARGE_TRIGGERS_SQL);
       db.exec("COMMIT");
@@ -7802,7 +7814,7 @@ export class ControlPlaneDb {
       }
     }
     const controlPlane = new ControlPlaneDb(
-      db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted,
+      db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted, true,
     );
     try {
       installMaintenanceIndexes(db);
@@ -7820,6 +7832,42 @@ export class ControlPlaneDb {
       controlPlane.maintainUsageAggregation(Date.now());
       controlPlane.trackSessionAccessChanges();
       return controlPlane;
+    } catch (error) {
+      db.close();
+      throw error;
+    }
+  }
+
+  /**
+   * A second connection to a database that a running control plane already opened, for tests and
+   * inspection beside it (#3789). Unlike open, it applies no schema and runs no startup work, so it
+   * takes the write lock only for the writes its caller makes; a read-only one never takes it, and
+   * WAL lets it read while the server writes. It waits out the server's commits for up to
+   * ATTACHED_DB_BUSY_TIMEOUT_MS. A writable one commits without syncing the WAL, so it releases the
+   * lock well within the server's own CONTROL_PLANE_DB_BUSY_TIMEOUT_MS wait; it trades durability
+   * across a power loss, which no caller beside a live server needs.
+   */
+  static attach(location: string, options: { readOnly?: boolean } = {}): ControlPlaneDb {
+    const readOnly = options.readOnly ?? false;
+    const uninitialized = new Error("attach needs a WAL database that ControlPlaneDb.open already initialized");
+    if (!existsSync(location)) throw uninitialized;
+    const db = new DatabaseSync(location, { readOnly, timeout: ATTACHED_DB_BUSY_TIMEOUT_MS });
+    try {
+      const journalMode = (db.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode;
+      const instanceId = db.prepare("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='control_plane_metadata'").get()
+        ? (db.prepare("SELECT value FROM control_plane_metadata WHERE key='instance_id'")
+          .get() as { value?: unknown } | undefined)?.value
+        : undefined;
+      if (journalMode !== "wal" || typeof instanceId !== "string") {
+        throw uninitialized;
+      }
+      // The same per-connection behavior open sets, so attached writes act exactly as the server's.
+      db.exec("PRAGMA secure_delete = ON;");
+      db.exec("PRAGMA foreign_keys = ON;");
+      db.exec("PRAGMA recursive_triggers = ON;");
+      if (!readOnly) db.exec("PRAGMA synchronous = NORMAL;");
+      // No WAL path: the connection never relaxes ingest commits or runs the checkpointer.
+      return new ControlPlaneDb(db, new FileArtifactBlobStore(defaultArtifactBlobRoot(location)), instanceId, null, false, false);
     } catch (error) {
       db.close();
       throw error;

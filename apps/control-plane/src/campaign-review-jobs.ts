@@ -9,7 +9,10 @@ type Row = { job_id: string; root_id: string; runner_id: string; command: string
 /** This ledger has no agent-facing completion method. Authenticated runner receipts settle it. */
 export class CampaignReviewJobs {
   constructor(private readonly sql: DatabaseSync, private readonly budgets: CampaignBudgetLedger,
-    private readonly chargeScope:(rootId:string)=>{organizationId:string;userId:string}|null=()=>null) {
+    private readonly chargeScope:(rootId:string)=>{organizationId:string;userId:string}|null=()=>null) {}
+
+  /** Only ControlPlaneDb.open installs these tables; an attached connection never does (#3789). */
+  static install(sql: DatabaseSync): void {
     sql.exec(`CREATE TABLE IF NOT EXISTS campaign_review_jobs (
       job_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, runner_id TEXT NOT NULL, request_id TEXT NOT NULL,
       target TEXT NOT NULL, base_sha TEXT NOT NULL, command TEXT NOT NULL, state TEXT NOT NULL,
