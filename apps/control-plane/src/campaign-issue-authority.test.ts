@@ -1192,6 +1192,49 @@ test("#3793 a new prompt for a bound child between approval and execution still 
   } finally { h.db.close(); }
 });
 
+/** #3835: a prompt to an idle child without a worktree is sent straight to the runner, so it is
+ * neither pending nor queued. Its admission must still change the bound child's digest at once,
+ * not only when the runner echoes it back as a user message. */
+test("#3835 an immediate-lane prompt for a bound idle child between approval and execution revokes the closure", async () => {
+  const { h, prompts, approved } = promptedClosure("immediate-prompt");
+  try {
+    const d = await approved();
+    const child = h.db.getSession("child")!;
+    assert.equal(child.status, "idle");
+    assert.equal(child.worktreePath, null);
+    const queued = JSON.stringify(child.queued ?? []);
+    const sends: string[] = [];
+    h.hub.sendToRunner = (_runner, message) => { sends.push(message.type); return true; };
+    // What the session prompt route admits: with no turn in flight, nothing is steered.
+    const sent = await h.svc.promptOrSteer("child", "Start on something else");
+    assert.ok(sent.ok, sent.error ?? "prompt");
+    assert.deepEqual(sends, ["prompt_session"], "the prompt went straight to the runner");
+    assert.equal(h.db.getSession("child")?.status, "running");
+    assert.equal(prompts().length, 1, "no durable prompt was staged");
+    assert.equal(JSON.stringify(h.db.getSession("child")?.queued ?? []), queued, "nor queued");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.match(executed.error ?? "", /active child work changed/u);
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+  } finally { h.db.close(); }
+});
+
+test("#3835 an immediate-lane prompt admitted and echoed before the closure request keeps it", async () => {
+  const { h, approved } = promptedClosure("echoed-prompt");
+  try {
+    const sent = await h.svc.promptOrSteer("child", "One more check");
+    assert.ok(sent.ok, sent.error ?? "prompt");
+    h.db.appendEvent("child", { kind: "user_message", text: "One more check" }, Date.now());
+    h.svc.onSessionStatus("child", "idle");
+    const d = await approved();
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.equal(h.state.executes, 1);
+  } finally { h.db.close(); }
+});
+
 test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)", async () => {
   const { h, setForge, forgeReads, reads, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
   try {

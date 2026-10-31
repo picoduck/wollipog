@@ -1224,6 +1224,15 @@ CREATE TABLE IF NOT EXISTS session_prompt_command_attempts (
 );
 CREATE INDEX IF NOT EXISTS idx_session_prompt_command_attempts_command
   ON session_prompt_command_attempts(command_id, sent_at DESC);
+-- The latest prompt sent straight to the runner rather than through the outbox above (#3835).
+-- Nothing else records it until the runner echoes it, so an issue closure binds this instead.
+CREATE TABLE IF NOT EXISTS session_immediate_prompt_admissions (
+  session_id      TEXT PRIMARY KEY,
+  admission_id    TEXT NOT NULL,
+  payload_sha256  TEXT NOT NULL,
+  admitted_at     INTEGER NOT NULL,
+  FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 
 -- Runner facts and control-plane delivery stages are separate so reconnect snapshots can update
 -- provider-owned progress without regressing projection/observation acknowledgements.
@@ -15842,8 +15851,8 @@ export class ControlPlaneDb {
     return typeof row?.text === "string" && row.text.length <= 65_536 ? row.text : null;
   }
 
-  /** Bound closure approvals to the most recent delivered or durable queued assignment.
-   * Read only bounded text for classification; the exact queued payload already has a digest. */
+  /** Bound closure approvals to the most recent delivered, durable queued, or immediately sent
+   * assignment. Read only bounded text for classification; each payload already has a digest. */
   issueClosureAssignmentState(sessionId: string) {
     const latest = this.stmt(`SELECT seq, substr(json_extract(payload, '$.text'), 1, 65537) AS text
       FROM session_events WHERE session_id=? AND kind='user_message' ORDER BY seq DESC LIMIT 1`)
@@ -15852,7 +15861,20 @@ export class ControlPlaneDb {
       substr(json_extract(payload_json, '$.text'), 1, 65537) AS text
       FROM session_prompt_commands WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
       .get(sessionId) as { id: string; digest: string; text: string | null } | undefined;
-    return { latest: latest ?? null, command: command ?? null };
+    const immediate = this.stmt(`SELECT admission_id AS id, payload_sha256 AS digest
+      FROM session_immediate_prompt_admissions WHERE session_id=?`)
+      .get(sessionId) as { id: string; digest: string } | undefined;
+    // Absent until a session's first immediate-lane prompt, so earlier digests are unchanged.
+    return { latest: latest ?? null, command: command ?? null, ...(immediate ? { immediate } : {}) };
+  }
+
+  /** Record a prompt sent straight to the runner (#3835). The fresh id changes the closure digest
+   * at admission, before the runner echoes the prompt; the echo does not clear it. */
+  recordImmediatePromptAdmission(sessionId: string, payloadSha256: string, now: number): void {
+    this.stmt(`INSERT INTO session_immediate_prompt_admissions (session_id, admission_id, payload_sha256, admitted_at)
+      VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET admission_id=excluded.admission_id,
+      payload_sha256=excluded.payload_sha256, admitted_at=excluded.admitted_at`)
+      .run(sessionId, randomUUID(), payloadSha256, now);
   }
 
   /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
