@@ -201,15 +201,15 @@ test("organization- and team-owned sessions follow the preference of the member 
   create("review", { scope: organization, reviewRequesterSessionId: "child" });
   const ids = ["org-launched", "team-launched", "child", "org-legacy", "personal-launched", "unknown-launcher", "review"];
   assert.deepEqual(ids.map((id) => db.sessionLauncherUserId(id)),
-    ["usr_member", "usr_member", "usr_member", null, "usr_admin", null, "usr_member"],
-    "child and review sessions inherit the launcher of their parent or requester; an unknown user records none");
+    ["usr_member", "usr_member", "usr_member", null, null, null, "usr_member"],
+    "child and review sessions inherit the launcher of their parent or requester; an unknown user or a non-member (#3898) records none");
   assert.deepEqual(ids.map((id) => db.artifactUploadPreferenceUser(id)),
-    ["usr_member", "usr_member", "usr_member", undefined, "usr_admin", undefined, "usr_member"],
-    "a recorded launcher governs; a legacy session in another organization stays without one");
+    ["usr_member", "usr_member", "usr_member", undefined, local, undefined, "usr_member"],
+    "a recorded launcher governs; without one, only the personal organization falls back to the local owner");
   assert.equal(db.sessionScope("org-launched")?.owner.kind, "organization", "attribution leaves ownership unchanged");
   db.setArtifactUploadPreference(local, "external_hosting");
   db.setArtifactUploadPreference("usr_member", "wollipog_automatic");
-  db.setArtifactUploadPreference("usr_admin", "external_hosting");
+  db.setArtifactUploadPreference("usr_admin", "wollipog_automatic");
   const sent: string[] = [];
   const hub = new Hub(db);
   hub.attachRunner("r", { send: (data) => sent.push(data) });

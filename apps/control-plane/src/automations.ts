@@ -64,6 +64,14 @@ function automationDeliveryWindowMs(schedule: AutomationSchedule, scheduledFor: 
   return Math.min(MAX_DELIVERY_BOUND_MS, Math.max(MIN_DELIVERY_BOUND_MS, cadence));
 }
 
+/** The sessions an automation creates are launched by its human creator (#3898), from its durable
+ * audit trail and never its action payload or the execution's schedule, and only while no one else
+ * has changed the definition or its triggers. Creation records them only while a member. */
+function automationLauncher(db: ControlPlaneDb, automation: AutomationSchedule): { launcherUserId: string } | undefined {
+  const creator = db.automationSoleHumanAuthor(automation.automationId);
+  return creator ? { launcherUserId: creator } : undefined;
+}
+
 type Logger = { info: (message: string) => void; warn: (message: string) => void };
 type AutomationNotifier = (
   automation: AutomationSchedule,
@@ -1697,7 +1705,8 @@ export class AutomationsService {
           ...(request.config ?? {}), costBudgetUsd: automation.limits.maxCostUsd,
           maxToolCalls: automation.limits.maxToolCalls,
         },
-      }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots));
+      }, this.deliveryOptions(automation, execution, { sessionId: `s_auto_${execution.executionId}` }, now, target, commandSnapshots),
+      undefined, false, false, false, automationLauncher(this.db, automation));
       result = created;
     } else if (automation.action.kind === "prompt_session") {
       const session = this.db.getSession(automation.action.sessionId)!;
@@ -1735,7 +1744,7 @@ export class AutomationsService {
         runId: `r_auto_${execution.executionId}`,
         workflowInstanceId: `wfi_auto_${execution.executionId}`,
         memberSessionId: (index) => `s_auto_${execution.executionId}_${String(index).padStart(3, "0")}`,
-      }, now, target, commandSnapshots));
+      }, now, target, commandSnapshots), automationLauncher(this.db, automation));
       result = launched;
       if (launched.data) {
         controlPlaneWorkflow = {

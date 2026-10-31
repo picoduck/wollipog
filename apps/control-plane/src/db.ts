@@ -4652,12 +4652,15 @@ type UsageDimensions = {
 };
 
 /** The sessions one user's daily budget governs in an organization: the ones they own, and the
- * organization- and team-owned ones they launched (#3840). Bind `dailyBudgetSessionIdParams`. */
+ * organization- and team-owned ones they launched while they remain a member (#3840, #3898). Bind
+ * `dailyBudgetSessionIdParams`. */
 const DAILY_BUDGET_SESSION_IDS_SQL = `
   SELECT session_id FROM session_ownership WHERE organization_id=? AND owner_kind='user' AND owner_id=?
   UNION ALL
   SELECT launcher.session_id FROM session_launchers launcher
     JOIN session_ownership ownership ON ownership.session_id=launcher.session_id
+    JOIN identity_memberships membership
+      ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
    WHERE launcher.user_id=? AND ownership.organization_id=? AND ownership.owner_kind<>'user'`;
 const dailyBudgetSessionIdParams = (organizationId: string, userId: string) =>
   [organizationId, userId, userId, organizationId] as const;
@@ -5872,7 +5875,7 @@ export class ControlPlaneDb {
         budget && this.campaignBudgetAccountingError(row.driver, row.model, budget.authority.costUsd !== undefined)) {
       return { state: "unsupported_capability", reason: "Required native accounting or reviewer capability is unavailable; recovery cannot bypass it." };
     }
-    const owner = this.sessionBudgetUser(campaignId);
+    const owner = this.sessionPersonalUser(campaignId);
     const daily = owner ? this.getUsageDailyBudget(owner.organizationId).perUserUsd : null;
     const used = this.stmt(`SELECT MAX(cost_usd,usage_peak_cost_usd)+MAX(0,child_cost_reserved_usd) AS cost,
       MAX(${toolCallCountSql("sessions.id")},usage_peak_tool_calls)+MAX(0,child_tool_calls_reserved) AS tools
@@ -11481,13 +11484,15 @@ export class ControlPlaneDb {
   }
 
   /** Whose Artifact Uploads preference governs a session: its user owner, else the user who launched
-   * it (#3840). A session with neither, such as one created before launchers were recorded, falls
+   * it while they remain a member of its organization (#3840, #3898). A session with neither, such as one created before launchers were recorded, falls
    * back to the local owner when the personal organization owns it, as sessions inherit from the
    * default runner (#3811); a team or another organization resolves to none and stays Manual. */
   artifactUploadPreferenceUser(sessionId: string): string | undefined {
     const row = this.stmt(
-      `SELECT ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
+      `SELECT ownership.owner_kind, ownership.owner_id, membership.user_id AS launcher_id
          FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id
+         LEFT JOIN identity_memberships membership
+           ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
         WHERE ownership.session_id=?`,
     ).get(sessionId) as { owner_kind: string; owner_id: string; launcher_id: string | null } | undefined;
     if (row?.owner_kind === "user") return row.owner_id;
@@ -15924,10 +15929,33 @@ export class ControlPlaneDb {
     return row?.user_id ?? null;
   }
 
-  /** An unknown user records nothing rather than failing the session's creation. */
-  private insertSessionLauncher(sessionId: string, userId: string, now: number): void {
+  isOrganizationMember(organizationId: string, userId: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM identity_memberships WHERE organization_id=? AND user_id=?").get(organizationId, userId));
+  }
+
+  /** The human who created an automation, from its durable creation event, while no one else has
+   * changed its definition or its triggers since (#3898); else null. Another member's edit, toggle,
+   * or trigger credential would otherwise make the creator answer for sessions whose instructions or
+   * callers they never authorized. Read from the audit trail rather than an execution's schedule,
+   * which a trigger invocation attributes to its trigger. */
+  automationSoleHumanAuthor(automationId: string): string | null {
+    const created = this.stmt(`SELECT actor_id FROM automation_events WHERE automation_id=? AND kind='created'
+        AND actor_kind='human' AND actor_id IS NOT NULL ORDER BY event_id LIMIT 1`).get(automationId) as
+      { actor_id: string } | undefined;
+    if (!created) return null;
+    const changed = this.stmt(`SELECT 1 FROM automation_events WHERE automation_id=?
+        AND kind IN ('updated','enabled','disabled','trigger_created','trigger_rotated')
+        AND (actor_kind<>'human' OR actor_id IS NOT ?) LIMIT 1`).get(automationId, created.actor_id);
+    return changed ? null : created.actor_id;
+  }
+
+  /** Only a member of the session's organization is recorded (#3898): an unknown user, or one who
+   * left it, such as an automation's departed creator, records nothing rather than failing the
+   * session's creation. */
+  private insertSessionLauncher(sessionId: string, organizationId: string, userId: string, now: number): void {
     this.stmt(`INSERT INTO session_launchers (session_id, user_id, created_at)
-      SELECT ?, user_id, ? FROM identity_users WHERE user_id=?`).run(sessionId, now, userId);
+      SELECT ?, user_id, ? FROM identity_memberships WHERE organization_id=? AND user_id=?`)
+      .run(sessionId, now, organizationId, userId);
   }
 
   /** Server-owned ancestry only. UNION terminates even if legacy data contains a cycle. */
@@ -16714,7 +16742,7 @@ export class ControlPlaneDb {
       this.insertSessionOwnership(input.id, scope, input.now);
       const launcherSource = input.reviewRequesterSessionId ?? input.parentSessionId;
       const launcherUserId = launcherSource ? this.sessionLauncherUserId(launcherSource) : input.launcherUserId;
-      if (launcherUserId) this.insertSessionLauncher(input.id, launcherUserId, input.now);
+      if (launcherUserId) this.insertSessionLauncher(input.id, scope.organizationId, launcherUserId, input.now);
       if (input.automationOrigin) {
         const execution = this.stmt(
           "SELECT automation_id FROM automation_executions WHERE execution_id=?",
@@ -16926,7 +16954,7 @@ export class ControlPlaneDb {
            VALUES (?, ?, ?, ?)`,
         ).run(snap.id, fork.sourceSessionId, fork.sourceTurn, now);
         const launcherUserId = fork.launcherUserId ?? this.sessionLauncherUserId(fork.sourceSessionId);
-        if (launcherUserId) this.insertSessionLauncher(snap.id, launcherUserId, now);
+        if (launcherUserId) this.insertSessionLauncher(snap.id, scope.organizationId, launcherUserId, now);
       }
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${snap.id}`,
@@ -19271,12 +19299,16 @@ export class ControlPlaneDb {
     return row && row.owner_kind === "user" ? { organizationId: row.organization_id, userId: row.owner_id } : null;
   }
 
-  /** Whose per-user daily budget governs a session: its user owner, else the user who launched an
-   * organization- or team-owned session (#3840). A session with neither has no daily allowance. */
-  sessionBudgetUser(sessionId: string): { organizationId: string; userId: string } | null {
+  /** Whose per-user daily budget and question policies govern a session: its user owner, else the
+   * user who launched an organization- or team-owned session, while they remain a member of its
+   * organization (#3840, #3898, #3899). A departed launcher's rules never act on the organization's
+   * sessions. A session with neither has no daily allowance and no policy answers. */
+  sessionPersonalUser(sessionId: string): { organizationId: string; userId: string } | null {
     const row = this.stmt(
-      `SELECT ownership.organization_id, ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
+      `SELECT ownership.organization_id, ownership.owner_kind, ownership.owner_id, membership.user_id AS launcher_id
          FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id
+         LEFT JOIN identity_memberships membership
+           ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
         WHERE ownership.session_id=?`,
     ).get(sessionId) as { organization_id: string; owner_kind: string; owner_id: string; launcher_id: string | null } | undefined;
     if (!row) return null;

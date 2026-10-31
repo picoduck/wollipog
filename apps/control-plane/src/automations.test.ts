@@ -118,10 +118,13 @@ function harness(
   const workflows: CreateWorkflowRunRequest[] = [];
   const failures = { create: false, throwCreate: false, throwAfterStage: false };
   const recoveredSnapshots: DurableSessionCommand[][] = [];
+  const launchers: Array<{ action: string; launcherUserId?: string }> = [];
   let nextSession = 1;
   const sessions = {
-    createSession(request: CreateSessionRequest, delivery?: PreStagedDeliveryOptions) {
+    createSession(request: CreateSessionRequest, delivery?: PreStagedDeliveryOptions, _scope?: unknown,
+      _cleanup?: boolean, _archived?: boolean, _projectWithoutLocation?: boolean, context?: { launcherUserId?: string }) {
       created.push(request);
+      launchers.push({ action: "create_session", ...(context?.launcherUserId ? { launcherUserId: context.launcherUserId } : {}) });
       if (delivery?.commandSnapshots) recoveredSnapshots.push(delivery.commandSnapshots);
       if (failures.throwCreate) throw new Error("sensitive simulated exception");
       if (failures.create) return { ok: false, status: 409, error: "simulated launch rejection" };
@@ -157,8 +160,10 @@ function harness(
       if (plan) delivery!.activate(plan);
       return { ok: true, status: 200, data: db.getSession(id)! };
     },
-    createWorkflowRun(request: CreateWorkflowRunRequest, _actor: unknown, delivery?: PreStagedDeliveryOptions) {
+    createWorkflowRun(request: CreateWorkflowRunRequest, _actor: unknown, delivery?: PreStagedDeliveryOptions,
+      context?: { launcherUserId?: string }) {
       workflows.push(request);
+      launchers.push({ action: "workflow_run", ...(context?.launcherUserId ? { launcherUserId: context.launcherUserId } : {}) });
       const runId = delivery?.runId ?? "run-auto";
       const instanceId = delivery?.workflowInstanceId ?? "instance-auto";
       const memberIds = delivery
@@ -200,7 +205,7 @@ function harness(
   const restartService = () => new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
   return { db, hub, online, service, restartService, created, prompted, workflows, notifications, failures,
-    delivered, recoveredSnapshots };
+    delivered, recoveredSnapshots, launchers };
 }
 
 function receiveSignedTrigger(
@@ -3184,4 +3189,61 @@ test("a transient-refusal replacement that never reaches its runner settles the 
 
   online.add("runner-1");
   assert.equal(service.tick(33 * 60_000), 1);
+});
+
+test("a webhook invocation launches an automation's sessions as its sole human author (#3898)", () => {
+  const { db, service, launchers } = harness();
+  try {
+    installCapabilityWorkflow(db, "wf-1");
+    const creator = { kind: "human" as const, id: "usr_creator" };
+    const actions = [baseSpec().action, { kind: "workflow_run" as const, request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+    } }];
+    actions.forEach((action, index) => {
+      const automation = service.create(baseSpec({ name: `Hook ${index}`, action }), creator, 0).data!;
+      const credential = service.createTrigger(automation.automationId, { kind: "webhook", name: "Hook" }, creator, 1_000);
+      assert.ok(credential.ok && credential.data, credential.error);
+      const invoked = receiveSignedTrigger(service, credential.data.trigger.triggerId, credential.data.secret,
+        Buffer.from(`{"eventId":"delivery-${index}"}`), 2_000 + index);
+      assert.equal(invoked.data?.invocation.state, "dispatched", invoked.error);
+    });
+    assert.deepEqual(launchers, [
+      { action: "create_session", launcherUserId: "usr_creator" },
+      { action: "workflow_run", launcherUserId: "usr_creator" },
+    ], "the trigger-attributed schedule does not hide the automation's creator");
+  } finally { db.close(); }
+});
+
+test("an automation launches its sessions as its human creator, never as a system actor (#3898)", () => {
+  const { db, service, launchers } = harness();
+  try {
+    installCapabilityWorkflow(db, "wf-1");
+    const workflow = { kind: "workflow_run" as const, request: {
+      workflowId: "wf-1", runnerId: "runner-1", workspaceId: "ws-1", task: "Build",
+      agentBindings: { worker: "agent-1", reviewer: "agent-1" },
+    } };
+    service.create(baseSpec(), { kind: "human", id: "usr_creator" }, 0);
+    service.create(baseSpec({ name: "Workflow", action: workflow }), { kind: "human", id: "usr_creator" }, 0);
+    service.create(baseSpec({ name: "System" }), { kind: "system", id: "seed" }, 0);
+    // The creator's own edit keeps the attribution; another member's edit or trigger ends it.
+    const ownEdit = service.create(baseSpec({ name: "Own Edit" }), { kind: "human", id: "usr_creator" }, 0).data!;
+    assert.ok(service.update(ownEdit.automationId, baseSpec({ name: "Own Edit", limits: { maxCostUsd: 1, maxToolCalls: 10 } }),
+      { kind: "human", id: "usr_creator" }, 1).ok);
+    const edited = service.create(baseSpec({ name: "Edited" }), { kind: "human", id: "usr_creator" }, 0).data!;
+    assert.ok(service.update(edited.automationId, baseSpec({ name: "Edited", action: { kind: "create_session",
+      request: { runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Something else" } } }),
+    { kind: "human", id: "usr_other" }, 1).ok);
+    const triggered = service.create(baseSpec({ name: "Triggered" }), { kind: "human", id: "usr_creator" }, 0).data!;
+    assert.ok(service.createTrigger(triggered.automationId, { kind: "webhook", name: "Hook" }, { kind: "human", id: "usr_other" }, 1).ok);
+    service.tick(60_000);
+    assert.deepEqual(launchers.map((entry) => JSON.stringify(entry)).sort(), [
+      { action: "create_session" },
+      { action: "create_session" },
+      { action: "create_session" },
+      { action: "create_session", launcherUserId: "usr_creator" },
+      { action: "create_session", launcherUserId: "usr_creator" },
+      { action: "workflow_run", launcherUserId: "usr_creator" },
+    ].map((entry) => JSON.stringify(entry)).sort());
+  } finally { db.close(); }
 });
