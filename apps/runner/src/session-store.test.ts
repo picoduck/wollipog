@@ -700,6 +700,8 @@ test("unlisted first observations survive refreshes and retire with pending ids 
     store.patchMeta("s_abc", { pendingBackgroundTaskIds: ["unlisted", "new"] });
     assert.equal(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts!.unlisted, starts.unlisted);
     assert.equal(Object.hasOwn(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts!, "__proto__"), false);
+    store.flushAll();
+    assert.equal(new SessionStore(root).readMeta("s_abc")!.unlistedBackgroundTaskStarts!.unlisted, starts.unlisted);
     store.patchMeta("s_abc", { pendingBackgroundTaskIds: [] });
     assert.deepEqual(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts, {});
   } finally { rmSync(root, { recursive: true, force: true }); }
