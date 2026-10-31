@@ -6954,10 +6954,11 @@ export class SessionManager {
       root: repoPath,
       target: executionTarget,
     });
-    // This roadmap slice changes explicit Restart semantics only for app-server: its durable
-    // thread must survive desktop/runner restarts. Preserve the existing fresh-start behavior
-    // for Claude and exec Codex; their ordinary prompt-after-process-loss resume path is unchanged.
-    const priorResumeId = prior?.driver === driver && (driver === "codex-app-server" || driver === "pi")
+    // Restart replaces the process, not the conversation. Retain an established Claude id just
+    // as we retain Codex and Pi threads, including after an explicit Stop. Never-run sessions
+    // have no persisted id and still start fresh; changing providers also starts fresh.
+    const priorResumeId = prior?.driver === driver &&
+      (driver === "claude-code" || driver === "codex-app-server" || driver === "pi")
       ? prior.agentSessionId
       : null;
     // A fresh provider conversation keeps this Wollipog session's corrected lifetime baseline.

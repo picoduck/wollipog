@@ -26,6 +26,54 @@ import {
   type SessionMeta,
 } from "./session-store.js";
 
+for (const driver of ["claude-code", "codex-app-server", "pi"] as const) {
+  test(`stop then restart resumes the established ${driver} conversation`, async () => {
+    const h = harness({ driver, agentSessionId: "conversation-before-stop", tokensIn: 42, costUsd: 1 });
+    try {
+      h.manager.stop("resume-session");
+      assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+      assert.equal(await h.manager.start({ ...launchSpec(h.root), driver }), true);
+      assert.equal(h.launches[0]?.options.resumeId, "conversation-before-stop");
+      assert.equal(h.store.readMeta("resume-session")?.agentSessionId, "conversation-before-stop");
+      assert.equal(h.store.readMeta("resume-session")?.tokensIn, 42);
+      h.manager.prompt("resume-session", "What were we doing?");
+      await tick();
+      assert.deepEqual(h.prompts, ["What were we doing?"]);
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
+test("restarting a live Claude process resumes its established conversation", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: "claude-existing" });
+  try {
+    h.manager.prompt("resume-session", "First turn");
+    await shortDelay();
+    assert.equal(h.launches.length, 1);
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.launches.length, 2);
+    assert.equal(h.launches[1]?.options.resumeId, "claude-existing");
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("restarting a never-run Claude session still creates its first conversation", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: null });
+  try {
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.launches[0]?.options.resumeId, undefined);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("switching providers on restart does not reuse the old provider conversation", async () => {
+  const h = harness({ driver: "codex-app-server", agentSessionId: "codex-existing" });
+  try {
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.launches[0]?.options.resumeId, undefined);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
 test("restart keeps the acknowledged correction with its carried cumulative cost", async () => {
   const h = harness({ costUsd: 2, costReconciliationRevision: 1, costReconciliationDeltaUsd: -1 });
   try {

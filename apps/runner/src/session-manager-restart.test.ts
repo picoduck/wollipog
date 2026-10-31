@@ -824,10 +824,10 @@ for (const revision of [0, 1, Number.MAX_SAFE_INTEGER]) test(`Claude Restart ret
     assert.equal(await manager.start(spec), true);
     const restarted = f.store.readMeta(spec.sessionId)!;
     for (const key of ["costUsd", "tokensIn", "tokensOut", "costReconciliationRevision", "costReconciliationDeltaUsd", "costReconciliationIdentity", "costReconciliationRepairId", "logEpoch"] as const) {
-      assert.equal(restarted[key], prior[key], `${key} survives a fresh provider conversation`);
+      assert.equal(restarted[key], prior[key], `${key} survives a provider process restart`);
     }
     assert.deepEqual(restarted.ratePricedUsage, prior.ratePricedUsage, "rate-priced buckets stay aligned with tokensIn");
-    assert.notEqual(restarted.agentSessionId, prior.agentSessionId, "Restart still starts a fresh Claude conversation");
+    assert.equal(restarted.agentSessionId, prior.agentSessionId, "Restart resumes the established Claude conversation");
     fake.providers[0]!.cb.onEvent({ kind: "token_usage", costUsd: 0.001, inputTokens: 10, outputTokens: 1 });
     const afterUsage = f.store.readMeta(spec.sessionId)!;
     assert.ok(Math.abs(afterUsage.costUsd - 0.037) < 1e-12);
