@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapsh
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
+import { writeArchiveBrowse } from "../archive-browse-history.js";
 import { deleteSessionMessage, stopArchivedSessionMessage } from "../session-confirmation-copy.js";
 import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
@@ -125,7 +126,7 @@ let sequence = 0;
 async function mount(
   sessions: SessionView[],
   overrides: Partial<ApiClient> = {},
-  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean } = {},
+  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean; restoreBrowse?: boolean } = {},
 ) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -197,7 +198,7 @@ async function mount(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <ArchivedSessionsView />
+            <ArchivedSessionsView restoreBrowse={options.restoreBrowse} />
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>,
@@ -1499,4 +1500,18 @@ test("an empty archive stays offline through a reconnect retry instead of claimi
   assert.match(fixture.container.textContent ?? "", /Reconnecting…/, "a retry in progress is still offline");
   assert.doesNotMatch(fixture.container.textContent ?? "", /No Archived Sessions/);
   await fixture.unmount();
+});
+
+test("history restore requests the stored page once without disclosing transcript search in the URL", async () => {
+  const beforeUrl = domWindow.location.href;
+  writeArchiveBrowse({ filters: { query: "private transcript words", project: "Wollipog", location: null,
+    agent: null, lifecycle: "all", archive: "all" }, page: 2, cursors: [null, "50"], scrollTop: 120, rowId: "session-65" });
+  const fixture = await mount([], {}, { restoreBrowse: true });
+  try {
+    assert.equal(fixture.archiveInputs.length, 1);
+    assert.equal(fixture.archiveInputs[0]?.cursor, "50");
+    assert.equal(fixture.archiveInputs[0]?.q, "private transcript words");
+    assert.equal(fixture.archiveInputs[0]?.project, "Wollipog");
+    assert.equal(domWindow.location.href, beforeUrl);
+  } finally { await fixture.unmount(); }
 });

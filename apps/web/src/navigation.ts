@@ -19,7 +19,8 @@ export type View =
   | { name: "automation"; id: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
   | { name: "usage" }
-  | { name: "archived" }
+  /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
+  | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
   | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */

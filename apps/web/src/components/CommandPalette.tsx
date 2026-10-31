@@ -16,7 +16,6 @@ import { loadSessionsViewMode, sessionsDestination } from "../sessions-view-mode
 import { railDigits, setRailLabels, visibleRailViews } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { loadRecentSessions } from "../recent-sessions.js";
-import { requestArchiveSearch } from "../archive-search-handoff.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { VIEW_ICONS } from "./Rail.js";
@@ -290,8 +289,7 @@ export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: 
   };
 
   const searchArchive = () => {
-    requestArchiveSearch(query);
-    navigate({ name: "archived" });
+    navigate({ name: "archived", archiveSearch: query });
     onClose();
   };
 
