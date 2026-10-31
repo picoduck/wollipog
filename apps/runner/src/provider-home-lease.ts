@@ -14,6 +14,7 @@ import {
   realpathSync,
   rmSync,
   writeFileSync,
+  type Stats,
 } from "node:fs";
 import { homedir, hostname as systemHostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
@@ -23,7 +24,9 @@ import type { SpawnIsolation } from "./spawn.js";
 import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
-import { decideProviderProfileAccess, isProviderProfileId, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
+import { createProviderProfileMarker, decideProviderProfileAccess, isProviderProfileId, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileGrant, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
+import { codexApiKeyRecord, ProviderCredentialImportRefusal, publishCodexCredential, readCodexCredentialSource, type CodexCredentialLayout } from "./provider-credential-import.js";
+import { createManagedProviderProfileHome } from "./provider-profile-home.js";
 import { currentBootTimeMs } from "./provider-home-lease-boot.js";
 import { leaseContainmentGuidance, type LeaseContainmentEvidence } from "./provider-home-lease-containment.js";
 import { currentLeaseProcessEvidence, isLeaseProcessEvidence, linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseAbandonmentProof, type LeaseProcessEvidence, type LeaseProcessProbe } from "./provider-home-lease-evidence.js";
@@ -858,12 +861,12 @@ export class ProviderHomeLeaseRegistry {
     return this.acquireHomeFor(requestedHome, provider, profile);
   }
 
-  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization): boolean {
+  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization, create = true): boolean {
     let providerHome = resolve(requestedHome);
     try { providerHome = realpathSync(requestedHome); } catch { /* A fresh HOME must not be created before probing. */ }
     return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome }, () => {
       ensureLeaseIoAvailable();
-      return this.acquireHomeAvailable(requestedHome, provider, profile, authorization);
+      return this.acquireHomeAvailable(requestedHome, provider, profile, authorization, create);
     });
   }
 
@@ -940,8 +943,8 @@ export class ProviderHomeLeaseRegistry {
     return this.acquireReceiptFor(requestedHome, provider, profile);
   }
 
-  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization): { first: boolean; cancel: () => boolean } {
-    const first = this.acquireHomeFor(requestedHome, provider, profile, authorization);
+  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization, create = true): { first: boolean; cancel: () => boolean } {
+    const first = this.acquireHomeFor(requestedHome, provider, profile, authorization, create);
     const home = this.lastAcquisitionHome!;
     const held = this.held.get(home);
     if (!held) throw new Error("acquisition has no private reference proof");
@@ -1013,6 +1016,92 @@ export class ProviderHomeLeaseRegistry {
     return !shared && !this.held.has(home);
   }
 
+  /**
+   * Worker-internal (#3719): copy the Codex API-key sign-in of `sourceHome` into a new managed
+   * profile HOME `<destinationRoot>/<profileId>`, in this one operation. The source must already
+   * exist as a real directory (it is never created), hold no other provider's marker, and be
+   * neither held nor being acquired by this registry, so a running session, sign-in or Agent TUI of
+   * this runner refuses the import instead of lending its reference. Its lease is then taken
+   * exclusively with the source's own profile context, so another owner's lease and a profile not
+   * granted here refuse exactly as an acquisition would. With `user_home` the credential directory
+   * `.codex` is admitted the same way, with its own context, since an account may name it as its
+   * HOME. The credential is read and validated while those leases are held, and the source is
+   * checked unchanged once more; only then is the destination created, given its first marker and a
+   * fresh API-key-only record, before the source is released. Every refusal therefore precedes the
+   * destination and leaves both HOMEs unchanged apart from the source's lease-journal bookkeeping;
+   * a later failure is an I/O failure that retains the new, unrecorded HOME.
+   */
+  importCodexCredentialWhileHeld(input: {
+    sourceHome: string; layout: CodexCredentialLayout; sourceProfile?: ProviderProfileAccess; credentialProfile?: ProviderProfileAccess;
+    destinationRoot: string; profileId: string; grant: ProviderProfileGrant;
+  }): void {
+    const admitted: Array<{ receipt: { cancel: () => boolean }; unchanged: () => void }> = [];
+    const drop = (cause?: unknown) => {
+      let dropped = true;
+      for (const entry of admitted.reverse()) dropped = entry.receipt.cancel() && dropped;
+      admitted.length = 0;
+      if (!dropped) throw new Error("provider credential import could not drop its source reference", { cause });
+    };
+    try {
+      if (!isAbsolute(input.sourceHome)) throw new ProviderCredentialImportRefusal("import_source_unsafe");
+      const home = this.admitImportSource(input.sourceHome, input.sourceProfile, admitted);
+      const credentialDirectory = input.layout === "codex_home" ? home
+        : this.admitImportSource(join(home, ".codex"), input.credentialProfile, admitted);
+      const credential = readCodexCredentialSource(credentialDirectory);
+      // The last source check: nothing after it refuses, so a refusal never leaves a destination.
+      for (const entry of admitted) entry.unchanged();
+      credential.verifyUnchanged();
+      const destination = createManagedProviderProfileHome(input.destinationRoot, input.profileId);
+      const target = this.acquireReceiptFor(destination, "codex", PROFILE_CHANGE);
+      const destinationHome = this.lastAcquisitionHome!;
+      try {
+        if (!target.first) throw new Error("a new managed profile HOME was already held");
+        const created = createProviderProfileMarker(readProviderProfileMarker(destinationHome, { provider: "codex" }),
+          { provider: "codex", profileId: input.profileId, grant: input.grant });
+        this.writeProfileMarkerWhileHeld(destinationHome, created.marker);
+        publishCodexCredential(destinationHome, codexApiKeyRecord(credential.apiKey));
+      } catch (error) {
+        if (!target.cancel()) throw new Error("provider credential import could not drop its new profile's reference", { cause: error });
+        throw error;
+      }
+      if (!target.cancel()) throw new Error("provider credential import could not drop its new profile's reference");
+    } catch (error) {
+      drop(error);
+      throw error;
+    }
+    drop();
+  }
+
+  /** #3719: admit one existing source directory of an import: a real directory that this registry
+   * neither holds nor is acquiring, without another provider's marker, leased exclusively and
+   * without creating it. Its receipt joins `admitted`; returns the canonical path. */
+  private admitImportSource(requested: string, profile: ProviderProfileAccess | undefined,
+    admitted: Array<{ receipt: { cancel: () => boolean }; unchanged: () => void }>): string {
+    let root: Stats;
+    try { root = lstatSync(requested); } catch (error) {
+      throw new ProviderCredentialImportRefusal((error as NodeJS.ErrnoException).code === "ENOENT" ? "import_source_missing" : "import_source_unsafe");
+    }
+    if (root.isSymbolicLink() || !root.isDirectory()) throw new ProviderCredentialImportRefusal("import_source_unsafe");
+    let home: string;
+    try { home = realpathSync(requested); } catch { throw new ProviderCredentialImportRefusal("import_source_missing"); }
+    if (this.held.has(home) || this.failedInitializations.has(home) || this.pendingCompletions.has(home) || this.pendingMigrations.has(home)) {
+      throw new ProviderCredentialImportRefusal("import_source_held");
+    }
+    const marker = readProviderProfileMarker(home);
+    if (marker.state === "present" && marker.marker.provider !== "codex") throw new ProviderCredentialImportRefusal("import_source_foreign");
+    const receipt = this.acquireReceiptFor(requested, "codex", profile, undefined, false);
+    const unchanged = () => {
+      let now: Stats;
+      try { now = lstatSync(requested); } catch { throw new ProviderCredentialImportRefusal("import_source_changed"); }
+      if (now.isSymbolicLink() || now.dev !== root.dev || now.ino !== root.ino) throw new ProviderCredentialImportRefusal("import_source_changed");
+    };
+    admitted.push({ receipt, unchanged });
+    if (!receipt.first) throw new ProviderCredentialImportRefusal("import_source_held");
+    if (this.lastAcquisitionHome !== home) throw new ProviderCredentialImportRefusal("import_source_changed");
+    unchanged();
+    return home;
+  }
+
   /** Profile grants are checked against the canonical HOME before any lease journal I/O, and again
    * on every re-entrant reference, so a revoked grant stops new references to a held HOME. Returns
    * the profile whose marker grants this control plane, which is what authorizes recovering another
@@ -1028,7 +1117,7 @@ export class ProviderHomeLeaseRegistry {
     return decision.profileId;
   }
 
-  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization): boolean {
+  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization, create = true): boolean {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     let home: string;
@@ -1036,8 +1125,9 @@ export class ProviderHomeLeaseRegistry {
       // A newly configured account is expected to be Login Required before the provider creates
       // its files. Establish the private root before canonicalizing it so the ownership boundary,
       // rather than a raw ENOENT containing the runner-local path, is the first launch result.
-      // A recovery only ever succeeds a lease that already exists, so it creates nothing.
-      if (!authorization) mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
+      // A recovery only ever succeeds a lease that already exists, so it creates nothing, and an
+      // import's source must already exist (#3719).
+      if (!authorization && create) mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
       home = realpathSync(requestedHome);
     } catch {
       throw new Error("provider credential home is unavailable");

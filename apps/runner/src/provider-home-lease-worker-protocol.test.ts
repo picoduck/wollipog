@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { PROVIDER_HOME_RECOVERY_CAUSES } from "@wollipog/protocol";
@@ -275,6 +276,59 @@ test("profile change frames are exact: provider, grant id and, for revocation, t
   assert.equal(validLeaseWorkerOperation({ method: "profile_retire", home: "/private/home", provider: "codex", profileId: PROFILE }), true);
   assert.equal(validLeaseWorkerOperation({ method: "profile_create", home: "/private/home", provider: "codex", profileId: PROFILE, grantId: GRANT }), true);
   for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
+});
+
+test("an import frame is exact: Codex only, a known layout, an absolute destination root, a profile and grant", () => {
+  const frame = { method: "profile_import", home: "/private/home", provider: "codex", layout: "user_home",
+    destinationRoot: "/private/home/.agent-manager/profiles", profileId: PROFILE, grantId: GRANT };
+  assert.equal(validLeaseWorkerOperation(frame), true);
+  assert.equal(validLeaseWorkerOperation({ ...frame, layout: "codex_home" }), true);
+  assert.equal(validLeaseWorkerOperation({ ...frame, profile: { expectedId: OTHER_PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [OTHER_PROFILE] } }), true);
+  const invalid: Array<[string, unknown]> = [
+    ["a Claude import", { ...frame, provider: "claude" }],
+    ["an unknown layout", { ...frame, layout: "keychain" }],
+    ["a relative destination root", { ...frame, destinationRoot: "profiles" }],
+    ["a destination root with NUL", { ...frame, destinationRoot: "/private/\0profiles" }],
+    ["an oversized destination root", { ...frame, destinationRoot: `/${"a".repeat(32768)}` }],
+    ["a non-v4 profile", { ...frame, profileId: "2a1b2c3d-4e5f-1a6b-8c7d-8e9fa0b1c2d3" }],
+    ["a malformed grant", { ...frame, grantId: "grant" }],
+    ["a missing destination root", { method: "profile_import", home: "/private/home", provider: "codex", layout: "user_home", profileId: PROFILE, grantId: GRANT }],
+    ["an extra key", { ...frame, path: "/private/home/.codex/auth.json" }],
+    ["a malformed profile context", { ...frame, profile: { controlPlaneSupportsProfiles: "yes", activeProfileIds: [] } }],
+    ["a credential context for an account HOME", { ...frame, layout: "codex_home", credentialProfile: { controlPlaneSupportsProfiles: true, activeProfileIds: [] } }],
+    ["a malformed credential context", { ...frame, credentialProfile: { activeProfileIds: [] } }],
+  ];
+  assert.equal(validLeaseWorkerOperation({ ...frame, credentialProfile: { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] } }), true);
+  for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
+});
+
+test("an import carries the source's dispatch-time profile context and its typed refusal", async () => {
+  const access = { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] };
+  let port!: Port;
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
+    controlPlaneInstanceId: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", profileAccess: () => access,
+    expectedProfileIdForHome: (home) => home === "/private/account" ? PROFILE : home === join("/private/home", ".codex") ? OTHER_PROFILE : undefined,
+    workerFactoryForTest: value => port = new Port(value.epoch as string),
+  });
+  const imported = registry.importCodexCredential("/private/account", "codex_home", "/private/profiles", OTHER_PROFILE, GRANT);
+  port.ready();
+  const op = port.execute();
+  assert.deepEqual(op.operation, { method: "profile_import", home: "/private/account", provider: "codex", layout: "codex_home",
+    destinationRoot: "/private/profiles", profileId: OTHER_PROFILE, grantId: GRANT,
+    profile: { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] } });
+  for (const kind of ["receipt", "done"] as const) port.reply(kind, op, { ok: false, value: false, error: "import_source_unsupported" });
+  await assert.rejects(imported, (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "import_source_unsupported" &&
+    error.message === LEASE_WORKER_ERRORS.import_source_unsupported);
+  // A user_home import also carries its credential directory's own context, since an account may
+  // name `.codex` itself. A successful import replies with no profile id: the parent chose it.
+  const second = registry.importCodexCredential("/private/home", "user_home", "/private/profiles", OTHER_PROFILE, GRANT);
+  const op2 = port.execute(1);
+  assert.deepEqual((op2.operation as { credentialProfile?: unknown }).credentialProfile,
+    { expectedId: OTHER_PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] });
+  port.reply("receipt", op2); port.reply("done", op2);
+  await second;
+  const close = registry.close(); const shutdown = port.execute(2);
+  port.reply("receipt", shutdown); port.reply("done", shutdown); assert.equal(await close, true);
 });
 
 test("only a successful adoption reply may carry a profile id", async () => {

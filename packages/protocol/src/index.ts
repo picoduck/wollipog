@@ -787,7 +787,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      reports as blocked work for the person. Discovery marks such a Codex installation
 //      unsupported with the `codex_sandbox_unavailable` failure code. An older peer omits or
 //      ignores both.
-export const PROTOCOL_VERSION = 259;
+// 260: importing an existing sign-in into a managed provider profile (#3719). A runner that can
+//      import reports `runtime.providerCredentialImport` (native Linux and macOS only, Codex only)
+//      and accepts `import_provider_credential`, which copies a Codex API-key sign-in from the
+//      runner user's own HOME or a configured account into a new managed profile and replies
+//      `import_provider_credential_result`. The control plane sends it only to a v260 runner that
+//      reports the capability; older runners never receive an import request.
+export const PROTOCOL_VERSION = 260;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1065,6 +1071,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v258 runner reports a refused Agent TUI open's typed provider-HOME refusal in
    * `shell_open_result` (#3338). */
   providerHomeAgentTuiRefusals: 258,
+  /** v260 runner imports a Codex API-key sign-in into a new managed profile (#3719). The runner
+   * must also report `runtime.providerCredentialImport`, which only supported hosts do. */
+  providerCredentialImport: 260,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
   worktreeSwitchContinuation: 255,
   /** v256 runner reports `worktreeSwitch` while it relaunches a session in another worktree (#3810). */
@@ -3778,6 +3787,30 @@ export interface RunnerMetadata {
   };
 }
 
+/** v260 (#3719): which providers' existing sign-ins the runner can import. Only `codex`. */
+export interface ProviderCredentialImportCapability {
+  version: 1;
+  providers: Array<"codex">;
+}
+
+export function validProviderCredentialImportCapability(value: unknown): value is ProviderCredentialImportCapability {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  return Object.keys(v).length === 2 && v.version === 1 && Array.isArray(v.providers) &&
+    v.providers.length === 1 && v.providers[0] === "codex";
+}
+
+/** #3719: whether a runner can receive an import request: v260 and a reported capability. The
+ * control plane gates the route and the command on it, and the web the offer. */
+export function runnerSupportsProviderCredentialImport(runner: { protocolVersion?: number | null; runtime?: { providerCredentialImport?: unknown } | null }): boolean {
+  return runnerSupportsProtocol(runner.protocolVersion, "providerCredentialImport") &&
+    validProviderCredentialImportCapability(runner.runtime?.providerCredentialImport);
+}
+
+/** #3719: how an import confirmation names the runner user's own Codex HOME as its source. The
+ * control plane requires exactly this text for a `default_home` source. */
+export const PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL = "This Machine's Codex Sign-In";
+
 export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
@@ -3788,6 +3821,10 @@ export interface RunnerRuntimeInfo {
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */
   reviewSession?: import("./review-session.js").ReviewSessionCapability;
+  /** v260 (#3719): this runner can import an existing sign-in into a managed profile, for these
+   * providers. Reported only by a native Linux or macOS runner outside a container or WSL. Missing
+   * is unsupported. */
+  providerCredentialImport?: ProviderCredentialImportCapability;
   /** Native-host runner data root. WSL contexts use the same `.agent-manager` layout in-distro. */
   dataDir: string;
   worktreeRoot: string;
@@ -10045,6 +10082,7 @@ export type RunnerToControlPlane =
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
   | AdoptProviderProfileResultMessage
+  | ImportProviderCredentialResultMessage
   | RevokeProviderProfileGrantResultMessage
   | InspectProviderHomeLeaseResultMessage
   | RecoverProviderHomeLeaseResultMessage
@@ -11008,6 +11046,67 @@ export interface AdoptProviderProfileResultMessage {
   ok: boolean;
   profileId?: string;
   code?: "PROFILE_EXISTS" | "HOME_IN_USE" | "UNSUPPORTED_HOME";
+  error?: string;
+}
+
+/** Protocol v260 (#3719): which existing sign-in on the Machine an import copies. The runner
+ * resolves the path itself: `default_home` is the runner user's own provider HOME (its `CODEX_HOME`,
+ * else `~/.codex`), `account` a configured account of the same provider. No path crosses the wire. */
+export type ProviderCredentialImportSource = { kind: "default_home" } | { kind: "account"; accountId: string };
+
+/** Protocol v260 (#3719): create a managed provider profile from an existing sign-in on the same
+ * Machine, after an Owner or Admin confirmed the source and the new profile. Only Codex API-key
+ * sign-ins on native Linux and macOS runners are importable. `accountId` is the id the new account
+ * must be recorded under: the control plane chose it and bound the new profile's pending grant
+ * (`profileGrantId`) to it before sending, so a report of that account completes the grant even
+ * when the reply is lost or the publication outcome is unknown. Sent only to a runner that reports
+ * `runtime.providerCredentialImport`. */
+export interface ImportProviderCredentialMessage {
+  type: "import_provider_credential";
+  requestId: string;
+  runnerId: string;
+  provider: "codex";
+  label: string;
+  source: ProviderCredentialImportSource;
+  accountId: string;
+  profileGrantId: string;
+}
+
+/** Protocol v260 (#3719): why an import was refused. Every refusal leaves both HOMEs unchanged
+ * (apart from the source's lease-journal bookkeeping), except `FAILED` after the new profile was
+ * created, which retains it unrecorded, as a failed sign-in retains its HOME.
+ * - `UNSUPPORTED`: this provider or Machine context cannot import.
+ * - `LABEL_IN_USE`: an account or running sign-in already uses the label.
+ * - `SOURCE_NOT_FOUND`: the named account is not configured, or no default HOME can be resolved.
+ * - `SOURCE_MISSING`: the source holds no sign-in.
+ * - `SOURCE_IN_USE`: a session, sign-in, Agent TUI or import on this or another runner holds it.
+ * - `SOURCE_UNSAFE`: its files are linked, foreign-owned, irregular or not private.
+ * - `SOURCE_FOREIGN`: it is another provider's profile.
+ * - `SOURCE_UNSUPPORTED`: the sign-in is not an API key in file storage (for example ChatGPT).
+ * - `SOURCE_CHANGED`: it changed while it was read.
+ * - `SOURCE_NOT_GRANTED`: it is a provider profile this control plane may not use.
+ * - `PUBLICATION_UNKNOWN`: the credential was copied, but whether the runner configuration recorded
+ *   the new account is unknown (#3506). Not a success: the runner stops using the grant without
+ *   revoking it, and a later report of the named account with its profile completes the grant.
+ * - `FAILED`: anything else. */
+export type ProviderCredentialImportCode =
+  | "UNSUPPORTED" | "LABEL_IN_USE" | "SOURCE_NOT_FOUND" | "SOURCE_MISSING" | "SOURCE_IN_USE" | "SOURCE_UNSAFE"
+  | "SOURCE_FOREIGN" | "SOURCE_UNSUPPORTED" | "SOURCE_CHANGED" | "SOURCE_NOT_GRANTED" | "PUBLICATION_UNKNOWN" | "FAILED";
+
+export const PROVIDER_CREDENTIAL_IMPORT_CODES: readonly ProviderCredentialImportCode[] = [
+  "UNSUPPORTED", "LABEL_IN_USE", "SOURCE_NOT_FOUND", "SOURCE_MISSING", "SOURCE_IN_USE", "SOURCE_UNSAFE",
+  "SOURCE_FOREIGN", "SOURCE_UNSUPPORTED", "SOURCE_CHANGED", "SOURCE_NOT_GRANTED", "PUBLICATION_UNKNOWN", "FAILED",
+];
+
+/** Protocol v260 (#3719): the import's outcome. A success names the new account and its profile;
+ * the account report that follows completes the pending grant, as for Add Account. */
+export interface ImportProviderCredentialResultMessage {
+  type: "import_provider_credential_result";
+  requestId: string;
+  ok: boolean;
+  accountId?: string;
+  profileId?: string;
+  code?: ProviderCredentialImportCode;
   error?: string;
 }
 
@@ -12045,6 +12144,7 @@ export type ControlPlaneToRunner =
   | CancelProviderLoginMessage
   | RemoveProviderAccountMessage
   | AdoptProviderProfileMessage
+  | ImportProviderCredentialMessage
   | RevokeProviderProfileGrantMessage
   | InspectProviderHomeLeaseMessage
   | RecoverProviderHomeLeaseMessage

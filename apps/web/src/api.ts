@@ -77,6 +77,7 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderLoginView,
+  ProviderCredentialImportSource,
   ProviderHomeLeaseInspection,
   QueuedPromptDraft,
   InvokeSessionCommandRequest,
@@ -1454,6 +1455,17 @@ export function createApiClient(transport: ApiTransport) {
     req<{ removed: true; credentialsRetained: boolean }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}`,
       { method: "DELETE" },
+    ),
+
+  /** Owner/Admin (#3719): create a managed Codex profile by copying an existing API-key sign-in on
+   * the same Machine, after the person confirmed the source and the new profile's label. */
+  importProviderCredential: (runnerId: string, body: {
+    provider: "codex"; label: string; source: ProviderCredentialImportSource; sourceLabel: string;
+  }) =>
+    req<{ accountId: string; profileId: string; grantId: string }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-imports`,
+      { method: "POST", body: JSON.stringify({ provider: body.provider, label: body.label, source: body.source,
+        confirmation: { acknowledgeCredentialImport: true, sourceLabel: body.sourceLabel, destinationLabel: body.label } }) },
     ),
 
   /** Owner/Admin: adopt the account's HOME as a provider profile granted to this control plane. */

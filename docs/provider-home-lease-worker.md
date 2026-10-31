@@ -394,7 +394,7 @@ refused as `profile_changed` for sessions, Agent TUIs, probes, sign-in and skill
 
 ### Profile Marker Operations
 
-Four operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
+Five operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
 for the grant model:
 
 - `profile_create { home, provider, profileId, grantId }` writes the first marker of a new managed
@@ -420,7 +420,22 @@ for the grant model:
   may still depend on the released HOME. Current cleanup retains every HOME and its canonical
   evidence; see [Provider HOME Cleanup Status](provider-home-cleanup.md).
 
-All four take the HOME's lease the same way an acquisition does, but skip the grant check, since
+- `profile_import { home, provider: "codex", layout, destinationRoot, profileId, grantId, profile?, credentialProfile? }`
+  copies a Codex API-key sign-in from the existing HOME `home` into the new managed profile HOME
+  `<destinationRoot>/<profileId>` (#3719; see
+  [Importing an Existing Sign-In](./provider-profiles.md#importing-an-existing-sign-in)). Unlike the
+  others it takes the source's lease with the source's own dispatch-time `profile` context, never
+  creates the source, and refuses it while this registry holds, initializes, completes or migrates
+  it, so a same-runner reference is refused rather than borrowed. With `layout: "user_home"` the
+  credential directory `home/.codex` is admitted the same way with its own `credentialProfile`
+  context. The credential is read and validated under those leases and the source checked unchanged
+  once more; only then is the destination created, leased without the grant check, given its first
+  marker (as `profile_create`) and a fresh API-key-only `auth.json`, so every refusal precedes the
+  destination. All references are dropped before the reply, which adds no field. Its refusals are `import_source_missing`,
+  `import_source_held`, `import_source_unsafe`, `import_source_foreign`, `import_source_unsupported`
+  and `import_source_changed`, besides the acquisition's own codes; each has a fixed, path-free text.
+
+The first four take the HOME's lease the same way an acquisition does, but skip the grant check, since
 they are how grants change. A HOME another live owner holds is refused with the acquisition's code
 (`busy`, `foreign_owner`, `foreign_host`). The marker is read with the operation's provider while
 the lease is held; an unreadable marker, or one for the other provider, is never replaced: creation,

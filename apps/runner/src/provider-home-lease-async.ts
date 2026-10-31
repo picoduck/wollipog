@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -58,6 +59,8 @@ interface Pending {
   id: string;
   operation: LeaseWorkerOperation;
   expectedProfileId?: string;
+  /** #3719: a `user_home` import's credential directory's recorded profile id. */
+  credentialExpectedProfileId?: string;
   deadline: bigint;
   enqueuedAt: number;
   startedAt?: number;
@@ -157,6 +160,17 @@ export class AsyncProviderHomeLeaseRegistry {
     await this.enqueue({ method: "profile_create", home, provider, profileId, grantId });
   }
 
+  /** #3719: copy the Codex API-key sign-in of the existing source HOME `home` into the new managed
+   * profile HOME `<destinationRoot>/<profileId>`, whose first marker records `grantId`, as one
+   * worker operation. The source's lease is taken exclusively with its own profile context (the
+   * recorded id in `profile`, else the configured account's for that path); a typed refusal, such
+   * as `import_source_held` or `import_source_unsupported`, leaves both HOMEs unchanged. */
+  async importCodexCredential(home: string, layout: "codex_home" | "user_home", destinationRoot: string, profileId: string,
+    grantId: string, profile: LeaseProfileBinding = {}): Promise<void> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    await this.enqueue({ method: "profile_import", home, provider: "codex", layout, destinationRoot, profileId, grantId }, {}, profile);
+  }
+
   /** #3239: grant retirement for a removed account's HOME, taken while the worker
    * holds its lease: drops every grant of this control plane from the marker, then releases.
    * Resolves true only when the lease was released and no other control plane is granted. This
@@ -221,6 +235,13 @@ export class AsyncProviderHomeLeaseRegistry {
         return Promise.reject(new Error("Provider-HOME lease profile context is unavailable; retry later."));
       }
     }
+    // #3719: a `user_home` import also leases its credential directory, which an account may name.
+    let credentialExpectedProfileId: string | undefined;
+    if (operation.method === "profile_import" && operation.layout === "user_home" && this.options.expectedProfileIdForHome) {
+      try { credentialExpectedProfileId = this.options.expectedProfileIdForHome(join(operation.home, ".codex")); } catch {
+        return Promise.reject(new Error("Provider-HOME lease profile context is unavailable; retry later."));
+      }
+    }
     if (this.poisonReason || this.closed) return Promise.reject(unavailable(this.poisonReason ?? "closed"));
     if (!validLeaseWorkerOperation(operation) || !boundedLeaseWorkerFrame(operation, LEASE_WORKER_LIMITS.requestBytes - 512) ||
         (expectedProfileId !== undefined && (!leaseWorkerOperationTakesProfile(operation.method) ||
@@ -231,6 +252,7 @@ export class AsyncProviderHomeLeaseRegistry {
     if (this.queue.length + (this.active ? 1 : 0) >= this.pendingLimit) return Promise.reject(new Error("Provider-HOME lease queue is full; retry later."));
     return new Promise((resolve, reject) => {
       const pending: Pending = { id: randomUUID(), operation, ...(expectedProfileId === undefined ? {} : { expectedProfileId }),
+        ...(credentialExpectedProfileId === undefined ? {} : { credentialExpectedProfileId }),
         deadline: leaseWorkerDeadline(this.deadlineMs), timer: undefined!, signal, isCurrent,
         enqueuedAt: performance.now(),
         cancelled: false, acceptedCancel: false, compensation: false, phase: "queued",
@@ -301,13 +323,15 @@ export class AsyncProviderHomeLeaseRegistry {
   private dispatched(pending: Pending): LeaseWorkerOperation {
     const operation = pending.operation;
     if (!leaseWorkerOperationTakesProfile(operation.method)) return operation;
-    if (!this.options.profileAccess && pending.expectedProfileId === undefined) return operation;
+    if (!this.options.profileAccess && pending.expectedProfileId === undefined && pending.credentialExpectedProfileId === undefined) return operation;
     const access = this.options.profileAccess?.() ?? { controlPlaneSupportsProfiles: false, activeProfileIds: [] };
-    const profile: LeaseWorkerProfileAccess = {
-      ...(pending.expectedProfileId === undefined ? {} : { expectedId: pending.expectedProfileId }),
+    const context = (expectedId: string | undefined): LeaseWorkerProfileAccess => ({
+      ...(expectedId === undefined ? {} : { expectedId }),
       controlPlaneSupportsProfiles: access.controlPlaneSupportsProfiles, activeProfileIds: [...access.activeProfileIds],
-    };
-    const profiled = { ...operation, profile };
+    });
+    const profiled = { ...operation, profile: context(pending.expectedProfileId),
+      ...(operation.method === "profile_import" && operation.layout === "user_home"
+        ? { credentialProfile: context(pending.credentialExpectedProfileId) } : {}) };
     if (!validLeaseWorkerOperation(profiled) || !boundedLeaseWorkerFrame(profiled, LEASE_WORKER_LIMITS.requestBytes - 512)) throw new Error("invalid profile context");
     return profiled;
   }
