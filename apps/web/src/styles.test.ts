@@ -259,9 +259,9 @@ test("a Sessions row's selection, unread state and focus are three different tre
  * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
  */
 /** The rule that lets a container's gap space a `.field-label`, and the field label rule (§8.1). */
-const STACKED_FIELD_LABELS = [".field > .field-label", ".archive-filter > .field-label"];
+const STACKED_FIELD_LABELS = [".field > .field-label"];
 /** Labels of a form that stacks them over the control outside a `.field` (#2366). */
-const OUTSIDE_FIELD_LABELS = [".archive-search > span", ".archive-filter > .field-label"];
+const OUTSIDE_FIELD_LABELS: string[] = [];
 const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ...OUTSIDE_FIELD_LABELS, ".new-session-field-label"].join(",\n");
 
 /** The line under a field's control (§8.1): the helper, the error that replaces it, or a `.field-foot`. */
@@ -308,26 +308,6 @@ test("every field row is one column under 480px, by one shared rule and no size 
   assert.deepEqual(bodies, [], "a dialog's scrolling body is never a size container");
 });
 
-/**
- * #2366: Archived Sessions stacks its labels over the control outside a `.field`. Those labels share
- * the §8.1 rule above, their containers space them by --space-2, and no other rule gives them a
- * colour or type of their own (the old weight-600 overrides are gone).
- * e2e/field-label-outside-field.spec.ts measures them.
- */
-test("a label stacked outside a .field is the §8.1 label, 8px above its control", () => {
-  for (const container of [".archive-search", ".archive-filter"]) {
-    assert.match(soleRuleBody(container), /gap: var\(--space-2\);/, `${container} spaces label and control by --space-2`);
-  }
-  const overrides: string[] = [];
-  postcss.parse(css).walkRules((rule) => {
-    if (rule.selector === FIELD_LABEL) return;
-    const owns = rule.selectors.some((selector) => OUTSIDE_FIELD_LABELS.includes(selector.replace(/\s+/g, " ").trim()));
-    if (owns && rule.nodes.some((node) => node.type === "decl" && /^(color|font|line-height)/.test(node.prop))) {
-      overrides.push(rule.selector);
-    }
-  });
-  assert.deepEqual(overrides, [], "no other rule gives those labels a colour or type of their own");
-});
 
 /**
  * #2365: the dim rule for a field's later spans takes only BARE spans. As `.field > span` its

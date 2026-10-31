@@ -955,14 +955,16 @@ A row of tools above the content they act on: search, filters, view switches and
 
 - `.toolbar`: one row, `display: flex; align-items: center; gap: var(--space-2); min-width: 0`.
   Every control in it uses one control height (§3.2).
-- The toolbar is only the row. Where it sits (the Archive filter card, the space above a machine
+- The toolbar is only the row. Where it sits (the space above Archived Sessions or a machine
   list) is the region's decision, written as that region's rule on `.toolbar`. Regions do not
   define their own toolbar class. The Sessions tab row's tools, the Board's Machine and Agent
   filters included, sit in its tab bar's `.tabs-tools` (§10.1); the Board has no toolbar of its own.
 - `.filter-btn` (`FilterButton`) is the phone "Filters" button that opens the filter sheet (§15.1):
   a `.btn` that says "Filters", with `aria-haspopup="dialog"`. While any filter is applied it is
   `.is-set`, which gives it the `--control-outline` edge of a chosen control (§3.1), and it shows
-  the number applied. No screen uses it yet.
+  the number applied. Archived Sessions also uses it in a main column narrower than 1100px.
+  Desktop filter menu triggers use `.filter-btn` too: they keep their field name visible and
+  take `.is-set` while applied; the accessible name and removable chip include the chosen value.
 - Replaces `.agent-defaults-toolbar`, `.archive-toolbar`, `.board-toolbar`, `.connections-toolbar`
   with `.view-toolbar`, `.inbox-toolbar` and `.usage-toolbar-controls`.
 
