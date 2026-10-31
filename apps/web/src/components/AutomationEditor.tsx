@@ -222,6 +222,7 @@ export function AutomationEditor({ route }: { route: AutomationEditorRoute }) {
   if (automationId !== null && stored.state === "missing") {
     return frame(fallbackTitle, (
       <State
+        pageLevel
         icon={<AutomationsIcon />}
         title="Automation Not Found"
         actions={<button type="button" className="btn primary" onClick={toList}>{backLabel("automations")}</button>}

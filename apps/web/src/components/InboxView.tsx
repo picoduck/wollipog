@@ -1872,7 +1872,7 @@ export function InboxView({
                 onShowSnoozed={() => setReminderMode("snoozed")}
               />
             ) : (
-              <State variant="offline">Reconnecting…</State>
+              <State variant="offline" pageLevel>Reconnecting…</State>
             )}
           </div>
         ) : boardMode ? (

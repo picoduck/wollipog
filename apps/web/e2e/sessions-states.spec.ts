@@ -87,6 +87,20 @@ test("a state's actions are full width and 44px tall at 390×844", async ({ page
   }
 });
 
+test("at 740×900 the stacked actions stop at the state's measure and stay centered (#3875)", async ({ page }) => {
+  // Under 760px the actions stack, but this area is wider than the 480px measure.
+  await open(page, fixture("first-run"), { width: 740, height: 900 });
+  const state = page.locator(".inbox-state .state");
+  await expect(state.getByRole("heading", { name: "No Sessions Yet" })).toBeVisible();
+  const [actionsBox, stateBox] = await Promise.all([state.locator(".actions").boundingBox(), state.boundingBox()]);
+  expect(stateBox!.width).toBeGreaterThan(480);
+  expect(Math.abs(actionsBox!.width - 480)).toBeLessThanOrEqual(1);
+  expect(Math.abs(actionsBox!.x + actionsBox!.width / 2 - (stateBox!.x + stateBox!.width / 2))).toBeLessThanOrEqual(1);
+  for (const button of await state.locator(".actions").getByRole("button").all()) {
+    expect((await button.boundingBox())!.height).toBe(44);
+  }
+});
+
 test("a Project with unsynced sessions shows skeleton rows and Loading 8 sessions…, then rows, with no state between", async ({ page }) => {
   await open(page, fixture("syncing", DOCS_TAB), { width: 1440, height: 900 });
   const skeleton = page.locator(".inbox-skeleton");
