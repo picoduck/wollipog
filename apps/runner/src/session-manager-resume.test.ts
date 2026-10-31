@@ -78,6 +78,28 @@ test("switching providers on restart does not reuse the old provider conversatio
   } finally { h.manager.shutdownAll(); h.cleanup(); }
 });
 
+for (const driver of ["codex-app-server", "pi"] as const) {
+  test(`switching Claude to ${driver} and back clears resumed-history task ownership`, async () => {
+    const h = harness({ driver: "claude-code", agentSessionId: "old-claude",
+      backgroundJobs: [{ id: "task-1", toolUseId: "old-tool", parentTurnId: "old-turn", runnerId: "runner",
+        workspaceId: "workspace", context: { kind: "native" }, launchType: "shell", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2, assistantResultPersistedAt: 3,
+        restartedAt: 4, restartResumed: true }] });
+    try {
+      assert.equal(await h.manager.start({ ...launchSpec(h.root), driver }), true);
+      assert.equal(h.store.readMeta("resume-session")!.backgroundJobs![0]!.restartResumed, undefined);
+      assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+      assert.equal(h.launches[1]!.options.resumeId, undefined);
+      assert.deepEqual(h.launches[1]!.options.endedBackgroundTaskIds, []);
+      h.callbacks().onBackgroundWork?.({ state: "running", pendingTaskIds: ["task-1"],
+        jobs: [{ id: "task-1", launchType: "shell", startedAt: 10 }], observedTaskIds: ["task-1"] });
+      const jobs = h.store.readMeta("resume-session")!.backgroundJobs!;
+      assert.equal(jobs.find((job) => job.id === "task-1")?.terminalStatus, undefined);
+      assert.ok(jobs.some((job) => job.id.startsWith("task-1~restart-") && job.terminalStatus === "completed"));
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
 test("a resumed Claude restart seeds killed jobs into the replacement driver's ended set", async () => {
   const h = harness({ driver: "claude-code", agentSessionId: "claude-existing",
     backgroundJobs: [{ id: "watcher", toolUseId: "watch-tool", parentTurnId: "turn-1", runnerId: "runner",

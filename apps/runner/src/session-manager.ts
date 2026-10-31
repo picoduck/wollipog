@@ -1240,7 +1240,9 @@ function carryBackgroundWorkAcrossRestart(
   }
   // Record the restart for continuation delivery. Only a fresh conversation can reuse provider
   // task ids; restartResumed keeps same-conversation terminal rows authoritative (#3752).
-  const carried = jobs.map((job) => job.restartedAt === undefined ? markRestart(job) : job);
+  const carried = jobs.map((job) => job.restartedAt === undefined
+    ? markRestart(job)
+    : !resumesConversation && job.restartResumed ? { ...job, restartResumed: undefined } : job);
   return {
     jobs: carried,
     killed: carried.filter((job) => job.endedBy?.reason === "session_restart" && job.endedBy.endedAt === now),
