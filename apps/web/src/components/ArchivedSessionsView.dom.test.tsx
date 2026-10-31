@@ -1510,14 +1510,18 @@ test("an empty archive stays offline through a reconnect retry instead of claimi
 
 test("history restore requests the stored page once without disclosing transcript search in the URL", async () => {
   const beforeUrl = domWindow.location.href;
-  writeArchiveBrowse({ filters: { query: "private transcript words", project: "Wollipog", location: null,
-    agent: null, lifecycle: "all", archive: "all" }, page: 2, cursors: [null, "50"], scrollTop: 120, rowId: "session-65" });
+  writeArchiveBrowse({ filters: { query: "private transcript words", project: "Wollipog", location: "Local Checkout",
+    agent: "Codex App Server", lifecycle: "completed", archive: "all" }, page: 2, cursors: [null, "50"], scrollTop: 120, rowId: "session-65" });
   const fixture = await mount([], {}, { restoreBrowse: true });
   try {
     assert.equal(fixture.archiveInputs.length, 1);
     assert.equal(fixture.archiveInputs[0]?.cursor, "50");
     assert.equal(fixture.archiveInputs[0]?.q, "private transcript words");
     assert.equal(fixture.archiveInputs[0]?.project, "Wollipog");
+    assert.equal(fixture.archiveInputs[0]?.location, "Local Checkout");
+    assert.equal(fixture.archiveInputs[0]?.agent, "Codex App Server");
+    assert.equal(fixture.archiveInputs[0]?.lifecycle, "completed");
+    assert.equal(fixture.archiveInputs[0]?.archive, "all");
     assert.equal(domWindow.location.href, beforeUrl);
   } finally { await fixture.unmount(); }
 });
