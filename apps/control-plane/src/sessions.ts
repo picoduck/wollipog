@@ -13921,7 +13921,10 @@ export class SessionsService {
       return fail("An active media review Session cannot be archived yet: Stop it and let authenticated reconciliation " +
         "settle it first; capacity is retained.", 409);
     }
-    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId)) {
+    // A disconnected side chat is already hidden and provisionally stopped. An explicit
+    // Archive must still record a durable Stop, rather than becoming a visibility-only no-op.
+    const stoppedSideChat = session.status === "stopped" && this.db.sideChatParent(sessionId) !== null;
+    if (archiveRequiresStop(session.status) || this.db.hasSessionStopIntent(sessionId) || stoppedSideChat) {
       const media = this.mediaSessionPurposes.owns(session.id);
       // A dedicated media Stop records no archive intent and settles nothing, so archival cannot be
       // scheduled for an active or ambiguous media Session (#3365). Refuse before any effect rather
@@ -17035,9 +17038,11 @@ export class SessionsService {
   }
 
   /** Side chats use archived only to stay out of ordinary lists, not as a Stop intent.
-   * Explicit Stops and archive-after-Stop requests are enforced separately for them too. */
+   * Pending explicit Stops are enforced separately. Requested-stop provenance keeps the
+   * fence after terminal runner evidence settles and removes the durable intent. */
   private archivedSessionRequiresStop(session: SessionView): boolean {
-    return session.archived && this.db.sideChatParent(session.id) === null;
+    return session.archived && (this.db.sideChatParent(session.id) === null ||
+      this.db.sessionStopProvenance(session.id)?.cause === "requested");
   }
 
   /**

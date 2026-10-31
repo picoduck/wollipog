@@ -8323,6 +8323,43 @@ for (const update of ["live", "batch", "inventory", "legacy inventory"] as const
   }
 }
 
+for (const source of ["snapshot", "legacy"] as const) {
+  test(`explicit Archive of a disconnected side chat survives ${source} reconnect`, () => {
+    const { db, hub, svc } = makeHarness();
+    const parentId = seedSession(svc, hub);
+    const created = svc.createSideChat(parentId);
+    assert.ok(created.ok && created.data);
+    const id = created.data.session.id;
+    db.updateSessionStatus(id, "stopped", Date.now());
+    hub.online = false;
+    assert.ok(svc.setArchived(id, true).ok);
+    hub.online = true;
+    hub.sentToRunner.length = 0;
+    if (source === "snapshot") svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle", costUsd: 0, seq: 0 })]);
+    else svc.reconcileRunnerSessions(RUNNER_ID, [parentId, id]);
+    assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id), "an explicit Archive must survive visibility hiding");
+    assert.equal(db.getSession(id)?.status, "stopped");
+  });
+}
+
+for (const intent of ["Stop", "Archive"] as const) {
+  test(`a confirmed side-chat ${intent} still fences late live snapshots`, () => {
+    const { db, hub, svc } = makeHarness();
+    const parentId = seedSession(svc, hub);
+    const created = svc.createSideChat(parentId);
+    assert.ok(created.ok && created.data);
+    const id = created.data.session.id;
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok((intent === "Stop" ? svc.stop(id) : svc.setArchived(id, true)).ok);
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "stopped", costUsd: 0, seq: 0 }));
+    assert.equal(db.hasSessionStopIntent(id), false, "the runner confirmed the Stop");
+    hub.sentToRunner.length = 0;
+    svc.applySessionRuntimeUpdates(RUNNER_ID, [snapshot({ id, status: "running", costUsd: 0, seq: 0 })]);
+    assert.equal(db.getSession(id)?.status, "stopped");
+    assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id));
+  });
+}
+
 test("a side-chat launch disconnect removes the undelivered child instead of orphaning it", () => {
   const { db, hub, svc } = makeHarness();
   const parentId = seedSession(svc, hub);
