@@ -18,7 +18,7 @@ const DESTINATIONS = [
   // master-detail (#2985).
   { path: "/connections", title: "Connections", tabs: true },
   { path: "/skills", title: "Agent Skills", description: true },
-  { path: "/archived", title: "Archived Sessions", max: 1200 },
+  { path: "/archived", title: "Archived Sessions", description: true, max: 960 },
   { path: "/usage", title: "Usage and Cost", description: true, max: 1200 },
   { path: "/settings", title: "Settings", description: true },
 ] as const;

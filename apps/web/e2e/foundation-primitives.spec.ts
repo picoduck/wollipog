@@ -67,12 +67,12 @@ for (const pointer of ["fine", "coarse"] as const) {
 test.describe("at 1440px", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("the Archive State column shows every badge whole", async ({ page }) => {
-    await page.goto(shell("/archived"));
-    await expect(page.locator(".archive-state-badges .status").first()).toBeVisible();
-    const clipped = await page.locator(".archive-state-badges .status").evaluateAll((badges) => badges
+  test("archive rows show their one exception badge whole", async ({ page }) => {
+    await page.goto("/archived-sessions-e2e.html?rows=1");
+    await expect(page.locator(".archive-item .status").first()).toBeVisible();
+    const clipped = await page.locator(".archive-item .status").evaluateAll((badges) => badges
       .filter((badge) => {
-        const cell = badge.closest("td")!.getBoundingClientRect();
+        const cell = badge.closest(".archive-item")!.getBoundingClientRect();
         const box = badge.getBoundingClientRect();
         return badge.scrollWidth > badge.clientWidth + 0.5 || box.right > cell.right + 0.5 || box.left < cell.left - 0.5;
       })
@@ -139,28 +139,24 @@ test("a required finding shows a neutral Required badge beside its severity", as
 test.describe("at 390px", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("an Archive row's inline action and ⋯ are separate 44px touch targets", async ({ page }) => {
+  test("an Archive row keeps only More Actions as a 44px phone target", async ({ page }) => {
     await page.goto(shell("/archived"));
-    const actions = page.locator(".archive-row-actions").first();
+    const actions = page.locator(".archive-item-actions").first();
     await expect(actions).toBeVisible();
-    const hits = await actions.evaluate((element) => {
-      const [inline, more] = [...element.querySelectorAll<HTMLElement>("button")];
-      const a = inline!.getBoundingClientRect();
-      const b = more!.getBoundingClientRect();
-      const y = a.top + a.height / 2;
-      const at = (x: number, yy: number) => document.elementFromPoint(x, yy);
-      return {
-        gap: b.left - a.right,
-        // 3px past each visible edge, inside its own borrowed area and not the neighbour's.
-        inlineRight: inline!.contains(at(a.right + 3, y)),
-        moreLeft: more!.contains(at(b.left - 3, y)),
-        // The borrowed area above and below is not clipped by the actions container.
-        inlineAbove: inline!.contains(at(a.left + a.width / 2, a.top - 3)),
-        moreBelow: more!.contains(at(b.left + b.width / 2, b.bottom + 3)),
-      };
+    await expect(actions.locator(".archive-inline")).toBeHidden();
+    const more = actions.getByRole("button", { name: /More Actions/ });
+    await expect(more).toBeVisible();
+    await more.scrollIntoViewIfNeeded();
+    const hit = await more.evaluate((button) => {
+      const box = button.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      return [-21, 21].every((offset) => button.contains(document.elementFromPoint(x + offset, y)) &&
+        button.contains(document.elementFromPoint(x, y + offset)));
     });
-    expect(hits.gap, "neighbours sit at least 8px apart (§2.8)").toBeGreaterThanOrEqual(8);
-    expect(hits).toMatchObject({ inlineRight: true, moreLeft: true, inlineAbove: true, moreBelow: true });
+    expect(hit, "the full 44px target is reachable without clipping").toBe(true);
+    await more.click();
+    await expect(page.getByRole("menuitem", { name: "Unarchive", exact: true })).toBeVisible();
   });
 
   test("the Usage breakdown keeps every driver's value on a phone, each named", async ({ page }) => {
@@ -220,6 +216,14 @@ test.describe("at 390px", () => {
   for (const [url, title, exact] of [[shell("/archived"), "Archived Sessions", true], ["/usage-view-e2e.html", "Usage and Cost", false]] as const) {
     test(`${title} tables become stacked rows without sideways scroll`, async ({ page }) => {
       await page.goto(url);
+      if (exact) {
+        const rows = page.locator(".archive-item");
+        await expect(rows.first()).toBeVisible();
+        expect(await rows.evaluateAll((items) => items.every((row) => row.getBoundingClientRect().height === 56 && row.scrollWidth <= row.clientWidth))).toBe(true);
+        await expect(rows.first().locator(".archive-item-meta")).toBeVisible();
+        await expect(page.locator(".archive-table")).toHaveCount(0);
+        return;
+      }
       const row = page.locator(".table tbody tr").first();
       await expect(row).toBeVisible();
       const layout = await page.evaluate(() => {

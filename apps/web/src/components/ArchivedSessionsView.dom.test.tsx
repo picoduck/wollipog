@@ -301,7 +301,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.equal(fixture.container.querySelectorAll(".archive-item").length, 50);
   assert.equal(fixture.container.querySelectorAll(".status").length, 0, "ordinary archived rows need no badge");
   assert.ok(await rowAction(fixture.container, "Stop Session…"));
-  assert.equal(fixture.container.querySelector('[role="region"][aria-label="Archived Sessions"]')?.hasAttribute("tabindex"), false);
+  assert.equal(fixture.container.querySelector('[role="region"][aria-label="Archived Session Results"]')?.hasAttribute("tabindex"), false);
   assert.equal(fixture.container.querySelectorAll('.archive-item[tabindex="0"]').length, 50);
 
   const firstLink = fixture.container.querySelector<HTMLAnchorElement>('a[href^="/sessions/"]');
