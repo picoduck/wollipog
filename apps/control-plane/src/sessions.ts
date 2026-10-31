@@ -17038,11 +17038,14 @@ export class SessionsService {
   }
 
   /** Side chats use archived only to stay out of ordinary lists, not as a Stop intent.
-   * Pending explicit Stops are enforced separately. Requested-stop provenance keeps the
-   * fence after terminal runner evidence settles and removes the durable intent. */
+   * A provisional disconnect may recover, but an ended child must not come back to life.
+   * Pending explicit Stops are enforced separately, until terminal evidence confirms them. */
   private archivedSessionRequiresStop(session: SessionView): boolean {
-    return session.archived && (this.db.sideChatParent(session.id) === null ||
-      this.db.sessionStopProvenance(session.id)?.cause === "requested");
+    if (!session.archived) return false;
+    if (this.db.sideChatParent(session.id) === null) return true;
+    return session.status === "stopped"
+      ? this.db.sessionStopProvenance(session.id)?.confirmation != null
+      : isTerminal(session.status);
   }
 
   /**
