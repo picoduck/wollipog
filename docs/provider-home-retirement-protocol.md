@@ -257,6 +257,64 @@ An old process already paused after release does not consult a new fence. Theref
 
 ## Publication and Consumer Races
 
+### Bounded Account-Config Publication
+
+The account-config writer captures an immutable config identity, full-config digest, normalized
+account preimage and evidence-store epoch/revision. Adoption captures this ticket before awaiting
+the HOME marker write. Add/remove capture immediately before synchronous config publication.
+Updated writers serialize on an exclusive, identity-checked config-sibling guard and recheck the
+ticket before rename. A later cooperating writer invalidates an earlier ticket, including an
+accounts A→B→A sequence. This is not a barrier against old runners or operator edits; their history
+remains unknown. It attests neither complete producers, exhaustive process containment, a frozen
+owner store nor eligibility for physical retirement.
+
+`.<config-name>.account-publications-v1` contains a private versioned header and append-only JSONL
+intent/outcome log. A separate private `.<config-name>.account-publications-anchor-v1` binds the
+epoch to that directory identity. Missing or substituted evidence refuses mutation instead of
+resetting an epoch. Erasing/restoring every artifact is outside this cooperative guarantee: every
+record retains `historyIncomplete: true`. Records contain structural binding fingerprints and
+before/after digests, never credential contents, labels, raw config or HOME paths.
+
+Before any producer grows, the writer reserves a 64 KiB control/metadata allowance, the complete
+temporary config size and two maximum-sized records against a 256 MiB per-config logical budget.
+The limits are 4,096 intents, 8,192 records and 32,768 bytes per record, with at most 64 old/new
+binding fingerprints per intent. Directory size and control/anchor bytes must fit the fixed allowance.
+Unknown entries, oversized controls, malformed/partial history, pending intents and abandoned
+guards refuse further mutations. Intent fsync precedes config temporary creation/fsync and atomic
+replacement. Published-outcome fsync follows config-parent fsync. The guard spans synchronous
+local I/O only, never provider or network waits. There is no PID-based steal, expiry, repair, retry,
+compaction, pruning or supported reset.
+
+**Availability risk:** exhaustion or ambiguous I/O can permanently disable NEW account-config
+mutations for this config, including add, remove and adoption. Existing inventory/sessions and CP
+revocation continue; no evidence or credentials are deleted to restore availability. Unsupported
+ownership/filesystem proof, including platforms without the required POSIX checks, refuses mutation.
+These limits and indefinite refusal require disclosure in later review, PR and human merge decisions.
+Boundary fault tests use synthetic failures; they do not prove power-loss durability or optional
+platform support.
+
+**Windows compatibility:** the POSIX-only publication admission would refuse Windows account
+add/remove, so Windows uses the native WACW1 account-config backend below. Its positive add/remove
+execution comes from the windows-latest Platform Isolation job; this document records no run
+result, and the pull request carries the exact-head receipts. Provider profile adoption/markers
+remain unsupported on Windows. The existing Windows lease/skill helpers are not account-config
+ownership or publication proof. No legacy unenrolled writer or skipped ownership/identity check is
+a fallback.
+
+A sanitized refusal can ask an operator to verify existing ownership, restrictive config/parent
+permissions and retained publication evidence. It does not change permissions, repair/reset a
+store, or establish that permissions alone caused every refusal.
+
+Callers distinguish definitely-unpublished, known-renamed and unknown publication. A successful
+rename stays published when subsequent observation or directory fsync fails. Unknown and
+known-renamed failures retain intent, temporary/guard and any referenced HOME marker. They must
+not infer successful admission from today's config, activate a grant, report account removal or run
+grant retirement. Login's local settlement uses `recorded: "unknown"`: the existing grant manager
+drops temporary local access, while the callback retains the marker rather than falsely applying
+unrecorded rollback. Existing true/false settlement and CP revocation remain effective. No path in
+this slice deletes a credential HOME, edits its native lease evidence or authorizes physical cleanup.
+All other #3157 producer, lifecycle, process and detach proofs remain undelivered.
+
 The earlier private-only proposal used `preparing -> private -> published` or `private -> retired`;
 it was never implemented. The complete contract instead needs durable enrollment **before** each
 config/binding/grant publication, followed by irreversible freeze, exact owner-store barriers and
@@ -325,3 +383,117 @@ Full delivery requires a reviewed durable binding-retirement contract in additio
 5. Demonstrate positive configured-account physical removal only when these proofs hold, plus deterministic races/failures and truthful retained/indeterminate results. Independently review that full protocol before implementing its new cross-component messages or migration behavior.
 
 These requirements remain on #3157. Approval of the partial slice cannot close the issue or establish that full configured-account retirement is solved. This document requests no new authentication, governance, runtime/resource, artifact-transfer or hosting authority.
+
+
+### Command-Scoped Profile Adoption Authorization
+
+Pending initial adoptions and retries carry an in-memory, one-shot authorization capability.
+A complete authoritative grant snapshot, CP revocation or profile-support transition replaces a
+global object generation. Reappearance of the same grant/map entry never makes an old capability
+current. At most 32 capabilities are admitted; excess commands refuse before marker work, and a
+finally block releases every admitted slot. There is no counter wrap, grant-id tombstone history,
+durable authorization claim or new security grant. Unrelated CP updates conservatively fence an
+adoption too; a stale command retains current marker/grant state and does not perform rollback.
+Activation checks and consumes the current capability synchronously before setting a local grant.
+The config preimage remains an independent fence and is not merged or retried.
+
+A definitely-unpublished retry preserves a previously observed exact, still-known grant, including
+when a persisted binding/CP grant remains known but marker observation is unverifiable. Retention
+does not activate or reconstruct a grant. Unknown marker provenance is not new-grant ownership.
+Known/unknown publication failures retain their existing conservative evidence behavior; a stale
+authorization never deletes a newer valid CP grant merely to compensate its own failed operation.
+
+Failed adoption no longer dispatches compensating asynchronous marker revocation, even when a
+definitely-unpublished write and readable marker suggest this command introduced the grant. That
+worker mutation cannot carry the command's CP generation across its await. Retention avoids a
+newer same-grant authorization being deleted; it can leave a pending marker until authoritative
+CP settlement or independently authorized retirement. This is an explicit proposed behavior change
+to two former rollback assertions, not evidence that the old tests passed with new semantics.
+
+
+### Windows Account-Config Backend Candidate
+
+The native Windows account-config backend uses a separate fixed WACW1 contract. Its trusted
+platform prerequisites are the installed Windows kernel and global SystemRoot link, protected
+OS Windows PowerShell/.NET installation and OS administrators, analogous to trusting Node/OS.
+GLOBALROOT selects the true object-manager root; it is not executable image attestation. No
+postlaunch self-report supplies first-launch trust. A compromised/misconfigured trusted OS is
+outside this candidate's guarantee and must be disclosed in independent review and merge risk.
+The fixed GLOBALROOT SystemRoot anchor and its System32 WindowsPowerShell image are resolved
+read-only with realpathSync.native to a bounded local drive-qualified OS root and that SAME
+canonical image. Node/libuv uses GetFinalPathNameByHandleW with VOLUME_NAME_DOS here.
+Only that canonical absolute image is launched: no PATH/environment/RPC selector, hardcoded
+C: installation, alternate launcher or fallback. Resolution failure refuses conservatively.
+This is documented API design basis, not actual Windows launch or image-attestation proof.
+The observed GLOBALROOT spawnSync EINVAL does not establish its exact failing Win32 call.
+
+SystemRoot/WINDIR come from that validated root; PATH is explicitly empty. libuv supplies
+other mandatory Windows compatibility variables from the parent when omitted, so the JS
+dictionary is not the complete effective environment. CLR/DOTNET/COMPLUS/PS/Node startup
+hooks remain absent; no runtime compiler, module autoload/profile or ExecutionPolicy change
+is used. Build-only TEMP/TMP and fixed native payload fields retain their existing controls.
+Two read-only metadata resolutions add no process/temp producer; their OS-call duration is
+outside the existing child termination control, with no hard total metadata-call deadline.
+The source/SEA engine and DLL remain build-hash-bound. One passing windows-latest Platform
+Isolation job, which runs the 14 selected source cases and the actual SEA verification, is the
+required Windows receipt (a human decision replacing the earlier two-job requirement); pure validation/env assertions do
+not replace native success, architecture, death, sharing or durability evidence.
+
+Inside that trusted engine, all actual config/store file and parent owner SID, DACL, reparse,
+hardlink, alternate-stream, fixed-local-NTFS, canonical-path and identity checks remain mandatory
+before a config producer begins. No POSIX check is faked or bypassed and no legacy writer is a
+fallback.
+
+Config-directory short names require native handle proof. The engine validates ordinary raw DOS
+components, pins ORIGINAL raw ancestors with existing reparse/SID/DACL/share checks, and binds
+raw parent/config handles to canonical names and file IDs before producers. Config-leaf short
+aliases stay unsupported because replacement can invalidate them. Canonical preimage, stamp
+and store namespace coalesce directory aliases; immutable Windows-private requestedPath retains
+the original witness across asynchronous work. Publication revalidates that raw chain. The
+Windows-only native-realpath caller comparison is preliminary, never admission proof, and its
+metadata duration is outside child termination controls. No hard total-call bound is claimed.
+One extra read pin permits delete sharing for replacement, not write sharing, and closes with
+the command. No producer, global map/cache/history, HOME canonicalization or ACL repair is added.
+
+The source regression queries a genuine directory alias once through the fixed fixture-only
+helper, then checks parent/file identity, canonical coalescing and default publication. Alias
+absence fails proof without a fake, skip, fallback or OS setting change. The query is absent from
+production/SEA admission. Raw dot refusal reuses that owned fixture. The selected names, assertions,
+HOME strings and all root/entry/byte/process/time limits remain; runtime/SEA/durability proof
+still requires actual receipts.
+
+Config payloads are bounded at 2 MiB, assemblies/engine at 1 MiB and IPC at 8 MiB.
+Eight fixed store/control/pending names are reserved before growth; no unknown prefix entry,
+partial store or coexisting POSIX store is adopted. The retained 4096-intent/8192-record,
+32768-byte-record/256 MiB logical limits and 64 KiB control reservation remain, with no reset.
+These are application-managed logical budgets, not a quota on the OS or filesystem internals.
+
+Native publication records intent before temp growth, then writes and flushes a private pending
+file opened WRITE_THROUGH. Rename uses that SAME handle and the pinned parent handle through
+`NtSetInformationFile`, so the target name stays relative to that handle; the Win32
+`SetFileInformationByHandle` wrapper refused every such rename on windows-latest. Store-slot renames
+use FileRenameInformation without replacement. The config replacement uses FileRenameInformationEx
+with REPLACE_IF_EXISTS|POSIX_SEMANTICS, because the command's own delete-sharing read pin keeps the
+old config open and NTFS refuses an ordinary replacement of an open target with access denied.
+A handle another process holds without delete sharing still refuses the replacement. Microsoft documents NTFS metadata flushing, including rename, for write-through
+requests; this is the implementation design basis under ordinary OS/storage assumptions and
+the documented hardware caveat, not synthetic power-loss proof. No path-based fallback,
+unsupported ReplaceFile write-through, TxF, ACL repair or administrator volume flush is used.
+Postattempt uncertainty stays unknown; successful rename followed by observation/outcome
+failure stays published-but-unconfirmed. Evidence is retained and never replayed automatically.
+
+Capture is read-only and binds native parent PID/creation time; publication checks that exact
+parent and observes liveness at boundaries. Those checks and the 10-second termination control
+are not an atomic process-death barrier or hard whole-infrastructure/process-tree guarantee.
+Same-user legacy writers, operator edits and trusted administrator interference still prevent
+complete producer/history or physical-eligibility proof. Foreign config/store mutation admission
+is refused. Native evidence never authorizes HOME deletion or restores revoked grant knowledge.
+
+Windows source verification must run the actual default publisher/supervisor paths and native
+enrollment assertions; packaged verification executes the actual SEA's unchanged fixed engine
+asset and DLL. Test-only fixture/fault assembly is separate and never embedded in the SEA.
+All native outcomes, compiler/build identities, real OS exits, selected case names/counts and
+remaining architecture/launcher/sharing limits require actual receipts. Source selection or a
+filtered/skipped job is not passing proof. The existing OS matrix and 25-minute deadlines remain.
+This document supplies no Windows build/test/CI result. The windows-latest job's exact-head
+receipts and a fresh independent review are recorded on the pull request, not here.
