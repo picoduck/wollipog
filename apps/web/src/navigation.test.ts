@@ -201,7 +201,7 @@ const RETIRED_TERMS = [
   "content-free",
 ];
 
-test("page descriptions are one short sentence in user terms", () => {
+test("page descriptions use short sentence-case copy in user terms", () => {
   assert.deepEqual(
     Object.fromEntries(GLOBAL_VIEW_ITEMS.map((item) => [item.id, item.description])),
     {
@@ -212,7 +212,7 @@ test("page descriptions are one short sentence in user terms", () => {
       pods: "Agents that share notes and a worktree while they work toward one objective.",
       runners: undefined,
       skills: "Write a skill once, then choose which machines and agents get it.",
-      archived: undefined,
+      archived: "Archived sessions keep their transcripts. Restore one to keep working.",
       usage: "What your agents spent, by day, agent and project.",
     },
   );
@@ -220,7 +220,8 @@ test("page descriptions are one short sentence in user terms", () => {
     if (item.description === undefined) continue;
     assert.ok(item.description.length <= 80, `${item.name}: ${item.description.length} characters`);
     // Sentence case: one capital to start, a full stop to end, and no Title Case run after it.
-    assert.match(item.description, /^[A-Z][^A-Z]*\.$/u, `${item.name} is one sentence-case line`);
+    assert.match(item.description, item.id === "archived" ? /^[A-Z][^A-Z]*\. [A-Z][^A-Z]*\.$/u : /^[A-Z][^A-Z]*\.$/u,
+      `${item.name} uses sentence case`);
     for (const term of RETIRED_TERMS) {
       assert.ok(!item.description.toLowerCase().includes(term), `${item.name} uses the retired term "${term}"`);
     }

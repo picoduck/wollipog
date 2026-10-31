@@ -328,8 +328,8 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--title-bar-h` | 40px | The macOS desktop app's strip at the top of the rail, which the traffic lights sit in (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
-| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods. Left-aligned. |
-| `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost, Archived Sessions. Left-aligned. |
+| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods, Archived Sessions. Left-aligned. |
+| `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost. Left-aligned. |
 | `--page-max-form` | 760px | Settings content, single-form pages. |
 | `--measure` | 68ch | Prose. |
 | `--list-pane-w` | 320px (280–440 resizable) | Master list in side-by-side master-detail. |
@@ -451,7 +451,7 @@ One definition of each tier, shared by components and the stylesheet (#1969):
   inline-size`. A rule that depends on the room the column has after the rail and any docked panel
   queries it with `@container app (max-width: 1099px)`, not the viewport; the Projects list pane is
   the first such rule. A rule whose edge is its own content's fit rather than the tier uses the same
-  container with that edge: the Archived Sessions fold (§14) ends at a 1220px column. A phone has
+  container with that edge so the name column stays readable (§14). A phone has
   no `app` container. There the column is the viewport's width, and the phone's full-screen right
   panel and editor note are placed in viewport coordinates.
 - **Nothing fixed inside the column may assume the viewport.** At the build floor (Chrome 111–128,
@@ -2803,7 +2803,8 @@ the same notice with Reload and Copy Error Details, top-left in the content area
   changed." Its actions are **Reload Page** (primary) and **Copy Error Details**; Show Details opens a
   code well with the error message and the first three component frames, which is also what Copy
   copies. There is no Try Again: re-rendering the same data crashes the same way. The route's page
-  header stays above it, and navigating elsewhere clears it.
+  header stays above it, and navigating elsewhere clears it. Archived Sessions keeps its `.page`
+  list container when it crashes, matching its normal 960px rows.
 - **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
   Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
 - **A turned-off experiment's route** is not an error: it keeps its page header, and below it an
@@ -3392,15 +3393,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - **Compact tier (761–1099px): a table whose declared widths exceed the tier folds its secondary
   columns into the name cell** as a meta line under the name, and hides those columns, so it never
   scrolls sideways and the name keeps about 150px at 761px. The meta line wraps between values
-  rather than truncating, so every value stays on screen. Archived Sessions does this for Project,
-  Location and Agent, and narrows State to 188px, room for its longest badge, so its badges stack
-  (§15.2).
-- **The fold ends where the full layout fits, not at the tier's edge.** A folding table answers to
-  the main column (`@container app`, §2.10), not the viewport, and keeps its fold until the column
-  holds its declared widths plus 200px for the name, its wrapper's borders and the page gutters.
-  Archived Sessions' six declared columns need 970px, so it folds below a 1220px column: up to a
-  1283px window with the icon rail and a 1427px window with the labelled rail (#2114).
-  `tokens.test.ts` derives that edge from the declared widths.
+  rather than truncating, so every value stays on screen.
+- Archived Sessions uses a 960px list of two-line, 56px rows (§5.2), or 76px with a labelled,
+  highlighted search snippet. Each row opens on click or Enter; its title is also a link.
+  Project and Location form one fact, with Location omitted when equal to Project. One exception
+  badge follows the title, moving before the meta on phones. Time and the fixed action slot stay
+  trailing on desktop; phones keep only More Actions. It never folds table columns.
 
 ---
 
@@ -3439,9 +3437,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   height. It does this by redefining `--control-h-lg` on the rail. Touch keeps 48px items (§15.3).
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
-- Page content follows the tier too (#2106). The Archived Sessions table folds Project, Location and
-  Agent into its Session cell (§14), and keeps that fold above the tier until the main column fits
-  the full layout. The Usage API card's description takes the line and its three segmented
+- Page content follows the tier too (#2106). Archived Sessions keeps its two-line rows (§14) at every tier. The Usage API card's description takes the line and its three segmented
   controls follow as one group: beside the description while it keeps 220px (about 30 characters),
   otherwise together on their own line below it.
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
@@ -3656,7 +3652,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
 | `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947 and Settings' hand-built rows with #3019; `.agent-defaults-editor` moves with #3024, and New Session's `.orchestrator-policy-control` with its own unit). `.rail-order-row` became the Navigation editor's fixed-column `.rail-nav-row` (#3021, §8.2) |
-| `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
+| `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
 | `.shortcut-row kbd`, `.shortcut-hint kbd` (9px) | `kbd` (one recipe) |
 | `code` global chip | `:not(pre) > code` chip only |
 | `a` (unstyled) | `a, .link { color: var(--accent) }`; `accent-color: var(--accent)` on `:root` |

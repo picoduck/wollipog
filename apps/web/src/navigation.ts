@@ -237,7 +237,7 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
     description: "Write a skill once, then choose which machines and agents get it.",
     group: "oversight",
   },
-  { id: "archived", name: "Archived Sessions", group: "records" },
+  { id: "archived", name: "Archived Sessions", description: "Archived sessions keep their transcripts. Restore one to keep working.", group: "records" },
   {
     id: "usage",
     name: "Usage and Cost",
