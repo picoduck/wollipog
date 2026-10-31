@@ -118,7 +118,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 262);
+  assert.equal(PROTOCOL_VERSION, 263);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -344,8 +344,22 @@ test("a worktree switch is accepted only as its exact display shape (#3810)", ()
   ]) assert.equal(validWorktreeSwitch(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 262", () => {
-  assert.equal(PROTOCOL_VERSION, 262);
+test("session restart capability overlays controls without freezing the agent catalog", () => {
+  const catalog = { models: [], effortLevels: ["high"], slashCommands: [], supportsImages: true, supportsApprovals: true };
+  for (const restartResumesConversation of [true, false]) {
+    assert.deepEqual(mergeSessionCapabilities(catalog, { restartResumesConversation }),
+      { ...catalog, restartResumesConversation });
+  }
+  const marker = { ...catalog, effortLevels: [], permissionModes: ["orchestrator"],
+    elicitation: { orchestrator: ["none" as const] } };
+  assert.equal(mergeSessionCapabilities(marker, { restartResumesConversation: false }), undefined,
+    "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
+});
+
+test("PROTOCOL_VERSION is 263", () => {
+  assert.equal(PROTOCOL_VERSION, 263);
+  assert.equal(runnerSupportsProtocol(260, "sessionRestartResume"), false);
+  assert.equal(runnerSupportsProtocol(261, "sessionRestartResume"), true);
   // A v259 runner never receives an import, and a v260 runner only with a valid capability (#3719).
   assert.equal(runnerSupportsProtocol(259, "providerCredentialImport"), false);
   assert.equal(runnerSupportsProtocol(260, "providerCredentialImport"), true);
@@ -2006,7 +2020,7 @@ test("a hold whose runner keeps the queue across a restart states what a restart
     "Wait for the unfinished background job to end; the handoff and the queued messages then proceed on their own. " +
     "If it never ends (a monitor whose condition never fires ends only with its provider process), restart the session " +
     "with restart_session, knowing what that costs: the provider and its background job end, with unfinished work " +
-    "recorded as killed and unrecoverable and a finished result still owed reported to the new conversation; " +
+    "recorded as killed and unrecoverable and a finished result still owed reported after the restart; " +
     "the queued messages are kept and run after the restart; " +
     "and any approved workflow decision the session has not yet consumed is revoked, and the restarted session is told " +
     "which ones to request again.");
@@ -2015,7 +2029,7 @@ test("a hold whose runner keeps the queue across a restart states what a restart
     { ...queueHold, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43) },
   ]) {
     const action = queueHoldRecoveryAction(hold);
-    assert.match(action, /to restarting the session: a restart keeps the queued messages but ends every background job and starts a new conversation\.$/u);
+    assert.match(action, /to restarting the session: a restart keeps the queued messages but ends every background job and relaunches the provider\.$/u);
     assert.doesNotMatch(action, /discard/u);
   }
   assert.match(queueHoldRecoveryAction({ ...queueHold, restartKeepsQueue: undefined }),

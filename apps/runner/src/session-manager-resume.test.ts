@@ -159,6 +159,22 @@ test("Stop retains unfinished Claude task ids for the next resumed process", asy
   } finally { h.manager.shutdownAll(); h.cleanup(); }
 });
 
+test("establishing the first Claude conversation publishes its restart capability", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: null });
+  try {
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!)
+      .agentCapabilities?.restartResumesConversation, false);
+    h.callbacks().onSessionEstablished?.("thread-new");
+    const updated = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(updated?.type === "session_runtime_updated" &&
+      updated.snapshot.agentCapabilities?.restartResumesConversation, true);
+    h.manager.stop("resume-session");
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!)
+      .agentCapabilities?.restartResumesConversation, true);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
 test("restart keeps the acknowledged correction with its carried cumulative cost", async () => {
   const h = harness({ costUsd: 2, costReconciliationRevision: 1, costReconciliationDeltaUsd: -1 });
   try {

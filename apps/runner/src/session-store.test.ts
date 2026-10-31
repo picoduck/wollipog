@@ -831,6 +831,21 @@ test("rate-priced usage rides registration and v219 snapshots but never an older
   assert.equal("ratePricedUsage" in metaToSnapshot(meta(), 219), false);
 });
 
+test("restart capability describes the retained provider coordinate without exposing it", () => {
+  for (const driver of ["claude-code", "codex-app-server", "pi", "codex", "acp"] as const) {
+    for (const agentSessionId of [null, "", "established-conversation"]) {
+      const stored = meta({ driver, agentSessionId });
+      const expected = !!agentSessionId && ["claude-code", "codex-app-server", "pi"].includes(driver);
+      for (const version of [null, 261]) {
+        const snap = metaToSnapshot(stored, version);
+        assert.equal(snap.agentCapabilities?.restartResumesConversation, expected, `${driver} ${agentSessionId}`);
+        assert.equal((snap as unknown as Record<string, unknown>).agentSessionId, undefined);
+      }
+      assert.equal(metaToSnapshot(stored, 260).agentCapabilities?.restartResumesConversation, undefined);
+    }
+  }
+});
+
 test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command provenance)", () => {
   const snap = metaToSnapshot(meta({
     controlPlaneLaunchId: "launch-proof-1",

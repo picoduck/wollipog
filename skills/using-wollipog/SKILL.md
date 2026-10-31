@@ -76,8 +76,11 @@ queued handoff waiting. Only that job ends and is recorded as killed; the child'
 other jobs, and its queued prompts are kept. If the provider does not confirm the stop in time, the
 job is left running; should it end later, it is still recorded as your stop, so do not repeat the
 request just to be named. `session stop` and `session restart` end every job
-instead: a stop discards the queued prompts, while a restart keeps them and runs them after it, but
-starts a new Claude Code conversation. Only the session's owner and its controlling Orchestrator may
+instead: a stop discards the queued prompts, while a restart keeps them and runs them after it.
+Current runners resume established Claude Code, Codex App Server and Pi conversations; a never-run
+session starts fresh. The session capability `agentCapabilities.restartResumesConversation` reports
+whether its next Restart resumes. Older runners omit it and may start fresh, so absence provides no
+continuity guarantee. Only the session's owner and its controlling Orchestrator may
 use `stop-job`. When a child's queued handoff hold reports `canRelease`, `session release-hold`
 (MCP `release_queue_hold`) with the hold's id from `session get` ends every unfinished job at once,
 records each as killed by you, and runs the handoff and queued prompts in order without a restart;

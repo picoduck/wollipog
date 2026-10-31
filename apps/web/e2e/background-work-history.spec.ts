@@ -64,7 +64,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     }
     await hold(3_000);
     await notice.getByRole("button", { name: "Show Details" }).click();
-    await expect(notice.locator(".facts")).toContainText("Restarting the session ends every job and reports this result to the new conversation.");
+    await expect(notice.locator(".facts")).toContainText("Restarting the session ends every job and reports this result after the restart.");
     await hold(3_000);
     await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/ }).click();
     await hold(1_500);

@@ -1141,7 +1141,7 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
     assert.equal(notice().querySelector(".background-recovery-note[role='status']")?.textContent,
       "Stopped. Its status updates here shortly.");
     await act(async () => notice().querySelector<HTMLButtonElement>(".notice-details-toggle")!.click());
-    assert.match(notice().querySelector(".facts")?.textContent ?? "", /Other Ways.*Restarting the session ends every job and reports this result to the new conversation\./su);
+    assert.match(notice().querySelector(".facts")?.textContent ?? "", /Other Ways.*Restarting the session ends every job and reports this result after the restart\./su);
 
     // An older runner: the action stays, disabled, described by its reason on screen.
     await render(blockedSession("session-blocked-old-runner"), 189);
