@@ -1,6 +1,7 @@
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { shellGuidance } from "./shell-guidance.js";
+import { restartResumeId } from "./restart-resume.js";
 import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.js";
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
@@ -6986,10 +6987,7 @@ export class SessionManager {
     // Restart replaces the process, not the conversation. Retain an established Claude id just
     // as we retain Codex and Pi threads, including after an explicit Stop. Never-run sessions
     // have no persisted id and still start fresh; changing providers also starts fresh.
-    const priorResumeId = prior?.driver === driver &&
-      (driver === "claude-code" || driver === "codex-app-server" || driver === "pi")
-      ? prior.agentSessionId
-      : null;
+    const priorResumeId = prior?.driver === driver ? restartResumeId(prior) ?? null : null;
     // A fresh provider conversation keeps this Wollipog session's corrected lifetime baseline.
     // Clearing it would lose the repair generation and make every subsequent snapshot stale.
     const retainAccounting = !!priorResumeId || prior?.costReconciliationRevision !== undefined ||
@@ -17840,7 +17838,10 @@ export class SessionManager {
   private captureAgentSessionId(sessionId: string, client: Driver): void {
     const aid = client.agentSessionId();
     if (aid && this.store.readMeta(sessionId)?.agentSessionId !== aid) {
-      this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+      const updated = this.store.patchMeta(sessionId, { agentSessionId: aid, handoffPending: undefined });
+      if (updated && runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "sessionRestartResume")) {
+        this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+      }
       this.refreshCapacityInventorySession(sessionId);
       this.reportCapacity();
     }

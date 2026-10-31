@@ -171,7 +171,7 @@ function ResultBlockedNotice({
     reason = (state === "continuation_blocked"
       ? "These historical job records have no confirmed end. Wollipog cannot verify that the jobs are still running. "
       : "These historical results have no recorded return step. Wollipog will not resubmit them automatically. ") +
-      "Review the conversation before recovering. Open More Actions and choose Restart Session to recover in a new conversation. " +
+      "Review the conversation before recovering. Open More Actions and choose Restart Session to relaunch the agent. " +
       (restartReportsResult
         ? "Restart ends every job and reports held results; it does not rerun their original commands."
         : "Restart ends every job and discards held results; it does not rerun their original commands.");

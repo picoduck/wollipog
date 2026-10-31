@@ -51,7 +51,7 @@ const runner = {
   runnerId: "runner-1", hostname: "build-box.local", displayName: "Build Box", os: "linux", version: "1",
   status: "online",
   agents: [{ id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true }],
-  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 200,
+  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 261,
 } as RunnerView;
 
 class FakeSocket implements UiSocket {
@@ -75,6 +75,7 @@ async function flush(delay = 0) {
 let sequence = 0;
 interface FixtureOptions {
   status: SessionView["status"];
+  runnerProtocolVersion?: number;
   runnerStatus?: RunnerView["status"];
   overrides?: Partial<SessionView>;
   /** Replaces the default restart, which resolves at once with a starting session. */
@@ -82,7 +83,7 @@ interface FixtureOptions {
 }
 
 async function withFailedTurn(
-  { status, runnerStatus = "online", overrides = {}, restart }: FixtureOptions,
+  { status, runnerStatus = "online", runnerProtocolVersion = 261, overrides = {}, restart }: FixtureOptions,
   check: (view: { id: string; container: HTMLElement; calls: string[]; retry: () => HTMLButtonElement | undefined }) => Promise<void>,
 ) {
   sequence += 1;
@@ -145,7 +146,7 @@ async function withFailedTurn(
     await act(async () => socket.push({
       type: "snapshot",
       capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-      runners: [{ ...runner, status: runnerStatus }], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
+      runners: [{ ...runner, status: runnerStatus, protocolVersion: runnerProtocolVersion }], boxes: [], projects: [], sessions: [session], runs: [], pods: [],
     }));
     await flush();
     const resolve = tail.shift();
@@ -166,7 +167,8 @@ async function withFailedTurn(
   }
 }
 
-const resumable = { driver: "codex-app-server", agentId: "codex", agentName: "Codex" } as const;
+const resumable = { driver: "codex-app-server", agentId: "codex", agentName: "Codex",
+  agentCapabilities: { restartResumesConversation: true } } as const;
 const click = (button: HTMLButtonElement) =>
   act(async () => { button.click(); await new Promise((resolve) => setTimeout(resolve, 5)); });
 const reasonOf = (button: HTMLButtonElement) =>
@@ -233,6 +235,9 @@ test("Retry Turn stays busy until restart and prompt both settle, and a second c
 const viewerReason = "Your Viewer role is read-only.";
 const disabledCases: Array<{ name: string; options: FixtureOptions; reason: string }> = [
   { name: "the runner is offline", options: { status: "failed", runnerStatus: "offline", overrides: resumable }, reason: "Runner is offline." },
+  { name: "an older runner cannot attest a cached restart capability",
+    options: { status: "failed", runnerProtocolVersion: 260, overrides: resumable },
+    reason: "The runner has not confirmed that restarting preserves this conversation. Update the runner, then try again." },
   {
     name: "a Viewer may not prompt",
     options: { status: "idle", overrides: { commandPermissions: { prompt: { allowed: false, reason: viewerReason } } as SessionView["commandPermissions"] } },
@@ -261,21 +266,39 @@ const disabledCases: Array<{ name: string; options: FixtureOptions; reason: stri
   },
   { name: "another turn is running", options: { status: "running" }, reason: "The agent is working on another turn." },
   {
-    name: "a failed Claude Code session's restart would start a new conversation",
-    options: { status: "failed", overrides: { driver: "claude-code" } },
+    name: "a failed Claude Code session has no established conversation",
+    options: { status: "failed", overrides: { driver: "claude-code", agentCapabilities: { restartResumesConversation: false } } },
     reason: "Restarting starts a new conversation. Restart the session, then send the message again.",
   },
   {
     name: "a stopped exec Codex session's restart would start a new conversation",
-    options: { status: "stopped", overrides: { driver: "codex", agentId: "codex", agentName: "Codex" } },
+    options: { status: "stopped", overrides: { driver: "codex", agentId: "codex", agentName: "Codex",
+      agentCapabilities: { restartResumesConversation: false } } },
     reason: "Restarting starts a new conversation. Restart the session, then send the message again.",
   },
 ];
 
 test("a failed Pi session also restarts, resuming its conversation, before the prompt", async () => {
-  await withFailedTurn({ status: "failed", overrides: { driver: "pi", agentId: "pi", agentName: "Pi" } }, async ({ id, calls, retry }) => {
+  await withFailedTurn({ status: "failed", overrides: { ...resumable, driver: "pi", agentId: "pi", agentName: "Pi" } }, async ({ id, calls, retry }) => {
     await click(retry()!);
     assert.deepEqual(calls, [`restart:${id}`, `prompt:${id}:Summarize the release notes:0`]);
+  });
+});
+
+for (const status of ["failed", "stopped"] as const) test(`an established Claude ${status} session restarts before Retry Turn`, async () => {
+  await withFailedTurn({ status, overrides: { driver: "claude-code", agentCapabilities: { restartResumesConversation: true } } },
+    async ({ id, calls, retry }) => {
+      await click(retry()!);
+      assert.deepEqual(calls, [`restart:${id}`, `prompt:${id}:Summarize the release notes:0`]);
+    });
+});
+
+test("a legacy runner's absent restart capability keeps Retry Turn disabled", async () => {
+  await withFailedTurn({ status: "failed", overrides: { driver: "codex-app-server" } }, async ({ calls, retry }) => {
+    assert.equal(retry()!.disabled, true);
+    assert.match(reasonOf(retry()!)?.textContent ?? "", /has not confirmed/u);
+    await click(retry()!);
+    assert.deepEqual(calls, []);
   });
 });
 

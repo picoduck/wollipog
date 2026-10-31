@@ -40,6 +40,7 @@ import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { TextDecoder } from "node:util";
+import { restartResumeId } from "./restart-resume.js";
 import {
   PROTOCOL_VERSION,
   SESSION_HISTORY_PAGE_MAX_BYTES,
@@ -4242,6 +4243,9 @@ export function metaToSnapshot(
   m: SessionMeta,
   controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
 ): SessionSnapshot {
+  const restartCapability = controlPlaneProtocolVersion === null ||
+    runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionRestartResume")
+    ? { restartResumesConversation: !!restartResumeId(m) } : undefined;
   const nativeElicitation = controlPlaneProtocolVersion != null &&
     controlPlaneProtocolVersion >= NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION
     ? m.capabilities?.elicitation
@@ -4272,6 +4276,9 @@ export function metaToSnapshot(
             : {}),
         }
       : undefined;
+  const providerCapabilities = m.driver === "acp" ? m.capabilities : nativeCapabilities;
+  const agentCapabilities = providerCapabilities || restartCapability
+    ? { ...providerCapabilities, ...restartCapability } : undefined;
   return {
     id: m.sessionId,
     controlPlaneLaunchId: m.controlPlaneLaunchId,
@@ -4324,11 +4331,9 @@ export function metaToSnapshot(
     config,
     resolvedModel: m.resolvedModel,
     acpSessionContext: m.acpSessionOverrides,
-    // ACP owns complete per-session controls. Native drivers publish only the elicitation overlay;
+    // ACP owns complete per-session controls. Native drivers publish session overlays and lifecycle facts;
     // their model/effort/mode/modalities remain live runner-catalog truth after CLI upgrades.
-    agentCapabilities: m.driver === "acp"
-      ? m.capabilities
-      : nativeCapabilities,
+    agentCapabilities,
     preview: m.preview,
     pendingApproval: m.pendingApproval,
     // A supporting peer always hears the current truth, including its absence: `null` is how a
