@@ -17034,6 +17034,12 @@ export class SessionsService {
     }
   }
 
+  /** Side chats use archived only to stay out of ordinary lists, not as a Stop intent.
+   * Explicit Stops and archive-after-Stop requests are enforced separately for them too. */
+  private archivedSessionRequiresStop(session: SessionView): boolean {
+    return session.archived && this.db.sideChatParent(session.id) === null;
+  }
+
   /**
    * On runner reconnect, reconcile DB session state with the processes the runner
    * still has alive: restore sessions that were only marked stopped because of a
@@ -17056,7 +17062,7 @@ export class SessionsService {
         }
         continue;
       }
-      if (liveSet.has(s.id) && s.archived) {
+      if (liveSet.has(s.id) && this.archivedSessionRequiresStop(s)) {
         this.requestStop(s, now, true);
         continue;
       }
@@ -17333,7 +17339,7 @@ export class SessionsService {
         if (changedSinceInventory(snap.id)) continue;
         const existing = this.db.getSession(snap.id);
         campaignBefore(existing);
-        if (existing?.archived && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
+        if (existing && this.archivedSessionRequiresStop(existing) && !isTerminal(snap.status) && !stopIntentIds.has(snap.id)) {
           this.requestStop(existing, now, true);
           recordAppliedVersion(snap.id);
           continue;
@@ -17488,7 +17494,7 @@ export class SessionsService {
       ? { ...snapshot, costUsd: existing.costUsd }
       : snapshot;
     const campaignBefore = this.runtimeCampaignBefore(existing, runtimeSnapshot, batch);
-    if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
+    if (this.archivedSessionRequiresStop(existing) && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
     }
@@ -17572,7 +17578,7 @@ export class SessionsService {
     const existing = this.db.getSession(sessionId);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(sessionId) ||
         this.pendingMediaLifecycle(existing) || this.db.hasSessionStopIntent(sessionId) ||
-        (existing.archived && !isTerminal(snapshot.status))) return null;
+        (this.archivedSessionRequiresStop(existing) && !isTerminal(snapshot.status))) return null;
     // Role-conversion reconciliation acts only on an unapplied conversion, and it can publish.
     const conversion = this.db.sessionRoleConversion(sessionId);
     if (conversion && conversion.state !== "applied") return null;
