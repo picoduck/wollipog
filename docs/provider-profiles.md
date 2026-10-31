@@ -409,6 +409,15 @@ profile ids or the refusal code. It holds no credential content or path. A refus
 a lost reply leaves it pending and the audit `unknown`, and the account report completes the grant
 if the import ran.
 
+The runner records the new account through the same fenced configuration publication as Add
+Account (#3506): it captures the configuration's preimage, then publishes. Only a confirmed
+publication is a success. A publication that definitely did not happen is a refusal (`FAILED`) that
+drops this control plane's grant from the new HOME's marker. One whose outcome is unknown (including
+one published but not confirmed) answers `PUBLICATION_UNKNOWN`: the runner stops using the grant
+without removing it from the marker, the control plane leaves the grant pending and the audit
+`unknown`, and an account report that names the profile completes it. Neither case is reported as a
+copied account.
+
 ### Compatibility
 
 A v260 runner on a supported host reports `runtime.providerCredentialImport` (`{ version: 1,

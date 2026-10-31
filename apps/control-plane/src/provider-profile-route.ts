@@ -595,6 +595,16 @@ export function registerProviderProfileRoutes(
       deps.db.settleProviderCredentialImport(importId, { status: "unknown" }, now());
       return reply.code(502).send({ error: "unexpected runner reply" });
     }
+    if (!result.ok && result.code === "PUBLICATION_UNKNOWN") {
+      // The runner copied the credential but cannot say whether its configuration recorded the
+      // account (#3506). Like a lost reply, the grant stays pending: an account report naming the
+      // profile completes it. Never reported as a success.
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown" }, now());
+      return reply.code(409).send({
+        error: boundedRunnerText(result.error) ?? "The sign-in was copied, but whether the account was recorded is unknown.",
+        code: "PUBLICATION_UNKNOWN", status: "pending", grantId,
+      });
+    }
     if (!result.ok || typeof result.accountId !== "string" || !ACCOUNT_ID.test(result.accountId) ||
         typeof result.profileId !== "string" || !PROFILE_ID.test(result.profileId)) {
       settleGrant({ started: false });

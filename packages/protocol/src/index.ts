@@ -11082,14 +11082,17 @@ export interface ImportProviderCredentialMessage {
  * - `SOURCE_UNSUPPORTED`: the sign-in is not an API key in file storage (for example ChatGPT).
  * - `SOURCE_CHANGED`: it changed while it was read.
  * - `SOURCE_NOT_GRANTED`: it is a provider profile this control plane may not use.
+ * - `PUBLICATION_UNKNOWN`: the credential was copied, but whether the runner configuration recorded
+ *   the new account is unknown (#3506). Not a success: the runner stops using the grant without
+ *   revoking it, and an account report that names the profile completes the grant.
  * - `FAILED`: anything else. */
 export type ProviderCredentialImportCode =
   | "UNSUPPORTED" | "LABEL_IN_USE" | "SOURCE_NOT_FOUND" | "SOURCE_MISSING" | "SOURCE_IN_USE" | "SOURCE_UNSAFE"
-  | "SOURCE_FOREIGN" | "SOURCE_UNSUPPORTED" | "SOURCE_CHANGED" | "SOURCE_NOT_GRANTED" | "FAILED";
+  | "SOURCE_FOREIGN" | "SOURCE_UNSUPPORTED" | "SOURCE_CHANGED" | "SOURCE_NOT_GRANTED" | "PUBLICATION_UNKNOWN" | "FAILED";
 
 export const PROVIDER_CREDENTIAL_IMPORT_CODES: readonly ProviderCredentialImportCode[] = [
   "UNSUPPORTED", "LABEL_IN_USE", "SOURCE_NOT_FOUND", "SOURCE_MISSING", "SOURCE_IN_USE", "SOURCE_UNSAFE",
-  "SOURCE_FOREIGN", "SOURCE_UNSUPPORTED", "SOURCE_CHANGED", "SOURCE_NOT_GRANTED", "FAILED",
+  "SOURCE_FOREIGN", "SOURCE_UNSUPPORTED", "SOURCE_CHANGED", "SOURCE_NOT_GRANTED", "PUBLICATION_UNKNOWN", "FAILED",
 ];
 
 /** Protocol v260 (#3719): the import's outcome. A success names the new account and its profile;

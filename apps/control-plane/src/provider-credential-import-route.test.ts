@@ -165,3 +165,19 @@ test("the confirmation must acknowledge the import and name the new profile exac
     null, [],
   ]) assert.equal(parseProviderCredentialImport(value).ok, false, JSON.stringify(value));
 });
+
+test("an import whose account publication is unknown is never a success and leaves its grant pending (#3506)", async () => {
+  const f = await fixture({ handler: (_runnerId, message) => ({ type: "import_provider_credential_result",
+    requestId: (message as { requestId: string }).requestId, ok: false, code: "PUBLICATION_UNKNOWN",
+    error: "runner configuration publication is unknown; credentials and evidence were retained" }) });
+  try {
+    const response = await f.app.inject({ method: "POST", url: IMPORT, payload: body() });
+    assert.equal(response.statusCode, 409);
+    const grantId = (f.sent[0] as { profileGrantId: string }).profileGrantId;
+    assert.deepEqual(response.json(), { error: "runner configuration publication is unknown; credentials and evidence were retained",
+      code: "PUBLICATION_UNKNOWN", status: "pending", grantId });
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "pending", "not revoked: the account may have been recorded");
+    const [row] = importsOf(f.db);
+    assert.deepEqual([row!.status, row!.destination_profile_id, row!.result_code], ["unknown", null, null]);
+  } finally { await f.close(); }
+});

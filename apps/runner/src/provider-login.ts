@@ -579,7 +579,7 @@ export class ProviderLoginSupervisor {
     const account: RunnerProviderAccount = { id: accountId, label, provider: "codex", directory: join(profiles.root, profileId), profileId };
     // Reserved with no await before it, so overlapping imports of one source or label are refused.
     this.importing.set(accountId, { persistAccount: true, provider: "codex", label, sourceKey });
-    const settle = (recorded: boolean) => profiles.settle({ home: account.directory, provider: "codex", profileId,
+    const settle = (recorded: boolean | "unknown") => profiles.settle({ home: account.directory, provider: "codex", profileId,
       grantId: input.profileGrantId, recorded, homeRemoved: false }).catch(() => {});
     try {
       try {
@@ -594,11 +594,22 @@ export class ProviderLoginSupervisor {
         await settle(false);
         throw new ProviderCredentialImportError("FAILED", "The provider sign-in supervisor has stopped.");
       }
+      // The account is recorded through the fenced publication (#3506), exactly as Add Account
+      // records one. Only a confirmed publication is a success.
       try {
-        this.writeAccounts(this.options.configPath, [...this.options.accounts, account]);
-      } catch {
+        const preimage = captureProviderAccountsConfigPreimage(this.options.configPath, this.options.accounts);
+        this.writeAccounts(this.options.configPath, [...this.options.accounts, account], preimage);
+      } catch (error) {
+        const copied = "The sign-in was copied, but the runner configuration could not be updated.";
+        if (accountConfigPublicationMayHaveOccurred(error)) {
+          // The account may already be in the configuration: stop using the grant here without
+          // revoking a marker grant the published account may reference, and say the outcome is
+          // unknown rather than report a success or a clean refusal.
+          await settle("unknown");
+          throw new ProviderCredentialImportError("PUBLICATION_UNKNOWN", accountConfigPublicationErrorMessage(error, copied));
+        }
         await settle(false);
-        throw new ProviderCredentialImportError("FAILED", "The sign-in was copied, but the runner configuration could not be updated.");
+        throw new ProviderCredentialImportError("FAILED", accountConfigPublicationErrorMessage(error, copied));
       }
       this.options.accounts.push(account);
       await settle(true);

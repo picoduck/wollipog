@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test, type TestContext } from "node:test";
 import type { RunnerProviderAccount } from "./config.js";
+import { AccountConfigPublicationError } from "./provider-account-config-publication.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import {
   ProviderCredentialImportError, ProviderLoginSupervisor,
@@ -19,13 +20,16 @@ function importFixture(t: TestContext, options: {
   accounts?: RunnerProviderAccount[];
   imports?: boolean;
   writeFails?: boolean;
+  writeError?: Error;
   platform?: NodeJS.Platform;
 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-login-import-")));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const configPath = join(root, "runner.config.json");
-  writeFileSync(configPath, `${JSON.stringify({ runnerId: "machine" })}\n`);
   const accounts: RunnerProviderAccount[] = options.accounts ?? [];
+  // The configuration records the accounts the supervisor starts with, as a runner's does; a
+  // publication refuses a preimage that differs from them (#3506).
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "machine", ...(accounts.length ? { providerAccounts: accounts } : {}) })}\n`, { mode: 0o600 });
   const copies: Array<Parameters<ProviderCredentialImportOptions["copyCodex"]>[0]> = [];
   const settled: Array<Parameters<ProviderLoginProfileOptions["settle"]>[0]> = [];
   const added: string[] = [];
@@ -39,7 +43,8 @@ function importFixture(t: TestContext, options: {
       defaultCodexHome: () => "defaultHome" in options ? options.defaultHome : { home: join(root, "user"), layout: "user_home" },
       copyCodex: async (input) => { copies.push(input); await options.copy?.(input); },
     } }),
-    ...(options.writeFails ? { writeAccounts: (() => { throw new Error("disk full"); }) as never } : {}),
+    ...(options.writeFails || options.writeError
+      ? { writeAccounts: (() => { throw options.writeError ?? new Error("disk full"); }) as never } : {}),
     ...(options.platform ? { platform: options.platform } : {}),
   });
   return { root, configPath, supervisor, accounts, copies, settled, added, profilesRoot };
@@ -94,11 +99,10 @@ test("unsupported providers, hosts and sources are refused before anything is co
 test("a second import of the same source, or of the same label, is refused while one runs", async (t) => {
   let finish!: () => void;
   const gate = new Promise<void>((resolve) => { finish = resolve; });
-  const f = importFixture(t, { copy: () => gate });
+  const f = importFixture(t, { copy: () => gate, accounts: [{ id: "other", label: "Other", provider: "codex", directory: "/other" }] });
   const first = f.supervisor.importAccount({ provider: "codex", label: "First", source: { kind: "default_home" }, profileGrantId: GRANT });
   await assert.rejects(f.supervisor.importAccount({ provider: "codex", label: "Second", source: { kind: "default_home" }, profileGrantId: GRANT }),
     refused("SOURCE_IN_USE"));
-  f.accounts.push({ id: "other", label: "Other", provider: "codex", directory: "/other" });
   await assert.rejects(f.supervisor.importAccount({ provider: "codex", label: "first", source: { kind: "account", accountId: "other" }, profileGrantId: GRANT }),
     refused("LABEL_IN_USE"));
   finish();
@@ -132,4 +136,34 @@ test("a copy whose account cannot be recorded settles the grant as unrecorded", 
   assert.deepEqual(f.accounts, []);
   assert.deepEqual(f.settled.map((s) => s.recorded), [false]);
   assert.deepEqual(f.added, []);
+});
+
+test("an unpublished account write is a refusal, and an unknown one is never reported as a success (#3506)", async (t) => {
+  const refused = importFixture(t, { writeError: new AccountConfigPublicationError("not_published", "SOURCE_CHANGED") });
+  await assert.rejects(refused.supervisor.importAccount({ provider: "codex", label: "Work", source: { kind: "default_home" }, profileGrantId: GRANT }),
+    (error: unknown) => error instanceof ProviderCredentialImportError && error.code === "FAILED" &&
+      error.message === "The sign-in was copied, but the runner configuration could not be updated.");
+  assert.deepEqual(refused.accounts, []);
+  assert.deepEqual(refused.settled.map((s) => s.recorded), [false], "a definitely unpublished account drops the grant");
+  assert.deepEqual(refused.added, []);
+
+  for (const publication of ["unknown", "committed"] as const) {
+    const f = importFixture(t, { writeError: new AccountConfigPublicationError(publication, "IO") });
+    await assert.rejects(f.supervisor.importAccount({ provider: "codex", label: "Work", source: { kind: "default_home" }, profileGrantId: GRANT }),
+      (error: unknown) => error instanceof ProviderCredentialImportError && error.code === "PUBLICATION_UNKNOWN" &&
+        error.message === new AccountConfigPublicationError(publication, "IO").message, publication);
+    assert.deepEqual(f.accounts, [], `${publication}: not admitted as a usable account here`);
+    assert.deepEqual(f.settled.map((s) => s.recorded), ["unknown"], `${publication}: settled as unknown, not revoked`);
+    assert.deepEqual(f.added, [], `${publication}: no account report claims it`);
+  }
+});
+
+test("a copied account is published through the fenced configuration write", async (t) => {
+  const f = importFixture(t);
+  const first = await f.supervisor.importAccount({ provider: "codex", label: "Work", source: { kind: "default_home" }, profileGrantId: GRANT });
+  assert.deepEqual(JSON.parse(readFileSync(f.configPath, "utf8")).providerAccounts.map((a: { id: string }) => a.id), [first.accountId]);
+  // A second publication starts from the first one's recorded preimage.
+  const second = await f.supervisor.importAccount({ provider: "codex", label: "Second", source: { kind: "default_home" }, profileGrantId: GRANT });
+  assert.deepEqual(JSON.parse(readFileSync(f.configPath, "utf8")).providerAccounts.map((a: { id: string }) => a.id),
+    [first.accountId, second.accountId]);
 });
