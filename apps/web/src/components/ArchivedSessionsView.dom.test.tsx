@@ -380,7 +380,7 @@ test("Filters applies choices immediately, includes searchable long facets, and 
   await act(async () => { fireDomEvent.click(button(dialog, "Done")); });
   await new Promise((resolve) => setTimeout(resolve, 10));
   assertNoDomNode(fixture.container.querySelector('[role="dialog"]'), "Done dismisses Filters");
-  assert.equal(domWindow.document.activeElement === trigger, true);
+  assert.equal((domWindow.document as unknown as Document).activeElement === trigger, true);
   await fixture.unmount();
 });
 
