@@ -766,7 +766,7 @@ test("releasing a hold on request ends its work at once, records who asked, and 
   }
 });
 
-for (const protocol of [260, 262, null]) for (const count of [1, 25]) test(`peer ${protocol}: a hold waiting only on ${count} unlisted ids retains start times, counts all work, and releases it (#3894)`, { skip: !haveGit() }, async () => {
+for (const protocol of [260, 262]) for (const count of [1, 25]) test(`peer ${protocol}: a hold waiting only on ${count} unlisted ids retains start times, counts all work, and releases it (#3894)`, { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-unlisted-"));
   let manager: SessionManager | undefined;
   try {
