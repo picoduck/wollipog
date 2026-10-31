@@ -51,7 +51,7 @@ function snapshot(home: string): Record<string, string> {
     if (!existsSync(dir)) return;
     for (const entry of readdirSync(dir, { withFileTypes: true })) {
       const relative = `${prefix}${entry.name}`;
-      if (relative.startsWith(`${PROVIDER_PROFILE_DIRECTORY}/provider-home-leases-v1`)) continue;
+      if (relative.endsWith(`${PROVIDER_PROFILE_DIRECTORY}/provider-home-leases-v1`)) continue;
       const path = join(dir, entry.name);
       if (entry.isDirectory()) walk(path, `${relative}/`);
       else out[relative] = `${statSync(path).mode & 0o777}:${readFileSync(path, "utf8")}`;
@@ -147,6 +147,25 @@ test("a source this runner holds, even by its own reference, is refused rather t
   assert.equal(await reference.release(), true);
   await m.leases.importCodexCredential(home, "codex_home", m.profiles, PROFILE, GRANT);
   assert.equal(existsSync(join(m.profiles, PROFILE, "auth.json")), true);
+});
+
+test("a user HOME's .codex directory is admitted as a source of its own", posixOnly, async (t) => {
+  // An account may name ~/.codex itself as its HOME: its lease and its profile apply too.
+  const m = machine(t);
+  const codex = codexDirectory(join(m.user, ".codex"), { "auth.json": API_KEY_RECORD });
+  const reference = await m.leases.acquireHomeReference(codex, "codex");
+  const before = snapshot(m.user);
+  await assert.rejects(m.leases.importCodexCredential(m.user, "user_home", m.profiles, PROFILE, GRANT), refused("import_source_held"));
+  assert.deepEqual(snapshot(m.user), before);
+  assert.equal(existsSync(join(m.profiles, PROFILE)), false);
+  assert.equal(await reference.release(), true);
+
+  writeProviderProfileMarker(codex, { version: 1, kind: "wollipog-provider-profile", profileId: SOURCE_PROFILE, provider: "codex",
+    createdAt: "2026-10-30T00:00:00.000Z", grants: [] });
+  const marked = snapshot(m.user);
+  await assert.rejects(m.leases.importCodexCredential(m.user, "user_home", m.profiles, PROFILE, GRANT), refused("profile_not_granted"));
+  assert.deepEqual(snapshot(m.user), marked);
+  assert.equal(existsSync(join(m.profiles, PROFILE)), false);
 });
 
 test("a source another runner holds is refused with that lease's code", posixOnly, async (t) => {

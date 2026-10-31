@@ -361,21 +361,25 @@ is no inspect-then-acquire gap:
    Agent TUI or another import of it refuses the import instead of lending its reference.
 2. Its lease is taken exclusively, with the source's own profile context, so another runner's or
    control plane's lease, and a profile this control plane is not granted, refuse it as an
-   acquisition would.
-3. Under that lease the credential directory and `auth.json` are read without following links and
+   acquisition would. For the runner user's own HOME without `CODEX_HOME`, the lease covers the
+   HOME, and its `.codex` directory is admitted the same way with its own profile context, since a
+   configured account may name `~/.codex` itself as its HOME.
+3. Under those leases the credential directory and `auth.json` are read without following links and
    with their identities pinned: a real directory and a single-link regular file owned by the
    runner's user, the directory not group- or world-writable and the file private (no group or
-   other permission bits), at most 16 KiB, and unchanged across the read.
+   other permission bits), at most 16 KiB, and unchanged across the read. The source directories
+   and files are checked unchanged once more. This is the last check that can refuse.
 4. Only then is the new managed HOME created (as for Add Account), its first marker written with
    this control plane's grant, and the record published by an exclusive 0600 temporary file, fsync,
-   rename and directory fsync. The source is checked unchanged immediately before and after.
-5. The source's lease is released.
+   rename and directory fsync, while the source is still held.
+5. The source's leases are released.
 
-A refusal before step 4 leaves both HOMEs unchanged; the source's lease journal records the
-acquisition and release, which is bookkeeping, not a credential change. A failure after the new
-HOME is created retains it unrecorded, without this control plane's grant, as a failed sign-in
-retains its HOME. A Wollipog lease does not stop an ordinary terminal process from changing the
-source; the pinned identities refuse a change they observe.
+Every refusal happens before step 4, so it leaves both HOMEs unchanged; the source's lease journal
+records the acquisition and release, which is bookkeeping, not a credential change. A failure in
+step 4 is an I/O failure (`FAILED`), which retains the new HOME unrecorded, without this control
+plane's grant, as a failed sign-in retains its HOME. A Wollipog lease does not stop an ordinary
+terminal process from changing the source; the pinned identities refuse a change they observe, and a
+change after the last check is no different from a change after the import.
 
 ### Authorization and Audit
 
@@ -386,14 +390,14 @@ source; the pinned identities refuse a change they observe.
   "provider": "codex",
   "label": "Work",
   "source": { "kind": "default_home" },
-  "confirmation": { "acknowledgeCredentialImport": true, "sourceLabel": "This Machine's Codex sign-in", "destinationLabel": "Work" }
+  "confirmation": { "acknowledgeCredentialImport": true, "sourceLabel": "This Machine's Codex Sign-In", "destinationLabel": "Work" }
 }
 ```
 
 `source` is `{ "kind": "default_home" }` or `{ "kind": "account", "accountId": "<id>" }`; nothing
 else, and never a path, is accepted. The runner resolves the path itself. The confirmation must
 name the source exactly as the person confirmed it (the account's label, or "This Machine's Codex
-sign-in") and the new profile's label; a stale or different name is 409 `CONFIRMATION_MISMATCH`.
+Sign-In") and the new profile's label; a stale or different name is 409 `CONFIRMATION_MISMATCH`.
 
 The route needs a human Owner or Admin who can access the Machine, so the central gate confines it
 to the personal control-plane organization; members, agent credentials and other organizations'

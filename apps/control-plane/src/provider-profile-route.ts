@@ -2,10 +2,11 @@ import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   PROVIDER_CREDENTIAL_IMPORT_CODES,
+  PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
+  runnerSupportsProviderCredentialImport,
   TERMINAL_STATUSES,
-  validProviderCredentialImportCapability,
   type ProviderAccountDefinition,
   type ProviderCredentialImportSource,
   type ProviderProfileGrantView,
@@ -52,9 +53,6 @@ export function parseProviderHomeLeaseRecovery(body: unknown): { ok: true; stale
   return { ok: true, staleTipHash };
 }
 
-/** #3719: how a confirmation names the runner user's own Codex HOME as an import source. */
-export const DEFAULT_CODEX_SIGN_IN_LABEL = "This Machine's Codex sign-in";
-
 /** #3719: an import request. The confirmation must name the source (the account's label, or the
  * Machine's own sign-in) and the new profile's label exactly as the person confirmed them. */
 export function parseProviderCredentialImport(body: unknown):
@@ -84,12 +82,6 @@ export function parseProviderCredentialImport(body: unknown):
     return { ok: false, error: "confirmation must acknowledge the import and name its source and the new profile" };
   }
   return { ok: true, provider, label: label.trim(), source: parsedSource, sourceLabel: confirmed.sourceLabel };
-}
-
-/** #3719: whether a runner can receive an import request: v260 and a reported capability. */
-export function runnerSupportsProviderCredentialImport(runner: { protocolVersion?: number | null; runtime?: { providerCredentialImport?: unknown } | null }): boolean {
-  return runnerSupportsProtocol(runner.protocolVersion, "providerCredentialImport") &&
-    validProviderCredentialImportCapability(runner.runtime?.providerCredentialImport);
 }
 
 const IMPORT_CODES = new Set<string>(PROVIDER_CREDENTIAL_IMPORT_CODES);
@@ -545,7 +537,7 @@ export function registerProviderProfileRoutes(
       if (parsed.sourceLabel !== account.label) {
         return reply.code(409).send({ error: "The confirmation names a different source. Review the source and confirm again.", code: "CONFIRMATION_MISMATCH" });
       }
-    } else if (parsed.sourceLabel !== DEFAULT_CODEX_SIGN_IN_LABEL) {
+    } else if (parsed.sourceLabel !== PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL) {
       return reply.code(409).send({ error: "The confirmation names a different source. Review the source and confirm again.", code: "CONFIRMATION_MISMATCH" });
     }
     const requestId = `provider_credential_import_${randomUUID()}`;

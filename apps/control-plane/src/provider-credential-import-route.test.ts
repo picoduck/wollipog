@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import { PROTOCOL_VERSION, type ControlPlaneToRunner, type ProviderAccountDefinition, type RunnerMetadata } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL as DEFAULT_CODEX_SIGN_IN_LABEL, type ControlPlaneToRunner, type ProviderAccountDefinition, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub, RunnerRequestResult } from "./hub.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
-import { DEFAULT_CODEX_SIGN_IN_LABEL, parseProviderCredentialImport, reconcileProviderProfileGrants, registerProviderProfileRoutes } from "./provider-profile-route.js";
+import { parseProviderCredentialImport, reconcileProviderProfileGrants, registerProviderProfileRoutes } from "./provider-profile-route.js";
 
 const PROFILE = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
 const IMPORT = "/api/runners/runner-a/provider-imports";

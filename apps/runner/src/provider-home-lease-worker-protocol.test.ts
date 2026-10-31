@@ -294,7 +294,10 @@ test("an import frame is exact: Codex only, a known layout, an absolute destinat
     ["a missing destination root", { method: "profile_import", home: "/private/home", provider: "codex", layout: "user_home", profileId: PROFILE, grantId: GRANT }],
     ["an extra key", { ...frame, path: "/private/home/.codex/auth.json" }],
     ["a malformed profile context", { ...frame, profile: { controlPlaneSupportsProfiles: "yes", activeProfileIds: [] } }],
+    ["a credential context for an account HOME", { ...frame, layout: "codex_home", credentialProfile: { controlPlaneSupportsProfiles: true, activeProfileIds: [] } }],
+    ["a malformed credential context", { ...frame, credentialProfile: { activeProfileIds: [] } }],
   ];
+  assert.equal(validLeaseWorkerOperation({ ...frame, credentialProfile: { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] } }), true);
   for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
 });
 
@@ -303,7 +306,7 @@ test("an import carries the source's dispatch-time profile context and its typed
   let port!: Port;
   const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
     controlPlaneInstanceId: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", profileAccess: () => access,
-    expectedProfileIdForHome: (home) => home === "/private/account" ? PROFILE : undefined,
+    expectedProfileIdForHome: (home) => home === "/private/account" ? PROFILE : home === "/private/home/.codex" ? OTHER_PROFILE : undefined,
     workerFactoryForTest: value => port = new Port(value.epoch as string),
   });
   const imported = registry.importCodexCredential("/private/account", "codex_home", "/private/profiles", OTHER_PROFILE, GRANT);
@@ -315,9 +318,12 @@ test("an import carries the source's dispatch-time profile context and its typed
   for (const kind of ["receipt", "done"] as const) port.reply(kind, op, { ok: false, value: false, error: "import_source_unsupported" });
   await assert.rejects(imported, (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "import_source_unsupported" &&
     error.message === LEASE_WORKER_ERRORS.import_source_unsupported);
-  // A successful import replies with no profile id: the parent chose it.
+  // A user_home import also carries its credential directory's own context, since an account may
+  // name `.codex` itself. A successful import replies with no profile id: the parent chose it.
   const second = registry.importCodexCredential("/private/home", "user_home", "/private/profiles", OTHER_PROFILE, GRANT);
   const op2 = port.execute(1);
+  assert.deepEqual((op2.operation as { credentialProfile?: unknown }).credentialProfile,
+    { expectedId: OTHER_PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] });
   port.reply("receipt", op2); port.reply("done", op2);
   await second;
   const close = registry.close(); const shutdown = port.execute(2);

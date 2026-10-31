@@ -1023,44 +1023,34 @@ export class ProviderHomeLeaseRegistry {
    * neither held nor being acquired by this registry, so a running session, sign-in or Agent TUI of
    * this runner refuses the import instead of lending its reference. Its lease is then taken
    * exclusively with the source's own profile context, so another owner's lease and a profile not
-   * granted here refuse exactly as an acquisition would. The credential is read and validated while
-   * that lease is held; only after the source is admitted is the destination created, given its
-   * first marker and a fresh API-key-only record. The source stays held until the destination is
-   * published and is checked unchanged before and after. Refusals before the destination is created
-   * leave both HOMEs unchanged apart from the source's lease-journal bookkeeping.
+   * granted here refuse exactly as an acquisition would. With `user_home` the credential directory
+   * `.codex` is admitted the same way, with its own context, since an account may name it as its
+   * HOME. The credential is read and validated while those leases are held, and the source is
+   * checked unchanged once more; only then is the destination created, given its first marker and a
+   * fresh API-key-only record, before the source is released. Every refusal therefore precedes the
+   * destination and leaves both HOMEs unchanged apart from the source's lease-journal bookkeeping;
+   * a later failure is an I/O failure that retains the new, unrecorded HOME.
    */
   importCodexCredentialWhileHeld(input: {
-    sourceHome: string; layout: CodexCredentialLayout; sourceProfile?: ProviderProfileAccess;
+    sourceHome: string; layout: CodexCredentialLayout; sourceProfile?: ProviderProfileAccess; credentialProfile?: ProviderProfileAccess;
     destinationRoot: string; profileId: string; grant: ProviderProfileGrant;
   }): void {
-    const { sourceHome } = input;
-    if (!isAbsolute(sourceHome)) throw new ProviderCredentialImportRefusal("import_source_unsafe");
-    let root: Stats;
-    try { root = lstatSync(sourceHome); } catch (error) {
-      throw new ProviderCredentialImportRefusal((error as NodeJS.ErrnoException).code === "ENOENT" ? "import_source_missing" : "import_source_unsafe");
-    }
-    if (root.isSymbolicLink() || !root.isDirectory()) throw new ProviderCredentialImportRefusal("import_source_unsafe");
-    let home: string;
-    try { home = realpathSync(sourceHome); } catch { throw new ProviderCredentialImportRefusal("import_source_missing"); }
-    const busyHere = (path: string) => this.held.has(path) || this.failedInitializations.has(path) ||
-      this.pendingCompletions.has(path) || this.pendingMigrations.has(path);
-    if (busyHere(home)) throw new ProviderCredentialImportRefusal("import_source_held");
-    const marker = readProviderProfileMarker(home);
-    if (marker.state === "present" && marker.marker.provider !== "codex") throw new ProviderCredentialImportRefusal("import_source_foreign");
-    const unchangedRoot = () => {
-      let now: Stats;
-      try { now = lstatSync(sourceHome); } catch { throw new ProviderCredentialImportRefusal("import_source_changed"); }
-      if (now.isSymbolicLink() || now.dev !== root.dev || now.ino !== root.ino) throw new ProviderCredentialImportRefusal("import_source_changed");
-    };
-    const source = this.acquireReceiptFor(sourceHome, "codex", input.sourceProfile, undefined, false);
-    const acquired = this.lastAcquisitionHome;
-    const dropSource = (cause?: unknown) => {
-      if (!source.cancel()) throw new Error("provider credential import could not drop its source reference", { cause });
+    const admitted: Array<{ receipt: { cancel: () => boolean }; unchanged: () => void }> = [];
+    const drop = (cause?: unknown) => {
+      let dropped = true;
+      for (const entry of admitted.reverse()) dropped = entry.receipt.cancel() && dropped;
+      admitted.length = 0;
+      if (!dropped) throw new Error("provider credential import could not drop its source reference", { cause });
     };
     try {
-      if (!source.first || acquired !== home) throw new ProviderCredentialImportRefusal(source.first ? "import_source_changed" : "import_source_held");
-      unchangedRoot();
-      const credential = readCodexCredentialSource(input.layout === "codex_home" ? home : join(home, ".codex"));
+      if (!isAbsolute(input.sourceHome)) throw new ProviderCredentialImportRefusal("import_source_unsafe");
+      const home = this.admitImportSource(input.sourceHome, input.sourceProfile, admitted);
+      const credentialDirectory = input.layout === "codex_home" ? home
+        : this.admitImportSource(join(home, ".codex"), input.credentialProfile, admitted);
+      const credential = readCodexCredentialSource(credentialDirectory);
+      // The last source check: nothing after it refuses, so a refusal never leaves a destination.
+      for (const entry of admitted) entry.unchanged();
+      credential.verifyUnchanged();
       const destination = createManagedProviderProfileHome(input.destinationRoot, input.profileId);
       const target = this.acquireReceiptFor(destination, "codex", PROFILE_CHANGE);
       const destinationHome = this.lastAcquisitionHome!;
@@ -1069,21 +1059,47 @@ export class ProviderHomeLeaseRegistry {
         const created = createProviderProfileMarker(readProviderProfileMarker(destinationHome, { provider: "codex" }),
           { provider: "codex", profileId: input.profileId, grant: input.grant });
         this.writeProfileMarkerWhileHeld(destinationHome, created.marker);
-        unchangedRoot();
-        credential.verifyUnchanged();
         publishCodexCredential(destinationHome, codexApiKeyRecord(credential.apiKey));
-        // The source stays held through publication; a change seen now leaves the copy unrecorded.
-        credential.verifyUnchanged();
       } catch (error) {
         if (!target.cancel()) throw new Error("provider credential import could not drop its new profile's reference", { cause: error });
         throw error;
       }
       if (!target.cancel()) throw new Error("provider credential import could not drop its new profile's reference");
     } catch (error) {
-      dropSource(error);
+      drop(error);
       throw error;
     }
-    dropSource();
+    drop();
+  }
+
+  /** #3719: admit one existing source directory of an import: a real directory that this registry
+   * neither holds nor is acquiring, without another provider's marker, leased exclusively and
+   * without creating it. Its receipt joins `admitted`; returns the canonical path. */
+  private admitImportSource(requested: string, profile: ProviderProfileAccess | undefined,
+    admitted: Array<{ receipt: { cancel: () => boolean }; unchanged: () => void }>): string {
+    let root: Stats;
+    try { root = lstatSync(requested); } catch (error) {
+      throw new ProviderCredentialImportRefusal((error as NodeJS.ErrnoException).code === "ENOENT" ? "import_source_missing" : "import_source_unsafe");
+    }
+    if (root.isSymbolicLink() || !root.isDirectory()) throw new ProviderCredentialImportRefusal("import_source_unsafe");
+    let home: string;
+    try { home = realpathSync(requested); } catch { throw new ProviderCredentialImportRefusal("import_source_missing"); }
+    if (this.held.has(home) || this.failedInitializations.has(home) || this.pendingCompletions.has(home) || this.pendingMigrations.has(home)) {
+      throw new ProviderCredentialImportRefusal("import_source_held");
+    }
+    const marker = readProviderProfileMarker(home);
+    if (marker.state === "present" && marker.marker.provider !== "codex") throw new ProviderCredentialImportRefusal("import_source_foreign");
+    const receipt = this.acquireReceiptFor(requested, "codex", profile, undefined, false);
+    const unchanged = () => {
+      let now: Stats;
+      try { now = lstatSync(requested); } catch { throw new ProviderCredentialImportRefusal("import_source_changed"); }
+      if (now.isSymbolicLink() || now.dev !== root.dev || now.ino !== root.ino) throw new ProviderCredentialImportRefusal("import_source_changed");
+    };
+    admitted.push({ receipt, unchanged });
+    if (!receipt.first) throw new ProviderCredentialImportRefusal("import_source_held");
+    if (this.lastAcquisitionHome !== home) throw new ProviderCredentialImportRefusal("import_source_changed");
+    unchanged();
+    return home;
   }
 
   /** Profile grants are checked against the canonical HOME before any lease journal I/O, and again

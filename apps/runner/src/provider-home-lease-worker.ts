@@ -107,7 +107,8 @@ export function runProviderHomeLeaseWorker(): void {
           const controlPlaneInstanceId = options.controlPlaneInstanceId;
           if (!controlPlaneInstanceId) throw new Error("provider profile changes require an attested control-plane instance");
           registry.importCodexCredentialWhileHeld({ sourceHome: op.home, layout: op.layout,
-            ...(op.profile ? { sourceProfile: op.profile } : {}), destinationRoot: op.destinationRoot, profileId: op.profileId,
+            ...(op.profile ? { sourceProfile: op.profile } : {}), ...(op.credentialProfile ? { credentialProfile: op.credentialProfile } : {}),
+            destinationRoot: op.destinationRoot, profileId: op.profileId,
             grant: { controlPlaneInstanceId, grantId: op.grantId, grantedAt: new Date().toISOString() } });
           reply.value = true;
         } else if (op.method === "lease_inspect") {

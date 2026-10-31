@@ -3800,6 +3800,17 @@ export function validProviderCredentialImportCapability(value: unknown): value i
     v.providers.length === 1 && v.providers[0] === "codex";
 }
 
+/** #3719: whether a runner can receive an import request: v260 and a reported capability. The
+ * control plane gates the route and the command on it, and the web the offer. */
+export function runnerSupportsProviderCredentialImport(runner: { protocolVersion?: number | null; runtime?: { providerCredentialImport?: unknown } | null }): boolean {
+  return runnerSupportsProtocol(runner.protocolVersion, "providerCredentialImport") &&
+    validProviderCredentialImportCapability(runner.runtime?.providerCredentialImport);
+}
+
+/** #3719: how an import confirmation names the runner user's own Codex HOME as its source. The
+ * control plane requires exactly this text for a `default_home` source. */
+export const PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL = "This Machine's Codex Sign-In";
+
 export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;

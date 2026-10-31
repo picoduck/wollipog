@@ -44,8 +44,11 @@ export type LeaseWorkerOperation =
    * profile HOME `<destinationRoot>/<profileId>` whose first marker records `grantId`, in one
    * operation. `layout` says where the credential sits under `home`. The source is never created,
    * is refused while this runner holds or acquires it, and is leased exclusively with its own
-   * dispatch-time profile context; the destination is created only after the source is admitted. */
-  | { method: "profile_import"; home: string; provider: "codex"; layout: "codex_home" | "user_home"; destinationRoot: string; profileId: string; grantId: string; profile?: LeaseWorkerProfileAccess }
+   * dispatch-time profile context; the destination is created only after the source is admitted.
+   * With `layout: "user_home"` the credential directory `home/.codex` is leased too, exclusively,
+   * with its own context `credentialProfile`, since an account may name that directory itself. */
+  | { method: "profile_import"; home: string; provider: "codex"; layout: "codex_home" | "user_home"; destinationRoot: string; profileId: string; grantId: string;
+    profile?: LeaseWorkerProfileAccess; credentialProfile?: LeaseWorkerProfileAccess }
   /** #3241 part 2: read the HOME's lease journal without creating anything; the reply carries
    * `inspection`. */
   | { method: "lease_inspect"; home: string; profile?: LeaseWorkerProfileAccess }
@@ -176,10 +179,13 @@ export function validLeaseWorkerOperation(value: unknown): value is LeaseWorkerO
   const profiled = Object.hasOwn(v, "profile");
   if (profiled && !validLeaseWorkerProfileAccess(v.profile)) return false;
   if (v.method === "profile_import") {
+    const credentialProfiled = Object.hasOwn(v, "credentialProfile");
+    if (credentialProfiled && (v.layout !== "user_home" || !validLeaseWorkerProfileAccess(v.credentialProfile))) return false;
     return v.provider === "codex" && (v.layout === "codex_home" || v.layout === "user_home") &&
       typeof v.destinationRoot === "string" && v.destinationRoot.startsWith("/") && !v.destinationRoot.includes("\0") &&
       Buffer.byteLength(v.destinationRoot) <= 32768 && typeof v.profileId === "string" && PROFILE_ID.test(v.profileId) &&
-      typeof v.grantId === "string" && GRANT_ID.test(v.grantId) && Object.keys(v).length === (profiled ? 8 : 7);
+      typeof v.grantId === "string" && GRANT_ID.test(v.grantId) &&
+      Object.keys(v).length === 7 + (profiled ? 1 : 0) + (credentialProfiled ? 1 : 0);
   }
   if (v.method === "lease_inspect") return Object.keys(v).length === (profiled ? 3 : 2);
   const provider = typeof v.provider === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(v.provider);
