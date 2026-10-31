@@ -281,6 +281,8 @@ export const CODEX_REVIEW_TURN_PARAMS = {
 } as const;
 
 export interface ReviewPromptInput {
+  /** Codex discovers from a neutral cwd; Claude continues to run in the checkout. */
+  checkout?: string;
   brief: string;
   repository: string;
   number: number;
@@ -329,7 +331,9 @@ export function reviewPrompt(input: ReviewPromptInput): string {
     ...(input.fullReason ? [`- Reason for a full review (untrusted data): ${input.fullReason.replace(/\s+/gu, " ").slice(0, REVIEW_FULL_REASON_LIMIT)}`] : []),
     `- Base: ${input.baseSha}`,
     `- Reviewed head: ${input.headSha}`,
-    "- The working directory is a checkout of the reviewed head.",
+    input.checkout
+      ? "- The reviewed checkout is " + JSON.stringify(input.checkout) + "; the working directory is an empty discovery boundary. Use absolute paths or an explicit command workdir to read the checkout."
+      : "- The working directory is a checkout of the reviewed head.",
     "",
     "Changed files to classify (each exactly once):",
     ...(input.changedFiles.length ? input.changedFiles.map((path) => `- \`${path}\``) : ["- (none)"]),
@@ -597,6 +601,7 @@ export class ReviewSessionLauncher {
       };
       const inScope = new Set(scopeFiles);
       const prompt = reviewPrompt({
+        ...(driver === "codex-app-server" ? { checkout } : {}),
         brief, repository: policy.pullRequest.repository, number: policy.pullRequest.number,
         baseSha, headSha: policy.headSha, changedFiles: scopeFiles, patch, mode,
         ...(round.since ? { since: round.since } : {}),
