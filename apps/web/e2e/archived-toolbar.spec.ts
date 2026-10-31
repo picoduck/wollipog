@@ -1,6 +1,22 @@
 import { expect, test } from "@playwright/test";
 
 for (const theme of ["light", "dark"]) {
+  test(`desktop archive unset edge after touch in ${theme}`, async ({ browser }) => {
+    const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, hasTouch: true });
+    try {
+      const page = await context.newPage();
+      await page.goto(`/archived-sessions-e2e.html?toolbar&theme=${theme}`);
+      const trigger = page.getByRole("button", { name: "Project: All Projects", exact: true });
+      const resting = await trigger.evaluate((node) => getComputedStyle(node).borderTopColor);
+      await trigger.tap();
+      await page.keyboard.press("Escape");
+      await expect(trigger).not.toHaveClass(/is-set/);
+      await expect.poll(() => trigger.evaluate((node) => getComputedStyle(node).borderTopColor)).toBe(resting);
+    } finally {
+      await context.close();
+    }
+  });
+
   test(`desktop archive filter edges in ${theme}`, async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/archived-sessions-e2e.html?toolbar&theme=${theme}`);
