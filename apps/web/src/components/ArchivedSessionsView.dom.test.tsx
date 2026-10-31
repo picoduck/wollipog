@@ -1525,3 +1525,31 @@ test("history restore requests the stored page once without disclosing transcrip
     assert.equal(domWindow.location.href, beforeUrl);
   } finally { await fixture.unmount(); }
 });
+
+test("typing during a slow restore cancels its later focus rescue", async () => {
+  writeArchiveBrowse({ filters: { query: "", project: null, location: null, agent: null,
+    lifecycle: "all", archive: "archived" }, page: 2, cursors: [null, "50"], scrollTop: 0, rowId: "session-1" });
+  const pending: Array<(value: ReturnType<typeof archiveResponse>) => void> = [];
+  const originalMatchMedia = domWindow.matchMedia.bind(domWindow);
+  domWindow.matchMedia = ((query: string) => {
+    const result = originalMatchMedia(query);
+    if (query.includes("pointer: fine")) Object.defineProperty(result, "matches", { value: true });
+    return result;
+  }) as typeof domWindow.matchMedia;
+  const fixture = await mount([], { archiveSessionPage: () => new Promise((resolve) => pending.push(resolve)) }, { restoreBrowse: true });
+  try {
+    const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+    input.id = "slow-restore-search";
+    await act(async () => {
+      input.focus();
+      input.value = "Archived";
+      fireDomEvent.change(input);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    await act(async () => {
+      for (const resolve of pending) resolve(archiveResponse([session(1)]));
+      await Promise.resolve();
+    });
+    assert.equal(domWindow.document.activeElement?.id, input.id, "a late response must not take focus from the new search");
+  } finally { await fixture.unmount(); domWindow.matchMedia = originalMatchMedia; }
+});

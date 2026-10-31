@@ -21,6 +21,7 @@ async function prepare(page: Page, width = 1440) {
 for (const width of [1440, 390]) {
   test(`Back and Forward preserve archive context at ${width}`, async ({ page }) => {
     await prepare(page, width);
+    expect(await page.evaluate(() => history.state?.wollipogArchiveBrowse)).toBeUndefined();
     const before = await page.evaluate(() => ({ length: history.length, requests: (window as any).archiveBrowseFixture.requests }));
     await page.goBack();
     await expect(page.locator(".archive-view > .count")).toHaveText("Page 2");

@@ -4,6 +4,7 @@ import type { ControlPlaneToUi, SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
+import { pushPositionedEntry } from "../history-position.js";
 import { StoreProvider, useStoreActions, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { ArchivedSessionsView } from "../components/ArchivedSessionsView.js";
@@ -79,7 +80,10 @@ const navigation: ViewNavigation = {
   current: () => ({ name: "archived" }),
   push(view) {
     document.title = view.name === "session" ? `Session ${view.id}` : "Archived Sessions E2E";
-    if (params.has("browse")) history.pushState({ ...history.state, fixtureView: view }, "", `${location.pathname}${location.search}${view.name === "session" ? `#${view.id}` : ""}`);
+    if (params.has("browse")) {
+      pushPositionedEntry(history, `${location.pathname}${location.search}${view.name === "session" ? `#${view.id}` : ""}`);
+      history.replaceState({ ...history.state, fixtureView: view }, "");
+    }
   },
   listen: (onView) => {
     const listener = () => onView(history.state?.fixtureView ?? { name: "archived" });

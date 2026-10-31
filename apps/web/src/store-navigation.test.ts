@@ -34,6 +34,41 @@ test("store navigation pushes only real in-app transitions", () => {
   assert.deepEqual(pushed, [{ name: "run", id: "run_1" }]);
 });
 
+test("archive visits reset directly and restore through history without serializing their intent", () => {
+  const pushed: View[] = [];
+  const store = new Store({ name: "archived" }, (view) => pushed.push(view));
+  store.navigate({ name: "archived", archiveSearch: "private transcript" });
+  const first = store.getState().view;
+  assert.ok(first.name === "archived" && first.browseVisit?.restore === false);
+  assert.equal(viewPath(first), "/archived");
+  store.navigate({ name: "archived" });
+  const second = store.getState().view;
+  assert.ok(second.name === "archived" && second.browseVisit?.activationId !== first.browseVisit.activationId);
+  assert.deepEqual(pushed, [], "same-route direct entry replaces the mounted visit without a push");
+  store.navigate({ name: "session", id: "s1" });
+  store.navigateFromHistory({ name: "archived", archiveSearch: "stale handoff" });
+  const restored = store.getState().view;
+  assert.ok(restored.name === "archived" && restored.browseVisit?.restore === true);
+  assert.equal(restored.archiveSearch, undefined);
+  assert.equal(pushed.length, 1, "history restoration does not push");
+});
+
+test("new navigation entries retain history positions but leave private archive context on its own entry", () => {
+  const browser = new TestBrowserHistory("/archived");
+  const context = { filters: { query: "private transcript" } };
+  browser.window.history.replaceState({ wollipogArchiveBrowse: context, unrelated: "preserved" }, "");
+  const navigation = new BrowserNavigation(browser.window);
+  navigation.current();
+  navigation.push({ name: "session", id: "s1" });
+  navigation.push({ name: "settings" });
+  const state = browser.window.history.state as Record<string, unknown>;
+  assert.equal(state.wollipogArchiveBrowse, undefined);
+  assert.equal(state.unrelated, "preserved");
+  assert.equal((state.wollipogEntry as { index: number }).index, 2);
+  browser.traverse(-2);
+  assert.deepEqual((browser.window.history.state as Record<string, unknown>).wollipogArchiveBrowse, context);
+});
+
 test("a replace navigation takes the place of the route it corrects, so Back skips it (#2984)", () => {
   const browser = new TestBrowserHistory("/");
   const navigation = new BrowserNavigation(browser.window);

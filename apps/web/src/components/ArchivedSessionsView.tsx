@@ -396,6 +396,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
     filters.agent !== null || filters.lifecycle !== "all" || filters.archive !== "archived";
 
   const changeFilter = <K extends keyof ArchiveBrowserFilters>(key: K, value: ArchiveBrowserFilters[K]) => {
+    restorePositionRef.current = null;
     setPageChanged(false);
     setFilters((current) => ({ ...current, [key]: value }));
     setPage(1);
@@ -410,6 +411,8 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
     { key: "archive" as const, label: "Show", value: filters.archive === "archived" ? null : filters.archive === "all" ? "All" : "Not Archived" },
   ].filter((filter) => filter.value !== null);
   const clearFilters = () => {
+    restorePositionRef.current = null;
+    setPageChanged(false);
     // The Clear Filters button disappears with the last chip; leave focus on a durable control.
     if (filtersOpen) filtersDoneRef.current?.focus();
     else searchRef.current?.focus();
@@ -582,9 +585,9 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
         <div className="archive-query">
           <SearchIcon size={16} aria-hidden="true" />
           <input ref={searchRef} type="search" aria-label="Search Titles and Transcripts" value={queryInput}
-            onChange={(event) => setQueryInput(event.target.value)} placeholder="Search titles and transcripts" />
+            onChange={(event) => { restorePositionRef.current = null; setQueryInput(event.target.value); }} placeholder="Search titles and transcripts" />
           {queryInput && <button type="button" className="icon-btn sm" aria-label="Clear Search"
-            onClick={() => { setQueryInput(""); searchRef.current?.focus(); }}><CloseIcon size={14} /></button>}
+            onClick={() => { restorePositionRef.current = null; setQueryInput(""); searchRef.current?.focus(); }}><CloseIcon size={14} /></button>}
         </div>
         <div className="archive-show"><span className="field-label">Show:</span>{showSegments}</div>
         <div className="archive-desktop-facets">{filterFields(true)}</div>
@@ -639,7 +642,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
             : `No ${destination("archived").name}`}
           icon={<InboxIcon />}
           actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
-            if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
+            if (hasActiveFilters) { restorePositionRef.current = null; setPageChanged(false); setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
             else navigate({ name: "inbox" });
           }}>{hasActiveFilters ? "Clear Search and Filters" : "Go to Sessions"}</button>}
         >

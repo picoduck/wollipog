@@ -1,7 +1,7 @@
 import type { ArchiveBrowserFilters } from "./archive-browser.js";
 import { SESSION_LIFECYCLE_STATES } from "./archive-browser.js";
+import { ARCHIVE_BROWSE_HISTORY_KEY as KEY } from "./history-position.js";
 
-const KEY = "wollipogArchiveBrowse";
 export interface ArchiveBrowseContext {
   filters: ArchiveBrowserFilters;
   page: number;
