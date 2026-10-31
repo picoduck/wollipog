@@ -47,6 +47,7 @@ for (const width of [1440, 834, 390]) {
       await expect(page.locator(".chips")).toHaveCount(0);
       await page.getByRole("button", { name: "Clear Search", exact: true }).click();
       await expect(page.getByRole("searchbox")).toHaveValue("");
+      await expect(page.getByRole("searchbox")).toBeFocused();
       await page.goto(`/archived-sessions-e2e.html?toolbar&paged&theme=${theme}`);
       await expect(page.getByRole("button", { name: "Next", exact: true })).toBeEnabled();
       await expect(page.getByRole("button", { name: "Previous", exact: true })).toBeDisabled();

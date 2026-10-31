@@ -142,6 +142,8 @@ export function ArchivedSessionsView() {
   const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, query: pendingArchiveSearch() ?? "" }));
   const [queryInput, setQueryInput] = useState(() => pendingArchiveSearch() ?? "");
   const [filtersOpen, setFiltersOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const filtersDoneRef = useRef<HTMLButtonElement>(null);
   const [page, setPage] = useState(1);
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -348,6 +350,9 @@ export function ArchivedSessionsView() {
     { key: "archive" as const, label: "Show", value: filters.archive === "archived" ? null : filters.archive === "all" ? "All" : "Not Archived" },
   ].filter((filter) => filter.value !== null);
   const clearFilters = () => {
+    // The Clear Filters button disappears with the last chip; leave focus on a durable control.
+    if (filtersOpen) filtersDoneRef.current?.focus();
+    else searchRef.current?.focus();
     setFilters((current) => ({ ...DEFAULT_FILTERS, query: current.query }));
     setPage(1); setCursors([null]);
   };
@@ -515,10 +520,10 @@ export function ArchivedSessionsView() {
       <div className="toolbar">
         <div className="archive-query">
           <SearchIcon size={16} aria-hidden="true" />
-          <input type="search" aria-label="Search Titles and Transcripts" value={queryInput}
+          <input ref={searchRef} type="search" aria-label="Search Titles and Transcripts" value={queryInput}
             onChange={(event) => setQueryInput(event.target.value)} placeholder="Search titles and transcripts" />
           {queryInput && <button type="button" className="icon-btn sm" aria-label="Clear Search"
-            onClick={() => setQueryInput("")}><CloseIcon size={14} /></button>}
+            onClick={() => { setQueryInput(""); searchRef.current?.focus(); }}><CloseIcon size={14} /></button>}
         </div>
         <div className="archive-show"><span className="field-label">Show:</span>{showSegments}</div>
         <div className="archive-desktop-facets">{filterFields(true)}</div>
@@ -529,13 +534,13 @@ export function ArchivedSessionsView() {
         {appliedFilters.map(({ key, label, value }) => <span className="chip" key={key}>
           {label}: {value}
           <button type="button" className="icon-btn sm" aria-label={`Remove ${label}: ${value}`}
-            onClick={() => changeFilter(key, DEFAULT_FILTERS[key])}><CloseIcon size={14} /></button>
+            onClick={() => { searchRef.current?.focus(); changeFilter(key, DEFAULT_FILTERS[key]); }}><CloseIcon size={14} /></button>
         </span>)}
         <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>
       </div>}
       {filtersOpen && <Modal title="Filters" size="sm" onClose={() => setFiltersOpen(false)}
         tertiary={appliedFilters.length > 0 ? <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button> : undefined}
-        footer={<button type="button" className="btn primary" onClick={() => setFiltersOpen(false)}>Done</button>}>
+        footer={<button ref={filtersDoneRef} type="button" className="btn primary" onClick={() => setFiltersOpen(false)}>Done</button>}>
         <p role="status" aria-live="polite">{resultSummary}</p>
         <div className="archive-sheet-show field"><span>Show</span>{showSegments}</div>
         {filterFields(false)}
