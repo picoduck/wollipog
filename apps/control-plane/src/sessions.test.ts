@@ -8469,6 +8469,10 @@ for (const target of ["parent", "project"] as const) {
       assert.equal(hub.sentOfType("stop_session").filter((message) => message.sessionId === id).length, 1);
       assert.equal(db.hasSessionStopIntent(id), true);
       assert.equal(db.getSideChat(parentId)?.childSessionId, id);
+      if (target === "project" && parentState === "already archived") {
+        assert.deepEqual(result.data, { sessions: [], archivedSessionIds: [], pendingSessionIds: [], failedSessionIds: [] },
+          "reconciling an earlier archive must not add that parent to this action's Undo");
+      }
     });
   }
 }

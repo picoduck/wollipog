@@ -14105,7 +14105,9 @@ export class SessionsService {
     for (const candidate of candidates) {
       const result = this.setArchived(candidate.id, true, false);
       if (!result.ok || !result.data) return failAs(result, "session archive failed");
-      sessions.push(result.data);
+      // An earlier archive may still owe its hidden child a Stop. Reconcile that child, but
+      // do not count the parent in this action or let this action's Undo restore it.
+      if (!candidate.archived) sessions.push(result.data);
     }
     return ok({
       sessions,
