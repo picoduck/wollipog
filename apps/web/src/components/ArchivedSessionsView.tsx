@@ -239,8 +239,9 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
     const scroller = sectionRef.current?.closest(".main-body");
     let timer: number | undefined;
     const onScroll = () => {
-      if (restorePositionRef.current || timer !== undefined) return;
-      timer = window.setTimeout(() => { timer = undefined; saveBrowse(); }, 100);
+      if (restorePositionRef.current) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = undefined; saveBrowse(); }, 200);
     };
     scroller?.addEventListener("scroll", onScroll, { passive: true });
     return () => {
