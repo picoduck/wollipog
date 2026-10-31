@@ -358,6 +358,12 @@ test("chips remove one filter and Clear Filters preserves search; Clear Search p
   assert.equal(search.value, "");
   assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog");
   assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
+  await act(async () => { search.value = "No Such Session"; fireDomEvent.change(search); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search and Filters")); });
+  assert.equal(search.value, "");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, undefined);
+  assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
   await fixture.unmount();
 });
 

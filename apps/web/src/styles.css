@@ -19133,6 +19133,7 @@ a.tab { text-decoration: none; }
 .archive-show > .seg { grid-auto-columns: auto; }
 .archive-sheet-trigger, .archive-sheet-show { display: none; }
 .archive-sheet-show > .seg { width: 100%; }
+.archive-view .chip { gap: var(--space-1); }
 .archive-pager { display: flex; align-items: center; justify-content: flex-end; gap: var(--space-2); }
 @container app (width < 1100px) {
   .archive-desktop-facets { display: none; }
