@@ -31,6 +31,7 @@ import {
   DiffIcon,
   FolderIcon,
   GlobeIcon,
+  IdentifierIcon,
   JobsIcon,
   PlanInProgressIcon,
   PlanPendingIcon,
@@ -41,7 +42,7 @@ import {
   WarningIcon,
   WorkflowDecisionsIcon,
 } from "./Icons.js";
-import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundNotificationBadge, CopyButton, Spinner } from "./common.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
@@ -209,6 +210,14 @@ export function PinnedSummary({
             note={session.providerAccountAutomaticallySelected ? "Chosen Automatically" : undefined}
           />
         )}
+        {/* The id is short enough to show whole (#3897), so it is not shortened like a hash. */}
+        <SummaryRow
+          icon={<IdentifierIcon className="ps-icon" size={14} aria-hidden="true" />}
+          label="Session ID"
+          value={<span className="ps-mono">{session.id}</span>}
+          title={session.id}
+          trailing={<CopyButton text={session.id} iconOnly ariaLabel="Copy Session ID" className="icon-btn sm" />}
+        />
         {orchestrator && (
           <SummaryRow
             icon={<ChildSessionRequestsIcon className="ps-icon" size={14} aria-hidden="true" />}

@@ -54,6 +54,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds; the Request Card's Budget kind. |
 | `CountIcon` | Lucide | `Hash` | A whole count inside a field, such as the Guardrails tool-call and live-child limits. |
+| `IdentifierIcon` | Lucide | `FingerprintPattern` | An entity's own identifier, such as the Pinned Summary's Session ID row (#3897). |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability; a skill step in the transcript. |
 | `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
 | `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |

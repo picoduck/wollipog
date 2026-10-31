@@ -67,7 +67,7 @@ test("sections and rows read in Title Case, with values in sentence case", async
   await expect(gitSection(aside).getByText(LONG_BRANCH)).toBeVisible();
   await expect(aside.locator(".ps-head > h3")).toHaveText(["Session", "Environment", "Git", "Activity"]);
   await expect(aside.locator(".ps-row > .k").filter({ hasNotText: /\// })).toHaveText([
-    "Agent", "Account", "Updated", "Background Work",
+    "Agent", "Account", "Session ID", "Updated", "Background Work",
     "Machine", "Folder",
     "Rebase in Progress", "Conflicts", "Changes", "Commit or Push", "Alpha Visibility PR", "Checks",
   ]);

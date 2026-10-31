@@ -1923,6 +1923,65 @@ for (const outcome of [
   });
 }
 
+for (const outcome of [
+  { refused: false, message: "Session ID copied.", tone: "t-success", detail: "B" },
+  { refused: true, message: "Couldn't copy the session ID.", tone: "t-danger", detail: undefined },
+]) {
+  test(`Copy Session ID from a row's menu ${outcome.refused ? "reports a refused write" : "copies the row's ID and shows it"} (#3897)`, async () => {
+    mobileViewport = false;
+    setWindowFocused(true);
+    setVisibility("visible");
+    const { container, root } = mountTestRoot();
+    const socket = new FakeSocket();
+    const connection: UiConnectionRuntime = {
+      instanceId: "inbox-copy-session-id",
+      runtimeKey: "inbox-copy-session-id:1",
+      createSocket: () => socket,
+      close() {},
+    };
+    const written: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => { if (outcome.refused) throw new Error("denied"); written.push(text); } },
+    });
+    // happy-dom has no execCommand, so a refused write's hidden-field fallback fails too.
+    try {
+      await act(async () => {
+        root.render(
+          <ApiProvider client={api}>
+            <StoreProvider connection={connection} navigation={navigation}>
+              <FeedbackProvider>
+                <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+              </FeedbackProvider>
+            </StoreProvider>
+          </ApiProvider>,
+        );
+      });
+      await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+      const rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+        .find((row) => row.textContent?.includes("Session B"))!;
+      await act(async () => {
+        rowB.dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 60 }) as never);
+      });
+      await act(async () => { menuItem("Copy Session ID").click(); });
+      await act(async () => { await Promise.resolve(); });
+      assert.deepEqual(written, outcome.refused ? [] : ["B"], "the exact ID of the row the menu belongs to");
+      assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the menu closed");
+
+      const toasts = [...container.querySelectorAll<HTMLElement>(".toast")];
+      assert.equal(toasts.length, 1);
+      const toast = toasts[0]!;
+      assert.equal(toast.querySelector(".toast-message")?.textContent, outcome.message);
+      assert.ok(toast.classList.contains(outcome.tone), `${outcome.tone}, not ${toast.className}`);
+      assert.equal(toast.querySelector(".toast-detail.mono")?.textContent, outcome.detail);
+    } finally {
+      if (clipboard) Object.defineProperty(domWindow.navigator, "clipboard", clipboard);
+      else delete (domWindow.navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
+}
+
 test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing (#1857)", async () => {
   mobileViewport = false;
   setWindowFocused(true);
@@ -3086,7 +3145,8 @@ test("a desktop row's ⋯ selects the row without moving any, so the menu, previ
     assert.equal(domWindow.document.querySelector('[role="menu"]')?.getAttribute("aria-label"),
       "Session Actions for Session B");
     assert.deepEqual(menuLabels(), [
-      "Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Archive and Stop…",
+      "Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Copy Session ID",
+      "Archive and Stop…",
     ]);
     // The menu reads the preview's own Fork availability: disabled, with its reason as a second line.
     const fork = menuItem("Fork Conversation…");
