@@ -214,6 +214,8 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
       if (requestSequence !== requestSequenceRef.current) return;
       if (restorePositionRef.current && page > 1 && cause instanceof ApiError && cause.status === 400) {
         restorePositionRef.current = null;
+        const scroller = sectionRef.current?.closest(".main-body");
+        if (scroller) scroller.scrollTop = 0;
         setPageChanged(true);
         setPage(1);
         setCursors([null]);
