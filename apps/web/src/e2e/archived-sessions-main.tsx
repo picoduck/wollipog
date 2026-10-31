@@ -16,6 +16,7 @@ import "../styles.css";
  * `?theme=light|dark` picks the theme.
  */
 const params = new URLSearchParams(window.location.search);
+const scenario = params.get("state");
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
 const DAY = 86_400_000;
@@ -63,6 +64,7 @@ class FixtureSocket implements UiSocket {
     setTimeout(() => {
       this.onopen?.();
       this.onmessage?.({ data: JSON.stringify(snapshot) });
+      if (scenario === "offline") setTimeout(() => this.onclose?.({ code: 1006 }), 500);
     }, 0);
   }
   send() {}
@@ -111,16 +113,24 @@ const client = {
   listAllSessions: async () => ({ sessions }),
   search: async () => ({ results: [] }),
   archiveSessionPage: async (input: Parameters<ApiClient["archiveSessionPage"]>[0]) => {
+    if (scenario === "loading") await new Promise((resolve) => setTimeout(resolve, 30_000));
+    if (scenario === "error") throw new Error("The archive service is unavailable.");
+    if (input.q && (scenario === "replacement" || scenario === "failure")) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+      if (scenario === "failure") throw new Error("The replacement search failed.");
+    }
+    if (scenario === "revalidation" && document.visibilityState === "visible" && refreshRequested) throw new Error("Refresh unavailable.");
     browse.requests++;
     if (browse.invalid && input.cursor) throw new ApiError("cursor is invalid", 400);
     const matched = sessions.filter((item) => (input.archive === "all" || (input.archive === "unarchived" ? !item.archived : item.archived))
+      && (!input.q || scenario !== "replacement" || item.title.toLowerCase().includes(input.q.toLowerCase()))
       && (!input.project || input.project === "Wollipog")
       && (!input.location || input.location === "wollipog")
       && (!input.agent || input.agent === "Claude Code")
       && (input.lifecycle === "all" || input.lifecycle === item.status)
       && !(browse.deleted && item.id === "archived-65"));
     return ({
-    sessions: params.has("browse") ? matched.slice(input.cursor ? 50 : 0, input.cursor ? 100 : 50) : matched,
+    sessions: scenario === "empty" || scenario === "no-matches" ? [] : params.has("browse") ? matched.slice(input.cursor ? 50 : 0, input.cursor ? 100 : 50) : matched,
     snippets: input.q ? { "archived-1": "The ⟪UI⟫ now groups usage by day." } : {},
     metadata: Object.fromEntries(sessions.map((item, index) => [item.id, { project: "Wollipog", location: index % 2 === 0 ? "Wollipog" : "Release Checkout", agent: "Claude Code" }])),
     nextCursor: params.has("paged") && !input.cursor ? "page-2" : null,
@@ -130,6 +140,9 @@ const client = {
   stop: async (id: string) => ({ ...sessions.find((item) => item.id === id)!, status: "stopped" }),
   deleteSession: async () => { throw new Error("The server refused this deletion."); },
 } as unknown as ApiClient;
+
+let refreshRequested = false;
+document.addEventListener("visibilitychange", () => { refreshRequested = true; });
 
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>

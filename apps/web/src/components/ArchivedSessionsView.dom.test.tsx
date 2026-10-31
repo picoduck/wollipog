@@ -282,6 +282,168 @@ async function rowAction(container: HTMLElement, label: string): Promise<HTMLBut
   assert.fail(`${label} row action exists`);
 }
 
+function deferredPage() {
+  let resolve!: (value: ReturnType<typeof archiveResponse>) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<ReturnType<typeof archiveResponse>>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function searchFor(container: HTMLElement, query: string) {
+  const input = container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => { input.value = query; fireDomEvent.change(input); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 240)); });
+}
+
+test("replacement search marks old rows busy and stale, announces one count, and replaces them", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await searchFor(fixture.container, "terraform");
+  const region = fixture.container.querySelector('[aria-label="Archived Session Results"]')!;
+  assert.equal(region.getAttribute("aria-busy"), "true");
+  assert.ok(region.querySelector(".is-stale .archive-item"));
+  assert.equal(fixture.container.querySelector(".count")?.textContent, "Searching…");
+  const status = fixture.container.querySelector('[role="status"]')!;
+  assert.equal(status.textContent, "Searching…");
+  await act(async () => { request.resolve(archiveResponse([session(2, { title: "terraform" })])); });
+  assert.equal(region.getAttribute("aria-busy"), "false");
+  assertNoDomNode(region.querySelector(".is-stale"), "new rows are current");
+  assert.equal(region.querySelectorAll(".archive-item").length, 1);
+  assert.match(region.textContent!, /terraform/);
+  assert.doesNotMatch(region.textContent!, /Archived Session 1/);
+  assert.match(status.textContent!, /^1 session/);
+  await fixture.unmount();
+});
+
+test("replacement failure removes old rows and count, offers Retry and hides raw detail", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await searchFor(fixture.container, "terraform");
+  await act(async () => { request.reject(new Error("raw backend failure")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0);
+  assertNoDomNode(fixture.container.querySelector(".count"), "error hides count");
+  assert.match(fixture.container.textContent!, /Couldn't Load Archived Sessions/);
+  assert.doesNotMatch(fixture.container.textContent!, /raw backend failure/);
+  assert.ok(button(fixture.container, "Retry"));
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Show Details")); });
+  assert.match(fixture.container.textContent!, /raw backend failure/);
+  await fixture.unmount();
+});
+
+test("unchanged revalidation preserves the count and does not announce a replacement search", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  assert.equal(fixture.container.querySelector(".count")?.textContent, "1 session");
+  assert.equal(fixture.container.querySelector('[aria-label="Archived Session Results"]')?.getAttribute("aria-busy"), "false");
+  assertNoDomNode(fixture.container.querySelector(".is-stale"), "unchanged refresh keeps current rows");
+  await act(async () => { request.resolve(archiveResponse([session(1)])); });
+  await fixture.unmount();
+});
+
+test("search counts use singular and plural grammar in the same visible live announcement", async () => {
+  for (const count of [1, 2]) {
+    const rows = Array.from({ length: count }, (_, index) => session(index, { title: `Usage ${index}` }));
+    const fixture = await mount(rows);
+    await searchFor(fixture.container, "Usage");
+    const expected = count === 1 ? "1 session matches “Usage”" : "2 sessions match “Usage”";
+    assert.equal(fixture.container.querySelector(".count")?.textContent, expected);
+    assert.equal(fixture.container.querySelector('[role="status"]')?.textContent, expected);
+    await fixture.unmount();
+  }
+});
+
+test("spaces-only search keeps the empty state and its clear control", async () => {
+  const fixture = await mount([]);
+  await searchFor(fixture.container, "   ");
+  assert.match(fixture.container.textContent!, /No Archived Sessions/);
+  assert.ok(fixture.container.querySelector('button[aria-label="Clear Search"]'));
+  assert.ok(button(fixture.container, "Go to Sessions"));
+  await fixture.unmount();
+});
+
+test("failed unchanged revalidation keeps rows and offers a compact refresh notice", async () => {
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => {
+    if (++calls > 1) throw new Error("refresh unavailable");
+    return archiveResponse([session(1)]);
+  } });
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 1);
+  assert.match(fixture.container.querySelector(".notice")?.textContent!, /Couldn't refresh archived sessions. Showing the last results./);
+  assert.ok(button(fixture.container, "Retry"));
+  await fixture.unmount();
+});
+
+test("a late row action cannot show old matches after a replacement search fails", async () => {
+  const row = session(1, { archiveStatus: "stop_failed" });
+  let finishStop!: (value: SessionView) => void;
+  const stopResult = new Promise<SessionView>((resolve) => { finishStop = resolve; });
+  const retry = deferredPage();
+  let calls = 0;
+  const fixture = await mount([row], {
+    archiveSessionPage: async (input) => {
+      if (++calls > 2) return retry.promise;
+      if (input.q) throw new Error("replacement failed");
+      return archiveResponse([row]);
+    },
+    retryStop: () => stopResult,
+  });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); });
+  await searchFor(fixture.container, "terraform");
+  await act(async () => { finishStop({ ...row, updatedAt: row.updatedAt + 1 }); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0);
+  assert.match(fixture.container.textContent!, /Couldn't Load Archived Sessions/);
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0, "Retry cannot show a late action's old match");
+  await act(async () => { retry.resolve(archiveResponse([])); });
+  await fixture.unmount();
+});
+
+test("first load waits 300ms then shows five skeleton rows and no count", async () => {
+  const request = deferredPage();
+  const fixture = await mount([], { archiveSessionPage: () => request.promise });
+  assertNoDomNode(fixture.container.querySelector(".archive-skeleton"), "skeleton is delayed");
+  assertNoDomNode(fixture.container.querySelector(".count"), "initial loading hides count");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 320)); });
+  assert.equal(fixture.container.querySelectorAll(".archive-skeleton-row").length, 5);
+  assert.match(fixture.container.textContent!, /Loading archived sessions…/);
+  await act(async () => { request.resolve(archiveResponse([])); });
+  assertNoDomNode(fixture.container.querySelector(".archive-skeleton"), "success removes skeleton");
+  assert.ok(button(fixture.container, "Go to Sessions"));
+  await fixture.unmount();
+});
+
+test("offline retains loaded rows dimmed under Reconnecting", async () => {
+  const fixture = await mount([session(1)]);
+  await act(async () => { fixture.socket.onclose?.({ code: 1006 }); });
+  assert.ok(fixture.container.querySelector(".is-stale .archive-item"));
+  assert.match(fixture.container.textContent!, /Reconnecting…/);
+  await fixture.unmount();
+});
+
+test("no matches names query and project and offers separate clearing actions once", async () => {
+  const fixture = await mount([session(1)]);
+  const project = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Project: All Projects"]')!;
+  await act(async () => { fireDomEvent.click(project); });
+  const option = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.textContent === "Wollipog")!;
+  await act(async () => { fireDomEvent.click(option); });
+  await searchFor(fixture.container, "terraform");
+  assert.match(fixture.container.textContent!, /No archived sessions match “terraform” in Wollipog\./);
+  const actions = [...fixture.container.querySelectorAll("button")];
+  for (const label of ["Clear Search", "Clear Filters"]) {
+    assert.equal(actions.filter((item) => (item.getAttribute("aria-label") ?? item.textContent?.trim()) === label).length, 1);
+  }
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search")); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 240)); });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog");
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 1);
+  await fixture.unmount();
+});
+
 test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
@@ -328,7 +490,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
     fixture.socket.push({ type: "session_upsert", session: session(0, { status: "stopped", updatedAt: 100 }) });
     await Promise.resolve();
   });
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/,
     "a second client's lifecycle change immediately re-evaluates the active filter");
   await fixture.unmount();
 });
@@ -361,7 +523,10 @@ test("chips remove one filter and Clear Filters preserves search; Clear Search p
   assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
   await act(async () => { search.value = "No Such Session"; fireDomEvent.change(search); });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
-  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search and Filters")); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search")); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog", "clearing a no-match search preserves its filter");
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Filters")); });
   assert.equal(search.value, "");
   assert.equal(fixture.archiveInputs.at(-1)?.project, undefined);
   assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
@@ -447,7 +612,7 @@ test("a Project literally named all is encoded distinctly from All Projects", as
     fixture.socket.push({ type: "session_upsert", session: updated });
     await Promise.resolve();
   });
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/,
     "literal all remains an active facet during live reconciliation");
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
@@ -832,7 +997,7 @@ test("paged search failures expose a retryable load error", async () => {
   await act(async () => { await Promise.resolve(); });
   assert.match(
     fixture.container.textContent ?? "",
-    /Could not load archived sessions: search unavailable/,
+    /Couldn't Load Archived Sessions/,
   );
   await fixture.unmount();
 });
@@ -922,7 +1087,7 @@ test("a live title update removes a row that no longer matches the active query"
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/);
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
   await fixture.unmount();
 });
@@ -950,7 +1115,7 @@ test("a live Project update removes a row that no longer matches the active face
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/);
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
   await fixture.unmount();
 });
@@ -1291,7 +1456,7 @@ test("bursty live filter misses coalesce into one bounded revalidation", async (
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/);
   await fixture.unmount();
 });
 
