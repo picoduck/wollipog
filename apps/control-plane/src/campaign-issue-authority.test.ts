@@ -1326,8 +1326,36 @@ test("#3877 the closure state of a never-steered child is unchanged and a steere
     const latest = h.db.findSteeringAttemptBySubmission("child", steering.submissions[1]!)!;
     // Compared as the closure digest serializes it.
     assert.equal(JSON.stringify(h.db.issueClosureAssignmentState("child")),
-      JSON.stringify({ ...unsteered, steering: { id: latest.requestId, digest: latest.requestSha256 } }));
+      JSON.stringify({ ...unsteered, steering: { id: latest.requestId, digest: latest.requestSha256, count: 2 } }));
   } finally { h.db.close(); }
+});
+
+test("#3877 a prompt steered after the wall clock steps back between approval and execution still revokes the closure", async () => {
+  const { h, prompts, approved } = promptedClosure("steered-clock-step");
+  const now = Date.now;
+  try {
+    const steering = steerable(h);
+    const first = await h.svc.promptOrSteer("child", "First redirect");
+    assert.ok(first.ok, first.error ?? "prompt");
+    const a = h.db.findSteeringAttemptBySubmission("child", steering.submissions[0]!)!;
+    const d = await approved();
+    const pending = JSON.stringify(prompts());
+    // An NTP step or VM restore: the next attempt is stamped before the one the approval bound.
+    Date.now = () => a.attempt.createdAt - 60_000;
+    const second = await h.svc.promptOrSteer("child", "Start on something else");
+    Date.now = now;
+    assert.ok(second.ok, second.error ?? "prompt");
+    assert.equal(second.data?.promptDelivery?.lane, "steered");
+    const b = h.db.findSteeringAttemptBySubmission("child", steering.submissions[1]!)!;
+    assert.ok(b.attempt.createdAt < a.attempt.createdAt, "the new attempt is stamped earlier");
+    assert.equal(JSON.stringify(prompts()), pending, "and the runner has echoed nothing");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.match(executed.error ?? "", /active child work changed/u);
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+  } finally { Date.now = now; h.db.close(); }
 });
 
 test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)", async () => {

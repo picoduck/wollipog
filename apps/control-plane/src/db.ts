@@ -15965,9 +15965,13 @@ export class ControlPlaneDb {
       .get(sessionId) as { id: string; digest: string } | undefined;
     // A mid-turn message is recorded only here until the runner echoes it (#3877). The attempt is
     // written before steer_session is sent, and only its identity is bound, never its disposition.
-    const steering = this.stmt(`SELECT request_id AS id, request_sha256 AS digest
-      FROM session_steering_attempts WHERE session_id=? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
-      .get(sessionId) as { id: string; digest: string } | undefined;
+    // created_at follows the wall clock, which can step back, so the latest is chosen by insertion
+    // order; attempts are deleted only with their session. The count changes with every admission
+    // even if a full VACUUM renumbers rowids.
+    const steering = this.stmt(`SELECT request_id AS id, request_sha256 AS digest,
+      (SELECT COUNT(*) FROM session_steering_attempts WHERE session_id=?1) AS count
+      FROM session_steering_attempts WHERE session_id=?1 ORDER BY rowid DESC LIMIT 1`)
+      .get(sessionId) as { id: string; digest: string; count: number } | undefined;
     // Each is absent until a session's first immediate-lane prompt or steering attempt, so earlier
     // digests are unchanged.
     return { latest: latest ?? null, command: command ?? null, ...(immediate ? { immediate } : {}),
