@@ -25,7 +25,7 @@ test("an Owner copies a Codex API-key sign-in into a new profile after confirmin
   await dialog.getByLabel("Account Label").fill("Codex Copy");
   await dialog.getByRole("button", { name: "Copy Sign-In" }).click();
   const confirmation = page.getByRole("dialog", { name: "Copy Sign-In" });
-  await expect(confirmation).toContainText("copies only the API key from Codex Team into a new profile named Codex Copy on Design Workstation");
+  await expect(confirmation).toContainText("Only the API key is copied from Codex Team into the new profile Codex Copy on Design Workstation");
   await confirmation.getByRole("button", { name: "Copy Sign-In" }).click();
   await expect(page.getByText("Sign-in copied to the new profile.")).toBeVisible();
   await expect(dialog).toBeHidden();

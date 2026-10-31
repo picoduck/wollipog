@@ -131,8 +131,8 @@ export function AddProviderAccountDialog({ runnerId, machineName, accounts, logi
       submittingRef.current = true;
       const approved = await confirm({
         title: "Copy Sign-In",
-        message: `Wollipog copies only the API key from ${source.display} into a new profile named ${trimmed} on ${machineName}. ` +
-          "Settings, history, plugins and skills aren't copied, and the original stays signed in. Both use the same key, so they share its billing and limits.",
+        message: `Only the API key is copied from ${source.display} into the new profile ${trimmed} on ${machineName}; ` +
+          "settings, history, plugins and skills aren't. The original stays signed in, and both share one key's billing and limits.",
         detailRows: [{ label: source.display, meta: "Copy From" }, { label: trimmed, meta: "New Profile" }],
         confirmLabel: "Copy Sign-In",
       });

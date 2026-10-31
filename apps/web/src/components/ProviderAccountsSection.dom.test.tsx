@@ -1640,7 +1640,7 @@ test("an Owner can copy a Codex API-key sign-in after a confirmation naming the 
     await ui.settle();
     const confirmation = dialogs().at(-1)!;
     assert.notEqual(confirmation, add.dialog);
-    assert.match(confirmation.textContent ?? "", /copies only the API key from Legacy Work into a new profile named Copied on Studio Mac/);
+    assert.match(confirmation.textContent ?? "", /Only the API key is copied from Legacy Work into the new profile Copied on Studio Mac/);
     assert.match(confirmation.textContent ?? "", /Copy From/);
     assert.match(confirmation.textContent ?? "", /New Profile/);
     assert.deepEqual(api.imports, [], "nothing is sent before the confirmation");
