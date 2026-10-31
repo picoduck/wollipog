@@ -607,7 +607,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
       </Modal>}
 
       <div className="count" role="status" aria-live="polite">{resultSummary}</div>
-      {pageChanged && <Notice compact>That page changed. Showing page 1.</Notice>}
+      {pageChanged && <Notice tone="neutral" compact role="status">That page changed. Showing page 1.</Notice>}
 
       {error && pageSessions.length > 0 && (
         <Notice tone="danger" compact role="alert"
