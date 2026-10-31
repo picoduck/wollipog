@@ -88,7 +88,7 @@ test("a fresh phone follows the generated HTTPS pairing link, connects live, and
   test.setTimeout(60_000);
   await fixture.api("/api/remote-access", "DELETE");
   await fixture.api("/api/remote-access", "POST", { provider: "https", origin: fixture.origin });
-  const seeded = seedDelegatedUiEvidence(fixture.database, fixture.root, "human");
+  const seeded = seedDelegatedUiEvidence(fixture.database, fixture.root, "human", { live: true });
   const id = seeded.childId;
   const occurrenceId = seeded.occurrenceId;
   // Keep the host page on the local origin: only it can create the other device's pairing.

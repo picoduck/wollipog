@@ -137,7 +137,7 @@ async function startControlPlane(t: TestContext) {
 }
 
 function read<T>(database: string, work: (db: ControlPlaneDb) => T): T {
-  const db = ControlPlaneDb.open(database);
+  const db = ControlPlaneDb.attach(database);
   try { return work(db); } finally { db.close(); }
 }
 

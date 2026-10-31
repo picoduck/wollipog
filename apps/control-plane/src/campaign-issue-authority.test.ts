@@ -1235,6 +1235,129 @@ test("#3835 an immediate-lane prompt admitted and echoed before the closure requ
   } finally { h.db.close(); }
 });
 
+/** #3877: a prompt for a child that is mid-turn is steered into that turn, so it is recorded only
+ * as a steering attempt. Make the bound child steerable: running with a live turn on a provider
+ * that steers. While `hold` is set, the runner's steering reply waits for `release()`. */
+function steerable(h: ReturnType<typeof harness>) {
+  h.db.registerRunner({ ...h.metadata, agents: h.metadata.agents.map((agent) => ({ ...agent, capabilities: {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, supportsSteering: true } })) },
+  Date.now(), PROTOCOL_VERSION);
+  h.db.updateSessionStatus("child", "running", Date.now());
+  h.hub.activeTurnIdForSession = (id) => id === "child" ? "turn-live" : undefined;
+  const steering = { hold: false, submissions: [] as string[], waiting: [] as Array<() => void>,
+    release() { for (const resume of this.waiting.splice(0)) resume(); } };
+  const runner = h.hub.requestFromRunner;
+  h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+    if (message.type !== "steer_session") return runner(runnerId, requestId, message, timeout);
+    steering.submissions.push(message.submissionId);
+    if (steering.hold) await new Promise<void>((resume) => steering.waiting.push(resume));
+    return { type: "steer_session_result", requestId: message.requestId, submissionId: message.submissionId,
+      sessionId: message.sessionId, turnId: message.turnId, disposition: "accepted", reason: "accepted", providerTurnId: "provider-turn" };
+  };
+  return steering;
+}
+
+test("#3877 a prompt steered into a bound running child between approval and execution revokes the closure", async () => {
+  const { h, prompts, approved } = promptedClosure("steered-prompt");
+  try {
+    const steering = steerable(h);
+    const d = await approved();
+    const transcript = h.db.issueClosureAssignmentState("child").latest;
+    const pending = JSON.stringify(prompts());
+    const queued = JSON.stringify(h.db.getSession("child")?.queued ?? []);
+    const sends: string[] = [];
+    h.hub.sendToRunner = (_runner, message) => { sends.push(message.type); return true; };
+    // What the session prompt route admits: with a turn in flight, the message is steered into it.
+    const sent = await h.svc.promptOrSteer("child", "Start on something else");
+    assert.ok(sent.ok, sent.error ?? "prompt");
+    assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    assert.equal(steering.submissions.length, 1, "one steer_session went to the runner");
+    assert.deepEqual(sends, [], "no prompt_session was sent");
+    // Nothing the closure digest read before #3877 records the steered message.
+    assert.equal(h.db.getSession("child")?.status, "running");
+    assert.deepEqual(h.db.issueClosureAssignmentState("child").latest, transcript, "the runner has not echoed it");
+    assert.equal(JSON.stringify(prompts()), pending, "no durable prompt was staged");
+    assert.equal(JSON.stringify(h.db.getSession("child")?.queued ?? []), queued, "nor queued");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.match(executed.error ?? "", /active child work changed/u);
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+  } finally { h.db.close(); }
+});
+
+test("#3877 a steering attempt admitted before the closure request keeps it whatever the runner later reports", async () => {
+  const { h, settle, approved } = promptedClosure("steered-before");
+  const steering = steerable(h);
+  try {
+    steering.hold = true;
+    let returned = false;
+    const steered = h.svc.promptOrSteer("child", "One more check").finally(() => { returned = true; });
+    await settle(() => steering.waiting.length > 0 || returned);
+    assert.equal(steering.waiting.length, 1, "the steer is waiting on the runner");
+    const submission = steering.submissions[0]!;
+    assert.equal(h.db.findSteeringAttemptBySubmission("child", submission)?.attempt.state, "pending");
+    const d = await approved();
+    // The runner's reply settles the attempt after approval; no new instruction reached the child.
+    steering.release();
+    const sent = await steered;
+    assert.ok(sent.ok, sent.error ?? "prompt");
+    assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    assert.equal(h.db.findSteeringAttemptBySubmission("child", submission)?.attempt.state, "accepted");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.equal(h.state.executes, 1);
+  } finally { steering.release(); h.db.close(); }
+});
+
+test("#3877 the closure state of a never-steered child is unchanged and a steered one binds its latest attempt", async () => {
+  const { h } = promptedClosure("steering-state");
+  try {
+    // Exactly what the digest bound before #3877, so approvals pending across the upgrade survive.
+    const unsteered = h.db.issueClosureAssignmentState("child");
+    assert.deepEqual(Object.keys(unsteered), ["latest", "command"]);
+    const steering = steerable(h);
+    for (const text of ["First redirect", "Second redirect"]) {
+      const sent = await h.svc.promptOrSteer("child", text);
+      assert.ok(sent.ok, sent.error ?? "prompt");
+      assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    }
+    const latest = h.db.findSteeringAttemptBySubmission("child", steering.submissions[1]!)!;
+    // Compared as the closure digest serializes it.
+    assert.equal(JSON.stringify(h.db.issueClosureAssignmentState("child")),
+      JSON.stringify({ ...unsteered, steering: { id: latest.requestId, digest: latest.requestSha256, count: 2 } }));
+  } finally { h.db.close(); }
+});
+
+test("#3877 a prompt steered after the wall clock steps back between approval and execution still revokes the closure", async () => {
+  const { h, prompts, approved } = promptedClosure("steered-clock-step");
+  const now = Date.now;
+  try {
+    const steering = steerable(h);
+    const first = await h.svc.promptOrSteer("child", "First redirect");
+    assert.ok(first.ok, first.error ?? "prompt");
+    const a = h.db.findSteeringAttemptBySubmission("child", steering.submissions[0]!)!;
+    const d = await approved();
+    const pending = JSON.stringify(prompts());
+    // An NTP step or VM restore: the next attempt is stamped before the one the approval bound.
+    Date.now = () => a.attempt.createdAt - 60_000;
+    const second = await h.svc.promptOrSteer("child", "Start on something else");
+    Date.now = now;
+    assert.ok(second.ok, second.error ?? "prompt");
+    assert.equal(second.data?.promptDelivery?.lane, "steered");
+    const b = h.db.findSteeringAttemptBySubmission("child", steering.submissions[1]!)!;
+    assert.ok(b.attempt.createdAt < a.attempt.createdAt, "the new attempt is stamped earlier");
+    assert.equal(JSON.stringify(prompts()), pending, "and the runner has echoed nothing");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(executed.status, 409);
+    assert.match(executed.error ?? "", /active child work changed/u);
+    assert.equal(h.state.executes, 0, "no execute dispatch");
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)?.status, "revoked");
+  } finally { Date.now = now; h.db.close(); }
+});
+
 test("#2940 concurrent executes of one closure share one uncached read (CR-2.3)", async () => {
   const { h, setForge, forgeReads, reads, close, useObserver, settle } = delivery({ gate: "consumed", stage: [{ number: 9 }] });
   try {

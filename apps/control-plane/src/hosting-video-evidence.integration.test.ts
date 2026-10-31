@@ -58,7 +58,7 @@ test("hosting composes video evidence review and refuses every route until a rev
       await delay(50);
     }
     assert.ok(healthy, logs);
-    live = ControlPlaneDb.open(database);
+    live = ControlPlaneDb.attach(database);
     // Startup composed the pieces: their durable schema exists, empty, in the hosting database.
     for (const table of ["video_profile_live_validation", "temporal_video_reviews", "workflow_video_approvals",
       "prepared_media_sessions", "prepared_media_active_stops"]) {
