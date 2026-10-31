@@ -2279,11 +2279,12 @@ button.status { cursor: pointer; }
 .state.page-level .actions { justify-content: center; }
 .state.page-level > .state-details { justify-self: center; width: 100%; max-width: 480px; }
 .state.page-level:is(.loading, .offline, .no-results) { justify-content: center; }
-.notice.state-error.page-level { margin-inline: auto; }
+.notice.state-error.page-level { margin-right: auto; margin-left: auto; }
 /* A detail page gives the notice its gutter as its own margins: keep at least that much, and center
    it once the page is wider than the measure plus both gutters. */
 :is(.session-detail, .run-detail) > .notice.state-error.page-level {
-  margin-inline: max(var(--page-gutter), calc((100% - 480px) / 2));
+  margin-right: max(var(--page-gutter), calc((100% - 480px) / 2));
+  margin-left: max(var(--page-gutter), calc((100% - 480px) / 2));
 }
 /* The shell itself crashed: no header or rail to sit under, so the state takes the window and the
    page's gutter, top-aligned and centered like every page-level state (§12.1). */
@@ -16069,7 +16070,7 @@ button.review-finding-location {
 .skills-how .steps > li > strong { color: var(--text); font: var(--type-body-strong); }
 /* Under the centered empty state (§12.1, #3875) its notice and the steps are centered blocks, and
    the steps read as three centered columns under one centered label. */
-.master-detail-state > .state.page-level ~ :is(.notice, .skills-how) { margin-inline: auto; }
+.master-detail-state > .state.page-level ~ :is(.notice, .skills-how) { margin-right: auto; margin-left: auto; }
 .master-detail-state > .state.page-level ~ .skills-how { text-align: center; }
 .master-detail-state > .notice {
   max-width: 480px;
