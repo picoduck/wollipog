@@ -15,6 +15,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { ArchivedSessionsView } from "./ArchivedSessionsView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/archived" });
 installDomTestCleanup(domWindow);
@@ -283,10 +284,11 @@ async function rowAction(container: HTMLElement, label: string): Promise<HTMLBut
 test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
-  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "Showing 0 Sessions");
-  assert.ok([...fixture.container.querySelectorAll("label")]
-    .some((label) => label.textContent?.trim().startsWith("Search Sessions and Transcripts")));
-  for (const expected of ["Project", "Location", "Agent", "Archive State", "Lifecycle State"]) {
+  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "0 sessions");
+  assert.ok(fixture.container.querySelector('input[aria-label="Search Titles and Transcripts"]'));
+  assert.ok(fixture.container.querySelector('[role="radiogroup"][aria-label="Show"]'));
+  assertNoDomNode(fixture.container.querySelector('[aria-label="Archived Sessions Pagination"]'), "single-page archives have no pager");
+  for (const expected of ["Project", "Location", "Agent", "Status"]) {
     assert.ok(fixture.container.querySelector(`button[aria-label^="${expected}:"]`), `${expected} labels its control`);
   }
   assert.equal(fixture.container.querySelectorAll("select").length, 0);
@@ -307,11 +309,11 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   await act(async () => { fireDomEvent.click(firstLink!, { button: 0 }); });
   assert.equal(fixture.navigated.at(-1)?.name, "session");
 
-  await act(async () => { fireDomEvent.click(button(fixture.container, "Next Page")); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Next")); });
   assert.equal(fixture.container.querySelectorAll(".archive-item").length, 5);
   assert.match(fixture.container.textContent ?? "", /Page 2/);
 
-  const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Lifecycle State:"]');
+  const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Status:"]');
   assert.ok(lifecycle);
   await act(async () => { lifecycle.click(); });
   const inputRequired = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
@@ -327,6 +329,64 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   });
   assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
     "a second client's lifecycle change immediately re-evaluates the active filter");
+  await fixture.unmount();
+});
+
+test("chips remove one filter and Clear Filters preserves search; Clear Search preserves filters", async () => {
+  const fixture = await mount([session(0), session(1)]);
+  const search = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => { search.value = "Archived"; fireDomEvent.change(search); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  const choose = async (label: string, option: string) => {
+    await act(async () => { fireDomEvent.click(fixture.container.querySelector<HTMLButtonElement>(`button[aria-label^="${label}:"]`)!); });
+    const item = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((node) => node.textContent?.trim() === option)!;
+    await act(async () => { fireDomEvent.click(item); });
+  };
+  await choose("Project", "Wollipog");
+  await choose("Agent", "Codex App Server");
+  assert.equal(fixture.container.querySelectorAll(".chip").length, 2);
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector<HTMLButtonElement>('[aria-label="Remove Project: Wollipog"]')!); });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, undefined);
+  assert.equal(fixture.archiveInputs.at(-1)?.agent, "Codex App Server");
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Filters")); });
+  assert.equal(search.value, "Archived");
+  assert.equal(fixture.archiveInputs.at(-1)?.agent, undefined);
+  assertNoDomNode(fixture.container.querySelector(".chips"), "cleared filters have no chips");
+  await choose("Project", "Wollipog");
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector<HTMLButtonElement>('[aria-label="Clear Search"]')!); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.equal(search.value, "");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog");
+  assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
+  await act(async () => { search.value = "No Such Session"; fireDomEvent.change(search); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search and Filters")); });
+  assert.equal(search.value, "");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, undefined);
+  assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
+  await fixture.unmount();
+});
+
+test("Filters applies choices immediately, includes searchable long facets, and returns focus on Done", async () => {
+  const fixture = await mount(Array.from({ length: 13 }, (_, i) => session(i, { projectName: `Project ${i}` })));
+  const trigger = button(fixture.container, "Filters");
+  trigger.focus();
+  await act(async () => { fireDomEvent.click(trigger); });
+  const dialog = fixture.container.querySelector<HTMLElement>('[role="dialog"]')!;
+  assert.ok(dialog);
+  await act(async () => { fireDomEvent.click(dialog.querySelector<HTMLButtonElement>('[aria-label="Project: All Projects"]')!); });
+  const filter = dialog.querySelector<HTMLInputElement>('[role="combobox"][aria-label="Search Project Options"]')!;
+  assert.ok(filter, "long facets expose a filter field");
+  await act(async () => { filter.value = "Project 12"; fireDomEvent.change(filter); });
+  const options = dialog.querySelectorAll<HTMLButtonElement>('[role="option"]');
+  assert.equal(options.length, 1);
+  await act(async () => { fireDomEvent.click(options[0]!); });
+  assert.equal(dialog.querySelector('[role="status"]')?.textContent, "1 session");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Project 12");
+  await act(async () => { fireDomEvent.click(button(dialog, "Done")); });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertNoDomNode(fixture.container.querySelector('[role="dialog"]'), "Done dismisses Filters");
+  assert.equal((domWindow.document as unknown as Document).activeElement === trigger, true);
   await fixture.unmount();
 });
 

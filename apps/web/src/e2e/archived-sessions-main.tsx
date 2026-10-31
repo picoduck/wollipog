@@ -86,12 +86,16 @@ const client = {
   listAllSessions: async () => ({ sessions }),
   search: async () => ({ results: [] }),
   archiveSessionPage: async (input: Parameters<ApiClient["archiveSessionPage"]>[0]) => ({
-    sessions: sessions.filter((item) => input.archive === "all" || (input.archive === "unarchived" ? !item.archived : item.archived)),
+    sessions: sessions.filter((item) => (input.archive === "all" || (input.archive === "unarchived" ? !item.archived : item.archived))
+      && (!input.project || input.project === "Wollipog")
+      && (!input.location || input.location === "wollipog")
+      && (!input.agent || input.agent === "Claude Code")
+      && (input.lifecycle === "all" || input.lifecycle === item.status)),
     snippets: input.q ? { "archived-1": "The ⟪UI⟫ now groups usage by day." } : {},
     metadata: Object.fromEntries(sessions.map((item, index) => [item.id, { project: "Wollipog", location: index % 2 === 0 ? "Wollipog" : "Release Checkout", agent: "Claude Code" }])),
-    nextCursor: null,
-    hasMore: false,
-    facets: { projects: ["Wollipog"], locations: ["wollipog"], agents: ["Claude Code"] },
+    nextCursor: params.has("paged") && !input.cursor ? "page-2" : null,
+    hasMore: params.has("paged") && !input.cursor,
+    facets: { projects: ["Wollipog", ...(params.has("toolbar") ? Array.from({ length: 13 }, (_, i) => `Project ${i + 1}`) : [])], locations: ["wollipog"], agents: ["Claude Code"] },
   }),
   stop: async (id: string) => ({ ...sessions.find((item) => item.id === id)!, status: "stopped" }),
   deleteSession: async () => { throw new Error("The server refused this deletion."); },

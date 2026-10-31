@@ -23,7 +23,7 @@ import { destination, viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { BotIcon, HistoryIcon, InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
+import { BotIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, HistoryIcon, InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
@@ -31,7 +31,9 @@ import { PageHeader } from "./PageHeader.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Notice } from "./Notice.js";
 import { State, stateVariant } from "./State.js";
-import { Select } from "./ui/ChoiceControls.js";
+import { Select, SegmentedControl } from "./ui/ChoiceControls.js";
+import { FilterButton } from "./FilterButton.js";
+import { Modal } from "./Modal.js";
 
 const DEFAULT_FILTERS: ArchiveBrowserFilters = {
   query: "",
@@ -139,6 +141,9 @@ export function ArchivedSessionsView() {
   // A query handed over by the palette's "Search Archived Sessions" (#1978) is the first search.
   const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, query: pendingArchiveSearch() ?? "" }));
   const [queryInput, setQueryInput] = useState(() => pendingArchiveSearch() ?? "");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const filtersDoneRef = useRef<HTMLButtonElement>(null);
   const [page, setPage] = useState(1);
   const [cursors, setCursors] = useState<Array<string | null>>([null]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
@@ -337,6 +342,52 @@ export function ArchivedSessionsView() {
     setCursors([null]);
   };
 
+  const appliedFilters = [
+    { key: "project" as const, label: "Project", value: filters.project },
+    { key: "location" as const, label: "Location", value: filters.location },
+    { key: "agent" as const, label: "Agent", value: filters.agent },
+    { key: "lifecycle" as const, label: "Status", value: filters.lifecycle === "all" ? null : canonicalLifecycleLabel(filters.lifecycle) },
+    { key: "archive" as const, label: "Show", value: filters.archive === "archived" ? null : filters.archive === "all" ? "All" : "Not Archived" },
+  ].filter((filter) => filter.value !== null);
+  const clearFilters = () => {
+    // The Clear Filters button disappears with the last chip; leave focus on a durable control.
+    if (filtersOpen) filtersDoneRef.current?.focus();
+    else searchRef.current?.focus();
+    setFilters((current) => ({ ...DEFAULT_FILTERS, query: current.query }));
+    setPage(1); setCursors([null]);
+  };
+  const showSegments = <SegmentedControl label="Show" value={filters.archive}
+    options={[{ value: "archived", label: "Archived" }, { value: "unarchived", label: "Not Archived" }, { value: "all", label: "All" }]}
+    onChange={(value) => changeFilter("archive", value)} />;
+  const filterFields = (toolbar: boolean) => <>
+    {(["project", "location", "agent"] as const).map((key) => {
+      const label = { project: "Project", location: "Location", agent: "Agent" }[key];
+      const values = facets[`${key}s`];
+      // Keep a selected value available even if a refreshed facet list no longer contains it.
+      const choices = filters[key] !== null && !values.includes(filters[key]) ? [filters[key], ...values] : values;
+      return <div key={key} className={toolbar ? undefined : "field"}>
+        {!toolbar && <span>{label}</span>}
+        <Select label={label} value={filters[key] === null ? "all" : facetValue(filters[key])}
+          options={[{ value: "all", label: `All ${label}s` }, ...choices.map((value) => ({ value: facetValue(value), label: value }))]}
+          searchable={values.length > 12} noun={`${key}s`}
+          triggerLabel={toolbar ? label : undefined}
+          triggerClassName={toolbar ? `filter-btn${filters[key] !== null ? " is-set" : ""}` : undefined}
+          onChange={(value) => changeFilter(key, value === "all" ? null : facetName(value))} />
+      </div>;
+    })}
+    <div className={toolbar ? undefined : "field"}>
+      {!toolbar && <span>Status</span>}
+      <Select label="Status" value={filters.lifecycle}
+        options={[{ value: "all", label: "Any Status" }, ...SESSION_LIFECYCLE_STATES.map((value) => ({ value, label: canonicalLifecycleLabel(value) }))]}
+        searchable={SESSION_LIFECYCLE_STATES.length > 12}
+        triggerLabel={toolbar ? "Status" : undefined}
+        triggerClassName={toolbar ? `filter-btn${filters.lifecycle !== "all" ? " is-set" : ""}` : undefined}
+        onChange={(value) => changeFilter("lifecycle", value)} />
+    </div>
+  </>;
+  const resultSummary = page > 1 || nextCursor ? `Page ${page}`
+    : `${pageSessions.length} session${pageSessions.length === 1 ? "" : "s"}${filters.query.trim() ? ` match “${filters.query.trim()}”` : ""}`;
+
   const setBusy = (id: string, value: boolean) => {
     setBusyIds((current) => {
       const next = new Set(current);
@@ -467,68 +518,35 @@ export function ArchivedSessionsView() {
     <section className="page archive-view" aria-labelledby="page-title">
       <PageHeader title={destination("archived").name} description={destination("archived").description} />
       <div className="toolbar">
-        <label className="archive-search">
-          <span>Search Sessions and Transcripts</span>
-          <div>
-            <SearchIcon size={16} aria-hidden="true" />
-            <input
-              type="search"
-              value={queryInput}
-              onChange={(event) => setQueryInput(event.target.value)}
-              placeholder="Search sessions and transcripts"
-            />
-          </div>
-        </label>
-        <fieldset className="archive-filters">
-          <legend className="sr-only">Archived Session Filters</legend>
-          <div className="archive-filter"><span className="field-label">Project</span><Select
-            label="Project"
-            value={filters.project === null ? "all" : facetValue(filters.project)}
-            options={[{ value: "all", label: "All Projects" }, ...facets.projects.map((value) => ({ value: facetValue(value), label: value }))]}
-            onChange={(value) => changeFilter("project", value === "all" ? null : facetName(value))}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Location</span><Select
-            label="Location"
-            value={filters.location === null ? "all" : facetValue(filters.location)}
-            options={[{ value: "all", label: "All Locations" }, ...facets.locations.map((value) => ({ value: facetValue(value), label: value }))]}
-            onChange={(value) => changeFilter("location", value === "all" ? null : facetName(value))}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Agent</span><Select
-            label="Agent"
-            value={filters.agent === null ? "all" : facetValue(filters.agent)}
-            options={[{ value: "all", label: "All Agents" }, ...facets.agents.map((value) => ({ value: facetValue(value), label: value }))]}
-            onChange={(value) => changeFilter("agent", value === "all" ? null : facetName(value))}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Archive State</span><Select<ArchiveBrowserFilters["archive"]>
-            label="Archive State"
-            value={filters.archive}
-            options={[
-              { value: "archived", label: "Archived" },
-              { value: "unarchived", label: "Not Archived" },
-              { value: "all", label: "All Sessions" },
-            ]}
-            onChange={(value) => changeFilter("archive", value)}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Lifecycle State</span><Select<ArchiveBrowserFilters["lifecycle"]>
-            label="Lifecycle State"
-            value={filters.lifecycle}
-            options={[
-              { value: "all", label: "All Lifecycle States" },
-              ...SESSION_LIFECYCLE_STATES.map((status) => ({ value: status, label: canonicalLifecycleLabel(status) })),
-            ]}
-            onChange={(value) => changeFilter("lifecycle", value)}
-          /></div>
-          <button type="button" className="btn ghost sm" onClick={() => {
-            setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]);
-          }}>
-            Reset Filters
-          </button>
-        </fieldset>
+        <div className="archive-query">
+          <SearchIcon size={16} aria-hidden="true" />
+          <input ref={searchRef} type="search" aria-label="Search Titles and Transcripts" value={queryInput}
+            onChange={(event) => setQueryInput(event.target.value)} placeholder="Search titles and transcripts" />
+          {queryInput && <button type="button" className="icon-btn sm" aria-label="Clear Search"
+            onClick={() => { setQueryInput(""); searchRef.current?.focus(); }}><CloseIcon size={14} /></button>}
+        </div>
+        <div className="archive-show"><span className="field-label">Show:</span>{showSegments}</div>
+        <div className="archive-desktop-facets">{filterFields(true)}</div>
+        <div className="archive-sheet-trigger"><FilterButton applied={appliedFilters.length}
+          expanded={filtersOpen} onClick={() => setFiltersOpen(true)} /></div>
       </div>
+      {appliedFilters.length > 0 && <div className="chips" aria-label="Applied Filters">
+        {appliedFilters.map(({ key, label, value }) => <button type="button" className="chip" key={key}
+          aria-label={`Remove ${label}: ${value}`}
+          onClick={() => { searchRef.current?.focus(); changeFilter(key, DEFAULT_FILTERS[key]); }}>
+          {label}: {value} <CloseIcon size={14} />
+        </button>)}
+        <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>
+      </div>}
+      {filtersOpen && <Modal title="Filters" size="sm" onClose={() => setFiltersOpen(false)}
+        tertiary={appliedFilters.length > 0 ? <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button> : undefined}
+        footer={<button ref={filtersDoneRef} type="button" className="btn primary" onClick={() => setFiltersOpen(false)}>Done</button>}>
+        <p role="status" aria-live="polite">{resultSummary}</p>
+        <div className="archive-sheet-show field"><span>Show</span>{showSegments}</div>
+        {filterFields(false)}
+      </Modal>}
 
-      <div className="archive-results-summary" role="status" aria-live="polite">
-        Showing {pageSessions.length} Session{pageSessions.length === 1 ? "" : "s"}
-      </div>
+      <div className="count" role="status" aria-live="polite">{resultSummary}</div>
 
       {error && pageSessions.length > 0 && (
         <Notice tone="danger" compact role="alert"
@@ -561,7 +579,7 @@ export function ArchivedSessionsView() {
           actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
             if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
             else navigate({ name: "inbox" });
-          }}>{hasActiveFilters ? "Reset Filters" : "Go to Sessions"}</button>}
+          }}>{hasActiveFilters ? "Clear Search and Filters" : "Go to Sessions"}</button>}
         >
           {hasActiveFilters
             ? "Try clearing search text or changing a filter."
@@ -628,15 +646,15 @@ export function ArchivedSessionsView() {
         </div>
       )}
 
-      {(pageSessions.length > 0 || page > 1) && (
-        <nav className="archive-pagination" aria-label="Archived Sessions Pagination">
-          <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}>Previous Page</button>
+      {(page > 1 || nextCursor) && (
+        <nav className="archive-pager" aria-label="Archived Sessions Pagination">
+          <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}><ChevronLeftIcon size={14} />Previous</button>
           <span>Page {page}</span>
           <button type="button" className="btn ghost sm" disabled={!nextCursor || loading} onClick={() => {
             if (!nextCursor) return;
             setCursors((current) => [...current.slice(0, page), nextCursor]);
             setPage((current) => current + 1);
-          }}>Next Page</button>
+          }}>Next<ChevronRightIcon size={14} /></button>
         </nav>
       )}
     </section>

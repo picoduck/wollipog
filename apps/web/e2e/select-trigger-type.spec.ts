@@ -93,17 +93,12 @@ for (const theme of ["dark", "light"] as const) {
         await page.evaluate(() => localStorage.clear());
         await page.goto(url);
         await setTheme(page, theme);
-        await expect(page.locator(".archive-filter").first()).toBeVisible();
-        const search = page.locator(".archive-search input");
-        await expectTriggerType(page, page.locator(".archive-filters"),
-          ["Project", "Location", "Agent", "Archive State", "Lifecycle State"], search);
+        const search = page.getByRole("searchbox", { name: "Search Titles and Transcripts" });
+        if (width === 390) await page.getByRole("button", { name: /^Filters/ }).click();
+        const scope = width === 390 ? page.getByRole("dialog", { name: "Filters", exact: true }) : page.locator(".archive-desktop-facets");
+        await expectTriggerType(page, scope, ["Project", "Location", "Agent", "Status"], search);
         // The search field is on the body line too, so here the two read identically.
         expect(await search.evaluate((input) => getComputedStyle(input).lineHeight)).toBe("20px");
-        // The filters' own labels keep §8.1's --type-label (#2366).
-        expect(await page.locator(".archive-filter > .field-label").first().evaluate((label) => {
-          const style = getComputedStyle(label);
-          return { weight: style.fontWeight, lineHeight: style.lineHeight };
-        })).toEqual({ weight: "500", lineHeight: "16px" });
       });
 
       test("New Automation's Selects read at its text fields' weight on the body line", async ({ page }) => {
