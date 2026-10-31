@@ -264,6 +264,15 @@ let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 // `outdated` gives Design Workstation an older runner protocol (#2988's Runner Update Required).
 if (fixtureParams.has("outdated") && runner) runner.protocolVersion = PROTOCOL_VERSION - 1;
+// `credentialImport` (#3719) makes Design Workstation a Linux machine whose runner can copy an
+// existing Codex API-key sign-in into a new managed profile. `credentialImport=unsupported` is a
+// Linux runner that reports no such capability (one inside WSL or a container).
+if (fixtureParams.has("credentialImport") && runner) {
+  runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
+  runner.runtime = { dataDir: "/home/misko/.agent-manager", worktreeRoot: "/home/misko/.agent-manager/worktrees", maxConcurrentSessions: 8,
+    ...(fixtureParams.get("credentialImport") === "unsupported" ? {} : { providerCredentialImport: { version: 1 as const, providers: ["codex" as const] } }) };
+}
 // `capacity=waiting` is Design Workstation before its first live report (#2989).
 if (fixtureParams.get("capacity") === "waiting" && runner?.capacity) {
   runner.capacity = { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision, authority: "control_plane" };
@@ -661,6 +670,19 @@ const client = {
     runner.providerAccounts = runner.providerAccounts?.filter((account) => account.id !== accountId);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { removed: true as const, credentialsRetained: accountId === "claude-work" };
+  },
+  // #3719, with `?credentialImport`: a label of "ChatGPT" is refused as an OAuth sign-in would be;
+  // any other copy records a managed profile account.
+  importProviderCredential: async (_runnerId: string, body: { provider: "codex"; label: string }) => {
+    if (!runner) throw new Error("runner not found");
+    if (body.label === "ChatGPT") {
+      throw new ApiError("Only a Codex sign-in that uses an API key stored in auth.json can be copied. A ChatGPT sign-in, or one kept in the keyring, can't be shared safely; sign in instead.", 409, "SOURCE_UNSUPPORTED");
+    }
+    const accountId = `copied-${runner.providerAccounts?.length ?? 0}`;
+    runner.providerAccounts = [...runner.providerAccounts ?? [],
+      { id: accountId, label: body.label, provider: "codex", authStatus: "authenticated", profile: { id: `profile-${accountId}`, access: "granted" } }];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { accountId, profileId: `profile-${accountId}`, grantId: `grant-${accountId}` };
   },
   // Provider profiles (#3239), with `?profiles`: adoption succeeds, and the first revocation of an
   // account with sessions is refused so the force confirmation can be exercised.

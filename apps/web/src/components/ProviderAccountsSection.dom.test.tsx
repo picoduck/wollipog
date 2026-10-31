@@ -1589,3 +1589,123 @@ test("Recover Existing Profile waits for the account it names to be listed", asy
     await ui.unmount();
   }
 });
+
+// --- Copy an existing sign-in (#3719) ---
+
+const IMPORT_RUNTIME = { dataDir: "/data", worktreeRoot: "/data/worktrees", maxConcurrentSessions: 4,
+  providerCredentialImport: { version: 1 as const, providers: ["codex" as const] } };
+const IMPORTING = RUNNER_CAPABILITY_MIN_PROTOCOL.providerCredentialImport;
+
+function importClient(imported?: (body: unknown) => Promise<unknown>) {
+  const base = client();
+  const imports: unknown[] = [];
+  const value = Object.assign(base.client, {
+    importProviderCredential: async (_runnerId: string, body: unknown) => {
+      imports.push(body);
+      return imported ? imported(body) : { accountId: "copied-1", profileId: "p-new", grantId: "g-new" };
+    },
+    inspectProviderHomeLease: async () => ({ state: "none" }),
+    updateMachineProviderAccountDefault: async () => ({}),
+  }) as ApiClient;
+  return { client: value, calls: base.calls, imports };
+}
+
+async function chooseRadio(ui: Awaited<ReturnType<typeof render>>, scope: HTMLElement, name: string) {
+  const radio = [...scope.querySelectorAll<HTMLElement>('[role="radio"], input[type="radio"]')].find((candidate) =>
+    (candidate.textContent || candidate.closest("label")?.textContent || "").includes(name));
+  assert.ok(radio, `expected the ${name} choice`);
+  await act(async () => { radio.click(); });
+  await ui.settle();
+}
+
+const dialogs = () => [...(domWindow.document.body as unknown as HTMLElement).querySelectorAll<HTMLElement>('[role="dialog"]')];
+
+test("an Owner can copy a Codex API-key sign-in after a confirmation naming the source and the new profile", async () => {
+  const api = importClient();
+  const ui = await render({ runner: runnerView({ protocolVersion: IMPORTING, runtime: IMPORT_RUNTIME }), api: api.client });
+  try {
+    const add = await openAdd(ui);
+    assert.equal(add.dialog.textContent?.includes("Sign-In Method"), false, "Claude offers no copy");
+    assert.match(add.dialog.textContent ?? "", /Copying an existing Claude sign-in isn't available/);
+    await chooseRadio(ui, add.dialog, "Codex");
+    await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+    const sources = [...add.dialog.querySelectorAll<HTMLElement>(".choice-list .choice-row, .choice-list label")]
+      .map((row) => row.textContent?.trim());
+    assert.ok(sources.some((text) => text?.includes("This Machine's Codex Sign-In")), JSON.stringify(sources));
+    assert.ok(sources.some((text) => text?.includes("Legacy Work")), "configured Codex accounts are sources");
+    assert.ok(!sources.some((text) => text?.includes("Granted Work")), "Claude accounts are not");
+    await chooseRadio(ui, add.dialog, "Legacy Work");
+    await add.type("Copied");
+    await act(async () => { ui.button(add.dialog, "Copy Sign-In").click(); });
+    await ui.settle();
+    const confirmation = dialogs().at(-1)!;
+    assert.notEqual(confirmation, add.dialog);
+    assert.match(confirmation.textContent ?? "", /copies only the API key from Legacy Work into a new profile named Copied on Studio Mac/);
+    assert.match(confirmation.textContent ?? "", /Copy From/);
+    assert.match(confirmation.textContent ?? "", /New Profile/);
+    assert.deepEqual(api.imports, [], "nothing is sent before the confirmation");
+    await act(async () => { ui.button(confirmation, "Copy Sign-In").click(); });
+    await ui.settle();
+    assert.deepEqual(api.imports, [{ provider: "codex", label: "Copied", source: { kind: "account", accountId: "legacy" }, sourceLabel: "Legacy Work" }]);
+    assert.deepEqual(api.calls, [], "no sign-in started");
+    assert.ok(ui.toasts().some((toast) => toast.includes("Sign-in copied to the new profile.")));
+    assertNoDomNode(ui.dialog(), "success closes the dialog");
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("declining the copy confirmation sends nothing, and a runner refusal is a notice in the dialog", async () => {
+  const api = importClient(async () => { throw new ApiError("Only a Codex sign-in that uses an API key stored in auth.json can be copied.", 409); });
+  const ui = await render({ runner: runnerView({ protocolVersion: IMPORTING, runtime: IMPORT_RUNTIME }), api: api.client });
+  try {
+    const add = await openAdd(ui);
+    await chooseRadio(ui, add.dialog, "Codex");
+    await chooseRadio(ui, add.dialog, "Copy Existing Sign-In");
+    await add.type("Copied");
+    await act(async () => { ui.button(add.dialog, "Copy Sign-In").click(); });
+    await ui.settle();
+    await act(async () => { ui.button(dialogs().at(-1)!, "Cancel").click(); });
+    await ui.settle();
+    assert.deepEqual(api.imports, []);
+    assert.ok(ui.dialog(), "Add Account stays open");
+    await act(async () => { ui.button(add.dialog, "Copy Sign-In").click(); });
+    await ui.settle();
+    await act(async () => { ui.button(dialogs().at(-1)!, "Copy Sign-In").click(); });
+    await ui.settle();
+    assert.deepEqual(api.imports, [{ provider: "codex", label: "Copied", source: { kind: "default_home" }, sourceLabel: "This Machine's Codex Sign-In" }]);
+    const notice = add.dialog.querySelector<HTMLElement>('.notice[role="alert"]')!;
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Copy the Sign-In");
+    assert.match(notice.textContent ?? "", /uses an API key stored in auth\.json/);
+  } finally {
+    await ui.unmount();
+  }
+});
+
+test("where copying isn't available an Owner sees why, and a member sees only the sign-in", async () => {
+  for (const [runner, reason] of [
+    [runnerView({ os: "windows", protocolVersion: IMPORTING }), /isn't available on Windows machines/],
+    [runnerView({ protocolVersion: IMPORTING - 1 }), /Update this machine's runner to copy an existing sign-in/],
+    [runnerView({ protocolVersion: IMPORTING }), /runs inside WSL or a container/],
+  ] as const) {
+    const ui = await render({ runner, api: importClient().client });
+    try {
+      const add = await openAdd(ui);
+      await chooseRadio(ui, add.dialog, "Codex");
+      assert.equal(add.dialog.textContent?.includes("Sign-In Method"), false);
+      assert.match(add.dialog.textContent ?? "", reason);
+      assert.ok(ui.button(add.dialog, "Start Sign-In"));
+    } finally {
+      await ui.unmount();
+    }
+  }
+  const ui = await render({ runner: runnerView({ protocolVersion: IMPORTING, runtime: IMPORT_RUNTIME }), api: importClient().client, canManageProfiles: false });
+  try {
+    const add = await openAdd(ui);
+    await chooseRadio(ui, add.dialog, "Codex");
+    assert.equal(add.dialog.textContent?.includes("Sign-In Method"), false);
+    assert.equal(add.dialog.textContent?.includes("Copying an existing"), false, "members are not told about copying");
+  } finally {
+    await ui.unmount();
+  }
+});
