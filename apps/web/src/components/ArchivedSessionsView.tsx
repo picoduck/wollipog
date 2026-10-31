@@ -492,6 +492,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
       const restarted = await api.unarchiveAndRestart(session.id);
       updateSession(restarted);
       showToast("Session restored and restarting.");
+      saveBrowse(restarted.id);
       navigate({ name: "session", id: restarted.id });
     } catch (cause) {
       const failure = unarchiveAndRestartFailureMessage(cause);
@@ -706,10 +707,11 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
 
       {(page > 1 || nextCursor) && (
         <nav className="archive-pager" aria-label="Archived Sessions Pagination">
-          <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}><ChevronLeftIcon size={14} />Previous</button>
+          <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => { setPageChanged(false); setPage((current) => current - 1); }}><ChevronLeftIcon size={14} />Previous</button>
           <span>Page {page}</span>
           <button type="button" className="btn ghost sm" disabled={!nextCursor || loading} onClick={() => {
             if (!nextCursor) return;
+            setPageChanged(false);
             setCursors((current) => [...current.slice(0, page), nextCursor]);
             setPage((current) => current + 1);
           }}>Next<ChevronRightIcon size={14} /></button>
