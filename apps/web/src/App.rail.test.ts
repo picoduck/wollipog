@@ -267,7 +267,7 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
   // and its own scroll; the list pane gives it the flexible area.
   assert.match(css, /\.master-detail-state\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/,
     "the page state scrolls on its own");
-  assert.match(css, /\.inbox-state \{ flex: 1; \}/, "the page state consumes the flexible list area");
+  assert.match(css, /\.inbox-state\s*\{[^}]*\bflex:\s*1;/, "the page state consumes the flexible list area");
   assert.doesNotMatch(css, /\.inbox-(list|preview)-pane:has\([^{]*focus-visible/,
     "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
