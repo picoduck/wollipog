@@ -32247,7 +32247,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
       !Number.isSafeInteger(value.unfinishedBackgroundJobs) || value.unfinishedBackgroundJobs! < 1) return undefined;
   const oldest = value.oldestUnfinishedJob;
   if (oldest !== undefined && (!oldest || typeof oldest !== "object" ||
-      !BACKGROUND_LAUNCH_TYPES.has(oldest.launchType) ||
+      !(oldest.launchType === "provisional" || oldest.launchType === "unregistered" || BACKGROUND_LAUNCH_TYPES.has(oldest.launchType)) ||
       !Number.isSafeInteger(oldest.startedAt) || oldest.startedAt < 0)) return undefined;
   if (value.endsAt !== undefined && (!Number.isSafeInteger(value.endsAt) || value.endsAt < value.since!)) return undefined;
   // Display only (#3752): a malformed entry is dropped, not the hold that still holds the queue.
@@ -32255,7 +32255,8 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     .filter((job): job is QueueHoldUnlistedJob => !!job && typeof job === "object" &&
       validBackgroundIdentity(job.id) && (job.kind === "provisional" || job.kind === "unregistered"))
     .slice(0, 20)
-    .map((job) => ({ id: job.id, kind: job.kind }));
+    .map((job) => ({ id: job.id, kind: job.kind,
+      ...(validBackgroundTimestamp(job.startedAt) ? { startedAt: job.startedAt } : {}) }));
   return {
     kind: value.kind,
     holdId: value.holdId,
@@ -32268,6 +32269,8 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
     ...(value.canRelease === true ? { canRelease: true as const } : {}),
     ...(unlistedJobs.length > 0 ? { unlistedJobs } : {}),
+    ...(validBackgroundTimestamp(value.unlistedJobCount) && value.unlistedJobCount >= unlistedJobs.length &&
+      value.unlistedJobCount <= value.unfinishedBackgroundJobs! ? { unlistedJobCount: value.unlistedJobCount } : {}),
     ...(value.restartKeepsQueue === true ? { restartKeepsQueue: true as const } : {}),
   };
 }

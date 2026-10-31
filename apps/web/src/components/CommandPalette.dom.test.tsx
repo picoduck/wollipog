@@ -16,7 +16,6 @@ import { getRailPreferences, resetRailPreferencesForTest, setRailViewHidden } fr
 import { RECENT_SESSIONS_KEY } from "../recent-sessions.js";
 import { saveInstanceStorageValue } from "../instance-storage.js";
 import { shortcutDisplay } from "../shortcuts.js";
-import { takeArchiveSearch } from "../archive-search-handoff.js";
 import { CommandPalette, useSearchShortcut } from "./CommandPalette.js";
 import { AppBarSearchProvider, DetailBar, PageHeader } from "./PageHeader.js";
 import { Rail } from "./Rail.js";
@@ -367,8 +366,10 @@ test("no results: the sentence, Clear Search and Search Archived Sessions", asyn
   await act(async () => { ui.searches.at(-1)!.resolve([]); });
   await act(async () => { ui.doc.querySelectorAll<HTMLButtonElement>(".palette-empty button")[1]!.click(); });
   assertNoDomNode(ui.palette());
-  assert.deepEqual(ui.view(), { name: "archived" });
-  assert.equal(takeArchiveSearch(), "zzzz", "Archived Sessions opens searching for the same words");
+  const view = ui.view();
+  assert.ok(view);
+  assert.equal(view.name, "archived");
+  assert.equal(view.name === "archived" ? view.archiveSearch : undefined, "zzzz", "Archived Sessions opens searching for the same words");
 });
 
 test("at 760px and below: Cancel closes, and the labelled rail is not offered", async () => {

@@ -5821,7 +5821,14 @@ export class SessionManager {
    * provider can never leave one behind. Older peers get no field and keep what they had. */
   private overlayQueueHold(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
     if (!runnerSupportsProtocol(protocolVersion, "queueHolds")) return snapshot;
-    return { ...snapshot, queueHold: this.publishedQueueHolds.get(snapshot.id) ?? null };
+    const hold = this.publishedQueueHolds.get(snapshot.id) ?? null;
+    const oldest = hold?.oldestUnfinishedJob;
+    // Project at delivery, including reconnect: the cache always retains the richest truth.
+    if (hold && oldest && (protocolVersion ?? 0) < 262 &&
+        (oldest.launchType === "provisional" || oldest.launchType === "unregistered")) {
+      return { ...snapshot, queueHold: { ...hold, oldestUnfinishedJob: { ...oldest, launchType: "unknown" } } };
+    }
+    return { ...snapshot, queueHold: hold };
   }
 
   private overlayRuntimeSteering(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
@@ -11867,15 +11874,32 @@ export class SessionManager {
         this.rewinding.has(sessionId) || this.forking.has(sessionId) || this.loggingOut.has(sessionId) ||
         this.closing.has(sessionId) || this.deleting.has(sessionId)) return null;
     const unfinished = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus);
-    const oldest = unfinished.reduce<typeof unfinished[number] | undefined>(
-      (min, job) => !min || job.registeredAt < min.registeredAt ? job : min, undefined);
+
     const published = this.publishedQueueHolds.get(sessionId);
     const waitStart = this.handoffWaitStarts.get(sessionId);
     // One incident keeps its identity while it lasts, however its counts change, and across a turn
     // that interrupts it while the same prompts keep waiting.
     const since = waitStart?.kind === kind ? waitStart.since
       : published?.kind === kind ? published.since : Date.now();
-    const unfinishedBackgroundJobs = Math.max(unfinished.length, meta.pendingBackgroundTaskIds?.length ?? 0);
+    const listed = new Set(unfinished.flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]));
+    const unlistedIds = [...new Set(meta.pendingBackgroundTaskIds ?? [])].filter((id) => !listed.has(id)).sort();
+    // Seed metadata from older runners at the first observation, never the later hold start.
+    const starts = { ...meta.unlistedBackgroundTaskStarts };
+    if (unlistedIds.some((id) => !Object.hasOwn(starts, id))) {
+      for (const id of unlistedIds) if (!Object.hasOwn(starts, id)) Object.defineProperty(starts, id,
+        { value: Date.now(), enumerable: true, configurable: true, writable: true });
+      this.store.patchMeta(sessionId, { unlistedBackgroundTaskStarts: starts });
+    }
+    const allUnlistedJobs = unlistedIds.map((id) => ({ id,
+      kind: id.startsWith("tool:") ? "provisional" as const : "unregistered" as const,
+      startedAt: starts[id]!,
+    }));
+    const oldest = [
+      ...unfinished.map((job) => ({ launchType: job.launchType, startedAt: job.registeredAt })),
+      ...allUnlistedJobs.map((job) => ({ launchType: job.kind, startedAt: job.startedAt })),
+    ].reduce<SessionQueueHoldView["oldestUnfinishedJob"]>(
+      (min, job) => !min || job.startedAt < min.startedAt ? job : min, undefined);
+    const unfinishedBackgroundJobs = unfinished.length + allUnlistedJobs.length;
     // The bound applies only to work a live provider still owns. Orphaned work already has its
     // one recovery turn coming, which crosses the barrier; a queued continuation does too.
     const bound = entry.client.endBackgroundWork ? entry.client.handoffWaitMaxMs ?? 0 : 0;
@@ -11886,10 +11910,7 @@ export class SessionManager {
     // Work the hold waits on that Background Work has no unfinished row for (#3752): a launch the
     // provider has not confirmed yet (`tool:<tool-use-id>`), or a task id the runner tracks without a
     // job record. Named so the session can show it, since nothing else lists it.
-    const listed = new Set(unfinished.flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]));
-    const unlistedJobs = [...new Set(meta.pendingBackgroundTaskIds ?? [])]
-      .filter((id) => !listed.has(id)).sort().slice(0, MAX_UNLISTED_HOLD_JOBS)
-      .map((id) => ({ id, kind: id.startsWith("tool:") ? "provisional" as const : "unregistered" as const }));
+    const unlistedJobs = allUnlistedJobs.slice(0, MAX_UNLISTED_HOLD_JOBS);
     return {
       kind,
       holdId: `${kind.replaceAll("_", "-")}:${since}`,
@@ -11897,11 +11918,11 @@ export class SessionManager {
       target: kind === "worktree_rebind" ? entry.pendingWorktreeRebind! : entry.pendingProviderAccountSwitch!.label,
       queuedPrompts: waiting.length,
       unfinishedBackgroundJobs,
-      ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
+      ...(oldest ? { oldestUnfinishedJob: oldest } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
       ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
       ...(releasable ? { canRelease: true as const } : {}),
-      ...(unlistedJobs.length > 0 ? { unlistedJobs } : {}),
+      ...(unlistedJobs.length > 0 ? { unlistedJobs, unlistedJobCount: allUnlistedJobs.length } : {}),
       restartKeepsQueue: true,
     };
   }
