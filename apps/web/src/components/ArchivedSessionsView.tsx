@@ -571,12 +571,12 @@ export function ArchivedSessionsView() {
       {filtersOpen && <Modal title="Filters" size="sm" onClose={() => setFiltersOpen(false)}
         tertiary={appliedFilters.length > 0 ? <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button> : undefined}
         footer={<button ref={filtersDoneRef} type="button" className="btn primary" onClick={() => setFiltersOpen(false)}>Done</button>}>
-        <p>{resultSummary}</p>
+        <p role="status" aria-live="polite" aria-atomic="true">{resultSummary}</p>
         <div className="archive-sheet-show field"><span>Show</span>{showSegments}</div>
         {filterFields(false)}
       </Modal>}
 
-      <div role="status" aria-live="polite" aria-atomic="true">
+      <div role={filtersOpen ? undefined : "status"} aria-live={filtersOpen ? undefined : "polite"} aria-atomic="true">
         {resultSummary && <div className="count">{resultSummary}</div>}
       </div>
 

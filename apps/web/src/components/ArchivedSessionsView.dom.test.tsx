@@ -479,7 +479,7 @@ test("Filters applies choices immediately, includes searchable long facets, and 
   const options = dialog.querySelectorAll<HTMLButtonElement>('[role="option"]');
   assert.equal(options.length, 1);
   await act(async () => { fireDomEvent.click(options[0]!); });
-  assert.equal(dialog.querySelector("p")?.textContent, "1 session");
+  assert.equal(dialog.querySelector('[role="status"]')?.textContent, "1 session");
   assert.equal(fixture.archiveInputs.at(-1)?.project, "Project 12");
   await act(async () => { fireDomEvent.click(button(dialog, "Done")); });
   await new Promise((resolve) => setTimeout(resolve, 10));

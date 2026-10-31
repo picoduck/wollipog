@@ -31,7 +31,7 @@ for (const width of [1440, 834, 390]) {
       await scope.getByRole("button", { name: "Status: Any Status", exact: true }).click();
       await page.getByRole("option", { name: "Completed", exact: true }).click();
       if (compact) {
-        await expect(scope.locator("p").first()).toHaveText("2 sessions");
+        await expect(scope.getByRole("status")).toHaveText("2 sessions");
         await scope.getByRole("button", { name: "Done", exact: true }).click();
         await expect(filters).toBeFocused();
         await expect(filters).toHaveAccessibleName(/Filters\s*, 2 applied/);
