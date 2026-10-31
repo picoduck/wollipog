@@ -598,7 +598,7 @@ export function ArchivedSessionsView() {
           </div>
           <p role="status">Loading archived sessions…</p>
         </>
-      ) : error && pageSessions.length === 0 ? (
+      ) : error ? (
         <State variant="error" title="Couldn't Load Archived Sessions"
           details={error}
           actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Retry</button>}>

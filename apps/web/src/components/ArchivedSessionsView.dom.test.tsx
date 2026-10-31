@@ -344,6 +344,25 @@ test("failed unchanged revalidation keeps rows and offers a compact refresh noti
   await fixture.unmount();
 });
 
+test("a late row action cannot show old matches after a replacement search fails", async () => {
+  const row = session(1, { archiveStatus: "stop_failed" });
+  let finishStop!: (value: SessionView) => void;
+  const stopResult = new Promise<SessionView>((resolve) => { finishStop = resolve; });
+  const fixture = await mount([row], {
+    archiveSessionPage: async (input) => {
+      if (input.q) throw new Error("replacement failed");
+      return archiveResponse([row]);
+    },
+    retryStop: () => stopResult,
+  });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); });
+  await searchFor(fixture.container, "terraform");
+  await act(async () => { finishStop({ ...row, updatedAt: row.updatedAt + 1 }); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0);
+  assert.match(fixture.container.textContent!, /Couldn't Load Archived Sessions/);
+  await fixture.unmount();
+});
+
 test("first load waits 300ms then shows five skeleton rows and no count", async () => {
   const request = deferredPage();
   const fixture = await mount([], { archiveSessionPage: () => request.promise });
