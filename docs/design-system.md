@@ -1637,9 +1637,9 @@ master-detail pages stay side by side.
   hidden at 760px and below as well (#3020); the stored choice is kept.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
   **Built (#2220).** `.inbox-state.master-detail-state` takes the list pane's place on the page grid,
-  and the preview and divider are not rendered. The state follows the §12 order: Reconnecting… while
-  disconnected with nothing loaded, then skeleton rows while sessions arrive (§12.3), then No Matches
-  (§12.2), then one state for the group's situation (`sessions-states.ts`, `SessionsStates.tsx`):
+  the state is centered in it (§12.1, #3869), and the preview and divider are not rendered. The state
+  follows the §12 order: Reconnecting… while disconnected with nothing loaded, then skeleton rows
+  while sessions arrive (§12.3), then No Matches (§12.2), then one state for the group's situation (`sessions-states.ts`, `SessionsStates.tsx`):
 
   | Situation | Icon | Title | Actions |
   | --- | --- | --- | --- |
@@ -2744,6 +2744,11 @@ One `State` component with variants; the states are **mutually exclusive** in th
 - Top-aligned and **left-aligned with the page grid**, `padding-top: var(--space-12)`, max-width
   480px. It spans the whole content area when the collection is empty (not squeezed into a list
   column). In a narrow panel it is left-aligned at the panel's padding.
+- **Exception: Sessions (#3869).** The state that replaces both Sessions panes (§6.1) is centered
+  horizontally in the area it fills: its icon, title, sentence and actions are center-aligned at the
+  same 480px measure and drop, with `--space-4` of inline padding so the area's inset focus ring
+  never touches them. Its danger notice (§12.4) is centered as a block and keeps its own anatomy.
+  Every other state, in a list column, a panel or a narrow surface, stays left-aligned.
 - Title in Title Case, one or two sentences in sentence case, at least one action. The action is not a
   duplicate of the page header's primary if that is visible: the header primary is hidden while the
   empty state shows it.

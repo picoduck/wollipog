@@ -28,15 +28,47 @@ test("with zero sessions at 1440×900 the page shows one state under the tab row
   await expect(page.getByRole("button", { name: "New Session", exact: true })).toHaveCount(1);
   await expect(state.getByRole("button", { name: "New Session", exact: true })).toBeVisible();
   await expect(page.locator(".page-header .page-primary")).toHaveCount(0);
-  // Under the tab row, top-left on the page grid: its title starts where the page title does.
-  const [tabs, title, pageTitle] = await Promise.all([
+  // Under the tab row, and centered in the area it fills (#3869): its icon, title, sentence and
+  // actions share the area's center line.
+  const [tabs, area, title] = await Promise.all([
     page.locator(".page-header .tabs-bar").boundingBox(),
+    state.boundingBox(),
     state.locator(".state-title").boundingBox(),
-    page.locator("#page-title").boundingBox(),
   ]);
   expect(title!.y).toBeGreaterThanOrEqual(tabs!.y + tabs!.height);
-  expect(Math.abs(title!.x - pageTitle!.x)).toBeLessThanOrEqual(1);
+  const center = area!.x + area!.width / 2;
+  for (const part of [".state-icon", ".state-title", ".state-body", ".actions"]) {
+    const box = (await state.locator(`.state ${part}`).boundingBox())!;
+    expect(Math.abs(box.x + box.width / 2 - center), part).toBeLessThanOrEqual(1);
+  }
+  await expect(state.locator(".state")).toHaveCSS("text-align", "center");
 });
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`at ${viewport.width}×${viewport.height} a focused state keeps its content clear of the focus ring (#3869)`, async ({ page }) => {
+    await open(page, fixture("first-run"), viewport);
+    const area = page.locator(".inbox-state");
+    await expect(area.getByRole("heading", { name: "No Sessions Yet" })).toBeVisible();
+    // The ring a digit or a handoff shows: keyboard-style focus on the state's own container.
+    const ring = await area.evaluate((element) => {
+      (element as HTMLElement).focus({ focusVisible: true } as FocusOptions);
+      const style = getComputedStyle(element);
+      return { visible: element.matches(":focus-visible"), style: style.outlineStyle, offset: parseFloat(style.outlineOffset) };
+    });
+    expect(ring.visible).toBe(true);
+    expect(ring.style).not.toBe("none");
+    // An outline sits outside its offset edge, so a negative offset puts the ring's inner edge that
+    // far inside the box.
+    const box = (await area.boundingBox())!;
+    const inner = { left: box.x - ring.offset, right: box.x + box.width + ring.offset, top: box.y - ring.offset };
+    for (const part of [".state-icon", ".state-title", ".state-body", ".actions"]) {
+      const content = (await area.locator(`.state ${part}`).boundingBox())!;
+      expect(content.x, part).toBeGreaterThanOrEqual(inner.left + 8);
+      expect(content.x + content.width, part).toBeLessThanOrEqual(inner.right - 8);
+      expect(content.y, part).toBeGreaterThanOrEqual(inner.top + 8);
+    }
+  });
+}
 
 test("a state's actions are full width and 44px tall at 390×844", async ({ page }) => {
   await open(page, fixture("first-run"), { width: 390, height: 844 });
@@ -96,14 +128,14 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 
     await expect(page.locator(".inbox-preview-pane")).toHaveCount(0);
     const retry = state.getByRole("button", { name: "Retry", exact: true });
     if (viewport.width >= 760) {
-      // Under the tab row, on the page grid, as every Sessions state is.
-      const [tabs, notice, pageTitle] = await Promise.all([
+      // Under the tab row, centered in the area it fills, as every Sessions state is (#3869).
+      const [tabs, notice, area] = await Promise.all([
         page.locator(".page-header .tabs-bar").boundingBox(),
         state.getByRole("alert").boundingBox(),
-        page.locator("#page-title").boundingBox(),
+        state.boundingBox(),
       ]);
       expect(notice!.y).toBeGreaterThanOrEqual(tabs!.y + tabs!.height);
-      expect(Math.abs(notice!.x - pageTitle!.x)).toBeLessThanOrEqual(1);
+      expect(Math.abs(notice!.x + notice!.width / 2 - (area!.x + area!.width / 2))).toBeLessThanOrEqual(1);
     }
 
     await retry.click();

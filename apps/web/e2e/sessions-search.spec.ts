@@ -142,6 +142,12 @@ test("No Matches replaces both panes; Clear Search restores the list and Search 
   await expect(state).toContainText("No sessions match “kubernetes” in any group.");
   await expect(page.locator(".inbox-preview-pane")).toHaveCount(0);
   await expect(page.locator(".master-detail-resize")).toHaveCount(0);
+  // Centered in the area it fills, like the other Sessions states (#3869).
+  const [area, title] = await Promise.all([
+    page.locator(".inbox-state").boundingBox(),
+    state.getByText("No Matches", { exact: true }).boundingBox(),
+  ]);
+  expect(Math.abs(title!.x + title!.width / 2 - (area!.x + area!.width / 2))).toBeLessThanOrEqual(1);
 
   await state.getByRole("button", { name: "Search Transcripts" }).click();
   const palette = page.getByRole("dialog", { name: "Search" });

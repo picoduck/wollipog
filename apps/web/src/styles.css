@@ -13610,11 +13610,26 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-list,
   .detail-scroll { transition: none; }
 }
-/* The Sessions list's own state: the list zone's focus target, holding a top-left `State`. */
-/* One state takes both panes' place (§6.1): No Matches (#2200) and an empty group (#2220), on the
-   page grid like any state that spans them. No Matches is stacked at the page state's drop (§12.1)
-   rather than the inline row of a list's own. */
-.inbox-state { flex: 1; }
+/* The Sessions list's own state: the list zone's focus target. One state takes both panes' place
+   (§6.1): No Matches (#2200), an empty group (#2220) or sessions that never arrived (#2803). It
+   spans the whole content area, so it is centered in it rather than left on the page grid (§12.1,
+   #3869), and the inline padding keeps it clear of the inset focus ring at any width. No Matches is
+   stacked at the page state's drop (§12.1) rather than the inline row of a list's own. */
+.inbox-state {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  align-content: start;
+  padding-inline: var(--space-4);
+}
+.inbox-state > .state {
+  justify-items: center;
+  text-align: center;
+}
+.inbox-state > .state .actions { justify-content: center; }
+/* The danger notice keeps its own left-aligned anatomy; only its block is centered. */
+.inbox-state > .notice.state-error { width: 100%; }
 .inbox-state > .state.no-results {
   display: grid;
   padding-top: var(--space-12);
