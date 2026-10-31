@@ -5383,6 +5383,15 @@ export class SessionManager {
     await this.providerHomeLeases.createProfile(home, provider, profileId, grantId);
   }
 
+  /** #3719: copy a Codex API-key sign-in into a new managed profile HOME, in one lease-worker operation. */
+  async importCodexCredential(home: string, layout: "codex_home" | "user_home", destinationRoot: string, profileId: string,
+    grantId: string, expectedProfileId?: string): Promise<void> {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    if (this.shuttingDown) throw new Error("provider credential import was cancelled by shutdown");
+    await this.providerHomeLeases.importCodexCredential(home, layout, destinationRoot, profileId, grantId,
+      expectedProfileId ? { expectedProfileId } : {});
+  }
+
   /** #3241: one HOME's lease state for an Owner or Admin deciding on a recovery. */
   async inspectProviderHomeLease(home: string): Promise<LeaseWorkerInspection> {
     if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");

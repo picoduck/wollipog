@@ -21,6 +21,9 @@ test("each lease state a launch can meet maps to its launch refusal code; everyt
     cancelled: undefined, cancel_release_failed: undefined, expired: undefined,
     profile_unsupported_control_plane: "unverifiable", profile_grant_limit: "unverifiable",
     stale_tip_changed: undefined, no_reboot_proof: "unverifiable", recovery_unconfirmed: undefined,
+    // Only an import (#3719) meets these, never a launch.
+    import_source_missing: undefined, import_source_held: undefined, import_source_unsafe: undefined,
+    import_source_foreign: undefined, import_source_unsupported: undefined, import_source_changed: undefined,
   };
   for (const [code, launch] of Object.entries(expected) as [LeaseWorkerError, string | undefined][]) {
     assert.equal(providerHomeLaunchRefusalCode(new ProviderHomeLeaseError(code)), launch, code);

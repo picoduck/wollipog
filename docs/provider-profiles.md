@@ -310,8 +310,108 @@ The actions follow the routes' authority. Set Up Managed Profile needs manage ri
 Machine and a v225 runner; Use for New Sessions and Recover Existing Profile need an Owner or Admin
 of the personal organization as well. A viewer who can't complete one gets **Open Machine
 Accounts** instead, where the section says why. Recover Existing Profile is not offered for the
-runner's own HOME, which has no account to adopt. Importing an existing sign-in into a managed
-profile is tracked separately (#3719).
+runner's own HOME, which has no account to adopt. An Owner or Admin can also create the managed
+profile from an existing sign-in instead of signing in again; see
+[Importing an Existing Sign-In](#importing-an-existing-sign-in).
+
+## Importing an Existing Sign-In
+
+An Owner or Admin setting up a managed profile can copy an existing sign-in on the same Machine
+into it instead of starting a new provider sign-in (#3719). The import is a separate, explicit
+authorization that names the source and the new profile.
+
+### What Can Be Imported
+
+Only one combination is supported: a **copy** of a **Codex** sign-in that is an **API key** stored
+in a file-backed `auth.json`, on a **native Linux or macOS** runner. The source is the runner user's
+own Codex HOME (its `CODEX_HOME`, else `~/.codex`) or a configured Codex account.
+
+| Source or context | Import | Why |
+| --- | --- | --- |
+| Codex API key in `auth.json` (native Linux, macOS) | Copy | A static key has no refresh state, so two copies stay usable. |
+| Codex ChatGPT (OAuth) sign-in | Not supported | Refresh tokens rotate, and Codex treats a reused refresh token (`refresh_token_reused`) as a permanent failure, so two copies can sign each other out. |
+| Codex keyring, `auto` or `ephemeral` credential storage | Not supported | The credential is not, or not only, in `auth.json`. |
+| Any Claude credential (file, Keychain, keyless Console) | Not supported | No version-safe credential-only extraction is verified. |
+| Native Windows, Windows-hosted WSL | Not supported | The runner cannot verify a profile marker there, and a WSL path does not identify its distribution. |
+| A runner inside WSL or a container; container execution targets | Not supported | The HOME's relation to the Machine cannot be verified, and container targets never bind host accounts. |
+
+There is no "move": nothing is removed from the source, and Wollipog never runs a provider logout
+or revokes anything. Both copies share the key's billing, rate limits and revocation. Where import
+is not available, the setup explains why and offers the ordinary sign-in.
+
+### What Is Copied
+
+Only the API key. The runner never copies the source's JSON: it writes a fresh record holding only
+the key, in exactly the shape `codex login --with-api-key` writes (`{ "auth_mode": "apikey",
+"OPENAI_API_KEY": … }`, verified against codex-cli 0.165.0 with a throwaway `CODEX_HOME` and a fake
+key). Configuration, transcripts, plugins and skills stay behind, so the new profile is as isolated
+as one created by sign-in. `config.toml` is read only to prove that Codex uses file storage: any
+`cli_auth_credentials_store` other than `file`, at any level, refuses the import. The source record
+must hold an API key and nothing else; OAuth tokens, a refresh time, another `auth_mode`, or an
+unknown key (a newer authentication type) refuse it.
+
+### Source Safety
+
+The whole import is one operation in the serialized provider-HOME lease worker (`profile_import`;
+see [Profile Marker Operations](provider-home-lease-worker.md#profile-marker-operations)), so there
+is no inspect-then-acquire gap:
+
+1. The source must already exist as a real directory (it is never created) and must not be another
+   provider's profile. This runner must not hold it or be acquiring it: a running session, sign-in,
+   Agent TUI or another import of it refuses the import instead of lending its reference.
+2. Its lease is taken exclusively, with the source's own profile context, so another runner's or
+   control plane's lease, and a profile this control plane is not granted, refuse it as an
+   acquisition would.
+3. Under that lease the credential directory and `auth.json` are read without following links and
+   with their identities pinned: a real directory and a single-link regular file owned by the
+   runner's user, the directory not group- or world-writable and the file private (no group or
+   other permission bits), at most 16 KiB, and unchanged across the read.
+4. Only then is the new managed HOME created (as for Add Account), its first marker written with
+   this control plane's grant, and the record published by an exclusive 0600 temporary file, fsync,
+   rename and directory fsync. The source is checked unchanged immediately before and after.
+5. The source's lease is released.
+
+A refusal before step 4 leaves both HOMEs unchanged; the source's lease journal records the
+acquisition and release, which is bookkeeping, not a credential change. A failure after the new
+HOME is created retains it unrecorded, without this control plane's grant, as a failed sign-in
+retains its HOME. A Wollipog lease does not stop an ordinary terminal process from changing the
+source; the pinned identities refuse a change they observe.
+
+### Authorization and Audit
+
+`POST /api/runners/:id/provider-imports` with:
+
+```json
+{
+  "provider": "codex",
+  "label": "Work",
+  "source": { "kind": "default_home" },
+  "confirmation": { "acknowledgeCredentialImport": true, "sourceLabel": "This Machine's Codex sign-in", "destinationLabel": "Work" }
+}
+```
+
+`source` is `{ "kind": "default_home" }` or `{ "kind": "account", "accountId": "<id>" }`; nothing
+else, and never a path, is accepted. The runner resolves the path itself. The confirmation must
+name the source exactly as the person confirmed it (the account's label, or "This Machine's Codex
+sign-in") and the new profile's label; a stale or different name is 409 `CONFIRMATION_MISMATCH`.
+
+The route needs a human Owner or Admin who can access the Machine, so the central gate confines it
+to the personal control-plane organization; members, agent credentials and other organizations'
+Owners and Admins are refused. The control plane records the new profile's pending grant as Add
+Account does (`origin = 'created'`, with the authorizer's role), and an audit row in
+`provider_credential_imports`: the authorizer and role, the source kind (and, for an account
+source, its opaque account id), the grant, and, once the runner answers, the new account and
+profile ids or the refusal code. It holds no credential content or path. A refusal spends the grant;
+a lost reply leaves it pending and the audit `unknown`, and the account report completes the grant
+if the import ran.
+
+### Compatibility
+
+A v260 runner on a supported host reports `runtime.providerCredentialImport` (`{ version: 1,
+providers: ["codex"] }`) and accepts `import_provider_credential`. The control plane sends an import
+only to a v260 runner that reports the capability, and refuses the route with 409 otherwise, so
+older runners never receive an import request. Refusals carry a code
+(`ProviderCredentialImportCode`) and a fixed, path-free sentence.
 
 A session that doesn't choose an account never takes one whose profile only other control planes
 may use (`profile.access` of `not_granted`): the control plane's implicit choice, and New Session's

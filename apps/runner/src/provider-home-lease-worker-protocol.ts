@@ -40,6 +40,12 @@ export type LeaseWorkerOperation =
    * `profileId`, sent for a managed profile HOME, is the identity its account recorded: a marker
    * holding any other identity, or none, keeps the HOME and is not changed. */
   | { method: "profile_retire"; home: string; provider: "claude" | "codex"; profileId?: string }
+  /** #3719: copy the Codex API-key sign-in of the existing source HOME `home` into a new managed
+   * profile HOME `<destinationRoot>/<profileId>` whose first marker records `grantId`, in one
+   * operation. `layout` says where the credential sits under `home`. The source is never created,
+   * is refused while this runner holds or acquires it, and is leased exclusively with its own
+   * dispatch-time profile context; the destination is created only after the source is admitted. */
+  | { method: "profile_import"; home: string; provider: "codex"; layout: "codex_home" | "user_home"; destinationRoot: string; profileId: string; grantId: string; profile?: LeaseWorkerProfileAccess }
   /** #3241 part 2: read the HOME's lease journal without creating anything; the reply carries
    * `inspection`. */
   | { method: "lease_inspect"; home: string; profile?: LeaseWorkerProfileAccess }
@@ -50,13 +56,14 @@ export function isLeaseWorkerAcquisition(method: LeaseWorkerOperation["method"])
   return method === "acquire" || method === "acquire_reference";
 }
 /** Operations that carry the dispatch-time provider-profile context. */
-export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" | "lease_inspect" | "lease_recover" {
-  return isLeaseWorkerAcquisition(method) || method === "lease_inspect" || method === "lease_recover";
+export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" | "lease_inspect" | "lease_recover" | "profile_import" {
+  return isLeaseWorkerAcquisition(method) || method === "lease_inspect" || method === "lease_recover" || method === "profile_import";
 }
 export type LeaseWorkerError = "busy" | "unavailable" | "foreign_owner" | "foreign_host" | "refusal" | "cancelled" | "cancel_release_failed" | "expired" |
   "holder_alive" | "boundary_survivor" | "process_survivor" | "boundary_unverifiable" | "process_uninspectable" | "process_uninspectable_not_delegated" | "invalid_journal" |
   "profile_unsupported_control_plane" | "profile_unverifiable" | "profile_not_granted" | "profile_changed" | "profile_grant_limit" |
-  "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed";
+  "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed" |
+  "import_source_missing" | "import_source_held" | "import_source_unsafe" | "import_source_foreign" | "import_source_unsupported" | "import_source_changed";
 /** #3241 part 2: a HOME's lease state, as an Owner or Admin sees it before authorizing a recovery. */
 export interface LeaseWorkerInspection {
   state: "none" | "released" | "held" | "stale" | "unverifiable";
@@ -93,6 +100,12 @@ export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   stale_tip_changed: "This provider HOME's lease is no longer the stale lease that was authorized for recovery. Inspect it again before authorizing a recovery.",
   no_reboot_proof: "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.",
   recovery_unconfirmed: "The provider HOME lease recovery may have been recorded but could not be confirmed. Inspect the lease again before retrying.",
+  import_source_missing: "There's no Codex sign-in to copy there. Sign in to create the profile instead.",
+  import_source_held: "This sign-in is in use by a session, sign-in or Agent TUI on this Machine. Try again once it's free, or sign in instead.",
+  import_source_unsafe: "Wollipog can't verify this sign-in's files: they must be private regular files and directories owned by the runner's user, without links. Sign in instead.",
+  import_source_foreign: "This HOME belongs to another provider's profile, so its sign-in can't be copied. Sign in instead.",
+  import_source_unsupported: "Only a Codex sign-in that uses an API key stored in auth.json can be copied. A ChatGPT sign-in, or one kept in the keyring, can't be shared safely; sign in instead.",
+  import_source_changed: "This sign-in changed while it was being copied, so nothing was used. Try again.",
 };
 /** A worker refusal with its typed code, so callers can choose a recovery action without parsing text. */
 export class ProviderHomeLeaseError extends Error {
@@ -162,6 +175,12 @@ export function validLeaseWorkerOperation(value: unknown): value is LeaseWorkerO
   }
   const profiled = Object.hasOwn(v, "profile");
   if (profiled && !validLeaseWorkerProfileAccess(v.profile)) return false;
+  if (v.method === "profile_import") {
+    return v.provider === "codex" && (v.layout === "codex_home" || v.layout === "user_home") &&
+      typeof v.destinationRoot === "string" && v.destinationRoot.startsWith("/") && !v.destinationRoot.includes("\0") &&
+      Buffer.byteLength(v.destinationRoot) <= 32768 && typeof v.profileId === "string" && PROFILE_ID.test(v.profileId) &&
+      typeof v.grantId === "string" && GRANT_ID.test(v.grantId) && Object.keys(v).length === (profiled ? 8 : 7);
+  }
   if (v.method === "lease_inspect") return Object.keys(v).length === (profiled ? 3 : 2);
   const provider = typeof v.provider === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(v.provider);
   if (v.method === "lease_recover") {

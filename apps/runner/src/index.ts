@@ -38,6 +38,7 @@ import {
   type AgentDriverKind,
   type AgentDefinition,
   type AgentContext,
+  type ProviderCredentialImportCode,
   type AgentsUpdatedMessage,
   type ControlPlaneToRunner,
   type DurableSessionCommandResultMessage,
@@ -167,7 +168,8 @@ import {
   writeStarterWorktreeSetupConfig,
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
-import { ProviderLoginSupervisor } from "./provider-login.js";
+import { ProviderCredentialImportError, ProviderLoginSupervisor, type ProviderCredentialImportSourceHome } from "./provider-login.js";
+import { providerCredentialImportHostSupported } from "./provider-credential-import.js";
 import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
@@ -597,6 +599,8 @@ const metadata: RunnerMetadata = {
     maxConcurrentSessions: config.maxConcurrentSessions,
     admission: config.admission,
     executionIsolation: config.executionIsolation,
+    // #3719: the control plane offers import only on hosts that report this.
+    ...(providerCredentialImportHostSupported() ? { providerCredentialImport: { version: 1 as const, providers: ["codex" as const] } } : {}),
   },
   sessionNamingCustomModel: sessionNamingCustomModel.status(),
 };
@@ -861,6 +865,20 @@ const registerAgentControlCredentialAndWait = (sessionId: string, tokenHash: str
     }
   });
 };
+/** #3719: the runner user's own Codex HOME, as its native Codex agents inherit it: their
+ * `CODEX_HOME`, else `~/.codex` under their HOME (the lease then covers that HOME). Undefined when
+ * the native Codex agents disagree, since the source must be one unambiguous HOME. */
+function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefined {
+  const agents = metadata.agents.filter((agent) => (agent.context?.kind ?? "native") === "native" &&
+    (agent.driver === "codex" || agent.driver === "codex-app-server"));
+  const sources = (agents.length ? agents.map((agent) => ({ ...process.env, ...runnerLocalAgentEnv(agent.id, agent.driver ?? "codex", { kind: "native" }) }))
+    : [{ ...process.env }]).map((env): ProviderCredentialImportSourceHome => env.CODEX_HOME
+    ? { home: resolve(env.CODEX_HOME), layout: "codex_home" }
+    : { home: resolve(env.HOME || homedir()), layout: "user_home" });
+  const keys = new Set(sources.map((source) => `${source.layout}\u0000${source.home}`));
+  return keys.size === 1 ? sources[0] : undefined;
+}
+const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
   configPath: parsed.configPath,
@@ -921,6 +939,19 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
         .catch((error) => log(`a discarded provider profile's grant could not be removed from its marker: ${errText(error)}`));
     },
   },
+  // #3719: copying an existing Codex API-key sign-in into a managed profile, on supported hosts only.
+  ...(providerCredentialImportSupported ? {
+    imports: {
+      defaultCodexHome: () => defaultCodexImportSource(),
+      copyCodex: async ({ source, root, profileId, grantId }) => {
+        if (!attestation.instanceId || !providerProfileGrants.supportsProfiles()) {
+          throw new Error("This control plane did not negotiate provider profiles.");
+        }
+        await sessions.importCodexCredential(source.home, source.layout, root, profileId, grantId, source.expectedProfileId);
+        providerProfileGrants.recordCreated(profileId, grantId);
+      },
+    },
+  } : {}),
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
     sendUp({
@@ -3164,6 +3195,24 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         error: errText(error),
       })));
       break;
+    case "import_provider_credential": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerCredentialImport")) break;
+      const refuse = (code: ProviderCredentialImportCode, error: string) =>
+        sendUp({ type: "import_provider_credential_result", requestId: msg.requestId, ok: false, code, error });
+      if (msg.runnerId !== config.runnerId) { refuse("FAILED", "The import targeted a different Machine."); break; }
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) {
+        refuse("UNSUPPORTED", "This control plane did not negotiate provider profiles.");
+        break;
+      }
+      runCommandTask("import_provider_credential", providerLoginSupervisor.importAccount({
+        provider: msg.provider, label: msg.label, source: msg.source, profileGrantId: msg.profileGrantId,
+      }).then(({ accountId, profileId }) => sendUp({
+        type: "import_provider_credential_result", requestId: msg.requestId, ok: true, accountId, profileId,
+      })).catch((error) => error instanceof ProviderCredentialImportError
+        ? refuse(error.code, error.message)
+        : refuse("FAILED", "The sign-in could not be copied. Sign in to create the profile instead.")));
+      break;
+    }
     case "submit_provider_login_code":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) break;
       try {

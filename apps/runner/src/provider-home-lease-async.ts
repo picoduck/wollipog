@@ -157,6 +157,17 @@ export class AsyncProviderHomeLeaseRegistry {
     await this.enqueue({ method: "profile_create", home, provider, profileId, grantId });
   }
 
+  /** #3719: copy the Codex API-key sign-in of the existing source HOME `home` into the new managed
+   * profile HOME `<destinationRoot>/<profileId>`, whose first marker records `grantId`, as one
+   * worker operation. The source's lease is taken exclusively with its own profile context (the
+   * recorded id in `profile`, else the configured account's for that path); a typed refusal, such
+   * as `import_source_held` or `import_source_unsupported`, leaves both HOMEs unchanged. */
+  async importCodexCredential(home: string, layout: "codex_home" | "user_home", destinationRoot: string, profileId: string,
+    grantId: string, profile: LeaseProfileBinding = {}): Promise<void> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    await this.enqueue({ method: "profile_import", home, provider: "codex", layout, destinationRoot, profileId, grantId }, {}, profile);
+  }
+
   /** #3239: grant retirement for a removed account's HOME, taken while the worker
    * holds its lease: drops every grant of this control plane from the marker, then releases.
    * Resolves true only when the lease was released and no other control plane is granted. This

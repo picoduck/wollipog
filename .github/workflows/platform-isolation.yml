@@ -119,7 +119,7 @@ jobs:
         run: node --import tsx --test apps/runner/src/execution-isolation.test.ts apps/runner/src/runner-data-dir.test.ts apps/runner/src/spawn.test.ts apps/runner/src/linux-cgroup.test.ts
 
       - name: Verify Native Provider-HOME Lease Protocol
-        run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts apps/runner/src/provider-home-lease-async.test.ts apps/runner/src/provider-home-lease-worker-protocol.test.ts apps/runner/src/provider-home-lease-heartbeat.test.ts apps/runner/src/provider-home-lease-clock.test.ts apps/runner/src/provider-home-lease-deadline.test.ts apps/runner/src/provider-home-lease-worker-deadline.test.ts
+        run: node --import tsx --test apps/runner/src/provider-home-lease.test.ts apps/runner/src/provider-home-lease-portable.test.ts apps/runner/src/provider-home-lease-io.test.ts apps/runner/src/provider-home-lease-async.test.ts apps/runner/src/provider-home-lease-worker-protocol.test.ts apps/runner/src/provider-home-lease-heartbeat.test.ts apps/runner/src/provider-home-lease-clock.test.ts apps/runner/src/provider-home-lease-deadline.test.ts apps/runner/src/provider-home-lease-worker-deadline.test.ts apps/runner/src/provider-credential-import.test.ts apps/runner/src/provider-credential-import-lease.test.ts
 
       - name: Verify Successor Readiness Regression Detects Barrier Removal
         timeout-minutes: 2

@@ -395,6 +395,7 @@ export type RunnerRequestResult =
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
   | import("@wollipog/protocol").AdoptProviderProfileResultMessage
+  | import("@wollipog/protocol").ImportProviderCredentialResultMessage
   | import("@wollipog/protocol").RevokeProviderProfileGrantResultMessage
   | import("@wollipog/protocol").InspectProviderHomeLeaseResultMessage
   | import("@wollipog/protocol").RecoverProviderHomeLeaseResultMessage;
