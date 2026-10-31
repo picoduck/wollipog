@@ -14679,6 +14679,22 @@ export class ControlPlaneDb {
     return Number(row?.cost_usd ?? 0);
   }
 
+  /** Moves an approved reconciliation's change to one observation into its launcher's daily spend
+   * (#3840). The receipt's owner says whether the observation was booked to the launcher: only an
+   * organization- or team-owned observation was, and a session's launcher never changes. A day
+   * already pruned has nothing left to correct. */
+  correctLauncherDailyCostInTransaction(sessionId: string, organizationId: string, ownerKind: string, bucketTs: number, deltaMicrousd: number): void {
+    if (!(this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("historical correction requires an existing write transaction");
+    }
+    if (ownerKind === "user" || deltaMicrousd === 0) return;
+    const launcherUserId = this.sessionLauncherUserId(sessionId);
+    if (!launcherUserId) return;
+    this.stmt(`UPDATE usage_launcher_daily SET cost_microusd=MAX(0, cost_microusd+?)
+      WHERE organization_id=? AND user_id=? AND bucket_ts=?`)
+      .run(deltaMicrousd, organizationId, launcherUserId, Math.floor(bucketTs / 86_400_000) * 86_400_000);
+  }
+
   /** Only an approved reconciliation may release a proven overcount from a child's peak. */
   applyHistoricalCostCorrectionInTransaction(sessionId: string, deltaMicrousd: number): void {
     if (!(this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
@@ -16691,7 +16707,9 @@ export class ControlPlaneDb {
     now: number,
     explicitScope?: ResourceScope,
     explicitProject?: { projectId: string | null; projectLocationId: string | null },
-    fork?: { sourceSessionId: string; sourceTurn: number },
+    /** A fork records the authenticated human forking it as its launcher (#3840), else it inherits
+     * the source's launcher. */
+    fork?: { sourceSessionId: string; sourceTurn: number; launcherUserId?: string },
   ): SessionView {
     // An adopted session's snapshot carries no workspaceId (CLI sessions know nothing of our
     // workspaces) — resolve the exact workspace whose path contains its cwd, then infer the stable
@@ -16837,6 +16855,8 @@ export class ControlPlaneDb {
           `INSERT INTO session_forks (target_session_id, source_session_id, source_turn, created_at)
            VALUES (?, ?, ?, ?)`,
         ).run(snap.id, fork.sourceSessionId, fork.sourceTurn, now);
+        const launcherUserId = fork.launcherUserId ?? this.sessionLauncherUserId(fork.sourceSessionId);
+        if (launcherUserId) this.insertSessionLauncher(snap.id, launcherUserId, now);
       }
       this.enqueueOutboundSessionEventInTransaction({
         sourceKey: `session-created:${snap.id}`,

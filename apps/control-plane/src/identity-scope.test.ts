@@ -373,6 +373,33 @@ test("a runner snapshot fork atomically preserves scope and Project after its Lo
   db.close();
 });
 
+test("a fork records the human who forked it as its launcher, else the source's launcher (#3840)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const local = db.localIdentityContext();
+  db.createIdentityMember({
+    userId: "usr_operator", displayName: "Operator", organizationId: local.organizationId, role: "operator", now: 1,
+  });
+  db.registerRunner(runner(), 2, 53);
+  db.createSession({
+    id: "s_source", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent", title: "Source",
+    useWorktree: true, driver: "acp", config: {}, launcherUserId: "usr_operator", now: 3,
+  });
+  const fork = (id: string, launcherUserId?: string) => db.createSessionFromSnapshot({
+    id, workspaceId: "ws-1", agentId: "agent", title: id, status: "idle",
+    driver: "acp", useWorktree: true, worktreePath: `/repo-${id}`, config: {}, preview: null,
+    pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false, seq: 0,
+    createdAt: 4, updatedAt: 4,
+  }, "runner-1", 4, db.sessionScope("s_source")!, undefined,
+  { sourceSessionId: "s_source", sourceTurn: 1, ...(launcherUserId ? { launcherUserId } : {}) });
+  fork("s_inherited");
+  fork("s_forked_by_owner", local.userId);
+  assert.equal(db.sessionLauncherUserId("s_inherited"), "usr_operator");
+  assert.equal(db.sessionLauncherUserId("s_forked_by_owner"), local.userId);
+  assert.equal(db.sessionBudgetUser("s_inherited")?.userId, "usr_operator", "an organization-owned fork keeps a budget user");
+  assert.equal(db.sessionScope("s_inherited")?.owner.kind, "organization");
+  db.close();
+});
+
 test("an unknown snapshot workspace inherits the restricted runner owner instead of widening", () => {
   const db = ControlPlaneDb.open(":memory:");
   const local = db.localIdentityContext();

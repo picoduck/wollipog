@@ -14556,6 +14556,15 @@ export class SessionsService {
       }
       childSessionScope = parentScope;
     }
+    // Like a run, a workflow cannot launch new turns for an owner or launcher (#3840) past their
+    // daily allowance, through its workers or its organization-owned orchestrator.
+    const launcherUserId = parentSessionId
+      ? this.db.sessionLauncherUserId(parentSessionId)
+      : creationContext?.launcherUserId ?? null;
+    for (const scope of [childSessionScope, ...(orchestratorScope ? [orchestratorScope] : [])]) {
+      const admissionDenied = this.dailyBudgetAdmissionError(scope, launcherUserId);
+      if (admissionDenied) return fail(admissionDenied, 409);
+    }
     // Trusted orchestrators require organization scope for organization workflow tools. When a
     // Project is narrower, keep only that infrastructure session explicitly outside the Project;
     // every ordinary workflow child still adopts the inherited Project and parent scope.
@@ -14625,7 +14634,7 @@ export class SessionsService {
         driver: member.launch.driver,
         config,
         scope: member.orchestrator ? orchestratorScope! : childSessionScope,
-        ...(creationContext?.launcherUserId ? { launcherUserId: creationContext.launcherUserId } : {}),
+        ...(launcherUserId ? { launcherUserId } : {}),
         now,
       });
       const costBudget = parentSessionId ? config.costBudgetUsd : req.costBudgetUsd;

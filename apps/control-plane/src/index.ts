@@ -5844,6 +5844,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   const turn = Number((req.body as { turn?: number })?.turn);
   if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
+  const forkingHuman = requestHuman(req);
   const source = db.getSession(sourceId);
   if (!source) return reply.code(404).send({ error: "session not found" });
   const sourceScope = db.sessionScope(sourceId);
@@ -5957,7 +5958,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       now,
       sourceScope,
       inheritedProject,
-      { sourceSessionId: sourceId, sourceTurn: turn },
+      { sourceSessionId: sourceId, sourceTurn: turn, ...(forkingHuman ? { launcherUserId: forkingHuman.userId } : {}) },
     );
     let highWater = 0;
     for (const event of deferHistory ? [] : (res.events ?? [])) {

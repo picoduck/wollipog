@@ -22438,6 +22438,17 @@ test("a member's daily budget covers the organization-owned sessions they launch
   assert.match(refused.error ?? "", /daily budget reached/);
   assert.ok(launch("usr_other").ok, "another member still launches");
   assert.ok(launch().ok, "a launch with no human attribution keeps today's behavior");
+  const runsBefore = db.listRuns().length;
+  const run = svc.createRun({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentIds: [AGENT_ID], task: "spend more" },
+    { launcherUserId: "usr_member" });
+  assert.match(run.error ?? "", /daily budget reached/);
+  const workflow = svc.createWorkflowRun({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, workflowId: "builtin:build-review",
+    task: "spend more", agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID },
+  }, { kind: "human", id: "usr_member" }, undefined, { launcherUserId: "usr_member" });
+  assert.equal(workflow.status, 409);
+  assert.match(workflow.error ?? "", /daily budget reached/);
+  assert.equal(db.listRuns().length, runsBefore, "neither fan-out persisted a run");
   const nativeTui = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, launchSurface: "native_tui" },
     undefined, undefined, false, false, false, { defaultOwnerUserId: "usr_other" });
   assert.equal(nativeTui.status, 409);
