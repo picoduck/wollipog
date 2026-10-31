@@ -37,6 +37,26 @@ for (const width of [1440, 834, 390]) {
         await expect(filters).toHaveAccessibleName(/Filters\s*, 2 applied/);
       }
       await expect(page.locator(".chips")).toContainText("Project: Wollipog");
+      if (!compact) {
+        // Move off the controls so hover cannot masquerade as a chosen filter's edge.
+        await page.mouse.move(1400, 850);
+        const border = (name: string) => scope.getByRole("button", { name, exact: true })
+          .evaluate((node) => getComputedStyle(node).borderTopColor);
+        const unset = await border("Location: All Locations");
+        const chosen = await scope.evaluate((node) => {
+          const probe = document.createElement("span");
+          probe.style.color = "var(--control-outline)";
+          node.append(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        });
+        await expect.poll(() => border("Project: Wollipog")).toBe(chosen);
+        await expect.poll(() => border("Status: Completed")).toBe(chosen);
+        expect(await border("Project: Wollipog")).not.toBe(unset);
+        expect(await border("Status: Completed")).not.toBe(unset);
+        expect(await border("Agent: All Agents")).toBe(unset);
+      }
       expect(await toolbar.evaluate((node) => node.getBoundingClientRect().width)).toBe(initialWidth);
       await page.getByRole("searchbox").fill("UI");
       await expect(page.locator(".archive-view > [role=status]")).toContainText("match “UI”");
