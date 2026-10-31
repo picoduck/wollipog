@@ -101,7 +101,7 @@ test("a browser sees delegated image review complete through live scoped routes 
     if (!ready) throw new Error("control plane did not become healthy");
     // Startup marks sessions with no connected runner stopped. Restore their fixture status after
     // recovery, so an exact live agent credential can exercise the real authorization routes.
-    const db = ControlPlaneDb.open(databasePath);
+    const db = ControlPlaneDb.attach(databasePath);
     try {
       db.updateSessionStatus(seeded.parentId, "running", Date.now());
       db.updateSessionStatus(seeded.childId, "running", Date.now());
