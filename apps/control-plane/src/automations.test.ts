@@ -3202,9 +3202,22 @@ test("an automation launches its sessions as its human creator, never as a syste
     service.create(baseSpec(), { kind: "human", id: "usr_creator" }, 0);
     service.create(baseSpec({ name: "Workflow", action: workflow }), { kind: "human", id: "usr_creator" }, 0);
     service.create(baseSpec({ name: "System" }), { kind: "system", id: "seed" }, 0);
+    // The creator's own edit keeps the attribution; another member's edit or trigger ends it.
+    const ownEdit = service.create(baseSpec({ name: "Own Edit" }), { kind: "human", id: "usr_creator" }, 0).data!;
+    assert.ok(service.update(ownEdit.automationId, baseSpec({ name: "Own Edit", limits: { maxCostUsd: 1, maxToolCalls: 10 } }),
+      { kind: "human", id: "usr_creator" }, 1).ok);
+    const edited = service.create(baseSpec({ name: "Edited" }), { kind: "human", id: "usr_creator" }, 0).data!;
+    assert.ok(service.update(edited.automationId, baseSpec({ name: "Edited", action: { kind: "create_session",
+      request: { runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Something else" } } }),
+    { kind: "human", id: "usr_other" }, 1).ok);
+    const triggered = service.create(baseSpec({ name: "Triggered" }), { kind: "human", id: "usr_creator" }, 0).data!;
+    assert.ok(service.createTrigger(triggered.automationId, { kind: "webhook", name: "Hook" }, { kind: "human", id: "usr_other" }, 1).ok);
     service.tick(60_000);
     assert.deepEqual(launchers.map((entry) => JSON.stringify(entry)).sort(), [
       { action: "create_session" },
+      { action: "create_session" },
+      { action: "create_session" },
+      { action: "create_session", launcherUserId: "usr_creator" },
       { action: "create_session", launcherUserId: "usr_creator" },
       { action: "workflow_run", launcherUserId: "usr_creator" },
     ].map((entry) => JSON.stringify(entry)).sort());

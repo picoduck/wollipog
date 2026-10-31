@@ -7626,6 +7626,15 @@ test("a member's question policies answer only in the organization-owned session
     "the launcher's policy answers its organization-owned session; another member's, a legacy and a user-owned session ask a human");
   assert.equal(svc.governanceAudit(mine).find((entry) => entry.actor.kind === "policy")?.governancePolicyId, "routine");
   assert.equal(db.getSession(theirs)?.pendingApproval?.kind, "question");
+  // A launcher who leaves the organization stops acting on its sessions.
+  sql.prepare("DELETE FROM identity_memberships WHERE organization_id='org_team' AND user_id='usr_member'").run();
+  svc.onSessionEvent(mine, { kind: "question_resolved", requestId: `ask-${mine}`, answered: true });
+  db.updateSessionStatus(mine, "running", Date.now());
+  const before = hub.sentOfType("answer_question").length;
+  svc.onSessionEvent(mine, { kind: "question_request", requestId: "ask-after-leaving",
+    questions: [{ id: "q", header: "Review", question: "Continue?", options: [{ label: "Proceed" }] }] });
+  assert.equal(hub.sentOfType("answer_question").length, before, "a departed launcher's policy never answers");
+  assert.equal(db.sessionPersonalUser(mine), null);
 });
 
 for (const ordering of ["before", "after"] as const) {

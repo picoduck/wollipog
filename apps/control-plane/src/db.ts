@@ -4652,12 +4652,15 @@ type UsageDimensions = {
 };
 
 /** The sessions one user's daily budget governs in an organization: the ones they own, and the
- * organization- and team-owned ones they launched (#3840). Bind `dailyBudgetSessionIdParams`. */
+ * organization- and team-owned ones they launched while they remain a member (#3840, #3898). Bind
+ * `dailyBudgetSessionIdParams`. */
 const DAILY_BUDGET_SESSION_IDS_SQL = `
   SELECT session_id FROM session_ownership WHERE organization_id=? AND owner_kind='user' AND owner_id=?
   UNION ALL
   SELECT launcher.session_id FROM session_launchers launcher
     JOIN session_ownership ownership ON ownership.session_id=launcher.session_id
+    JOIN identity_memberships membership
+      ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
    WHERE launcher.user_id=? AND ownership.organization_id=? AND ownership.owner_kind<>'user'`;
 const dailyBudgetSessionIdParams = (organizationId: string, userId: string) =>
   [organizationId, userId, userId, organizationId] as const;
@@ -11481,13 +11484,15 @@ export class ControlPlaneDb {
   }
 
   /** Whose Artifact Uploads preference governs a session: its user owner, else the user who launched
-   * it (#3840). A session with neither, such as one created before launchers were recorded, falls
+   * it while they remain a member of its organization (#3840, #3898). A session with neither, such as one created before launchers were recorded, falls
    * back to the local owner when the personal organization owns it, as sessions inherit from the
    * default runner (#3811); a team or another organization resolves to none and stays Manual. */
   artifactUploadPreferenceUser(sessionId: string): string | undefined {
     const row = this.stmt(
-      `SELECT ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
+      `SELECT ownership.owner_kind, ownership.owner_id, membership.user_id AS launcher_id
          FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id
+         LEFT JOIN identity_memberships membership
+           ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
         WHERE ownership.session_id=?`,
     ).get(sessionId) as { owner_kind: string; owner_id: string; launcher_id: string | null } | undefined;
     if (row?.owner_kind === "user") return row.owner_id;
@@ -15928,6 +15933,20 @@ export class ControlPlaneDb {
     return Boolean(this.stmt("SELECT 1 FROM identity_memberships WHERE organization_id=? AND user_id=?").get(organizationId, userId));
   }
 
+  /** True while no one but this human has changed an automation's definition or its triggers since
+   * creating it (#3898). Another member's edit, toggle, or trigger credential would otherwise make
+   * the creator answer for sessions whose instructions or callers they never authorized. */
+  automationAuthoredSolelyBy(automationId: string, userId: string): boolean {
+    const row = this.stmt(`SELECT
+        EXISTS(SELECT 1 FROM automation_events WHERE automation_id=? AND kind='created'
+          AND actor_kind='human' AND actor_id=?) AS created,
+        EXISTS(SELECT 1 FROM automation_events WHERE automation_id=?
+          AND kind IN ('updated','enabled','disabled','trigger_created','trigger_rotated')
+          AND (actor_kind<>'human' OR actor_id IS NOT ?)) AS changed`)
+      .get(automationId, userId, automationId, userId) as { created: number; changed: number };
+    return row.created === 1 && row.changed === 0;
+  }
+
   /** Only a member of the session's organization is recorded (#3898): an unknown user, or one who
    * left it, such as an automation's departed creator, records nothing rather than failing the
    * session's creation. */
@@ -19279,12 +19298,15 @@ export class ControlPlaneDb {
   }
 
   /** Whose per-user daily budget and question policies govern a session: its user owner, else the
-   * user who launched an organization- or team-owned session (#3840, #3899). A session with neither
-   * has no daily allowance and no policy answers. */
+   * user who launched an organization- or team-owned session, while they remain a member of its
+   * organization (#3840, #3898, #3899). A departed launcher's rules never act on the organization's
+   * sessions. A session with neither has no daily allowance and no policy answers. */
   sessionPersonalUser(sessionId: string): { organizationId: string; userId: string } | null {
     const row = this.stmt(
-      `SELECT ownership.organization_id, ownership.owner_kind, ownership.owner_id, launcher.user_id AS launcher_id
+      `SELECT ownership.organization_id, ownership.owner_kind, ownership.owner_id, membership.user_id AS launcher_id
          FROM session_ownership ownership LEFT JOIN session_launchers launcher ON launcher.session_id=ownership.session_id
+         LEFT JOIN identity_memberships membership
+           ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
         WHERE ownership.session_id=?`,
     ).get(sessionId) as { organization_id: string; owner_kind: string; owner_id: string; launcher_id: string | null } | undefined;
     if (!row) return null;
