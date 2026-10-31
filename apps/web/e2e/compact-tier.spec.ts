@@ -136,6 +136,7 @@ for (const width of [761, 834, 940, 1099]) {
  */
 async function checkArchivedTable(page: Page, where: string, { minSession }: { folded: boolean; minSession: number }) {
   await expect(page.locator(".archive-item").first()).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
   const rows = await page.locator(".archive-item").evaluateAll((items) => items.map((row) => ({
     height: row.getBoundingClientRect().height,
     title: row.querySelector("a")!.getBoundingClientRect().width,
@@ -233,6 +234,17 @@ test.describe("Archived Sessions rows across compact and desktop widths", () => 
       await checkArchivedTable(page, `at ${width}px, labelled rail ${labelled ? "on" : "off"}`, { folded, minSession: 200 });
     });
   }
+
+  test("a wider timestamp font still leaves the title 200px at the labelled-rail floor", async ({ page }) => {
+    await page.setViewportSize({ width: 761, height: 860 });
+    await open(page, "path=%2Farchived", "Archived Sessions");
+    await expandRail(page);
+    // CI's DejaVu Sans timestamp is wider than this workstation's Noto Sans fallback.
+    await page.locator(".archive-item > time").evaluateAll((times) => times.forEach((time) => {
+      (time as HTMLElement).style.fontFamily = '"DejaVu Sans", sans-serif';
+    }));
+    await checkArchivedTable(page, "wide timestamp font at 761px with labelled rail", { folded: false, minSession: 200 });
+  });
 
   test("the full layout returns exactly where it fits", async ({ page }) => {
     await open(page, "path=%2Farchived", "Archived Sessions");
