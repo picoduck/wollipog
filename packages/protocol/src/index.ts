@@ -793,7 +793,9 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      runner user's own HOME or a configured account into a new managed profile and replies
 //      `import_provider_credential_result`. The control plane sends it only to a v260 runner that
 //      reports the capability; older runners never receive an import request.
-export const PROTOCOL_VERSION = 260;
+// 261: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
+//      runner's actual retained conversation state; older peers omit it and clients fail closed.
+export const PROTOCOL_VERSION = 261;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1074,6 +1076,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v260 runner imports a Codex API-key sign-in into a new managed profile (#3719). The runner
    * must also report `runtime.providerCredentialImport`, which only supported hosts do. */
   providerCredentialImport: 260,
+  /** Session-scoped assertion that Restart retains an established provider conversation (#2515). */
+  sessionRestartResume: 261,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
   worktreeSwitchContinuation: 255,
   /** v256 runner reports `worktreeSwitch` while it relaunches a session in another worktree (#3810). */
@@ -2288,6 +2292,9 @@ export interface AgentCapabilities {
  * truth and must not be frozen into a long-lived session snapshot. An explicitly empty command
  * list is authoritative for that session; an absent field continues to inherit the catalog. */
 export interface SessionCapabilityOverlay {
+  /** v261: this session's next explicit Restart retains an established conversation. Missing is
+   * unknown and must be treated as false; a never-run or unsupported session reports false. */
+  restartResumesConversation?: boolean;
   elicitation?: NonNullable<AgentCapabilities["elicitation"]>;
   slashCommands?: AgentSlashCommand[];
   /** Commands the agent lists that can't run inside Wollipog (a terminal-only command such as
@@ -2299,7 +2306,7 @@ export interface SessionCapabilityOverlay {
   supportsSteering?: boolean;
 }
 
-export type SessionCapabilities = AgentCapabilities | SessionCapabilityOverlay;
+export type SessionCapabilities = (AgentCapabilities & SessionCapabilityOverlay) | SessionCapabilityOverlay;
 
 /** A catalog-only marker that advertises runner-owned orchestration without inventing provider
  * controls before an ACP session has negotiated them. Consumers must not treat its empty arrays
@@ -2322,6 +2329,9 @@ export function mergeSessionCapabilities(
   session: SessionCapabilities | undefined,
 ): AgentCapabilities | undefined {
   if (!session) return isOrchestratorOnlyCapabilities(catalog) ? undefined : catalog;
+  // A restart fact alone does not mean ACP has negotiated any provider controls.
+  if (isOrchestratorOnlyCapabilities(catalog) && !("models" in session) &&
+      Object.keys(session).every((field) => field === "restartResumesConversation")) return undefined;
   // `orchestratorAdditive` and `imageToolResults` are runner-attested catalog truth about the
   // installation, not something a session snapshot observes, so even a full provider-native
   // snapshot must not drop them.
@@ -2345,6 +2355,8 @@ export function mergeSessionCapabilities(
       ? { unsupportedSlashCommands: session.unsupportedSlashCommands }
       : {}),
     ...(Object.hasOwn(session, "supportsSteering") ? { supportsSteering: session.supportsSteering } : {}),
+    ...(Object.hasOwn(session, "restartResumesConversation")
+      ? { restartResumesConversation: session.restartResumesConversation } : {}),
   };
 }
 
@@ -7691,12 +7703,12 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
 /** What clears a queue hold. Waiting is the ordinary way. When the runner bounds the wait
  * (`endsAt`), or can stop one job (`canStopJobs`), that is also the way out of a job that never
  * ends, so a restart is not recommended. Otherwise a restart is the bounded way out, and its costs
- * are stated so nobody is surprised. An explicit restart does not resume a Claude Code or Codex exec
- * conversation, so the provider's background work ends with it, and the control plane revokes
+ * are stated so nobody is surprised. Restart ends the provider process and its background work,
+ * even when it resumes the established conversation, and the control plane revokes
  * approved decisions the session has not consumed. What else it costs depends on the runner:
  * - one that keeps the queue (`restartKeepsQueue`, v191, #1779) runs the queued prompts after the
- *   restart, records unfinished work as killed, reports a finished result still owed to the new
- *   conversation, and the control plane tells the restarted session which decisions it revoked;
+ *   restart, records unfinished work as killed, reports a finished result still owed after the
+ *   restart, and the control plane tells the restarted session which decisions it revoked;
  * - an older runner rejects every prompt still in the queue ("session restart discarded the queued
  *   command") and returns no undelivered result.
  *
@@ -7715,7 +7727,7 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
   const avoidRestart = (preferred: string) => !canRestart ? ""
     : hold.restartKeepsQueue
     ? ` Prefer ${preferred} to restarting the session: a restart keeps the queued ${messages} but ends every ` +
-      "background job and starts a new conversation."
+      "background job and relaunches the provider."
     : ` Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
   const deadline = hold.endsAt === undefined ? undefined : new Date(hold.endsAt).toISOString().slice(0, 16);
   // Releasing needs the same authority as stopping a job (#3752): the owner or the controlling
@@ -7760,7 +7772,7 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: Que
   }
   const restartCost = hold.restartKeepsQueue
     ? `the provider and its background ${jobs} end, with unfinished work recorded as killed and unrecoverable and ` +
-      "a finished result still owed reported to the new conversation; " +
+      "a finished result still owed reported after the restart; " +
       `the queued ${messages} ${hold.queuedPrompts === 1 ? "is" : "are"} kept and ` +
       `${hold.queuedPrompts === 1 ? "runs" : "run"} after the restart; and any approved workflow decision the session ` +
       "has not yet consumed is revoked, and the restarted session is told which ones to request again."

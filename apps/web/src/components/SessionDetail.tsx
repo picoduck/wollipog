@@ -4684,7 +4684,8 @@ function SessionDetailLoaded({
   // but only where the restart resumes the provider conversation.
   const retryPlan = turnRetryPlan({
     status: session.status,
-    driver: session.driver,
+    restartResumesConversation: runnerSupportsProtocol(runner?.protocolVersion, "sessionRestartResume")
+      ? session.agentCapabilities?.restartResumesConversation : undefined,
     runnerOnline,
     promptRefusal,
     restartRefusal,

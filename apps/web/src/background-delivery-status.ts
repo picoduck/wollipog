@@ -177,12 +177,12 @@ export const ACKNOWLEDGE_MISSING_RESULT_EFFECT = "Clears the alert. It doesn't r
 /**
  * Result Blocked's other ways out, behind its Show Details (#1779, #2859): stopping or restarting the
  * session ends the unfinished job too, at a cost. `restartReportsResult` says the runner's restart hands
- * this result to the new conversation rather than discarding it (v191).
+ * this result back after the restart rather than discarding it (v191).
  */
 export function blockedResultSessionAlternative(restartReportsResult: boolean): string {
   return restartReportsResult
     ? "Stopping the session also ends the unfinished job but discards this result. Restarting the session ends " +
-      "every job and reports this result to the new conversation."
+      "every job and reports this result after the restart."
     : "Restarting or stopping the session also ends the unfinished job, but ends every other job and discards " +
       "this result.";
 }
