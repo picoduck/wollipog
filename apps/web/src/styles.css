@@ -2280,6 +2280,11 @@ button.status { cursor: pointer; }
 .state.page-level > .state-details { justify-self: center; width: 100%; max-width: 480px; }
 .state.page-level:is(.loading, .offline, .no-results) { justify-content: center; }
 .notice.state-error.page-level { margin-inline: auto; }
+/* A detail page gives the notice its gutter as its own margins: keep at least that much, and center
+   it once the page is wider than the measure plus both gutters. */
+:is(.session-detail, .run-detail) > .notice.state-error.page-level {
+  margin-inline: max(var(--page-gutter), calc((100% - 480px) / 2));
+}
 /* The shell itself crashed: no header or rail to sit under, so the state takes the window and the
    page's gutter, top-aligned and centered like every page-level state (§12.1). */
 .app-crash {
@@ -2304,6 +2309,12 @@ button.status { cursor: pointer; }
   /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
   :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) > .btn {
     max-width: none;
+  }
+  /* A page-level state caps the stack at its measure (§12.1): a stretched item with a max-width
+     would sit at the start of a wider area, so it takes the full width and centers instead. */
+  :is(.state.experiment-off, .app-crash .state, .inbox-state .state).page-level > .actions {
+    justify-self: center;
+    width: 100%;
   }
 }
 
