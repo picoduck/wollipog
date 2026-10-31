@@ -1851,6 +1851,17 @@ test("a handoff hold waiting on work no row shows is named in a notice, with Pro
   }
 });
 
+test("older holds with truncated ledgers show a lower bound rather than invent an unlisted count (#3894)", async () => {
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobsTruncated: true,
+    queueHold: { kind: "worktree_rebind", holdId: "legacy", since: 1, target: "/worktree",
+      queuedPrompts: 1, unfinishedBackgroundJobs: 30, unlistedJobs: [{ id: "pending", kind: "unregistered" }] } }) });
+  try {
+    const notice = panel.container.querySelector('[data-state="unlisted-hold"]')!;
+    assert.match(notice.textContent ?? "", /waits for at least 1 task that has no job in this list/u);
+    assert.doesNotMatch(notice.textContent ?? "", /Showing/u);
+  } finally { await panel.dispose(); }
+});
+
 for (const count of [1, 25]) test(`unlisted-only hold shows timestamps, oldest item and full ${count}-id count (#3894)`, async () => {
   const startedAt = Date.UTC(2026, 9, 30, 12);
   const queueHold = {

@@ -363,8 +363,9 @@ export function BackgroundWorkPanel({
   if (unlistedHold?.unlistedJobs?.length) {
     const unlisted = unlistedHold.unlistedJobs;
     // Older runners omit the full count; the total minus visible unfinished rows is a safe fallback.
-    const unlistedCount = unlistedHold.unlistedJobCount ?? Math.max(unlisted.length,
-      unlistedHold.unfinishedBackgroundJobs - (session.backgroundJobs ?? []).filter((job) => !job.terminalStatus).length);
+    const countIsLowerBound = unlistedHold.unlistedJobCount === undefined && session.backgroundJobsTruncated === true;
+    const unlistedCount = unlistedHold.unlistedJobCount ?? (countIsLowerBound ? unlisted.length : Math.max(unlisted.length,
+      unlistedHold.unfinishedBackgroundJobs - (session.backgroundJobs ?? []).filter((job) => !job.terminalStatus).length));
     const oldest = unlistedHold.oldestUnfinishedJob;
     const title = "Handoff Waiting on Unlisted Work";
     // An account label may be an email address (§11.8), so the account is not named.
@@ -389,7 +390,7 @@ export function BackgroundWorkPanel({
               ))}
             </dl>
           )}>
-          {`${handoff} waits for ${unlistedCount === 1 ? "a task that has" : `${unlistedCount} tasks that have`} no job in this list. `}
+          {`${handoff} waits for ${countIsLowerBound ? `at least ${unlistedCount} ${unlistedCount === 1 ? "task that has" : "tasks that have"}` : unlistedCount === 1 ? "a task that has" : `${unlistedCount} tasks that have`} no job in this list. `}
           {unlistedCount > unlisted.length && `Showing ${unlisted.length} of ${unlistedCount}. `}
           {oldest && <>The oldest blocking item, {backgroundLaunchTypeNoun(oldest.launchType)}, started <RecordedTime at={oldest.startedAt} now={now} />. </>}
           {canRelease

@@ -766,7 +766,7 @@ test("releasing a hold on request ends its work at once, records who asked, and 
   }
 });
 
-for (const count of [1, 25]) test(`a hold waiting only on ${count} unlisted ids retains start times, counts all work, and releases it (#3894)`, { skip: !haveGit() }, async () => {
+for (const protocol of [260, 262, null]) for (const count of [1, 25]) test(`peer ${protocol}: a hold waiting only on ${count} unlisted ids retains start times, counts all work, and releases it (#3894)`, { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-unlisted-"));
   let manager: SessionManager | undefined;
   try {
@@ -785,6 +785,7 @@ for (const count of [1, 25]) test(`a hold waiting only on ${count} unlisted ids 
     });
     manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
       fake.factory as never, dataDir, 1);
+    Object.assign(manager, { controlPlaneProtocolVersion: () => protocol });
     const spec = claudeSpec("s_handoff_unlisted", repo);
     await manager.start(spec);
     manager.prompt(spec.sessionId, "start a watcher");
@@ -804,7 +805,7 @@ for (const count of [1, 25]) test(`a hold waiting only on ${count} unlisted ids 
     const hold = publishedHolds(sent).find((candidate) => candidate?.queuedPrompts === 1)!;
     assert.equal(hold.unfinishedBackgroundJobs, count);
     assert.equal(hold.unlistedJobCount, count);
-    assert.deepEqual(hold.oldestUnfinishedJob, { launchType: "provisional", startedAt: oldestStart });
+    assert.deepEqual(hold.oldestUnfinishedJob, { launchType: (protocol ?? 0) >= 262 ? "provisional" : "unknown", startedAt: oldestStart });
     assert.equal(hold.canStopJobs, undefined, "no listed job can be stopped by id");
     assert.equal(hold.unlistedJobs?.length, Math.min(count, 20));
     for (const job of hold.unlistedJobs!) {

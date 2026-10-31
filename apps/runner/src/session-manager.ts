@@ -11911,7 +11911,12 @@ export class SessionManager {
       target: kind === "worktree_rebind" ? entry.pendingWorktreeRebind! : entry.pendingProviderAccountSwitch!.label,
       queuedPrompts: waiting.length,
       unfinishedBackgroundJobs,
-      ...(oldest ? { oldestUnfinishedJob: oldest } : {}),
+      ...(oldest ? { oldestUnfinishedJob: {
+        ...oldest,
+        // Older control planes reject the whole hold for an unknown enum member.
+        launchType: (this.controlPlaneProtocolVersion() ?? 0) < 262 &&
+          (oldest.launchType === "provisional" || oldest.launchType === "unregistered") ? "unknown" as const : oldest.launchType,
+      } } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
       ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
       ...(releasable ? { canRelease: true as const } : {}),

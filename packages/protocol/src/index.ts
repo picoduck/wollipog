@@ -794,6 +794,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      `import_provider_credential_result`. The control plane sends it only to a v260 runner that
 //      reports the capability; older runners never receive an import request.
 // 262: unlisted handoff work carries first-observed start times and its full count (#3894).
+//      The oldest item's type may be provisional/unregistered. Runners map these to unknown
+//      for older control planes, whose enum validation would otherwise discard the whole hold.
 export const PROTOCOL_VERSION = 262;
 
 export * from "./campaign-authority.js";
