@@ -690,6 +690,21 @@ test("isAdoptedSession: explicit flag wins; legacy adopt signature is the fallba
   assert.equal(isAdoptedSession(meta({ adopted: undefined, agentId: "codex-native", agentSessionId: "t1" })), false);
 });
 
+test("unlisted first observations survive refreshes and retire with pending ids (#3894)", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const starts = store.patchMeta("s_abc", { pendingBackgroundTaskIds: ["unlisted", "__proto__"] })!.unlistedBackgroundTaskStarts!;
+    assert.equal(typeof starts.unlisted, "number");
+    assert.equal(typeof starts["__proto__"], "number");
+    store.patchMeta("s_abc", { pendingBackgroundTaskIds: ["unlisted", "new"] });
+    assert.equal(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts!.unlisted, starts.unlisted);
+    assert.equal(Object.hasOwn(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts!, "__proto__"), false);
+    store.patchMeta("s_abc", { pendingBackgroundTaskIds: [] });
+    assert.deepEqual(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts, {});
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("patchMeta merges + bumps updatedAt, keeps sessionId", () => {
   const { store, root } = tmpStore();
   try {

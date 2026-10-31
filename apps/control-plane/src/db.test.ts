@@ -2838,6 +2838,20 @@ test("a queue hold keeps the unlisted work it waits on, dropping malformed entri
   assert.deepEqual(malformed.queueHold?.unlistedJobs, [unlistedJobs[0]]);
 });
 
+test("unlisted hold start times and full count survive storage (#3894)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "times", since: 5000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 25, unlistedJobCount: 25,
+    oldestUnfinishedJob: { launchType: "unregistered" as const, startedAt: 1000 },
+    unlistedJobs: Array.from({ length: 20 }, (_, i) => ({ id: `task-${i}`, kind: "provisional" as const, startedAt: 2000 + i })),
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "times", status: "queued", queueHold }), "runner-1", 6000);
+  assert.deepEqual(db.getSession("times")!.queueHold, queueHold);
+  assert.match(db.getSession("times")!.holds![0]!.reason, /an unregistered task started at/u);
+  assert.match(db.getSession("times")!.holds![0]!.reason, /none of which Background Work lists/u);
+});
+
 test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {
   const db = withRunner();
   const queueHold = {

@@ -766,7 +766,7 @@ test("releasing a hold on request ends its work at once, records who asked, and 
   }
 });
 
-test("a hold waiting only on work Background Work does not list names it, and Proceed Now releases it (#3752)", { skip: !haveGit() }, async () => {
+for (const count of [1, 25]) test(`a hold waiting only on ${count} unlisted ids retains start times, counts all work, and releases it (#3894)`, { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-unlisted-"));
   let manager: SessionManager | undefined;
   try {
@@ -779,7 +779,7 @@ test("a hold waiting only on work Background Work does not list names it, and Pr
       handoffWaitMaxMs: 3_600_000,
       onPrompt: (provider, text) => {
         if (text !== "start a watcher") return;
-        fake.unlisted.add("tool:toolu_watch");
+        for (let i = 0; i < count; i++) fake.unlisted.add(`tool:toolu_watch_${String(i).padStart(2, "0")}`);
         fake.report(provider);
       },
     });
@@ -792,19 +792,34 @@ test("a hold waiting only on work Background Work does not list names it, and Pr
       "the launching turn did not finish");
     assert.equal(store.readMeta(spec.sessionId)?.backgroundJobs?.some((job) => !job.terminalStatus) ?? false, false,
       "Background Work lists no unfinished job");
+    const firstSeen = store.readMeta(spec.sessionId)!.unlistedBackgroundTaskStarts!;
+    assert.equal(Object.keys(firstSeen).length, count);
+    const lastId = [...fake.unlisted].at(-1)!;
+    // The oldest id sorts outside the display cap in the 25-id case.
+    const oldestStart = Date.now() - 60_000;
+    store.patchMeta(spec.sessionId, { unlistedBackgroundTaskStarts: { ...firstSeen, [lastId]: oldestStart } });
     const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-unlisted" });
     manager.prompt(spec.sessionId, "queued");
     await waitFor(() => publishedHolds(sent).some((hold) => hold?.queuedPrompts === 1), "the prompt was not held");
     const hold = publishedHolds(sent).find((candidate) => candidate?.queuedPrompts === 1)!;
-    assert.equal(hold.unfinishedBackgroundJobs, 1);
-    assert.equal(hold.oldestUnfinishedJob, undefined);
+    assert.equal(hold.unfinishedBackgroundJobs, count);
+    assert.equal(hold.unlistedJobCount, count);
+    assert.deepEqual(hold.oldestUnfinishedJob, { launchType: "provisional", startedAt: oldestStart });
     assert.equal(hold.canStopJobs, undefined, "no listed job can be stopped by id");
-    assert.deepEqual(hold.unlistedJobs, [{ id: "tool:toolu_watch", kind: "provisional" }]);
+    assert.equal(hold.unlistedJobs?.length, Math.min(count, 20));
+    for (const job of hold.unlistedJobs!) {
+      assert.equal(job.kind, "provisional");
+      assert.equal(job.startedAt, job.id === lastId ? oldestStart : firstSeen[job.id]);
+    }
+    fake.report(fake.providers.at(-1)!);
+    assert.deepEqual(store.readMeta(spec.sessionId)!.unlistedBackgroundTaskStarts,
+      { ...firstSeen, [lastId]: oldestStart }, "repeated observations retain first-seen times");
     assert.equal(hold.canRelease, true);
 
     const actor = { kind: "user" as const, userId: "u_owner" };
+    const expectedIds = [...fake.unlisted].sort();
     assert.deepEqual(await manager.releaseQueueHold(spec.sessionId, hold.holdId, actor),
-      { outcome: "released", jobIds: ["tool:toolu_watch"] });
+      { outcome: "released", jobIds: expectedIds });
     await waitFor(() => fake.prompts.length === 2, "the queued prompt did not run after the release");
     assert.deepEqual(fake.prompts.at(-1), { cwd: requested.worktree.path, home: undefined, text: "queued" });
     assert.equal(publishedHolds(sent).at(-1), null, "the hold is cleared");

@@ -793,7 +793,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      runner user's own HOME or a configured account into a new managed profile and replies
 //      `import_provider_credential_result`. The control plane sends it only to a v260 runner that
 //      reports the capability; older runners never receive an import request.
-export const PROTOCOL_VERSION = 260;
+// 261: unlisted handoff work carries first-observed start times and its full count (#3894).
+export const PROTOCOL_VERSION = 261;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -7619,10 +7620,10 @@ export interface SessionQueueHoldView {
   target: string;
   /** Prompts waiting behind the barrier. */
   queuedPrompts: number;
-  /** Listed background jobs with no terminal status; the handoff waits for every one of them. */
+  /** Unfinished ledger jobs plus pending ids with no unfinished row. */
   unfinishedBackgroundJobs: number;
   /** The oldest of them, for the reason text. */
-  oldestUnfinishedJob?: { launchType: ManagedBackgroundJobSnapshot["launchType"]; startedAt: number };
+  oldestUnfinishedJob?: { launchType: ManagedBackgroundJobSnapshot["launchType"] | "provisional" | "unregistered"; startedAt: number };
   /** When the runner ends the work if it is still unfinished (#1778): it records each job as
    * killed, then runs the handoff and the queued prompts in order. Absent when the runner cannot
    * end the work or its bound is disabled, and from runners older than the bound. */
@@ -7640,6 +7641,8 @@ export interface SessionQueueHoldView {
    * them. Proceed Now ends it with the rest. Absent when there is none, and from runners older than
    * v250. */
   unlistedJobs?: QueueHoldUnlistedJob[];
+  /** v261: full number of unlisted ids, before the 20-entry display limit. */
+  unlistedJobCount?: number;
   /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports a
    * finished background result still owed to the new conversation (#1779). Absent from runners
    * older than v191, whose restart discards the queue. */
@@ -7652,10 +7655,14 @@ export interface SessionQueueHoldView {
 export interface QueueHoldUnlistedJob {
   id: string;
   kind: "provisional" | "unregistered";
+  /** v261: first observed pending without an unfinished row, in epoch milliseconds. */
+  startedAt?: number;
 }
 
-export function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
+export function backgroundLaunchTypeNoun(launchType: NonNullable<SessionQueueHoldView["oldestUnfinishedJob"]>["launchType"]): string {
   switch (launchType) {
+    case "provisional": return "an unconfirmed launch";
+    case "unregistered": return "an unregistered task";
     case "agent": return "a subagent";
     case "shell": return "a shell command";
     case "monitor": return "a monitor";
@@ -7679,7 +7686,7 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
       ` started at ${new Date(hold.oldestUnfinishedJob.startedAt).toISOString().slice(0, 16)}Z)`
     : "";
   // Work no Background Work row shows is named as such (#3752), so nobody looks there for it in vain.
-  const unlisted = Math.min(hold.unlistedJobs?.length ?? 0, hold.unfinishedBackgroundJobs);
+  const unlisted = Math.min(hold.unlistedJobCount ?? hold.unlistedJobs?.length ?? 0, hold.unfinishedBackgroundJobs);
   const notListed = unlisted === 0 ? ""
     : unlisted === hold.unfinishedBackgroundJobs
       ? hold.unfinishedBackgroundJobs === 1 ? ", which Background Work does not list" : ", none of which Background Work lists"
