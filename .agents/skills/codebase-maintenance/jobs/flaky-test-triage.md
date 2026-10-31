@@ -41,9 +41,10 @@ verified execution blocker. Record the exact interruption evidence and completed
 infer an automation wall-clock limit from the automatic continuation's request for a final result.
 
 Pin the baseline across the whole set of runs. Record `git rev-parse HEAD` before the first run
-and re-check it before and after every run, unit and e2e alike. Another session can fast-forward
-the primary checkout mid-sweep (the shared rule only assumes HEAD *lags* `origin/main`, not that
-it moves), and runs that straddle a pull are not comparable: a test set that grows or shrinks
+and re-check it before and after every run, unit and e2e alike. Explicitly requested checkout
+maintenance can move the primary checkout mid-sweep even though issue sessions no longer refresh
+it after merging.
+Runs that straddle a checkout update are not comparable: a test set that grows or shrinks
 between runs looks like nondeterministic collection when it is just a merged PR. If HEAD moved,
 name the runs on each baseline in the report, discount any run whose tree changed while it was in
 flight, and re-run the affected suite three times at the new HEAD before comparing failure sets.
