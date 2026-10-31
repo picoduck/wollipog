@@ -13,7 +13,7 @@ async function prepare(page: Page, width = 1440) {
   if (compact) await scope.getByRole("button", { name: "Done", exact: true }).click();
   await expect.poll(() => page.evaluate(() => history.state?.wollipogArchiveBrowse?.filters.query)).toBe("changelog");
   await page.getByRole("button", { name: "Next", exact: true }).click();
-  await expect(page.locator(".archive-view > .count")).toHaveText("Page 2");
+  await expect(page.locator(".archive-view > [role=status] > .count")).toHaveText("Page 2");
   await page.locator('[data-archive-row="archived-65"]').press("Enter");
   await expect(page.getByRole("heading", { name: "Session Detail" })).toBeVisible();
 }
@@ -24,7 +24,7 @@ for (const width of [1440, 390]) {
     expect(await page.evaluate(() => history.state?.wollipogArchiveBrowse)).toBeUndefined();
     const before = await page.evaluate(() => ({ length: history.length, requests: (window as any).archiveBrowseFixture.requests }));
     await page.goBack();
-    await expect(page.locator(".archive-view > .count")).toHaveText("Page 2");
+    await expect(page.locator(".archive-view > [role=status] > .count")).toHaveText("Page 2");
     await expect(page.getByRole("searchbox")).toHaveValue("changelog");
     await expect(page.locator(".chips")).toContainText("Project: Wollipog");
     await expect(page.locator(".chips")).toContainText("Show: All");
@@ -36,7 +36,7 @@ for (const width of [1440, 390]) {
     await page.goForward();
     await expect(page.getByRole("heading", { name: "Session Detail" })).toBeVisible();
     await page.goBack();
-    await expect(page.locator(".archive-view > .count")).toHaveText("Page 2");
+    await expect(page.locator(".archive-view > [role=status] > .count")).toHaveText("Page 2");
     await page.getByRole("button", { name: "Archived Sessions", exact: true }).click();
     await expect(page.getByRole("searchbox")).toHaveValue("");
     await expect(page.locator(".chips")).toHaveCount(0);
@@ -52,10 +52,10 @@ test("invalid saved cursor falls back without an error and deleted rows stay abs
   await expect(page.getByText("That page changed. Showing page 1.")).toBeVisible();
   await expect(page.getByRole("searchbox")).toHaveValue("changelog");
   await expect(page.getByRole("alert")).toHaveCount(0);
-  await expect(page.locator(".archive-view > .count")).toHaveText("Page 1");
+  await expect(page.locator(".archive-view > [role=status] > .count")).toHaveText("Page 1");
   await prepare(page);
   await page.evaluate(() => { (window as any).archiveBrowseFixture.deleted = true; });
   await page.goBack();
-  await expect(page.locator(".archive-view > .count")).toHaveText("Page 2");
+  await expect(page.locator(".archive-view > [role=status] > .count")).toHaveText("Page 2");
   await expect(page.locator('[data-archive-row="archived-65"]')).toHaveCount(0);
 });
