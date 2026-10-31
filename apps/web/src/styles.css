@@ -19219,6 +19219,8 @@ a.tab { text-decoration: none; }
   .archive-item-badge { order: 3; flex-shrink: 0; }
   .archive-item-snippet { order: 2; width: 100%; }
   .archive-item-meta { order: 4; flex: 1; }
+  .archive-history { flex-shrink: 0; }
+  .archive-history > span { display: none; }
   .archive-item-actions { width: auto; }
 }
 .archive-pagination {

@@ -617,7 +617,7 @@ export function ArchivedSessionsView() {
                 <div className="archive-item-meta">
                   <span className="archive-project" title={metadata.project === metadata.location ? metadata.project : `${metadata.project} › ${metadata.location}`}><ProjectsIcon size={14} /> <span>{metadata.project}{metadata.project !== metadata.location && ` › ${metadata.location}`}</span></span>
                   <span className="archive-agent"><BotIcon size={14} />{metadata.agent}</span>
-                  {prunedDetail && <span className="archive-history" title={prunedDetail}><HistoryIcon size={14} />History Pruned</span>}
+                  {prunedDetail && <span className="archive-history" role="img" aria-label="History Pruned" title={prunedDetail}><HistoryIcon size={14} /><span>History Pruned</span></span>}
                 </div>
               </div>
               <time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time>

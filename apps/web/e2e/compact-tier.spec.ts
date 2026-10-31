@@ -132,9 +132,7 @@ for (const width of [761, 834, 940, 1099]) {
 }
 
 /**
- * The Archived Sessions table, measured with the longest State badge in its first row: nothing
- * scrolls sideways or is cut off, the Session column keeps `minSession` for a title, and Project,
- * Location and Agent show either as columns or, `folded`, in the meta line under the title.
+ * Fixed archive rows never scroll sideways, and their native title links keep readable width.
  */
 async function checkArchivedTable(page: Page, where: string, { minSession }: { folded: boolean; minSession: number }) {
   await expect(page.locator(".archive-item").first()).toBeVisible();
@@ -217,13 +215,9 @@ test("a phone keeps the Archived Sessions table's own rows, with the project on 
   await expect(row.locator("time")).toBeHidden();
 });
 
-/**
- * Above the tier the table folds the same way until the main column fits its full layout with 200px
- * for the Session column (§14, #2114): a 1220px column, which the labelled rail's extra width pushes
- * from a 1284px window to 1428px.
- */
-test.describe("the Archived Sessions table from 1100px", () => {
+test.describe("Archived Sessions rows across compact and desktop widths", () => {
   const cases = [
+    ...[761, 834, 940, 1099].flatMap((width) => [false, true].map((labelled) => ({ width, labelled, folded: false }))),
     { width: 1100, labelled: false, folded: true },
     { width: 1280, labelled: false, folded: true },
     { width: 1439, labelled: false, folded: false },

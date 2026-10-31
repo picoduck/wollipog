@@ -14,6 +14,11 @@ for (const width of [1440, 1100, 834, 390]) {
       await expect(failed.locator(".status")).toHaveCount(1);
       await expect(failed.locator(".status")).toHaveText("Stop Failed");
       await expect(rows.first().locator(".archive-project")).toHaveText("Wollipog");
+      await expect(rows.first().getByRole("img", { name: "History Pruned" })).toHaveCount(1);
+      if (width === 390) {
+        await expect(rows.first().locator(".archive-history > span")).toBeHidden();
+        expect(await rows.first().locator(".archive-project").evaluate((item) => item.getBoundingClientRect().width)).toBeGreaterThan(60);
+      }
       await expect(rows.nth(1).locator(".archive-project")).toHaveText("Wollipog › Release Checkout");
       await failed.getByRole("button", { name: /More Actions/ }).click();
       await expect(page.getByRole("menuitem", { name: /Retry Stop/ })).toContainText("The machine could not stop the session.");
