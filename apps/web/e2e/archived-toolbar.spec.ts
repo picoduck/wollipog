@@ -43,6 +43,16 @@ for (const width of [1440, 834, 390]) {
         const border = (name: string) => scope.getByRole("button", { name, exact: true })
           .evaluate((node) => getComputedStyle(node).borderTopColor);
         const unset = await border("Location: All Locations");
+        const chosen = await scope.evaluate((node) => {
+          const probe = document.createElement("span");
+          probe.style.color = "var(--control-outline)";
+          node.append(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        });
+        await expect.poll(() => border("Project: Wollipog")).toBe(chosen);
+        await expect.poll(() => border("Status: Completed")).toBe(chosen);
         expect(await border("Project: Wollipog")).not.toBe(unset);
         expect(await border("Status: Completed")).not.toBe(unset);
         expect(await border("Agent: All Agents")).toBe(unset);
