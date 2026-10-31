@@ -819,13 +819,27 @@ test("restart capability describes the retained provider coordinate without expo
     for (const agentSessionId of [null, "", "established-conversation"]) {
       const stored = meta({ driver, agentSessionId });
       const expected = !!agentSessionId && ["claude-code", "codex-app-server", "pi"].includes(driver);
-      for (const version of [null, 261]) {
-        const snap = metaToSnapshot(stored, version);
-        assert.equal(snap.agentCapabilities?.restartResumesConversation, expected, `${driver} ${agentSessionId}`);
-        assert.equal((snap as unknown as Record<string, unknown>).agentSessionId, undefined);
+      const snap = metaToSnapshot(stored, 261);
+      assert.equal(snap.agentCapabilities?.restartResumesConversation, expected, `${driver} ${agentSessionId}`);
+      assert.equal((snap as unknown as Record<string, unknown>).agentSessionId, undefined);
+      for (const version of [null, 260]) {
+        assert.equal(metaToSnapshot(stored, version).agentCapabilities?.restartResumesConversation, undefined);
       }
-      assert.equal(metaToSnapshot(stored, 260).agentCapabilities?.restartResumesConversation, undefined);
     }
+  }
+});
+
+test("registration withholds restart continuity until a supported peer negotiates", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta({ driver: "claude-code", agentSessionId: "established-conversation" }));
+    assert.equal(store.registrationSnapshots()[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(260)[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(261)[0]?.agentCapabilities?.restartResumesConversation, true);
+    assert.equal(store.registrationSnapshots()[0]?.agentCapabilities?.restartResumesConversation, undefined,
+      "a reconnect must negotiate again rather than reuse the previous peer version");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 
