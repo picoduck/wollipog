@@ -61,6 +61,7 @@ import {
   Files as LucideFiles,
   Film as LucideFilm,
   Fence as LucideFence,
+  FingerprintPattern as LucideFingerprintPattern,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderInput as LucideFolderInput,
@@ -298,6 +299,11 @@ export function CostIcon(props: IconProps) {
 
 export function CountIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideHash} {...props} />;
+}
+
+/** An entity's own identifier, such as the Pinned Summary's Session ID (#3897). */
+export function IdentifierIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFingerprintPattern} {...props} />;
 }
 
 export function SkillsIcon(props: IconProps) {

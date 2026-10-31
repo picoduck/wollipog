@@ -28,6 +28,7 @@ import {
 } from "../inbox.js";
 import { decideDockedRequest } from "./requests/request-reveal.js";
 import { resolveCaps } from "../caps.js";
+import { writeClipboardText } from "../clipboard.js";
 import {
   conversationForkAvailabilityWithoutTranscript,
   pendingQueuedPromptCount,
@@ -1488,7 +1489,19 @@ export function InboxView({
   const forkFromMenu = useCallback((sessionId: string) => {
     if (previewForkControls?.sessionId === sessionId) previewForkControls.fork();
   }, [previewForkControls]);
-  const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
+  const copySessionId = useCallback(async (sessionId: string) => {
+    // The menu has handed focus back to what opened it; a write reports, and a refused one falls
+    // back, only while the view is mounted and focus is still there or nowhere.
+    const from = document.activeElement;
+    const current = () => mountedRef.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === from);
+    const copied = await writeClipboardText(sessionId, current);
+    if (copied === null) return;
+    if (from instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) from.focus();
+    if (copied) showToast("Session ID copied.", { tone: "success", detail: sessionId, detailStyle: "mono" });
+    else showToast("Couldn't copy the session ID.", { tone: "error" });
+  }, [showToast]);
+  const boardSessions =useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
   const setupNoticeSessionIds = useMemo(
     () => worktreeSetupNoticeSessionIds(
       sessions.values(), runners, worktreeSetupNoticeDismissals, worktreeSetupConfigSupported,
@@ -2005,6 +2018,7 @@ export function InboxView({
             void dismissReturnedReminder(sessionId)
               .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
           }}
+          onCopyId={(sessionId) => void copySessionId(sessionId)}
           onArchive={(sessionId) => {
             // On a phone the confirmation replaces the sheet, and Back brings the sheet back (§7.5).
             const menu = sessionMenu;
