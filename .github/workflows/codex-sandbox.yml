@@ -6,6 +6,9 @@ on:
     paths:
       - "apps/runner/src/agent-control-sandbox-cli*"
       - "apps/runner/src/fixtures/sandboxed-cli-probe.mjs"
+      - "apps/runner/src/review-sessions*"
+      - "apps/runner/src/drivers/codex-app-server*"
+      - "apps/runner/scripts/codex-review-skills-probe.mjs"
       - ".github/workflows/codex-sandbox.yml"
   workflow_dispatch:
 
@@ -86,3 +89,29 @@ jobs:
           }
           verify clean || exit $?
           verify invalid || exit $?
+  review-skills:
+    name: Codex Review Skills (${{ matrix.codex }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        codex: ["0.155.1", "0.162.1", "0.163.0", "0.165.0", "0.166.0"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install Codex and Configure Sandbox
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y bubblewrap
+          bash scripts/configure-ci-bubblewrap.sh
+          npm install --prefix "$RUNNER_TEMP/codex" --no-save --package-lock=false "@openai/codex@${{ matrix.codex }}"
+      - name: Verify Review Skill Isolation and File Reads
+        env:
+          CODEX_BIN: ${{ runner.temp }}/codex/node_modules/.bin/codex
+        run: node --import tsx apps/runner/scripts/codex-review-skills-probe.mjs --verify-sandbox-read
