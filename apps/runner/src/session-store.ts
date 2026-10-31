@@ -147,6 +147,8 @@ export interface SessionMeta {
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Discovered adapter/CLI version, refreshed before launch for capability gates and telemetry; never an auth source. */
   agentVersion?: string;
+  /** Provider task ids ended by Stop, retained after its visible job ledger is cleared. */
+  stoppedBackgroundTaskIds?: string[];
   claudeUsageCheckpoint?: import("./drivers/claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Durable event coverage for the raw baseline; generic seq repair must not advance it. */
   claudeUsageCheckpointSeq?: number;
@@ -474,9 +476,11 @@ export interface DurableBackgroundJob {
   terminalObservedAt?: number;
   /** Present only when Wollipog ended the job itself (#1778): who asked, why, and when. */
   endedBy?: BackgroundJobEnd;
-  /** When an explicit Restart replaced the conversation that started this job (#1779). Its result
-   * can no longer arrive as a provider task notification, so its continuation says so. */
+  /** When Restart carried this job across a process boundary (#1779). Without restartResumed,
+   * its conversation was replaced and its continuation must use the retained result. */
   restartedAt?: number;
+  /** The restart kept the provider conversation, so terminal task ids still belong to it. */
+  restartResumed?: true;
   continuationRequired?: boolean;
   /** Stable identity shared by every job in one parent-turn barrier continuation. */
   continuationId?: string;

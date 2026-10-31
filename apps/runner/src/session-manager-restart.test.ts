@@ -54,7 +54,7 @@ function fakeProvider(options: {
   const prompts: Array<{ provider: number; cwd: string; text: string }> = [];
   const factory = (
     _driver: unknown,
-    launch: { cwd: string; initialBackgroundTaskIds?: string[]; endedBackgroundTaskIds?: string[] },
+    launch: { cwd: string; resumeId?: string; initialBackgroundTaskIds?: string[]; endedBackgroundTaskIds?: string[] },
     cb: DriverCallbacks,
   ) => {
     const provider: ProviderProcess = {
@@ -83,7 +83,7 @@ function fakeProvider(options: {
       dispose: () => { endHeldTurn?.(); },
       setConfig: () => {},
       resolvePermission: () => false,
-      agentSessionId: () => `provider-session-${provider.index}`,
+      agentSessionId: () => launch.resumeId ?? `provider-session-${provider.index}`,
     };
   };
   return { factory, providers, prompts };
@@ -247,6 +247,9 @@ test("a restart reports a finished background job's result to the new conversati
     assert.deepEqual(fake.providers[1]!.seeded, [], "no task of the replaced conversation is seeded as pending");
     const continuation = fake.prompts.find((prompt) => prompt.text.startsWith(RESTART_CONTINUATION_PREFIX))!;
     assert.equal(continuation.provider, 1);
+    assert.match(continuation.text, /The same conversation was resumed/u);
+    assert.doesNotMatch(continuation.text, /conversation.*ended with the restart/u);
+    assert.ok(fake.providers[1]!.ended.includes("monitor-1"));
     const listed = JSON.parse(continuation.text.slice(continuation.text.lastIndexOf("\n") + 1)) as Array<Record<string, unknown>>;
     assert.deepEqual(listed.map((job) => ({ id: job.id, status: job.status, outputFile: job.outputFile, recoverable: job.recoverable })), [
       { id: "agent-1", status: "completed", outputFile: "/tmp/claude/tasks/agent-1.output", recoverable: undefined },
@@ -275,7 +278,7 @@ test("a restart reports a finished background job's result to the new conversati
     assert.ok(notice, timeline.join("\n"));
     assert.match(notice, /a monitor \(job monitor-1, started [^)]+\)\. It is recorded as killed, and its result cannot be recovered\./u);
     assert.match(notice, /The result of a subagent \(job agent-1, started [^)]+\), which finished before the restart, never reached the conversation\./u);
-    assert.ok(timeline.includes("Runner reported the background work of the conversation the restart replaced."));
+    assert.ok(timeline.includes("Runner continued after managed background work completed."));
     assert.equal(timeline.some((text) => text.includes("agent-1.output")), false,
       "the provider output path never reaches the timeline");
   } finally {
@@ -363,7 +366,7 @@ test("a restart that only ended unfinished work reports it as unrecoverable with
     assert.equal(meta.backgroundWorkState, undefined);
     const history = meta.backgroundJobs?.find((job) => job.id === finishedInTurn.id);
     assert.ok(history?.restartedAt, "history is marked as the replaced conversation's");
-    assert.deepEqual({ ...history, restartedAt: undefined }, { ...finishedInTurn, restartedAt: undefined },
+    assert.deepEqual({ ...history, restartedAt: undefined, restartResumed: undefined }, { ...finishedInTurn, restartedAt: undefined, restartResumed: undefined },
       "a result the old conversation already received is otherwise kept as history, unchanged");
     assert.deepEqual(meta.backgroundJobs?.filter((job) => job.id !== finishedInTurn.id)
       .map((job) => [job.id, job.launchType, job.terminalStatus, job.endedBy?.reason]), [
@@ -723,6 +726,7 @@ test("a job the restarted conversation starts under a reused task id gets its ow
     const spec = claudeSpec("s_restart_reused_id", f.repo);
     // The replaced conversation's task-1 finished and was delivered long ago.
     f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+      agentSessionId: null, // No established provider conversation: this restart really starts fresh.
       backgroundJobs: [storedJob("task-1", {
         terminalStatus: "completed", terminalObservedAt: 2_100, continuationRequired: false, assistantResultPersistedAt: 2_200,
       })],
@@ -770,6 +774,7 @@ test("a reused task id does not cost the replaced conversation's result that is 
     const spec = claudeSpec("s_restart_reused_owed_id", f.repo);
     // The replaced conversation's task-1 finished, and its result is still owed.
     f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+      agentSessionId: null, // No established provider conversation: this restart really starts fresh.
       backgroundWorkState: "continuation_pending",
       backgroundJobs: [storedJob("task-1", {
         terminalStatus: "completed", terminalObservedAt: 2_100, continuationRequired: true,

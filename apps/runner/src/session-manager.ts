@@ -999,11 +999,15 @@ function withoutRecoveredBackgroundTaskIds(current: string[] | undefined, observ
 
 /** Every job the resumed conversation has ended, by provider id and `tool:` alias (#3752). Unlike
  * the recovery tombstones, which a live observation may lift, such a job never runs again. A Restart
- * stamps the replaced conversation's rows with `restartedAt`; they are left out, because the fresh
- * conversation may start a new job under the same id (#1779). */
+ * stamps carried rows with `restartedAt`; only rows from a replaced conversation are left out,
+ * because a fresh conversation may start a new job under the same id (#1779). Stop retains ids
+ * separately when it clears the visible job ledger. */
 function endedBackgroundTaskIds(meta: SessionMeta): string[] {
-  return (meta.backgroundJobs ?? []).filter((job) => job.terminalStatus && job.restartedAt === undefined)
-    .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]);
+  return [...new Set([...(meta.stoppedBackgroundTaskIds ?? []),
+    ...(meta.backgroundJobs ?? []).filter((job) => job.terminalStatus &&
+      (job.restartedAt === undefined || job.restartResumed))
+      .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]),
+  ])];
 }
 
 function automaticClaudeRecoveryAllowed(meta: SessionMeta): boolean {
@@ -1162,9 +1166,9 @@ const RESTART_CONTINUATION_PROMPT =
 
 /** The background work of the Claude conversation an explicit Restart replaces (#1779).
  *
- * Restart starts a fresh conversation and ends the old provider process together with every job it
- * still ran, so nothing of the old conversation can deliver a result any more. The records are
- * carried rather than dropped:
+ * Restart ends the old provider process together with every job it still ran. An established
+ * conversation resumes; a never-established session or provider change starts fresh. Records are
+ * carried rather than dropped, and resumed terminal ids remain tombstones in the new process:
  * - a job with no terminal status, and a pending or orphaned task id without a record, ended with
  *   the process: it is recorded as killed by the restart, and its result is unrecoverable;
  * - a finished job whose result still waited for its continuation is queued for one continuation
@@ -1179,20 +1183,25 @@ function carryBackgroundWorkAcrossRestart(
   runnerId: string,
   now: number,
   deliver: boolean,
+  resumesConversation: boolean,
 ): {
   jobs: DurableBackgroundJob[];
   killed: DurableBackgroundJob[];
   delivering: DurableBackgroundJob[];
   undeliverable: DurableBackgroundJob[];
 } {
+  const markRestart = (job: DurableBackgroundJob): DurableBackgroundJob => ({
+    ...job, restartedAt: now,
+    // Historical records of an earlier replaced conversation must stay historical.
+    restartResumed: resumesConversation && (job.restartedAt === undefined || job.restartResumed) ? true : undefined,
+  });
   const endedBy: BackgroundJobEnd = { actor: { kind: "runner" }, reason: "session_restart", endedAt: now };
   const kill = (job: DurableBackgroundJob): DurableBackgroundJob => ({
-    ...job,
+    ...markRestart(job),
     terminalStatus: "killed",
     terminalObservedAt: now,
     continuationRequired: false,
     endedBy,
-    restartedAt: now,
   });
   const continuationId = `bgcont_${randomUUID()}`;
   const jobs = (prior.backgroundJobs ?? []).map((job): DurableBackgroundJob => {
@@ -1204,12 +1213,11 @@ function carryBackgroundWorkAcrossRestart(
     if (!job.continuationRequired || job.continuationMissingResultAt !== undefined ||
         job.continuationRetryExhaustedAt !== undefined) return job;
     if (job.continuationSubmittedAt !== undefined) return { ...job, continuationMissingResultAt: now };
-    if (!deliver) return { ...job, continuationMissingResultAt: now, restartedAt: now };
+    if (!deliver) return { ...markRestart(job), continuationMissingResultAt: now };
     return {
-      ...job,
+      ...markRestart(job),
       continuationId: job.continuationId ?? continuationId,
       continuationQueuedAt: job.continuationQueuedAt ?? now,
-      restartedAt: now,
     };
   });
   const known = new Set(jobs.flatMap((job) => job.toolUseId ? [job.id, job.toolUseId] : [job.id]));
@@ -1230,9 +1238,9 @@ function carryBackgroundWorkAcrossRestart(
       registeredAt: prior.orphanedWork?.markedAt ?? now,
     }));
   }
-  // Every carried record belongs to the replaced conversation. The stamp keeps a job the new
-  // conversation starts under a reused provider task id from merging into it (#1779).
-  const carried = jobs.map((job) => job.restartedAt === undefined ? { ...job, restartedAt: now } : job);
+  // Record the restart for continuation delivery. Only a fresh conversation can reuse provider
+  // task ids; restartResumed keeps same-conversation terminal rows authoritative (#3752).
+  const carried = jobs.map((job) => job.restartedAt === undefined ? markRestart(job) : job);
   return {
     jobs: carried,
     killed: carried.filter((job) => job.endedBy?.reason === "session_restart" && job.endedBy.endedAt === now),
@@ -7006,6 +7014,9 @@ export class SessionManager {
       providerProfileId: providerAccount?.profileId,
       providerConversationHome: priorResumeId ? prior?.providerConversationHome : undefined,
       providerUnstartedThreadId: priorResumeId ? prior?.providerUnstartedThreadId : undefined,
+      stoppedBackgroundTaskIds: priorResumeId ? prior?.stoppedBackgroundTaskIds : undefined,
+      claudeUsageCheckpoint: priorResumeId ? prior?.claudeUsageCheckpoint : undefined,
+      claudeUsageCheckpointSeq: priorResumeId ? prior?.claudeUsageCheckpointSeq : undefined,
       pendingProviderAccountId: prior?.pendingProviderAccountId,
       pendingProviderAccountLabel: prior?.pendingProviderAccountLabel,
       pendingProviderAccountProvider: prior?.pendingProviderAccountProvider,
@@ -7124,6 +7135,11 @@ export class SessionManager {
         // Price/repair frames can commit while Restart waits for this serialized transition.
         // Bind the replacement row to the latest lifetime baseline and generation, not its preview.
         if (!!priorResumeId || latest.costReconciliationRevision !== undefined || latest.costReconciliationRepairId !== undefined) {
+          if (priorResumeId) {
+            meta.claudeUsageCheckpoint = latest.claudeUsageCheckpoint;
+            meta.claudeUsageCheckpointSeq = latest.claudeUsageCheckpointSeq;
+            meta.stoppedBackgroundTaskIds = latest.stoppedBackgroundTaskIds;
+          }
           meta.costUsd = latest.costUsd;
           meta.tokensIn = latest.tokensIn;
           meta.tokensOut = latest.tokensOut;
@@ -7151,11 +7167,11 @@ export class SessionManager {
         meta.checkpointWorktreeIds = latest.checkpointWorktreeIds;
         meta.worktreePending = shouldUseWorktree;
       }
-      // The replaced Claude conversation's background work is carried, not dropped (#1779). No
-      // pending task id is carried: the fresh provider must not wait on work that died with the old.
+      // Claude background work is carried, not dropped (#1779). No pending task id is carried:
+      // the replacement process must not wait on work that died with the old process.
       // A session that left Claude Code keeps the records an earlier restart carried as history.
       if (prior && (prior.driver === "claude-code" || prior.backgroundJobs?.length)) {
-        restartBackground = carryBackgroundWorkAcrossRestart(prior, this.runnerId, Date.now(), driver === "claude-code");
+        restartBackground = carryBackgroundWorkAcrossRestart(prior, this.runnerId, Date.now(), driver === "claude-code", !!priorResumeId);
         if (restartBackground.jobs.length) {
           meta.backgroundJobs = restartBackground.jobs;
           meta.backgroundWorkState = managedBackgroundWorkState(restartBackground.jobs);
@@ -14640,7 +14656,7 @@ export class SessionManager {
           text: !backgroundJobIds?.length
             ? "Runner resumed orphaned background work automatically."
             : (this.store.readMeta(sessionId)?.backgroundJobs ?? []).some((job) =>
-                backgroundJobIds.includes(job.id) && job.restartedAt !== undefined)
+                backgroundJobIds.includes(job.id) && job.restartedAt !== undefined && !job.restartResumed)
               ? "Runner reported the background work of the conversation the restart replaced."
               : "Runner continued after managed background work completed.",
         })
@@ -16009,6 +16025,7 @@ export class SessionManager {
         // fork's tail would hide its first live requests from recovery (#3086).
         claudeUsageCheckpoint: undefined,
         claudeUsageCheckpointSeq: undefined,
+        stoppedBackgroundTaskIds: undefined,
         preview: null,
         pendingApproval: null,
         providerCredentialScopeId: undefined,
@@ -16474,6 +16491,14 @@ export class SessionManager {
     if (authenticationBlock?.loginOperationId) {
       this.providerAuthRecovery?.cancel(authenticationBlock.credentialScopeId);
     }
+    const stoppedBackgroundTaskIds = authenticationMeta?.driver === "claude-code" && authenticationMeta.agentSessionId
+      ? [...new Set([
+          ...endedBackgroundTaskIds(authenticationMeta),
+          ...(authenticationMeta.backgroundJobs ?? []).filter((job) => job.restartedAt === undefined || job.restartResumed)
+            .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]),
+          ...(authenticationMeta.pendingBackgroundTaskIds ?? []), ...(authenticationMeta.orphanedWork?.pendingTaskIds ?? []),
+        ])].filter((id) => id !== "unknown")
+      : undefined;
     const entry = this.active.get(sessionId);
     if (!entry) {
       const rebinding = this.worktreeRebindings.get(sessionId);
@@ -16492,6 +16517,7 @@ export class SessionManager {
           status: "stopped",
           backgroundWorkState: undefined,
           backgroundJobs: [],
+          stoppedBackgroundTaskIds,
           pendingBackgroundTaskIds: [],
           orphanedWork: undefined,
           providerAuthBlock: undefined,
@@ -16513,6 +16539,7 @@ export class SessionManager {
       status: "stopped",
       backgroundWorkState: undefined,
       backgroundJobs: [],
+      stoppedBackgroundTaskIds,
       pendingBackgroundTaskIds: [],
       orphanedWork: undefined,
       providerAuthBlock: undefined,
@@ -19266,10 +19293,9 @@ export class SessionManager {
       : undefined);
     const register = (job: NonNullable<DriverBackgroundWorkUpdate["jobs"]>[number]) => {
       let prior = findAlias(job.id, job.toolUseId);
-      // A record a restart carried over describes the replaced conversation, never a job of the
-      // current one, even when a provider task id repeats (#1779): the new job gets a fresh record,
-      // and the carried one moves aside under a distinct id so a result it still owes is reported.
-      if (prior?.restartedAt !== undefined) {
+      // Only a replaced conversation's record can collide with a new task id (#1779). Records of
+      // the resumed conversation remain authoritative, including terminal state (#3752).
+      if (prior?.restartedAt !== undefined && !prior.restartResumed) {
         byId.delete(prior.id);
         const { toolUseId: _replacedAlias, ...carried } = prior;
         const movedId = `${prior.id}~restart-${prior.restartedAt}`;
@@ -19629,8 +19655,12 @@ export class SessionManager {
         ...(restarted && job.endedBy?.reason === "session_restart" ? { endedByRestart: true, recoverable: false } : {}),
         ...(restarted && job.endedBy === undefined && job.outputReference ? { outputFile: job.outputReference } : {}),
       }));
+      const resumedRestart = restarted && selected.every((job) => job.restartResumed);
+      const restartPrompt = resumedRestart
+        ? "This session was restarted. The same conversation was resumed after its provider process ended. Reconcile queued task notifications with the records below; jobs the restart ended must remain ended. A finished job's output, when listed, is in the named file: read it if needed. Report these results without waiting for another user message."
+        : RESTART_CONTINUATION_PROMPT;
       const prompt = restarted
-        ? `${RESTART_CONTINUATION_PROMPT}\n\nBackground jobs from the replaced conversation:\n${JSON.stringify(resultSummary)}`
+        ? `${restartPrompt}\n\nBackground jobs recorded before the restart:\n${JSON.stringify(resultSummary)}`
         : `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
       const currentGeneration = this.launchGenerations.get(sessionId);
       const admissionInFlight = !entry && currentGeneration !== undefined &&
