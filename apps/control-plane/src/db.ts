@@ -15950,8 +15950,8 @@ export class ControlPlaneDb {
     return typeof row?.text === "string" && row.text.length <= 65_536 ? row.text : null;
   }
 
-  /** Bound closure approvals to the most recent delivered, durable queued, or immediately sent
-   * assignment. Read only bounded text for classification; each payload already has a digest. */
+  /** Bound closure approvals to the most recent delivered, durable queued, immediately sent, or
+   * steered assignment. Read only bounded text for classification; each payload already has a digest. */
   issueClosureAssignmentState(sessionId: string) {
     const latest = this.stmt(`SELECT seq, substr(json_extract(payload, '$.text'), 1, 65537) AS text
       FROM session_events WHERE session_id=? AND kind='user_message' ORDER BY seq DESC LIMIT 1`)
@@ -15963,8 +15963,19 @@ export class ControlPlaneDb {
     const immediate = this.stmt(`SELECT admission_id AS id, payload_sha256 AS digest
       FROM session_immediate_prompt_admissions WHERE session_id=?`)
       .get(sessionId) as { id: string; digest: string } | undefined;
-    // Absent until a session's first immediate-lane prompt, so earlier digests are unchanged.
-    return { latest: latest ?? null, command: command ?? null, ...(immediate ? { immediate } : {}) };
+    // A mid-turn message is recorded only here until the runner echoes it (#3877). The attempt is
+    // written before steer_session is sent, and only its identity is bound, never its disposition.
+    // created_at follows the wall clock, which can step back, so the latest is chosen by insertion
+    // order; attempts are deleted only with their session. The count changes with every admission
+    // even if a full VACUUM renumbers rowids.
+    const steering = this.stmt(`SELECT request_id AS id, request_sha256 AS digest,
+      (SELECT COUNT(*) FROM session_steering_attempts WHERE session_id=?1) AS count
+      FROM session_steering_attempts WHERE session_id=?1 ORDER BY rowid DESC LIMIT 1`)
+      .get(sessionId) as { id: string; digest: string; count: number } | undefined;
+    // Each is absent until a session's first immediate-lane prompt or steering attempt, so earlier
+    // digests are unchanged.
+    return { latest: latest ?? null, command: command ?? null, ...(immediate ? { immediate } : {}),
+      ...(steering ? { steering } : {}) };
   }
 
   /** Record a prompt sent straight to the runner (#3835). The fresh id changes the closure digest
