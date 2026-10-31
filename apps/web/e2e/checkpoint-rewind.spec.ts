@@ -133,9 +133,23 @@ for (const width of [1440, 390]) {
     const more = page.getByRole("button", { name: "More Turn Actions" });
     await expect(more).toBeVisible();
     await expect(more).toHaveCSS("opacity", "1");
-    // No hover cluster on a coarse pointer: More Turn Actions is the only action control.
+    // Touch keeps direct Copy beside the prompt and the existing turn menu.
     await expect(page.locator(".tl-user-actions, .tl-hover-action")).toHaveCount(0);
-    await expect(page.locator(".tl-message-actions button")).toHaveCount(1);
+    await expect(page.locator(".tl-message-actions button")).toHaveCount(2);
+    const copy = page.getByRole("button", { name: "Copy Message", exact: true });
+    await expect(copy).toBeVisible();
+    const copyArea = await hitArea(copy);
+    expect(copyArea.right - copyArea.left).toBeGreaterThanOrEqual(44);
+    expect(copyArea.bottom - copyArea.top).toBeGreaterThanOrEqual(44);
+    await page.evaluate(() => {
+      Object.defineProperty(navigator, "clipboard", { configurable: true, value: {
+        writeText: async (text: string) => { (window as unknown as { copiedPrompt: string }).copiedPrompt = text; },
+      } });
+    });
+    await copy.tap();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    expect(await page.evaluate(() => (window as unknown as { copiedPrompt: string }).copiedPrompt))
+      .toBe("Inspect the checkpoint controls.");
     const area = await hitArea(more);
     expect(area.right - area.left).toBeGreaterThanOrEqual(44);
     expect(area.bottom - area.top).toBeGreaterThanOrEqual(44);
@@ -163,6 +177,24 @@ for (const width of [1440, 390]) {
     await context.close();
   });
 }
+
+test("touch copy stays inside a narrow transcript with a long prompt", async ({ browser }) => {
+  const context = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 320, height: 900 } });
+  const page = await context.newPage();
+  await page.goto("/checkpoint-rewind-e2e.html");
+  await page.locator(".tl-row.user .bubble-text").evaluate((element) => {
+    element.textContent = "A long prompt with line breaks\n\n" + "unbroken".repeat(100);
+  });
+  const copy = page.getByRole("button", { name: "Copy Message", exact: true });
+  await copy.scrollIntoViewIfNeeded();
+  await expect(copy).toBeInViewport();
+  const area = await hitArea(copy);
+  expect(area.left).toBeGreaterThanOrEqual(0);
+  expect(area.right).toBeLessThanOrEqual(320);
+  const overflows = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
+  expect(overflows).toBe(false);
+  await context.close();
+});
 
 test("long-pressing a user bubble on a touch device selects text and opens no menu", async ({ browser }) => {
   const context = await browser.newContext({ hasTouch: true, isMobile: true, viewport: { width: 390, height: 900 } });

@@ -2917,20 +2917,18 @@ export function messageActions(item: UserMessageItem, input: MessageActionInput)
   return actions;
 }
 
-/** Beside the user bubble, drawn to its left and taking no height. On a fine pointer (§15.3): Copy
- * Message, Edit as a New Turn when it can be used, and More Message Actions, transparent until the
- * message is hovered, focused within or its menu is open. On a coarse pointer the turn's More Turn
- * Actions holds the same actions, so nothing renders here, unless no turn menu lists this message
- * (a steer, or a prompt whose turn is running or has no footer): then More Message Actions alone,
- * visible at rest, so no message loses its actions on a touch screen. */
+/** Fine pointers keep the hover cluster beside the bubble. Touch screens always get direct Copy
+ * below the bubble, plus More Message Actions when no settled turn menu lists this message. The
+ * touch row takes its own space so full-size targets cannot overlap the bubble or one another. */
 function UserMessageActions({ item, inTurnMenu, ...input }: MessageActionInput & { item: UserMessageItem; inTurnMenu: boolean }) {
   const coarsePointer = useIsCoarsePointer();
-  if (coarsePointer && inTurnMenu) return null;
+  if (coarsePointer && inTurnMenu && !item.text) return null;
   const actions = messageActions(item, input);
   if (coarsePointer) {
     return (
       <div className="tl-message-actions tl-user-menu" role="group" aria-label="Message Actions">
-        <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions }]} />
+        {item.text && <CopyButton text={item.text} iconOnly ariaLabel="Copy Message" className="icon-btn sm" />}
+        {!inTurnMenu && <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions }]} />}
       </div>
     );
   }
