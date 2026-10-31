@@ -227,7 +227,8 @@ export function BackgroundWorkPanel({
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
-  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0 || session.backgroundFollowUp != null);
+  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0 || session.backgroundFollowUp != null ||
+    (session.status === "queued" && !session.capacityWait && !!session.queueHold?.unlistedJobs?.length));
   const followUp = session.backgroundWorkState === "continuation_pending" ? backgroundWorkCondition(session, runnerOnline) : null;
   const aggregateState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
   const inventoryPending = session.backgroundJobsAvailable === true && session.backgroundJobs === undefined;

@@ -5821,7 +5821,14 @@ export class SessionManager {
    * provider can never leave one behind. Older peers get no field and keep what they had. */
   private overlayQueueHold(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
     if (!runnerSupportsProtocol(protocolVersion, "queueHolds")) return snapshot;
-    return { ...snapshot, queueHold: this.publishedQueueHolds.get(snapshot.id) ?? null };
+    const hold = this.publishedQueueHolds.get(snapshot.id) ?? null;
+    const oldest = hold?.oldestUnfinishedJob;
+    // Project at delivery, including reconnect: the cache always retains the richest truth.
+    if (hold && oldest && (protocolVersion ?? 0) < 262 &&
+        (oldest.launchType === "provisional" || oldest.launchType === "unregistered")) {
+      return { ...snapshot, queueHold: { ...hold, oldestUnfinishedJob: { ...oldest, launchType: "unknown" } } };
+    }
+    return { ...snapshot, queueHold: hold };
   }
 
   private overlayRuntimeSteering(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
@@ -11911,12 +11918,7 @@ export class SessionManager {
       target: kind === "worktree_rebind" ? entry.pendingWorktreeRebind! : entry.pendingProviderAccountSwitch!.label,
       queuedPrompts: waiting.length,
       unfinishedBackgroundJobs,
-      ...(oldest ? { oldestUnfinishedJob: {
-        ...oldest,
-        // Older control planes reject the whole hold for an unknown enum member.
-        launchType: (this.controlPlaneProtocolVersion() ?? 0) < 262 &&
-          (oldest.launchType === "provisional" || oldest.launchType === "unregistered") ? "unknown" as const : oldest.launchType,
-      } } : {}),
+      ...(oldest ? { oldestUnfinishedJob: oldest } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
       ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
       ...(releasable ? { canRelease: true as const } : {}),

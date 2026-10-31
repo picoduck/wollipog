@@ -806,6 +806,15 @@ for (const protocol of [260, 262]) for (const count of [1, 25]) test(`peer ${pro
     assert.equal(hold.unfinishedBackgroundJobs, count);
     assert.equal(hold.unlistedJobCount, count);
     assert.deepEqual(hold.oldestUnfinishedJob, { launchType: (protocol ?? 0) >= 262 ? "provisional" : "unknown", startedAt: oldestStart });
+    for (const peer of [262, 260, 261, 262]) {
+      Object.assign(manager, { controlPlaneProtocolVersion: () => peer });
+      const reconnected = manager.sessionSnapshots().find((snapshot) => snapshot.id === spec.sessionId)!.queueHold!;
+      assert.equal(reconnected.oldestUnfinishedJob?.launchType, peer >= 262 ? "provisional" : "unknown",
+        "cached hold is projected for the newly connected peer without a background update");
+      assert.equal(reconnected.oldestUnfinishedJob?.startedAt, oldestStart);
+      assert.equal(reconnected.holdId, hold.holdId);
+    }
+    Object.assign(manager, { controlPlaneProtocolVersion: () => protocol });
     assert.equal(hold.canStopJobs, undefined, "no listed job can be stopped by id");
     assert.equal(hold.unlistedJobs?.length, Math.min(count, 20));
     for (const job of hold.unlistedJobs!) {

@@ -1851,6 +1851,22 @@ test("a handoff hold waiting on work no row shows is named in a notice, with Pro
   }
 });
 
+test("unlisted-only hold timestamps update while the panel stays open (#3894)", async (t) => {
+  const startedAt = Date.now() - 2 * MINUTE;
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobs: [], backgroundDeliveries: [],
+    queueHold: { kind: "worktree_rebind", holdId: "clock", since: startedAt, target: "/worktree",
+      queuedPrompts: 1, unfinishedBackgroundJobs: 1, unlistedJobCount: 1,
+      oldestUnfinishedJob: { launchType: "provisional", startedAt },
+      unlistedJobs: [{ id: "pending", kind: "provisional", startedAt }] } }) });
+  try {
+    const notice = panel.container.querySelector('[data-state="unlisted-hold"]')!;
+    const before = notice.querySelector("time")!.textContent;
+    await act(async () => { t.mock.timers.tick(2 * MINUTE); });
+    assert.notEqual(notice.querySelector("time")!.textContent, before);
+  } finally { await panel.dispose(); t.mock.timers.reset(); }
+});
+
 test("older holds with truncated ledgers show a lower bound rather than invent an unlisted count (#3894)", async () => {
   const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobsTruncated: true,
     queueHold: { kind: "worktree_rebind", holdId: "legacy", since: 1, target: "/worktree",
