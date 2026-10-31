@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
+  backgroundLaunchTypeNoun,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
   type BackgroundDeliveryWatchdogState,
@@ -226,7 +227,8 @@ export function BackgroundWorkPanel({
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
-  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0 || session.backgroundFollowUp != null);
+  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0 || session.backgroundFollowUp != null ||
+    (session.status === "queued" && !session.capacityWait && !!session.queueHold?.unlistedJobs?.length));
   const followUp = session.backgroundWorkState === "continuation_pending" ? backgroundWorkCondition(session, runnerOnline) : null;
   const aggregateState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
   const inventoryPending = session.backgroundJobsAvailable === true && session.backgroundJobs === undefined;
@@ -361,6 +363,11 @@ export function BackgroundWorkPanel({
   const unlistedHold = session.status === "queued" && !session.capacityWait ? session.queueHold : undefined;
   if (unlistedHold?.unlistedJobs?.length) {
     const unlisted = unlistedHold.unlistedJobs;
+    // Older runners omit the full count; the total minus visible unfinished rows is a safe fallback.
+    const countIsLowerBound = unlistedHold.unlistedJobCount === undefined && session.backgroundJobsTruncated === true;
+    const unlistedCount = unlistedHold.unlistedJobCount ?? (countIsLowerBound ? unlisted.length : Math.max(unlisted.length,
+      unlistedHold.unfinishedBackgroundJobs - (session.backgroundJobs ?? []).filter((job) => !job.terminalStatus).length));
+    const oldest = unlistedHold.oldestUnfinishedJob;
     const title = "Handoff Waiting on Unlisted Work";
     // An account label may be an email address (§11.8), so the account is not named.
     const handoff = unlistedHold.kind === "worktree_rebind"
@@ -379,12 +386,14 @@ export function BackgroundWorkPanel({
               {unlisted.map((job) => (
                 <div key={job.id}>
                   <dt>{job.kind === "provisional" ? "Unconfirmed Launch" : "Unregistered Task"}</dt>
-                  <dd><code>{job.id}</code></dd>
+                  <dd><code>{job.id}</code>{job.startedAt !== undefined && <> — Started <RecordedTime at={job.startedAt} now={now} /></>}</dd>
                 </div>
               ))}
             </dl>
           )}>
-          {`${handoff} waits for ${unlisted.length === 1 ? "a task that has" : `${unlisted.length} tasks that have`} no job in this list. `}
+          {`${handoff} waits for ${countIsLowerBound ? `at least ${unlistedCount} ${unlistedCount === 1 ? "task that has" : "tasks that have"}` : unlistedCount === 1 ? "a task that has" : `${unlistedCount} tasks that have`} no job in this list. `}
+          {unlistedCount > unlisted.length && `Showing ${unlisted.length} of ${unlistedCount}. `}
+          {oldest && <>The oldest blocking item, {backgroundLaunchTypeNoun(oldest.launchType)}, started <RecordedTime at={oldest.startedAt} now={now} />. </>}
           {canRelease
             ? "Proceed Now in the queued messages ends it with the rest of this session's background work."
             : unlistedHold.endsAt !== undefined

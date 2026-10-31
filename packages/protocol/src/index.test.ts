@@ -118,7 +118,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 260);
+  assert.equal(PROTOCOL_VERSION, 262);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -344,8 +344,8 @@ test("a worktree switch is accepted only as its exact display shape (#3810)", ()
   ]) assert.equal(validWorktreeSwitch(invalid), null, JSON.stringify(invalid));
 });
 
-test("PROTOCOL_VERSION is 260", () => {
-  assert.equal(PROTOCOL_VERSION, 260);
+test("PROTOCOL_VERSION is 262", () => {
+  assert.equal(PROTOCOL_VERSION, 262);
   // A v259 runner never receives an import, and a v260 runner only with a valid capability (#3719).
   assert.equal(runnerSupportsProtocol(259, "providerCredentialImport"), false);
   assert.equal(runnerSupportsProtocol(260, "providerCredentialImport"), true);
