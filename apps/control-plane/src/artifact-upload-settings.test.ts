@@ -174,3 +174,58 @@ test("sessions owned by the personal organization follow the local owner's prefe
       "a saved change reaches personal-organization sessions and no one else's");
   } finally { db.close(); }
 });
+
+test("organization- and team-owned sessions follow the preference of the member who launched them (#3840)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const local = db.localIdentityContext().userId;
+  db.registerRunner({ runnerId: "r", hostname: "h", os: "linux", version: "1", agents: [],
+    workspaces: [{ id: "ws", name: "Repo", path: "/repo" }] }, 500, PROTOCOL_VERSION);
+  const sql = db.raw();
+  sql.prepare("INSERT INTO identity_organizations VALUES ('org_team','Team',1,1)").run();
+  for (const user of ["usr_member", "usr_admin"]) {
+    sql.prepare("INSERT INTO identity_users(user_id,display_name,created_at,updated_at) VALUES (?,?,1,1)").run(user, user);
+    sql.prepare("INSERT INTO identity_memberships VALUES ('org_team',?,'operator',1,1)").run(user);
+  }
+  const organization = { organizationId: "org_team", owner: { kind: "organization" as const, organizationId: "org_team" } };
+  const team = { organizationId: "org_team", owner: { kind: "team" as const, teamId: "team_1" } };
+  const personal = { organizationId: "org_personal", owner: { kind: "organization" as const, organizationId: "org_personal" } };
+  const create = (id: string, extra: Partial<Parameters<ControlPlaneDb["createSession"]>[0]>) =>
+    db.createSession({ id, runnerId: "r", workspaceId: "ws", agentId: "a", title: id, useWorktree: false,
+      driver: "claude-code", config: {}, now: 1000, ...extra });
+  create("org-launched", { scope: organization, launcherUserId: "usr_member" });
+  create("team-launched", { scope: team, launcherUserId: "usr_member" });
+  create("child", { scope: organization, parentSessionId: "org-launched", launcherUserId: "usr_admin" });
+  create("org-legacy", { scope: organization });
+  create("personal-launched", { scope: personal, launcherUserId: "usr_admin" });
+  create("unknown-launcher", { scope: organization, launcherUserId: "usr_missing" });
+  create("review", { scope: organization, reviewRequesterSessionId: "child" });
+  const ids = ["org-launched", "team-launched", "child", "org-legacy", "personal-launched", "unknown-launcher", "review"];
+  assert.deepEqual(ids.map((id) => db.sessionLauncherUserId(id)),
+    ["usr_member", "usr_member", "usr_member", null, "usr_admin", null, "usr_member"],
+    "child and review sessions inherit the launcher of their parent or requester; an unknown user records none");
+  assert.deepEqual(ids.map((id) => db.artifactUploadPreferenceUser(id)),
+    ["usr_member", "usr_member", "usr_member", undefined, "usr_admin", undefined, "usr_member"],
+    "a recorded launcher governs; a legacy session in another organization stays without one");
+  assert.equal(db.sessionScope("org-launched")?.owner.kind, "organization", "attribution leaves ownership unchanged");
+  db.setArtifactUploadPreference(local, "external_hosting");
+  db.setArtifactUploadPreference("usr_member", "wollipog_automatic");
+  db.setArtifactUploadPreference("usr_admin", "external_hosting");
+  const sent: string[] = [];
+  const hub = new Hub(db);
+  hub.attachRunner("r", { send: (data) => sent.push(data) });
+  try {
+    const launched = ids.map((sessionId) => {
+      hub.sendToRunner("r", { type: "start_session", spec: { sessionId, workspaceId: "ws", workspacePath: "/repo", agentId: "a",
+        command: "claude", args: [], env: {}, useWorktree: false } });
+      return JSON.parse(sent.at(-1)!).spec.artifactUploads;
+    });
+    assert.deepEqual(launched,
+      ["wollipog_automatic", "wollipog_automatic", "wollipog_automatic", "manual", "external_hosting", "manual", "wollipog_automatic"]);
+    db.setArtifactUploadPreference("usr_member", "manual");
+    sent.length = 0;
+    hub.syncArtifactUploads("usr_member");
+    assert.deepEqual(sent.map((data) => JSON.parse(data)).map((m) => [m.sessionId, m.preference]),
+      [["org-launched", "manual"], ["team-launched", "manual"], ["child", "manual"], ["review", "manual"]],
+      "a saved change reaches the sessions the member launched and no one else's");
+  } finally { db.close(); }
+});

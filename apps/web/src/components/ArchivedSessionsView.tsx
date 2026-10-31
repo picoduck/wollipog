@@ -607,6 +607,7 @@ export function ArchivedSessionsView() {
       ) : pageSessions.length === 0 ? (
         <State
           variant={hasActiveFilters ? "no-results" : "empty"}
+          pageLevel={!hasActiveFilters}
           live={false}
           title={hasActiveFilters ? undefined : `No ${destination("archived").name}`}
           icon={hasActiveFilters ? <SearchOffIcon /> : <ArchiveIcon />}

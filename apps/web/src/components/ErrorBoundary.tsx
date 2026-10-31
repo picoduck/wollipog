@@ -90,6 +90,7 @@ export class ErrorBoundary extends Component<
       return (
         <div className="app-crash" role="alert">
           <State
+            pageLevel
             icon={<ErrorIcon />}
             headingLevel={1}
             title="Wollipog Couldn't Show This Screen"

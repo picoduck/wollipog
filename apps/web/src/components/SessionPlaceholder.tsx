@@ -109,6 +109,7 @@ export function SessionPlaceholder({
       ) : (
         <State
           variant={placeholder.variant}
+          pageLevel={!preview}
           title={title}
           headingLevel={ownsPageTitle ? 1 : undefined}
           titleId={ownsPageTitle ? "page-title" : undefined}

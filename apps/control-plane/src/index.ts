@@ -380,7 +380,7 @@ function parseUiProtocolVersion(query: unknown): number | null {
 }
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
 const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
-// Heartbeats refresh durable last_seen; accepted traffic and replay progress also keep it active.
+// Heartbeats refresh last_seen (committed without a flush, #3874); accepted traffic and replay progress also keep it active.
 // If neither arrives within three intervals the socket is presumed half-open (sleep / NAT rebind leaves it
 // readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
 // runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
@@ -5844,6 +5844,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   const turn = Number((req.body as { turn?: number })?.turn);
   if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
+  const forkingHuman = requestHuman(req);
   const source = db.getSession(sourceId);
   if (!source) return reply.code(404).send({ error: "session not found" });
   const sourceScope = db.sessionScope(sourceId);
@@ -5957,7 +5958,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       now,
       sourceScope,
       inheritedProject,
-      { sourceSessionId: sourceId, sourceTurn: turn },
+      { sourceSessionId: sourceId, sourceTurn: turn, ...(forkingHuman ? { launcherUserId: forkingHuman.userId } : {}) },
     );
     let highWater = 0;
     for (const event of deferHistory ? [] : (res.events ?? [])) {
@@ -6537,7 +6538,8 @@ app.post("/api/runs", async (req, reply) => {
     return reply.code(404).send({ error: "project not found" });
   }
   return respond(reply, svc.createRun(body,
-    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
+      : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
 });
 
 app.get("/api/pods", async () => ({ pods: db.listPods() }));
@@ -6642,7 +6644,8 @@ app.post("/api/workflow-runs", async (req, reply) => {
     return reply.code(404).send({ error: "project not found" });
   }
   return respond(reply, svc.createWorkflowRun(body, workflowActor(req), undefined,
-    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
+      : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
 });
 
 app.get("/api/automations", async () => automations.list());

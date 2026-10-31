@@ -1639,7 +1639,7 @@ master-detail pages stay side by side.
   hidden at 760px and below as well (#3020); the stored choice is kept.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
   **Built (#2220).** `.inbox-state.master-detail-state` takes the list pane's place on the page grid,
-  the state is centered in it (§12.1, #3869), and the preview and divider are not rendered. The state
+  the state is a page-level state centered in it (§12.1, #3869), and the preview and divider are not rendered. The state
   follows the §12 order: Reconnecting… while disconnected with nothing loaded, then skeleton rows
   while sessions arrive (§12.3), then No Matches (§12.2), then one state for the group's situation (`sessions-states.ts`, `SessionsStates.tsx`):
 
@@ -2743,14 +2743,21 @@ One `State` component with variants; the states are **mutually exclusive** in th
  [+ New Skill]  [Import from Git…]              primary (lg on page) + secondary
 ```
 
-- Top-aligned and **left-aligned with the page grid**, `padding-top: var(--space-12)`, max-width
-  480px. It spans the whole content area when the collection is empty (not squeezed into a list
-  column). In a narrow panel it is left-aligned at the panel's padding.
-- **Exception: Sessions (#3869).** The state that replaces both Sessions panes (§6.1) is centered
-  horizontally in the area it fills: its icon, title, sentence and actions are center-aligned at the
-  same 480px measure and drop, with `--space-4` of inline padding so the area's inset focus ring
-  never touches them. Its danger notice (§12.4) is centered as a block and keeps its own anatomy.
-  Every other state, in a list column, a panel or a narrow surface, stays left-aligned.
+- Top-aligned, `padding-top: var(--space-12)`, at a 480px measure. It spans the whole content area
+  when the collection is empty (not squeezed into a list column).
+- **A state that replaces a whole page or content area is centered in it** (#3869, #3875): pass
+  `pageLevel` to `State`. It fills the area and centers its icon, title, sentence and actions at the
+  480px measure, with its text center-aligned, so the container's own margins and gutter still
+  hold. A danger notice (§12.4) is centered as a block and keeps its own anatomy. Content a page
+  shows under the state (Skills' "How Skills Work" steps, Machines' method rows at the form
+  measure) is a centered block whose rows keep their own alignment. This covers every empty list
+  page (Sessions, Skills, Projects, Machines, Pods, Multi-Agent Runs, Automations, Outbound Events,
+  an empty Archive), a turned-off experiment, the app crash state, a missing session, run, pod or
+  automation, and the shared transcript page. Where the area takes keyboard focus (Sessions), its
+  inline padding keeps the content clear of the focus ring.
+- **Every other state is left-aligned** at its surface's padding: compact states in list columns and
+  detail panes, side panels, dialogs, settings surfaces, and inline no-results rows in a list
+  (including Archive's "No Matching Sessions" under its filters).
 - Title in Title Case, one or two sentences in sentence case, at least one action. The action is not a
   duplicate of the page header's primary if that is visible: the header primary is hidden while the
   empty state shows it.
@@ -2798,7 +2805,7 @@ Transcripts** (`.btn.ghost`), which opens the command palette with the query. Bu
 
 A danger Notice (§13.2) in place of the content: title "Couldn't Load Skills", one sentence in user
 terms, **Retry** as the action, raw detail behind "Show Details" in mono. Render-error boundary uses
-the same notice with Reload and Copy Error Details, top-left in the content area.
+the same notice with Reload and Copy Error Details; a page-level error is centered as a block (§12.1).
 
 - **A crashed view** (`ErrorBoundary`) is titled with the destination's name, "Automations Couldn't
   Be Shown" ("This Session" inside a session), over "Part of this page failed to display. Nothing was
@@ -3643,7 +3650,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`, `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`, `.queued-error`, `.settings-inline-error`, `.settings-pending-reason`, `.skills-git-held`, `.error-boundary` | `.notice` (`.t-*`, `.compact`) |
 | `.toast` + 4px left stripe, `.toast-region` under the bar | `.toast` + tone icon; `.toast-region` bottom right (bottom center on phones) above `--toast-clear` (§13.1) |
 | offline banner, pairing banner | `.notice.page-banner` |
-| `.empty` (bordered card), `.empty-title` 15px, `.inbox-zero-mark ✓`, `.sidechat-empty`, `.background-work-empty`, `.subagents-empty`, `.rp-launcher` centring, "Select a …" detail placeholders | `.state` (`.state-icon`, `.state-title`, `.state-body`, `.actions`), top-left aligned; `.overview` default detail |
+| `.empty` (bordered card), `.empty-title` 15px, `.inbox-zero-mark ✓`, `.sidechat-empty`, `.background-work-empty`, `.subagents-empty`, `.rp-launcher` centring, "Select a …" detail placeholders | `.state` (`.state-icon`, `.state-title`, `.state-body`, `.actions`), top-aligned, centered when page-level and left-aligned otherwise (§12.1); `.overview` default detail |
 | `.skeleton` (flat bars, 16px inset) | `.skeleton-row` shaped like the real row |
 | `.skills-section` (all tiers), `.project-location-card` in cards, `.runner-card` stacks | `.section` / `.surface` / `.notice` tiers |
 | `.skills-item`, `.project-manager-item`, `.run-card` (button) | `.row` (`.row-2` for two-line) or `article.card` |

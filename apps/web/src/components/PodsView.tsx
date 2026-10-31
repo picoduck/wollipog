@@ -497,10 +497,11 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   if (list.length === 0 && !empty) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
     const placeholder = listPlaceholder("pods", conn);
-    body = <State variant={placeholder.variant} icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
+    body = <State variant={placeholder.variant} pageLevel icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
   } else if (empty) {
     body = (
       <State
+        pageLevel
         icon={<PodsIcon />}
         title={`No ${podsDestination.name} Yet`}
         actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
@@ -712,6 +713,7 @@ function PodDetailContent({ podId, member, onNewSession }: { podId: string; memb
         <DetailBar title={viewTitle({ name: "pod", id: podId })} backLabel={backLabel("pods")} onBack={() => navigate({ name: "pods" })} />
         <State
           variant={placeholder.variant}
+          pageLevel
           title={placeholder.title}
           actions={placeholder.actions.includes("back") && (
             <button type="button" className="btn primary" onClick={() => navigate({ name: "pods" })}>{backLabel("pods")}</button>
