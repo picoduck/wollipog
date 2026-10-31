@@ -43,6 +43,7 @@ export function ExperimentGate({
     <div className="page">
       <PageHeader title={pageTitle} />
       <State
+        pageLevel
         className="experiment-off"
         icon={<ExperimentIcon />}
         headingLevel={2}
