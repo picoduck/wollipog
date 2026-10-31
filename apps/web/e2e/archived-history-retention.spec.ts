@@ -50,6 +50,9 @@ test("the archive keeps pruned sessions openable without adding status badges", 
   const row = page.getByRole("group", { name: "Migrate the Usage Dashboard to Daily Buckets", exact: true });
   await expect(row.getByRole("link")).toHaveAttribute("href", /sessions/);
   await expect(row.locator(".status")).toHaveCount(0);
+  await expect(row.locator(".archive-history")).toHaveText("History Pruned");
+  await row.getByRole("button", { name: /More Actions/ }).click();
+  await expect(page.getByRole("menuitem", { name: /Open Session/ })).toContainText("90-day retention policy");
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {

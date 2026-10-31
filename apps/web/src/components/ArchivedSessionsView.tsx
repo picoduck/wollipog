@@ -15,6 +15,7 @@ import {
   type ArchiveBrowserFilters,
 } from "../archive-browser.js";
 import { discardComposerDraft } from "../composer-drafts.js";
+import { historyPrunedTitle } from "../archived-history-retention.js";
 import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
 import { statusMeta } from "../status-meta.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -22,7 +23,7 @@ import { destination, viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { BotIcon, InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
+import { BotIcon, HistoryIcon, InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
@@ -386,7 +387,9 @@ export function ArchivedSessionsView() {
       navigate({ name: "session", id: restarted.id });
     } catch (cause) {
       const failure = unarchiveAndRestartFailureMessage(cause);
-      showToast(`Couldn't unarchive “${session.title || session.id}”.`, { tone: "error", detail: failure.message });
+      showToast(failure.ambiguous ? failure.message : `Couldn't unarchive “${session.title || session.id}”.`, {
+        tone: "error", detail: (cause as Error).message,
+      });
       if (failure.ambiguous) void refreshCatalogRef.current();
     } finally {
       setBusy(session.id, false);
@@ -589,14 +592,18 @@ export function ArchivedSessionsView() {
               description: stopFailed ? `The last stop attempt failed, so archiving is paused.${session.archiveOperation?.failure?.message ? ` ${session.archiveOperation.failure.message}` : ""}` : undefined,
               run: () => void retryStop(session),
             };
-            const actions: ArchiveRowAction[] = [{ label: "Open Session", refusal: null, run: openSession }];
+            const prunedDetail = session.historyPruned ? historyPrunedTitle(session.historyPruned) : undefined;
+            const actions: ArchiveRowAction[] = [{ label: "Open Session", refusal: null, description: prunedDetail, run: openSession }];
             if (restore) actions.push(restore);
             if (stopPending || stopFailed) actions.push(retry);
             else if (showStop) actions.push({ label: "Stop Session…", refusal: sessionCommandRefusal(session, "stop"), run: (back) => void stop(session, back) });
             if (session.archived) actions.push({ label: "Delete Session…", danger: true, refusal: sessionCommandRefusal(session, "delete"), run: (back) => void deleteSession(session, back) });
             return <div key={session.id} className={`row row-2 archive-item${snippet ? " has-snippet" : ""}`}
               tabIndex={0} role="group" aria-label={title}
-              onClick={(event) => { if (!(event.target as HTMLElement).closest("a, button")) openSession(); }}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || window.getSelection()?.toString()) return;
+                if (!(event.target as HTMLElement).closest("a, button")) openSession();
+              }}
               onKeyDown={(event) => { if (event.key === "Enter" && event.target === event.currentTarget) { event.preventDefault(); openSession(); } }}>
               <div className="archive-item-content">
                 <div className="archive-item-heading">
@@ -610,6 +617,7 @@ export function ArchivedSessionsView() {
                 <div className="archive-item-meta">
                   <span className="archive-project" title={metadata.project === metadata.location ? metadata.project : `${metadata.project} › ${metadata.location}`}><ProjectsIcon size={14} /> <span>{metadata.project}{metadata.project !== metadata.location && ` › ${metadata.location}`}</span></span>
                   <span className="archive-agent"><BotIcon size={14} />{metadata.agent}</span>
+                  {prunedDetail && <span className="archive-history" title={prunedDetail}><HistoryIcon size={14} />History Pruned</span>}
                 </div>
               </div>
               <time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time>
@@ -658,7 +666,7 @@ function ArchiveRowActions({ sessionId, title, actions, inline, busy }: {
   return <div className={`archive-item-actions${inline?.label === "Retry Stop" ? " retry-visible" : ""}`} onClick={(event) => event.stopPropagation()}>
     {inline && <button type="button" className="btn ghost sm archive-inline" disabled={busy || inline.refusal !== null} title={inline.refusal ?? undefined}
       aria-describedby={`archive-title-${sessionId}${inline.refusal ? ` ${reasonId}` : ""}`} onClick={() => inline.run()}>{inline.label}</button>}
-    {inline?.refusal && <span id={reasonId} className="archive-action-refusal">{inline.refusal}</span>}
+    {inline?.refusal && <span id={reasonId} className="sr-only">{inline.refusal}</span>}
     <button ref={menu.triggerRef} type="button" className="icon-btn sm" disabled={busy} onClick={menu.toggle}
       onKeyDown={menu.onTriggerKeyDown} title="More Actions" aria-label={`More Actions for ${title}`}
       aria-haspopup="menu" aria-expanded={open} aria-controls={menu.menuId}><MoreHorizontalIcon /></button>

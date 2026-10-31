@@ -456,8 +456,7 @@ test("an Unarchive and Restart preflight refusal keeps the row archived with an 
     await Promise.resolve();
   });
 
-  assert.match(fixture.container.textContent ?? "",
-    /Could not unarchive and restart session: runner is offline\. The session is still archived\./);
+  assert.match(fixture.container.querySelector(".toast")?.textContent ?? "", /Couldn't unarchive “Archived Session 1”\..*runner is offline/s);
   assert.equal(button(fixture.container, "Unarchive and Restart").disabled, false, "the action can be retried");
   assert.deepEqual(fixture.navigated, []);
   assert.equal(fixture.archivePageCalls(), loadsBefore, "a definite refusal needs no reconciliation");
@@ -479,7 +478,18 @@ test("an ambiguous Unarchive and Restart failure reconciles the row against the 
   });
 
   assert.match(fixture.container.textContent ?? "", /Could not confirm Unarchive and Restart: Failed to fetch\./);
+  assert.doesNotMatch(fixture.container.querySelector(".toast-message")?.textContent ?? "", /Couldn't unarchive/);
   assert.ok(fixture.archivePageCalls() > loadsBefore, "delivery uncertainty is resolved from the server");
+  await fixture.unmount();
+});
+
+test("an already-restored receipt does not claim that Unarchive failed", async () => {
+  const fixture = await mount([session(1, { status: "completed" })], {
+    unarchiveAndRestart: async () => { throw new ApiError("already restored", 409, undefined, { archived: false }); },
+  }, { unarchiveAndRestart: true });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Unarchive and Restart")); await Promise.resolve(); });
+  assert.match(fixture.container.querySelector(".toast-message")?.textContent ?? "", /^This session was already restored\./);
+  assert.equal(fixture.container.querySelector(".toast-detail")?.textContent, "already restored");
   await fixture.unmount();
 });
 
@@ -604,6 +614,11 @@ test("a pruned session stays openable without adding an extra row badge", async 
   };
   assert.equal(badges(pruned.title).length, 0, "history metadata does not add a second status badge");
   assert.equal(badges(kept.title).length, 0);
+  const history = fixture.container.querySelector<HTMLElement>(".archive-history")!;
+  assert.equal(history.textContent, "History Pruned");
+  assert.match(history.title, /^Pruned .* by the 90-day retention policy$/);
+  await act(async () => { fireDomEvent.click(history.closest(".archive-item")!.querySelector('button[aria-label^="More Actions"]')!); });
+  assert.match(domWindow.document.querySelector('[role="menuitem"] .menu-desc')?.textContent ?? "", /^Pruned .* by the 90-day retention policy$/);
   assert.ok(hasButton(fixture.container, "Unarchive") || buttons(fixture.container, "Unarchive and Restart").length > 0,
     "a pruned session can still be unarchived");
   await fixture.unmount();
@@ -615,6 +630,8 @@ test("rows open on click and Enter while inline actions describe their session",
   const row = fixture.container.querySelector<HTMLElement>(".archive-item")!;
   const restore = row.querySelector<HTMLButtonElement>(".archive-inline")!;
   assert.equal(domWindow.document.getElementById(restore.getAttribute("aria-describedby")!)?.textContent, target.title);
+  await act(async () => { row.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, ctrlKey: true }) as unknown as MouseEvent); });
+  assert.equal(fixture.navigated.length, 0, "a modified row click does not replace the current tab");
   await act(async () => { fireDomEvent.keyDown(row, { key: "Enter" }); });
   assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id });
   await act(async () => { fireDomEvent.click(row); });

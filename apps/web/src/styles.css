@@ -19201,11 +19201,12 @@ a.tab { text-decoration: none; }
 .archive-project > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .archive-project > svg, .archive-agent { flex-shrink: 0; }
 .archive-agent { display: flex; align-items: center; gap: var(--space-1); }
+.archive-history { display: flex; align-items: center; gap: var(--space-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.archive-history > svg { flex-shrink: 0; }
 .archive-item > time { flex-shrink: 0; color: var(--text-faint); font: var(--type-small); font-variant-numeric: tabular-nums; }
 .archive-item-actions { width: 180px; flex-shrink: 0; display: flex; justify-content: flex-end; align-items: center; gap: var(--space-2); position: relative; }
 .archive-inline { visibility: hidden; }
 .archive-item:hover .archive-inline, .archive-item:focus-within .archive-inline, .retry-visible .archive-inline { visibility: visible; }
-.archive-action-refusal { position: absolute; right: 0; bottom: 100%; font: var(--type-small); color: var(--text-dim); background: var(--bg-elev); }
 @media (pointer: coarse) {
   .archive-item-actions { width: 188px; }
   .archive-inline { display: none; }
