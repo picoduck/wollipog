@@ -112,7 +112,7 @@ test("hold advice an agent credential reads names exactly the tools its routes a
       await delay(50);
     }
     assert.ok(healthy, logs);
-    const live = ControlPlaneDb.open(database);
+    const live = ControlPlaneDb.attach(database);
     try {
       for (const [id] of sessions) {
         live.updateSessionStatus(id, "running", Date.now());

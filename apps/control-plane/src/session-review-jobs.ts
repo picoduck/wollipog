@@ -30,7 +30,10 @@ function boundedText(text: string, limit: number, tail = false): { text: string;
  * nonce are accepted, and a terminal state is final.
  */
 export class SessionReviewJobs {
-  constructor(private readonly sql: DatabaseSync) {
+  constructor(private readonly sql: DatabaseSync) {}
+
+  /** Only ControlPlaneDb.open installs this table; an attached connection never does (#3789). */
+  static install(sql: DatabaseSync): void {
     sql.exec(`CREATE TABLE IF NOT EXISTS session_review_jobs (
       job_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, runner_id TEXT NOT NULL, command TEXT NOT NULL,
       state TEXT NOT NULL, round INTEGER, attempt INTEGER, reviewer TEXT, controller_digest TEXT, summary TEXT,

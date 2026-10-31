@@ -8268,6 +8268,122 @@ test("side chat is an idempotent hidden session with no implicit context or fork
   assert.equal(svc.setArchived(child.id, false).status, 409, "the hidden child cannot leak into ordinary lists");
 });
 
+for (const update of ["live", "batch", "inventory", "legacy inventory"] as const) {
+  test(`side chat stays ready for its first message after ${update}`, () => {
+    const { db, hub, svc } = makeHarness();
+    const parentId = seedSession(svc, hub);
+    const created = svc.createSideChat(parentId);
+    assert.ok(created.ok && created.data);
+    const childId = created.data.session.id;
+    const ready = snapshot({ id: childId, status: "idle", costUsd: 0, seq: 0 });
+    hub.sentToRunner.length = 0;
+
+    if (update === "live") svc.applySessionRuntimeUpdate(RUNNER_ID, ready);
+    else if (update === "batch") svc.applySessionRuntimeUpdates(RUNNER_ID, [ready]);
+    else if (update === "inventory") svc.hydrateRunnerSessions(RUNNER_ID, [ready]);
+    else {
+      // Legacy inventories restore the status lost during a disconnect.
+      db.updateSessionStatus(childId, "stopped", Date.now());
+      svc.reconcileRunnerSessions(RUNNER_ID, [parentId, childId]);
+    }
+
+    assert.equal(hub.sentOfType("stop_session").length, 0, "readiness must not stop a hidden side chat");
+    assert.equal(db.getSession(childId)?.status, "idle", "the composer must remain usable");
+    assert.equal(db.hasSessionStopIntent(childId), false);
+    assert.equal(svc.prompt(childId, "My first side-chat question").ok, true);
+  });
+}
+
+for (const update of ["live", "batch", "inventory", "legacy inventory"] as const) {
+  for (const intent of ["explicit Stop", "explicit Archive", "ordinary archived session"] as const) {
+    test(`${update} still enforces ${intent} with side-chat hiding`, () => {
+      const { db, hub, svc } = makeHarness();
+      const parentId = seedSession(svc, hub);
+      let id = parentId;
+      if (intent !== "ordinary archived session") {
+        const child = svc.createSideChat(parentId);
+        assert.ok(child.ok && child.data);
+        id = child.data.session.id;
+        db.updateSessionStatus(id, "running", Date.now());
+        const result = intent === "explicit Stop" ? svc.stop(id) : svc.setArchived(id, true);
+        assert.ok(result.ok);
+        assert.equal(db.hasSessionStopIntent(id), true);
+      } else {
+        db.setSessionArchived(id, true, Date.now());
+      }
+      hub.sentToRunner.length = 0;
+      const running = snapshot({ id, status: "running", costUsd: 0, seq: 0 });
+      if (update === "live") svc.applySessionRuntimeUpdate(RUNNER_ID, running);
+      else if (update === "batch") svc.applySessionRuntimeUpdates(RUNNER_ID, [running]);
+      else if (update === "inventory") svc.hydrateRunnerSessions(RUNNER_ID, [running]);
+      else svc.reconcileRunnerSessions(RUNNER_ID, [parentId, id]);
+      assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id));
+      assert.equal(db.hasSessionStopIntent(id), true);
+    });
+  }
+}
+
+for (const source of ["snapshot", "legacy"] as const) {
+  test(`explicit Archive of a disconnected side chat survives ${source} reconnect`, () => {
+    const { db, hub, svc } = makeHarness();
+    const parentId = seedSession(svc, hub);
+    const created = svc.createSideChat(parentId);
+    assert.ok(created.ok && created.data);
+    const id = created.data.session.id;
+    db.updateSessionStatus(id, "stopped", Date.now());
+    hub.online = false;
+    assert.ok(svc.setArchived(id, true).ok);
+    hub.online = true;
+    hub.sentToRunner.length = 0;
+    if (source === "snapshot") svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle", costUsd: 0, seq: 0 })]);
+    else svc.reconcileRunnerSessions(RUNNER_ID, [parentId, id]);
+    assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id), "an explicit Archive must survive visibility hiding");
+    assert.equal(db.getSession(id)?.status, "stopped");
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "stopped", costUsd: 0, seq: 0 }));
+    assert.equal(db.hasSessionStopIntent(id), false);
+    hub.sentToRunner.length = 0;
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "idle", costUsd: 0, seq: 0 }));
+    assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id), "confirmed Archive remains final even when the original stop was a disconnect");
+  });
+}
+
+for (const intent of ["Stop", "Archive"] as const) {
+  test(`a confirmed side-chat ${intent} still fences late live snapshots`, () => {
+    const { db, hub, svc } = makeHarness();
+    const parentId = seedSession(svc, hub);
+    const created = svc.createSideChat(parentId);
+    assert.ok(created.ok && created.data);
+    const id = created.data.session.id;
+    db.updateSessionStatus(id, "running", Date.now());
+    assert.ok((intent === "Stop" ? svc.stop(id) : svc.setArchived(id, true)).ok);
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id, status: "stopped", costUsd: 0, seq: 0 }));
+    assert.equal(db.hasSessionStopIntent(id), false, "the runner confirmed the Stop");
+    hub.sentToRunner.length = 0;
+    svc.applySessionRuntimeUpdates(RUNNER_ID, [snapshot({ id, status: "running", costUsd: 0, seq: 0 })]);
+    assert.equal(db.getSession(id)?.status, "stopped");
+    assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id));
+  });
+}
+
+for (const status of ["completed", "failed"] as const) {
+  for (const source of ["snapshot", "legacy"] as const) {
+    test(`an archived ${status} side chat cannot revive through ${source} reconnect`, () => {
+      const { db, hub, svc } = makeHarness();
+      const parentId = seedSession(svc, hub);
+      const created = svc.createSideChat(parentId);
+      assert.ok(created.ok && created.data);
+      const id = created.data.session.id;
+      db.updateSessionStatus(id, status, Date.now());
+      assert.ok(svc.setArchived(id, true).ok);
+      hub.sentToRunner.length = 0;
+      if (source === "snapshot") svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "idle", costUsd: 0, seq: 0 })]);
+      else svc.reconcileRunnerSessions(RUNNER_ID, [parentId, id]);
+      assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === id));
+      assert.ok(["stopped", status].includes(db.getSession(id)!.status));
+    });
+  }
+}
+
 test("a side-chat launch disconnect removes the undelivered child instead of orphaning it", () => {
   const { db, hub, svc } = makeHarness();
   const parentId = seedSession(svc, hub);
