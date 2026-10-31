@@ -19145,6 +19145,8 @@ a.tab { text-decoration: none; }
 .archive-show, .archive-desktop-facets { display: flex; align-items: center; gap: var(--space-2); flex-shrink: 0; }
 .archive-show > .field-label { margin: 0; }
 .archive-show > .seg { grid-auto-columns: auto; }
+.archive-desktop-facets .filter-btn { border-color: var(--border-strong); }
+.archive-desktop-facets .filter-btn.is-set { border-color: var(--control-outline); }
 .archive-sheet-trigger, .archive-sheet-show { display: none; }
 .archive-sheet-show > .seg { width: 100%; }
 .archive-view .chip { gap: var(--space-1); }
