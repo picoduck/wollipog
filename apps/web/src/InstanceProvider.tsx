@@ -393,7 +393,10 @@ export function InstanceProvider({
         return;
       }
       if (route.instanceId !== stateRef.current.activeProfile.id) {
-        void switchTo(route.instanceId, route.view, true);
+        const view: View = route.view.name === "archived"
+          ? { name: "archived", browseVisit: { restore: true, activationId: 0 } }
+          : route.view;
+        void switchTo(route.instanceId, view, true);
       }
     };
     window.addEventListener("popstate", onPopState);

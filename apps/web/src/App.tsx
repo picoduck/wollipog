@@ -959,7 +959,7 @@ export function Shell() {
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
           {view.name === "usage" && <UsageView />}
-          {view.name === "archived" && <ArchivedSessionsView />}
+          {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
           {view.name === "settings" && (
             <SettingsView
               section={view.section}

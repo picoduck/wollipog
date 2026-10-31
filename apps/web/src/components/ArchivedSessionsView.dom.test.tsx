@@ -8,6 +8,7 @@ import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapsh
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
+import { writeArchiveBrowse } from "../archive-browse-history.js";
 import { deleteSessionMessage, stopArchivedSessionMessage } from "../session-confirmation-copy.js";
 import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
@@ -125,7 +126,7 @@ let sequence = 0;
 async function mount(
   sessions: SessionView[],
   overrides: Partial<ApiClient> = {},
-  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean } = {},
+  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean; restoreBrowse?: boolean } = {},
 ) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -197,7 +198,7 @@ async function mount(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <ArchivedSessionsView />
+            <ArchivedSessionsView restoreBrowse={options.restoreBrowse} />
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>,
@@ -1505,4 +1506,50 @@ test("an empty archive stays offline through a reconnect retry instead of claimi
   assert.match(fixture.container.textContent ?? "", /Reconnecting…/, "a retry in progress is still offline");
   assert.doesNotMatch(fixture.container.textContent ?? "", /No Archived Sessions/);
   await fixture.unmount();
+});
+
+test("history restore requests the stored page once without disclosing transcript search in the URL", async () => {
+  const beforeUrl = domWindow.location.href;
+  writeArchiveBrowse({ filters: { query: "private transcript words", project: "Wollipog", location: "Local Checkout",
+    agent: "Codex App Server", lifecycle: "completed", archive: "all" }, page: 2, cursors: [null, "50"], scrollTop: 120, rowId: "session-65" });
+  const fixture = await mount([], {}, { restoreBrowse: true });
+  try {
+    assert.equal(fixture.archiveInputs.length, 1);
+    assert.equal(fixture.archiveInputs[0]?.cursor, "50");
+    assert.equal(fixture.archiveInputs[0]?.q, "private transcript words");
+    assert.equal(fixture.archiveInputs[0]?.project, "Wollipog");
+    assert.equal(fixture.archiveInputs[0]?.location, "Local Checkout");
+    assert.equal(fixture.archiveInputs[0]?.agent, "Codex App Server");
+    assert.equal(fixture.archiveInputs[0]?.lifecycle, "completed");
+    assert.equal(fixture.archiveInputs[0]?.archive, "all");
+    assert.equal(domWindow.location.href, beforeUrl);
+  } finally { await fixture.unmount(); }
+});
+
+test("typing during a slow restore cancels its later focus rescue", async () => {
+  writeArchiveBrowse({ filters: { query: "", project: null, location: null, agent: null,
+    lifecycle: "all", archive: "archived" }, page: 2, cursors: [null, "50"], scrollTop: 0, rowId: "session-1" });
+  const pending: Array<(value: ReturnType<typeof archiveResponse>) => void> = [];
+  const originalMatchMedia = domWindow.matchMedia.bind(domWindow);
+  domWindow.matchMedia = ((query: string) => {
+    const result = originalMatchMedia(query);
+    if (query.includes("pointer: fine")) Object.defineProperty(result, "matches", { value: true });
+    return result;
+  }) as typeof domWindow.matchMedia;
+  const fixture = await mount([], { archiveSessionPage: () => new Promise((resolve) => pending.push(resolve)) }, { restoreBrowse: true });
+  try {
+    const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+    input.id = "slow-restore-search";
+    await act(async () => {
+      input.focus();
+      input.value = "Archived";
+      fireDomEvent.change(input);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    await act(async () => {
+      for (const resolve of pending) resolve(archiveResponse([session(1)]));
+      await Promise.resolve();
+    });
+    assert.equal(domWindow.document.activeElement?.id, input.id, "a late response must not take focus from the new search");
+  } finally { await fixture.unmount(); domWindow.matchMedia = originalMatchMedia; }
 });
