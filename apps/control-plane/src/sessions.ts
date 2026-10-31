@@ -13923,6 +13923,7 @@ export class SessionsService {
       return ok(restored);
     }
     if (session.archiveStatus === "stop_failed") {
+      this.archiveSessionDependents(sessionId, now, refreshProject);
       return ok(session, 202);
     }
     // A dispatched media reviewer, even one only provisionally stopped, is still decided by its
@@ -13948,11 +13949,11 @@ export class SessionsService {
       if (media && !pending.archived && !this.db.sessionStopIntent(sessionId)?.archiveAfterStop) {
         return fail("Prepared media archive requires exact never-enqueued proof or authenticated reconciliation; capacity is retained.", 409);
       }
-      this.archiveRequesterReviews(sessionId, now, refreshProject);
+      this.archiveSessionDependents(sessionId, now, refreshProject);
       return ok(pending, 202);
     }
     if (session.archived) {
-      this.archiveRequesterReviews(sessionId, now, refreshProject);
+      this.archiveSessionDependents(sessionId, now, refreshProject);
       return ok(session);
     }
     // Archiving a terminal session needs no Stop, but it is an end all the same: a runner that
@@ -13960,13 +13961,25 @@ export class SessionsService {
     // provisionally stopped can answer nothing and is owed no resume from here on (#1759).
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-archived");
     this.db.setSessionArchived(sessionId, true, now);
-    this.archiveRequesterReviews(sessionId, now, refreshProject);
+    this.archiveSessionDependents(sessionId, now, refreshProject);
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated, refreshProject);
     return ok(updated);
   }
 
-  private archiveRequesterReviews(sessionId: string, now: number, refreshProject: boolean): void {
+  /** Visibility-only archival does not mean the linked side chat has released its provider. */
+  private sideChatToArchive(parentSessionId: string): SessionView | null {
+    const relation = this.db.getSideChat(parentSessionId);
+    const child = relation ? this.db.getSession(relation.childSessionId) : null;
+    if (!child) return null;
+    if (!isTerminal(child.status) || this.db.hasSessionStopIntent(child.id) ||
+        (child.status === "stopped" && !this.db.sessionStopProvenance(child.id)?.confirmation)) return child;
+    return null;
+  }
+
+  private archiveSessionDependents(sessionId: string, now: number, refreshProject: boolean): void {
+    const sideChat = this.sideChatToArchive(sessionId);
+    if (sideChat) this.setArchived(sideChat.id, true, refreshProject);
     const reviews = this.db.reviewSessions.forRequester(sessionId);
     if (!reviews.length) return;
     this.db.abandonReviewContinuations(sessionId, now);
@@ -14086,7 +14099,8 @@ export class SessionsService {
     failedSessionIds: string[];
   }> {
     const candidates = this.db.listSessions({ includeArchived: true })
-      .filter((session) => session.projectId === projectId && !session.archived);
+      .filter((session) => session.projectId === projectId &&
+        (!session.archived || this.sideChatToArchive(session.id) !== null));
     const sessions: SessionView[] = [];
     for (const candidate of candidates) {
       const result = this.setArchived(candidate.id, true, false);
