@@ -7,9 +7,16 @@ import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
 import { combineReports } from "./merge-queue-wait-report.mjs";
 import { reliabilityReport } from "./ci-reliability-report.mjs";
 
-const REQUIRED_WORK = ["Typecheck, Unit Tests & Bundles", ...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`),
+// #3770 moved the Node suite out of "Typecheck, Unit Tests & Bundles" into three shards. Runs
+// before it keep their original single Node job; a run is read in the layout it executed.
+const LEGACY_NODE_JOB = "Typecheck, Unit Tests & Bundles", CHECKS_JOB = "Typecheck & Bundles";
+const UNIT_WORK = [1, 2, 3].map((n) => `Unit Tests (${n})`);
+const OTHER_WORK = [...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`),
   "Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
   "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", "WebKit End-to-End Tests"];
+const requiredWork = (jobs) => jobs.some((job) => job.name === LEGACY_NODE_JOB) ? [LEGACY_NODE_JOB, ...OTHER_WORK]
+  : [CHECKS_JOB, ...UNIT_WORK, ...OTHER_WORK];
+const nodeJob = (name) => name === LEGACY_NODE_JOB || UNIT_WORK.includes(name);
 const mandatorySteps = ["Typecheck", "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle", "Rendered Production Browser Smoke"];
 const utcWorkingDate = (time) => {
   const date = new Date(time);
@@ -96,7 +103,7 @@ export function shadowReport(input) {
     }
     source.testedSha = plan.context.testedSha;
     if (record.attempt !== 1) { exclusions.push({ ...source, reason: "rerun-not-an-independent-change", cause: "unresolved" }); continue; }
-    const jobs = REQUIRED_WORK.map((name) => record.jobs.filter((job) => job.name === name));
+    const jobs = requiredWork(record.jobs).map((name) => record.jobs.filter((job) => job.name === name));
     if (jobs.some((matches) => matches.length !== 1)) { gaps.push({ ...source, reason: "missing-or-duplicate-full-job" }); continue; }
     const work = jobs.flat(), summaries = [];
     let incomplete = false, retryOnly = false, interruption = false, selectedFailed = false, fastFailed = false, outsideFailed = false;
@@ -107,15 +114,16 @@ export function shadowReport(input) {
         work.some((row) => row.name.endsWith("/ Detect Settings-Rows Changes") && row.state === "passing");
       if (!["passing", "failing"].includes(job.state) && !intentionalWindowsSkip) interruption = true;
       const projected = job.testTiming?.summaries ?? [];
-      // The Node job, each Chromium shard and WebKit must have final projections. Production
-      // emits a second browser summary on shard 1. Windows has a separate conditional workflow.
-      const expected = job.name === "Browser End-to-End Tests (1)" ? 2 : 1;
+      // Each Node shard, each Chromium shard and WebKit must have final projections. Production
+      // emits a second browser summary on shard 1. Windows has a separate conditional workflow,
+      // and the typecheck and bundles job runs no test suite.
+      const expected = job.name === "Browser End-to-End Tests (1)" ? 2 : job.name === CHECKS_JOB ? 0 : 1;
       if ((!windows && projected.length !== expected) || job.testTiming?.truncated) incomplete = true;
       for (const [projectionIndex, raw] of projected.entries()) {
         const summary = parseTiming(TIMING_MARKER + JSON.stringify(raw));
         if (!summary || summary.context.runId !== String(record.runId) || summary.context.attempt !== record.attempt ||
             summary.context.testedSha !== plan.context.testedSha || summary.truncated || !summary.reliability || summary.reliability.truncated ||
-            summary.suite !== (job.name === "Typecheck, Unit Tests & Bundles" ? "node" : "browser")) {
+            summary.suite !== (nodeJob(job.name) ? "node" : "browser")) {
           incomplete = true; continue;
         }
         summaries.push(summary);

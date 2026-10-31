@@ -151,7 +151,8 @@ successful measurement. The collector dispatches, reruns and cancels nothing.
 ### Content-Safe Test Timing
 
 Ordinary CI uses `pnpm test:ci` with the same complete Node inventory/timeouts as
-`pnpm test`. An additional reporter emits one `ci-timing-v1` JSON line. Browser
+`pnpm test`, split across the three `Unit Tests (n)` shard jobs since #3770. An additional
+reporter emits one `ci-timing-v1` JSON line per shard. Browser
 development, WebKit and production reporters emit the same schema. Existing
 reporters, retries, fail-on-flaky behavior and exit statuses remain intact.
 Only counts, duration, retry index, state and SHA-256 identities are emitted;

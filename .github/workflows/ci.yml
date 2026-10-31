@@ -129,15 +129,12 @@ jobs:
   checks:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
     needs: [suite_plan, merge_group_gate]
-    name: Typecheck, Unit Tests & Bundles
+    name: Typecheck & Bundles
     runs-on: ubuntu-24.04
-    # Everything except the video decoder install took a median of 539 seconds and at most 771 over
-    # 615 successful jobs from 2026-09-28 to 2026-10-01 (Unit Tests alone at most 615). Both install
-    # attempts at their seven-minute bounds plus that slowest remainder is just under 27 minutes
-    # (#2328), and the package cache's resolve, restore, verify, collect and save steps add at most
-    # eight more (#2345), so thirty-five still leaves the unit tests their full run time when every
-    # one of those steps runs to its bound. The contract test keeps this budget above the bounds of
-    # all of the decoder steps plus that remainder.
+    # Typecheck, the Node engine boundaries, delegated containment and the bundles took about
+    # five minutes beside the unit tests, which now run in the `unit` job below (#3770). Every run
+    # step has its own timeout, so the step that overruns is the one named; the contract test keeps
+    # this budget above all of those bounds plus a five-minute allowance for the setup actions.
     timeout-minutes: 35
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -146,6 +143,7 @@ jobs:
 
       - name: Verify Rolling Checkout
         if: inputs.target_sha != ''
+        timeout-minutes: 1
         env:
           EXPECTED_SHA: ${{ inputs.target_sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
@@ -168,6 +166,176 @@ jobs:
           cache: pnpm
 
       - name: Install Dependencies
+        timeout-minutes: 4
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision Engine Boundary Package Managers
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          package_manager="$(node -p 'require("./package.json").packageManager')"
+          npm install --prefix "$RUNNER_TEMP/engine-pnpm-10" --ignore-scripts --no-audit --no-fund --package-lock=false pnpm@10.11.0
+          npm install --prefix "$RUNNER_TEMP/engine-pnpm-current" --ignore-scripts --no-audit --no-fund --package-lock=false "$package_manager"
+
+      - name: Setup Minimum Node 22
+        id: setup_node_22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version: 22.13.0
+      - name: Retry Setup Minimum Node 22
+        if: ${{ !cancelled() && steps.setup_node_22.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.13.0
+      - name: Verify Node 22 Engine Boundary
+        timeout-minutes: 1
+        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
+
+      - name: Setup Excluded Node 23
+        id: setup_excluded_node_23
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version: 23.2.0
+      - name: Retry Setup Excluded Node 23
+        if: ${{ !cancelled() && steps.setup_excluded_node_23.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 23.2.0
+      - name: Verify Excluded Node Engine Boundary
+        timeout-minutes: 1
+        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
+
+      - name: Setup Minimum Node 23
+        id: setup_node_23
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version: 23.4.0
+      - name: Retry Setup Minimum Node 23
+        if: ${{ !cancelled() && steps.setup_node_23.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 23.4.0
+      - name: Verify Node 23 Engine Boundary
+        timeout-minutes: 1
+        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
+
+      - name: Restore Node 24
+        id: restore_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+      - name: Retry Restore Node 24
+        if: ${{ !cancelled() && steps.restore_node_24.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+      - name: Verify Recommended Node Engine Boundary
+        timeout-minutes: 1
+        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
+
+      - name: Typecheck
+        timeout-minutes: 6
+        run: pnpm typecheck
+
+      - name: Verify Delegated Linux Provider Containment
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          containment_root="$(mktemp -d "$RUNNER_TEMP/wollipog-cgroup.XXXXXX")"
+          trap 'rm -rf "$containment_root"' EXIT
+          mkdir -p "$containment_root/home" "$containment_root/tmp" "$containment_root/cache"
+          # A transient test service explicitly delegates its subtree to the ordinary test user.
+          # RuntimeMaxSec also cleans up if the client or CI step is cancelled.
+          sudo systemd-run --wait --collect --pipe \
+            --property=Delegate=yes --property=RuntimeMaxSec=75 --property=TimeoutStopSec=5 \
+            --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
+            /usr/bin/env PATH="$PATH" HOME="$containment_root/home" TMPDIR="$containment_root/tmp" \
+            XDG_CACHE_HOME="$containment_root/cache" WOLLIPOG_TEST_REQUIRE_CGROUP=1 \
+            "$(command -v node)" --import tsx --test --test-timeout=60000 apps/runner/src/linux-cgroup.test.ts
+          # User managers on systemd 255 do not set user.delegate. Exercise their authoritative
+          # Delegate/ControlGroup query too, instead of only testing the system-manager marker.
+          # The suite hides only the marker probe for initialization and requires a real query,
+          # so a future user manager adding the marker cannot silently remove this coverage.
+          # Start only this ephemeral CI user's manager; no lingering or persistent unit changes.
+          sudo systemctl start "user@$(id -u).service"
+          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --wait --collect --pipe \
+            --property=Delegate=yes --property=RuntimeMaxSec=75 --property=TimeoutStopSec=5 \
+            --working-directory="$PWD" \
+            /usr/bin/env PATH="$PATH" HOME="$containment_root/home" TMPDIR="$containment_root/tmp" \
+            XDG_CACHE_HOME="$containment_root/cache" XDG_RUNTIME_DIR="/run/user/$(id -u)" \
+            WOLLIPOG_TEST_REQUIRE_CGROUP=1 WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY=1 \
+            "$(command -v node)" --import tsx --test --test-timeout=60000 apps/runner/src/linux-cgroup.test.ts
+
+      - name: Validate Web Production Build
+        timeout-minutes: 4
+        run: pnpm --filter @wollipog/web build
+
+      - name: Validate Runner Bundle
+        timeout-minutes: 2
+        run: pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only
+
+      # esbuild-only pass (build-sidecar.mjs --bundle-only): proves the control plane and
+      # its deps still bundle into one CJS file. Skips the SEA/postject/Tauri steps, so no
+      # rustc or target triple is needed here.
+      - name: Validate Control-Plane Bundle
+        timeout-minutes: 2
+        run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
+
+  unit:
+    if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
+    needs: [suite_plan, merge_group_gate]
+    name: Unit Tests
+    runs-on: ubuntu-24.04
+    # One full Node suite took 1,816-1,896 seconds of the old 35-minute checks job by 2026-10-30,
+    # and merge groups were cancelled after every test had passed (#3770). Each shard runs a third
+    # of the same planned suite (scripts/node-test-plan.mjs deals every file to exactly one shard),
+    # so a shard's Unit Tests step should take about eleven minutes against its own 18. The budget
+    # covers every step's own bound, both video decoder install attempts included, plus a
+    # five-minute allowance for the setup actions, so an overrun fails the step that caused it
+    # instead of cancelling the job. `fail-fast` is off because the aggregator reads a cancelled job
+    # as a budget hit. To add a shard, extend the list and the `/3` denominators together; the
+    # contract test requires them to agree.
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.target_sha }}
+
+      - name: Verify Rolling Checkout
+        if: inputs.target_sha != ''
+        timeout-minutes: 1
+        env:
+          EXPECTED_SHA: ${{ inputs.target_sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node 24
+        id: setup_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Retry Setup Node 24
+        if: ${{ !cancelled() && steps.setup_node_24.outcome == 'failure' }}
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install Dependencies
+        timeout-minutes: 4
         run: pnpm install --frozen-lockfile
 
       # FFmpeg brings 73 packages (46.7 MB) from the Ubuntu mirror. Across 615 successful jobs from
@@ -266,73 +434,8 @@ jobs:
           path: ~/.cache/video-decoder-packages
           key: ${{ steps.video-decoder-packages.outputs.key }}
 
-      - name: Provision Engine Boundary Package Managers
-        shell: bash
-        run: |
-          package_manager="$(node -p 'require("./package.json").packageManager')"
-          npm install --prefix "$RUNNER_TEMP/engine-pnpm-10" --ignore-scripts --no-audit --no-fund --package-lock=false pnpm@10.11.0
-          npm install --prefix "$RUNNER_TEMP/engine-pnpm-current" --ignore-scripts --no-audit --no-fund --package-lock=false "$package_manager"
-
-      - name: Setup Minimum Node 22
-        id: setup_node_22
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        continue-on-error: true
-        with:
-          node-version: 22.13.0
-      - name: Retry Setup Minimum Node 22
-        if: ${{ !cancelled() && steps.setup_node_22.outcome == 'failure' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 22.13.0
-      - name: Verify Node 22 Engine Boundary
-        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
-
-      - name: Setup Excluded Node 23
-        id: setup_excluded_node_23
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        continue-on-error: true
-        with:
-          node-version: 23.2.0
-      - name: Retry Setup Excluded Node 23
-        if: ${{ !cancelled() && steps.setup_excluded_node_23.outcome == 'failure' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 23.2.0
-      - name: Verify Excluded Node Engine Boundary
-        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
-
-      - name: Setup Minimum Node 23
-        id: setup_node_23
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        continue-on-error: true
-        with:
-          node-version: 23.4.0
-      - name: Retry Setup Minimum Node 23
-        if: ${{ !cancelled() && steps.setup_node_23.outcome == 'failure' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version: 23.4.0
-      - name: Verify Node 23 Engine Boundary
-        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
-
-      - name: Restore Node 24
-        id: restore_node_24
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        continue-on-error: true
-        with:
-          node-version-file: .nvmrc
-      - name: Retry Restore Node 24
-        if: ${{ !cancelled() && steps.restore_node_24.outcome == 'failure' }}
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .nvmrc
-      - name: Verify Recommended Node Engine Boundary
-        run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
-
-      - name: Typecheck
-        run: pnpm typecheck
-
       - name: Unit Tests
+        timeout-minutes: 18
         env:
           ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
@@ -340,54 +443,12 @@ jobs:
           GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
           if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
-            node scripts/test-suites.mjs --node-only --groups node-fast --ci
+            node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=${{ matrix.shard }}/3
           elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
-            node scripts/test-suites.mjs --node-only --groups node-fast --ci
+            node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=${{ matrix.shard }}/3
           else
-            pnpm test:ci
+            pnpm test:ci --shard=${{ matrix.shard }}/3
           fi
-
-      - name: Verify Delegated Linux Provider Containment
-        timeout-minutes: 3
-        shell: bash
-        run: |
-          set -euo pipefail
-          containment_root="$(mktemp -d "$RUNNER_TEMP/wollipog-cgroup.XXXXXX")"
-          trap 'rm -rf "$containment_root"' EXIT
-          mkdir -p "$containment_root/home" "$containment_root/tmp" "$containment_root/cache"
-          # A transient test service explicitly delegates its subtree to the ordinary test user.
-          # RuntimeMaxSec also cleans up if the client or CI step is cancelled.
-          sudo systemd-run --wait --collect --pipe \
-            --property=Delegate=yes --property=RuntimeMaxSec=75 --property=TimeoutStopSec=5 \
-            --uid="$(id -u)" --gid="$(id -g)" --working-directory="$PWD" \
-            /usr/bin/env PATH="$PATH" HOME="$containment_root/home" TMPDIR="$containment_root/tmp" \
-            XDG_CACHE_HOME="$containment_root/cache" WOLLIPOG_TEST_REQUIRE_CGROUP=1 \
-            "$(command -v node)" --import tsx --test --test-timeout=60000 apps/runner/src/linux-cgroup.test.ts
-          # User managers on systemd 255 do not set user.delegate. Exercise their authoritative
-          # Delegate/ControlGroup query too, instead of only testing the system-manager marker.
-          # The suite hides only the marker probe for initialization and requires a real query,
-          # so a future user manager adding the marker cannot silently remove this coverage.
-          # Start only this ephemeral CI user's manager; no lingering or persistent unit changes.
-          sudo systemctl start "user@$(id -u).service"
-          XDG_RUNTIME_DIR="/run/user/$(id -u)" systemd-run --user --wait --collect --pipe \
-            --property=Delegate=yes --property=RuntimeMaxSec=75 --property=TimeoutStopSec=5 \
-            --working-directory="$PWD" \
-            /usr/bin/env PATH="$PATH" HOME="$containment_root/home" TMPDIR="$containment_root/tmp" \
-            XDG_CACHE_HOME="$containment_root/cache" XDG_RUNTIME_DIR="/run/user/$(id -u)" \
-            WOLLIPOG_TEST_REQUIRE_CGROUP=1 WOLLIPOG_TEST_EXPECT_USER_MANAGER_QUERY=1 \
-            "$(command -v node)" --import tsx --test --test-timeout=60000 apps/runner/src/linux-cgroup.test.ts
-
-      - name: Validate Web Production Build
-        run: pnpm --filter @wollipog/web build
-
-      - name: Validate Runner Bundle
-        run: pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only
-
-      # esbuild-only pass (build-sidecar.mjs --bundle-only): proves the control plane and
-      # its deps still bundle into one CJS file. Skips the SEA/postject/Tauri steps, so no
-      # rustc or target triple is needed here.
-      - name: Validate Control-Plane Bundle
-        run: pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only
 
   delegated_pipeline:
     if: ${{ !cancelled() && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
@@ -962,7 +1023,7 @@ jobs:
   regression-admission-shadow:
     if: ${{ !cancelled() && vars.CI_REGRESSION_ADMISSION == 'dry-run' && (github.event_name == 'merge_group' || github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)) }}
     name: Regression Admission Shadow (Advisory)
-    needs: [checks, browser, win32, webkit]
+    needs: [checks, unit, browser, win32, webkit]
     continue-on-error: true
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1011,7 +1072,7 @@ jobs:
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    needs: [checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]
+    needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
@@ -1024,6 +1085,7 @@ jobs:
           GATE_RESULT: ${{ needs.merge_group_gate.result }}
           GATE_MODE: ${{ needs.merge_group_gate.outputs.mode }}
           CHECKS_RESULT: ${{ needs.checks.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
           BROWSER_RESULT: ${{ needs.browser.result }}
           WIN32_RESULT: ${{ needs.win32.result }}
           WEBKIT_RESULT: ${{ needs.webkit.result }}
@@ -1061,7 +1123,8 @@ jobs:
           elif [ "$GATE_ENABLED" != false ] || [ "$GATE_RESULT" != skipped ] || [ -n "$GATE_MODE" ]; then
             echo "::error::Unexpected Merge Group Gate admission or output"; status=1
           fi
-          report "Typecheck, Unit Tests & Bundles" "$CHECKS_RESULT"
+          report "Typecheck & Bundles" "$CHECKS_RESULT"
+          report "Unit Tests" "$UNIT_RESULT"
           report "Browser End-to-End Tests" "$BROWSER_RESULT"
           report "Settings-Rows win32 Baselines" "$WIN32_RESULT"
           report "WebKit End-to-End Tests" "$WEBKIT_RESULT"

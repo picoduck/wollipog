@@ -128,12 +128,12 @@ test("workflow shadow has no dependency into required checks and reads trusted b
   const shadow = source.split("\n  regression-admission-shadow:\n")[1].split("\n  check:\n")[0];
   const aggregator = source.split("\n  check:\n")[1];
   assert.match(shadow, /vars.CI_REGRESSION_ADMISSION == 'dry-run'/);
-  assert.match(shadow, /continue-on-error: true/); assert.match(shadow, /needs: \[checks, browser, win32, webkit\]/);
+  assert.match(shadow, /continue-on-error: true/); assert.match(shadow, /needs: \[checks, unit, browser, win32, webkit\]/);
   assert.match(shadow, /ref: refs\/heads\/main/);
   assert.match(shadow, /persist-credentials: false/); assert.doesNotMatch(shadow, /: write|pull_request_target|pnpm install/);
   const permissions = shadow.match(/    permissions:\n((?:      .+\n)+)/)?.[1];
   assert.equal(permissions, "      contents: read\n", "reusable CI must not exceed its rolling caller's contents-only grant");
-  assert.match(aggregator, /needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]/);
+  assert.match(aggregator, /needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]/);
   assert.doesNotMatch(aggregator, /regression-admission|MAIN_MERGE_ADMISSION/);
   assert.match(shadow, /"decision":"hold","reasons":\["trusted-policy-unavailable"\]/);
 });

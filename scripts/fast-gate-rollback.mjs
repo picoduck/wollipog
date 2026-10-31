@@ -141,7 +141,8 @@ const ACTIVE = { gate: GATE_ENABLED, event: "merge_group", trustedMainSha: MAIN,
 export const REHEARSAL_THRESHOLDS = Object.freeze({ ...PROPOSED_THRESHOLDS, approved: true,
   approval: "Inert rehearsal fixture; not a human approval of these values" });
 
-const STEP_NAMES = (name) => name === "Typecheck, Unit Tests & Bundles" ? CHECK_STEPS
+const STEP_NAMES = (name) => name === "Typecheck & Bundles" ? CHECK_STEPS
+  : /^Unit Tests \(\d+\)$/.test(name) ? ["Unit Tests"]
   : name === "Delegated Pipeline Recovery" ? ["Verify Recorded-Boundary Pipeline Recovery"]
   : /^Browser End-to-End Tests \(1\)$/.test(name) ? ["Remote-Instance Browser End-to-End Tests", "Rendered Production Browser Smoke"]
     : /^Browser End-to-End Tests/.test(name) ? ["Remote-Instance Browser End-to-End Tests"]
