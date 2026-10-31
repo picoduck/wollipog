@@ -1501,7 +1501,7 @@ export function InboxView({
     if (copied) showToast("Session ID copied.", { tone: "success", detail: sessionId, detailStyle: "mono" });
     else showToast("Couldn't copy the session ID.", { tone: "error" });
   }, [showToast]);
-  const boardSessions =useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
+  const boardSessions = useMemo(() => liveEntries.map((entry) => entry.session), [liveEntries]);
   const setupNoticeSessionIds = useMemo(
     () => worktreeSetupNoticeSessionIds(
       sessions.values(), runners, worktreeSetupNoticeDismissals, worktreeSetupConfigSupported,

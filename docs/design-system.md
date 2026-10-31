@@ -2503,8 +2503,9 @@ guessing: the audit cannot be tied to one occurrence of a reused provider reques
 body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
 Tool, Path, Branch, the command in a §11.7 code well, Risk for a review, and Recorded as one absolute
 time with seconds. A Decision Record never shows its ids (request, audit, policy, session, review);
-Copy Audit ID copies them. (A session's own id is a Pinned Summary fact, §11.3.) The chosen option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel`
-Ended Early, even though the runner records a chosen Cancel as a dismissal); the runner's own
+Copy Audit ID copies them. (A session's own id is a Pinned Summary fact, §11.3.) The chosen
+option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel` Ended Early, even
+though the runner records a chosen Cancel as a dismissal); the runner's own
 sign-in resolutions keep their words.
 
 **Decision History** (#2213) is the side panel's list of every decision in the session: what the

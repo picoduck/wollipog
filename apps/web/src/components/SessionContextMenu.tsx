@@ -38,9 +38,10 @@ export interface SessionContextMenuState {
  * right-click and long-press, the preview bar's ⋯ and a board card, anchored to whatever opened it.
  * It is where every session action without a place of its own lives (docs/design-system.md §3.3),
  * in one order: Reply, Rename Session…, Pin, Mark Unread, Fork Conversation…, the reminder items,
- * then Copy Session ID and the archive item, each after a separator (#3897). It manages target identity and dismissal only — every
- * action keeps its owner's confirmation, undo, and availability semantics, which is why the items
- * receive the target `sessionId` back rather than closing over view state.
+ * then Copy Session ID and the archive item, each after a separator (#3897). It manages target
+ * identity and dismissal only — every action keeps its owner's confirmation, undo, and availability
+ * semantics, which is why the items receive the target `sessionId` back rather than closing over
+ * view state.
  *
  * Each item leads with its 16px icon, and an item with a Sessions list key shows the keycap in its
  * trailing slot (§9.1, §11.5) when `showKeys` says the key would act on this session.
