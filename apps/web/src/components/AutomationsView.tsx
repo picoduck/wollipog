@@ -306,6 +306,7 @@ export function AutomationsView() {
   } else if (empty) {
     body = (
       <State
+        pageLevel
         icon={<AutomationsIcon />}
         title={`No ${destination("automations").name} Yet`}
         // This screen exposed an `h3` before the conversion, and heading navigation is how a

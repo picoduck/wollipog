@@ -211,6 +211,7 @@ export function AutomationDetail({ automationId }: { automationId: string }) {
         ) : (
           <State
             variant={placeholder.variant}
+            pageLevel
             title={placeholder.title}
             details={placeholder.details}
             actions={placeholder.actions.includes("back") ? (

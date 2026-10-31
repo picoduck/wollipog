@@ -633,6 +633,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
       ) : pageSessions.length === 0 ? (
         <State
           variant={hasActiveFilters ? "no-results" : "empty"}
+          pageLevel={!hasActiveFilters}
           title={hasActiveFilters
             ? "No Matching Sessions"
             : `No ${destination("archived").name}`}

@@ -151,13 +151,14 @@ export function addMachineMethods({ offerLocalSetup, localRunnerEnabled, onLocal
 }
 
 /**
- * The Machines tab before its first machine (§12.1): one top-left state that owns the create
+ * The Machines tab before its first machine (§12.1): one centered page-level state that owns the create
  * actions, so the header hides Add Machine, and under it one row per method with the first as the
  * primary. A viewer gets the sentence and no rows.
  */
 function EmptyMachines({ methods, sentence }: { methods: AddMachineMethod[]; sentence: string }) {
   return (
     <State
+      pageLevel
       className="connections-empty"
       icon={<ComputerIcon />}
       title="No Machines Yet"
@@ -525,7 +526,7 @@ export function RunnersView() {
         )}
         {total === 0 && snapshot.offline ? (
           <div className="master-detail-state">
-            <State variant="offline">Reconnecting…</State>
+            <State variant="offline" pageLevel>Reconnecting…</State>
           </div>
         ) : machinesEmpty ? (
           // No machines is one state across both panes (§6.1, §12.1).

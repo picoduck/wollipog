@@ -2203,7 +2203,8 @@ button.status { cursor: pointer; }
 
 /* --------------------------------- States --------------------------------
    Empty, no results, loading, error and offline (docs/design-system.md §12): one component, top-
-   and left-aligned with the content's edge, no bordered card and no success glyph. An empty state
+   aligned, no bordered card and no success glyph. It is left-aligned with the content's edge, or
+   centered when it replaces a whole page or content area (`.page-level`, below). An empty state
    is a place to act, so it offers the next step. */
 .state {
   display: grid;
@@ -2266,8 +2267,27 @@ button.status { cursor: pointer; }
 .notice.state-error.compact-state { margin-top: var(--space-6); }
 /* Opened by the actions' Show Details, below them at the state's measure. */
 .state-details { justify-self: stretch; min-width: 0; margin-top: var(--space-2); }
+/* A state that replaces a whole page or content area is centered in it (§12.1, #3875): it fills
+   the area and centers its parts at the state's measure, so whatever margins or gutter its
+   container gives it still hold. A danger notice is centered as a block and keeps its anatomy. */
+.state.page-level {
+  justify-items: center;
+  max-width: none;
+  text-align: center;
+}
+.state.page-level > :is(.state-title, .actions) { max-width: 480px; }
+.state.page-level .actions { justify-content: center; }
+.state.page-level > .state-details { justify-self: center; width: 100%; max-width: 480px; }
+.state.page-level:is(.loading, .offline, .no-results) { justify-content: center; }
+.notice.state-error.page-level { margin-right: auto; margin-left: auto; }
+/* A detail page gives the notice its gutter as its own margins: keep at least that much, and center
+   it once the page is wider than the measure plus both gutters. */
+:is(.session-detail, .run-detail) > .notice.state-error.page-level {
+  margin-right: max(var(--page-gutter), calc((100% - 480px) / 2));
+  margin-left: max(var(--page-gutter), calc((100% - 480px) / 2));
+}
 /* The shell itself crashed: no header or rail to sit under, so the state takes the window and the
-   page's gutter, top-left like every other state. */
+   page's gutter, top-aligned and centered like every page-level state (§12.1). */
 .app-crash {
   box-sizing: border-box;
   min-height: 100dvh;
@@ -2290,6 +2310,12 @@ button.status { cursor: pointer; }
   /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
   :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions, .inbox-state .state .actions) > .btn {
     max-width: none;
+  }
+  /* A page-level state caps the stack at its measure (§12.1): a stretched item with a max-width
+     would sit at the start of a wider area, so it takes the full width and centers instead. */
+  :is(.state.experiment-off, .app-crash .state, .inbox-state .state).page-level > .actions {
+    justify-self: center;
+    width: 100%;
   }
 }
 
@@ -9845,6 +9871,14 @@ textarea {
 .state.connections-empty { max-width: var(--page-max-form); }
 .connections-empty > .actions { margin-top: var(--space-4); }
 .connections-empty > .actions > .surface { flex: 1 1 100%; }
+/* Centered across the tab (§12.1, #3875): the state fills it and its method rows form one centered
+   block at the form measure, each row keeping its own left-aligned anatomy. */
+.state.page-level.connections-empty { max-width: none; }
+.state.page-level.connections-empty > .actions {
+  width: 100%;
+  max-width: var(--page-max-form);
+  text-align: left;
+}
 /* On a phone a method's title and description take the row's width and wrap, and its button drops
    below at its natural width, indented to the text column. */
 @media (max-width: 760px) {
@@ -13611,25 +13645,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .detail-scroll { transition: none; }
 }
 /* The Sessions list's own state: the list zone's focus target. One state takes both panes' place
-   (§6.1): No Matches (#2200), an empty group (#2220) or sessions that never arrived (#2803). It
-   spans the whole content area, so it is centered in it rather than left on the page grid (§12.1,
-   #3869), and the inline padding keeps it clear of the inset focus ring at any width. No Matches is
-   stacked at the page state's drop (§12.1) rather than the inline row of a list's own. */
+   (§6.1): No Matches (#2200), an empty group (#2220) or sessions that never arrived (#2803). It is
+   a page-level state, centered in the area (§12.1, #3869), and the inline padding keeps it clear
+   of the inset focus ring at any width. No Matches is stacked at the page state's drop (§12.1)
+   rather than the inline row of a list's own. */
 .inbox-state {
   flex: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  justify-items: center;
-  align-content: start;
   padding-inline: var(--space-4);
 }
-.inbox-state > .state {
-  justify-items: center;
-  text-align: center;
-}
-.inbox-state > .state .actions { justify-content: center; }
-/* The danger notice keeps its own left-aligned anatomy; only its block is centered. */
-.inbox-state > .notice.state-error { width: 100%; }
 .inbox-state > .state.no-results {
   display: grid;
   padding-top: var(--space-12);
@@ -16041,6 +16064,10 @@ button.review-finding-location {
   color: var(--text-dim);
 }
 .skills-how .steps > li > strong { color: var(--text); font: var(--type-body-strong); }
+/* Under the centered empty state (§12.1, #3875) its notice and the steps are centered blocks, and
+   the steps read as three centered columns under one centered label. */
+.master-detail-state > .state.page-level ~ :is(.notice, .skills-how) { margin-right: auto; margin-left: auto; }
+.master-detail-state > .state.page-level ~ .skills-how { text-align: center; }
 .master-detail-state > .notice {
   max-width: 480px;
   margin-top: var(--space-6);

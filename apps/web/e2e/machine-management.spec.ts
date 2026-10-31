@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { expectCenteredState } from "./page-state.js";
 
 const recoveryGeometry = (notice: HTMLElement) => {
   const message = notice.querySelector(".notice-body") as HTMLElement;
@@ -1065,6 +1066,9 @@ test("Delete Machine… waits for an online native runner to stop, saying so, th
   // The empty tab owns the create actions, so the header no longer offers Add Machine (#2984).
   await expect(page.locator(".page-header").getByRole("button", { name: "Add Machine" })).toHaveCount(0);
   await expect(page.locator(".connections-empty .row button")).toHaveText(["Connect via SSH", "Install Manually"]);
+  // Centered across the tab (§12.1, #3875); the method rows keep their own left-aligned anatomy.
+  await expectCenteredState(page.locator(".state.connections-empty"));
+  await expect(page.locator(".connections-empty > .actions")).toHaveCSS("text-align", "left");
 });
 
 test("Save Changes names what wasn't saved when one field fails, and keeps what did (#2991)", async ({ page }) => {
