@@ -483,6 +483,7 @@ export function ProjectsView({
       {spanningEmpty ? (
         <div className="master-detail-state">
           <State
+            pageLevel
             icon={<ProjectsIcon />}
             title={`No ${PROJECTS.name} Yet`}
             headingLevel={2}

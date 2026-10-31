@@ -56,6 +56,10 @@ export interface StateProps {
   actions?: ReactNode;
   /** 24px from the top instead of 48px, for states inside panels (§21.4). */
   compact?: boolean;
+  /** The state stands in for a whole page or content area, so it is centered in it rather than
+   * left-aligned at its edge (§12.1, #3875). States in list columns, detail panes, panels, dialogs
+   * and settings surfaces leave this off. */
+  pageLevel?: boolean;
   /** Render the title as a heading at this level, for a state that replaced a real heading. A
    * state that stands in for the whole window, with no page header above it, takes level 1. */
   headingLevel?: 1 | 2 | 3 | 4;
@@ -72,7 +76,8 @@ export interface StateProps {
 
 /**
  * Empty, no results, loading, error and offline, in one component (docs/design-system.md §12).
- * Top-aligned and left-aligned with the content's edge: no bordered card and no success glyph.
+ * Top-aligned, with no bordered card and no success glyph: left-aligned with the content's edge,
+ * or centered in the area when `pageLevel` says it replaces a whole page or content area.
  */
 export function State({
   variant = "empty",
@@ -81,6 +86,7 @@ export function State({
   children,
   actions,
   compact = false,
+  pageLevel = false,
   headingLevel,
   titleId,
   details,
@@ -95,7 +101,8 @@ export function State({
     return (
       <Notice tone="danger" role="alert" title={title} headingLevel={headingLevel} titleId={titleId}
         actions={actions} details={details}
-        className={["state-error", compact ? "compact-state" : "", className ?? ""].filter(Boolean).join(" ")}>
+        className={["state-error", compact ? "compact-state" : "", pageLevel ? "page-level" : "", className ?? ""]
+          .filter(Boolean).join(" ")}>
         {children}
       </Notice>
     );
@@ -112,6 +119,7 @@ export function State({
             : variant === "no-results" ? "no-results"
               : "",
         compact ? "compact" : "",
+        pageLevel ? "page-level" : "",
         className ?? "",
       ].filter(Boolean).join(" ")}
       role={announce && (live || variant === "no-results") ? "status" : undefined}

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectCenteredState } from "./page-state.js";
 
 /**
  * The Multi-Agent Runs list (#2974; docs/design-system.md §5.2, §12.5, §15.1), measured in a real
@@ -129,4 +130,5 @@ test("an empty list offers exactly one New Run, in the empty state", async ({ pa
   await expect(page.getByText("No Multi-Agent Runs Yet")).toBeVisible();
   await expect(page.getByRole("button", { name: "New Run", exact: true })).toHaveCount(1);
   await expect(page.locator(".state").getByRole("button", { name: "New Run", exact: true })).toBeVisible();
+  await expectCenteredState(page.locator(".state"));
 });
