@@ -256,7 +256,7 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.equal(admitted.status, 201, JSON.stringify(admitted.json));
   const rootId = admitted.json.id as string;
   await running(rootId, "the root starts");
-  const live = ControlPlaneDb.open(s.databasePath);
+  const live = ControlPlaneDb.attach(s.databasePath, { readOnly: true });
   try {
     assert.deepEqual(live.sessionScope(rootId), { organizationId: org, owner: { kind: "user", userId: admin } },
       "the root stays charged to the authorizing Human");
@@ -310,7 +310,7 @@ test("a Full Control root and its descendants reach the organization runner thei
   const refusedGrandchild = await tool(childId, "create_session", { runnerId: "colleague-runner", workspaceId: WORKSPACE,
     agentId: AGENT, prompt: "Never launched", useWorktree: false });
   assert.match(refusedGrandchild.text, /HTTP 404: runner not found/u);
-  const lineage = ControlPlaneDb.open(s.databasePath);
+  const lineage = ControlPlaneDb.attach(s.databasePath, { readOnly: true });
   try {
     for (const id of [rootId, childId, grandchildId]) {
       assert.equal(lineage.getSession(id)!.projectId, projectId, `${id} is in the organization Project`);
@@ -330,7 +330,7 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.equal(inspected.isError, true, "the Full Control root cannot read an organization session it did not create");
 
   // 5. A Custom root in the organization Project is delegated organization-wide, exactly as before.
-  const scopeCheck = ControlPlaneDb.open(s.databasePath);
+  const scopeCheck = ControlPlaneDb.attach(s.databasePath, { readOnly: true });
   try {
     assert.deepEqual(scopeCheck.sessionScope(customId), { organizationId: org, owner: { kind: "organization", organizationId: org } });
   } finally { scopeCheck.close(); }
@@ -348,7 +348,7 @@ test("a user-delegated agent cannot launch into a workspace or host path its Hum
   assert.equal(created.status, 201, JSON.stringify(created.json));
   const orchestratorId = created.json.id as string;
   await s.running(orchestratorId, "the operator's Orchestrator starts");
-  const scope = ControlPlaneDb.open(s.databasePath);
+  const scope = ControlPlaneDb.attach(s.databasePath, { readOnly: true });
   try {
     assert.deepEqual(scope.sessionScope(orchestratorId), { organizationId: s.org, owner: { kind: "user", userId: s.operator } });
   } finally { scope.close(); }

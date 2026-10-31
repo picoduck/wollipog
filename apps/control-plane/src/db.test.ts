@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -410,6 +412,58 @@ function recordCommitSynchronousLevels(db: ControlPlaneDb): number[] {
   };
   return levels;
 }
+
+test("a connection attached beside a live writer reads through its lock and waits out its commit (#3789)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attached-db-"));
+  const path = join(root, "control-plane.db");
+  try {
+    assert.throws(() => ControlPlaneDb.attach(path), /already initialized/u, "attach never creates a schema");
+    const server = ControlPlaneDb.open(path);
+    server.registerRunner(meta(), 1);
+    server.createSession(newSession());
+    const schemaVersion = () => Number(Object.values(server.raw().prepare("PRAGMA schema_version").get()!)[0]);
+    const schemaBefore = schemaVersion();
+    // The live server mid-commit: it holds the write lock past every 250 ms wait.
+    const writer = new DatabaseSync(path);
+    writer.exec("BEGIN IMMEDIATE; UPDATE sessions SET title='server write' WHERE id='sess-1';");
+    try {
+      assert.throws(() => ControlPlaneDb.open(path), /database is locked/u, "open writes its schema, so the lock refuses it");
+      const reader = ControlPlaneDb.attach(path, { readOnly: true });
+      try {
+        assert.equal(reader.getSession("sess-1")?.status, "queued");
+        assert.throws(() => reader.updateSessionStatus("sess-1", "running", 2), /readonly database/u);
+      } finally { reader.close(); }
+    } finally { writer.exec("ROLLBACK"); writer.close(); }
+
+    // A writer in another thread holds the lock for 750 ms; the attached write waits for it.
+    const holder = new Worker(`
+      const { DatabaseSync } = require("node:sqlite");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const db = new DatabaseSync(workerData);
+      db.exec("BEGIN IMMEDIATE; UPDATE sessions SET title='server write' WHERE id='sess-1';");
+      parentPort.postMessage("locked");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 750);
+      db.exec("COMMIT");
+      db.close();
+    `, { eval: true, workerData: path });
+    const exited = once(holder, "exit");
+    await once(holder, "message");
+    const started = Date.now();
+    const attached = ControlPlaneDb.attach(path);
+    try {
+      attached.updateSessionStatus("sess-1", "running", 3);
+      assert.ok(Date.now() - started >= CONTROL_PLANE_DB_BUSY_TIMEOUT_MS, "the write waited past the server's own timeout");
+    } finally { attached.close(); }
+    await exited;
+    assert.equal(server.getSession("sess-1")?.status, "running");
+    assert.equal(server.getSession("sess-1")?.title, "server write");
+    // Neither attached connection rewrote a table, index or trigger under the live server.
+    assert.equal(schemaVersion(), schemaBefore);
+    server.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("only runner-replayable event ingest commits without a per-commit WAL flush", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-commit-durability-"));

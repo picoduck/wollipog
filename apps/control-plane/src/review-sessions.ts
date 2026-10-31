@@ -135,7 +135,10 @@ export interface NewReviewSession {
  * report it, and a terminal state is final. A requester has at most one active review.
  */
 export class ReviewSessions {
-  constructor(private readonly sql: DatabaseSync) {
+  constructor(private readonly sql: DatabaseSync) {}
+
+  /** Only ControlPlaneDb.open installs this table; an attached connection never does (#3789). */
+  static install(sql: DatabaseSync): void {
     sql.exec(`CREATE TABLE IF NOT EXISTS review_sessions (
       review_session_id TEXT PRIMARY KEY, requester_session_id TEXT NOT NULL, runner_id TEXT NOT NULL,
       repository TEXT NOT NULL, pr_number INTEGER NOT NULL, head_sha TEXT NOT NULL,
