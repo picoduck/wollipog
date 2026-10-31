@@ -1,5 +1,51 @@
 import { expect, test } from "@playwright/test";
 
+for (const theme of ["light", "dark"]) {
+  test(`desktop archive filter edges in ${theme}`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/archived-sessions-e2e.html?toolbar&theme=${theme}`);
+    await expect(page.locator(".archive-item")).toHaveCount(4);
+    const colors = await page.locator(".archive-desktop-facets").evaluate((node) => {
+      const probe = document.createElement("span");
+      node.append(probe);
+      const colors = ["--border-strong", "--text-dim", "--control-outline"].map((token) => {
+        probe.style.color = `var(${token})`;
+        return getComputedStyle(probe).color;
+      });
+      probe.remove();
+      return colors;
+    });
+    expect(new Set(colors).size).toBe(3);
+    const [resting, hovered, applied] = colors;
+    for (const [label, initial, chosen] of [
+      ["Project", "All Projects", "Wollipog"],
+      ["Location", "All Locations", "wollipog"],
+      ["Agent", "All Agents", "Claude Code"],
+      ["Status", "Any Status", "Completed"],
+    ]) {
+      const trigger = page.locator(".archive-desktop-facets").getByRole("button", { name: new RegExp(`^${label}:`) });
+      const border = () => trigger.evaluate((node) => getComputedStyle(node).borderTopColor);
+      await page.mouse.move(1400, 850);
+      await expect(trigger).toHaveAccessibleName(`${label}: ${initial}`);
+      // Poll the final token value so transitions cannot supply a transient color.
+      await expect.poll(border).toBe(resting);
+      await trigger.hover();
+      await expect.poll(border).toBe(hovered);
+      await trigger.click();
+      await page.getByRole("option", { name: chosen, exact: true }).click();
+      await page.mouse.move(1400, 850);
+      await expect(trigger).toHaveClass(/is-set/);
+      await expect.poll(border).toBe(applied);
+      await trigger.hover();
+      await expect.poll(border).toBe(hovered);
+      await page.mouse.move(1400, 850);
+      await expect.poll(border).toBe(applied);
+      await page.getByRole("button", { name: "Clear Filters", exact: true }).click();
+      await expect.poll(border).toBe(resting);
+    }
+  });
+}
+
 for (const width of [1440, 834, 390]) {
   for (const theme of ["light", "dark"]) {
     test(`archive toolbar at ${width}px in ${theme}`, async ({ page }) => {
