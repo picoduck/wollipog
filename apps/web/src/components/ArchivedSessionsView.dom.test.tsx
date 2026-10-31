@@ -331,6 +331,27 @@ test("replacement failure removes old rows and count, offers Retry and hides raw
   await fixture.unmount();
 });
 
+test("unchanged revalidation preserves the count and does not announce a replacement search", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  assert.equal(fixture.container.querySelector(".count")?.textContent, "1 session");
+  assert.equal(fixture.container.querySelector('[aria-label="Archived Session Results"]')?.getAttribute("aria-busy"), "false");
+  assertNoDomNode(fixture.container.querySelector(".is-stale"), "unchanged refresh keeps current rows");
+  await act(async () => { request.resolve(archiveResponse([session(1)])); });
+  await fixture.unmount();
+});
+
+test("spaces-only search keeps the empty state and its clear control", async () => {
+  const fixture = await mount([]);
+  await searchFor(fixture.container, "   ");
+  assert.match(fixture.container.textContent!, /No Archived Sessions/);
+  assert.ok(fixture.container.querySelector('button[aria-label="Clear Search"]'));
+  assert.ok(button(fixture.container, "Go to Sessions"));
+  await fixture.unmount();
+});
+
 test("failed unchanged revalidation keeps rows and offers a compact refresh notice", async () => {
   let calls = 0;
   const fixture = await mount([], { archiveSessionPage: async () => {
@@ -348,8 +369,11 @@ test("a late row action cannot show old matches after a replacement search fails
   const row = session(1, { archiveStatus: "stop_failed" });
   let finishStop!: (value: SessionView) => void;
   const stopResult = new Promise<SessionView>((resolve) => { finishStop = resolve; });
+  const retry = deferredPage();
+  let calls = 0;
   const fixture = await mount([row], {
     archiveSessionPage: async (input) => {
+      if (++calls > 2) return retry.promise;
       if (input.q) throw new Error("replacement failed");
       return archiveResponse([row]);
     },
@@ -360,6 +384,9 @@ test("a late row action cannot show old matches after a replacement search fails
   await act(async () => { finishStop({ ...row, updatedAt: row.updatedAt + 1 }); });
   assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0);
   assert.match(fixture.container.textContent!, /Couldn't Load Archived Sessions/);
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0, "Retry cannot show a late action's old match");
+  await act(async () => { retry.resolve(archiveResponse([])); });
   await fixture.unmount();
 });
 

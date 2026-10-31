@@ -349,12 +349,12 @@ export function ArchivedSessionsView() {
   }, [conn, loading, refreshCatalog]);
 
   const pageSessions = useMemo(() => [...catalog.values()], [catalog]);
-  const hasActiveFilters = Boolean(queryInput) || filters.project !== null || filters.location !== null ||
+  const hasActiveFilters = Boolean(queryInput.trim()) || filters.project !== null || filters.location !== null ||
     filters.agent !== null || filters.lifecycle !== "all" || filters.archive !== "archived";
   const offline = conn === "offline" || conn === "unauthorized" || (conn === "connecting" && hasBeenOnlineRef.current);
   // Mark rows as stale immediately, including the search debounce interval.
   const replacing = loadedKey !== null && (loadedKey !== requestKey || queryInput !== filters.query);
-  const pending = loading || replacing && !error;
+  const pending = !error && (replacing || loading && (loadedKey === null || pageSessions.length === 0));
   const noMatches = !offline && !pending && !error && pageSessions.length === 0 && hasActiveFilters;
   useEffect(() => {
     setShowSkeleton(false);
@@ -434,11 +434,14 @@ export function ArchivedSessionsView() {
       new Set(transcriptHits.keys()),
     );
     setCatalog((current) => {
+      // A mutation may finish after a replacement discarded this bounded page. Only the
+      // archive endpoint can establish membership in the new page or search.
+      if (!current.has(session.id)) return current;
       const next = mergeArchiveSessionCatalog(current, [session]);
       if (reconciliation === "exclude") next.delete(session.id);
       return next;
     });
-    if (reconciliation === "revalidate") scheduleLiveRevalidation();
+    if (catalogRef.current.has(session.id) && reconciliation === "revalidate") scheduleLiveRevalidation();
     loadSession(session);
   };
 
