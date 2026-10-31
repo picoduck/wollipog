@@ -19,6 +19,8 @@ recovers it.
   startup work, so it takes the write lock repeatedly. An attached connection applies no schema,
   can be read-only, and waits up to 10 s (`ATTACHED_DB_BUSY_TIMEOUT_MS`) for the server's lock.
   Its own commits skip the WAL sync, so they release the lock well within the server's 250 ms wait.
+  It never collects artifact blobs, because only the owning server knows which blobs it is staging.
+  Read-only suits only plain queries, since some reads settle derived state (`getSession`).
 - `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
   control-plane decision is durable once it has been acknowledged.
 - Live runtime snapshots (`session_runtime_updated`) stay `FULL` but are grouped. After

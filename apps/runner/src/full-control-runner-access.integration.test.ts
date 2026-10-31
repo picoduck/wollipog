@@ -310,7 +310,7 @@ test("a Full Control root and its descendants reach the organization runner thei
   const refusedGrandchild = await tool(childId, "create_session", { runnerId: "colleague-runner", workspaceId: WORKSPACE,
     agentId: AGENT, prompt: "Never launched", useWorktree: false });
   assert.match(refusedGrandchild.text, /HTTP 404: runner not found/u);
-  const lineage = ControlPlaneDb.attach(s.databasePath, { readOnly: true });
+  const lineage = ControlPlaneDb.attach(s.databasePath);
   try {
     for (const id of [rootId, childId, grandchildId]) {
       assert.equal(lineage.getSession(id)!.projectId, projectId, `${id} is in the organization Project`);

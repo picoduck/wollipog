@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -39,6 +39,7 @@ import {
   type OrchestratorCampaignPolicy,
 } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
+import { artifactBlobFilePath } from "./artifact-blob-store.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import {
@@ -430,7 +431,7 @@ test("a connection attached beside a live writer reads through its lock and wait
       assert.throws(() => ControlPlaneDb.open(path), /database is locked/u, "open writes its schema, so the lock refuses it");
       const reader = ControlPlaneDb.attach(path, { readOnly: true });
       try {
-        assert.equal(reader.getSession("sess-1")?.status, "queued");
+        assert.equal((reader.raw().prepare("SELECT status FROM sessions WHERE id=?").get("sess-1") as { status: string }).status, "queued");
         assert.throws(() => reader.updateSessionStatus("sess-1", "running", 2), /readonly database/u);
       } finally { reader.close(); }
     } finally { writer.exec("ROLLBACK"); writer.close(); }
@@ -459,6 +460,33 @@ test("a connection attached beside a live writer reads through its lock and wait
     assert.equal(server.getSession("sess-1")?.title, "server write");
     // Neither attached connection rewrote a table, index or trigger under the live server.
     assert.equal(schemaVersion(), schemaBefore);
+    server.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an attached connection leaves artifact blob collection to the control plane that stages them (#3789 CR-1.1)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attached-blobs-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const server = ControlPlaneDb.open(path);
+    const bytes = Buffer.from("restaged blob");
+    const key = createHash("sha256").update(bytes).digest("hex");
+    // A deleted artifact queued its blob for collection; the server is now staging the same bytes
+    // again, ahead of the row that will reference them. Only the server's own map knows that.
+    server.raw().prepare("INSERT INTO artifact_blob_gc (blob_key, queued_at) VALUES (?, 1)").run(key);
+    await server.stageArtifactBlob(key, bytes, 2);
+    const blobFile = artifactBlobFilePath(server.workflowArtifactBlobRoot()!, key);
+    try {
+      for (const readOnly of [true, false]) {
+        const attached = ControlPlaneDb.attach(path, { readOnly });
+        assert.deepEqual(attached.collectWorkflowArtifactBlobs(), { examined: 0, deleted: 0, retained: 0 });
+        attached.close();
+        assert.ok(existsSync(blobFile), `closing a ${readOnly ? "read-only" : "writable"} attached connection keeps the staged blob`);
+        assert.ok(server.raw().prepare("SELECT 1 FROM artifact_blob_gc WHERE blob_key=?").get(key), "the queue stays for the server");
+      }
+    } finally { server.releaseStagedArtifactBlob(key); }
     server.close();
   } finally {
     rmSync(root, { recursive: true, force: true });

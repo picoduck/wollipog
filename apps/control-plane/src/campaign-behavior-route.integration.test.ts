@@ -196,7 +196,7 @@ async function startControlPlane(t: TestContext) {
 }
 
 function session(database: string, id: string): SessionView {
-  const db = ControlPlaneDb.attach(database, { readOnly: true });
+  const db = ControlPlaneDb.attach(database);
   try { return db.getSession(id)!; } finally { db.close(); }
 }
 

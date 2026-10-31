@@ -165,7 +165,7 @@ async function startControlPlane(t: TestContext) {
 }
 
 function campaign(database: string, id: string) {
-  const db = ControlPlaneDb.attach(database, { readOnly: true });
+  const db = ControlPlaneDb.attach(database);
   try { return db.getSession(id)!; } finally { db.close(); }
 }
 

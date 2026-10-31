@@ -5555,10 +5555,12 @@ export class ControlPlaneDb {
     /** The write-ahead log file, or null outside WAL journaling (where every commit is FULL). */
     private readonly walPath: string | null,
     hostRebooted: boolean,
-    /** False for an attached connection, which must not rewrite the owner's tables or triggers. */
-    installStores: boolean,
+    /** A connection beside the control plane that owns the database (ControlPlaneDb.attach). It
+     * never rewrites the owner's tables or triggers, and never collects artifact blobs: only the
+     * owner knows which blobs it is staging. */
+    private readonly attached: boolean,
   ) {
-    if (installStores) {
+    if (!attached) {
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
@@ -7814,7 +7816,7 @@ export class ControlPlaneDb {
       }
     }
     const controlPlane = new ControlPlaneDb(
-      db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted, true,
+      db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted, false,
     );
     try {
       installMaintenanceIndexes(db);
@@ -7845,7 +7847,9 @@ export class ControlPlaneDb {
    * WAL lets it read while the server writes. It waits out the server's commits for up to
    * ATTACHED_DB_BUSY_TIMEOUT_MS. A writable one commits without syncing the WAL, so it releases the
    * lock well within the server's own CONTROL_PLANE_DB_BUSY_TIMEOUT_MS wait; it trades durability
-   * across a power loss, which no caller beside a live server needs.
+   * across a power loss, which no caller beside a live server needs. Some reads settle derived
+   * state as they go (getSession's campaign projection, campaignBudgets.view), so a read-only one
+   * suits only plain queries. An attached connection never collects artifact blobs.
    */
   static attach(location: string, options: { readOnly?: boolean } = {}): ControlPlaneDb {
     const readOnly = options.readOnly ?? false;
@@ -7867,7 +7871,7 @@ export class ControlPlaneDb {
       db.exec("PRAGMA recursive_triggers = ON;");
       if (!readOnly) db.exec("PRAGMA synchronous = NORMAL;");
       // No WAL path: the connection never relaxes ingest commits or runs the checkpointer.
-      return new ControlPlaneDb(db, new FileArtifactBlobStore(defaultArtifactBlobRoot(location)), instanceId, null, false, false);
+      return new ControlPlaneDb(db, new FileArtifactBlobStore(defaultArtifactBlobRoot(location)), instanceId, null, false, true);
     } catch (error) {
       db.close();
       throw error;
@@ -29336,8 +29340,9 @@ export class ControlPlaneDb {
   }
 
   private cleanupPendingArtifactBlob(blobKey: string): void {
-    // An in-flight staging owns the pending row until its own release.
-    if (this.stagingArtifactBlobs.has(blobKey)) return;
+    // An in-flight staging owns the pending row until its own release. An attached connection
+    // cannot see the owner's stagings, so it leaves the row to the owner or startup recovery.
+    if (this.attached || this.stagingArtifactBlobs.has(blobKey)) return;
     try {
       const references = this.stmt("SELECT COUNT(*) AS count FROM artifacts WHERE blob_key=?")
         .get(blobKey) as unknown as { count: number };
@@ -29566,6 +29571,9 @@ export class ControlPlaneDb {
   }
 
   collectWorkflowArtifactBlobs(limit = 1_000): { examined: number; deleted: number; retained: number } {
+    // An attached connection cannot see the owner's staging map, so it could unlink a blob the
+    // owner is staging again. The queue stays for the owner's next pass (#3789).
+    if (this.attached) return { examined: 0, deleted: 0, retained: 0 };
     const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
     const rows = this.stmt("SELECT blob_key FROM artifact_blob_gc ORDER BY queued_at, blob_key LIMIT ?")
       .all(bounded) as unknown as Array<{ blob_key: string }>;
