@@ -19174,6 +19174,10 @@ a.tab { text-decoration: none; }
 .archive-show > .seg { grid-auto-columns: auto; }
 .archive-desktop-facets .filter-btn { border-color: var(--border-strong); }
 .archive-desktop-facets .filter-btn.is-set { border-color: var(--control-outline); }
+/* Match the shared Select hover edge without changing sticky hover on touch devices. */
+@media (hover: hover) {
+  .archive-desktop-facets .filter-btn:where(:not([aria-disabled="true"])):hover { border-color: var(--text-dim); }
+}
 .archive-sheet-trigger, .archive-sheet-show { display: none; }
 .archive-sheet-show > .seg { width: 100%; }
 .archive-view .chip { gap: var(--space-1); }
