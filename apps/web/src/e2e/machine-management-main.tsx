@@ -659,8 +659,8 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { dismissed: true as const };
   },
-  // Removal (#2995): Codex Solo is Custom ACP's default, so the runner refuses it; Work's credentials
-  // are kept because a session still uses them; any other account is simply removed.
+  // Removal (#2995): Codex Solo is Custom ACP's default, so the runner refuses it. Current runners keep
+  // the stored sign-in (#3157) and report it; Work stands in for an older runner that doesn't.
   removeProviderAccount: async (_runnerId: string, accountId: string) => {
     if (!runner) throw new Error("runner not found");
     if (accountId === "codex-solo") {
@@ -669,7 +669,7 @@ const client = {
     }
     runner.providerAccounts = runner.providerAccounts?.filter((account) => account.id !== accountId);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
-    return { removed: true as const, credentialsRetained: accountId === "claude-work" };
+    return { removed: true as const, credentialsRetained: accountId !== "claude-work" };
   },
   // #3719, with `?credentialImport`: a label of "ChatGPT" is refused as an OAuth sign-in would be;
   // any other copy records a managed profile account.

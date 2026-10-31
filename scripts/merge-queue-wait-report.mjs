@@ -60,7 +60,9 @@ export function dependencyCandidates(job, work, aggregator) {
   const requiredWork = work.filter((other) => !ADVISORY_JOBS.has(other.name));
   if (job === aggregator) return requiredWork;
   if (PLANNING_JOBS.has(job.name)) return [];
-  const gated = job.name === "Typecheck, Unit Tests & Bundles" || /^Browser End-to-End Tests \([1-5]\)$/.test(job.name);
+  // Runs before #3770 named the checks job "Typecheck, Unit Tests & Bundles" and had no unit shards.
+  const gated = ["Typecheck & Bundles", "Typecheck, Unit Tests & Bundles"].includes(job.name) ||
+    /^(?:Browser End-to-End Tests \([1-5]\)|Unit Tests \([1-9]\))$/.test(job.name);
   const routed = gated || job.name === "Delegated Pipeline Recovery";
   const routing = routed ? requiredWork.filter((other) => other.name === "PR Suite Routing" ||
     gated && other.name === "Merge Group Gate") : [];

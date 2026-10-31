@@ -253,11 +253,11 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "unit", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
-  for (const id of ["checks", "browser", "webkit", "delegated_pipeline"]) {
+  for (const id of ["checks", "unit", "browser", "webkit", "delegated_pipeline"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
     if (id === "webkit") assert.doesNotMatch(byId[id], /^    needs:/m);
     else if (id === "delegated_pipeline") assert.match(byId[id], /^    needs: suite_plan$/m, `${id}: delegated recovery only waits for routing`);
@@ -359,14 +359,52 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.deepEqual(shards, [1, 2, 3, 4, 5],
     "browser: retain the five-job envelope; browser-shards.test.mjs compares all project test identities");
 
-  assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
-    "the browser suites must not share the unit-test job's budget");
-  assert.match(byId.checks, /^      - name: Unit Tests$/m);
+  for (const id of ["checks", "unit"]) assert.doesNotMatch(byId[id], /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
+    "the browser suites must not share the unit-test jobs' budgets");
+  assert.doesNotMatch(byId.checks, /^      - name: Unit Tests$/m, "the unit tests run only in their sharded job (#3770)");
+
+  // The unit tests are sharded like the browser suite (#3770), with the same ways to run less than
+  // the whole suite while every leg reports green, so the job is pinned the same way: its exact
+  // header, no job key after `steps:`, and the exact Unit Tests step, whose `/n` denominator must
+  // equal the shard list. scripts/node-test-plan.test.mjs proves the shards partition the plan.
+  const unit = byId.unit.split("\n").filter((line) => line.trim().length > 0 && !line.trim().startsWith("#")).join("\n");
+  const unitHeader = unit.match(
+    /^  unit:\n    if: [^\n]*\n    needs: \[suite_plan, merge_group_gate\]\n    name: Unit Tests\n    runs-on: ubuntu-24\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+  );
+  assert.ok(unitHeader, "unit: the job header must be exactly its guard, needs, name, runner, timeout, `fail-fast: false`, " +
+    "a single `shard:` list, and then `steps:`; `exclude`, `include`, `max-parallel` or `continue-on-error` would each run " +
+    "less than the whole suite or hide a failed shard");
+  assert.deepEqual(unit.slice(unit.indexOf("\n    steps:") + "\n    steps:".length).split("\n").filter((line) => /^    \S/.test(line)), [],
+    "unit: every line after `steps:` must belong to a step");
+  const unitShards = unitHeader[1].split(",").map((value) => Number(value.trim()));
+  assert.deepEqual(unitShards, unitShards.map((_, index) => index + 1), "unit: shards must be numbered consecutively");
+  assert.ok(unitShards.length >= 2, "unit: the suite must stay split across parallel jobs");
+  const shardArg = `--shard=\${{ matrix.shard }}/${unitShards.length}`;
+  assert.ok(unit.endsWith([
+    "      - name: Unit Tests",
+    "        timeout-minutes: 18",
+    "        env:",
+    `          ROUTING_SWITCH: \${{ vars.CI_PR_SUITE_ROUTING }}`,
+    `          PR_FAST: ${fastExpression}`,
+    `          GATE_SWITCH: \${{ vars.CI_MERGE_GROUP_GATE }}`,
+    `          GROUP_FAST: ${groupFastExpression}`,
+    "        run: |",
+    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
+    `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
+    '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
+    `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
+    "          else",
+    `            pnpm test:ci ${shardArg}`,
+    "          fi",
+  ].join("\n")), "unit: the Unit Tests step must be the job's last step, exactly as reviewed, and its denominator must equal the shard list");
+
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
+  assert.match(byId.check, /^          UNIT_RESULT: \$\{\{ needs\.unit\.result \}\}$/m, "the aggregator must inspect every unit shard's combined result");
+  assert.match(byId.check, /^          report "Unit Tests" "\$UNIT_RESULT"$/m, "the aggregator must fail when any unit shard did not succeed");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
   assert.match(byId.check, /needs\.delegated_pipeline\.result/, "the aggregator must inspect recorded-boundary recovery");
   assert.match(byId.check, /^          report "Delegated Pipeline Recovery" "\$DELEGATED_PIPELINE_RESULT"$/m);
@@ -550,7 +588,7 @@ test("CI validates production builds and caches the pinned Playwright browser", 
 
   assert.match(
     ci,
-    /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
+    /^      - name: Validate Web Production Build\r?\n(?:        timeout-minutes: \d+\r?\n)?        run: pnpm --filter @wollipog\/web build$/m,
     "CI must exercise the web production build",
   );
   // The production pass is guarded to one shard, so the `run:` no longer follows its `name:` line
@@ -564,7 +602,7 @@ test("CI validates production builds and caches the pinned Playwright browser", 
   );
   assert.match(
     ci,
-    /^      - name: Validate Runner Bundle\r?\n        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
+    /^      - name: Validate Runner Bundle\r?\n(?:        timeout-minutes: \d+\r?\n)?        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
     "CI must exercise the runner esbuild bundle",
   );
   assert.match(
@@ -701,7 +739,7 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
   // longer follows its attempt, swallows its own failure or skips clearing the first attempt's
   // processes, or a lost error naming the install all fail here.
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
-  const job = ci.slice(ci.indexOf("\n  checks:\n"), ci.indexOf("\n  browser:\n"));
+  const job = ci.slice(ci.indexOf("\n  unit:\n"), ci.indexOf("\n  delegated_pipeline:\n"));
   const steps = job.split(/^      - name: /m).slice(1)
     .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
   const name = "Install Isolated Video Decoder for Unit Tests";
@@ -821,16 +859,37 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
     `          key: ${key}`,
   ].join("\n"), `${names[6]}: must save only a complete collection under the restored key, and never fail the job`);
 
-  // Everything else in the job took at most 771 seconds over 615 successful jobs (2026-09-28 to
-  // 2026-10-01). Every decoder step running to its bound, including both install attempts, must
-  // still leave that much, or a stall the retry recovers from cancels the unit tests anyway, which
-  // is the failure #2328 removed.
-  const SLOWEST_REMAINDER_SECONDS = 771;
-  const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
-  const decoderMinutes = bounds.reduce((sum, minutes) => sum + minutes, 0);
-  assert.ok((budget - decoderMinutes) * 60 >= SLOWEST_REMAINDER_SECONDS,
-    `checks: timeout-minutes ${budget} must cover every video decoder step at its bound (${bounds.join(" + ")} minutes) ` +
-    `plus the slowest measured remainder of the job (${SLOWEST_REMAINDER_SECONDS} seconds)`);
+  // Every decoder step running to its bound, including both install attempts, must still leave the
+  // Unit Tests step its whole bound, or a stall the retry recovers from cancels the unit tests anyway,
+  // which is the failure #2328 removed. The next test checks that, with every other step's bound too.
+});
+
+test("the unit and checks jobs name the step that exceeds its budget (#3770)", () => {
+  // A job budget that runs out cancels the job and names no step: #3770's merge groups were cancelled
+  // during the web build after every unit test had passed. So every `run:` step in these two jobs
+  // carries its own timeout-minutes, and the job budget covers all of those bounds at once (both
+  // video decoder attempts included) plus a fixed allowance for the pinned setup actions, which
+  // take well under a minute. Whichever step overruns then fails under its own name first, unless
+  // a setup action itself stalls past the allowance.
+  const SETUP_ACTION_ALLOWANCE_MINUTES = 5;
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
+  for (const [id, next] of [["checks", "unit"], ["unit", "delegated_pipeline"]]) {
+    const job = ci.slice(ci.indexOf(`\n  ${id}:\n`), ci.indexOf(`\n  ${next}:\n`));
+    const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+    const steps = job.split(/^      - /m).slice(1);
+    assert.ok(steps.length > 5, `${id}: steps must be readable`);
+    let bounded = 0;
+    for (const step of steps) {
+      const name = step.match(/^(?:name: )?([^\n]*)/)[1];
+      const bound = Number(step.match(/^        timeout-minutes: (\d+)$/m)?.[1] ?? 0);
+      if (/^        run: /m.test(step)) assert.ok(bound > 0, `${id}: ${name} needs its own timeout-minutes`);
+      else assert.match(step, /^ *(?:- )?uses: [^\s@]+@[0-9a-f]{40}/m, `${id}: ${name}: a step is a run step or a pinned action`);
+      bounded += bound;
+    }
+    assert.ok(bounded + SETUP_ACTION_ALLOWANCE_MINUTES <= budget,
+      `${id}: timeout-minutes ${budget} must cover every step's own bound (${bounded} minutes) plus ` +
+      `${SETUP_ACTION_ALLOWANCE_MINUTES} minutes for the setup actions, so a timeout names its step`);
+  }
 });
 
 test("PR workflow expressions satisfy the complete event matrix", () => {
@@ -859,7 +918,7 @@ test("every CI Node setup retries once with the same pinned action and version",
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
   const steps = ci.split(/^      - name: /m).slice(1);
   const setupSteps = steps.filter((step) => /^        uses: actions\/setup-node@/m.test(step));
-  assert.equal(setupSteps.length, 16, "eight Node setups each need one retry");
+  assert.equal(setupSteps.length, 18, "nine Node setups each need one retry");
 
   const versions = [];
   for (const [index, step] of steps.entries()) {
@@ -892,6 +951,7 @@ test("every CI Node setup retries once with the same pinned action and version",
     "node-version: 23.2.0",
     "node-version: 23.4.0",
     "node-version-file: .nvmrc",
+    "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",

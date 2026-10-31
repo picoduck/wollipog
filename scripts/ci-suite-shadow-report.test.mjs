@@ -14,11 +14,15 @@ const plan = () => makeSelection({ tree, fastFiles: [], diff: { entries: [{ path
     runId: "101", attempt: 1, event: "merge_group", diffKind: "combined-merge-group" } });
 const summary = (suite) => ({ version: 1, suite, count: 3, failed: 0, skipped: 0, cancelled: 0, unmeasured: 0, retryOnly: 0, truncated: false,
   context: { runId: "101", attempt: 1, testedSha, workflowSha: testedSha }, slowestFiles: [], slowestTests: [], reliability: { tests: [], truncated: false } });
-function input() {
-  const names = ["Typecheck, Unit Tests & Bundles", ...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`), "WebKit End-to-End Tests"];
+// Runs before #3770 had one Node job; later runs have a test-free checks job and three Node shards.
+function input({ split = false } = {}) {
+  const node = split ? ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)"] : ["Typecheck, Unit Tests & Bundles"];
+  const names = [...(split ? ["Typecheck & Bundles"] : []), ...node, ...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`),
+    "WebKit End-to-End Tests"];
   const jobs = names.map((name, index) => ({ id: 1010 + index, name, state: "passing", steps: [],
-    testTiming: { state: "measured", summaries: name.endsWith("(1)") ? [summary("browser"), summary("browser")]
-      : [summary(index === 0 ? "node" : "browser")] } }));
+    testTiming: { state: "measured", summaries: name === "Typecheck & Bundles" ? []
+      : name === "Browser End-to-End Tests (1)" ? [summary("browser"), summary("browser")]
+        : [summary(node.includes(name) ? "node" : "browser")] } }));
   jobs.push({ id: 1020, name: "Settings-Rows win32 Baselines / Detect Settings-Rows Changes", state: "passing", steps: [] },
     { id: 1021, name: "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", state: "skipped", steps: [] },
     { id: 1022, name: "Suite Selection Shadow (Advisory)", state: "passing", testTiming: { summaries: [], selections: [plan()] } });
@@ -42,6 +46,26 @@ test("full passing results yield explicitly inferred samples with actual full ru
   assert.equal(report.comparisons[0].selectedRuntimeMs, null);
   assert.equal(report.cohorts[0].sampleThresholdMet, false);
   assert.equal(report.certification, "none");
+});
+
+test("from #3770, a run is read as a test-free checks job and three Node shards, each one required", () => {
+  const split = shadowReport(input({ split: true }));
+  assert.deepEqual(split.gaps, []);
+  assert.equal(split.comparisons.length, 1);
+  assert.equal(split.comparisons[0].eligible, true);
+  assert.equal(split.comparisons[0].projectedSelectedOutcome, "passing");
+  const missing = input({ split: true });
+  missing.records[0].jobs = missing.records[0].jobs.filter((job) => job.name !== "Unit Tests (2)");
+  assert.equal(shadowReport(missing).gaps[0].reason, "missing-or-duplicate-full-job");
+  const unmeasured = input({ split: true });
+  unmeasured.records[0].jobs.find((job) => job.name === "Unit Tests (3)").testTiming.summaries = [];
+  assert.equal(shadowReport(unmeasured).comparisons.length, 0, "a shard without its Node projection is incomplete");
+  const browserLabel = input({ split: true });
+  browserLabel.records[0].jobs.find((job) => job.name === "Unit Tests (1)").testTiming.summaries = [summary("browser")];
+  assert.equal(shadowReport(browserLabel).comparisons.length, 0, "a shard must report the Node suite");
+  const extra = input({ split: true });
+  extra.records[0].jobs.find((job) => job.name === "Typecheck & Bundles").testTiming.summaries = [summary("node")];
+  assert.equal(shadowReport(extra).comparisons.length, 0, "the checks job runs no test suite");
 });
 
 test("known selected failures and missed-failure candidates remain individual exact identities", () => {
@@ -314,5 +338,5 @@ test("shadow workflow is advisory, draft guarded and runs base-revision code wit
   assert.match(shadow, /ref: \$\{\{ github\.event\.merge_group\.base_sha \|\| github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(shadow, /--change-head "\$CHANGE_HEAD_SHA"/);
   assert.doesNotMatch(shadow, /pnpm install|pnpm test|pull_request_target/);
-  assert.match(workflow, /needs: \[checks, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]/);
+  assert.match(workflow, /needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]/);
 });

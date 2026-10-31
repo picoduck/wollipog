@@ -274,10 +274,10 @@ export async function writeHealthState(api, repository, previous, health) {
   return commit.sha;
 }
 
-const CORE_STEPS = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+const CORE_STEPS = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
-const EVIDENCE_STEPS = [...CORE_STEPS, "Verify Rolling Checkout", "Remote-Instance Browser End-to-End Tests",
+const EVIDENCE_STEPS = [...CORE_STEPS, "Unit Tests", "Verify Rolling Checkout", "Remote-Instance Browser End-to-End Tests",
   "Rendered Production Browser Smoke", "WebKit Browser End-to-End Tests", "Compare the Diff Against the Settings-Rows Paths",
   "Compare Against the Committed win32 Baselines", "Verify Recorded-Boundary Pipeline Recovery",
   "Require Every Job to Have Succeeded"];
@@ -287,7 +287,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
   now = () => new Date().toISOString() } = {}) {
   const observedAt = now(), health = unknownHealth(repository, observedAt, "no-full-evidence");
   try {
-    const { workerIdentity, REQUIRED } = await import("./main-rolling-validation.mjs");
+    const { workerIdentity, REQUIRED, UNIT_SHARDS } = await import("./main-rolling-validation.mjs");
     const root = `/repos/${repository}`;
     const mainSha = (await api(`${root}/git/ref/heads/main`))?.object?.sha;
     if (!SHA.test(mainSha)) fail("main-unavailable");
@@ -411,6 +411,7 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
           stepPassed(inventory[6], "WebKit Browser End-to-End Tests") &&
           stepPassed(inventory[7], "Compare the Diff Against the Settings-Rows Paths") &&
           stepPassed(inventory[8], "Compare Against the Committed win32 Baselines") &&
+          UNIT_SHARDS.every((name) => stepPassed(inventory.find((job) => job.name === prefix + name), "Unit Tests")) &&
           stepPassed(inventory.find((job) => job.name === prefix + "Delegated Pipeline Recovery"), "Verify Recorded-Boundary Pipeline Recovery") &&
           stepPassed(inventory.at(-1), "Require Every Job to Have Succeeded");
         const fullSuccess = identity && checkoutVerified && testsVerified && completed &&

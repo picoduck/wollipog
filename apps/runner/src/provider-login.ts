@@ -5,7 +5,8 @@ import { agentContextKey, type AgentContext, type AgentDefinition, type Provider
 import type { CodexCredentialLayout } from "./provider-credential-import.js";
 import { LEASE_WORKER_ERRORS, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { RunnerProviderAccount } from "./config.js";
-import { writeProviderAccountsConfig } from "./config.js";
+import { captureProviderAccountsConfigPreimage, writeProviderAccountsConfig } from "./config.js";
+import { accountConfigPublicationErrorMessage, accountConfigPublicationMayHaveOccurred } from "./provider-account-config-publication.js";
 import { codexLauncherBootstrap } from "./codex-plugins.js";
 import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
@@ -118,9 +119,9 @@ export interface ProviderLoginProfileOptions {
   /** Write the new HOME's first marker, identity `profileId` with this control plane's grant, under
    * the HOME's lease, and make the grant usable for this sign-in. */
   create(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void>;
-  /** The sign-in settled. Unless the account was recorded, stop using the grant and, when the HOME
-   * was kept (the provider wrote credentials into it), drop the grant from its marker. */
-  settle(input: { home: string; provider: "claude" | "codex"; profileId: string; grantId: string; recorded: boolean; homeRemoved: boolean }): Promise<void>;
+  /** The sign-in settled. Unknown recording stops local grant use while retaining its marker;
+   * definitely-unrecorded settlement also drops the marker's grant from a retained HOME. */
+  settle(input: { home: string; provider: "claude" | "codex"; profileId: string; grantId: string; recorded: boolean | "unknown"; homeRemoved: boolean }): Promise<void>;
 }
 
 /** #3719: an import's source, resolved on the runner: the HOME whose lease it takes, where Codex's
@@ -623,7 +624,7 @@ export class ProviderLoginSupervisor {
   }
 
   /** Report a created profile's settlement; never throws, since the sign-in already has a result. */
-  private async settleProfile(resolved: ResolvedProviderLogin, recorded: boolean): Promise<void> {
+  private async settleProfile(resolved: ResolvedProviderLogin, recorded: boolean | "unknown"): Promise<void> {
     if (!resolved.profile || !this.options.profiles) return;
     try {
       await this.options.profiles.settle({ home: resolved.directory, provider: resolved.provider, profileId: resolved.profile.id,
@@ -814,9 +815,11 @@ export class ProviderLoginSupervisor {
     const blocker = this.options.removalBlocker?.(account);
     if (blocker) throw new Error(blocker);
     try {
-      this.writeAccounts(this.options.configPath, this.options.accounts.filter((candidate) => candidate !== account));
-    } catch {
-      throw new Error("The runner configuration could not be updated.");
+      const preimage = captureProviderAccountsConfigPreimage(this.options.configPath, this.options.accounts);
+      this.writeAccounts(this.options.configPath, this.options.accounts.filter((candidate) => candidate !== account), preimage);
+    } catch (error) {
+      if (accountConfigPublicationMayHaveOccurred(error)) throw error;
+      throw new Error(accountConfigPublicationErrorMessage(error, "The runner configuration could not be updated."));
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
     if (options.retainCredentialHome !== true) {
@@ -1071,7 +1074,8 @@ export class ProviderLoginSupervisor {
             ...(operation.resolved.profile ? { profileId: operation.resolved.profile.id } : {}),
           };
           const next = [...this.options.accounts, account];
-          this.writeAccounts(this.options.configPath, next);
+          const preimage = captureProviderAccountsConfigPreimage(this.options.configPath, this.options.accounts);
+          this.writeAccounts(this.options.configPath, next, preimage);
           this.options.accounts.push(account);
           if (operation.resolved.profile) {
             profileSettled = true;
@@ -1094,11 +1098,18 @@ export class ProviderLoginSupervisor {
           verificationUrl: undefined,
           userCode: undefined,
         });
-      } catch {
+      } catch (error) {
+        const publicationUncertain = accountConfigPublicationMayHaveOccurred(error);
+        // Drop temporary local access without falsely revoking a possibly referenced marker.
+        // Neither true settlement nor usable account admission is inferred.
+        if (publicationUncertain) {
+          profileSettled = true;
+          await this.settleProfile(operation.resolved, "unknown");
+        }
         this.update(operation, {
           status: "failed",
           expectsCode: false,
-          error: "Authentication succeeded, but the runner configuration could not be updated.",
+          error: accountConfigPublicationErrorMessage(error, "Authentication succeeded, but the runner configuration could not be updated."),
           verificationUrl: undefined,
           userCode: undefined,
         });

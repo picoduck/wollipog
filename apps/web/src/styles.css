@@ -8449,9 +8449,13 @@ textarea {
   flex: none;
 }
 .tl-message-stack.user { position: relative; }
-/* On a coarse pointer, a message no turn menu lists keeps More Message Actions, visible at rest. */
-.tl-user-actions,
+/* Touch actions occupy their own row below the bubble, with room for the shared 44px targets. */
 .tl-user-menu {
+  justify-self: end;
+  gap: var(--space-2);
+  padding: var(--space-1);
+}
+.tl-user-actions {
   position: absolute;
   inset-inline-end: calc(100% + var(--space-1));
   bottom: 0;

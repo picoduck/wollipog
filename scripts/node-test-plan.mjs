@@ -27,6 +27,18 @@ export function planNodeTests(files, suite = "full") {
     .sort((a, b) => (costs.get(b) ?? 0) - (costs.get(a) ?? 0) || a.localeCompare(b, "en"));
 }
 
+// CI splits one planned suite across parallel jobs (#3770). The cost-ordered plan is dealt to
+// the n shards back and forth (1..n, then n..1), so the measured long files spread evenly instead
+// of always landing on shard 1 first. Each file goes to exactly one shard: the n shards together
+// run exactly the plan, each file once.
+export function shardNodeTests(files, shard) {
+  const match = /^([1-9]\d*)\/([1-9]\d*)$/.exec(shard ?? "");
+  if (!match || Number(match[1]) > Number(match[2])) throw new Error(`Invalid Node test shard: ${shard}`);
+  const [index, total] = [Number(match[1]), Number(match[2])];
+  const dealt = (position) => position % (2 * total) < total ? position % (2 * total) : 2 * total - 1 - position % (2 * total);
+  return files.filter((_, position) => dealt(position) === index - 1);
+}
+
 export function nodeTestInventory(files) {
   const fast = new Set(profile.fastFiles);
   return [...new Set(files)].sort().map((file) => ({ file, full: true, partition: fast.has(file) ? "fast" : "remaining" }));

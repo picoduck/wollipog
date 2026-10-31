@@ -81,6 +81,7 @@ import {
   resolveAgentEnvironment,
   resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
+  captureProviderAccountsConfigPreimage,
   writeProviderAccountsConfig,
   type RunnerConfig,
 } from "./config.js";
@@ -173,6 +174,7 @@ import { providerCredentialImportHostSupported } from "./provider-credential-imp
 import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
+import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
   adoptProviderProfileCommand,
@@ -929,15 +931,11 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
       await sessions.createProviderProfile(home, provider, profileId, grantId);
       providerProfileGrants.recordCreated(profileId, grantId);
     },
-    settle: async ({ home, provider, profileId, grantId, recorded, homeRemoved }) => {
-      providerProfileGrants.settleCreated(profileId, grantId, recorded);
-      // Absence is not proof that cleanup removed the HOME. Keep the old missing-path guard
-      // separately so grant settlement does not recreate a HOME that moved or disappeared.
-      if (recorded || homeRemoved || !existsSync(home)) return;
-      // Physical cleanup has no proved retirement authority yet; retain the HOME without this grant.
-      await sessions.revokeProviderProfileGrant(home, provider, profileId, grantId)
-        .catch((error) => log(`a discarded provider profile's grant could not be removed from its marker: ${errText(error)}`));
-    },
+    settle: createProviderProfileLoginSettlement({
+      settleCreated: (profileId, grantId, recorded) => providerProfileGrants.settleCreated(profileId, grantId, recorded),
+      revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
+      log,
+    }),
   },
   // #3719: copying an existing Codex API-key sign-in into a managed profile, on supported hosts only.
   ...(providerCredentialImportSupported ? {
@@ -1297,7 +1295,8 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
   retire: (home, provider, expectedProfileId) => sessions.retireProviderAccountHome(home, provider, expectedProfileId),
   profileRoot: managedProviderProfileRoot(),
-  persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
+  captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(parsed.configPath, config.providerAccounts),
+  persistAccounts: (accounts, preimage) => writeProviderAccountsConfig(parsed.configPath, accounts, preimage),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
   log,

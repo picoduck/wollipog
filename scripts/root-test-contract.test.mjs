@@ -42,6 +42,6 @@ test("CI preserves full required coverage rather than selecting only fast contra
   assert.match(scripts["test:fast"], /--suite fast /);
   assert.match(scripts["test:remaining"], /--suite remaining /);
   const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
-  assert.match(workflow, /name: Unit Tests\n[\s\S]*?else\n\s+pnpm test:ci\n\s+fi/);
+  assert.match(workflow, /name: Unit Tests\n[\s\S]*?else\n\s+pnpm test:ci --shard=\$\{\{ matrix\.shard \}\}\/3\n\s+fi/);
   assert.doesNotMatch(workflow, /run: pnpm test:(?:fast|remaining)\b/);
 });

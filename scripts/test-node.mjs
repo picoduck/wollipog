@@ -7,7 +7,7 @@ import { spec } from "node:test/reporters";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import timingReporter from "./ci-node-timing-reporter.mjs";
-import { discoverNodeTests, nodeTestInventory, planNodeTests } from "./node-test-plan.mjs";
+import { discoverNodeTests, nodeTestInventory, planNodeTests, shardNodeTests } from "./node-test-plan.mjs";
 
 export async function runNodeTests(files, { concurrency = Math.max(1, availableParallelism() - 1), timeout = 300_000, ci = false } = {}) {
   if (!files.length) throw new Error("Refusing to pass an empty Node test suite");
@@ -50,13 +50,16 @@ export async function runNodeTests(files, { concurrency = Math.max(1, availableP
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const { values } = parseArgs({ options: {
     suite: { type: "string", default: "full" }, ci: { type: "boolean", default: false },
-    inventory: { type: "boolean", default: false },
+    inventory: { type: "boolean", default: false }, shard: { type: "string" },
     "test-concurrency": { type: "string" }, "test-timeout": { type: "string", default: "300000" },
   } });
   const discovered = await discoverNodeTests();
   if (values.inventory) console.log(JSON.stringify(nodeTestInventory(discovered), null, 2));
-  else await runNodeTests(planNodeTests(discovered, values.suite), {
-    timeout: Number(values["test-timeout"]), ci: values.ci,
-    ...(values["test-concurrency"] ? { concurrency: Number(values["test-concurrency"]) } : {}),
-  });
+  else {
+    const planned = planNodeTests(discovered, values.suite);
+    await runNodeTests(values.shard === undefined ? planned : shardNodeTests(planned, values.shard), {
+      timeout: Number(values["test-timeout"]), ci: values.ci,
+      ...(values["test-concurrency"] ? { concurrency: Number(values["test-concurrency"]) } : {}),
+    });
+  }
 }

@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { ALERT_LABEL, ALERT_TITLE, API_BUDGET, API_MAX_BUDGET, API_WRITE_RESERVE, API_REMAINING_FLOOR, RECOVERY_API_BUDGET,
   collectHealth, githubApi, HEALTH_REF, HEALTH_SCHEMA, main, readHealthState, reconcile, STALE_MS, writeHealthState } from "./main-ci-health.mjs";
-import { REQUIRED, WORKER } from "./main-rolling-validation.mjs";
+import { REQUIRED, UNIT_SHARDS, WORKER } from "./main-rolling-validation.mjs";
 
 const repository = "example/project";
 const W = "d".repeat(40), A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40);
@@ -17,7 +17,7 @@ const worker = (id = 10, target = A, extra = {}) => ({ id, run_attempt: 1,
   repository: { full_name: repository }, head_repository: { full_name: repository }, ...extra });
 const legacy = (id = 9, target = A, extra = {}) => worker(id, target, {
   path: ".github/workflows/ci.yml", event: "push", head_sha: target, ...extra });
-const core = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+const core = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
 const jobSteps = [core,
@@ -25,7 +25,7 @@ const jobSteps = [core,
   ...[2, 3, 4, 5].map(() => ["Remote-Instance Browser End-to-End Tests"]),
   ["WebKit Browser End-to-End Tests"], ["Compare the Diff Against the Settings-Rows Paths"],
   ["Compare Against the Committed win32 Baselines"], ["Verify Recorded-Boundary Pipeline Recovery"],
-  ["Require Every Job to Have Succeeded"]];
+  ...UNIT_SHARDS.map(() => ["Unit Tests"]), ["Require Every Job to Have Succeeded"]];
 const jobs = (isLegacy = false) => REQUIRED.map((name, index) => ({ id: index + 1,
   name: isLegacy ? name.replace(/^Full Validation \/ /, "") : name, status: "completed", conclusion: "success",
   steps: ["Verify Rolling Checkout", ...jobSteps[index]].map((name) => ({ name, conclusion: "success" })) }));
@@ -116,8 +116,9 @@ function forge({ runs = [worker()], currentMain = A, state = null, history = cha
 
 function makeRed(f, id = 10, attempt = 1) {
   const js = jobs(f.data.runs.find((run) => run.id === id)?.event === "push");
-  js[0].conclusion = "failure";
-  js[0].steps.find((step) => step.name === "Unit Tests").conclusion = "failure";
+  const unit = js.find((job) => job.name.endsWith(UNIT_SHARDS[0]));
+  unit.conclusion = "failure";
+  unit.steps.find((step) => step.name === "Unit Tests").conclusion = "failure";
   f.data.jobSets.set(`${id}:${attempt}`, js);
 }
 
@@ -238,7 +239,8 @@ test("skipped, cancelled, partial, duplicate, missing-checkout and omitted-test 
     (js) => { js[1].conclusion = "skipped"; }, (js) => { js[2].conclusion = "cancelled"; }, (js) => { js.pop(); },
     (js) => { js[0].steps = js[0].steps.filter((step) => step.name !== "Verify Rolling Checkout"); },
     (js) => { js.push({ ...js[0], id: 55 }); },
-    (js) => { js[0].steps = js[0].steps.filter((step) => step.name !== "Unit Tests"); },
+    (js) => { js[0].steps = js[0].steps.filter((step) => step.name !== "Typecheck"); },
+    (js) => { js.at(-2).steps = js.at(-2).steps.filter((step) => step.name !== "Unit Tests"); },
     (js) => { js[1].steps.find((step) => step.name === "Rendered Production Browser Smoke").conclusion = "skipped"; },
   ]) {
     const f = forge(), js = jobs(); change(js); f.data.jobSets.set("10:1", js);

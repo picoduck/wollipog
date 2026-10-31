@@ -166,6 +166,44 @@ card; the Orchestrator may decline it too, but no one acting for the campaign ca
 it. A credential question asked as a typed implementation question creates no decision at all. A
 request offering no one-time allow is never converted into anything else: it is declined.
 
+A design question about credential handling is not a credential question (#3844). A typed
+implementation question's approval selects one offered option id, so it can carry no value back;
+there a question such as whether importing a provider sign-in should copy an API key, move an OAuth
+sign-in or be unsupported is decided like any other, for a child or the root. The same screen
+classifies a root's own question, which is dismissed without applying any answer: a design question
+becomes `root_questions`, whose notice names the typed route, rather than credential blocked work.
+A design form is declined when any of three screens declines it:
+- the ordinary question screen, unchanged;
+- the round-1 design screen of #3844, which declines asking for a credential, an identity, a
+  sign-in or access;
+- a stricter disclosure and destination screen.
+
+The stricter screen declines:
+- disclosing, collecting or transferring any credential, a bare token, key or sign-in included
+  (tell, give, reveal, show, print, display, read out, dictate, send, upload, post, publish,
+  forward, share, export, leak, dump, hand over, ask for, prompt for, sync and others);
+- a qualified credential (my, our, your, their, real, prod, company, team, shared, admin, live,
+  personal, the maintainer's or user's, and others);
+- handling any credential near a destination:
+  - a URL, a `www.` host, any dotted host or IP with or without a port, `localhost` or a name:port,
+    or an email;
+  - a public or shared sink: third-party, external, remote, server, endpoint, webhook, collector,
+    log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord, email,
+    vendor, someone, cloud, ticket, wiki, README, commit, bug report, screenshot, repository, SSH,
+    another device, plain text and others;
+- an email value, and signing in;
+- an option granting access, wider provider access or a lasting permission;
+- a credential-store path named in the form.
+
+The only excusal is an ordinary-screen match whose sole verb is a local "copy" or "use", and only
+when neither of the other two screens matches and no destination is named. A decline that proves
+unnecessary is acceptable; an admission that should have been declined is not.
+
+Quotes and backticks are removed before these checks. For paths, every character that cannot be
+part of a path separates words, so `(.netrc)`, `«.netrc»` or a quoted `.netrc` is still seen. A secret
+or email field always fails closed. A child's provider question can be answered with free text, so
+it keeps the ordinary screen without the excusal.
+
 The worktree allowlist decides whether a tool effect can be approved at all. No denylist can name
 every credential store, and no runner isolation mode hides those stores from a child: bwrap binds
 `/` read-only, Seatbelt allows file reads and provider mode has no sandbox. So the Orchestrator may

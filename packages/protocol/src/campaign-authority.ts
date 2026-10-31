@@ -179,6 +179,88 @@ export function campaignContainedOperation(request: PendingApproval, repositoryR
 const sensitiveSubject = /\b(?:auth(?:entication)?|passwords?|secrets?|credentials?|tokens?|api[ _-]?key|oauth|identity|login|account|permission|access)\b/iu;
 const planningIntent = /\b(?:implement(?:ation)?|design|approach|schema|library|framework|test|mock|fixture|component|feature|architecture|provider|flow|validation|review|tradeoff|format|should)\b/iu;
 
+// A design form (#3844) can carry no answer value back, so it may ask how a feature should copy or
+// use a credential: "Should importing copy the API key?". Every pattern above still declines it
+// unchanged, with one excusal: a protectedAction match whose only verb is a local "copy" or "use".
+// Any other verb (send, upload, load, export, paste, share, ...) or clause still declines.
+const localHandlingVerbs = "|copy|use|";
+if (!protectedAction.source.includes(localHandlingVerbs)) throw new Error("protectedAction no longer names its local handling verbs");
+const protectedActionBeyondLocalHandling = new RegExp(protectedAction.source.replace(localHandlingVerbs, "|"), protectedAction.flags);
+// Round 1 of #3844 (f74ca119), restored verbatim as a decline-only layer: asking FOR a credential,
+// an identity, a sign-in or access. It is composed with main's screen, never a replacement for it.
+const designCredentialNoun = String.raw`(?:passwords?|passphrases?|secrets?|credentials?|api[ _-]?keys?|access[ _-]?tokens?|private[ _-]?keys?|cookies?|bearer|e-?mail(?:[ _-]?address(?:es)?)?)`;
+const designCredentialRequest = new RegExp([
+  // Disclosing a credential or identity to, or collecting one from, whoever answers.
+  String.raw`\b(?:paste|enter|provide|supply|reveal|show|print|share|give|tell|send\s+(?:me|us))\b.{0,80}\b${designCredentialNoun}`,
+  String.raw`\b(?:${designCredentialNoun}|tokens?)\b.{0,40}\b(?:values?|here|please|to\s+(?:me|us))\b`,
+  String.raw`\b(?:${designCredentialNoun}|tokens?)\s+(?:values?\s+)?(?:should|shall|will|can|do|does|may)\s+(?:I|we|you|(?:the|our)\s+(?:app|application|client|provider))\s+(?:use|enter|provide|supply|send|paste|choose|select)\b`,
+  // A real identity's credential, rather than credentials as a kind of data.
+  String.raw`\b(?:your|my|our|real|production|live|personal)\b.{0,50}\b${designCredentialNoun}`,
+  String.raw`\b(?:${designCredentialNoun}|tokens?)\b.{0,40}\b(?:your|my)\b`,
+  // Performing a sign-in, as opposed to a sign-in as the subject of the design.
+  String.raw`\b(?:sign|log)\s+(?:in|on)\b`, String.raw`\b(?:I|you|we|please)\s+(?:sign[ -]?in|log[ -]?in|authenticate|authorize)\b`,
+  String.raw`\b(?:authenticate|authorize)\b.{0,60}\b(?:me|your|my|account|device|browser|now)\b`, String.raw`\b(?:gh|railway|vercel|npm|aws)\s+(?:auth\s+)?login\b`,
+  // An option granting access, wider provider permissions or a lasting permission.
+  String.raw`\b(?:grant|give|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox|polic(?:y|ies)|limits?|protections?)\b`,
+  String.raw`\b(?:wider|broader|more|additional|extra|elevated|admin)\s+(?:provider\s+)?(?:access|permissions?|scopes?)\b`,
+  String.raw`\b(?:always|permanently|persistently|indefinitely)\s+(?:allow|approve|trust|grant|permit)\b`, String.raw`\ballow\s+(?:always|permanently)\b`,
+  String.raw`\b(?:lasting|persistent|permanent|standing|durable)\s+(?:permissions?|access|grants?|approvals?)\b`, String.raw`\b(?:chmod|chown|sudo)\b`,
+  // Values the form carries itself: credential-shaped literals and email addresses.
+  String.raw`\b(?:sk-[a-z0-9]{12,}|gh[pousr]_[a-z0-9]{12,})\b`, String.raw`[^\s@]+@[^\s@]+\.[a-z]{2,}`,
+].join("|"), "iu");
+/** A destination voids the excusal: copying or using a credential somewhere public, shared or
+ * outside the feature is disclosure, not design. */
+const designCredentialSink = new RegExp([
+  String.raw`[a-z][a-z0-9+.-]*:\/\/`, String.raw`\bwww\.`, String.raw`[^\s@]+@[^\s@]+\.[a-z]{2,}`,
+  // Any dotted host-shaped or IP token, with or without a port and with no scheme; a file name such
+  // as auth.json voids it too. Also localhost and any name:port.
+  String.raw`\b[a-z0-9-]+(?:\.[a-z0-9-]+)+(?::\d+)?\b`, String.raw`\[[0-9a-f:]*:[0-9a-f:]*\]`, String.raw`\blocalhost\b`,
+  String.raw`\b[a-z0-9-]+:\d{1,5}\b`,
+  String.raw`\b(?:third[ -]?part(?:y|ies)|external(?:ly)?|remote(?:ly)?|servers?|endpoints?|webhooks?|collectors?|logs?|logging|prs?|pull[ -]?requests?|issues?|comments?|chats?|transcripts?|public(?:ly)?|uploads?|gists?|paste(?:bin|s)?|slack|discord|e-?mails?|vendors?|partners?|customers?|someone|anyone|everyone|others?|buckets?|cloud|internet|online|web|channels?|clipboard|screen|output|stdout|console|tickets?|wiki|docs?|readme|commits?|reports?|bugs?|screenshots?|recordings?|repositor(?:y|ies)|repos?|git|github|gitlab|version[ -]control|visible|readable|plain[ -]?text|unmasked|unredacted|curl|wget|http|ssh|scp|rsync|devices?|machines?|hosts?|across|sync(?:ed|ing)?)\b`,
+].join("|"), "iu");
+/** Decline-only additions for design forms: none of these admits anything main declined. */
+const designOnlyProtected = new RegExp([
+  // An email value, or performing a sign-in at all.
+  String.raw`[^\s@]+@[^\s@]+\.[a-z]{2,}`, String.raw`\b(?:sign|log)\s+(?:in|on)\b`,
+  String.raw`\be-?mail(?:[ _-]?address(?:es)?)?\s+(?:values?\s+)?(?:should|shall|will|can|do|does|may)\s+(?:I|we|you|(?:the|our)\s+(?:app|application|client|provider))\s+(?:use|enter|provide|supply|send|paste|choose|select)\b`,
+  // Disclosure to whoever answers, and a real identity's credential, beyond credentialIdentity.
+  String.raw`\b(?:paste|enter|provide|supply|reveal|share|give|tell)\b.{0,80}\be-?mail(?:[ _-]?address(?:es)?)?\b`,
+  // Disclosing or transferring any credential, a bare token, key or sign-in included. A local copy,
+  // use or move is not here: that is the design subject (#3844).
+  String.raw`\b(?:tell|give|reveal|show|print|display|disclose|dictate|recite|expose|output|echo|say|read\s+(?:out|back|aloud)|spell\s+out|send|sent|upload|post|publish|forward|share|export|leak|dump|hand\s+(?:over|out)|write\s+(?:down|out)|e-?mail|mail|message|text|transmit|broadcast|paste|provide|supply|enter|submit|disclos(?:e|ing)|collect|ask|request|prompt|obtain|solicit|capture|harvest|type\s+in|sync|replicate|mirror|transfer|distribute|propagate|commit|push|include|attach|embed)\b.{0,80}\b(?:tokens?|(?:api[ _-]?)?keys?|access[ _-]?tokens?|private[ _-]?keys?|passwords?|passphrases?|secrets?|credentials?|cookies?|bearer|sign[ -]?ins?|log[ -]?ins?|sessions?)\b`,
+  String.raw`\b(?:passwords?|passphrases?|secrets?|credentials?|tokens?|api[ _-]?keys?|cookies?)\b.{0,40}\bto\s+(?:me|us)\b`,
+  String.raw`\b(?:my|our|your|their|his|her|real|prod|production|live|personal|company|team|org|organi[sz]ation(?:al)?|corporate|staging|shared|admin|root|master|actual|existing|maintainers?|owners?|users?|person|human|developers?|operators?|ci|deploy(?:ment)?|service|bot)\b.{0,50}\b(?:tokens?|(?:api[ _-]?)?keys?|access[ _-]?tokens?|private[ _-]?keys?|passwords?|passphrases?|secrets?|credentials?|cookies?)\b`,
+  // "work" qualifies a credential only when adjacent, so "…work? Copy the API key" is not one.
+  String.raw`\bwork\s+(?:oauth\s+|api[ _-]?|access[ _-]?)?(?:tokens?|keys?|passwords?|secrets?|credentials?|accounts?)\b`,
+  // An option granting access, wider provider access or a lasting permission, plural nouns included.
+  String.raw`\b(?:grant|give|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox(?:es)?|polic(?:y|ies)|limits?|protections?)\b`,
+  String.raw`\b(?:wider|broader|more|additional|extra|elevated|admin)\s+(?:provider\s+)?(?:access|permissions?|scopes?)\b`,
+  String.raw`\b(?:always|permanently|persistently|indefinitely)\s+(?:allow|approve|trust|grant|permit)\b`, String.raw`\ballow\s+(?:always|permanently)\b`,
+  String.raw`\b(?:lasting|persistent|permanent|standing|durable)\s+(?:permissions?|access|grants?|approvals?)\b`,
+].join("|"), "iu");
+/** Handling any credential, bare "token" or "key" included, near a sink is disclosure too. */
+const handlingVerb = String.raw`(?:cop(?:y|ies|ied|ying)|us(?:e|es|ed|ing)|mov(?:e|es|ed|ing)|send(?:s|ing)?|sent|upload(?:s|ed|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|export(?:s|ed|ing)?|forward(?:s|ed|ing)?|shar(?:e|es|ed|ing)|past(?:e|es|ed|ing)|put(?:s|ting)?|writ(?:e|es|ing|ten)|wrote|stor(?:e|es|ed|ing)|sav(?:e|es|ed|ing)|print(?:s|ed|ing)?|log(?:s|ged|ging)?|includ(?:e|es|ed|ing)|attach(?:es|ed|ing)?|embed(?:s|ded|ding)?|leak(?:s|ed|ing)?|transmit(?:s|ted|ting)?)`;
+const anyCredential = String.raw`(?:tokens?|(?:api[ _-]?)?keys?|secrets?|credentials?|passwords?|passphrases?|cookies?|bearer)`;
+const credentialHandling = new RegExp(String.raw`\b${handlingVerb}\b.{0,80}\b${anyCredential}\b|\b${anyCredential}\b.{0,80}\b${handlingVerb}\b`, "iu");
+/** Quotes and backticks never hide a word or a path from these screens. */
+const withoutQuoting = (text: string) => text.replace(/[`'"‘’“”]/gu, " ");
+/** Credential-store paths, matched on path-like words so that the subject "credentials" stays
+ * discussable while `~/.codex/auth.json` or ".env" does not. Every character that cannot be part
+ * of a path separates words, so no wrapper ((, [, <, «, *, fullwidth quotes) hides one. */
+const namesCredentialPath = (text: string) => text.replace(/[^\p{L}\p{N}._~\/\\-]/gu, " ").split(/\s+/u).some((word) => {
+  const path = word.replace(/\.+$/u, "");
+  return /[\\/]|^[.~]/u.test(path) && protectedPath.test(path);
+});
+function designQuestionProtected(raw: string, verifiedPlanning: boolean): boolean {
+  const forms = [raw, withoutQuoting(raw)];
+  const any = (pattern: RegExp) => forms.some((text) => pattern.test(text));
+  const sink = designCredentialSink.test(forms[1]!);
+  const localHandlingOnly = !any(protectedActionBeyondLocalHandling) && !sink;
+  return (any(protectedAction) && !localHandlingOnly) || any(credentialIdentity) || any(credentialValueChoice) ||
+    (any(sensitiveSubject) && (!verifiedPlanning || !planningIntent.test(raw))) || any(designCredentialRequest) || any(designOnlyProtected) ||
+    (sink && any(credentialHandling)) || namesCredentialPath(raw);
+}
+
 /** Exact finite operation selectors shared by the runner's evidence collector and resolver.
  * This parses effects, never authorization; unresolved filesystem targets still fail closed. */
 export function campaignCodeOperationTargets(toolName: string | undefined, operation: ApprovalContext["operation"]): { cwd?: string; paths: string[] } | null {
@@ -232,14 +314,18 @@ type ProtectedRequestClass = "secrets_and_sign_in" | "provider_access_expansion"
 
 /** Trusted is a caller-side fact derived from the normalized provider bridge or typed route,
  * not a field taken from a child-authored snapshot. Unknown sensitive forms fail closed.
- * Credential text is screened before every other class, so it always wins the classification. */
-function protectedRequestClass(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation: boolean): ProtectedRequestClass | null {
+ * Credential text is screened before every other class, so it always wins the classification.
+ * `designForm` is equally caller-side: set only where no answer can carry a value back (the
+ * typed implementation route, which selects one offered option id, or a root's own question,
+ * which is dismissed without applying any answer). */
+function protectedRequestClass(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation: boolean, designForm = false): ProtectedRequestClass | null {
   if (request.kind === "authentication") return "secrets_and_sign_in";
   if (request.runnerGuardrail) return "guardrail";
   if (request.kind === "question") {
     if (request.questions?.some((q) => {
       if (q.secret || q.inputFormat === "email") return true;
       const text = [q.id, q.header, q.question, q.context, ...q.options.flatMap((o) => [o.label, o.description])].join(" ");
+      if (designForm) return designQuestionProtected(text, verifiedPlanning);
       return protectedAction.test(text) || credentialIdentity.test(text) || credentialValueChoice.test(text) || (sensitiveSubject.test(text) && (!verifiedPlanning || !planningIntent.test(text)));
     })) return "secrets_and_sign_in";
   } else {
@@ -327,14 +413,19 @@ export function resolveCampaignAuthority(input: {
     if (input.trustedSource !== "workflow_route") return result("human", "human_required", "unverified_intent");
     if (category === "implementation_question") {
       const snapshot = input.snapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>;
-      if (campaignRequestProtected({ requestId: "", title: "", options: [], kind: "question", questions: [{ id: "", question: snapshot.question, options: snapshot.options }] }, true)) return declined("secrets_and_sign_in");
+      // The route normalizes the snapshot to text and options, and approval selects one option id.
+      if (protectedRequestClass({ requestId: "", title: "", options: [], kind: "question", questions: [{ id: "", question: snapshot.question, options: snapshot.options }] }, true, false, true)) return declined("secrets_and_sign_in");
     }
     return result("orchestrator", input.root ? "standing_authorization" : "campaign_delegation", "authorized_operation");
   }
   const generic = request!;
   const question = generic.kind === "question";
   const verifiedCode = input.trustedSource === "provider_tool" && repositoryCodeToolIntent(generic, input.repositoryRoot);
-  const screened = protectedRequestClass(generic, input.trustedSource === "provider_question", verifiedCode);
+  // A root's own question is dismissed without applying any answer, so it is a design form and a
+  // credential-design question becomes `root_questions`, whose notice names the typed route. A
+  // child's provider question can be answered with free text, so it keeps the broader screen.
+  const designForm = input.root && question && input.trustedSource === "provider_question";
+  const screened = protectedRequestClass(generic, input.trustedSource === "provider_question", verifiedCode, designForm);
   if (screened === "secrets_and_sign_in" || screened === "provider_access_expansion" || screened === "persistent_permissions") return declined(screened);
   // Runner guardrails and cost or limit pauses belong to budget and guardrail authority: human-only.
   if (screened === "guardrail" || (generic.kind && !["question", "permission", "policy_hook"].includes(generic.kind))) return result("human", "human_required", "protected_request");

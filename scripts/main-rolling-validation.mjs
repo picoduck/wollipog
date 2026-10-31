@@ -20,13 +20,16 @@ const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const ZERO = "0".repeat(40);
 const ACTIVE = ["queued", "in_progress", "waiting", "pending", "requested"];
+// Unit-test shards appended before the aggregator (#3770), so the established positions hold.
+export const UNIT_SHARDS = [1, 2, 3].map((i) => `Unit Tests (${i})`);
 export const REQUIRED = [
-  "Full Validation / Typecheck, Unit Tests & Bundles",
+  "Full Validation / Typecheck & Bundles",
   ...[1, 2, 3, 4, 5].map((i) => `Full Validation / Browser End-to-End Tests (${i})`),
   "Full Validation / WebKit End-to-End Tests",
   "Full Validation / Settings-Rows win32 Baselines / Detect Settings-Rows Changes",
   "Full Validation / Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines",
   "Full Validation / Delegated Pipeline Recovery",
+  ...UNIT_SHARDS.map((name) => `Full Validation / ${name}`),
   "Full Validation / Typecheck, Test & Sidecar Bundle",
 ];
 const CHECKOUT_JOBS = REQUIRED.filter((name) => !name.endsWith("Typecheck, Test & Sidecar Bundle"));
