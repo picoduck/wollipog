@@ -5,6 +5,7 @@ import {
   pairingLinks,
   parsePairingFragment,
   parsePairingInput,
+  sameComputerPairingLink,
   storeDeviceToken,
 } from "./device-token.js";
 
@@ -102,22 +103,28 @@ test("pairingLinks: a configured public origin is the link, even for a loopback 
   for (const bad of ["not a url", "ftp://box.example", "https://user:pw@box.example", "https://box.example/?q=1", null, undefined]) {
     assert.deepEqual(pairingLinks("TOK", { ...base, hosts: ["10.0.0.1"], boundBeyondLoopback: true, publicOrigin: bad }).links, ["http://10.0.0.1:4317/#pair=TOK"], String(bad));
   }
-  // Loopback bind without a public origin still names both fixes.
-  assert.match(pairingLinks("TOK", base).blocked!, /CONTROL_PLANE_PUBLIC_ORIGIN.*CONTROL_PLANE_HOST/u);
+  // Loopback bind without a public origin has no link another device can open.
+  assert.deepEqual(pairingLinks("TOK", base), { links: [], blocked: "loopback" });
 });
 
-test("pairingLinks: never offers a dead link — each blocker names its fix", () => {
+test("pairingLinks: never offers a dead link; each blocker is a reason code the dialog words", () => {
   const base = { hosts: ["10.0.0.1"], port: 4317, webServed: true, boundBeyondLoopback: true };
-  // No bundle → the link would 404.
-  const noWeb = pairingLinks("T", { ...base, webServed: false });
-  assert.deepEqual(noWeb.links, []);
-  assert.match(noWeb.blocked!, /web build/);
-  // Loopback bind → the phone can't reach it.
-  const loopback = pairingLinks("T", { ...base, boundBeyondLoopback: false });
-  assert.deepEqual(loopback.links, []);
-  assert.match(loopback.blocked!, /CONTROL_PLANE_HOST/);
+  // No bundle: the link would 404.
+  assert.deepEqual(pairingLinks("T", { ...base, webServed: false }), { links: [], blocked: "not-web-served" });
+  // Secure remote access set up but not ready: its origin would not answer yet.
+  assert.deepEqual(
+    pairingLinks("T", { ...base, publicOrigin: "https://box.example", remoteAccess: { phase: "failed", message: "x" } }),
+    { links: [], blocked: "remote-access" },
+  );
+  // Loopback bind: the phone can't reach it.
+  assert.deepEqual(pairingLinks("T", { ...base, boundBeyondLoopback: false }), { links: [], blocked: "loopback" });
   // Nothing routable to advertise.
-  const noHosts = pairingLinks("T", { ...base, hosts: [] });
-  assert.deepEqual(noHosts.links, []);
-  assert.match(noHosts.blocked!, /network address/);
+  assert.deepEqual(pairingLinks("T", { ...base, hosts: [] }), { links: [], blocked: "no-address" });
+});
+
+test("sameComputerPairingLink: a link at the page's own origin, only where a browser can open it", () => {
+  assert.equal(sameComputerPairingLink("T", "http://127.0.0.1:4317"), "http://127.0.0.1:4317/#pair=T");
+  assert.equal(sameComputerPairingLink("T", "https://box.example"), "https://box.example/#pair=T");
+  assert.equal(sameComputerPairingLink("T", "tauri://localhost"), null);
+  assert.equal(sameComputerPairingLink("T", "null"), null);
 });

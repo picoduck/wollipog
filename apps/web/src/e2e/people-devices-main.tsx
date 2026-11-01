@@ -30,6 +30,16 @@ const organizationName = "Fixture Organization";
 const params = new URLSearchParams(window.location.search);
 const withSuspendedMember = params.has("suspended");
 const failMembers = params.has("failMembers");
+// Pair Device's result (#2999): by default the common local setup, bound to this computer only;
+// `?reach=lan` offers two addresses with a QR, and the other values each reason no link is offered.
+const REACH: Record<string, { hosts: string[]; webServed: boolean; boundBeyondLoopback: boolean }> = {
+  lan: { hosts: ["192.168.1.24", "100.101.102.103"], webServed: true, boundBeyondLoopback: true },
+  loopback: { hosts: [], webServed: true, boundBeyondLoopback: false },
+  "not-web-served": { hosts: [], webServed: false, boundBeyondLoopback: false },
+  "no-address": { hosts: [], webServed: true, boundBeyondLoopback: true },
+};
+const reach = REACH[params.get("reach") ?? "loopback"] ?? REACH.loopback!;
+if (params.has("theme")) document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 
 function identity(ownerName: string, memberName: string): IdentityAdministrationView {
   return {
@@ -131,8 +141,9 @@ const client: ApiClient = {
   listDevices: async () => ({ devices: structuredClone(devices) }),
   pairDevice: async (name, userId) => ({
     device: { ...devices[0]!, deviceId: "device-2", name, userId: userId ?? "member-1" },
-    token: "fixture_pairing_token",
-    pairing: { hosts: [], port: 443, webServed: false, boundBeyondLoopback: false },
+    // A real token's length (43), so Manual Setup shows its ellipsis; never a real credential.
+    token: "fixture_pairing_token_not_a_real_credential",
+    pairing: { ...reach, port: 4317 },
   }),
   renameIdentityTeam: async (teamId, name) => {
     if (currentIdentity.teams.some((team) => team.teamId !== teamId && team.name === name)) {

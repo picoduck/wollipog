@@ -1773,9 +1773,12 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 
 - Right-aligned: **Cancel** (`.btn`, secondary, never ghost) then the **primary**. The primary label
   repeats the dialog's verb ("Create Session", never "OK", "Submit" or "Continue").
-- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 3) the
+- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 2) the
   primary may be **Continue**, with Back as the secondary from step 2 on. The final step's primary
-  names the outcome ("Pair Device"), never Continue.
+  names the outcome ("Create Pairing Link"), never Continue. A stepper keeps one title; its
+  description names the step ("Step 2 of 2: Name the device."), and a stepper whose steps differ in
+  height anchors near the top (`Modal`'s `grows`, a local `data-grows` on the backdrop, §19.4) so
+  its top edge never moves.
 - A destructive tertiary action (Delete Team, Remove Location) goes far left as `.btn.ghost.danger`
   and opens its own confirmation.
 - A harmless extra action (Show Sessions) is a `.btn.ghost` after the spacer and before Cancel

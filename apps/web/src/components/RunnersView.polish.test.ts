@@ -9,6 +9,7 @@ const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", impo
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const teamDialog = readFileSync(new URL("./TeamDialog.tsx", import.meta.url), "utf8");
 const personAccess = readFileSync(new URL("./PersonAccessDialogs.tsx", import.meta.url), "utf8");
+const pairDevice = readFileSync(new URL("./PairDeviceDialog.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.meta.url), "utf8");
 const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
@@ -49,7 +50,8 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(access, /kind: "pair-device"/);
   assert.match(access, /kind: "create-team"/);
   assert.match(access, /Forms open only when/);
-  assert.match(access, /<Modal/);
+  // The forms are dialogs of their own files; Pair Device is one (#2999).
+  assert.match(pairDevice, /<Modal/);
   assert.match(access, /nextAdmin \? await api\.listDevices\(\) : \{ devices: \[\] \}/);
   assert.match(teamDialog, /api\.createIdentityTeam\(\{ name: trimmed, memberUserIds: memberIds \}\)/);
   assert.match(personAccess, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);

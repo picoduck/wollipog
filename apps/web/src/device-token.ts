@@ -82,27 +82,41 @@ function publicOriginLink(publicOrigin: string | null | undefined, token: string
 }
 
 /**
+ * Why a freshly-minted token has no link another device can open. A code, not a sentence: Pair
+ * Device owns the words (#2999), so they stay in the person's language and the operator's detail
+ * stays behind Show Details.
+ * - `not-web-served`: the control plane has no web bundle to serve, so a link would 404;
+ * - `remote-access`: secure remote access is set up but not ready;
+ * - `loopback`: bound to this computer only, with no public origin configured;
+ * - `no-address`: bound past loopback, but no network address was found.
+ */
+export type PairingBlocker = "not-web-served" | "remote-access" | "loopback" | "no-address";
+
+/**
  * Clickable pairing links for a freshly-minted token, or the reason none can be offered. Pure so
  * the "don't show a dead link" rule is unit-tested rather than re-litigated in JSX. IPv6 literals
  * are bracketed so the URL stays valid.
  */
-export function pairingLinks(token: string, reach: PairingReach): { links: string[]; blocked: string | null } {
-  if (!reach.webServed) {
-    return { links: [], blocked: "this control plane isn't serving the dashboard (run `pnpm --filter @wollipog/web build`)" };
-  }
+export function pairingLinks(token: string, reach: PairingReach): { links: string[]; blocked: PairingBlocker | null } {
+  if (!reach.webServed) return { links: [], blocked: "not-web-served" };
   // The operator said where remote clients reach the dashboard; that beats guessing from the bind
   // address, and it is the only link that works for a loopback bind behind a reverse proxy.
-  if (reach.remoteAccess && reach.remoteAccess.phase !== "ready") {
-    return { links: [], blocked: "secure remote access needs attention; open Network settings on the computer running Wollipog and retry setup" };
-  }
+  if (reach.remoteAccess && reach.remoteAccess.phase !== "ready") return { links: [], blocked: "remote-access" };
   const configured = publicOriginLink(reach.publicOrigin, token);
   if (configured) return { links: [configured], blocked: null };
-  if (!reach.boundBeyondLoopback) {
-    return { links: [], blocked: "this control plane is bound to loopback — set CONTROL_PLANE_PUBLIC_ORIGIN to the address you reach it at (HTTPS proxy or Tailscale Serve), or CONTROL_PLANE_HOST=0.0.0.0 to reach it directly from another device" };
-  }
-  if (reach.hosts.length === 0) return { links: [], blocked: "no reachable network address was found on this machine" };
+  if (!reach.boundBeyondLoopback) return { links: [], blocked: "loopback" };
+  if (reach.hosts.length === 0) return { links: [], blocked: "no-address" };
   const host = (h: string) => (h.includes(":") && !h.startsWith("[") ? `[${h}]` : h);
   return { links: reach.hosts.map((h) => `http://${host(h)}:${reach.port}/#pair=${token}`), blocked: null };
+}
+
+/**
+ * The pairing link for another browser on this computer, at the page's own origin, for when no
+ * other device can reach one. Null where the page is not served over http(s) (the desktop app's
+ * own scheme), since no browser could open that.
+ */
+export function sameComputerPairingLink(token: string, origin: string): string | null {
+  return /^https?:\/\//u.test(origin) ? `${origin}/#pair=${token}` : null;
 }
 
 /**
