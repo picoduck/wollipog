@@ -34,7 +34,12 @@ authority and mutation-fence checks apply unchanged at that revision. If scope m
 was synchronizing, execution refuses without consuming the approval, and a retry synchronizes first. An armed merge survives
 a change that only adds issues; one a removal revokes can still be reconciled, which only records a
 forge-proven merge at the approved head. A person's approval under Full Control re-authorizes the
-boundary every decision was evaluated under, so it still revokes all of them.
+boundary every decision was evaluated under, so it still revokes all of them. Its re-mint moves the
+policy revision those decisions are bound to, so reconciliation accepts that one change for an
+armed merge the approval revoked: the scope decision consumed at the revocation, naming the
+occurrence, under the same policy revision; exactly one revision bump since; and the re-minted
+boundary still current and still giving the Orchestrator the merge. Any later policy change, any
+other revocation, or an approval that was never armed stays terminal.
 
 Protocol v208 capability-gates the complete operation before any update. Active Orchestrator participants
 must share the campaign runner and repository workspace; finish or move incompatible participants first.
