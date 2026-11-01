@@ -747,22 +747,14 @@ kbd {
    groups. */
 .app-rail {
   width: var(--rail-w);
-}
-.app-rail,
-.instance-recovery-nav {
   flex-shrink: 0;
   background: var(--bg-elev);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 6px 0;
-  gap: 4px;
-}
-.instance-recovery-nav {
-  width: 260px;
-  align-items: stretch;
-  padding: 12px 10px;
+  padding: calc(var(--space-3) / 2) 0;
+  gap: var(--space-1);
 }
 /* The macOS desktop app has no separate title bar (#1979, §4.1): its traffic lights sit in the rail's
    top-left, in a strip of top padding that also drags the window. The strip is absolutely placed, so
@@ -770,8 +762,7 @@ kbd {
    window's 940px minimum never reaches the phone bar, which has no strip. */
 .rail-drag-strip { display: none; }
 @media (min-width: 761px) {
-  :root.macos-title-bar .app-rail,
-  :root.macos-title-bar .instance-recovery-nav {
+  :root.macos-title-bar .app-rail {
     position: relative;
     padding-top: var(--title-bar-h);
   }
@@ -828,6 +819,18 @@ kbd {
    reads a colour and a fill in one rule as a text pair and cannot resolve --surface-selected; the
    glyph clears 4.5:1 on it in every scheme and theme (#1958). */
 .rail-item.active { color: var(--accent); }
+/* With no instance open (the recovery screen, #3004) every item is there but unavailable: faint
+   ink, no hover fill, and only its tooltip answers a hover or focus. */
+.rail-item[aria-disabled="true"] {
+  color: var(--text-faint);
+  cursor: default;
+}
+@media (hover: hover) {
+  .rail-item[aria-disabled="true"]:hover {
+    color: var(--text-faint);
+    background: transparent;
+  }
+}
 .rail-item[aria-current="page"] { background: var(--surface-selected); }
 .rail-item.active::before {
   content: "";
@@ -1053,19 +1056,8 @@ kbd {
   min-height: 0;
   overflow: auto;
 }
-/* The instance recovery screen is not a routed page, so it keeps the inset `.main-body` used to
-   give every view (the page container is the gutter everywhere else). Compound, so the phone
-   `.main-body` safe-area rule later in the sheet does not override it. */
-.main-body.instance-recovery-body { padding: var(--space-5) var(--page-gutter) var(--space-8); }
 
-/* ---------------------- Recovery and instance controls ------------------ */
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  padding: 2px 5px;
-  min-height: 36px;
-}
+/* ------------------------------ Instance controls ------------------------- */
 .brand-mark {
   width: 32px;
   height: 32px;
@@ -1073,10 +1065,6 @@ kbd {
   flex-shrink: 0;
   /* The Wollipog tile (an <img>); pixelated keeps the pixel art crisp at this size. */
   image-rendering: pixelated;
-}
-.brand-name {
-  font-weight: 650;
-  font-size: 14.5px;
 }
 /* A CLOSED selector must sit below every blocking backdrop. At 55 it out-stacked the modal
    backdrop (50), so its trigger stayed hit-testable through an open dialog: tapping it opened a
@@ -1147,8 +1135,8 @@ kbd {
   background: var(--bg-elev);
   box-shadow: inset 0 0 0 2px var(--tone);
 }
-/* A navigation wide enough for the name shows it and the status beside the tile: the recovery
-   shell's, and the labelled rail (#1968). */
+/* The labelled rail (#1968) is wide enough for the name, so it shows it and the status beside the
+   tile. */
 .instance-selector.labelled {
   flex: 1;
   min-width: 0;
@@ -10027,6 +10015,29 @@ textarea {
 /* A failed switch, retry or removal sits under its row, inside the surface (§13.2). */
 .instance-list > .notice { margin: 0 var(--space-3) var(--space-3); }
 .instance-list > .notice + .instance-row { box-shadow: inset 0 1px 0 var(--border); }
+/* The instance recovery screen (#3004): its status panel is the page's heading, so its title sits
+   where a page title sits, in the page title's type, and wraps rather than clamping a long name.
+   The icon tile takes the status word's tone; the Instances list follows 40px below. */
+.instance-recovery-state { padding-top: var(--space-5); }
+.instance-recovery-state > .state-title {
+  font: var(--type-page-title);
+  overflow-wrap: anywhere;
+}
+.instance-recovery-state > .state-icon { color: var(--tone); }
+/* Connecting's spinner turns in the status word's info tone, as the rows' and the tile's dots do. */
+.instance-recovery-state > .state-icon > .spinner { border-top-color: var(--tone); }
+.state-body > .instance-recovery-fact {
+  margin-top: var(--space-1);
+  font: var(--type-small);
+}
+.instance-recovery-page > .instance-list { margin-top: var(--space-10); }
+/* Before the registry loads (§12.3): a 60% title bar over a 40% meta bar, at the rows' height. */
+.instance-skeleton-row {
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-2);
+}
 /* The instance dialog (#3003): Manual Setup's address and code share one helper, 4px under them as a
    field's helper sits under its control (§8.1), and Re-Pair's saved address is a mono line. */
 .remote-instance-code {
@@ -12406,13 +12417,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   }
 }
 
-/* ---- View toolbar (Runners "Add a runner", etc.) ---- */
-/* ---- Boxes (SSH-bootstrapped runners) ---- */
-.toolbar-actions {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
 /* ---- Copy button (reused in onboarding) ---- */
 .copy-btn {
   border: 1px solid var(--border);
@@ -15344,8 +15348,6 @@ button.review-finding-location {
     align-items: stretch;
     flex-direction: column;
   }
-  .connections-panel > .toolbar .toolbar-actions,
-  .connections-panel > .toolbar .toolbar-actions .btn,
   .connection-access-error .btn {
     width: 100%;
   }

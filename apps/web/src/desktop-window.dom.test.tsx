@@ -364,6 +364,8 @@ test("the rail keeps the traffic lights' strip clear in the macOS app, and nowhe
   const css = readFileSync(new URL("./styles.css", import.meta.url), "utf8");
   assert.match(css, /--title-bar-h: 40px;/);
   assert.match(css, /\.rail-drag-strip \{ display: none; \}/, "the strip is hidden unless the class asks for it");
-  assert.match(css, /:root\.macos-title-bar \.app-rail,\s*:root\.macos-title-bar \.instance-recovery-nav \{[^}]*padding-top: var\(--title-bar-h\);/);
+  // The recovery screen draws the same rail (#3004), so it needs no rule of its own.
+  assert.match(css, /:root\.macos-title-bar \.app-rail \{[^}]*padding-top: var\(--title-bar-h\);/);
+  assert.doesNotMatch(css, /instance-recovery-nav/);
   assert.match(css, /:root\.macos-title-bar \.rail-drag-strip \{[^}]*position: absolute;[^}]*height: var\(--title-bar-h\);/);
 });

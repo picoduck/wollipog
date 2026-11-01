@@ -505,7 +505,8 @@ test("Settings survives the breakpoint because it is a route", () => {
     "the phone entry point is a routed row in the More sheet");
   // Gated on the breakpoint, not on overflowItems: hiding every optional destination by experiment
   // would otherwise unmount the trigger and leave Settings no entry point in the phone chrome.
-  assert.match(rail, /const showMore = isMobile;[\s\S]*?\{showMore && \(/,
+  // A disabled rail (the desktop recovery screen, #3004) has no More: nothing behind it opens.
+  assert.match(rail, /const showMore = isMobile && !disabled;[\s\S]*?\{showMore && \(/,
     "the sheet survives an empty overflow list");
   assert.doesNotMatch(app, /SettingsDialog/, "the dialog is replaced by the route, not kept beside it");
   assert.doesNotMatch(app, /settingsOpen/, "there is no open state to hoist once it is a route");

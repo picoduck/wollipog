@@ -135,6 +135,12 @@ export function railSeparatorsBefore(groups: readonly DestinationGroup[]): boole
   return groups.map((group, index) => index > 0 && groups[index - 1] !== group);
 }
 
+/**
+ * What a disabled rail item says, as its tooltip's second line and its description (#3004): the
+ * desktop app's instance recovery screen keeps the rail with nothing open behind it.
+ */
+export const RAIL_DISABLED_NOTE = "Open an instance first.";
+
 function selectedRailView(view: View): GlobalViewName | null {
   // Board mode and an expanded session are both the Sessions destination.
   if (view.name === "session" || view.name === "board") return "inbox";
@@ -153,6 +159,7 @@ export function Rail({
   instanceControl,
   settingsControl,
   onSearch,
+  disabled = false,
 }: {
   view: View;
   blockedCount: number;
@@ -166,8 +173,15 @@ export function Rail({
   settingsControl?: ReactNode;
   /** Desktop only: opens the command palette, as Ctrl/Cmd+K does. */
   onSearch?: () => void;
+  /**
+   * No instance is open (the desktop app's recovery screen, #3004): every destination is
+   * `aria-disabled`, in faint ink, says `RAIL_DISABLED_NOTE` in its tooltip and goes nowhere. It is
+   * the 64px rail, with no Search, attention, More sheet or labels switch. The shell passes
+   * Settings disabled the same way (`SettingsTrigger`).
+   */
+  disabled?: boolean;
 }) {
-  const selected = selectedRailView(view);
+  const selected = disabled ? null : selectedRailView(view);
   const instanceScope = useInstanceScope();
   // Read at activation time, not render time: the persisted mode may have changed since mount.
   const sessionsViewDestination = () => sessionsDestination(instanceScope);
@@ -175,7 +189,7 @@ export function Rail({
   // array numbers the desktop rail AND its bare-digit shortcuts, so adding an entry would rebind
   // every later destination and render a second Settings row beside the gear (see navigation.ts).
   // It is therefore tracked on its own rather than through selectedRailView.
-  const settingsSelected = view.name === "settings";
+  const settingsSelected = !disabled && view.name === "settings";
   const isMobile = useIsMobile();
   const isShort = useIsShortViewport();
   const [moreOpen, setMoreOpen] = useState(false);
@@ -243,7 +257,8 @@ export function Rail({
   const { flags } = useExperiments();
   const preferences = useRailPreferences();
   // Desktop only: a stored preference never widens the phone tab bar (#1968).
-  const labelled = !isMobile && preferences.labels;
+  // Disabled, it is the 64px rail whatever the preference says, and its switch is not offered.
+  const labelled = !isMobile && !disabled && preferences.labels;
   const visibleNames = visibleRailViews(preferences, flags);
   const digits = railDigits(visibleNames);
   const itemFor = (name: GlobalViewName) => GLOBAL_VIEW_ITEMS.find((item) => item.id === name)!;
@@ -259,11 +274,12 @@ export function Rail({
   // Search opens the palette rather than a page, so it takes no digit and renumbers nothing. It
   // leads the Work group wherever a saved order put that group.
   const entries: RailEntry[] = [...visibleItems];
-  if (!isMobile && onSearch) {
+  if (!isMobile && onSearch && !disabled) {
     entries.splice(Math.max(0, entries.findIndex((entry) => entryGroup(entry) === "work")), 0, "search");
   }
   const separatorsBefore = isMobile ? entries.map(() => false) : railSeparatorsBefore(entries.map(entryGroup));
   const descriptionPrefix = useId();
+  // A disabled destination draws no attention mark (renderEntry), whatever the counts say.
   const attentionState = { blocked: blockedCount, stalled: stalledCount, machines };
   // A destination moved into the sheet takes its attention with it, so More has to say so while the
   // sheet is closed, or Sessions waiting behind it goes unnoticed (#2110).
@@ -274,7 +290,7 @@ export function Rail({
   // The sheet is rendered for the whole phone breakpoint rather than only when a destination
   // overflows: Settings always lives there, so hiding every optional destination by experiment
   // must not strand it.
-  const showMore = isMobile;
+  const showMore = isMobile && !disabled;
 
   /**
    * Focus returns to More only when the sheet was closed from the keyboard, so a keyboard user keeps
@@ -341,6 +357,25 @@ export function Rail({
     const attention = railAttention(item.id, attentionState);
     const descriptionId = `${descriptionPrefix}-${item.id}`;
     const glyph = <Icon size={isMobile ? TAB_ICON_SIZE : RAIL_ICON_SIZE} />;
+    if (disabled) {
+      // No href, so there is no address to open in a new window either. It stays in the tab order,
+      // so focus shows its tooltip, and `aria-disabled` announces it as unavailable.
+      return (
+        <a
+          className="rail-item"
+          role="link"
+          tabIndex={0}
+          aria-disabled="true"
+          aria-label={item.name}
+          aria-describedby={`${descriptionPrefix}-disabled`}
+          data-rail-tip={isMobile ? undefined : item.name}
+          data-rail-note={isMobile ? undefined : RAIL_DISABLED_NOTE}
+          onClick={(event) => event.preventDefault()}
+        >
+          {isMobile ? railTab(true, item.name, <span className="rail-icon">{glyph}</span>) : <span className="rail-icon">{glyph}</span>}
+        </a>
+      );
+    }
     return (
       <a
         className={`rail-item${active ? " active" : ""}`}
@@ -510,9 +545,13 @@ export function Rail({
             )}
           </div>
         )}
-        <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
-          Sessions: {blockedCount} Blocked, {stalledCount} Stalled
-        </span>
+        {disabled ? (
+          <span id={`${descriptionPrefix}-disabled`} className="sr-only">{RAIL_DISABLED_NOTE}</span>
+        ) : (
+          <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+            Sessions: {blockedCount} Blocked, {stalledCount} Stalled
+          </span>
+        )}
       </div>
       <div className="rail-spacer" />
       {/* On a phone Settings is the trailing item of the More sheet above, and there is no instance
@@ -527,7 +566,7 @@ export function Rail({
           Floating buttons were rejected: that band is occupied by the shell dock and the toast
           stack. */}
       {!isMobile && <div className="rail-settings">{settingsControl}</div>}
-      {!isMobile && (
+      {!isMobile && !disabled && (
         <div className="rail-foot">
           {/* One of three switches for the labelled rail, with Settings › Appearance › Navigation
               and the palette (#1968). Its name is the action it takes, so it has no pressed state. */}
