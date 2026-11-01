@@ -625,7 +625,8 @@ function sessionStatusText(value: CampaignObservedSessionStatus): string {
 
 function cleanupText(value: CampaignObservedCleanup): string {
   if (value.worktrees.length === 0) return "No Worktrees";
-  return value.worktrees.map((worktree, index) => index === 0 ? titleCaseLabel(worktree.status) : worktree.status).join(", ");
+  return value.worktrees.map((worktree) => `${titleCaseLabel(worktree.status)}: ${worktree.path}` +
+    (worktree.reason ? ` — ${worktree.reason}` : "")).join("; ");
 }
 
 /** One pull request as GitHub was observed: its status line says when, and a stale observation's

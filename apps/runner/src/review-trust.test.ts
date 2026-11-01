@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, lchownSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { trustedPath, configuredSessionWritablePaths } from "./review-trust.js";
@@ -11,6 +11,45 @@ const posixOnly = { skip: process.platform === "win32" };
 function executable(path: string, body = "#!/bin/sh\nexit 0\n"): string {
   writeFileSync(path, body, { mode: 0o755 }); return path;
 }
+
+test("trustedPath refuses a regular path owned by another user", posixOnly, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-other-owner-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  chmodSync(root, 0o700);
+  const tool = executable(join(root, "tool"));
+  // Root-owned paths are intentionally trusted, so give root-run fixtures a non-root owner.
+  const ownerUid = uid === 0 ? 1000 : statSync(root).uid;
+  if (uid === 0) {
+    chownSync(root, ownerUid, statSync(root).gid);
+    chownSync(tool, ownerUid, statSync(tool).gid);
+  }
+  const otherUid = ownerUid + 1;
+  assert.equal(statSync(root).mode & 0o777, 0o700);
+  // A temporary ancestor may also belong to the fixture owner rather than root.
+  assert.throws(() => trustedPath(tool, [], otherUid, rootUid), /is owned by another user$/);
+  assert.equal(trustedPath(tool, [], ownerUid, rootUid), tool);
+});
+
+test("trustedPath refuses another user's symlink before following its target", posixOnly, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-other-link-owner-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  chmodSync(root, 0o700);
+  const tool = executable(join(root, "tool"));
+  const link = join(root, "link");
+  symlinkSync(tool, link);
+  const ownerUid = uid === 0 ? 1000 : statSync(root).uid;
+  if (uid === 0) {
+    chownSync(root, ownerUid, statSync(root).gid);
+    chownSync(tool, ownerUid, statSync(tool).gid);
+    lchownSync(link, ownerUid, statSync(root).gid);
+  }
+  const otherUid = ownerUid + 1;
+  assert.equal(statSync(root).mode & 0o777, 0o700);
+  assert.throws(() => trustedPath(link, [], otherUid, rootUid), {
+    message: `${link} is owned by another user`,
+  }, "the link itself is refused before checking its containing directory or target");
+  assert.equal(trustedPath(link, [], ownerUid, rootUid), tool);
+});
 
 test("trusted paths refuse session-writable roots and other-user-writable components", posixOnly, (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-trust-"));

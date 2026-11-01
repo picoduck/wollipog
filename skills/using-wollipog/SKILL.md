@@ -25,6 +25,7 @@ wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <ta
 wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
+wollipog session unarchive <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
 wollipog session release-hold <session-id> <hold-id> --json
 wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
@@ -47,6 +48,12 @@ wollipog decision list [--session <descendant-id>] [--limit <1-100>] [--cursor <
 wollipog decision consume <occurrence-id> --snapshot '<json>' [--action '<json>'] --json
 wollipog decision reconcile <occurrence-id> --snapshot '<json>' --json
 ```
+
+For a verified, fully archived campaign child's refused dirty worktree, only its controlling Orchestrator may use `session unarchive`
+(protocol 266+ on control plane and runner). This restores visibility without restarting or deleting
+files. Then restart the child and ask it to preserve and clean its work, verify its new final report,
+and archive again. Retirement still refuses dirty, unpushed or undelivered work; an older runner
+refuses recovery explicitly. Keep scratch reports outside managed worktrees.
 
 Without `--after`, `session events` returns the newest `--limit` events (default 30, maximum 100).
 To read a long range, such as everything a child did since a known point, page forward: start with
@@ -133,7 +140,18 @@ session credential where a token is provisioned. Provider-isolated sessions hold
 relay key, which cannot authenticate direct HTTP calls; upgrade the runner/CLI for the tools rather
 than seeking a bearer token. Older control planes expose only pending requests through
 `list_descendant_requests`; update them for authoritative descendant state inspection.
-Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
+Only the current owner may resolve the exact pending occurrence.
+
+For an unnecessary pending human-owned `review_round_extension`, the controlling Orchestrator
+may instead call `withdraw_descendant_workflow_decision` with the child's `sessionId`, the exact
+`occurrenceId`, and a nonempty `reason` explaining the withdrawal and giving the child's next
+instructions (control plane v265+). It removes only that request, audits the Orchestrator's
+withdrawal, and delivers the reason through the durable resume path without stopping or restarting
+the child. The decision reads `revoked` with `withdrawal` provenance; it grants no approval and
+cannot be consumed. Approved decisions and categories not designated for withdrawal are refused.
+Use `get_workflow_decision` for the exact outcome; a request that still needs a person stays theirs.
+
+Authentication, secrets,
 persistent grants, governance changes, budget increases, and tool guardrails remain human-only.
 Separate human-established budget authority may permit bounded managed-worker reservations and
 allocations; never infer it from a campaign name or use an unmetered worker to evade accounting.

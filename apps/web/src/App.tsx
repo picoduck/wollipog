@@ -48,7 +48,7 @@ import { closeGuardLinks } from "./desktop-close-guard.js";
 import { DesktopUpdateNotifier } from "./components/DesktopUpdateNotifier.js";
 import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
-import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
+import { useWindowTitle } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { LazyDialogBoundary } from "./components/LazyDialogBoundary.js";
 import { LazyRouteFocusRecovery, LazyRouteLoading, routeFocusIsLost } from "./components/LazyRouteLoading.js";
@@ -96,8 +96,8 @@ import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
 import { AppBarSearchProvider } from "./components/PageHeader.js";
-import { Rail, RailDragStrip } from "./components/Rail.js";
-import { InstancesPanel } from "./components/InstancesPanel.js";
+import { Rail } from "./components/Rail.js";
+import { InstanceRecoveryShell } from "./components/InstanceRecoveryShell.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
 import { useSessionsViewToggleKey } from "./useSessionsViewToggleKey.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
@@ -251,55 +251,6 @@ function CloseGuardSessionSource() {
     });
   }, [scope]);
   return null;
-}
-
-function InstanceRecoveryShell() {
-  const instances = useInstances();
-  const loading = instances.phase === "loading" || instances.phase === "opening";
-  useWindowTitle("Instances");
-  return (
-    <div className="app instance-recovery-app">
-      <aside className="instance-recovery-nav" aria-label="Instance Navigation">
-        <div className="brand">
-          <img className="brand-mark" src="/icons/icon-192.png" alt="" aria-hidden="true" />
-          <div className="brand-name">Wollipog</div>
-        </div>
-        <InstanceSelector labelled />
-        <RailDragStrip />
-      </aside>
-      <main className="main">
-        <header className="topbar" {...windowDragRegion()}><h1>Instances</h1></header>
-        <div className="main-body instance-recovery-body">
-          {loading ? (
-            <div className="instance-recovery-state" role="status" aria-live="polite">
-              <h2>{instances.phase === "loading" ? "Loading Instances" : `Connecting to ${instances.activeProfile.label}`}</h2>
-              <p>{instances.phase === "loading" ? "Loading saved Wollipog instances…" : "Opening a secure connection…"}</p>
-            </div>
-          ) : (
-            <>
-              <div className="instance-recovery-state" role={instances.phase === "missing" ? "alert" : "status"}>
-                <h2>{instances.phase === "missing" ? "Instance Not Found" : `${instances.activeProfile.label} Is Unavailable`}</h2>
-                <p>
-                  {instances.phase === "missing"
-                    ? "This saved instance no longer exists. Choose another instance before opening this resource."
-                    : instances.error ?? "Wollipog could not open this instance."}
-                </p>
-                <div className="toolbar-actions">
-                  {instances.phase !== "missing" && (
-                    <button type="button" className="btn primary" onClick={() => void instances.retryActive()}>Retry</button>
-                  )}
-                  {(instances.phase === "missing" || instances.activeProfile.id !== "local") && (
-                    <button type="button" className="btn" onClick={() => void instances.goToThisMachine()}>Go to This Machine</button>
-                  )}
-                </div>
-              </div>
-              <InstancesPanel />
-            </>
-          )}
-        </div>
-      </main>
-    </div>
-  );
 }
 
 function xtermOwnsKey(target: EventTarget | null): boolean {

@@ -147,6 +147,24 @@ test("details show observed GitHub facts beside the reported stage, with stale a
 const FORGE_EVIDENCE_DIR = process.env.CAMPAIGN_FORGE_EVIDENCE_DIR;
 for (const theme of ["dark", "light"] as const) {
   for (const [device, viewport] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 390, height: 844 }]] as const) {
+    test(`dirty cleanup paths fit a ${device} ${theme} viewport`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&theme=${theme}`);
+      await workRows(page).filter({ hasText: "Ledger Read API" }).click();
+      const cleanup = page.locator("dd").filter({ hasText: /Refused: \/w\/3/ });
+      await expect(cleanup).toContainText('10 paths');
+      await expect(cleanup).toContainText('"report.md"');
+      await expect(cleanup).toContainText('2 more');
+      await cleanup.scrollIntoViewIfNeeded();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (process.env.CAMPAIGN_CLEANUP_EVIDENCE_DIR) await page.screenshot({
+        path: `${process.env.CAMPAIGN_CLEANUP_EVIDENCE_DIR}/cleanup-${device}-${theme}.png`,
+      });
+    });
+  }
+}
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 390, height: 844 }]] as const) {
     test(`forge facts fit a ${device} ${theme} viewport`, async ({ page }) => {
       await page.setViewportSize(viewport);
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&theme=${theme}`);

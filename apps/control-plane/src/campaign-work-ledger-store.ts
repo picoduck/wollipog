@@ -732,25 +732,46 @@ export class CampaignWorkLedgerStore {
     return sessions;
   }
 
-  /** Sessions an issue closure (#3084) may leave out: each has an open attempt, and every attempt
-   * it has ever had is on an item created after attribution history began that has never tracked
-   * the issue and has never been linked to another item as a follow-up origin or result. All of
-   * it comes from append-only history, so a session can only lose this status, never regain it by
-   * a ledger edit. */
-  issueClosureExcludableSessions(campaignId: string, repository: string, issueNumber: number): Set<string> {
+  /** Sessions whose ledger history proves them unrelated to every listed issue of one repository
+   * (#3084, #3914). A session qualifies only when it has an open attempt in this campaign and no
+   * item it can reach is related. It reaches every item it has ever attempted, and from those every
+   * item joined to one by follow-up lineage, followed transitively in both directions (an origin's
+   * results, a result's origins, their results, and so on). An item is related when it has ever
+   * tracked a listed issue, or when it predates attribution history (a legacy item, whose issues
+   * and links are unknown). Lineage that never meets a related item, such as a follow-up for
+   * another issue, does not bind.
+   *
+   * Every input is append-only history, so the reachable set only grows: a session can lose this
+   * status but never regain it by a ledger edit. An empty list proves only that no legacy item is
+   * reachable. Closures pass their one issue; callers comparing a set of issues pass them all. */
+  sessionsUnrelatedToIssues(campaignId: string, repository: string, issueNumbers: readonly number[]): Set<string> {
     return new Set((this.stmt(`
-      SELECT DISTINCT attempt.session_id FROM campaign_work_attempts attempt
-      WHERE attempt.campaign_session_id=?1 AND attempt.session_id IS NOT NULL AND attempt.ended_at IS NULL
-        AND NOT EXISTS (
-          SELECT 1 FROM campaign_work_attempts earlier
-          WHERE earlier.session_id=attempt.session_id AND (
-            EXISTS (SELECT 1 FROM campaign_work_legacy_items legacy WHERE legacy.work_item_id=earlier.work_item_id)
-            OR EXISTS (SELECT 1 FROM campaign_work_item_issue_history history
-              WHERE history.work_item_id=earlier.work_item_id
-                AND history.issue_repository=lower(?2) AND history.issue_number=?3)
-            OR EXISTS (SELECT 1 FROM campaign_work_lineage_edges edge
-              WHERE edge.origin_work_item_id=earlier.work_item_id OR edge.result_work_item_id=earlier.work_item_id)))
-    `).all(campaignId, repository, issueNumber) as Array<{ session_id: string }>).map((row) => row.session_id));
+      WITH RECURSIVE
+        candidate(session_id) AS (
+          SELECT session_id FROM campaign_work_attempts
+          WHERE campaign_session_id=?1 AND session_id IS NOT NULL AND ended_at IS NULL),
+        reach(session_id, work_item_id) AS (
+          SELECT earlier.session_id, earlier.work_item_id FROM candidate
+            JOIN campaign_work_attempts earlier ON earlier.session_id=candidate.session_id
+          UNION
+          SELECT reach.session_id, edge.result_work_item_id FROM reach
+            JOIN campaign_work_lineage_edges edge ON edge.origin_work_item_id=reach.work_item_id
+          UNION
+          SELECT reach.session_id, edge.origin_work_item_id FROM reach
+            JOIN campaign_work_lineage_edges edge ON edge.result_work_item_id=reach.work_item_id)
+      SELECT candidate.session_id FROM candidate WHERE NOT EXISTS (
+        SELECT 1 FROM reach WHERE reach.session_id=candidate.session_id AND (
+          EXISTS (SELECT 1 FROM campaign_work_legacy_items legacy WHERE legacy.work_item_id=reach.work_item_id)
+          OR EXISTS (SELECT 1 FROM campaign_work_item_issue_history history
+            WHERE history.work_item_id=reach.work_item_id AND history.issue_repository=lower(?2)
+              AND history.issue_number IN (SELECT value FROM json_each(?3)))))
+    `).all(campaignId, repository, JSON.stringify(issueNumbers)) as Array<{ session_id: string }>).map((row) => row.session_id));
+  }
+
+  /** Sessions an issue closure may leave out: those {@link sessionsUnrelatedToIssues} proves
+   * unrelated to the one issue being closed. */
+  issueClosureExcludableSessions(campaignId: string, repository: string, issueNumber: number): Set<string> {
+    return this.sessionsUnrelatedToIssues(campaignId, repository, [issueNumber]);
   }
 
   /* ------------------------------ Dependencies ------------------------------ */
@@ -1328,7 +1349,14 @@ export class CampaignWorkLedgerStore {
         workItemId = existing.id;
       }
       if (request.disposition === "accepted") {
-        const key = request.resultingWorkItemKey ??
+        // Recording a published issue on an already accepted recommendation links the work item that
+        // acceptance created, never a second one (#3918). An explicit key still chooses another.
+        const linked = request.resultingWorkItemKey === undefined ? this.stmt(
+          `SELECT item.item_key FROM campaign_recommendation_dispositions disposition
+           JOIN campaign_work_items item ON item.id=disposition.resulting_work_item_id
+           WHERE disposition.recommendation_id=? AND disposition.disposition='accepted'`,
+        ).get(recommendation.id) as { item_key: string } | undefined : undefined;
+        const key = request.resultingWorkItemKey ?? linked?.item_key ??
           (request.resultingIssue ? `${request.resultingIssue.repository}#${request.resultingIssue.number}` : `followup:${recommendation.id}`);
         const existing = this.itemByKey(campaignId, key);
         if (existing) {

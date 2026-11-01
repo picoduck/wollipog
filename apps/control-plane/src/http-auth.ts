@@ -32,6 +32,8 @@ export interface AuthGateDeps {
   /** Resolve the device a request authenticates as. `allowQueryToken` is true only for `/ui`
    * (browsers cannot set headers on a WebSocket upgrade). */
   authenticate: (req: FastifyRequest, allowQueryToken?: boolean) => AuthedDevice | null;
+  /** Credential-bound diagnostics only, called after authentication has failed. */
+  authenticationRefusal?: (req: FastifyRequest) => string | undefined;
   /** Optional organization-role authorization layered after authentication/origin checks. */
   authorize?: (req: FastifyRequest, principal: AuthedDevice | null) =>
     string | { statusCode: number; error: string } | null;
@@ -80,7 +82,7 @@ export function registerAuthGate(app: FastifyInstance, deps: AuthGateDeps): void
         !isPublicPushReceiptAck(req.method, routePath)) {
       if (routePath === "/ui") return; // authenticated inside the /ui upgrade handler
       const principal = deps.authenticate(req);
-      if (!principal) return reply.code(401).send({ error: UNAUTHORIZED });
+      if (!principal) return reply.code(401).send({ error: deps.authenticationRefusal?.(req) ?? UNAUTHORIZED });
       return; // token-authed non-loopback API call: Origin is moot (possession beats Origin)
     }
 

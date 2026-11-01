@@ -14,6 +14,25 @@ recovers it.
   hold the write lock. A statement that meets that lock now waits up to 250 ms instead of failing
   at once with `SQLITE_BUSY`. The wait blocks the event loop, so it stays short: a lock held longer
   still fails fast, and periodic work defers its tick as before.
+- Runner frame handling retries base `SQLITE_BUSY` (errcode 5) at the failed prepared statement
+  or transaction boundary, with three retries shared by the entire frame or runtime-update run.
+  A cumulative one-second contention-time budget measured by a monotonic clock also stops new
+  retries; an in-flight SQLite operation can add its existing 250 ms wait. These retries are synchronous: contention
+  can block the event loop for about one second, but never replays already-published frame side
+  effects or lets later socket frames overtake the failed write. Cooperative inventory yields
+  retain that same budget, without counting time spent processing or yielding between operations.
+  Single-statement deferred transaction starts acquire write intent within runner frame handling,
+  avoiding stale read transactions during lock upgrades. Savepoint-based stores acquire the same
+  write intent with a zero-row update immediately after opening their savepoint, before any reads;
+  nested rollback and root RELEASE semantics are unchanged. Failed admission unwinds its savepoint.
+  Registration first checks for a recognized active or pending credential read-only, so unknown or
+  revoked tokens do not contend for write intent, then rechecks under the write lock before
+  activation. Recognized expired pending credentials retain their existing revoke-and-prune path.
+  Other entry points retain their prior
+  behavior and timeout. Extended busy codes and arbitrary multi-statement scripts are not replayed.
+  `runner_persistence_contention` identifies the message type, runner, retry count and exhaustion;
+  an exhausted frame logs `runner_persistence_exhausted` and closes only that socket with 1011,
+  `runner persistence unavailable`. Malformed frames keep their separate 1008 rejection.
 - A second connection beside a running control plane, such as a test that inspects or adjusts its
   database, uses `ControlPlaneDb.attach`, never `open` (#3789). `open` applies the schema and runs
   startup work, so it takes the write lock repeatedly. An attached connection applies no schema,

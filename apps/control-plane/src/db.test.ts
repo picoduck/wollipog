@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import Fastify from "fastify";
+import { sessionCredentialRefusal } from "./session-credential-refusal.js";
+import { registerAuthGate, UNAUTHORIZED } from "./http-auth.js";
+import { hashToken, isAuthenticatedAgentControlClaim } from "./auth.js";
+import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
 import { test } from "node:test";
 import { once } from "node:events";
 import { Worker } from "node:worker_threads";
@@ -3768,6 +3773,35 @@ test("old campaign report tables migrate without losing an existing verification
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("old campaign request resolutions migrate, keep their resolver and record a server revocation's reason (#3916)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-resolution-migration-"));
+  const file = join(root, "cp.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
+    for (const column of ["revocation_reason", "triggered_by"]) {
+      db.raw().exec(`ALTER TABLE orchestrator_campaign_request_resolutions DROP COLUMN ${column}`);
+    }
+    db.raw().prepare(`INSERT INTO orchestrator_campaign_request_resolutions
+      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,outcome,resolved_by,resolved_at)
+      VALUES ('campaign','old','campaign','wd_old','campaign_issue_scope','revoked','human',?)`).run(Date.now());
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    const old = reopened.campaignRequestResolution("campaign", "old");
+    assert.equal(old?.resolvedBy, "human");
+    assert.equal(old?.revocationReason, undefined);
+    assert.equal(old?.triggeredBy, undefined);
+    reopened.recordCampaignRequestResolution({ campaignSessionId: "campaign", requestToken: "new", subjectSessionId: "campaign",
+      occurrenceId: "wd_new", category: "campaign_issue_scope", outcome: "revoked", resolvedBy: "system", resolvedAt: Date.now(),
+      revocationReason: "approval_refused_stale", triggeredBy: "human" });
+    const recorded = reopened.campaignRequestResolution("campaign", "new");
+    assert.equal(recorded?.revocationReason, "approval_refused_stale");
+    assert.equal(recorded?.triggeredBy, "human");
+    reopened.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {
@@ -3835,6 +3869,63 @@ test("agent-control credentials are hash-only, exact-session, runner-bound, repl
   assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), true);
   db.deleteSession("agent-session");
   assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), false);
+});
+
+test("refused session credentials disclose stop provenance only to the matching bearer", async () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "agent-session" }));
+  db.setAgentControlCredential("agent-session", "runner-1", hashToken("known-secret"), 1);
+  const app = Fastify();
+  const reasons: string[] = [];
+  registerAuthGate(app, {
+    authenticate: () => null,
+    isAllowedOrigin: () => true,
+    authenticationRefusal: (req) => {
+      const refusal = sessionCredentialRefusal(req.headers, db);
+      if (refusal) reasons.push(refusal.reason);
+      return refusal?.error;
+    },
+  });
+  app.get("/api/compatibility", async () => assert.fail("refused request reached the handler"));
+  const request = (token: string, actor = "agent-session") => app.inject({
+    url: "/api/compatibility", headers: {
+      authorization: `Bearer ${token}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor,
+    },
+  });
+  try {
+    db.updateSessionStatus("agent-session", "stopped", 2, { cause: "runner_disconnect" });
+    assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", hashToken("known-secret")), true);
+    assert.equal(isAuthenticatedAgentControlClaim({ credentialValid: true, claimedSessionId: "agent-session",
+      session: db.getSession("agent-session") }), false, "diagnostics do not make stopped credentials accepted");
+    const reconnecting = await request("known-secret");
+    assert.equal(reconnecting.statusCode, 401);
+    assert.match(reconnecting.json().error, /runner reconnecting; retry/);
+    for (const [token, actor] of [["wrong", "agent-session"], ["known-secret", "missing"], ["", "agent-session"]]) {
+      const unknown = await request(token!, actor!);
+      assert.equal(unknown.statusCode, 401);
+      assert.equal(unknown.json().error, UNAUTHORIZED);
+    }
+    db.confirmSessionStop("agent-session", "runner_absent", 3);
+    assert.match((await request("known-secret")).json().error, /session stopped.*Orchestrator.*restart/);
+    db.updateSessionStatus("agent-session", "running", 4);
+    assert.equal(isAuthenticatedAgentControlClaim({ credentialValid: true, claimedSessionId: "agent-session",
+      session: db.getSession("agent-session") }), true);
+    for (const state of ["running", "idle"] as const) {
+      db.updateSessionStatus("agent-session", state, 5);
+      const unavailable = await request("known-secret");
+      assert.equal(unavailable.statusCode, 401);
+      assert.match(unavailable.json().error, /check the requested operation, session state and delegated access/);
+      assert.doesNotMatch(unavailable.json().error, /restart|reconnect|stopped/);
+    }
+    db.raw().prepare(`INSERT INTO session_role_conversions
+      (session_id, conversion_id, command, state, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run("agent-session", "conversion-test", "{}", "preparing", 6);
+    const fenced = await request("known-secret");
+    assert.equal(fenced.statusCode, 401);
+    assert.equal(fenced.json().error, UNAUTHORIZED);
+    assert.deepEqual(reasons, ["runner_reconnecting", "unknown_credential", "unknown_credential", "unknown_credential", "session_stopped", "session_unavailable", "session_unavailable", "unknown_credential"]);
+    assert.doesNotMatch(JSON.stringify(reasons), /known-secret|agent-session|runner-1/);
+  } finally { await app.close(); db.close(); }
 });
 
 test("policy hook reconciliation queries use session/status indexes instead of optional-filter scans", () => {

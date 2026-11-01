@@ -7,6 +7,8 @@ const machine = readFileSync(new URL("./MachineDetail.tsx", import.meta.url), "u
 const settings = readFileSync(new URL("./MachineSettingsDialog.tsx", import.meta.url), "utf8");
 const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", import.meta.url), "utf8");
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
+const teamDialog = readFileSync(new URL("./TeamDialog.tsx", import.meta.url), "utf8");
+const personAccess = readFileSync(new URL("./PersonAccessDialogs.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.meta.url), "utf8");
 const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
@@ -21,7 +23,7 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /aria-controls=\{`connections-\$\{item\.id\}-panel`\}/);
   assert.match(view, /handleRovingChoiceKeyDown\(event, "tab"\)/);
   assert.match(view, /id: "instances" as const/);
-  assert.match(view, /<InstancesPanel \/>/);
+  assert.match(view, /<InstancesPanel addButtonRef=\{addInstanceRef\} \/>/);
   assert.match(view, /id: "machines", label: <>Machines/);
   assert.match(view, /id: "people", label: <>People and Devices/);
   assert.match(view, /const instancesTab = instances\.desktopMultiInstance && !isMobile/);
@@ -49,8 +51,8 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(access, /Forms open only when/);
   assert.match(access, /<Modal/);
   assert.match(access, /nextAdmin \? await api\.listDevices\(\) : \{ devices: \[\] \}/);
-  assert.match(access, /api\.createIdentityTeam\(\{ name: name\.trim\(\), memberUserIds: memberIds \}\)/);
-  assert.match(access, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
+  assert.match(teamDialog, /api\.createIdentityTeam\(\{ name: trimmed, memberUserIds: memberIds \}\)/);
+  assert.match(personAccess, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
   assert.doesNotMatch(access, /device-pair-row/);
   // One detail for every machine (#2988): the spec sheet moved into Connection Details.
   assert.doesNotMatch(view, /runner-meta|runner-system-meta/);
@@ -62,13 +64,10 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.doesNotMatch(view, /export function (BoxCard|NativeRunnerCard)\(/);
   assert.match(machine, /<h2 className="machine-detail-title" title=\{name\}>\{name\}<\/h2>/);
   assert.doesNotMatch(css, /\.runner-card\.status-offline/);
-  // auto-FILL, not auto-fit: auto-fit collapses the empty tracks so a single instance stretched to
-  // a full-bleed card holding two fields.
-  const rule = /\.instance-grid\s*\{[^}]*\}/s.exec(css)?.[0];
-  assert.ok(rule, ".instance-grid rule must exist");
-  assert.match(rule!, /repeat\(auto-fill, minmax\(min\(100%, 360px\), 1fr\)\)/,
-    ".instance-grid must use auto-fill so one card does not span the row");
-  assert.doesNotMatch(rule!, /auto-fit/, ".instance-grid must not reintroduce auto-fit");
+  // Instances are rows in one surface now (#3002): the card grid, its cards, their uppercase
+  // definition terms and the count toolbar are gone.
+  assert.doesNotMatch(css, /\.(instances-page|instance-grid|instance-card|instance-meta|instance-status-dot)\b/);
+  assert.doesNotMatch(css.match(/\.instance-row[^{]*\{[^}]*\}/g)?.join("\n") ?? "", /text-transform/);
   // Machines are rows beside their detail now (#2985): the card grid is gone.
   assert.doesNotMatch(css, /\.runner-grid\b/);
   assert.doesNotMatch(view, /runner-grid/);

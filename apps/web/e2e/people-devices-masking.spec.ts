@@ -257,12 +257,12 @@ for (const formFactor of ["desktop", "phone"] as const) {
     let dialog = page.getByRole("dialog", { name: "Manage Person" });
     await expect(dialog).toBeVisible();
     await expectNoEmailLeak(page);
-    await dialog.getByRole("button", { name: "Show Person Name" }).click();
+    await dialog.getByRole("button", { name: "Show Name", exact: true }).click();
     await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await memberRow.getByRole("button", { name: "Manage", exact: true }).click();
     dialog = page.getByRole("dialog", { name: "Manage Person" });
-    await expect(dialog.getByRole("button", { name: "Show Person Name" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Show Name", exact: true })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
@@ -301,26 +301,26 @@ for (const formFactor of ["desktop", "phone"] as const) {
 
     const teamRow = page.getByRole("region", { name: "Teams" }).locator(".access-row").first();
     await teamRow.getByRole("button", { name: "Manage" }).click();
-    dialog = page.getByRole("dialog", { name: "Manage Support" });
+    dialog = page.getByRole("dialog", { name: "Manage Team" });
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 1/ })).toBeVisible();
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 2/ })).toBeVisible();
     await expectNoEmailLeak(page);
-    await dialog.getByRole("button", { name: "Show Person Names" }).click();
+    await dialog.getByRole("button", { name: "Show Names" }).click();
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("button", { name: "Create Team" }).click();
-    dialog = page.getByRole("dialog", { name: "Create a Team" });
+    dialog = page.getByRole("dialog", { name: "Create Team" });
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 1/ })).toBeVisible();
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 2/ })).toBeVisible();
     await expectNoEmailLeak(page);
-    await dialog.getByRole("button", { name: "Show Person Names" }).click();
+    await dialog.getByRole("button", { name: "Show Names" }).click();
     await expect(dialog).toContainText(OWNER);
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await page.getByRole("button", { name: "Create Team" }).click();
-    dialog = page.getByRole("dialog", { name: "Create a Team" });
-    await expect(dialog.getByRole("button", { name: "Show Person Names" })).toBeVisible();
+    dialog = page.getByRole("dialog", { name: "Create Team" });
+    await expect(dialog.getByRole("button", { name: "Show Names" })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
   });
@@ -396,8 +396,10 @@ for (const formFactor of ["desktop", "phone"] as const) {
     // and the reveal state of each name in it, stays mounted.
     const requestsBefore = await identityRequests(page);
     await page.getByRole("region", { name: "Teams" }).getByRole("button", { name: "Manage" }).click();
-    const dialog = page.getByRole("dialog", { name: "Manage Support" });
-    await dialog.getByRole("button", { name: "Save Members" }).click();
+    const dialog = page.getByRole("dialog", { name: "Manage Team" });
+    // Save Changes sends nothing when nothing changed, so the team is renamed to make it save (#3000).
+    await dialog.getByRole("textbox", { name: "Team Name" }).fill("Support Desk");
+    await dialog.getByRole("button", { name: "Save Changes" }).click();
     await expect(dialog).toHaveCount(0);
     expect(await identityRequests(page)).toBeGreaterThan(requestsBefore);
     await expect(context.getByRole("button", { name: "Show Your Name" })).toBeVisible();

@@ -1,4 +1,5 @@
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Provider-neutral Wollipog CLI plus the general stdio MCP entrypoint. */
 
 import { readFileSync } from "node:fs";
@@ -737,6 +738,8 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
     case "archive":
       return words[2] ? { tool: "archive_session", input: { sessionId: words[2] } } : { error: "session archive requires an id" };
+    case "unarchive":
+      return words[2] ? { tool: "unarchive_session", input: { sessionId: words[2] } } : { error: "session unarchive requires an id" };
     case "guardrails":
       return words[2]
         ? {
@@ -790,6 +793,7 @@ async function compatible(
         const body = JSON.parse(await response.text()) as { error?: unknown };
         if (typeof body.error === "string") detail = `: ${body.error}`;
       } catch { /* Keep the status alone when the body is not a JSON error. */ }
+      if (response.status === 401 && sessionId) detail = `: ${sessionCredentialRefusal(detail.replace(/^: /u, ""))}`;
       return { error: `control plane compatibility check failed: HTTP ${response.status}${detail}` };
     }
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };

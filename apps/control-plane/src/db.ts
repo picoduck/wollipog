@@ -8,6 +8,7 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { runnerRetryConnection } from "./runner-persistence.js";
 import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
   installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable, validProviderPublicationInput,
@@ -15,7 +16,7 @@ import {
 } from "./provider-profile-publication-store.js";
 import { CampaignBudgetLedger, FollowUpApprovalRequired, campaignFollowUpAdmissionKey, campaignFollowUpAdmissionTitle,
   campaignFollowUpIdentity, type CampaignFollowUpIdentityContent } from "./campaign-budget.js";
-import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef } from "@wollipog/protocol";
+import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef, WorkflowDecisionRevocationReason } from "@wollipog/protocol";
 
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
@@ -1048,7 +1049,8 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
 -- (#3083). Written with the resolution's governance audit, read when the request's removal is
 -- published: a removal the campaign Orchestrator caused itself wakes nobody, and any other carries
 -- its outcome and resolver into the continuation. Rows are bounded by age, not by consumption, so
--- a deferred attention batch replaying the same removal still finds them.
+-- a deferred attention batch replaying the same removal still finds them. A server revocation
+-- records its reason and the kind of actor whose action led to it (#3916).
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_request_resolutions (
   campaign_session_id TEXT NOT NULL,
   request_token       TEXT NOT NULL,
@@ -1060,6 +1062,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_request_resolutions (
   outcome             TEXT NOT NULL,
   resolved_by         TEXT NOT NULL,
   resolved_at         INTEGER NOT NULL,
+  revocation_reason   TEXT,
+  triggered_by        TEXT,
   PRIMARY KEY (campaign_session_id, request_token),
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -3753,6 +3757,11 @@ export interface CampaignRequestResolutionRecord {
   outcome: string;
   resolvedBy: CampaignRequestResolver;
   resolvedAt: number;
+  /** #3916: present when the server revoked the request, which it records as `system`. */
+  revocationReason?: WorkflowDecisionRevocationReason;
+  /** #3916: on a server revocation, the kind of actor whose action led to it, such as the person
+   * whose approval was refused as stale. Never the resolver. */
+  triggeredBy?: CampaignRequestResolver;
 }
 
 export interface CampaignContinuationRecord {
@@ -4339,6 +4348,9 @@ export type SkillAgentSelector =
 export type SkillAssignmentScopeKind = "instance" | "runner";
 
 export class SkillImportConflictError extends Error {}
+
+/** A team member's removal would leave their own work nested inside work shared with the team. */
+export class TeamMemberContainmentError extends Error {}
 
 export interface SkillVersionSummary {
   id: string;
@@ -5601,6 +5613,7 @@ export class ControlPlaneDb {
      * owner knows which blobs it is staging. */
     private readonly attached: boolean,
   ) {
+    this.db = db = runnerRetryConnection(db);
     if (!attached) {
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
@@ -7044,6 +7057,7 @@ export class ControlPlaneDb {
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
+      "withdrawal TEXT",
       "delegated_video_evidence TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
@@ -7854,6 +7868,14 @@ export class ControlPlaneDb {
     for (const column of ["report_event_epoch INTEGER", "report_ts INTEGER", "report_digest TEXT"]) {
       if (!campaignReportColumns.has(column.split(" ")[0]!)) {
         db.exec(`ALTER TABLE orchestrator_campaign_child_reports ADD COLUMN ${column}`);
+      }
+    }
+    // A server revocation's reason and trigger (#3916). Earlier rows have neither and read as before.
+    const requestResolutionColumns = new Set((db.prepare("PRAGMA table_info(orchestrator_campaign_request_resolutions)")
+      .all() as Array<{ name: string }>).map((column) => column.name));
+    for (const column of ["revocation_reason TEXT", "triggered_by TEXT"]) {
+      if (!requestResolutionColumns.has(column.split(" ")[0]!)) {
+        db.exec(`ALTER TABLE orchestrator_campaign_request_resolutions ADD COLUMN ${column}`);
       }
     }
     const controlPlane = new ControlPlaneDb(
@@ -10681,7 +10703,13 @@ export class ControlPlaneDb {
     now: number,
     protocolVersion: number | null = null,
   ): { credentialId: string; scope: ResourceScope; legacy: boolean; activated: boolean } | null {
-    this.db.exec("BEGIN");
+    // Reject unknown or revoked credentials without competing for a write lock. This
+    // read is only a preflight: authentication is repeated under write intent before activation.
+    // A known expired pending token still enters normal authentication so its revocation and
+    // bounded-history pruning retain their existing behavior.
+    if (!this.stmt("SELECT 1 FROM runner_credentials WHERE runner_id=? AND token_hash=? AND status IN ('pending','active')")
+      .get(meta.runnerId, tokenHash)) return null;
+    this.db.exec("BEGIN IMMEDIATE");
     try {
       const credential = this.authenticateRunnerCredential(meta.runnerId, tokenHash, now, false);
       if (!credential) {
@@ -11118,6 +11146,30 @@ export class ControlPlaneDb {
     return this.identityAdministration(context).teams.find((item) => item.teamId === input.teamId)!;
   }
 
+  /** Team names are unique within an organization (exactly, as the table's constraint compares). */
+  identityTeamNameTaken(organizationId: string, name: string, exceptTeamId?: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM identity_teams WHERE organization_id=? AND name=? AND team_id<>?")
+      .get(organizationId, name, exceptTeamId ?? ""));
+  }
+
+  /** Renames a team in its organization. The name is display-only: ids, members and every grant
+   * that names the team are unchanged. */
+  renameIdentityTeam(input: {
+    teamId: string;
+    organizationId: string;
+    name: string;
+    now: number;
+  }): TeamView | "not_found" | "name_taken" {
+    const team = this.stmt("SELECT 1 FROM identity_teams WHERE team_id=? AND organization_id=?")
+      .get(input.teamId, input.organizationId);
+    if (!team) return "not_found";
+    if (this.identityTeamNameTaken(input.organizationId, input.name, input.teamId)) return "name_taken";
+    this.stmt("UPDATE identity_teams SET name=?, updated_at=? WHERE team_id=? AND organization_id=?")
+      .run(input.name, input.now, input.teamId, input.organizationId);
+    const context = { ...this.localIdentityContext(), organizationId: input.organizationId };
+    return this.identityAdministration(context).teams.find((item) => item.teamId === input.teamId)!;
+  }
+
   /** Membership can be part of a persisted privacy invariant: a user-owned resource is safely
    * nested inside a team-owned parent only while that user remains a member of the team. */
   private assertTeamMemberRemovalPreservesResourceContainment(
@@ -11135,7 +11187,7 @@ export class ControlPlaneDb {
           wider.organizationId !== organizationId || narrower.owner.kind !== "user" ||
           wider.owner.kind !== "team" || wider.owner.teamId !== teamId ||
           !removedMemberIds.has(narrower.owner.userId)) return;
-      throw new Error(
+      throw new TeamMemberContainmentError(
         `cannot remove user '${narrower.owner.userId}' from this team because ${relationship} ` +
         "relies on that membership; change the related access scopes first",
       );
@@ -12407,7 +12459,9 @@ export class ControlPlaneDb {
         }
       }
       const permissions = principal.kind === "human" && humanPermissions.get(row.summary_owns) ||
-        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant });
+        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant,
+          archivedWorktreeRecoveryError: principal.kind === "agent" && principal.orchestrator &&
+            row.parent_session_id === principal.credentialSessionId ? this.campaignWorktreeRecoveryError(view.id) : undefined });
       if (principal.kind === "human") humanPermissions.set(row.summary_owns, permissions);
       // This row has not escaped the generator yet; avoid copying its projection just to add
       // requester-owned verdicts. Only held rows need the advice rewrite.
@@ -16993,17 +17047,27 @@ export class ControlPlaneDb {
 
   /** Apply a registration batch of existing snapshots in one durable transaction. The caller
    * must reserve this for sessions whose service-level reconciliation is read-only; active
-   * sessions and sessions with pending durable work stay on the per-session path. */
+   * sessions with pending durable work stay on the per-session path. With fallbackOnRollback,
+   * an empty result for a nonempty batch means nothing committed; retry on the service path. */
   updateSessionsFromSnapshots(
     snapshots: readonly SessionSnapshot[],
     now: number,
+    options: { fallbackOnRollback?: boolean } = {},
   ): Array<RunnerHistoryReconciliation | null> {
     if (snapshots.length === 0) return [];
     if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
       throw new Error("updateSessionsFromSnapshots requires an autocommit connection");
     }
-    const histories = this.atomic(() => snapshots.map((snap) =>
-      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    let histories: Array<RunnerHistoryReconciliation | null>;
+    try {
+      histories = this.atomic(() => snapshots.map((snap) =>
+        this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    } catch (error) {
+      // Only a rolled-back transaction may fall back. Maintenance below runs after COMMIT;
+      // its failure must never be mistaken for an unapplied batch and retried.
+      if (options.fallbackOnRollback && !this.db.isTransaction) return [];
+      throw error;
+    }
     if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
@@ -19952,14 +20016,17 @@ export class ControlPlaneDb {
     this.stmt(`DELETE FROM orchestrator_campaign_request_resolutions WHERE campaign_session_id=? AND resolved_at<?`)
       .run(input.campaignSessionId, input.resolvedAt - CAMPAIGN_REQUEST_RESOLUTION_RETENTION_MS);
     this.stmt(`INSERT INTO orchestrator_campaign_request_resolutions
-      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,title,resource_key,outcome,resolved_by,resolved_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)
+      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,title,resource_key,outcome,resolved_by,resolved_at,
+        revocation_reason,triggered_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(campaign_session_id,request_token) DO UPDATE SET
         subject_session_id=excluded.subject_session_id,occurrence_id=excluded.occurrence_id,
         category=excluded.category,title=excluded.title,resource_key=excluded.resource_key,outcome=excluded.outcome,
-        resolved_by=excluded.resolved_by,resolved_at=excluded.resolved_at`)
+        resolved_by=excluded.resolved_by,resolved_at=excluded.resolved_at,
+        revocation_reason=excluded.revocation_reason,triggered_by=excluded.triggered_by`)
       .run(input.campaignSessionId, input.requestToken, input.subjectSessionId, input.occurrenceId,
-        input.category, input.title ?? null, input.resourceKey ?? null, input.outcome, input.resolvedBy, input.resolvedAt);
+        input.category, input.title ?? null, input.resourceKey ?? null, input.outcome, input.resolvedBy, input.resolvedAt,
+        input.revocationReason ?? null, input.triggeredBy ?? null);
   }
 
   /** A resolution whose delivery failed left its request pending; forget the recorded resolver. */
@@ -19973,6 +20040,7 @@ export class ControlPlaneDb {
       WHERE campaign_session_id=? AND request_token=?`).get(campaignSessionId, requestToken) as {
       request_token: string; subject_session_id: string; occurrence_id: string; category: string;
       title: string | null; resource_key: string | null; outcome: string; resolved_by: string; resolved_at: number;
+      revocation_reason: string | null; triggered_by: string | null;
     } | undefined;
     return row ? {
       requestToken: row.request_token,
@@ -19984,13 +20052,16 @@ export class ControlPlaneDb {
       outcome: row.outcome,
       resolvedBy: row.resolved_by as CampaignRequestResolver,
       resolvedAt: row.resolved_at,
+      ...(row.revocation_reason ? { revocationReason: row.revocation_reason as WorkflowDecisionRevocationReason } : {}),
+      ...(row.triggered_by ? { triggeredBy: row.triggered_by as CampaignRequestResolver } : {}),
     } : null;
   }
 
   /** When the earliest undelivered event that must wake the Orchestrator promptly was recorded,
    * across the whole pending queue rather than one bounded delivery slice (#3083). Prompt events are
    * a child becoming ready or held, the last human blocker clearing, and a request removal not
-   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. */
+   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. A server
+   * revocation a person's action led to (#3916) is as prompt as that person's own resolution. */
   campaignContinuationPromptEventAt(campaignSessionId: string): number | null {
     const row = this.stmt(
       `SELECT MIN(event.created_at) AS at FROM orchestrator_campaign_events event
@@ -20000,7 +20071,8 @@ export class ControlPlaneDb {
            SELECT 1 FROM orchestrator_campaign_request_resolutions resolution
            WHERE resolution.campaign_session_id=event.campaign_session_id
              AND resolution.request_token=event.occurrence_id
-             AND resolution.resolved_by!='human' AND resolution.resolved_at<=event.created_at)))`,
+             AND resolution.resolved_by!='human' AND COALESCE(resolution.triggered_by,'')!='human'
+             AND resolution.resolved_at<=event.created_at)))`,
     ).get(campaignSessionId, this.campaignContinuationCursor(campaignSessionId)) as { at: number | null };
     return row.at ?? null;
   }
@@ -20504,6 +20576,21 @@ export class ControlPlaneDb {
 
   campaignChildWorktreesRetired(sessionId: string): boolean {
     return this.campaignWorktreeCleanup(sessionId).length === 0;
+  }
+
+  /** Agent restoration only recovers a settled campaign archive whose dirty cleanup was refused. */
+  campaignWorktreeRecoveryError(sessionId: string): string | null {
+    const session = this.getSession(sessionId);
+    if (!session?.archived || session.archiveStatus || this.hasSessionStopIntent(sessionId) ||
+        !this.campaignForVerifiedChild(sessionId)) {
+      return "Only a fully archived, verified campaign child with refused dirty-worktree cleanup can be recovered.";
+    }
+    if (!runnerSupportsProtocol(this.getRunner(session.runnerId)?.protocolVersion, "campaignWorktreeRecovery")) {
+      return "Update Wollipog on the child's runner: campaignWorktreeRecovery is required.";
+    }
+    return this.campaignWorktreeCleanup(sessionId).some((item) => item.status === "refused" &&
+      item.reason?.startsWith("the worktree has uncommitted changes"))
+      ? null : "Only a fully archived, verified campaign child with refused dirty-worktree cleanup can be recovered.";
   }
 
   /** The campaign's status and the counts behind it, derived once for both the full projection and
@@ -21069,6 +21156,17 @@ export class ControlPlaneDb {
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  /** Conditional terminal write and owed resume are atomic; approved grants are never touched. */
+  withdrawPendingWorkflowDecision(occurrenceId: string, bySessionId: string, reason: string, now: number,
+    oweResume: boolean): WorkflowDecisionView | null {
+    const result = this.stmt(`UPDATE workflow_decisions SET status='revoked', resolved_at=?,
+      withdrawal=?, child_message=?, resume_state=?, resume_command_id=NULL, resume_updated_at=?
+      WHERE occurrence_id=? AND status='pending' AND authority='human'
+        AND category='review_round_extension' AND controlling_session_id=?`)
+      .run(now, JSON.stringify({ bySessionId, reason }), reason, oweResume ? "held" : null, now, occurrenceId, bySessionId);
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
@@ -32080,6 +32178,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_provider_thread_id?: string | null;
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
+    withdrawal?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     closing_reference_check?: string | null;
@@ -32136,6 +32235,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
         } }
       : {}),
     ...(row.child_message ? { childMessage: row.child_message } : {}),
+    ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
   };
 }
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -10,7 +10,7 @@ import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { closureEvidence, closureDeliveryFailure, issueEvidenceDigest } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
-import type { HumanPrincipal } from "./identity.js";
+import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 
 function harness(full = true, maximum = 5, issues = [100]) {
   const db = ControlPlaneDb.open(":memory:");
@@ -286,6 +286,144 @@ test("scope rejects incidental references, unapproved epics, foreign repositorie
   } finally { h.db.close(); }
   const limited = harness(true,1);
   try { assert.equal((await limited.proposal("capacity")).ok,false); } finally { limited.db.close(); }
+});
+
+/** Deliver the next campaign continuation the idle root is woken with, if any: its text, and
+ * whether a prompt event woke it. The delivery completes, so a later one can follow. */
+function nextContinuation(h: ReturnType<typeof harness>): { text: string; prompt: boolean } | null {
+  h.db.updateSessionStatus("root", "idle", Date.now());
+  const prompt = h.db.campaignContinuationPromptEventAt("root") !== null;
+  const sent: Array<{ type: string; requestId?: string; commandId?: string; command?: { type: string; text?: string; campaignContinuation?: unknown } }> = [];
+  h.hub.sendToRunner = (_id, message) => { sent.push(message as (typeof sent)[number]); return true; };
+  h.svc.retryDuePrompts(Date.now() + 120_000);
+  h.hub.sendToRunner = () => true;
+  const delivery = sent.find((message) => message.type === "durable_session_command" && message.command?.campaignContinuation);
+  if (!delivery) return null;
+  assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: delivery.requestId!,
+    commandId: delivery.commandId!, sessionId: "root", state: "accepted", revision: 1, duplicate: false }));
+  assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId: delivery.commandId!,
+    sessionId: "root", state: "completed", revision: 2 }));
+  return { text: delivery.command!.text!, prompt };
+}
+
+function requiredContinuation(h: ReturnType<typeof harness>): { text: string; prompt: boolean } {
+  const continuation = nextContinuation(h);
+  assert.ok(continuation, "a continuation was delivered");
+  return continuation;
+}
+
+function revocationAudit(h: ReturnType<typeof harness>, sessionId: string, occurrenceId: string) {
+  const entries = h.db.listGovernanceAudit(sessionId).filter((entry) => entry.requestId === occurrenceId && entry.outcome === "revoked");
+  assert.equal(entries.length, 1);
+  return entries[0]!;
+}
+
+test("#3916 a person's scope approval refused as stale is the system's revocation, with its reason and the person as trigger", async () => {
+  const h = harness(false);
+  try {
+    const proposed = await h.proposal("stale-human"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    const occurrenceId = proposed.data!.occurrenceId;
+    assert.equal(proposed.data!.authority, "human");
+    nextContinuation(h);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    // Affected child work changes while the request waits for the person.
+    h.db.createSession({ id: "later", runnerId: "r", workspaceId: "w", agentId: "codex", title: "Later", parentSessionId: "root",
+      driver: "codex-app-server", config: {}, useWorktree: false, now: Date.now() });
+    const refused = h.approve(proposed.data!);
+    assert.equal(refused.ok, false);
+    assert.equal(refused.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+
+    const resolution = h.db.campaignRequestResolution("root", campaignRequestToken("typed", "root", occurrenceId));
+    assert.deepEqual({ outcome: resolution?.outcome, resolvedBy: resolution?.resolvedBy,
+      revocationReason: resolution?.revocationReason, triggeredBy: resolution?.triggeredBy },
+    { outcome: "revoked", resolvedBy: "system", revocationReason: "approval_refused_stale", triggeredBy: "human" });
+    const audit = revocationAudit(h, "root", occurrenceId);
+    assert.deepEqual(audit.actor, { kind: "system", id: "approval_refused_stale" });
+    assert.deepEqual(audit.workflowDecision?.revocation,
+      { reason: "approval_refused_stale", triggeredBy: { kind: "human", id: h.principal.userId } });
+
+    const { text, prompt } = requiredContinuation(h);
+    assert.match(text, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${occurrenceId}","owner":"human",.*` +
+      `"outcome":"revoked","resolvedBy":"system","revocationReason":"approval_refused_stale","triggeredBy":"human"`, "u"));
+    assert.doesNotMatch(text, /"resolvedBy":"human"/u, "the person approved; they did not revoke it");
+    assert.equal(prompt, true, "a refused human approval wakes the Orchestrator as promptly as the approval would have");
+    assert.match(text, /Action needed: yes/u);
+  } finally { h.db.close(); }
+});
+
+test("#3916 decisions a person's scope approval revokes are reported as the system's, superseded by that change", async () => {
+  const h = harness(false);
+  try {
+    const other = h.svc.createWorkflowDecision("child", { requestId: "question", resourceKey: "question",
+      resourceSnapshot: { category: "implementation_question", question: "Which test?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(other.ok, other.error ?? "question");
+    assert.equal(other.data!.authority, "human");
+    const proposed = await h.proposal("side-effect"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    nextContinuation(h);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    assert.ok(h.approve(proposed.data!).ok);
+    const occurrenceId = other.data!.occurrenceId;
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+
+    const resolution = h.db.campaignRequestResolution("root", campaignRequestToken("typed", "child", occurrenceId));
+    assert.deepEqual({ outcome: resolution?.outcome, resolvedBy: resolution?.resolvedBy,
+      revocationReason: resolution?.revocationReason, triggeredBy: resolution?.triggeredBy },
+    { outcome: "revoked", resolvedBy: "system", revocationReason: "superseded_by_scope_change", triggeredBy: "human" });
+    const audit = revocationAudit(h, "child", occurrenceId);
+    assert.deepEqual(audit.actor, { kind: "system", id: "superseded_by_scope_change" });
+    assert.deepEqual(audit.workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
+
+    const { text } = requiredContinuation(h);
+    assert.match(text, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${occurrenceId}","owner":"human",.*` +
+      `"outcome":"revoked","resolvedBy":"system","revocationReason":"superseded_by_scope_change","triggeredBy":"human"`, "u"));
+    assert.match(text, new RegExp(`"occurrenceId":"${proposed.data!.occurrenceId}","owner":"human",.*"outcome":"allowed","resolvedBy":"human"`, "u"),
+      "the person's own approval is still theirs");
+  } finally { h.db.close(); }
+});
+
+test("#3916 decisions the Orchestrator's own scope approval revokes record it as the trigger and do not wake it", async () => {
+  const h = harness();
+  try {
+    const other = h.svc.createWorkflowDecision("child", { requestId: "question", resourceKey: "question",
+      resourceSnapshot: { category: "implementation_question", question: "Which test?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(other.ok, other.error ?? "question");
+    const proposed = await h.proposal("orchestrator-side-effect"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const eventsBefore = h.db.campaignContinuationEvents("root").length;
+    assert.ok(h.approve(proposed.data!).ok);
+    const occurrenceId = other.data!.occurrenceId;
+    const token = campaignRequestToken("typed", "child", occurrenceId);
+    const resolution = h.db.campaignRequestResolution("root", token);
+    assert.deepEqual({ resolvedBy: resolution?.resolvedBy, revocationReason: resolution?.revocationReason, triggeredBy: resolution?.triggeredBy },
+      { resolvedBy: "system", revocationReason: "superseded_by_scope_change", triggeredBy: "orchestrator" });
+    assert.deepEqual(revocationAudit(h, "child", occurrenceId).workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "agent", id: "root" } });
+    assert.equal(h.db.campaignContinuationEvents("root").slice(eventsBefore)
+      .some((event) => event.kind === "request_resolved" && event.occurrenceId === token), false,
+    "the Orchestrator caused it and already has the result");
+  } finally { h.db.close(); }
+});
+
+test("#3916 a person's denial of a scope change is still reported as theirs, with no revocation reason", async () => {
+  const h = harness(false);
+  try {
+    const proposed = await h.proposal("human-denial"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    const occurrenceId = proposed.data!.occurrenceId;
+    nextContinuation(h);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    assert.ok(h.svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome: "deny" }, "human",
+      { kind: "human", id: h.principal.userId }, () => true).ok);
+    const resolution = h.db.campaignRequestResolution("root", campaignRequestToken("typed", "root", occurrenceId));
+    assert.equal(resolution?.resolvedBy, "human");
+    assert.equal(resolution?.outcome, "denied");
+    assert.equal(resolution?.revocationReason, undefined);
+    assert.equal(resolution?.triggeredBy, undefined);
+    const { text, prompt } = requiredContinuation(h);
+    assert.match(text, new RegExp(`"occurrenceId":"${occurrenceId}","owner":"human",.*"outcome":"denied","resolvedBy":"human"\\}`, "u"));
+    assert.equal(prompt, true);
+  } finally { h.db.close(); }
 });
 
 test("Custom scope and closure stay human-owned, and old peers cannot execute the bounded issue contract", async () => {
@@ -564,8 +702,8 @@ test("a child's publication outside the proof routes to the person with a visibl
       assert.ok(p.ok,`${c.name}: ${p.error}`);
       assert.equal(p.data!.authority,"human",c.name);
       assert.equal(p.data!.authorityEvaluation?.admissionFailure,c.expected,c.name);
-      assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && !p.data!.resourceSnapshot.recommendationId &&
-        !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim carries no lineage or admission`);
+      assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && p.data!.resourceSnapshot.recommendationId === recommendationId &&
+        !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim is kept as sent (#3918) and carries no admission`);
     } finally { h.db.close(); }
   }
   const failedInspection = harness();
@@ -752,6 +890,61 @@ test("the actual Campaign Status HTTP route keeps a bounded Full Control human p
     assert.equal(result.json().resourceSnapshot.issueAdmission,undefined);
   } finally {await app.close();h.db.close();}
 });
+
+for (const [credentialSessionId, method, target] of [
+  ["child", "POST", "root"],
+  ["child", "POST", "child"],
+  ["other-root", "POST", "root"],
+  ["other-root", "GET", "root"],
+  ["child", "GET", "root"],
+  ["root", "POST", "root"],
+  ["root", "GET", "root"],
+] as const) {
+  test(`issue-scope agent route: ${credentialSessionId} ${method} ${target}`, async () => {
+    const h = harness();
+    const { default: Fastify } = await import("fastify");
+    const { registerCampaignIssueScopeRoutes } = await import("./campaign-issue-scope-routes.js");
+    const app = Fastify();
+    try {
+      h.db.createSession({ id: "other-root", runnerId: "r", workspaceId: "w", agentId: "codex", title: "Other campaign",
+        useWorktree: false, driver: "codex-app-server", now: 1, config: {}, role: "orchestrator",
+        orchestratorPolicy: h.db.getSession("root")!.orchestratorPolicy! });
+      const principal: AgentPrincipal = { kind: "agent", actorId: credentialSessionId, credentialSessionId,
+        orchestrator: credentialSessionId !== "child", organizationId: h.principal.organizationId,
+        delegatedScope: h.db.sessionScope(credentialSessionId)! };
+      // Same-owner access must succeed so the route's agent checks, rather than resource isolation, refuse the request.
+      assert.equal(h.db.canAccessSession(principal, target), true);
+      assert.equal(h.db.canAccessSession(principal, "root"), true);
+      assert.equal(h.db.resolvedCampaignSessionId("other-root"), "other-root");
+      registerCampaignIssueScopeRoutes(app, { db: h.db, svc: h.svc, requestPrincipal: () => principal });
+      const decisions = () => h.db.raw().prepare("SELECT * FROM workflow_decisions ORDER BY occurrence_id").all();
+      const before = decisions();
+      const result = await app.inject({ method,
+        url: `/api/sessions/${target}/campaign/issue-scope${method === "POST" ? "/proposals" : ""}`,
+        ...(method === "POST" ? { payload: { requestId: "agent-http", expectedRevision: 1,
+          additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Verified intended member",
+          lineage: { kind: "epic", epic: 100 } } } : {}) });
+      if (credentialSessionId !== "root") {
+        assert.equal(result.statusCode, 403, result.body);
+        assert.deepEqual(result.json(), { error: method === "POST"
+          ? "only the campaign owner or its root Orchestrator may propose a scope change"
+          : "campaign scope requires access to its Orchestrator" });
+        assert.deepEqual(decisions(), before, "refused requests create no scope proposal");
+      } else if (method === "POST") {
+        assert.equal(result.statusCode, 201, result.body);
+        assert.equal(result.json().resourceSnapshot.category, "campaign_issue_scope");
+        assert.equal(result.json().authority, "orchestrator");
+        assert.equal(decisions().length, before.length + 1);
+        assert.ok(h.db.workflowDecisionByOccurrence(result.json().occurrenceId));
+      } else {
+        assert.equal(result.statusCode, 200, result.body);
+        assert.deepEqual(result.json().issueNumbers, [100]);
+        assert.equal(result.json().repository, "team/repo");
+        assert.deepEqual(decisions(), before);
+      }
+    } finally { await app.close(); h.db.close(); }
+  });
+}
 
 test("non-delegated closure reasons and operations retain human review without demanding delivery inspection", async () => {
   for (const operations of [["campaign_issue_scope"],["campaign_issue_scope","issue_closure"]] as const) {
@@ -1519,8 +1712,8 @@ test("#2940 an excluded pull request reopened during scope synchronization is ne
 });
 
 // #2940, observed live: before #3824 a child's in-boundary publication was routed to the person,
-// who approved its exact payload. The fallback strips the recommendation claim, so the Orchestrator
-// could never admit the published issue: the bounded path needed an issueAdmission it never got.
+// who approved its exact payload. The fallback carries no issueAdmission, so the Orchestrator could
+// never admit the published issue: the bounded path needed an admission it never got.
 type ScopeHarness = ReturnType<typeof harness>;
 
 function member(h: ScopeHarness, userId: string, role: "owner" | "admin" | "operator" | "viewer") {
@@ -1540,7 +1733,7 @@ async function humanApprovedPublication(h: ScopeHarness, options: { approver?: s
   h.state.publicationOk = true;
   assert.ok(created.ok,created.error ?? "publication"); const decision = created.data!;
   assert.equal(decision.authority,"human");
-  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && !decision.resourceSnapshot.recommendationId);
+  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && decision.resourceSnapshot.recommendationId === rec.data!.id);
   const approved = h.svc.resolveWorkflowDecision("root","child",decision.occurrenceId,
     { outcome: "approve", ...options.resolution } as import("@wollipog/protocol").ResolveWorkflowDecisionRequest,"human",{kind:"human",id:approver},()=>true);
   assert.ok(approved.ok,approved.error ?? "human approval");
@@ -1830,4 +2023,170 @@ test("#2940 Custom campaigns and the owner's Campaign Status route treat a perso
     assert.ok(full.approve(direct.data!).ok);
     assert.deepEqual(full.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101]);
   } finally { full.db.close(); }
+});
+
+// #3918, observed live: a Custom campaign's publication dropped the recommendation it named, so
+// consuming with the requested snapshot was refused as stale and revoked the approval, and nothing
+// linked the published issue back to the accepted recommendation.
+const workSummary = (h: ReturnType<typeof harness>) => h.db.campaignWorkLedger.summary("root",
+  { campaignCreatedAt: 1, complete: false, childSessionIds: ["child"], cleanupPending: 0 });
+const workItemCount = (h: ReturnType<typeof harness>) => {
+  const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now());
+  assert.ok(page.ok); return page.data.items.length;
+};
+const humanApprove = (h: ReturnType<typeof harness>, requester: string, d: WorkflowDecisionView) =>
+  h.svc.resolveWorkflowDecision("root", requester, d.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: h.principal.userId }, () => true);
+
+/** The documented step after publishing (#3918): record the issue on the accepted recommendation. */
+function linksPublishedIssue(h: ReturnType<typeof harness>, recommendationId: string, issue: number) {
+  const before = h.db.campaignWorkLedger.recommendation("root", recommendationId)!;
+  assert.equal(before.publication, "awaiting_publication");
+  assert.ok(before.resultingWorkItemId, "acceptance created the follow-up work item");
+  const items = workItemCount(h);
+  assert.equal(workSummary(h).obligations.publication, 1);
+  const linked = h.svc.adjudicateCampaignRecommendation("root", { recommendationId, disposition: "accepted", reason: "Published payload read back",
+    resultingIssue: { repository: "team/repo", number: issue } });
+  assert.ok(linked.ok, linked.error ?? "link");
+  assert.equal(linked.data!.workItem?.id, before.resultingWorkItemId, "the existing work item is linked");
+  assert.equal(workItemCount(h), items, "no second work item is created");
+  assert.deepEqual(linked.data!.workItem?.issue, { repository: "team/repo", number: issue });
+  const after = h.db.campaignWorkLedger.recommendation("root", recommendationId)!;
+  assert.equal(after.publication, "published");
+  assert.deepEqual(after.resultingIssue, { repository: "team/repo", number: issue });
+  assert.equal(workSummary(h).obligations.publication, 0);
+}
+
+for (const named of [true, false]) {
+  test(`#3918 a Custom child's publication ${named ? "naming" : "without"} its recommendation is consumed as requested and links its existing item`, async () => {
+    const h = harness(false);
+    try {
+      const recommendationId = acceptedRecommendation(h);
+      const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Feature]: Related repair",
+        sanitizedBody: body, labels: ["enhancement"], ...(named ? { recommendationId } : {}) };
+      const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "custom", resourceKey: "custom", resourceSnapshot: requested });
+      assert.ok(created.ok, created.error ?? "request");
+      const decision = created.data!;
+      assert.equal(decision.authority, "human");
+      assert.equal(decision.controllingSessionId, "root");
+      assert.deepEqual(decision.resourceSnapshot, requested, "the stored snapshot is exactly the requested one");
+      assert.deepEqual(h.svc.workflowDecision("child", decision.occurrenceId).data!.resourceSnapshot, requested);
+      if (named) assert.equal(decision.authorityEvaluation?.admissionFailure, "no_issue_boundary", "the person sees why it is theirs");
+      assert.equal(h.db.campaignPublicationReservations("root").length, 0, "a named recommendation reserves no bounded slot");
+      assert.ok(humanApprove(h, "child", decision).ok);
+      const consumed = await h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: requested });
+      assert.ok(consumed.ok, consumed.error ?? "consume");
+      assert.equal(consumed.data!.status, "consumed");
+      linksPublishedIssue(h, recommendationId, 101);
+    } finally { h.db.close(); }
+  });
+}
+
+test("#3918 a person-approved publication's named recommendation never replaces the title match or makes it bounded", async () => {
+  const h = harness(true, 3);
+  try {
+    const alpha = acceptedRecommendation(h, "Alpha repair");
+    h.state.publicationOk = true;
+    // The name claims Alpha for a Beta payload: bounded admission refuses, and the person decides.
+    const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Feature]: Beta repair",
+      sanitizedBody: body, labels: [], recommendationId: alpha };
+    const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
+    assert.ok(created.ok, created.error ?? "request");
+    assert.equal(created.data!.authority, "human");
+    assert.equal(created.data!.authorityEvaluation?.admissionFailure, "title_mismatch");
+    assert.deepEqual(created.data!.resourceSnapshot, requested);
+    assert.equal(h.db.campaignPublicationReservations("root").length, 0);
+    assert.ok(humanApprove(h, "child", created.data!).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("child", created.data!.occurrenceId, { resourceSnapshot: requested })).ok);
+    h.state.publicationTitles[101] = requested.sanitizedTitle;
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: alpha, disposition: "accepted", reason: "Claimed delivery",
+      resultingIssue: { repository: "team/repo", number: 101 } }).ok);
+    const scope = await followUpScope(h, "named-other-title", created.data!.occurrenceId);
+    assert.equal(refusalCode(scope), "recommendation_not_found");
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+  } finally { h.db.close(); }
+});
+
+// #3919, observed live: a Custom root that drafted a follow-up itself was refused with "no
+// controlling Orchestrator ancestor" and had to create a child only to publish it.
+test("#3919 a Custom root requests its own publication, only the campaign owner decides it, and consume stays exact and one-shot", async () => {
+  const h = harness(false);
+  try {
+    // Even a delegated publication policy never lets the root own its own request.
+    assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, follow_up_issue_publication: "orchestrator" }).ok);
+    const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Bug]: Root drafted repair",
+      sanitizedBody: body, labels: ["bug"] };
+    const created = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "root-draft", resourceKey: "root-draft", resourceSnapshot: requested });
+    assert.ok(created.ok, created.error ?? "root request");
+    const decision = created.data!;
+    assert.equal(decision.status, "pending");
+    assert.equal(decision.authority, "human");
+    assert.equal(decision.sessionId, "root");
+    assert.equal(decision.controllingSessionId, "root");
+    assert.deepEqual(decision.resourceSnapshot, requested);
+    assert.equal(h.db.getSession("root")!.status, "input_required");
+    // The root's agent cannot approve its own occurrence by any route.
+    const asOrchestrator = h.svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asOrchestrator.ok, false); assert.equal(asOrchestrator.status, 403);
+    const asAgent = h.svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asAgent.ok, false); assert.equal(asAgent.status, 403);
+    const descendant = h.svc.resolveDescendantRequest("root", "root", decision.occurrenceId, { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(descendant.ok, false);
+    const viaCard = h.svc.approve("root", decision.occurrenceId, "approve", { kind: "agent", id: "root" });
+    assert.equal(viaCard.ok, false); assert.equal(viaCard.status, 403);
+    // A person who is not the campaign's owner cannot decide it either.
+    member(h, "usr_operator", "operator");
+    const other = h.svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: "usr_operator" }, () => true);
+    assert.equal(other.ok, false); assert.equal(other.status, 403);
+    assert.match(other.error!, /Only the campaign owner/);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "pending");
+    // The owner approves it from the root's card.
+    const approved = h.svc.approve("root", decision.occurrenceId, "approve", { kind: "human", id: h.principal.userId });
+    assert.ok(approved.ok, approved.error ?? "owner approval");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    // A changed snapshot is refused and revokes the approval, which can then never be consumed.
+    const changed = await h.svc.consumeWorkflowDecision("root", decision.occurrenceId, { resourceSnapshot: { ...requested, sanitizedTitle: "[Bug]: Another repair" } });
+    assert.equal(changed.ok, false); assert.equal(changed.status, 409); assert.match(changed.error!, /stale/);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    const revoked = await h.svc.consumeWorkflowDecision("root", decision.occurrenceId, { resourceSnapshot: requested });
+    assert.equal(revoked.ok, false); assert.equal(revoked.status, 409);
+    // A fresh request naming an accepted recommendation is consumed once, then linked.
+    const recommendationId = acceptedRecommendation(h, "Root drafted repair");
+    const again = { ...requested, recommendationId };
+    const second = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "root-draft-2", resourceKey: "root-draft", resourceSnapshot: again });
+    assert.ok(second.ok, second.error ?? "second request");
+    assert.equal(second.data!.authority, "human");
+    assert.deepEqual(second.data!.resourceSnapshot, again);
+    assert.ok(h.svc.approve("root", second.data!.occurrenceId, "approve", { kind: "human", id: h.principal.userId }).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("root", second.data!.occurrenceId, { resourceSnapshot: again });
+    assert.ok(consumed.ok, consumed.error ?? "consume"); assert.equal(consumed.data!.status, "consumed");
+    const reused = await h.svc.consumeWorkflowDecision("root", second.data!.occurrenceId, { resourceSnapshot: again });
+    assert.equal(reused.ok, false); assert.equal(reused.status, 409);
+    linksPublishedIssue(h, recommendationId, 101);
+  } finally { h.db.close(); }
+});
+
+test("#3919 a root's own publication leaves child, nested and non-campaign requesters as before", async () => {
+  const h = harness(false);
+  try {
+    assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, follow_up_issue_publication: "orchestrator" }).ok);
+    const policy = h.db.getSession("root")!.parentControlPolicy!;
+    h.db.createSession({ id: "nested", runnerId: "r", workspaceId: "w", agentId: "codex", title: "nested", useWorktree: false, driver: "codex-app-server", now: 1, config: {},
+      role: "orchestrator", parentSessionId: "root", parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+    h.db.createSession({ id: "solo", runnerId: "r", workspaceId: "w", agentId: "codex", title: "solo", useWorktree: false, driver: "codex-app-server", now: 1, config: {} });
+    for (const id of ["nested", "solo"]) h.db.updateSessionStatus(id, "running", 2);
+    const snapshot = (title: string) => ({ category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: title, sanitizedBody: body, labels: [] });
+    // A child's publication still follows the root's saved policy.
+    const child = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "child", resourceKey: "child", resourceSnapshot: snapshot("Child repair") });
+    assert.ok(child.ok, child.error ?? "child");
+    assert.equal(child.data!.controllingSessionId, "root"); assert.equal(child.data!.authority, "orchestrator");
+    assert.equal(child.data!.policyRevision, policy.revision);
+    // A nested Orchestrator's publication belongs to the root, not to itself.
+    const nested = await h.svc.createWorkflowDecisionWithVideo("nested", { requestId: "nested", resourceKey: "nested", resourceSnapshot: snapshot("Nested repair") });
+    assert.ok(nested.ok, nested.error ?? "nested");
+    assert.equal(nested.data!.controllingSessionId, "root"); assert.equal(nested.data!.authority, "orchestrator");
+    // A session outside any campaign still has nobody to control its publication.
+    const solo = await h.svc.createWorkflowDecisionWithVideo("solo", { requestId: "solo", resourceKey: "solo", resourceSnapshot: snapshot("Solo repair") });
+    assert.equal(solo.ok, false); assert.equal(solo.status, 409);
+    assert.match(solo.error!, /no controlling Orchestrator ancestor/);
+  } finally { h.db.close(); }
 });

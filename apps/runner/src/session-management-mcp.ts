@@ -1,4 +1,5 @@
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
 import { createHash } from "node:crypto";
@@ -257,7 +258,10 @@ async function cpFetch(
     /* non-JSON body (proxy error page etc.) — surface the raw text below */
   }
   if (!res.ok) {
-    const detail = typeof data?.error === "string" ? data.error : truncate(raw, MAX_LINE);
+    let detail = typeof data?.error === "string" ? data.error : truncate(raw, MAX_LINE);
+    if (res.status === 401 && deps.selfSessionId && actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER) {
+      detail = sessionCredentialRefusal(detail);
+    }
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
@@ -1055,7 +1059,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         category: { const: "follow_up_issue_publication" }, repository: { type: "string" },
         sanitizedTitle: { type: "string" }, sanitizedBody: { type: "string" },
         labels: { type: "array", maxItems: 32, items: { type: "string" } },
-        recommendationId: { type: "string", description: "Root Full Control related recommendation; the server inspects sanitation, duplicates, lineage and capacity." },
+        recommendationId: { type: "string", description: "The accepted campaign recommendation this publishes. Under Full Control the server inspects sanitation, duplicates, lineage and capacity for a bounded grant; otherwise the person decides. It is kept in the stored snapshot either way, so consume with exactly what you requested. After publishing, record the issue with adjudicate_campaign_recommendation (accepted, resultingIssue)." },
         issueAdmission: { type: "object", properties: { boundaryRevision: { type: "integer" }, evidenceDigest: { type: "string" },
           publicationAuthority: { type: "object", properties: { authorizedByUserId: { type: "string" }, objectiveDigest: { type: "string" } }, required: ["authorizedByUserId", "objectiveDigest"], additionalProperties: false } }, required: ["boundaryRevision", "evidenceDigest"], additionalProperties: false, description: "Echo only the server-derived admission from get_workflow_decision when consuming." },
       },
@@ -1091,18 +1095,18 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "get_campaign_issue_scope", "request_campaign_issue_scope_change",
   "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
-  "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
+  "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
   "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
-  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "set_guardrails", "create_worktree",
+  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
-  "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
+  "resolve_descendant_approval", "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
 ]);
 
@@ -1665,7 +1669,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "adjudicate_campaign_recommendation",
-    description: "Record a disposition for one recorded follow-up recommendation: accepted (creates or links a follow_up work item by resultingWorkItemKey, optionally with resultingIssue), rejected, deferred, or duplicate (optionally of the existing item resultingWorkItemKey), with a reason. Accepting is not approval: publishing an issue and starting work still need their typed decisions.",
+    description: "Record a disposition for one recorded follow-up recommendation: accepted (creates or links a follow_up work item by resultingWorkItemKey, optionally with resultingIssue; re-accepting with only resultingIssue records the published issue on the work item the first acceptance created), rejected, deferred, or duplicate (optionally of the existing item resultingWorkItemKey), with a reason. Accepting is not approval: publishing an issue and starting work still need their typed decisions.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1808,6 +1812,39 @@ export const TOOLS: McpTool[] = [
       const decision = args?.decision;
       if (decision !== "approve" && decision !== "deny") return errorResult("decision must be approve or deny");
       return resolveDescendantRequestTool(args, deps, decision);
+    },
+  },
+  {
+    name: "withdraw_descendant_workflow_decision",
+    description: "Withdraw an unnecessary pending human-owned review_round_extension from your controlled child, with a reason and steering. This removes the human request and resumes the child without approving it or touching other decisions. Approved decisions and other categories are refused.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, occurrenceId: { type: "string" },
+        reason: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS } },
+      required: ["sessionId", "occurrenceId", "reason"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.sessionId !== "string" || !args.sessionId ||
+          typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
+          typeof args?.reason !== "string" || !args.reason.trim() ||
+          args.reason.length > WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS) {
+        return errorResult("sessionId, occurrenceId, and a bounded nonempty reason are required");
+      }
+      let peer = deps.controlPlaneProtocolVersion;
+      if (peer === undefined) {
+        const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+        peer = compatibility.ok ? compatibility.data?.protocolVersion : undefined;
+      }
+      if (!Number.isSafeInteger(peer) || peer === undefined || peer < 265) {
+        return errorResult("Workflow request withdrawal requires control plane protocol v265; no withdrawal was sent");
+      }
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/resolve`, {
+          sessionId: args.sessionId, occurrenceId: args.occurrenceId,
+          resolution: { action: "withdraw_workflow_decision", reason: args.reason },
+        });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {
@@ -3280,6 +3317,27 @@ export const TOOLS: McpTool[] = [
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
       if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot archive its own session");
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: true });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "unarchive_session",
+    description: "Recover a fully archived, verified campaign child whose dirty-worktree cleanup was refused. Only its controlling Orchestrator may do this. Does not delete files or restart the child; cannot cancel a pending archive.",
+    inputSchema: {
+      type: "object", properties: { sessionId: { type: "string" } },
+      required: ["sessionId"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.orchestrator) return errorResult("only the controlling Orchestrator may unarchive a child");
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot unarchive its own session");
+      const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+      const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorktreeRecovery;
+      if (!compatibility.ok || !Number.isInteger(compatibility.data?.protocolVersion) || compatibility.data.protocolVersion < required) {
+        return errorResult("Update Wollipog before recovering an archived child (campaign worktree recovery is unsupported).");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: false });
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data) });
     },

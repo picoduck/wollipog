@@ -69,8 +69,9 @@ function issueClosurePrompts(child: Pick<SessionView, "queued" | "pendingPrompts
 
 /** Live campaign children whose work can bear on the issue (#3084). A child is left out only when
  * its launch prompt is recorded (the runner echoes it as the first user message) and the campaign
- * work ledger attributes it elsewhere: it has an open attempt, and every attempt it has ever had is
- * on an item that has never tracked the issue and has no follow-up links. Every other child stays
+ * work ledger attributes it elsewhere: it has an open attempt, and no item it has ever attempted, nor
+ * any item joined to one by follow-up lineage in either direction, has ever tracked the issue or
+ * predates attribution history (see `sessionsUnrelatedToIssues`, #3914). Every other child stays
  * included: a task can move between issues in steering history, and a later "continue" prompt is
  * not proof it is unrelated. Exclusion is decided from append-only history, so a child once
  * connected to the issue is never excluded again, and bringing one into the set changes the

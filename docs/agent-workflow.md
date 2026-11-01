@@ -67,7 +67,7 @@ pass delivery, report verification and exact merged-PR checks before the complet
 Orchestrator-owned. Missing proof retains human ownership with a server-derived delivery gap.
 Existing closure requests never gain authority retroactively. Issues without relationships retain
 their own-work-item behavior. Epic prose and other agent-written text cannot create a relationship;
-this implementation supports the recorded-plan source. Clients need protocol 265 to send `fixedBy`;
+this implementation supports the recorded-plan source. Clients need protocol 268 to send `fixedBy`;
 older servers keep such closures human-owned. Do not update the hosting stack to gain support.
 
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision

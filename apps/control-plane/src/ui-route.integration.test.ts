@@ -3007,12 +3007,27 @@ test("legacy workspace rename cannot bypass durable Project management authority
   );
 });
 
-test("adding an organization member reconnects its UI clients so they reload the directory (#2527)", { timeout: 30_000 }, async (t) => {
+test("directory changes refresh dashboards in place; only a member's own access change closes theirs (#2606)", { timeout: 30_000 }, async (t) => {
   const port = await reservePort();
-  const temp = mkdtempSync(join(tmpdir(), "wollipog-member-reconnect-"));
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-member-directory-"));
   const databasePath = join(temp, "control-plane.db");
   const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
-  ControlPlaneDb.open(databasePath).close();
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  const members = [
+    { userId: "usr_directory_ada", name: "Ada", deviceToken: "directory-ada-device-token" },
+    { userId: "usr_directory_lin", name: "Lin", deviceToken: "directory-lin-device-token" },
+  ];
+  for (const [index, member] of members.entries()) {
+    seed.createIdentityMember({
+      userId: member.userId, displayName: member.name, organizationId: identity.organizationId, role: "operator", now: 1,
+    });
+    seed.createDevice({
+      id: `dev_directory_${index}`, name: `${member.name} Device`, tokenHash: hashToken(member.deviceToken),
+      userId: member.userId, organizationId: identity.organizationId, now: 2,
+    });
+  }
+  seed.close();
 
   let output = "";
   const child = spawn(
@@ -3043,22 +3058,174 @@ test("adding an organization member reconnects its UI clients so they reload the
 
   const httpBase = `http://127.0.0.1:${port}`;
   await waitForHealth(httpBase, child, () => output);
-  const ui = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, ownerToken));
-  // A single-member organization reads every answer as the viewer's own; once a second member
-  // exists, a tab that kept its old directory would keep calling that member "you".
-  let created: Promise<Response> | undefined;
-  const closed = await closeAfter(ui, () => {
-    created = fetchWithBearer(`${httpBase}/api/identity/users`, ownerToken, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "Grace Hopper", role: "operator" }),
+  const json = { "content-type": "application/json" };
+  const tokens = [ownerToken, members[0]!.deviceToken, members[1]!.deviceToken];
+  const dashboards = await Promise.all(tokens.map(async (token) => {
+    const socket = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, token));
+    const dashboard = { socket, refreshes: 0, closed: null as { code: number; reason: string } | null };
+    socket.on("message", (raw) => {
+      if ((JSON.parse(raw.toString()) as { type?: string }).type === "identity_directory_changed") dashboard.refreshes++;
     });
+    socket.once("close", (code, reason) => { dashboard.closed = { code, reason: reason.toString("utf8") }; });
+    return dashboard;
+  }));
+  t.after(() => dashboards.forEach(({ socket }) => socket.close()));
+  const [owner, ada, lin] = dashboards as [typeof dashboards[0], typeof dashboards[0], typeof dashboards[0]];
+  const refreshedTo = (expected: number[], description: string) => waitForValue(
+    () => dashboards.map(({ refreshes }) => refreshes),
+    (counts) => counts.every((count, index) => count === expected[index]),
+    description,
+  );
+
+  // A new member makes every session shared, so a transcript must stop calling their answers "you"
+  // (#2527); nobody's access changed, so every dashboard refreshes in place.
+  const created = await fetchWithBearer(`${httpBase}/api/identity/users`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ displayName: "Grace Hopper", role: "operator" }),
   });
-  assert.equal((await created!).status, 201);
-  assert.deepEqual(closed, { code: 1000, reason: "organization directory changed" },
-    "a new member is an ordinary reconnect, not an authorization failure");
-  const identity = await (await fetchWithBearer(`${httpBase}/api/identity`, ownerToken)).json() as {
+  assert.equal(created.status, 201);
+  await refreshedTo([1, 1, 1], "every dashboard to refresh after a member is added");
+  const directory = await (await fetchWithBearer(`${httpBase}/api/identity`, members[0]!.deviceToken)).json() as {
     memberships: Array<{ userName: string }>;
   };
-  assert.ok(identity.memberships.some((membership) => membership.userName === "Grace Hopper"));
+  assert.ok(directory.memberships.some((membership) => membership.userName === "Grace Hopper"));
+
+  // A rename, even of a connected member, changes nobody's access.
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/users/${members[0]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Ada Lovelace" }),
+  });
+  assert.equal(renamed.status, 200);
+  await refreshedTo([2, 2, 2], "every dashboard to refresh after a rename");
+  // Resending the same role and status is still only a rename.
+  const unchanged = await fetchWithBearer(`${httpBase}/api/identity/users/${members[0]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Ada L.", role: "operator", status: "active" }),
+  });
+  assert.equal(unchanged.status, 200);
+  await refreshedTo([3, 3, 3], "every dashboard to refresh after an unchanged-access edit");
+  await delay(250);
+  assert.deepEqual(dashboards.map(({ closed }) => closed), [null, null, null],
+    "adding or renaming a member closes no dashboard");
+
+  // A role change revokes that member's cached privileges with the authorization close; everyone
+  // else only refreshes.
+  const demoted = await fetchWithBearer(`${httpBase}/api/identity/users/${members[0]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ role: "viewer" }),
+  });
+  assert.equal(demoted.status, 200);
+  await waitForValue(() => ada.closed, (closed) => closed !== null, "the demoted member's dashboard to close");
+  assert.deepEqual(ada.closed, { code: 1008, reason: "authorization changed" });
+  await waitForValue(() => [owner.refreshes, lin.refreshes], ([a, b]) => a === 4 && b === 4,
+    "the other dashboards to refresh after a role change");
+
+  // Suspension does the same for the suspended member, on every device.
+  const suspended = await fetchWithBearer(`${httpBase}/api/identity/users/${members[1]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ status: "suspended" }),
+  });
+  assert.equal(suspended.status, 200);
+  await waitForValue(() => lin.closed, (closed) => closed !== null, "the suspended member's dashboard to close");
+  assert.deepEqual(lin.closed, { code: 1008, reason: "authorization changed" });
+  await waitForValue(() => owner.refreshes, (count) => count === 5, "the owner's dashboard to refresh after a suspension");
+  await delay(250);
+  assert.equal(owner.closed, null, "another member's role or status change never closes this dashboard");
+  assert.equal(ada.refreshes, 3, "a closed dashboard receives nothing more");
+
+  // The demoted member reconnects as a viewer, and the suspended member cannot reconnect.
+  const reconnected = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, members[0]!.deviceToken));
+  reconnected.close();
+  const viewerMutation = await fetchWithBearer(`${httpBase}/api/identity/users`, members[0]!.deviceToken, {
+    method: "POST", headers: json, body: JSON.stringify({ displayName: "Nope", role: "viewer" }),
+  });
+  assert.equal(viewerMutation.status, 403);
+  const refused = await rejectedSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, members[1]!.deviceToken));
+  assert.equal(refused.code, 1008);
+});
+
+test("renaming a team is audited and reconnects no UI client, unlike a membership change (#3000)", { timeout: 30_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-team-rename-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const operatorToken = "team-rename-operator-token";
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.createIdentityMember({
+    userId: "usr_team_operator", displayName: "Team Operator", organizationId: identity.organizationId, role: "operator", now: 1,
+  });
+  seed.createDevice({
+    id: "dev_team_operator", name: "Team Operator Device", tokenHash: hashToken(operatorToken),
+    userId: "usr_team_operator", organizationId: identity.organizationId, now: 2,
+  });
+  seed.close();
+
+  let output = "";
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "apps/control-plane/src/index.ts"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const capture = (chunk: unknown) => {
+    output = (output + String(chunk)).slice(-32_768);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const json = { "content-type": "application/json" };
+  const created = await fetchWithBearer(`${httpBase}/api/identity/teams`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ name: "Support", memberUserIds: [] }),
+  });
+  assert.equal(created.status, 201);
+  const { team } = await created.json() as { team: { teamId: string } };
+
+  // An admin's dashboard and a scoped member's: membership changes close the scoped one (and an
+  // organization directory change would close both); a rename closes neither.
+  const sockets = await Promise.all([ownerToken, operatorToken].map((token) =>
+    openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, token))));
+  const closedEarly: number[] = [];
+  sockets.forEach((socket, index) => socket.once("close", () => { closedEarly.push(index); }));
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/teams/${team.teamId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ name: "Help Desk" }),
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json() as { team: { name: string } }).team.name, "Help Desk");
+  await delay(250);
+  assert.deepEqual(closedEarly, [], "a rename changes nobody's access, so it closes no dashboard");
+  sockets.forEach((socket) => socket.removeAllListeners("close"));
+
+  // The member's socket is closed by a membership change, so the quiet rename was not a dead socket.
+  const closed = await closeAfter(sockets[1]!, () => {
+    void fetchWithBearer(`${httpBase}/api/identity/teams/${team.teamId}/members`, ownerToken, {
+      method: "PUT", headers: json, body: JSON.stringify({ memberUserIds: [] }),
+    });
+  });
+  assert.ok(closed.code > 0);
+  sockets[0]!.close();
+
+  // Creating a team under a taken name is refused with the same stable code as a rename.
+  const duplicate = await fetchWithBearer(`${httpBase}/api/identity/teams`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ name: " Help Desk ", memberUserIds: [] }),
+  });
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json() as { code?: string }).code, "team_name_taken");
+
+  const { audit } = await (await fetchWithBearer(`${httpBase}/api/identity/mutation-audit`, ownerToken)).json() as {
+    audit: Array<{ method: string; route: string; targetId?: string; statusCode: number }>;
+  };
+  assert.ok(audit.some((entry) => entry.method === "PATCH" && entry.route === "/api/identity/teams/:teamId" &&
+    entry.targetId === team.teamId && entry.statusCode === 200), "the rename is in the identity mutation audit");
 });

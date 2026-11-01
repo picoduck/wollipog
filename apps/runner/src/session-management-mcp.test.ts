@@ -220,6 +220,25 @@ test("Parent Control tools are orchestrator-only and bind resolutions to exact o
   }
 });
 
+test("withdrawal binds the pending occurrence and refuses an older peer (#3941)", async () => {
+  const { deps, calls } = makeDeps();
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = 265;
+  const args = { sessionId: "child", occurrenceId: "workflow_1", reason: "Continue from the reviewed head." };
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "workflow_1",
+    resolution: { action: "withdraw_workflow_decision", reason: args.reason } });
+  const count = calls.length;
+  deps.controlPlaneProtocolVersion = 264;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.length, count);
+  deps.controlPlaneProtocolVersion = 265;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", { ...args, reason: " " })).isError, true);
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.length, count);
+});
+
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
@@ -624,6 +643,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "release_queue_hold",
       "restart_session",
       "archive_session",
+      "unarchive_session",
       "set_guardrails",
       "create_run",
     ],
@@ -2269,6 +2289,21 @@ test("archive_session sends only archived true, preserves scoped errors, and ref
   assert.equal((await callTool(denied.deps, "archive_session", { sessionId: "s_sibling" })).isError, true);
 });
 
+test("unarchive_session is explicit, Orchestrator-only, and refuses unsupported control planes", async () => {
+  const { deps, calls } = makeDeps((call) => ({ status: 200,
+    body: call.url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION } : { id: "s_child", archived: false } }));
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: "s_child" })).isError, true);
+  deps.orchestrator = true;
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: SELF_ID })).isError, true);
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: "s_child" })).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { archived: false });
+  assert.ok(calls.at(-1)?.url.endsWith("/api/sessions/s_child/archive"));
+  const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 263 } }));
+  old.deps.orchestrator = true;
+  assert.equal((await callTool(old.deps, "unarchive_session", { sessionId: "s_child" })).isError, true);
+  assert.equal(old.calls.length, 1, "never sends an unsupported mutation");
+});
+
 test("compact archive and inspection responses retain lifecycle progress without inventing legacy state", async () => {
   for (const archiveStatus of ["stop_pending", "stop_failed", null, undefined]) {
     const session = { id: "s_child", archived: archiveStatus === null, archiveStatus };
@@ -2618,6 +2653,20 @@ test("REST errors map to isError results carrying the status + CP error text ver
   }
 });
 
+test("MCP session 401s name recovery and preserve credential-bound causes", async () => {
+  for (const error of ["unauthorized — pair this device", "session agent credential refused: session stopped; ask the Orchestrator to restart the session"]) {
+    const { deps } = makeDeps(() => ({ status: 401, body: { error } }));
+    const result = await callTool(deps, "get_session", { sessionId: SELF_ID });
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /HTTP 401: session agent credential refused:/);
+    assert.match(resultText(result), /Orchestrator/);
+    assert.doesNotMatch(resultText(result), /pair/i);
+    if (error.startsWith("session agent")) assert.ok(resultText(result).includes(error));
+    const deviceResult = await callTool({ ...deps, selfSessionId: "" }, "get_session", { sessionId: SELF_ID });
+    assert.ok(resultText(deviceResult).includes(error), "device callers retain the server diagnostic");
+  }
+});
+
 test("a network-level fetch rejection maps to an isError result", async () => {
   const failingFetch: McpFetch = async () => {
     throw new Error("ECONNREFUSED 127.0.0.1:4317");
@@ -2890,7 +2939,7 @@ test("a lost issue closure response tells the agent to inspect before renewed re
 
 test("fixedBy plan fields require a supporting server and reach it unchanged (#3943)", async () => {
   const plan = { items: [], planComplete: true, fixedBy: [{ issue: { repository: "o/r", number: 1 }, workItemKeys: ["unit"] }] };
-  const old = makeDeps(); old.deps.orchestrator = true; old.deps.controlPlaneProtocolVersion = 264;
+  const old = makeDeps(); old.deps.orchestrator = true; old.deps.controlPlaneProtocolVersion = 267;
   assert.equal((await callTool(old.deps, "record_campaign_plan", plan)).isError, true);
   assert.equal(old.calls.length, 0);
   const current = makeDeps(); current.deps.orchestrator = true; current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
