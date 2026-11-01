@@ -147,6 +147,12 @@ function sentenceStart(text: string): string {
  * row is its text and one ⋯ button that opens the shared menu sheet, every action listed with its
  * reason. A queue held behind a worktree or account handoff (#3752) says why under the summary,
  * collapsed or expanded, with Proceed Now… for a reader who may end the work it waits on.
+ *
+ * One queued message is its own row in place of the summary (#3962): the same one line, but with
+ * the message's words and a Steer that takes one tap, so steering never waits behind a disclosure
+ * and a menu. On a phone that Steer leaves the row's sheet, which keeps Edit and Cancel; when the
+ * row cannot steer, the sheet still lists Steer with its reason. On desktop what the expanded tray
+ * would say about the row is said under it.
  */
 export function QueuedMessages({
   sessionId,
@@ -174,6 +180,18 @@ export function QueuedMessages({
   // summary changes it, so arrivals and status updates never open the tray.
   const [disclosure, setDisclosure] = useState({ sessionId, expanded: false });
   const expanded = disclosure.sessionId === sessionId && disclosure.expanded;
+  const single = prompts.length === 1;
+  // A second arrival brings the summary back, collapsed as the person last left it, unless they are
+  // using the lone row: then the tray opens, so the control they hold does not vanish under them.
+  const [shape, setShape] = useState({ sessionId, single });
+  if (shape.sessionId !== sessionId || shape.single !== single) {
+    setShape({ sessionId, single });
+    const active = trayRef.current?.ownerDocument.activeElement;
+    if (shape.sessionId === sessionId && shape.single && prompts.length > 1 && !expanded && active &&
+        (trayRef.current?.contains(active) || active.closest("[data-queue-sheet]") !== null)) {
+      setDisclosure({ sessionId, expanded: true });
+    }
+  }
   const toggleExpanded = () => {
     // Collapsing hides the rows and closes a phone row's sheet (QueuedMessageActionMenu); focus left
     // in either returns to the summary rather than to <body>.
@@ -188,7 +206,12 @@ export function QueuedMessages({
   // A phone row's action sheet is portalled to <body>, so focus in it is tracked by its marker.
   const focusRemoved = useRemovedFocus(trayRef, "[data-queue-sheet]");
   useLayoutEffect(() => {
-    if (focusRemoved()) onFocusLost?.();
+    if (!focusRemoved()) return;
+    // A queue down to one message loses its summary; focus that was there, or on a control the lone
+    // row dropped, stays on the row while it has a control to take it.
+    const next = single ? trayRef.current?.querySelector<HTMLButtonElement>(".queue-row button:not(:disabled)") : null;
+    if (next) next.focus();
+    else onFocusLost?.();
   });
 
   const canCancel = runnerSupportsProtocol(steering.runnerProtocolVersion, "queuedPromptCancellation");
@@ -297,130 +320,149 @@ export function QueuedMessages({
     return undefined;
   };
 
-  return (
-    <section ref={trayRef} className={`queue${phone ? " is-phone" : ""}`} aria-label="Queued Messages">
-      <button
-        ref={summaryRef}
-        type="button"
-        className="disclosure-trigger queue-summary"
-        aria-expanded={expanded}
-        aria-controls={rowsId}
-        onClick={toggleExpanded}
-      >
-        <ChevronRightIcon className="disclosure-chevron" />
-        <span className="queue-count">
-          {prompts.length} {prompts.length === 1 ? "Queued Message" : "Queued Messages"}
-        </span>
-        {held && <StatusBadge meta={statusMeta("queuedMessage", "held")} inline />}
-        {summaryStatus !== undefined && (
-          <StatusBadge meta={statusMeta("queuedMessage", summaryStatus)} inline />
-        )}
-      </button>
-      {queueHold !== null && (
-        <QueueHoldLine key={`${sessionId}\n${queueHold.hold.holdId}`} sessionId={sessionId} view={queueHold} />
-      )}
-      {(refusal !== null || held || steeringNote !== null || sharedCancelReason !== null) && (
-        <div className="queue-notes" hidden={!expanded}>
-          {refusal !== null && <p className="queue-note" id={refusalId}>{refusal}</p>}
-          {held && <p className="queue-note">{HELD_REASON}</p>}
-          {steeringNote !== null && <p className="queue-note">{steeringNote}</p>}
-          {sharedCancelReason !== null && <p className="queue-note" id={cancelReasonId}>{sharedCancelReason}</p>}
-        </div>
-      )}
-      <ul id={rowsId} className="queue-rows" hidden={!expanded}>
-        {rows.map((row) => {
-          const { prompt } = row;
-          const editing = editingPromptId === prompt.id;
-          const ownCancelReason = row.remove.kind === "cancel" && row.remove.reason !== null &&
-            refusal === null && sharedCancelReason === null ? row.remove.reason : null;
-          // Where rows differ, an ordinary row that cannot steer says why on its own line; a row with
-          // a status is explained by it, and a reason every row shares is said once above the rows.
-          const ownSteerReason = !row.terminal && row.status === null && steeringNote === null && !held
-            ? row.steerUnavailable
-            : null;
-          return (
-            <li
-              key={prompt.id}
-              className="queue-row"
-              data-testid={`queued-prompt-${prompt.id}`}
-              aria-current={editing ? "true" : undefined}
-            >
-              {row.status && (
-                <StatusBadge meta={row.status} inline className="queue-status" title={row.steer.reason ?? undefined} />
-              )}
-              <span className="queue-text" title={prompt.text || undefined}>
-                {prompt.hasImages && <PaperclipIcon size={14} className="queue-clip" aria-hidden="true" />}
-                {queuedMessageLabel(prompt)}
-              </span>
-              {phone ? (
-                <QueuedMessageActionMenu row={row} concealed={!expanded} onSteer={onSteer} onEdit={onEdit}
-                  onCancel={onCancel} onDismiss={onDismiss} />
-              ) : (
-                <>
-                  <div className="queue-actions">
-                    {row.steerShown && (
-                      <button
-                        type="button"
-                        className="btn sm ghost"
-                        disabled={row.steer.reason !== null}
-                        title={row.steer.reason ?? "Send this message into the current turn."}
-                        aria-label="Steer Queued Message"
-                        aria-describedby={describedBy(row, "steer")}
-                        onClick={() => onSteer(prompt)}
-                      >
-                        Steer
-                      </button>
-                    )}
+  const holdLine = queueHold !== null && (
+    <QueueHoldLine key={`${sessionId}\n${queueHold.hold.holdId}`} sessionId={sessionId} view={queueHold} />
+  );
+  // A phone's lone row keeps every reason in its sheet, so its notes stay hidden like a collapsed
+  // tray's; they still describe the controls that reference them.
+  const notes = (refusal !== null || held || steeringNote !== null || sharedCancelReason !== null) && (
+    <div key="notes" className="queue-notes" hidden={single ? phone : !expanded}>
+      {refusal !== null && <p className="queue-note" id={refusalId}>{refusal}</p>}
+      {held && <p className="queue-note">{HELD_REASON}</p>}
+      {steeringNote !== null && <p className="queue-note">{steeringNote}</p>}
+      {sharedCancelReason !== null && <p className="queue-note" id={cancelReasonId}>{sharedCancelReason}</p>}
+    </div>
+  );
+  const rowList = (
+    <ul key="rows" id={rowsId} className="queue-rows" hidden={!single && !expanded}>
+      {rows.map((row) => {
+        const { prompt } = row;
+        const editing = editingPromptId === prompt.id;
+        const ownCancelReason = row.remove.kind === "cancel" && row.remove.reason !== null &&
+          refusal === null && sharedCancelReason === null ? row.remove.reason : null;
+        // Where rows differ, an ordinary row that cannot steer says why on its own line; a row with
+        // a status is explained by it, and a reason every row shares is said once above the rows.
+        const ownSteerReason = !row.terminal && row.status === null && steeringNote === null && !held
+          ? row.steerUnavailable
+          : null;
+        // A phone's lone row steers in one tap whenever the person may steer it; a Viewer's
+        // refusal stays in the sheet, where a phone can read it.
+        const steerInline = phone ? single && row.steerShown && refusal === null : row.steerShown;
+        const steerButton = steerInline && (
+          <button
+            type="button"
+            className="btn sm ghost queue-steer"
+            disabled={row.steer.reason !== null}
+            title={row.steer.reason ?? "Send this message into the current turn."}
+            aria-label="Steer Queued Message"
+            aria-describedby={describedBy(row, "steer")}
+            onClick={() => onSteer(prompt)}
+          >
+            Steer
+          </button>
+        );
+        return (
+          <li
+            key={prompt.id}
+            className="queue-row"
+            data-testid={`queued-prompt-${prompt.id}`}
+            aria-current={editing ? "true" : undefined}
+          >
+            {row.status && (
+              <StatusBadge meta={row.status} inline className="queue-status" title={row.steer.reason ?? undefined} />
+            )}
+            <span className="queue-text" title={prompt.text || undefined}>
+              {prompt.hasImages && <PaperclipIcon size={14} className="queue-clip" aria-hidden="true" />}
+              {queuedMessageLabel(prompt)}
+            </span>
+            {/* With no summary, the lone row carries the queue's Held badge. */}
+            {single && held && <StatusBadge meta={statusMeta("queuedMessage", "held")} inline className="queue-held" />}
+            {phone ? (
+              <>
+                {steerButton}
+                <QueuedMessageActionMenu row={row} concealed={!single && !expanded} steerInline={steerInline}
+                  onSteer={onSteer} onEdit={onEdit} onCancel={onCancel} onDismiss={onDismiss} />
+              </>
+            ) : (
+              <>
+                <div className="queue-actions">
+                  {steerButton}
+                  <button
+                    type="button"
+                    className="icon-btn sm"
+                    disabled={row.edit.reason !== null}
+                    title={row.edit.reason ?? "Edit this queued message."}
+                    aria-label="Edit Queued Message"
+                    aria-describedby={describedBy(row, "edit")}
+                    onClick={() => onEdit(prompt)}
+                  >
+                    <EditIcon size={14} />
+                  </button>
+                  {row.remove.kind === "dismiss" ? (
                     <button
                       type="button"
                       className="icon-btn sm"
-                      disabled={row.edit.reason !== null}
-                      title={row.edit.reason ?? "Edit this queued message."}
-                      aria-label="Edit Queued Message"
-                      aria-describedby={describedBy(row, "edit")}
-                      onClick={() => onEdit(prompt)}
+                      disabled={row.remove.reason !== null}
+                      aria-busy={row.remove.busy || undefined}
+                      title={refusal ?? "Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is canceled, resent, or restarted."}
+                      aria-label={prompt.durableDeliveryState === "failed"
+                        ? "Dismiss Failed Message"
+                        : "Dismiss Uncertain Message"}
+                      aria-describedby={describedBy(row, "remove")}
+                      onClick={() => onDismiss(prompt)}
                     >
-                      <EditIcon size={14} />
+                      <CloseIcon size={14} />
                     </button>
-                    {row.remove.kind === "dismiss" ? (
-                      <button
-                        type="button"
-                        className="icon-btn sm"
-                        disabled={row.remove.reason !== null}
-                        aria-busy={row.remove.busy || undefined}
-                        title={refusal ?? "Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is canceled, resent, or restarted."}
-                        aria-label={prompt.durableDeliveryState === "failed"
-                          ? "Dismiss Failed Message"
-                          : "Dismiss Uncertain Message"}
-                        aria-describedby={describedBy(row, "remove")}
-                        onClick={() => onDismiss(prompt)}
-                      >
-                        <CloseIcon size={14} />
-                      </button>
-                    ) : (
-                      <button
-                        type="button"
-                        className="icon-btn sm"
-                        disabled={row.remove.reason !== null}
-                        title={row.remove.reason ?? "Cancel this queued message."}
-                        aria-label="Cancel Queued Message"
-                        aria-describedby={describedBy(row, "remove")}
-                        onClick={() => onCancel(prompt)}
-                      >
-                        <CloseIcon size={14} />
-                      </button>
-                    )}
-                  </div>
-                  {ownSteerReason !== null && <span className="queue-reason">{ownSteerReason}</span>}
-                  {ownCancelReason !== null && (
-                    <span className="queue-reason" id={`queued-cancel-reason-${prompt.id}`}>{ownCancelReason}</span>
+                  ) : (
+                    <button
+                      type="button"
+                      className="icon-btn sm"
+                      disabled={row.remove.reason !== null}
+                      title={row.remove.reason ?? "Cancel this queued message."}
+                      aria-label="Cancel Queued Message"
+                      aria-describedby={describedBy(row, "remove")}
+                      onClick={() => onCancel(prompt)}
+                    >
+                      <CloseIcon size={14} />
+                    </button>
                   )}
-                </>
-              )}
-            </li>
-          );
-        })}
-      </ul>
+                </div>
+                {ownSteerReason !== null && <span className="queue-reason">{ownSteerReason}</span>}
+                {ownCancelReason !== null && (
+                  <span className="queue-reason" id={`queued-cancel-reason-${prompt.id}`}>{ownCancelReason}</span>
+                )}
+              </>
+            )}
+          </li>
+        );
+      })}
+    </ul>
+  );
+
+  const summary = (
+    <button
+      key="summary"
+      ref={summaryRef}
+      type="button"
+      className="disclosure-trigger queue-summary"
+      aria-expanded={expanded}
+      aria-controls={rowsId}
+      onClick={toggleExpanded}
+    >
+      <ChevronRightIcon className="disclosure-chevron" />
+      <span className="queue-count">{prompts.length} Queued Messages</span>
+      {held && <StatusBadge meta={statusMeta("queuedMessage", "held")} inline />}
+      {summaryStatus !== undefined && (
+        <StatusBadge meta={statusMeta("queuedMessage", summaryStatus)} inline />
+      )}
+    </button>
+  );
+  // Keyed, so the row list moves rather than remounts when the queue grows past one or shrinks to
+  // it: a row's open sheet and focused control survive the change.
+  return (
+    <section ref={trayRef} className={`queue${single ? " is-single" : ""}${phone ? " is-phone" : ""}`}
+      aria-label="Queued Messages">
+      {single ? [rowList, holdLine, notes] : [summary, holdLine, notes, rowList]}
     </section>
   );
 }
@@ -492,11 +534,13 @@ function QueueHoldLine({ sessionId, view }: { sessionId: string; view: QueueHold
 }
 
 /** A phone row's one ⋯ button and its sheet: every action listed, each disabled one with its
- * reason as the visible second line (§9.1). */
-function QueuedMessageActionMenu({ row, concealed, onSteer, onEdit, onCancel, onDismiss }: {
+ * reason as the visible second line (§9.1), except a Steer the row already shows beside it. */
+function QueuedMessageActionMenu({ row, concealed, steerInline, onSteer, onEdit, onCancel, onDismiss }: {
   row: QueuedRow;
   /** The tray is collapsed, hiding this row. */
   concealed: boolean;
+  /** The row shows its own Steer button (a lone queued message, #3962). */
+  steerInline: boolean;
   onSteer: (prompt: QueuedPromptView) => void;
   onEdit: (prompt: QueuedPromptView) => void;
   onCancel: (prompt: QueuedPromptView) => void;
@@ -511,8 +555,8 @@ function QueuedMessageActionMenu({ row, concealed, onSteer, onEdit, onCancel, on
   const { prompt } = row;
   const label = "Queued Message Actions";
   const items = [
-    { key: "steer", label: "Steer into This Turn", icon: <ArrowUpIcon />, reason: row.steer.reason,
-      run: () => onSteer(prompt) },
+    ...(steerInline ? [] : [{ key: "steer", label: "Steer into This Turn", icon: <ArrowUpIcon />, reason: row.steer.reason,
+      run: () => onSteer(prompt) }]),
     { key: "edit", label: "Edit Message", icon: <EditIcon />, reason: row.edit.reason, run: () => onEdit(prompt) },
     row.remove.kind === "dismiss"
       ? { key: "dismiss", label: "Dismiss Message", icon: <CloseIcon />, reason: row.remove.reason,
