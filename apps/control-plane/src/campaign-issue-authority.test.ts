@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
-import { SessionsService } from "./sessions.js";
+import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { closureEvidence, issueEvidenceDigest } from "./campaign-issue-authority.js";
@@ -2081,5 +2082,270 @@ test("#3919 a root's own publication leaves child, nested and non-campaign reque
     const solo = await h.svc.createWorkflowDecisionWithVideo("solo", { requestId: "solo", resourceKey: "solo", resourceSnapshot: snapshot("Solo repair") });
     assert.equal(solo.ok, false); assert.equal(solo.status, 409);
     assert.match(solo.error!, /no controlling Orchestrator ancestor/);
+  } finally { h.db.close(); }
+});
+
+/* ---------- #3915: a scope change binds and revokes only what depends on the issues it changes ---------- */
+
+/** Ledger-attributed children for scope-impact tests: each gets an open attempt on a plan item
+ * and its launch prompt, so the work ledger can prove what it is unrelated to (#3914). */
+function scopeImpactFixture(h: ReturnType<typeof harness>) {
+  assert.ok(h.svc.recordCampaignPlan("root", { items: [{ key: "other" }, { key: "issue:101", issue: { repository: "team/repo", number: 101 } }],
+    planComplete: true }).ok);
+  const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now()); assert.ok(page.ok);
+  const itemId = (key: string) => page.data.items.find((item) => item.key === key)!.id;
+  const policy = h.db.getSession("root")!.parentControlPolicy!;
+  assert.ok(h.svc.setParentControlPolicy("root", { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
+  const runner = h.hub.requestFromRunner;
+  h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => message.type === "github_merge_preflight"
+    ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } }
+    : runner(runnerId, requestId, message, timeout);
+  const child = (id: string, key: string, driver: "codex-app-server" | "claude-code" = "codex-app-server") => {
+    if (!h.db.getSession(id)) h.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "codex", title: id, parentSessionId: "root",
+      driver, config: {}, useWorktree: false, now: Date.now() });
+    h.db.updateSessionStatus(id, "running", Date.now());
+    h.db.appendEvent(id, { kind: "user_message", text: `Deliver ${key}` }, Date.now());
+    const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: itemId(key), childSessionId: id });
+    assert.ok(assigned.ok, assigned.error ?? "refused");
+    return id;
+  };
+  const question = (sessionId: string, requestId: string) => {
+    const created = h.svc.createWorkflowDecision(sessionId, { requestId, resourceKey: requestId, resourceSnapshot: { category: "implementation_question",
+      question: "Which test?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(created.ok && created.data, created.error ?? "refused");
+    return created.data.occurrenceId;
+  };
+  /** An Orchestrator-approved merge its Claude Code child has armed: the enqueue already ran. */
+  const armedMerge = async (sessionId: string, pullRequest: number) => {
+    const headSha = String(pullRequest).padStart(40, "a");
+    const snapshot = { category: "pr_merge" as const, repository: "team/repo", pullRequest, headSha, reviewResult: "merge" as const,
+      requiredChecks: { headSha, status: "passed" as const, checkedAt: 10, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
+    const created = h.svc.createWorkflowDecision(sessionId, { requestId: `merge-${pullRequest}`, resourceKey: `team/repo#${pullRequest}`, resourceSnapshot: snapshot });
+    assert.ok(created.ok && created.data, created.error ?? "refused");
+    assert.equal(created.data.authority, "orchestrator");
+    const approved = h.svc.resolveDescendantRequest("root", sessionId, created.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.ok(approved.ok, approved.error ?? "refused");
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    const armed = await h.svc.consumeWorkflowDecision(sessionId, created.data.occurrenceId, { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
+    assert.ok(armed.ok, armed.error ?? "refused");
+    assert.equal(armed.data?.status, "approved");
+    return { occurrenceId: created.data.occurrenceId, snapshot, command };
+  };
+  const closure = async (issue: number) => {
+    const requested = await h.svc.requestGithubIssueClosure("root", { requestId: `closure-${issue}`, issue, reason: "completed",
+      explanation: "The work merged.", evidence: ["Merged in the campaign."] });
+    assert.ok(requested.ok && requested.data?.decision, requested.error ?? "refused");
+    return requested.data.decision;
+  };
+  const status = (occurrenceId: string) => h.db.workflowDecisionByOccurrence(occurrenceId)!.status;
+  return { itemId, child, question, armedMerge, closure, status };
+}
+
+test("#3915 adding an issue leaves unrelated decisions as they were and revokes only work related to it", async () => {
+  const h = harness(false);
+  try {
+    const f = scopeImpactFixture(h);
+    const unrelated = f.child("child", "other");
+    const merger = f.child("merger", "issue:100", "claude-code");
+    const related = f.child("worker101", "issue:101", "claude-code");
+    const unrelatedQuestion = f.question(unrelated, "unrelated-question");
+    const relatedQuestion = f.question(related, "related-question");
+    const unrelatedMerge = await f.armedMerge(merger, 7);
+    const relatedMerge = await f.armedMerge(related, 8);
+    const closure = await f.closure(100);
+    assert.ok(h.approve(closure).ok, "the person approves the closure of an issue the change keeps");
+    const published = await h.svc.createWorkflowDecisionWithVideo(unrelated, { requestId: "unrelated-publication", resourceKey: "publication",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Unrelated Repair", sanitizedBody: body, labels: [] } });
+    assert.ok(published.ok && published.data, published.error ?? "refused");
+    const publication = published.data.occurrenceId;
+
+    const proposed = await h.proposal("add-101"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    const snapshot = proposed.data!.resourceSnapshot;
+    assert.ok(snapshot.category === "campaign_issue_scope");
+    assert.deepEqual(snapshot.activeChildren.map((c) => c.sessionId), [related], "only a child related to the added issue binds the request");
+    assert.deepEqual(snapshot.affectedDecisions, [relatedQuestion, publication].sort(), "the request lists exactly what it will revoke");
+    assert.ok(h.approve(proposed.data!).ok);
+
+    assert.equal(f.status(publication), "revoked", "a publication counts against the issue capacity every scope change moves");
+    assert.equal(f.status(unrelatedQuestion), "pending");
+    assert.equal(f.status(unrelatedMerge.occurrenceId), "approved");
+    assert.equal(h.db.workflowDecisionByOccurrence(unrelatedMerge.occurrenceId)!.actionAdmission?.command, unrelatedMerge.command);
+    assert.equal(f.status(relatedMerge.occurrenceId), "approved", "an armed merge survives a change that only adds issues");
+    assert.equal(f.status(closure.occurrenceId), "approved", "a closure of an issue the change keeps stays approved");
+    assert.equal(f.status(relatedQuestion), "revoked", "a child related to the added issue cannot keep an approval evaluated before it");
+    assert.deepEqual(revocationAudit(h, related, relatedQuestion).workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
+    assert.deepEqual(revocationAudit(h, related, relatedQuestion).actor, { kind: "system", id: "superseded_by_scope_change" });
+
+    // The kept closure still executes: the only later scope revision left its issue alone.
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision, 2);
+    assert.equal(h.db.issueScopeUnchangedFor("root", "team/repo", 100, 1, 2), true);
+    assert.equal(h.db.issueScopeUnchangedFor("root", "team/repo", 101, 1, 2), false, "the change added 101");
+    assert.equal(h.db.issueScopeUnchangedFor("root", "team/repo", 100, 1, 3), false, "no scope decision wrote revision 3");
+    assert.equal(h.db.issueScopeUnchangedFor("root", "other/repo", 100, 1, 2), false, "another repository has separate authority");
+    // Like the runner, refuse a snapshot at any revision but the one just synchronized.
+    let synchronizedRevision = 0;
+    let dispatched: import("@wollipog/protocol").GithubIssueClosureSnapshot | undefined;
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type === "campaign_issue_scope" && message.operation === "synchronize") synchronizedRevision = message.scope.revision;
+      if (message.type === "github_issue_closure" && message.operation === "execute") {
+        dispatched = message.snapshot;
+        if (message.snapshot.scopeRevision !== synchronizedRevision) return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId,
+          ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
+      }
+      return runner(runnerId, requestId, message, timeout);
+    };
+    const executed = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "refused");
+    assert.equal(h.state.executes, 1);
+    assert.equal(synchronizedRevision, 2);
+    assert.ok(closure.resourceSnapshot.category === "issue_closure");
+    assert.deepEqual(dispatched, { ...closure.resourceSnapshot, scopeRevision: 2 },
+      "the approved closure is dispatched unchanged except for the revision the runner was synchronized to");
+    assert.notEqual(h.db.workflowDecisionByOccurrence(closure.occurrenceId)!.issueClosureResult?.outcome, "refused");
+  } finally { h.db.close(); }
+});
+
+test("#3915 a scope change during closure synchronization defers the closure without consuming it", async () => {
+  const h = harness(false);
+  try {
+    const f = scopeImpactFixture(h);
+    const closure = await f.closure(100);
+    assert.ok(h.approve(closure).ok);
+    const first = await h.proposal("add-101"); assert.ok(first.ok, first.error ?? "proposal");
+    assert.ok(h.approve(first.data!).ok);
+    const second = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-102", expectedRevision: 2, additions: [{ repository: "team/repo", number: 102 }],
+      removals: [], explanation: "Verified intended member" });
+    assert.ok(second.ok, second.error ?? "proposal");
+
+    // The runner acknowledges only what reaches it. During execution's synchronization at revision
+    // 2, the unrelated addition of 102 is approved; its own synchronization never reaches the runner.
+    let runnerRevision = 0;
+    let raced = false;
+    let holdLater = true;
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type === "campaign_issue_scope" && message.operation === "synchronize") {
+        if (message.scope.revision === 3 && holdLater) return new Promise(() => {});
+        runnerRevision = message.scope.revision;
+        if (!raced) { raced = true; assert.ok(h.approve(second.data!).ok); }
+      }
+      if (message.type === "github_issue_closure" && message.operation === "execute" && message.snapshot.scopeRevision !== runnerRevision) {
+        return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: false, error: "Campaign scope revision is stale" };
+      }
+      return runner(runnerId, requestId, message, timeout);
+    };
+    const deferred = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
+    assert.equal(deferred.status, 409);
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision, 3);
+    assert.equal(f.status(closure.occurrenceId), "approved", "nothing was consumed or dispatched");
+    assert.equal(h.state.executes, 0);
+
+    holdLater = false;
+    const executed = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "refused");
+    assert.equal(runnerRevision, 3);
+    assert.equal(h.state.executes, 1, "once synchronized, the closure runs at the revision the runner holds");
+  } finally { h.db.close(); }
+});
+
+test("#3915 a pending scope request stays approvable through unrelated child activity and goes stale on related activity", async () => {
+  const h = harness(false);
+  try {
+    const f = scopeImpactFixture(h);
+    const unrelated = f.child("child", "other");
+    const related = f.child("worker101", "issue:101");
+    const quiet = await h.proposal("add-101"); assert.ok(quiet.ok, quiet.error ?? "proposal");
+    // Routine progress by a child unrelated to 101: a new prompt and a new request.
+    h.db.stageSessionPromptCommand({ commandId: "prompt-unrelated", sessionId: unrelated, runnerId: "r",
+      payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+    const kept = f.question(unrelated, "unrelated-question");
+    assert.ok(h.approve(quiet.data!).ok, "unrelated progress does not make the request stale");
+    assert.equal(f.status(kept), "pending");
+
+    const busy = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-102", expectedRevision: 2, additions: [{ repository: "team/repo", number: 102 }],
+      removals: [{ repository: "team/repo", number: 101 }], explanation: "Swap the member" });
+    assert.ok(busy.ok, busy.error ?? "refused");
+    h.db.stageSessionPromptCommand({ commandId: "prompt-related", sessionId: related, runnerId: "r",
+      payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "d".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+    const refused = h.approve(busy.data!);
+    assert.equal(refused.status, 409, "a child assigned to the removed issue changed");
+    assert.equal(f.status(busy.data!.occurrenceId), "revoked");
+    assert.deepEqual(revocationAudit(h, "root", busy.data!.occurrenceId).actor, { kind: "system", id: "approval_refused_stale" });
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision, 2);
+  } finally { h.db.close(); }
+});
+
+test("#3915 removing an issue revokes its closure and related work, and its armed merge is recorded from forge proof only", async () => {
+  const h = harness(false);
+  try {
+    const f = scopeImpactFixture(h);
+    const unrelated = f.child("child", "other");
+    const merger = f.child("merger", "issue:100", "claude-code");
+    const unrelatedQuestion = f.question(unrelated, "unrelated-question");
+    const relatedQuestion = f.question(merger, "related-question");
+    const merge = await f.armedMerge(merger, 9);
+    const closure = await f.closure(100);
+
+    const removal = await h.svc.proposeCampaignIssueScope("root", { requestId: "remove-100", expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+      removals: [{ repository: "team/repo", number: 100 }], explanation: "Replace the member" });
+    assert.ok(removal.ok, removal.error ?? "refused");
+    assert.ok(removal.data!.resourceSnapshot.category === "campaign_issue_scope");
+    assert.deepEqual(removal.data!.resourceSnapshot.activeChildren.map((c) => c.sessionId), [merger]);
+    assert.ok(h.approve(removal.data!).ok);
+    for (const occurrenceId of [relatedQuestion, merge.occurrenceId, closure.occurrenceId]) {
+      assert.equal(f.status(occurrenceId), "revoked", occurrenceId);
+    }
+    assert.equal(f.status(unrelatedQuestion), "pending");
+    assert.deepEqual(revocationAudit(h, "root", closure.occurrenceId).workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
+
+    // Reconciliation only records what the forge proves: first an unmerged head, then the merge.
+    let merged = false;
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "reconcile_workflow_action") return runner(runnerId, requestId, message, timeout);
+      assert.equal(message.command, merge.command);
+      return merged ? { type: "workflow_action_reconciliation_result", requestId, sessionId: merger, occurrenceId: merge.occurrenceId, accepted: true,
+        commandDigest: createHash("sha256").update(merge.command, "utf8").digest("hex"), forgeHeadSha: merge.snapshot.headSha }
+        : { type: "workflow_action_reconciliation_result", requestId, sessionId: merger, occurrenceId: merge.occurrenceId, accepted: false,
+          error: "forge did not prove the exact approved head was merged" };
+    };
+    const early = await h.svc.reconcileWorkflowDecision(merger, merge.occurrenceId, { resourceSnapshot: merge.snapshot });
+    assert.equal(early.status, 409);
+    assert.equal(f.status(merge.occurrenceId), "revoked", "nothing is recorded before the forge proves the merge");
+    merged = true;
+    const recorded = await h.svc.reconcileWorkflowDecision(merger, merge.occurrenceId, { resourceSnapshot: merge.snapshot });
+    assert.ok(recorded.ok, recorded.error ?? "refused");
+    assert.equal(recorded.data?.status, "consumed");
+    assert.equal((await h.svc.reconcileWorkflowDecision(merger, merge.occurrenceId, { resourceSnapshot: merge.snapshot })).status, 409,
+      "the merge is recorded once");
+
+    // The removed issue's closure stays revoked and is never executed.
+    const executed = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
+    assert.equal(executed.ok, false);
+    assert.equal(h.state.executes, 0);
+  } finally { h.db.close(); }
+});
+
+test("#3915 a person's scope approval under Full Control re-authorizes the boundary and still revokes every outstanding decision", async () => {
+  const h = harness();
+  try {
+    const f = scopeImpactFixture(h);
+    const unrelated = f.child("child", "other");
+    const question = f.question(unrelated, "unrelated-question");
+    const proposed = await h.svc.proposeCampaignIssueScope("root", { requestId: "human-add", expectedRevision: 1, additions: [{ repository: "team/repo", number: 101 }],
+      removals: [], explanation: "Verified intended member" }, () => true, h.principal);
+    assert.ok(proposed.ok, proposed.error ?? "refused");
+    assert.equal(proposed.data!.authority, "human");
+    assert.ok(proposed.data!.resourceSnapshot.category === "campaign_issue_scope");
+    assert.deepEqual(proposed.data!.resourceSnapshot.affectedDecisions, [question],
+      "the person sees every decision their approval revokes, although the child is unrelated");
+    assert.ok(h.approve(proposed.data!).ok);
+    assert.equal(f.status(question), "revoked");
+    assert.deepEqual(revocationAudit(h, unrelated, question).workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
   } finally { h.db.close(); }
 });

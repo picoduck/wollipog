@@ -28,7 +28,8 @@ import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullContro
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
-import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
+import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
+  everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
@@ -10431,6 +10432,11 @@ export class SessionsService {
       const current = this.db.getSession(sessionId);
       if (!current || (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision ||
           snapshot.issueAdmission && issueBoundary(current)?.revision !== snapshot.issueAdmission.boundaryRevision) return fail("Issue authority changed during lineage inspection; refresh the proposal", 409);
+      const controller = this.workflowDecisionController(current, "campaign_issue_scope");
+      if (current.orchestratorPolicy?.control?.mode === "full_control" && (!controller ||
+          this.evaluateWorkflowDecisionAuthority(controller.session, controller.policy, sessionId, snapshot).effectiveOwner === "human")) {
+        snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
+      }
       return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
         resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
     } catch { return fail("GitHub issue validation timed out or failed. Try a smaller explicit proposal and verify the runner's GitHub access, then retry.", 409); }
@@ -10568,6 +10574,16 @@ export class SessionsService {
     }
   }
 
+  /** Whether the campaign scope still names the authority an issue closure was decided under: the
+   * revision it was bound to, or a later one reached only by scope changes that left its issue alone
+   * (#3915), as a scope change that neither adds nor removes the issue does not revoke it. */
+  private closureScopeCurrent(session: SessionView, snapshot: GithubIssueClosureSnapshot): boolean {
+    const scope = session.orchestratorPolicy?.issueScope;
+    if (!scope) return snapshot.scopeRevision === undefined;
+    return snapshot.scopeRevision === scope.revision || snapshot.scopeRevision !== undefined &&
+      this.db.issueScopeUnchangedFor(session.id, snapshot.repository, snapshot.issue, snapshot.scopeRevision, scope.revision);
+  }
+
   async executeGithubIssueClosure(
     sessionId: string,
     occurrenceId: string,
@@ -10586,8 +10602,7 @@ export class SessionsService {
     const snapshot = decision.resourceSnapshot;
     const now = Date.now();
     if (!session || sessionRole(session) !== "orchestrator" || isTerminal(session.status) ||
-        !session.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) ||
-        (session.orchestratorPolicy?.issueScope && snapshot.scopeRevision !== session.orchestratorPolicy.issueScope.revision) ||
+        !session.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) || !this.closureScopeCurrent(session, snapshot) ||
         this.db.resolvedCampaignSessionId(sessionId) !== sessionId ||
         !this.workflowDecisionAuthorityCurrent(session, session.parentControlPolicy!, decision) || decision.policyRevision !== session.parentControlPolicy?.revision ||
         decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
@@ -10608,6 +10623,9 @@ export class SessionsService {
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
       return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
     }
+    // Synchronization reads the scope before its first await: this is the revision every runner
+    // acknowledges when it succeeds, and the only one a closure may be dispatched at (#3915).
+    const synchronizedScopeRevision = this.db.getSession(sessionId)?.orchestratorPolicy?.issueScope?.revision;
     if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
     // The uncached read is the last await: a pull request reopened during synchronization is seen,
     // and only synchronous rechecks of every current-state condition separate it from consumption.
@@ -10617,7 +10635,8 @@ export class SessionsService {
       return fail("An excluded closed pull request could not be confirmed still closed and unmerged; request a new exact closure", 409);
     }
     const freshSession = this.db.getSession(sessionId);
-    if (!freshSession || isTerminal(freshSession.status) || (freshSession.orchestratorPolicy?.issueScope?.revision ?? 0) !== (snapshot.scopeRevision ?? 0) ||
+    if (!freshSession || isTerminal(freshSession.status) || !freshSession.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) ||
+        freshSession.orchestratorPolicy.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(freshSession, snapshot) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
@@ -10633,10 +10652,15 @@ export class SessionsService {
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.hub.sessionChangedById(sessionId);
     let result: GithubIssueClosureResult = { outcome: "uncertain", completedAt: now };
+    // The runner fences the mutation on the scope revision it was just synchronized to. A closure
+    // carried across scope changes that left its issue alone (#3915) is dispatched at that revision,
+    // which the checks above proved is still current and still names its authority; the runner's
+    // own scope, issue, bounded-authority and mutation-fence checks then apply unchanged.
+    const dispatched = synchronizedScopeRevision === undefined ? snapshot : { ...snapshot, scopeRevision: synchronizedScopeRevision };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot,
+        type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
       }, 150_000);
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
           response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&
@@ -11083,6 +11107,9 @@ export class SessionsService {
       const latest = scopeSnapshot(this.db, currentChild, snapshot.repository, request);
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
+      if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
+        latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
+      }
       if (snapshot.verifiedPublications?.some((p) => this.db.admittedCampaignPublicationIssue(childSessionId, p.publicationOccurrenceId) !== null)) return fail("Publication lineage was already admitted; refresh the scope proposal", 409);
       const boundary = issueBoundary(currentChild);
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
@@ -11107,11 +11134,11 @@ export class SessionsService {
         return fail("Campaign scope or affected work changed. Refresh Campaign Status and request approval of a new exact proposal.", 409);
       }
       if (!actor.id) return fail("An authenticated human identity is required for scope authorization", 403);
-      const staleDecisions = this.db.unconsumedWorkflowDecisionsForController(childSessionId).filter((d) => d.occurrenceId !== occurrenceId);
-      const resolvedScope = this.db.approveCampaignIssueScope(occurrenceId, authority === "orchestrator" ? issueBoundary(currentChild)!.authorizedByUserId : actor.id, now,
+      const approved = this.db.approveCampaignIssueScope(occurrenceId, authority === "orchestrator" ? issueBoundary(currentChild)!.authorizedByUserId : actor.id, now,
         authority === "orchestrator" ? actor.id : undefined);
-      if (!resolvedScope) return fail("Campaign scope changed concurrently. Refresh and propose again.", 409);
-      for (const stale of staleDecisions) {
+      if (!approved) return fail("Campaign scope changed concurrently. Refresh and propose again.", 409);
+      const resolvedScope = approved.decision;
+      for (const stale of approved.revoked) {
         this.settleWorkflowDecisionPause(stale.sessionId, stale.occurrenceId, now);
         this.recordWorkflowDecisionRevocation(stale, { reason: "superseded_by_scope_change", triggeredBy: actor }, now);
       }
