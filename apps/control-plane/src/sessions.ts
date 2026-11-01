@@ -11533,8 +11533,7 @@ export class SessionsService {
         !parent || isTerminal(child.status) ||
         isTerminal(parent.status) || !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) || !policy ||
-        policy.revision !== decision.policyRevision ||
-        !this.workflowDecisionAuthorityCurrent(parent, policy, decision, { recordingCompletedMerge: true })) {
+        !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
     }
     for (const owner of [child, parent]) {
@@ -11622,8 +11621,7 @@ export class SessionsService {
     if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
         !canAccess(currentChild.id) || !canAccess(currentParent.id) ||
         !this.workflowDecisionRelationship(currentParent.id, currentChild.id) || !currentPolicy ||
-        currentPolicy.revision !== decision.policyRevision ||
-        !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision, { recordingCompletedMerge: true })) {
+        !this.completedMergeAuthorityCurrent(currentParent, currentPolicy, decision)) {
       return fail("workflow decision authority or ancestry changed during reconciliation", 409);
     }
     for (const owner of [currentChild, currentParent]) {
@@ -12923,6 +12921,32 @@ export class SessionsService {
 
   /** The approving authority must still stand after the forge read. A live reconcile also needs a
    * live child; a lifecycle settlement records a merge that landed before its child ended. */
+  /** Whether the authority a completed merge is recorded under still stands: the approving
+   * authority unchanged, or the one exact re-authorization below. */
+  private completedMergeAuthorityCurrent(parent: SessionView, policy: ParentControlPolicy, decision: WorkflowDecisionView): boolean {
+    return policy.revision === decision.policyRevision &&
+      this.workflowDecisionAuthorityCurrent(parent, policy, decision, { recordingCompletedMerge: true }) ||
+      this.scopeReauthorizedArmedMerge(parent, policy, decision);
+  }
+
+  /** A person's scope approval under Full Control re-mints the boundary, bumping the policy
+   * revision every decision is bound to, and revokes every outstanding decision (#3915). An armed
+   * merge it revoked has already been enqueued, so reconciliation may still record the merge the
+   * proof shows. Only that exact re-authorization counts: the scope decision that revoked this
+   * occurrence (`scopeApprovalRevoking`), the one revision bump its re-mint made and no other, and
+   * the boundary that re-mint wrote, still current and still giving the campaign's Orchestrator
+   * this merge. It never re-arms, approves or runs anything, and an unarmed approval stays terminal. */
+  private scopeReauthorizedArmedMerge(parent: SessionView, policy: ParentControlPolicy, decision: WorkflowDecisionView): boolean {
+    if (decision.status !== "revoked" || decision.category !== "pr_merge" || decision.authority !== "orchestrator" ||
+        decision.actionAdmission?.kind !== "pr_merge_enqueue" || decision.controllingSessionId !== parent.id ||
+        policy.revision !== decision.policyRevision + 1) return false;
+    const scope = this.db.scopeApprovalRevoking(decision);
+    const control = parent.orchestratorPolicy?.control;
+    return Boolean(scope) && control?.mode === "full_control" && control.boundary.revision === policy.revision &&
+      control.boundary.authorizedAt === scope!.resolvedAt && campaignBoundaryCurrent(parent) &&
+      this.evaluateWorkflowDecisionAuthority(parent, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "orchestrator";
+  }
+
   private forgeAttestedMergeAuthority(
     decision: WorkflowDecisionView,
     requireLive: boolean,
@@ -12935,8 +12959,7 @@ export class SessionsService {
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||
-        policy.revision !== decision.policyRevision ||
-        !this.workflowDecisionAuthorityCurrent(parent, policy, decision, { recordingCompletedMerge: true })) {
+        !this.completedMergeAuthorityCurrent(parent, policy, decision)) {
       return false;
     }
     return [child, parent].every((owner) => !this.capabilityFailure(

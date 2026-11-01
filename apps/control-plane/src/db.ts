@@ -22137,6 +22137,30 @@ export class ControlPlaneDb {
     return true;
   }
 
+  /** The person's campaign scope approval that revoked this decision (#3915), or null. The decision
+   * has exactly one `superseded_by_scope_change` revocation, triggered by a person; exactly one
+   * consumed, human-owned scope decision of its controlling campaign root was consumed at that
+   * instant, under the same policy revision, and its exact snapshot names this occurrence among
+   * the decisions it revokes. Anything else proves nothing. */
+  scopeApprovalRevoking(decision: WorkflowDecisionView): WorkflowDecisionView | null {
+    const revocations = this.stmt(
+      `SELECT created_at, workflow_decision FROM governance_audit
+       WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision' AND stage='resolution'
+         AND outcome='revoked' AND actor_kind='system' AND actor_id='superseded_by_scope_change'`,
+    ).all(decision.sessionId, decision.occurrenceId) as Array<{ created_at: number; workflow_decision: string | null }>;
+    if (revocations.length !== 1) return null;
+    const provenance = parseJson<NonNullable<GovernanceAuditEntry["workflowDecision"]>>(revocations[0]!.workflow_decision ?? "");
+    if (provenance?.revocation?.reason !== "superseded_by_scope_change" || provenance.revocation.triggeredBy?.kind !== "human") return null;
+    const scopes = (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=? AND category='campaign_issue_scope'
+         AND authority='human' AND status='consumed' AND consumed_at=? AND resolved_at=? AND policy_revision=?`,
+    ).all(decision.controllingSessionId, decision.controllingSessionId, revocations[0]!.created_at, revocations[0]!.created_at,
+      decision.policyRevision) as unknown[]).map(workflowDecisionFromRow);
+    const scope = scopes.length === 1 ? scopes[0] : null;
+    return scope?.resourceSnapshot.category === "campaign_issue_scope" && scope.resourceSnapshot.affectedDecisions.includes(decision.occurrenceId)
+      ? scope : null;
+  }
+
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
    * auditable lifecycle-revoked state above. The eligibility check is repeated under the write
    * lock so restart/revocation races cannot widen recovery. */
