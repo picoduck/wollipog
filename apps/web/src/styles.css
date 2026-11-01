@@ -6167,6 +6167,38 @@ body.shell-dock-dragging * {
   background: none;
   cursor: zoom-in;
 }
+/* An artifact a reply cites by id (#3970): a chip of its kind and name in the line of text, which
+   opens the viewer. It wraps with the sentence and truncates a long name rather than widening it. */
+.art-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+.art-ref:hover { border-color: var(--border-strong); }
+.art-ref > .app-icon { flex: none; }
+.art-ref-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The cited artifacts a reply's turn did not attach, previewed under the reply. */
+.tl-artifact-refs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
+}
 /* The artifact viewer (#3924): a full dialog, a full-height sheet on phones, its stage taking what the
    header and footer leave. An image's stage takes every touch, so a pinch zooms the image and not the
    page; any other stage leaves vertical scrolling to the browser and reads horizontal swipes. */
