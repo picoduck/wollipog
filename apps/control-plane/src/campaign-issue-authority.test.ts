@@ -8,12 +8,12 @@ import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
-import { closureEvidence, issueEvidenceDigest } from "./campaign-issue-authority.js";
+import { closureEvidence, closureDeliveryFailure, issueEvidenceDigest } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 
-function harness(full = true, maximum = 5) {
+function harness(full = true, maximum = 5, issues = [100]) {
   const db = ControlPlaneDb.open(":memory:");
   const principal: HumanPrincipal = { ...db.localIdentityContext(), kind: "human", actorId: db.localIdentityContext().userId };
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
@@ -21,8 +21,8 @@ function harness(full = true, maximum = 5) {
       driver: "codex-app-server", context: { kind: "native" }, available: true }] };
   db.registerRunner(metadata, 1, PROTOCOL_VERSION);
   const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
-  policy.issueScope = { repository: "team/repo", issueNumbers: [100], revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
-  policy.issueNumbers = [100];
+  policy.issueScope = { repository: "team/repo", issueNumbers: issues, revision: 1, authorizedByUserId: principal.userId, authorizedAt: 1 };
+  policy.issueNumbers = issues;
   for (const id of ["root", "child"]) {
     db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "codex", title: id, useWorktree: false, driver: "codex-app-server", now: 1, config: {},
       ...(id === "root" ? { role: "orchestrator", orchestratorPolicy: policy, parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } } : { parentSessionId: "root" }) });
@@ -52,7 +52,7 @@ function harness(full = true, maximum = 5) {
   };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   if (full) assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"],
-    delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: maximum, closureReasons: ["completed", "not_planned"] } }, 1, principal).ok);
+    delegatablePolicyIds: [], issueAuthority: { epics: issues, relatedFollowUps: true, maxIssues: maximum, closureReasons: ["completed", "not_planned"] } }, 1, principal).ok);
   const approve = (d: WorkflowDecisionView) => svc.resolveWorkflowDecision("root", "root", d.occurrenceId, { outcome: "approve" }, d.authority,
     d.authority === "human" ? { kind: "human", id: principal.userId } : { kind: "agent", id: "root" }, () => true);
   const proposal = (requestId: string, number = 101) => svc.proposeCampaignIssueScope("root", { requestId, expectedRevision: 1, additions: [{repository:"team/repo",number}],
@@ -62,6 +62,113 @@ function harness(full = true, maximum = 5) {
   const item = page.data.items[0]!;
   return { db, svc, hub, metadata, principal, state, approve, proposal, item };
 }
+
+test("fixed-by planning is scoped, root-only, atomic and immutable before dispatch (#3943)", () => {
+  const h = harness();
+  try {
+    const link = { issue: { repository: "team/repo", number: 100 }, workItemKeys: ["unit:a", "unit:b"] };
+    assert.equal(h.svc.recordCampaignPlan("child", { items: [], planComplete: true, fixedBy: [link] }).ok, false);
+    assert.equal(h.svc.recordCampaignPlan("root", { items: [], planComplete: true, fixedBy: [link] }).ok, false);
+    h.db.raw().prepare("DELETE FROM sessions WHERE id='child'").run();
+    assert.equal(h.svc.recordCampaignPlan("root", { items: [], planComplete: true,
+      fixedBy: [{ ...link, issue: { repository: "team/repo", number: 999 } }] }).ok, false);
+    const plan = { items: [{ key: "unit:a", issue: link.issue }, { key: "unit:b", issue: link.issue }], planComplete: true, fixedBy: [link] };
+    assert.ok(h.svc.recordCampaignPlan("root", plan).ok);
+    const ids = h.db.campaignWorkLedger.fixedBy("root", "team/repo", 100)!;
+    assert.equal(ids.length, 2);
+    assert.ok(h.svc.recordCampaignPlan("root", plan).ok);
+    assert.equal(h.svc.recordCampaignPlan("root", { ...plan, fixedBy: [{ ...link, workItemKeys: ["unit:a"] }] }).ok, false);
+    assert.equal(h.svc.recordCampaignPlan("root", { ...plan, fixedBy: [{ ...link, workItemKeys: ["missing"] }] }).ok, false);
+    assert.deepEqual(h.db.campaignWorkLedger.fixedBy("root", "team/repo", 100), ids);
+    h.db.createSession({ id: "child", runnerId: "r", workspaceId: "w", agentId: "codex", title: "child", useWorktree: false,
+      driver: "codex-app-server", now: 2, config: {}, parentSessionId: "root" });
+    h.db.updateSessionStatus("child", "running", 3);
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: ids[0]!, childSessionId: "child" }).ok);
+    const late = h.svc.recordCampaignPlan("root", plan);
+    assert.equal(late.ok, false); assert.match(late.error!, /before creating any campaign child/);
+    // Historical attempts continue to freeze planning even after the child is deleted.
+    h.db.raw().prepare("DELETE FROM sessions WHERE id='child'").run();
+    assert.match(h.svc.recordCampaignPlan("root", plan).error!, /before any campaign dispatch/);
+  } finally { h.db.close(); }
+});
+
+test("every fixed-by unit needs delivery, verification and exact merged proof (#3943)", async () => {
+  const h = harness(true, 5, [100, 101, 102]);
+  try {
+    h.db.raw().prepare("DELETE FROM sessions WHERE id='child'").run();
+    const target = { repository: "team/repo", number: 100 };
+    const prior = await h.svc.requestGithubIssueClosure("root", { requestId: "before-plan", issue: 100, reason: "completed",
+      explanation: "No established delivery", evidence: ["Plan pending"] });
+    assert.ok(prior.ok); assert.equal(prior.data!.decision!.authority, "human");
+    const plan = h.svc.recordCampaignPlan("root", { items: [{ key: "unit:a", issue: { ...target, number: 101 } }, { key: "unit:b", issue: { ...target, number: 102 } }],
+      planComplete: true, fixedBy: [{ issue: target, workItemKeys: ["unit:a", "unit:b"] }] });
+    assert.ok(plan.ok, plan.error ?? "plan recorded");
+    assert.equal(h.svc.workflowDecision("root", prior.data!.decision!.occurrenceId).data?.authority, "human");
+    const merge = { number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) };
+    h.state.delivery = [merge];
+    const details = new Map(plan.data!.items.map(({ workItemId }, index) => [workItemId, { id: workItemId, issue: { ...target, number: 101 + index }, primaryState: "delivered", currentAttempt: null,
+      verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
+      observed: { pullRequests: [{ ref: { repository: "team/repo", number: 10 }, fact: { availability: "fresh", value: { state: "merged", ...merge } } }] },
+    } as unknown as CampaignWorkItemDetail]));
+    const original = h.db.campaignWorkLedger.detail.bind(h.db.campaignWorkLedger);
+    h.db.campaignWorkLedger.detail = (campaign, id, now) => details.get(id) ?? original(campaign, id, now);
+    const request = { requestId: "fixed-by-completed", issue: 100, reason: "completed" as const, explanation: "All required units verified", evidence: ["Merged reports"] };
+    const ownGap = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: "own-unit-still-queued" });
+    assert.ok(ownGap.ok);
+    assert.equal(ownGap.data!.decision!.authority, "human", "fixed-by units cannot bypass the target's own queued item");
+    const first = [...details.values()][0]!;
+    details.set(h.item.id, { ...structuredClone(first), id: h.item.id, issue: target });
+    const closure = await h.svc.requestGithubIssueClosure("root", request);
+    assert.ok(closure.ok, closure.error ?? "closure requested");
+    assert.equal(closure.data!.decision!.authority, "orchestrator");
+    const snapshot = closure.data!.decision!.resourceSnapshot;
+    assert.equal(snapshot.category, "issue_closure");
+    if (snapshot.category !== "issue_closure") return;
+    // A gate for the fixed-by target still constrains a cited unit's delivered head.
+    first.attempts = [{ id: "unit-attempt", sessionId: "unit-session", startedAt: 1, endedAt: 3 }] as CampaignWorkItemDetail["attempts"];
+    const firstVerifications = first.verifications;
+    first.verifications = [{ outcome: "delivered", attemptId: "unit-attempt", childSessionId: "unit-session", report: { ts: 3, digest: "d".repeat(64) } }] as CampaignWorkItemDetail["verifications"];
+    const originalGates = h.db.consumedPullRequestMerges.bind(h.db);
+    h.db.consumedPullRequestMerges = () => [{ sessionId: "unit-session", createdAt: 2, resourceSnapshot: {
+      category: "pr_merge", repository: "team/repo", pullRequest: 10, headSha: "e".repeat(40), intendedClosures: ["team/repo#100"],
+    } }] as unknown as ReturnType<typeof h.db.consumedPullRequestMerges>;
+    assert.equal(closureEvidence(h.db, h.db.getSession("root")!, snapshot), null, "a target-only approval cannot admit a different merged head");
+    h.db.consumedPullRequestMerges = originalGates;
+    first.verifications = firstVerifications;
+    const second = [...details.values()][1]!;
+    assert.ok(h.approve(closure.data!.decision!).ok);
+    const verified = second.verifications;
+    second.verifications = [];
+    assert.equal((await h.svc.executeGithubIssueClosure("root", closure.data!.decision!.occurrenceId, closure.data!.decision!.resourceDigest)).ok, false);
+    second.verifications = verified;
+    for (const gap of ["unverified", "undelivered", "unmerged", "missing"] as const) {
+      const saved = structuredClone(second);
+      if (gap === "unverified") second.verifications = [];
+      if (gap === "undelivered") second.primaryState = "queued";
+      if (gap === "unmerged") second.observed.pullRequests = [];
+      if (gap === "missing") h.db.campaignWorkLedger.detail = (_c, id) => id === second.id ? null : details.get(id) ?? null;
+      assert.equal(closureEvidence(h.db, h.db.getSession("root")!, snapshot), null, gap);
+      assert.match(closureDeliveryFailure(h.db, h.db.getSession("root")!, snapshot), new RegExp(`${gap}_work_item:`));
+      const fallback = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: `gap-${gap}` });
+      assert.ok(fallback.ok, fallback.error ?? "human fallback");
+      assert.equal(fallback.data!.decision!.authority, "human");
+      assert.equal(fallback.data!.decision!.resourceSnapshot.category === "issue_closure" &&
+        fallback.data!.decision!.resourceSnapshot.deliveryFailure, closureDeliveryFailure(h.db, h.db.getSession("root")!, snapshot));
+      Object.assign(second, saved);
+      h.db.campaignWorkLedger.detail = (campaign, id, now) => details.get(id) ?? original(campaign, id, now);
+    }
+    const lateOwn = h.svc.recordCampaignPlan("root", { items: [{ key: "late-own", issue: target }], planComplete: true });
+    assert.ok(lateOwn.ok);
+    const lateGap = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: "late-own-unit-queued" });
+    assert.ok(lateGap.ok); assert.equal(lateGap.data!.decision!.authority, "human");
+    const lateId = lateOwn.data!.items[0]!.workItemId;
+    details.set(lateId, { ...structuredClone(first), id: lateId, issue: target });
+    const final = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: "fixed-by-final" });
+    assert.ok(final.ok); assert.equal(final.data!.decision!.authority, "orchestrator");
+    assert.ok(h.approve(final.data!.decision!).ok);
+    assert.ok((await h.svc.executeGithubIssueClosure("root", final.data!.decision!.occurrenceId, final.data!.decision!.resourceDigest)).ok);
+  } finally { h.db.close(); }
+});
 
 test("scope reads and proposals explain unsupported runner targets without exposing runner error text", async () => {
   const h = harness(false);

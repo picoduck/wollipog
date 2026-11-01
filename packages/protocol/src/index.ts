@@ -802,7 +802,9 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 264: reserved by the async-review question continuation change (#3938, PR #3939).
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
 // 266: campaign dirty-worktree diagnostics and controlling-Orchestrator recovery (#3942).
-export const PROTOCOL_VERSION = 266;
+// 268: immutable pre-dispatch fixedBy campaign plan relationships (#3943), with a client
+//      capability floor so older servers cannot silently ignore the new plan field.
+export const PROTOCOL_VERSION = 268;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1167,6 +1169,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
+  campaignFixedBy: 268,
   /** v220 control plane records a child's work-item attempt at creation (#3106). Checked by the
    * runner's create_session tool and CLI against the connected control plane. */
   campaignWorkItemAtCreation: 220,
@@ -5089,6 +5092,8 @@ export interface GithubIssueClosureRequest {
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
+  /** Server-derived reason delegated delivery could not be proven. */
+  deliveryFailure?: string;
   scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];

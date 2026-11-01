@@ -370,8 +370,8 @@ async function campaignWorkItemAtCreationCompatibilityError(deps: McpDeps): Prom
 
 /** A pre-v196 control plane has no campaign work ledger. It would ignore an unknown `workItem` or
  * `originWorkItemIds` field, silently recording nothing, so refuse by name instead. */
-async function campaignWorkLedgerCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
+async function campaignWorkLedgerCompatibilityError(deps: McpDeps, fixedBy = false): Promise<ToolResult | null> {
+  const required = fixedBy ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignFixedBy : RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
@@ -1560,6 +1560,10 @@ export const TOOLS: McpTool[] = [
             additionalProperties: false,
           },
         },
+        fixedBy: { type: "array", maxItems: 100, items: { type: "object", properties: {
+          issue: CAMPAIGN_ISSUE_SCHEMA,
+          workItemKeys: { type: "array", minItems: 1, maxItems: 100, items: { type: "string", maxLength: 256 } },
+        }, required: ["issue", "workItemKeys"], additionalProperties: false } },
         planComplete: { type: "boolean" },
       },
       required: ["items", "planComplete"],
@@ -1567,11 +1571,11 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
-      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps, args?.fixedBy !== undefined);
       if (incompatible) return incompatible;
       const r = await cpFetch(deps, "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/plan`,
-        { items: args?.items, planComplete: args?.planComplete });
+        { items: args?.items, planComplete: args?.planComplete, ...(args?.fixedBy === undefined ? {} : { fixedBy: args.fixedBy }) });
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },

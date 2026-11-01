@@ -2937,6 +2937,16 @@ test("a lost issue closure response tells the agent to inspect before renewed re
   assert.match(resultText(result), /Never replay/);
 });
 
+test("fixedBy plan fields require a supporting server and reach it unchanged (#3943)", async () => {
+  const plan = { items: [], planComplete: true, fixedBy: [{ issue: { repository: "o/r", number: 1 }, workItemKeys: ["unit"] }] };
+  const old = makeDeps(); old.deps.orchestrator = true; old.deps.controlPlaneProtocolVersion = 267;
+  assert.equal((await callTool(old.deps, "record_campaign_plan", plan)).isError, true);
+  assert.equal(old.calls.length, 0);
+  const current = makeDeps(); current.deps.orchestrator = true; current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  assert.equal((await callTool(current.deps, "record_campaign_plan", plan)).isError, undefined);
+  assert.deepEqual(current.calls.at(-1)?.body, plan);
+});
+
 test("campaign work ledger tools require an Orchestrator and a v196 control plane (#2417)", async () => {
   const ledgerTools = ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
     "adjudicate_campaign_recommendation", "get_campaign_work_items"];
