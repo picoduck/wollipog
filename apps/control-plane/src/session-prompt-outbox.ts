@@ -22,6 +22,9 @@ export type RetryablePendingPrompt = {
   errorCode: "PROVIDER_AUTHENTICATION_REQUIRED" | "WORKTREE_RECOVERY_REQUIRED";
 };
 
+export const REVIEW_CONTINUATION_UNSUPPORTED_REASON =
+  "runner no longer supports question-preserving review continuations";
+
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
 const CAMPAIGN_HOLD_RECHECK_MS = 10_000;
@@ -260,7 +263,7 @@ export class SessionPromptOutbox {
             : command.type === "prompt_session" && command.campaignContinuation
               ? "runner no longer supports durable campaign continuations"
               : command.type === "prompt_session" && command.reviewContinuation
-                ? "runner no longer supports question-preserving review continuations"
+                ? REVIEW_CONTINUATION_UNSUPPORTED_REASON
                 : "runner no longer supports durable queued prompt identity",
           now,
         });

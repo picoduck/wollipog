@@ -1,3 +1,4 @@
+import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
@@ -288,7 +289,7 @@ import {
   claudeStableAliasFamily,
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
-import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { SessionPromptOutbox, REVIEW_CONTINUATION_UNSUPPORTED_REASON } from "./session-prompt-outbox.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
@@ -9825,8 +9826,20 @@ export class SessionsService {
     if (!requesterSessionId) return;
     const command = this.db.getSessionPromptCommand(commandId);
     if (!command) return;
-    if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
-        command.userEventSeq === undefined) {
+    const requester = this.db.getSession(requesterSessionId);
+    let automaticReview = false;
+    try {
+      const payload = JSON.parse(command.payloadJson) as DurableSessionCommand;
+      automaticReview = payload.type === "prompt_session" && payload.reviewContinuation === true;
+    } catch { /* Malformed stored payloads are final failures, never retried. */ }
+    const retryUnsentReview = automaticReview && requester && !isTerminal(requester.status) && !requester.archived &&
+      ((command.errorCode === "COMMAND_CANCELLED" && command.error === AUTOMATIC_TURN_RESTART_CANCELLED_REASON) ||
+        (command.attemptCount === 0 && command.error === REVIEW_CONTINUATION_UNSUPPORTED_REASON));
+    // Restart cancels rejection-held automatic turns before submission; a transport downgrade
+    // can also reject a never-sent command. Keep the result owed, without replaying any user event
+    // or uncertain delivery. Older runners then use the same pending-question hold as admission.
+    if (command.state === "failed" && command.userEventSeq === undefined &&
+        (command.errorCode === "WORKTREE_RECOVERY_REQUIRED" || retryUnsentReview)) {
       if (!this.db.holdReviewContinuationCommand(requesterSessionId, commandId, now)) return;
       this.hub.sessionChangedById(requesterSessionId);
       this.deliverHeldReviewContinuations(requesterSessionId, now);

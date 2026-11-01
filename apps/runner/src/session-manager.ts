@@ -1,3 +1,4 @@
+import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { isProviderCapacityFailure, PROVIDER_RETRY_CONTINUATION } from "./provider-turn-retry.js";
 import { artifactGuidance } from "./artifact-guidance.js";
 import { shellGuidance } from "./shell-guidance.js";
@@ -12223,7 +12224,7 @@ export class SessionManager {
       ? replaced.filter((prompt) => automaticTurn(prompt) && !(prompt.syntheticRecovery || prompt.providerRecovery))
       : [];
     this.cancelQueued(rejectionHeld,
-      "session restart cleared the provider rejection hold before this automatic turn was sent");
+      AUTOMATIC_TURN_RESTART_CANCELLED_REASON);
     const carried = replaced.filter((prompt) =>
       !(prompt.syntheticRecovery || prompt.providerRecovery) && !rejectionHeld.includes(prompt));
     if (carried.length === 0) return;

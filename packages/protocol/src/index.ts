@@ -804,6 +804,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      notifications while a question is pending instead of treating them as human input.
 export const PROTOCOL_VERSION = 268;
 
+/** A COMMAND_CANCELLED receipt with this reason attests an automatic turn stayed behind a
+ * provider-rejection hold until Restart. Distinguish it from a person's deliberate cancellation. */
+export const AUTOMATIC_TURN_RESTART_CANCELLED_REASON =
+  "session restart cleared the provider rejection hold before this automatic turn was sent";
+
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
 export * from "./campaign-issue-publication.js";

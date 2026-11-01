@@ -10,6 +10,7 @@ import {
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
+import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
@@ -950,6 +951,76 @@ test("older runners hold review notifications until the pending async question i
     assert.equal(continuationCommands(h).size, 1);
     const command = h.sent.find((message) => message.type === "durable_session_command")?.command;
     assert.equal((command as { reviewContinuation?: boolean }).reviewContinuation, undefined);
+  } finally { h.db.close(); }
+});
+
+test("an unsent review notification cancelled by Restart remains owed (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const commandId = [...continuationCommands(h).keys()][0]!;
+    assert.ok(commandId);
+    // A provider-rejection hold parked the automatic turn; Restart cancels it before submission.
+    h.db.updateSessionStatus("s1", "running", 11);
+    h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId,
+      sessionId: "s1", state: "failed", revision: 5, code: "COMMAND_CANCELLED",
+      error: "session restart cleared the provider rejection hold before this automatic turn was sent" });
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
+    h.db.updateSessionStatus("s1", "idle", 12);
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 2, "one fresh durable attempt follows the proven unsent attempt");
+  } finally { h.db.close(); }
+});
+
+test("a review notification staged before a runner downgrade returns to the question hold (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.svc.onSessionEvent("s1", { kind: "question_request", async: true, requestId: "async-approval",
+      occurrenceId: "original-question", questions: [{ id: "0", question: "Approve?", options: [] }] }, 1, 10);
+    // Finish while busy, so the service owes the continuation but has not staged or sent it yet.
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const outbox = new SessionPromptOutbox(h.db, h.hub, { warn() {} });
+    const row = outbox.stageReviewContinuation([view.reviewSessionId], "s1", "r",
+      { type: "prompt_session", sessionId: "s1", text: "Automatic review result", reviewContinuation: true }, Date.now());
+    h.db.registerRunner(h.metadata, 13, 263);
+    h.db.updateSessionStatus("s1", "idle", 14);
+    outbox.flush(Date.now());
+    assert.equal(h.db.getSessionPromptCommand(row.commandId)?.state, "failed");
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
+    assert.equal(continuationCommands(h).size, 0);
+    assert.equal(h.db.getSession("s1")!.pendingApproval?.occurrenceId, "original-question");
+    h.db.registerRunner(h.metadata, 15, PROTOCOL_VERSION);
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 1, "an upgraded runner receives the still-owed notification");
+  } finally { h.db.close(); }
+});
+
+for (const delivery of ["uncertain", "user-event", "human-cancelled"] as const) test(`review recovery never replays ${delivery} delivery (#3938)`, () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const commandId = [...continuationCommands(h).keys()][0]!;
+    if (delivery === "user-event") h.svc.onSessionEvent("s1", {
+      kind: "user_message", text: "Automatic review result", commandId, campaignContinuation: true,
+    }, 1, 11);
+    h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId,
+      sessionId: "s1", state: delivery === "uncertain" ? "uncertain" : "failed", revision: 5,
+      code: "COMMAND_CANCELLED", error: "delivery is not proven unsent",
+      ...(delivery === "user-event" ? { userEventSeq: 1 } : {}) });
+    h.db.updateSessionStatus("s1", "idle", 12);
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation,
+      delivery === "uncertain" ? "uncertain" : "failed");
+    assert.equal(continuationCommands(h).size, 1);
   } finally { h.db.close(); }
 });
 
