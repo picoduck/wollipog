@@ -791,6 +791,7 @@ export class CodexAppServerDriver implements Driver {
           const matches: CompletedCommandReconciliationProof[] = [];
           const successfulExactCommands: { turnId: string; itemId: string }[] = [];
           let liveSawExactCommand = false;
+          let liveSawUnfinishedExactCommand = false;
           let liveSawAdmissionCandidate = false;
           for (const turn of read.thread.turns as Json[]) {
             if (!Array.isArray(turn?.items)) continue;
@@ -803,7 +804,12 @@ export class CodexAppServerDriver implements Driver {
               const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
               if (logicalCommand !== command) continue;
               liveSawExactCommand = true;
-              if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
+              if (item.status === "inProgress") liveSawUnfinishedExactCommand = true;
+              // The provider owns this item and its terminal exit status. The surrounding turn
+              // may still be waiting for reconciliation; requiring it to finish creates a cycle.
+              // Failed/interrupted/unknown turns remain ineligible, as do nonterminal items.
+              if (!boundedProviderCorrelationId(turn?.id) ||
+                  (turn?.status !== "completed" && turn?.status !== "inProgress") ||
                   (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
                   item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
               successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
@@ -823,6 +829,9 @@ export class CodexAppServerDriver implements Driver {
               });
             }
           }
+          // An additional invocation can still become a second success. Do not select a
+          // completed proof while that duplicate is unfinished, including via a receipt fence.
+          if (liveSawUnfinishedExactCommand) return null;
           if (matches.length !== 0) {
             return matches.length === 1 && successfulExactCommands.length === 1 ? matches[0]! : null;
           }
