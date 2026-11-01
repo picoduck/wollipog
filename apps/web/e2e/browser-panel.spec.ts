@@ -237,14 +237,16 @@ for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px p
       expect(await page.locator(".art-code pre").evaluate((element) => getComputedStyle(element).fontFamily)).toMatch(/Cascadia|Consolas|mono/iu);
     });
 
-    test("Enlarge opens the screenshot in a full dialog and returns focus to Enlarge", async ({ page }) => {
+    test("Enlarge opens the screenshot in the full-screen viewer and returns focus to Enlarge", async ({ page }) => {
       await openBrowser(page, width);
       await openArtifact(page, "Settings at 390px, dark theme.png");
       await expect(page.locator(".art-checker img")).toBeVisible();
       const enlarge = page.locator(".art-bar").getByRole("button", { name: "Enlarge" });
       await enlarge.click();
+      // The viewer the transcript opens too (#3924), over the Browser's loaded list.
       const dialog = page.getByRole("dialog", { name: "Settings at 390px, dark theme.png" });
-      await expect(dialog.locator(".art-stage img")).toBeVisible();
+      await expect(dialog.locator(".art-gallery-stage img")).toBeVisible();
+      await expect(dialog.locator(".art-gallery-position")).toHaveText(/^\d+ of \d+$/);
       const box = (await dialog.boundingBox())!;
       expect(box.width).toBeGreaterThan(width === 390 ? 380 : 1000);
       await dialog.getByRole("button", { name: "Done" }).click();

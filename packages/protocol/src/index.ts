@@ -802,11 +802,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 264: reserved by the async-review question continuation change (#3938, PR #3939).
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
 // 266: campaign dirty-worktree diagnostics and controlling-Orchestrator recovery (#3942).
-// 267: the requester or controlling Orchestrator withdraws a pending or approved, unconsumed and
+// 268: immutable pre-dispatch fixedBy campaign plan relationships (#3943), with a client
+//      capability floor so older servers cannot silently ignore the new plan field.
+// 269: the requester or controlling Orchestrator withdraws a pending or approved, unconsumed and
 //      unarmed workflow decision with a reason (#3917), through
 //      POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw. Older control planes have
 //      no route, so current clients refuse by name rather than sending it.
-export const PROTOCOL_VERSION = 267;
+export const PROTOCOL_VERSION = 269;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1150,8 +1152,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
-  /** v267 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
-  workflowDecisionWithdrawal: 267,
+  /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
+  workflowDecisionWithdrawal: 269,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -1173,6 +1175,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
+  campaignFixedBy: 268,
   /** v220 control plane records a child's work-item attempt at creation (#3106). Checked by the
    * runner's create_session tool and CLI against the connected control plane. */
   campaignWorkItemAtCreation: 220,
@@ -5095,6 +5098,8 @@ export interface GithubIssueClosureRequest {
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
+  /** Server-derived reason delegated delivery could not be proven. */
+  deliveryFailure?: string;
   scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];
@@ -5328,7 +5333,7 @@ export interface WorkflowDecisionView {
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
-  /** Explicit withdrawal by the controlling Orchestrator (#3941) or, from v267, by the requester
+  /** Explicit withdrawal by the controlling Orchestrator (#3941) or, from v269, by the requester
    * itself (#3917). The status reads `revoked`, which is terminal and never grants authority. */
   withdrawal?: { bySessionId: string; reason: string };
 }
@@ -5365,7 +5370,7 @@ export interface ConsumeWorkflowDecisionRequest {
   action?: WorkflowDecisionAction;
 }
 
-/** v267 (#3917): retire one pending or approved, unconsumed and unarmed occurrence. It never
+/** v269 (#3917): retire one pending or approved, unconsumed and unarmed occurrence. It never
  * approves or consumes anything. */
 export interface WithdrawWorkflowDecisionRequest {
   /** Why it is withdrawn. Stored on the decision; audit records only its digest. */
@@ -6270,7 +6275,8 @@ export type SessionEventPayload =
       kind: "user_message";
       text: string;
       images?: PromptImageInput[];
-      /** Runner-authenticated automatic campaign turn; preserves earlier async questions. */
+      /** Runner-authenticated automatic campaign or review turn; preserves earlier async questions.
+       * The historical field name is retained for persisted event compatibility. */
       campaignContinuation?: true;
       final?: boolean;
       commandId?: string;
@@ -10339,6 +10345,9 @@ export interface PromptSessionMessage {
   config?: SessionConfig;
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
+  /** Trusted automatic review notification; never supplied by the person-authored prompt API.
+   * Requires the runner's explicit reviewSession.questionPreservation advertisement. */
+  reviewContinuation?: true;
   /** Control-plane-authenticated synthetic campaign turn. Event bounds contain identities and
    * metadata only; the provider must query scoped management tools for authorized details. */
   campaignContinuation?: {

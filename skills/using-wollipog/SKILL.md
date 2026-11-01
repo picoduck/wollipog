@@ -154,7 +154,7 @@ Use `get_workflow_decision` for the exact outcome; a request that still needs a 
 
 When a pending or approved decision is no longer needed and was never consumed or armed, retire it
 with `withdraw_workflow_decision` (`decision withdraw`) and a nonempty `reason` (control plane
-v267+); never consume it with a stale snapshot to have it revoked. Omit `sessionId` to withdraw your
+v269+); never consume it with a stale snapshot to have it revoked. Omit `sessionId` to withdraw your
 own. A controlling Orchestrator may pass its child's `sessionId` to withdraw one the Orchestrator
 owns; a decision a person owns stays the requester's to withdraw. Withdrawal approves and consumes
 nothing: the decision reads `revoked` with `withdrawal` naming the withdrawing session and its

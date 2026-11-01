@@ -370,8 +370,8 @@ async function campaignWorkItemAtCreationCompatibilityError(deps: McpDeps): Prom
 
 /** A pre-v196 control plane has no campaign work ledger. It would ignore an unknown `workItem` or
  * `originWorkItemIds` field, silently recording nothing, so refuse by name instead. */
-async function campaignWorkLedgerCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
+async function campaignWorkLedgerCompatibilityError(deps: McpDeps, fixedBy = false): Promise<ToolResult | null> {
+  const required = fixedBy ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignFixedBy : RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
@@ -582,7 +582,7 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
       "Update Wollipog before reconciling this approval."), required, actual);
 }
 
-/** A pre-v267 control plane has no withdrawal route (#3917). Refuse by name rather than letting the
+/** A pre-v269 control plane has no withdrawal route (#3917). Refuse by name rather than letting the
  * call 404, which a caller could misread as the decision being gone. */
 async function workflowDecisionWithdrawalCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal;
@@ -1578,6 +1578,10 @@ export const TOOLS: McpTool[] = [
             additionalProperties: false,
           },
         },
+        fixedBy: { type: "array", maxItems: 100, items: { type: "object", properties: {
+          issue: CAMPAIGN_ISSUE_SCHEMA,
+          workItemKeys: { type: "array", minItems: 1, maxItems: 100, items: { type: "string", maxLength: 256 } },
+        }, required: ["issue", "workItemKeys"], additionalProperties: false } },
         planComplete: { type: "boolean" },
       },
       required: ["items", "planComplete"],
@@ -1585,11 +1589,11 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
-      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps, args?.fixedBy !== undefined);
       if (incompatible) return incompatible;
       const r = await cpFetch(deps, "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/plan`,
-        { items: args?.items, planComplete: args?.planComplete });
+        { items: args?.items, planComplete: args?.planComplete, ...(args?.fixedBy === undefined ? {} : { fixedBy: args.fixedBy }) });
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
@@ -2215,7 +2219,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "withdraw_workflow_decision",
-    description: "Withdraw one pending or approved workflow decision that is no longer needed and was never consumed or armed, with a reason. It approves and consumes nothing: the occurrence ends revoked with withdrawal provenance naming you and the reason, can never be consumed afterwards, and no longer blocks verify_campaign_child. Omit sessionId to withdraw your own; an Orchestrator may pass its controlled child's sessionId to withdraw a decision it owns. Consumed decisions, an armed pr_merge (reconcile it instead), another session's decisions, a human-owned decision you did not request, and human-owned issue closure, scope, follow-up admission and automation requests are refused. Requires control plane v267.",
+    description: "Withdraw one pending or approved workflow decision that is no longer needed and was never consumed or armed, with a reason. It approves and consumes nothing: the occurrence ends revoked with withdrawal provenance naming you and the reason, can never be consumed afterwards, and no longer blocks verify_campaign_child. Omit sessionId to withdraw your own; an Orchestrator may pass its controlled child's sessionId to withdraw a decision it owns. Consumed decisions, an armed pr_merge (reconcile it instead), another session's decisions, a human-owned decision you did not request, and human-owned issue closure, scope, follow-up admission and automation requests are refused. Requires control plane v269.",
     inputSchema: {
       type: "object",
       properties: {

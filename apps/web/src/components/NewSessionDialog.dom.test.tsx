@@ -355,7 +355,7 @@ async function chooseSelectOption(container: HTMLDivElement, label: string, opti
 
 function permissionPresetGroup(container: HTMLDivElement): Element {
   const group = container.querySelector('[role="radiogroup"][aria-label="Role"]');
-  assert.ok(group, "Role renders a segmented choice in Options");
+  assert.ok(group, "Role renders a segmented choice above Options");
   return group;
 }
 
@@ -2058,8 +2058,9 @@ test("unsupported control-plane combinations explain the upgrade and block Orche
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     await choosePermissionPreset(fixture.container, "Orchestrator");
-    // A compact danger notice with Retry in the policy row's place (#2955), never the raw error.
-    const notice = fixture.container.querySelector(".session-options-body .notice.t-danger");
+    // A compact danger notice with Retry in the policy row's place (#2955), never the raw error,
+    // under the visible Role (#3929) rather than inside Options.
+    const notice = fixture.container.querySelector(".new-session-role .notice.t-danger");
     assert.ok(notice, "the failure is a danger notice");
     assert.ok(notice.classList.contains("compact"), "a compact one");
     assert.equal(notice.querySelector(".notice-body, span[id]")?.textContent, "Couldn't load your Orchestrator defaults.");
@@ -2067,9 +2068,12 @@ test("unsupported control-plane combinations explain the upgrade and block Orche
     assertNoDomNode(customizeButton(fixture.container), "there is no policy to customize");
     assert.doesNotMatch(notice.textContent ?? "", RETIRED_PROJECT_TERMS);
     assert.doesNotMatch(notice.textContent ?? "", /Missing|404/);
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false",
+      "a policy problem is in view at Role, so it doesn't open Options");
     await assertCreateRefused(fixture);
     await act(async () => { submitWithEnter(fixture.container); });
     assert.equal(fixture.requests.length, 0);
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
   } finally {
     await unmountFixture(fixture);
   }
@@ -3975,14 +3979,20 @@ function optionsMeta(container: HTMLDivElement): string[] {
   return [...optionsHead(container).querySelectorAll(".session-options-meta-item")].map((item) => item.textContent ?? "");
 }
 
-test("with every option at its default, Options is one closed row listing Normal, Direct, In Place and the permissions (#2954)", async () => {
+test("with every option at its default, Role is visible and Options is one closed row listing Direct, In Place and the permissions (#2954, #3929)", async () => {
   const fixture = await mountFixture({ runners: [{ ...runner, executionTargets: hostTargets() }] });
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
     const head = optionsHead(fixture.container);
     assert.equal(head.getAttribute("aria-expanded"), "false");
-    assert.deepEqual(optionsMeta(fixture.container), ["Normal", "Direct", "In Place", "Harness Default"],
-      "Run On is listed only when there is a choice");
+    assert.deepEqual(optionsMeta(fixture.container), ["Direct", "In Place", "Harness Default"],
+      "Run On is listed only when there is a choice, and Role is not listed because it is always visible");
+    // Role sits above Options, outside its hidden body, so one click picks Orchestrator.
+    const role = permissionPresetGroup(fixture.container);
+    assertNoDomNode(role.closest(".session-options-body"));
+    assert.ok(role.closest(".new-session-role"));
+    assert.deepEqual(radioRows(role).map((radio) => radio.textContent), ["Normal", "Orchestrator"]);
+    assert.equal(radioRows(role).find((radio) => radio.getAttribute("aria-checked") === "true")?.textContent, "Normal");
     assert.equal(fixture.container.querySelector<HTMLElement>(".session-options-body")?.hidden, true);
     assertNoDomNode(fixture.container.querySelector('button[aria-label^="Run On:"]'), "two host targets offer no choice");
     // Every retired line and class is gone, as are the old controls' names.
@@ -3994,16 +4004,40 @@ test("with every option at its default, Options is one closed row listing Normal
     }
     await act(async () => { head.click(); });
     const titles = [...fixture.container.querySelectorAll(".session-options-body .setting-row-title")].map((title) => title.textContent);
-    assert.deepEqual(titles, ["Role", "Harness", "Working Copy", "Permissions"]);
+    assert.deepEqual(titles, ["Harness", "Working Copy", "Permissions"]);
     const workingCopy = fixture.container.querySelector('[role="radiogroup"][aria-label="Working Copy"]')!;
     assert.equal(settingRowOf(workingCopy).querySelector(".setting-row-desc")?.textContent,
       "A worktree keeps your checkout untouched. Recommended for code changes.");
     await act(async () => { radioRows(workingCopy).find((radio) => radio.textContent === "Worktree")!.click(); });
     await act(async () => { head.click(); });
-    assert.deepEqual(optionsMeta(fixture.container), ["Normal", "Direct", "Worktree", "Harness Default"]);
+    assert.deepEqual(optionsMeta(fixture.container), ["Direct", "Worktree", "Harness Default"]);
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.useWorktree, true);
     assert.equal(fixture.requests[0]?.executionTargetId, "host-worktree", "the same request as before");
+  } finally { await unmountFixture(fixture); }
+});
+
+test("choosing Orchestrator takes one click with Options closed, and its policy shows under Role (#3929)", async () => {
+  const enabledRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } })),
+  };
+  const fixture = await mountFixture({ runners: [enabledRunner] });
+  try {
+    await act(async () => { await selectProject(fixture.container, project.id); });
+    await choosePermissionPreset(fixture.container, "Orchestrator");
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
+    const policy = policyRow(fixture.container);
+    assert.ok(policy.closest(".new-session-role"), "the policy sits with Role");
+    assertNoDomNode(policy.closest(".session-options-body"), "outside Options' hidden body");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.ok(fixture.requests[0]?.orchestrator, "the request launches an Orchestrator");
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
   } finally { await unmountFixture(fixture); }
 });
 
@@ -4275,13 +4309,14 @@ test("an ACP Orchestrator's permissions come from the preset, and a warning noti
     assert.match(notice.textContent ?? "",
       /This agent's adapter can't run an Orchestrator with normal permissions, so the preset sets them\./);
     assert.match(permissionsSummary(fixture.container).textContent, /Orchestrator Preset/);
-    await act(async () => { optionsHead(fixture.container).click(); });
-    assert.deepEqual(optionsMeta(fixture.container).slice(0, 1), ["Orchestrator"]);
-    assert.ok(optionsMeta(fixture.container).includes("Orchestrator Preset"));
+    // Nothing about the role opens Options any more (#3929), so it is still closed here.
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false");
+    assert.deepEqual(optionsMeta(fixture.container), ["Direct", "In Place", "Orchestrator Preset"],
+      "the role is shown above Options, so its head lists only the permissions it sets");
   } finally { await unmountFixture(fixture); }
 });
 
-test("a saved Orchestrator default this runner can't honor opens Options and names it (#2954)", async () => {
+test("a saved Orchestrator default this runner can't honor says so at the visible Role, without opening Options (#2954, #3929)", async () => {
   const oldRunner: RunnerView = {
     ...runner, protocolVersion: 67,
     agents: runner.agents.map((agent) => ({ ...agent, capabilities: {
@@ -4295,13 +4330,16 @@ test("a saved Orchestrator default this runner can't honor opens Options and nam
   }));
   try {
     await act(async () => { await selectProject(fixture.container, project.id); });
-    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "true");
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false",
+      "the problem is already in view at Role, so Options stays closed");
+    assertNoDomNode(optionsHead(fixture.container).querySelector(".status.t-warning"));
     const roleRow = settingRowOf(permissionPresetGroup(fixture.container));
+    assertNoDomNode(roleRow.closest(".session-options-body"));
     assert.match(roleRow.querySelector(".field-error")?.textContent ?? "",
       /The saved Orchestrator preset is unavailable here\. This runner is too old to orchestrate child sessions\./);
-    await act(async () => { optionsHead(fixture.container).click(); });
-    assert.equal(optionsHead(fixture.container).querySelector(".status.t-warning")?.textContent, "Orchestrator Unavailable");
     await assertCreateRefused(fixture);
+    assert.equal(optionsHead(fixture.container).getAttribute("aria-expanded"), "false",
+      "a refused create focuses the visible Role without opening Options");
   } finally { await unmountFixture(fixture); }
 });
 

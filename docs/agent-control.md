@@ -1972,7 +1972,7 @@ and moves it to consumed if the approved head merged.
 
 An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
 `decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol
-v267, #3917) and a required reason, rather than by consuming it with a stale snapshot. `:id` is
+v269, #3917) and a required reason, rather than by consuming it with a stale snapshot. `:id` is
 always the caller's own credential session. The requester withdraws its own pending or approved
 occurrence; its controlling Orchestrator names the child in `sessionId` and may withdraw only one it
 owns, under the same ancestry and current-authority checks as resolution. The write is conditional

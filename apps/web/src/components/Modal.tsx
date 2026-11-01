@@ -131,6 +131,7 @@ export function Modal({
   onKeyDown,
   headerActions,
   back,
+  grows = false,
 }: {
   title: string;
   /** Optional one-line description under the title, in `--text-dim` (§7.2). Phrasing content only:
@@ -168,6 +169,10 @@ export function Modal({
   /** A step inside this dialog (a phone sheet's review step, §7.5): the header's Close becomes a
    * Back arrow with this name that runs this handler. Escape still closes the dialog. */
   back?: { label: string; onBack: () => void };
+  /** A stepper whose steps differ in height (Pair Device): the desktop card is anchored near the
+   * top, so a taller step grows downward and the top edge never moves. A local modifier (§19.4),
+   * `data-grows` on the backdrop; a phone sheet is unchanged. */
+  grows?: boolean;
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -450,7 +455,7 @@ export function Modal({
   if (!canPortal || !panelHost) {
     // A server render has no portals: render the whole dialog in place.
     return (
-      <div className="modal-backdrop">
+      <div className="modal-backdrop" data-grows={grows || undefined}>
         <div className={["modal", size === "md" ? "" : size, phoneSheet === "full" ? "sheet-full" : ""].filter(Boolean).join(" ")}>
           {phoneSheet !== "full" && <div className="sheet-grabber" aria-hidden="true" />}
           {panel}
@@ -464,6 +469,7 @@ export function Modal({
   const sheet = (
     <div
       className={stacked ? "modal-backdrop stacked" : "modal-backdrop"}
+      data-grows={grows || undefined}
       onMouseDown={(event) => { if (event.target === event.currentTarget) closeTopOfSheet(); }}
     >
       <div

@@ -361,11 +361,10 @@ test("focus in a phone row's open action sheet returns to the composer when the 
   let lost = 0;
   const tray = await render({ prompts: [queued("a")], onFocusLost: () => { lost += 1; } });
   try {
-    await act(async () => { tray.summary()!.click(); });
     await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
     const item = domWindow.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement;
     await act(async () => { item.focus(); });
-    assert.equal(domWindow.document.activeElement, item as never);
+    assert.ok(domWindow.document.activeElement === (item as never));
     // The runner takes the message while its sheet is open.
     await tray.draw({ prompts: [], onFocusLost: () => { lost += 1; } });
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
@@ -386,11 +385,11 @@ test("an empty queue renders nothing", async () => {
 });
 
 test("the tray starts as one collapsed summary that names its count and controls the hidden rows (#2788)", async () => {
-  const tray = await render({ prompts: [queued("a")], steering: { ...STEERING, supportsSteering: false } });
+  const tray = await render({ prompts: [queued("a"), queued("b")], steering: { ...STEERING, supportsSteering: false } });
   try {
     const summary = tray.summary()!;
     assert.equal(summary.tagName, "BUTTON");
-    assert.equal(summary.textContent, "1 Queued Message");
+    assert.equal(summary.textContent, "2 Queued Messages");
     assert.equal(summary.getAttribute("aria-expanded"), "false");
     const rows = tray.container.querySelector(`#${summary.getAttribute("aria-controls")}`) as HTMLElement;
     assert.ok(rows.classList.contains("queue-rows"), "the summary controls the row list");
@@ -454,13 +453,14 @@ test("arrivals, removals and status changes update the count but keep the person
     assert.equal(tray.summary()?.getAttribute("aria-expanded"), "false", "a failure does not open the tray");
 
     await act(async () => { tray.summary()!.click(); });
+    await tray.draw({ prompts: [queued("a"), queued("b", { durableDeliveryState: "failed", steerable: false })] });
+    assert.equal(tray.summary()?.getAttribute("aria-expanded"), "true", "a status change does not close it");
+    // One message left is its own row; the queue's next growth finds the tray as the person left it.
     await tray.draw({ prompts: [queued("b", { durableDeliveryState: "failed", steerable: false })] });
-    assert.equal(tray.summary()?.textContent, "1 Queued Message");
-    assert.equal(tray.summary()?.getAttribute("aria-expanded"), "true", "a removal does not close it");
-    // An empty queue has no summary row; the next arrival finds the tray as the person left it.
-    await tray.draw({ prompts: [] });
     assertNoDomNode(tray.summary());
+    await tray.draw({ prompts: [] });
     await tray.draw({ prompts: [queued("d")] });
+    await tray.draw({ prompts: [queued("d"), queued("e")] });
     assert.equal(tray.summary()?.getAttribute("aria-expanded"), "true");
   } finally {
     await tray.unmount();
@@ -468,11 +468,11 @@ test("arrivals, removals and status changes update the count but keep the person
 });
 
 test("another session starts collapsed", async () => {
-  const tray = await render({ prompts: [queued("a")] });
+  const tray = await render({ prompts: [queued("a"), queued("b")] });
   try {
     await act(async () => { tray.summary()!.click(); });
     assert.equal(tray.summary()?.getAttribute("aria-expanded"), "true");
-    await tray.draw({ sessionId: "session-2", prompts: [queued("x")] });
+    await tray.draw({ sessionId: "session-2", prompts: [queued("x"), queued("y")] });
     assert.equal(tray.summary()?.getAttribute("aria-expanded"), "false");
     assert.equal(tray.summary()?.getAttribute("aria-controls"), "queued-rows-session-2");
   } finally {
@@ -483,7 +483,7 @@ test("another session starts collapsed", async () => {
 test("collapsing on a phone closes a row's open action sheet and returns its focus to the summary", async () => {
   phone = true;
   let lost = 0;
-  const tray = await render({ prompts: [queued("a")], onFocusLost: () => { lost += 1; } });
+  const tray = await render({ prompts: [queued("a"), queued("b")], onFocusLost: () => { lost += 1; } });
   try {
     await act(async () => { tray.summary()!.click(); });
     await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
@@ -518,6 +518,171 @@ test("collapsing returns focus held in a row to the summary and keeps the row be
     assert.equal(tray.button(tray.row("a"), "Edit Queued Message")?.disabled, true,
       "a collapse lifts no restriction");
   } finally {
+    await tray.unmount();
+  }
+});
+
+/** The sheet a phone row's ⋯ opens, as each item's label, unavailable flag and reason. */
+async function openSheet(tray: Awaited<ReturnType<typeof render>>, id: string) {
+  await act(async () => { tray.button(tray.row(id), "Queued Message Actions")!.click(); });
+  const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')] as unknown as HTMLButtonElement[];
+  return items.map((item) => ({
+    label: item.querySelector(".menu-text")?.textContent,
+    disabled: item.getAttribute("aria-disabled") === "true",
+    reason: item.querySelector(".menu-desc")?.textContent ?? null,
+  }));
+}
+
+test("one queued message is its own row in place of the summary, and Steer takes one click (#3962)", async () => {
+  const tray = await render({ prompts: [queued("a")] });
+  try {
+    assertNoDomNode(tray.summary(), "no count to expand");
+    const rows = tray.container.querySelector(".queue-rows") as HTMLElement;
+    assert.equal(rows.hidden, false);
+    assert.ok(tray.container.querySelector("section.queue")?.classList.contains("is-single"));
+    assert.equal(tray.row("a").querySelector(".queue-text")?.textContent, "Message a");
+    assert.deepEqual([...tray.row("a").querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
+      ["Steer Queued Message", "Edit Queued Message", "Cancel Queued Message"]);
+    assert.deepEqual(tray.notes(), [], "nothing to explain, so nothing past the one line");
+    tray.button(tray.row("a"), "Steer Queued Message")!.click();
+    assert.deepEqual(tray.calls.steer, ["a"]);
+  } finally {
+    await tray.unmount();
+  }
+});
+
+test("on a desktop, a lone message that cannot steer says why under its row, with Held on the row", async () => {
+  const tray = await render({
+    prompts: [queued("a")],
+    queueHeld: true,
+    steering: { ...STEERING, queueHeld: true },
+  });
+  try {
+    assertNoDomNode(tray.button(tray.row("a"), "Steer Queued Message"));
+    assert.equal(tray.row("a").querySelector(".queue-held")?.textContent, "Held");
+    assert.equal((tray.container.querySelector(".queue-notes") as HTMLElement).hidden, false);
+    assert.deepEqual(tray.notes(), [
+      "Held until the current turn or a pending decision settles. Resolve any visible prompt to continue.",
+    ]);
+  } finally {
+    await tray.unmount();
+  }
+});
+
+test("on a phone a lone message shows Steer beside its ⋯, whose sheet no longer repeats it (#3962)", async () => {
+  phone = true;
+  const tray = await render({ prompts: [queued("a")] });
+  try {
+    assertNoDomNode(tray.summary());
+    assert.deepEqual([...tray.row("a").querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
+      ["Steer Queued Message", "Queued Message Actions"]);
+    await act(async () => { tray.button(tray.row("a"), "Steer Queued Message")!.click(); });
+    assert.deepEqual(tray.calls.steer, ["a"], "one tap steers");
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "without opening the sheet");
+    assert.deepEqual(await openSheet(tray, "a"), [
+      { label: "Edit Message", disabled: false, reason: null },
+      { label: "Cancel Message", disabled: false, reason: null },
+    ]);
+  } finally {
+    phone = false;
+    await tray.unmount();
+  }
+});
+
+test("on a phone a lone message that cannot steer keeps one line, and its sheet lists Steer with the reason", async () => {
+  phone = true;
+  const refusal = "Viewers can't manage this session's queue.";
+  const cases: Array<{ name: string; props: Partial<QueuedMessagesProps>; steer: string }> = [
+    { name: "unsteerable", props: { prompts: [queued("a", { steerable: false, steerDisabledReason: "Not eligible." })] },
+      steer: "Not eligible." },
+    { name: "terminal receipt", props: { prompts: [queued("a", { durableDeliveryState: "failed", steerable: false,
+      liveQueueObserved: false })] }, steer: "Delivery attempts for this message have ended, so it cannot be steered or edited." },
+    { name: "Viewer", props: { prompts: [queued("a")], refusal }, steer: refusal },
+    { name: "held", props: { prompts: [queued("a")], queueHeld: true, steering: { ...STEERING, queueHeld: true } },
+      steer: "Steering waits until the current turn settles or the pending request is answered." },
+  ];
+  for (const { name, props, steer } of cases) {
+    const tray = await render(props);
+    try {
+      assertNoDomNode(tray.button(tray.row("a"), "Steer Queued Message"), `${name}: no Steer button`);
+      const notes = tray.container.querySelector(".queue-notes") as HTMLElement | null;
+      assert.ok(notes === null || notes.hidden, `${name}: no sentence under the row`);
+      const sheet = await openSheet(tray, "a");
+      assert.deepEqual(sheet[0], { label: "Steer into This Turn", disabled: true, reason: steer }, name);
+    } finally {
+      await tray.unmount();
+    }
+  }
+  phone = false;
+});
+
+test("a second arrival brings the collapsed summary back unless the lone row holds focus", async () => {
+  let lost = 0;
+  const onFocusLost = () => { lost += 1; };
+  const tray = await render({ prompts: [queued("a")], onFocusLost });
+  try {
+    await tray.draw({ prompts: [queued("a"), queued("b")] });
+    assert.equal(tray.summary()?.getAttribute("aria-expanded"), "false", "an arrival does not open the tray");
+
+    await tray.draw({ prompts: [queued("a")] });
+    const steer = tray.button(tray.row("a"), "Steer Queued Message")!;
+    await act(async () => { steer.focus(); });
+    await tray.draw({ prompts: [queued("a"), queued("b")] });
+    assert.equal(tray.summary()?.getAttribute("aria-expanded"), "true", "the row the person is using stays shown");
+    assert.ok(domWindow.document.activeElement === (steer as never), "focus stays on Steer");
+
+    // Back to one: the summary leaves, and focus that was on it moves to the row.
+    await act(async () => { tray.summary()!.focus(); });
+    await tray.draw({ prompts: [queued("b")] });
+    assert.ok(domWindow.document.activeElement === (tray.button(tray.row("b"), "Steer Queued Message") as never),
+      "focus moves to the lone row's first control");
+    assert.equal(lost, 0, "focus never fell to the page");
+  } finally {
+    await tray.unmount();
+  }
+});
+
+test("on a phone, a sheet whose focused Steer moves onto the row keeps focus inside the sheet", async () => {
+  phone = true;
+  let lost = 0;
+  const onFocusLost = () => { lost += 1; };
+  const tray = await render({ prompts: [queued("a"), queued("b")], onFocusLost });
+  try {
+    await act(async () => { tray.summary()!.click(); });
+    await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
+    const steer = domWindow.document.querySelector('[role="menuitem"][data-menu-label="Steer into This Turn"]') as unknown as HTMLButtonElement;
+    await act(async () => { steer.focus(); });
+    // B leaves, so A is the lone row and its Steer moves out of the sheet onto the row.
+    await tray.draw({ prompts: [queued("a")], onFocusLost });
+    const menu = domWindow.document.querySelector('[role="menu"]');
+    assert.ok(menu, "the sheet stays open");
+    const active = domWindow.document.activeElement;
+    assert.ok(active !== null && menu.contains(active as never), "focus stays inside the open sheet");
+    assert.equal(lost, 0);
+    await act(async () => {
+      active!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "Escape still closes it");
+  } finally {
+    phone = false;
+    await tray.unmount();
+  }
+});
+
+test("on a phone a lone row's open sheet survives a second arrival", async () => {
+  phone = true;
+  const tray = await render({ prompts: [queued("a")] });
+  try {
+    await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
+    const item = domWindow.document.querySelector('[role="menuitem"]') as unknown as HTMLButtonElement;
+    await act(async () => { item.focus(); });
+    await tray.draw({ prompts: [queued("a"), queued("b")] });
+    assert.equal(tray.summary()?.getAttribute("aria-expanded"), "true");
+    assert.ok(domWindow.document.querySelector('[role="menu"]'), "the sheet stays open");
+    const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')].map((node) => node.querySelector(".menu-text")?.textContent);
+    assert.deepEqual(items, ["Steer into This Turn", "Edit Message", "Cancel Message"], "and lists Steer again");
+  } finally {
+    phone = false;
     await tray.unmount();
   }
 });

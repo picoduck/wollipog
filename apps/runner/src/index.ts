@@ -2794,7 +2794,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             undefined,
             undefined,
             undefined,
-            Boolean(msg.command.campaignContinuation),
+            Boolean(msg.command.campaignContinuation || msg.command.reviewContinuation),
           );
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);

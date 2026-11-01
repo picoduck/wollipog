@@ -165,7 +165,7 @@ const EXEMPTIONS: Exemption[] = [
         // These frame an iframe carrying its own theme; tinting them shows through it.
         [".art-frame", "background"],
         [".browser-web-frame", "background"],
-        [".access-pairing-qr-frame", "background"],
+        [".pair-qr", "background"],
       ]).get(selector)) === normalisedProp(declaration.prop)),
   },
   {

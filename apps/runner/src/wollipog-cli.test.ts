@@ -1402,7 +1402,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
   for (const text of [
     "decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision",
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
-    "decision withdraw", "withdraw_workflow_decision", "protocol v267",
+    "decision withdraw", "withdraw_workflow_decision", "protocol v269",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
@@ -1481,7 +1481,7 @@ test("CLI reconciliation requires protocol v153 before calling the endpoint", as
   assert.deepEqual(calls, ["http://cp/api/compatibility"]);
 });
 
-test("CLI withdrawal forwards the exact reason and target, and refuses a pre-v267 control plane (#3917)", async () => {
+test("CLI withdrawal forwards the exact reason and target, and refuses a pre-v269 control plane (#3917)", async () => {
   const calls: Array<{ url: string; body?: string }> = [];
   let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal;
   const fetch: McpFetch = async (url, init) => {

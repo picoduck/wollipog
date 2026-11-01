@@ -1,6 +1,6 @@
 import { boundedIssueNumbers, campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, campaignRepositoryLocation,
   gitlabCampaignIssuesRequirement, normalizeCampaignIssueScopeSnapshot, RUNNER_CAPABILITY_MIN_PROTOCOL, runnerSupportsProtocol, type RunnerCapabilityRequirementDetails,
-  type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, isTerminal } from "@wollipog/protocol";
+  type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
@@ -78,12 +78,41 @@ export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository:
     }
     cursor = page.data.nextCursor ?? undefined;
   } while (cursor);
-  // All outstanding action decisions are invalidated conservatively; their authority was evaluated under the old scope.
+  const changed = [...additions, ...removals];
+  const unrelated = db.campaignWorkLedger.sessionsUnrelatedToIssues(root.id, repository, changed);
   const affectedDecisions = db.unconsumedWorkflowDecisionsForController(root.id)
-    .filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
+    .filter((d) => d.category !== "campaign_issue_scope" && scopeChangeAffectsDecision(db, root.id, repository, changed, removals.length > 0, unrelated, d))
+    .map((d) => d.occurrenceId).sort();
   return normalizeCampaignIssueScopeSnapshot({ category: "campaign_issue_scope", repository, expectedRevision: request.expectedRevision,
-    before, additions, removals, explanation: request.explanation, affectedAssignments, affectedDecisions, activeChildren:issueClosureActiveChildren(db,root.id),
+    before, additions, removals, explanation: request.explanation, affectedAssignments, affectedDecisions,
+    activeChildren: issueClosureActiveChildren(db, root.id, { repository, numbers: changed }),
     ...(request.lineage === undefined ? {} : { lineage: request.lineage }) });
+}
+
+/** Every outstanding decision the root controls, other than scope requests. A person deciding a
+ * Full Control scope change re-authorizes the boundary all of them were evaluated under, so that
+ * request lists, and its approval revokes, every one (#3915). */
+export function everyOutstandingScopeDecision(db: ControlPlaneDb, rootId: string): string[] {
+  return db.unconsumedWorkflowDecisionsForController(rootId).filter((d) => d.category !== "campaign_issue_scope").map((d) => d.occurrenceId).sort();
+}
+
+/** Whether a scope change that adds or removes `changed` invalidates an outstanding decision (#3915).
+ * A closure depends on its own issue only: one for an issue the change touches, or in another
+ * repository, is invalidated. A follow-up publication or admission counts against the campaign's
+ * issue capacity, which every scope change moves, so it is always invalidated. Any other decision
+ * is left alone only when its requester is a child the work ledger proves unrelated to every
+ * changed issue, by the rule issue closures use (#3914); the root's own decisions and every child
+ * without that proof are invalidated. An armed merge survives a change that only adds issues,
+ * whoever requested it: its enqueue already ran, so revoking it withdraws nothing and only stops
+ * the forge-proven merge being recorded. Anything kept is still re-evaluated against the new scope
+ * when it is resolved or consumed. */
+function scopeChangeAffectsDecision(db: ControlPlaneDb, rootId: string, repository: string, changed: readonly number[],
+  removes: boolean, unrelated: ReadonlySet<string>, decision: WorkflowDecisionView): boolean {
+  const snapshot = decision.resourceSnapshot;
+  if (snapshot.category === "issue_closure") return snapshot.repository.toLowerCase() !== repository.toLowerCase() || changed.includes(snapshot.issue);
+  if (snapshot.category === "follow_up_issue_publication" || snapshot.category === "campaign_follow_up_admission") return true;
+  if (!removes && decision.status === "approved" && snapshot.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue") return false;
+  return decision.sessionId === rootId || db.initialUserMessageText(decision.sessionId) === null || !unrelated.has(decision.sessionId);
 }
 
 export function campaignNeedsEpicScope(db: ControlPlaneDb, root: SessionView): boolean {

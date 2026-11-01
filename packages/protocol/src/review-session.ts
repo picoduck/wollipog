@@ -16,9 +16,17 @@ import type { SessionReviewHarness } from "./session-review-job.js";
 /** Ordinary sessions omit `kind` or report "standard"; only the control plane creates "review". */
 export type SessionKind = "standard" | "review";
 
+/** A COMMAND_CANCELLED receipt with this reason attests an automatic turn stayed behind a
+ * provider-rejection hold until Restart, rather than being cancelled by a person. */
+export const AUTOMATIC_TURN_RESTART_CANCELLED_REASON =
+  "session restart cleared the provider rejection hold before this automatic turn was sent";
+
 /** The reviewer harnesses a runner can launch as review sessions, each through one configured
  * native agent. Advertised with the runner's runtime metadata. */
 export interface ReviewSessionCapability {
+  /** The runner preserves pending async questions through durable automatic review prompts.
+   * Missing means unsupported, regardless of its numeric protocol version. */
+  questionPreservation?: true;
   /** #3370: revalidates configured reviewer/model/effort, same-family consent and round budget. */
   configuration?: true;
   reviewers: Array<{ harness: SessionReviewHarness; agentId: string }>;

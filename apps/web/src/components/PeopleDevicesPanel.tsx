@@ -1,7 +1,6 @@
-import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
-import { State } from "./State.js";
 import type {
   DeviceView,
   IdentityAdministrationView,
@@ -9,20 +8,13 @@ import type {
   TeamView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { pairingLinks } from "../device-token.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
-import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
-import { CopyButton, Modal } from "./common.js";
-import { ChoiceRows } from "./ui/ChoiceControls.js";
-import { ChevronRightIcon, DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
+import { DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { TeamDialog } from "./TeamDialog.js";
-import {
-  PersonalIdentifier,
-  PersonalIdentifierRevealButton,
-  usePersonalIdentifierReveal,
-} from "./PersonalIdentifier.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { AddPersonDialog, ManagePersonDialog } from "./PersonAccessDialogs.js";
+import { PairDeviceDialog } from "./PairDeviceDialog.js";
 
 type AccessDialog =
   | { kind: "add-person" }
@@ -30,215 +22,6 @@ type AccessDialog =
   | { kind: "pair-device" }
   | { kind: "create-team" }
   | { kind: "manage-team"; team: TeamView };
-
-const QRCodeSVG = lazy(() => import("qrcode.react").then((module) => ({ default: module.QRCodeSVG })));
-
-function DialogError({ error }: { error: string | null }) {
-  return error ? <div className="form-error" role="alert">{error}</div> : null;
-}
-
-export function PairDeviceDialog({
-  identity,
-  onClose,
-  onSaved,
-}: {
-  identity: IdentityAdministrationView;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const api = useApi();
-  const activeMembers = identity.memberships.filter((member) => member.userStatus === "active");
-  const [step, setStep] = useState<"person" | "device" | "success">("person");
-  const [userId, setUserId] = useState(
-    activeMembers.some((member) => member.userId === identity.context.userId)
-      ? identity.context.userId
-      : activeMembers[0]?.userId ?? "",
-  );
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{
-    token: string;
-    links: string[];
-    blocked: string | null;
-  } | null>(null);
-  const [selectedPairingLink, setSelectedPairingLink] = useState("");
-  const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
-  }, []);
-  const person = activeMembers.find((member) => member.userId === userId);
-  const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
-  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
-    activeMembers.map((member) => member.userName).join("\n"),
-  );
-  const requestClose = () => {
-    if (!busy) onClose();
-  };
-  const pair = async () => {
-    if (busy || !name.trim() || !userId) return;
-    setBusy(true);
-    setError(null);
-    let response: Awaited<ReturnType<typeof api.pairDevice>>;
-    try {
-      response = await api.pairDevice(name.trim(), userId);
-    } catch (cause) {
-      setError((cause as Error).message);
-      setBusy(false);
-      return;
-    }
-
-    // The credential is returned exactly once. Reveal it as soon as creation succeeds; refreshing
-    // the surrounding lists is useful but must never make the only plaintext copy inaccessible.
-    const pairing = pairingLinks(response.token, response.pairing);
-    setResult({ token: response.token, ...pairing });
-    setSelectedPairingLink(pairing.links[0] ?? "");
-    setStep("success");
-    setBusy(false);
-    try {
-      await onSaved();
-    } catch (cause) {
-      if (mountedRef.current) {
-        setError(`Device created, but the device list could not be refreshed: ${(cause as Error).message}`);
-      }
-    }
-  };
-  if (step === "success" && result) {
-    const primaryLink = result.links.includes(selectedPairingLink)
-      ? selectedPairingLink
-      : result.links[0] ?? null;
-    const copyValue = primaryLink ?? `#pair=${result.token}`;
-    return (
-      <Modal
-        title="Device Ready to Pair"
-        onClose={requestClose}
-        footer={<button type="button" className="btn primary" onClick={onClose}>Done</button>}
-      >
-        <div className="access-success" role="status">
-          <strong>{name}</strong> is ready for{" "}
-          {person ? <PersonalIdentifier value={person.userName} label="Person Name" /> : "this person"}. This credential is shown once.
-        </div>
-        {primaryLink ? (
-          <section className="access-pairing-qr" aria-labelledby="pair-device-qr-heading">
-            <h3 id="pair-device-qr-heading">Scan to Pair</h3>
-            {result.links.length > 1 && (
-              <label className="access-pairing-address">
-                Network Address
-                <select
-                  value={primaryLink ?? ""}
-                  onChange={(event) => setSelectedPairingLink(event.target.value)}
-                >
-                  {result.links.map((link) => (
-                    <option key={link} value={link}>{new URL(link).host}</option>
-                  ))}
-                </select>
-                <small>Choose an address the device you are pairing can reach.</small>
-              </label>
-            )}
-            <div className="access-pairing-qr-frame">
-              <Suspense fallback={<State variant="loading" compact>Loading pairing code…</State>}>
-              <QRCodeSVG
-                value={primaryLink}
-                title={`Pair ${name} with Wollipog`}
-                size={208}
-                level="M"
-                marginSize={4}
-              />
-              </Suspense>
-            </div>
-            <p>On the device you are pairing, open the camera and scan this code.</p>
-            <CopyButton text={copyValue} label="Copy Pairing Link" className="btn" />
-          </section>
-        ) : (
-          <div className="access-copy-primary">
-            <CopyButton text={copyValue} label="Copy Pairing Link" className="btn primary" />
-          </div>
-        )}
-        {result.blocked && <p className="hint">{result.blocked}</p>}
-        <DialogError error={error} />
-        <details className="disclosure">
-          <summary><ChevronRightIcon className="disclosure-chevron" />Manual Setup</summary>
-          <div className="disclosure-body">
-            <p className="hint">Use this only when the dashboard cannot provide a clickable pairing link.</p>
-            <pre className="code-block install-cmd">
-              {`#pair=${result.token}`}
-              <CopyButton text={`#pair=${result.token}`} />
-            </pre>
-            <pre className="code-block install-cmd">
-              {result.token}
-              <CopyButton text={result.token} />
-            </pre>
-          </div>
-        </details>
-      </Modal>
-    );
-  }
-  return (
-    <Modal
-      title={step === "person" ? "Choose a Person" : "Name the Device"}
-      onClose={requestClose}
-      footer={step === "person"
-        ? (
-          <>
-            <button type="button" className="btn" onClick={onClose}>Cancel</button>
-            <button type="button" className="btn primary" onClick={() => setStep("device")} disabled={!userId}>Continue</button>
-          </>
-        )
-        : (
-          <>
-            <button type="button" className="btn" onClick={() => setStep("person")} disabled={busy}>Back</button>
-            <button type="button" className="btn primary" onClick={() => void pair()} disabled={busy || !name.trim()}>
-              {busy ? "Pairing…" : "Create Pairing"}
-            </button>
-          </>
-        )}
-    >
-      {step === "person" ? (
-        <>
-          {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
-            <div className="pid-field-head">
-              <PersonalIdentifierRevealButton
-                label="Person Names"
-                revealed={namesRevealed}
-                onToggle={toggleNames}
-                controls="pair-person-choices"
-                withText
-              />
-            </div>
-          )}
-          <ChoiceRows<string>
-            id="pair-person-choices"
-            label="Person"
-            value={userId || null}
-            onChange={setUserId}
-            options={activeMembers.map((member, index) => ({
-              value: member.userId,
-              title: namesRevealed ? member.userName : memberTitles[index]!,
-              description: `${titleCaseLabel(member.role)} Access`,
-            }))}
-          />
-          {activeMembers.length === 0 && <div className="access-empty-copy">Add an active person before pairing a device.</div>}
-        </>
-      ) : (
-        <div className="access-form">
-          <p className="access-dialog-intro">
-            Pairing for <strong>{person && <PersonalIdentifier value={person.userName} label="Person Name" />}</strong>. Use a name they will recognize later.
-          </p>
-          <label>
-            <span>Device Name</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="For example, Pixel 9 or Home laptop"
-            />
-          </label>
-          <DialogError error={error} />
-        </div>
-      )}
-    </Modal>
-  );
-}
 
 export function PeopleDevicesPanel({
   identity,

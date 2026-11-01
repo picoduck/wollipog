@@ -28881,8 +28881,12 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
     assert.ok(stale.ok && stale.data,stale.error);
     const replacedClosure = await svc.requestGithubIssueClosure(id,{requestId:"changed-member-closure",issue:124,reason:"completed",explanation:"Changed evidence",evidence:["New PR"]});
     assert.ok(replacedClosure.ok);
+    // A closure of an issue the change keeps does not bind it (#3915); a child the ledger cannot
+    // prove unrelated to the added issue does.
+    db.stageSessionPromptCommand({ commandId: "scoped-child-prompt", sessionId: scopedChild.data!.id, runnerId: RUNNER_ID,
+      payloadJson: JSON.stringify({ text: "Continue." }), payloadSha256: "c".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
     const staleApproval = svc.resolveWorkflowDecision(id,id,stale.data.occurrenceId,{outcome:"approve"},"human",{kind:"human",id:"owner"},()=>true);
-    assert.equal(staleApproval.ok,false,"affected decisions changed after proposal");
+    assert.equal(staleApproval.ok,false,"affected child work changed after proposal");
     assert.deepEqual(db.getSession(id)!.orchestratorPolicy!.issueNumbers,[123,124]);
     assert.equal(db.workflowDecisionByOccurrence(stale.data.occurrenceId)!.status,"revoked");
     const remove = await svc.proposeCampaignIssueScope(id,{...proposal,requestId:"remove-member",expectedRevision:1,additions:[],removals:[{repository:"team/repo",number:124}]});

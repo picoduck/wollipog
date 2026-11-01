@@ -56,6 +56,20 @@ primary checkout is current or change it merely to obtain fresh input.
 
 ## Decisions and Delivery
 
+Before the first dispatch, the root may declare completion relationships in `record_campaign_plan`
+using `fixedBy: [{ issue: { repository, number }, workItemKeys: ["unit:a", "unit:b"] }]`.
+The target issue must already be in the human-established scope; every key must name an item in
+this campaign (including items in the same plan call). Record all required units together. These
+relationships are immutable and cannot be added after dispatch, including after an attempt ends.
+They supplement the target issue's own work items, including items recorded later; every own item
+still needs its existing completion proof. They grant no scope or delivery authority: every cited unit must remain in scope and independently
+pass delivery, report verification and exact merged-PR checks before the completed closure can be
+Orchestrator-owned. Missing proof retains human ownership with a server-derived delivery gap.
+Existing closure requests never gain authority retroactively. Issues without relationships retain
+their own-work-item behavior. Epic prose and other agent-written text cannot create a relationship;
+this implementation supports the recorded-plan source. Clients need protocol 268 to send `fixedBy`;
+older servers keep such closures human-owned. Do not update the hosting stack to gain support.
+
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision
 only when the server-established human boundary, current occurrence owner and repository rules
 permit it. Use request/get/consume with unchanged resources immediately before acting. Human
