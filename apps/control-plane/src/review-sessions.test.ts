@@ -1001,6 +1001,28 @@ test("a review notification staged before a runner downgrade returns to the ques
   } finally { h.db.close(); }
 });
 
+test("a downgraded review notification settles its real queued admission before retry (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    const stage = h.db.stageReviewContinuation.bind(h.db);
+    h.db.stageReviewContinuation = (...args) => {
+      const row = stage(...args);
+      // Downgrade after admission has chosen the marked durable lane, before its first send.
+      h.db.registerRunner(h.metadata, Date.now(), 263);
+      return row;
+    };
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(h.db.getSession("s1")!.status, "queued");
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered",
+      "the old-runner fallback must run without another runner status update");
+    assert.equal(immediatePrompts(h).length, 1);
+  } finally { h.db.close(); }
+});
+
 for (const delivery of ["uncertain", "user-event", "human-cancelled"] as const) test(`review recovery never replays ${delivery} delivery (#3938)`, () => {
   const h = harness({ driver: "codex-app-server" });
   try {

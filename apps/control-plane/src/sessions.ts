@@ -9841,6 +9841,7 @@ export class SessionsService {
     if (command.state === "failed" && command.userEventSeq === undefined &&
         (command.errorCode === "WORKTREE_RECOVERY_REQUIRED" || retryUnsentReview)) {
       if (!this.db.holdReviewContinuationCommand(requesterSessionId, commandId, now)) return;
+      this.settleQueuedAdmission(command, now);
       this.hub.sessionChangedById(requesterSessionId);
       this.deliverHeldReviewContinuations(requesterSessionId, now);
       return;
