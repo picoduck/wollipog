@@ -1,3 +1,4 @@
+import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
@@ -9790,9 +9791,7 @@ export class SessionsService {
     if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
     const daily = this.dailyBudgetFor(requesterSessionId);
     if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
-    const supportsQuestionRetention = runnerSupportsProtocol(
-      this.db.getRunner(session.runnerId)?.protocolVersion, "reviewContinuationQuestions",
-    );
+    const supportsQuestionRetention = runnerSupportsReviewQuestionPreservation(this.db.getRunner(session.runnerId));
     // Older runners mistake this automatic prompt for human input and dismiss the async card.
     // Keep the review owed until the person answers or the runner upgrades.
     if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async)) {

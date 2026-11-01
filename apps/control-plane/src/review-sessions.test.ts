@@ -16,6 +16,7 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const HEAD = "a".repeat(40);
 const CAPABILITY: ReviewSessionCapability = {
+  questionPreservation: true,
   reviewers: [{ harness: "codex", agentId: "codex" }, { harness: "claude-code", agentId: "claude" }],
 };
 const request = (extra: Partial<ReviewSessionRequest> = {}): ReviewSessionRequest => ({
@@ -895,8 +896,8 @@ function immediatePrompts(h: ReturnType<typeof harness>): string[] {
     .map((message) => String((message as { text?: unknown }).text ?? ""));
 }
 
-test("an older runner without a worktree gets one immediately claimed review continuation", () => {
-  const h = harness({ protocol: 267 });
+test("an unadvertised runner without a worktree gets one immediately claimed review continuation", () => {
+  const h = harness({ protocol: PROTOCOL_VERSION + 100, reviewSession: { reviewers: CAPABILITY.reviewers } });
   try {
     h.db.updateSessionStatus("s1", "idle", 10);
     const view = requested(h);
@@ -931,8 +932,8 @@ test("review completion preserves an unanswered async question (#3938)", () => {
   } finally { h.db.close(); }
 });
 
-test("older runners hold review notifications until the pending async question is answered (#3938)", () => {
-  const h = harness({ driver: "codex-app-server", protocol: 267 });
+test("unadvertised runners hold review notifications until the pending async question is answered (#3938)", () => {
+  const h = harness({ driver: "codex-app-server", protocol: PROTOCOL_VERSION + 100, reviewSession: { reviewers: CAPABILITY.reviewers } });
   try {
     h.db.setWorktreePath("s1", "/repo/worktrees/s1");
     const view = requested(h);
@@ -987,7 +988,7 @@ test("a review notification staged before a runner downgrade returns to the ques
     const outbox = new SessionPromptOutbox(h.db, h.hub, { warn() {} });
     const row = outbox.stageReviewContinuation([view.reviewSessionId], "s1", "r",
       { type: "prompt_session", sessionId: "s1", text: "Automatic review result", reviewContinuation: true }, Date.now());
-    h.db.registerRunner(h.metadata, 13, 267);
+    h.db.updateRunnerReviewSessionCapability("r", { reviewers: CAPABILITY.reviewers });
     h.db.updateSessionStatus("s1", "idle", 14);
     outbox.flush(Date.now());
     assert.equal(h.db.getSessionPromptCommand(row.commandId)?.state, "failed");
@@ -1009,7 +1010,7 @@ test("a downgraded review notification settles its real queued admission before 
     h.db.stageReviewContinuation = (...args) => {
       const row = stage(...args);
       // Downgrade after admission has chosen the marked durable lane, before its first send.
-      h.db.registerRunner(h.metadata, Date.now(), 267);
+      h.db.updateRunnerReviewSessionCapability("r", { reviewers: CAPABILITY.reviewers });
       return row;
     };
     h.db.updateSessionStatus("s1", "idle", 10);

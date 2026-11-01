@@ -1,3 +1,4 @@
+import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { randomUUID } from "node:crypto";
 import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
@@ -248,10 +249,11 @@ export class SessionPromptOutbox {
         ? "resumableQuestionAnswers"
         : command.type === "prompt_session" && command.campaignContinuation
           ? "campaignContinuations"
-          : command.type === "prompt_session" && command.reviewContinuation
-            ? "reviewContinuationQuestions"
-            : "durablePromptQueueIdentity";
-      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
+          : "durablePromptQueueIdentity";
+      const runner = this.db.getRunner(row.runnerId);
+      if (!runnerSupportsProtocol(runner?.protocolVersion, capability) ||
+          (command.type === "prompt_session" && command.reviewContinuation &&
+            !runnerSupportsReviewQuestionPreservation(runner))) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
           runnerId: row.runnerId,

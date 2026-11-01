@@ -799,15 +799,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
-// 268: automatic review continuations preserve pending async questions (#3938). The control
-//      plane marks durable review prompts with reviewContinuation; older runners hold these
-//      notifications while a question is pending instead of treating them as human input.
-export const PROTOCOL_VERSION = 268;
-
-/** A COMMAND_CANCELLED receipt with this reason attests an automatic turn stayed behind a
- * provider-rejection hold until Restart. Distinguish it from a person's deliberate cancellation. */
-export const AUTOMATIC_TURN_RESTART_CANCELLED_REASON =
-  "session restart cleared the provider rejection hold before this automatic turn was sent";
+export const PROTOCOL_VERSION = 265;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1060,7 +1052,6 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
   reviewSession: 226,
-  reviewContinuationQuestions: 268,
   /** v227 runner deletes an isolated session's own sequencer leftovers and recorded branches
    * (#3316); the session tools check the same floor against the connected control plane. */
   sessionWorktreeRefDeletion: 227,
@@ -10330,7 +10321,7 @@ export interface PromptSessionMessage {
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
   /** Trusted automatic review notification; never supplied by the person-authored prompt API.
-   * Requires reviewContinuationQuestions and uses the durable prompt lane. */
+   * Requires the runner's explicit reviewSession.questionPreservation advertisement. */
   reviewContinuation?: true;
   /** Control-plane-authenticated synthetic campaign turn. Event bounds contain identities and
    * metadata only; the provider must query scoped management tools for authorized details. */

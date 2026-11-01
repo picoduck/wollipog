@@ -467,12 +467,12 @@ export class ReviewSessionLauncher {
       agents ??= this.deps.agents();
       if ("unavailable" in tools) {
         this.logDiscoveryFailure("tools", tools.unavailable);
-        return { reviewers: [], configuration: true, unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
+        return { reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: reviewSessionDiscoveryReason(tools.unavailable) } };
       }
       this.discoveryFailures.delete("tools");
     } catch (error) {
       this.logDiscoveryFailure("tools", error);
-      return { reviewers: [], configuration: true, unavailable: { tools: reviewSessionDiscoveryReason(error) } };
+      return { reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: reviewSessionDiscoveryReason(error) } };
     }
     const reviewers: ReviewSessionCapability["reviewers"] = [];
     for (const harness of ["claude-code", "codex"] as const) {
@@ -491,7 +491,7 @@ export class ReviewSessionLauncher {
         unavailable[harness] = reviewSessionDiscoveryReason(error);
       }
     }
-    return { reviewers, configuration: true, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
+    return { reviewers, configuration: true, questionPreservation: true, ...(Object.keys(unavailable).length ? { unavailable } : {}) };
   }
 
   checkoutPath(sessionId: string): string {
