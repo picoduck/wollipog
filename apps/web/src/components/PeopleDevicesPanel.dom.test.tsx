@@ -9,7 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { textBefore } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ManagePersonDialog, PairDeviceDialog, PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
+import { PairDeviceDialog, PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -110,53 +110,6 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
   } finally {
     await act(async () => { root.unmount(); });
     api.pairDevice = priorPairDevice;
-    mountPoint.remove();
-  }
-});
-
-test("managing an email-named person keeps the stored name out of the form until shown", async () => {
-  const priorUpdate = api.updateIdentityMember;
-  const updates: Array<{ displayName?: string }> = [];
-  api.updateIdentityMember = (async (_userId: string, body: { displayName?: string }) => {
-    updates.push(body);
-    return {} as never;
-  }) as typeof api.updateIdentityMember;
-  const member = { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" } as never;
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const mountPoint = happyContainer as unknown as HTMLDivElement;
-  // Dialogs are portalled to <body>, so the test queries the body.
-  const container = domWindow.document.body as unknown as HTMLDivElement;
-  const root = createRoot(mountPoint);
-  const button = (text: string) => Array.from(container.querySelectorAll("button"))
-    .find((candidate) => candidate.textContent === text) as unknown as HTMLButtonElement | undefined;
-  const nameInput = () => Array.from(container.querySelectorAll("input"))
-    .find((input) => (input as unknown as HTMLInputElement).value.includes("@")) as unknown as HTMLInputElement | undefined;
-  try {
-    await act(async () => {
-      root.render(<ManagePersonDialog actorRole="owner" member={member} onClose={() => {}} onSaved={async () => {}} />);
-    });
-    assert.equal(container.innerHTML.includes("@example."), false, "neither the title nor the field shows the name");
-    assert.equal(nameInput(), undefined);
-
-    const show = button("Show Person Name")!;
-    show.focus();
-    await act(async () => { show.click(); });
-    assert.equal(nameInput()?.value, "pat@example.com");
-    // A keyboard reveal keeps focus on the same control, so the next Enter hides it again.
-    assert.equal(domWindow.document.activeElement, button("Hide Person Name") as unknown as Element);
-    await act(async () => { button("Hide Person Name")!.click(); });
-    assert.equal(container.innerHTML.includes("@example."), false, "the name can be hidden again while the dialog is open");
-
-    // Changing only the role never needs the name revealed, and saves it unchanged.
-    await act(async () => {
-      button("Save Changes")!.click();
-      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
-    });
-    assert.equal(updates[0]?.displayName, "pat@example.com");
-  } finally {
-    await act(async () => { root.unmount(); });
-    api.updateIdentityMember = priorUpdate;
     mountPoint.remove();
   }
 });

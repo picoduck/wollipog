@@ -4,6 +4,7 @@ import {
   AlarmClockOff as LucideAlarmClockOff,
   Archive as LucideArchive,
   ArrowDown as LucideArrowDown,
+  ArrowLeftRight as LucideArrowLeftRight,
   ArrowRightLeft as LucideArrowRightLeft,
   ArrowUp as LucideArrowUp,
   ArrowUpRight as LucideArrowUpRight,
@@ -82,6 +83,7 @@ import {
   ImageOff as LucideImageOff,
   Inbox as LucideInbox,
   Info as LucideInfo,
+  Key as LucideKey,
   Keyboard as LucideKeyboard,
   KeyRound as LucideKeyRound,
   LayoutGrid as LucideLayoutGrid,
@@ -521,6 +523,16 @@ export function ErrorIcon(props: IconProps) {
 
 export function KeyboardIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideKeyboard} {...props} />;
+}
+
+/** Re-Pair…: replace this app's saved pairing with an instance (#3002). */
+export function KeyIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideKey} {...props} />;
+}
+
+/** Switch: make another saved instance the one this app shows (#3002). */
+export function ArrowLeftRightIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideArrowLeftRight} {...props} />;
 }
 
 /** A sign-in the session waits for: the Request Card's Sign-In kind (#2198). */

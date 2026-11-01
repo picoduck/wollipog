@@ -349,6 +349,9 @@ export interface State {
   sessionSummarySnapshots: boolean;
   /** Monotonic reconnect generation used to revalidate REST-only routed resources. */
   snapshotRevision: number;
+  /** Advanced each time the control plane reports a member directory change that left this
+   * viewer's access alone (#2606), so the viewer's identity reloads without a reconnect. */
+  identityDirectoryRevision: number;
   /** Session ids received in this connection's incomplete initial inventory. */
   pendingSnapshotSessionIds?: Set<string>;
   /** True only when the connected control plane advertises an authoritative Project inventory.
@@ -1704,6 +1707,8 @@ function reducer(state: State, action: Action): State {
           podContext.set(msg.entry.podId, mergePodContext(podContext.get(msg.entry.podId), [msg.entry]));
           return { ...state, podContext };
         }
+        case "identity_directory_changed":
+          return { ...state, identityDirectoryRevision: state.identityDirectoryRevision + 1 };
       }
       return state;
     }
@@ -1722,6 +1727,7 @@ function initialState(
     currentTurnOpeningSupported: false,
     sessionSummarySnapshots: false,
     snapshotRevision: 0,
+    identityDirectoryRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
     projectCreationRetrySupported: false,

@@ -1,4 +1,5 @@
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
 import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
@@ -8401,6 +8402,41 @@ export class SessionsService {
       if (!this.db.hasCompletedAgentReportAt(request.childSessionId, request.reportEventSeq)) {
         await this.hydrateHistory(request.childSessionId, { force: true });
       }
+      const child = this.db.getSession(request.childSessionId);
+      if (!child) return fail("campaign child not found", 404);
+      const preflight = this.verifyCampaignChild(campaignSessionId, request, canAccess, true);
+      if (!preflight.ok) return preflight;
+      const paths = [...new Set([...(child.worktrees ?? []).filter((tree) => tree.source !== "attached").map((tree) => tree.path),
+        ...(child.worktreePath && !child.worktrees?.some((tree) => tree.path === child.worktreePath)
+          ? [child.worktreePath] : [])])];
+      const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
+      const completion = rootId ? this.db.getSession(rootId)?.orchestratorPolicy?.behavior.completion : undefined;
+      // Retain attests delivery without retiring the worktree; preserve offline/legacy verification
+      // in that mode. Only archival needs fresh runner inspection before making the child inaccessible.
+      if (paths.length && completion === "stop_and_archive") {
+        const unsupported = this.capabilityFailure(child.runnerId, "campaignWorktreeRecovery",
+          "campaign worktree inspection");
+        if (unsupported) return unsupported;
+        if (!this.hub.isRunnerOnline(child.runnerId)) return fail("runner is offline; cannot inspect child worktrees before archival", 409);
+        for (const worktreePath of paths) {
+          const requestId = randomUUID();
+          try {
+            const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
+              type: "git_action", requestId, sessionId: child.id, worktreePath, action: { kind: "status" },
+            }, 30_000);
+            const status = result.type === "git_result" && result.ok ? result.data?.status : undefined;
+            if (!status || !Number.isSafeInteger(status.changedPathCount) || status.changedPathCount! < 0 ||
+                status.hasChanges !== (status.changedPathCount! > 0) || !Array.isArray(status.files)) {
+              return fail("runner did not provide child worktree inspection; update Wollipog and retry", 409);
+            }
+            if (status.hasChanges) return fail(`Child worktree ${JSON.stringify(worktreePath)}: ` +
+              worktreeDirtyPaths(status.changedPathCount!, status.files.map((file) => file.path)) +
+              "; ask the child to preserve and clean its work before verification", 409);
+          } catch {
+            return fail("child worktree inspection failed; retry before archival", 409);
+          }
+        }
+      }
     }
     return this.verifyCampaignChild(campaignSessionId, request, canAccess);
   }
@@ -8409,6 +8445,7 @@ export class SessionsService {
     campaignSessionId: string,
     request: VerifyOrchestratorChildRequest,
     canAccess: (sessionId: string) => boolean = () => true,
+    checkOnly = false,
   ): ServiceResult<{ campaign: OrchestratorCampaignProjection; child: SessionView }> {
     const campaign = this.db.getSession(campaignSessionId);
     if (!campaign?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
@@ -8503,6 +8540,7 @@ export class SessionsService {
         workItem.outcome, this.db.campaignReportIdentity(child.id, request.reportEventSeq));
       if (!target.ok) return fail(target.error, target.status);
     }
+    if (checkOnly) return ok({ campaign: this.db.campaignProjection(campaignSessionId)!, child });
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
     const now = Date.now();
     for (const decision of spentApprovals) {
@@ -17552,7 +17590,7 @@ export class SessionsService {
       batches, snapshotBatchLimit: 32, affectedCampaigns, maxBatchMs: Math.round(maxBatchMs),
       durationMs: Math.round(performance.now() - started),
     }));
-    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; });
+    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; }, reconciliationId);
     diagnostic("runner_reconciliation_started");
     try {
       while (options.isCurrent()) {
@@ -17578,6 +17616,7 @@ export class SessionsService {
 
   private *runnerSessionHydrationSteps(
     runnerId: string, snapshots: SessionSnapshot[], onCampaignCount?: (count: number) => void,
+    reconciliationId = randomUUID(),
   ): Generator<void, void> {
     const now = Date.now();
     const byId = new Set(snapshots.map((s) => s.id));
@@ -17658,7 +17697,52 @@ export class SessionsService {
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
+      const activeBatchIndexes = new Set<number>();
+      let activeFallbackThrough = -1;
       for (const [snapshotIndex, incoming] of chunk.entries()) {
+        if (terminalBatchIndexes.has(snapshotIndex) || activeBatchIndexes.has(snapshotIndex)) continue;
+        // Keep active groups contiguous: an exceptional snapshot must settle on its original
+        // path before any later active group can commit or publish. Recheck eligibility after
+        // that work, rather than classifying the whole chunk against an obsolete view.
+        if (snapshotIndex > activeFallbackThrough) {
+          const run: SessionSnapshot[] = [];
+          for (let index = snapshotIndex; index < chunk.length; index++) {
+            const snap = chunk[index]!;
+            if (terminalBatchIndexes.has(index) || unsupportedCostSessions.has(snap.id) ||
+                duplicateSnapshotIds.has(snap.id) || changedSinceInventory(snap.id) ||
+                !this.batchableActiveRegistrationSnapshot(runnerId, snap)) break;
+            campaignBefore(this.db.getSession(snap.id));
+            run.push(snap);
+          }
+          if (run.length) {
+            const histories = this.db.updateSessionsFromSnapshots(run, now, { fallbackOnRollback: true });
+            if (histories.length === run.length) {
+              for (const [index, snap] of run.entries()) {
+                activeBatchIndexes.add(snapshotIndex + index);
+                this.synchronizeCostReconciliation(snap.id, snap.costReconciliationRevision ?? 0);
+                if (histories[index]?.reset) {
+                  const reset = this.db.getSession(snap.id)!;
+                  this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
+                  if (snap.seq > 0) this.rehydrate.add(snap.id);
+                }
+                this.gateOnPolicy(snap.id, now);
+                this.restorePendingWorkflowDecisionCards(snap.id);
+                // Policy evaluation can create new work after admission. Keep the original
+                // post-update delivery path, with its own FULL writes, for that fresh work.
+                this.deliverHeldWorkflowDecisionResumes(snap.id, now);
+                this.deliverHeldRestartNotices(snap.id, now);
+                this.applyStandingCampaignResponses(snap.id);
+                this.deliverHeldReviewContinuations(snap.id, now);
+                this.hub.sessionChangedById(snap.id);
+                recordAppliedVersion(snap.id);
+              }
+              continue;
+            }
+            activeFallbackThrough = snapshotIndex + run.length - 1;
+            this.log.warn(JSON.stringify({ event: "runner_reconciliation_batch_fallback",
+              entryPoint: "runner_registration", runnerId, reconciliationId, snapshotCount: run.length }));
+          }
+        }
         // Preserve possible costs/history/checkpoints through normal accounting while generic
         // snapshot status cannot overwrite an unresolved media dispatch/cancellation identity.
         const mediaSession = this.db.getSession(incoming.id);
@@ -17815,6 +17899,24 @@ export class SessionsService {
         }
       })();
     }
+  }
+
+  /** Active registration may share a FULL commit only when its pre-update service work is a
+   * no-op and it owes no post-update delivery. Policy evaluation still runs, durably, afterwards. */
+  private batchableActiveRegistrationSnapshot(runnerId: string, snap: SessionSnapshot): boolean {
+    if (snap.status !== "idle" && snap.status !== "running") return false;
+    const existing = this.db.getSession(snap.id);
+    if (!existing || existing.runnerId !== runnerId || existing.kind === "review" || existing.orchestratorCampaign ||
+        existing.pendingApproval || snap.pendingApproval || this.pendingMediaLifecycle(existing) ||
+        existing.worktreeRecovery || snap.worktreeRecovery ||
+        this.db.isTombstoned(snap.id) || this.db.hasSessionStopIntent(snap.id) ||
+        this.archivedSessionRequiresStop(existing) || this.db.hasActiveSessionPromptCommands(snap.id) ||
+        this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
+        this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
+        this.db.hasOpenRestartNotices(snap.id) || this.db.hasOpenReviewContinuations(snap.id) ||
+        this.db.listOpenPolicyHookApprovals(snap.id).length > 0 || this.db.policyResumeStatus(snap.id) !== null ||
+        reconciliationRevision(this.db, snap.id) !== 0 || latestReconciliationRepair(this.db, snap.id)) return false;
+    return true;
   }
 
   /** Apply one live runner-authoritative snapshot without treating every other box session as

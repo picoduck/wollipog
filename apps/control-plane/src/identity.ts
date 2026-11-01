@@ -112,8 +112,8 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
   return "the agent session is not delegated organization-wide access to this global resource";
 }
 
-/** Session credentials may archive their descendants but never unarchive a session, either plainly
- * or through Unarchive and Restart. */
+/** General agent restore refusal; only a controlling Orchestrator's narrow dirty-cleanup recovery
+ * can use plain unarchive. Combined Unarchive and Restart always refuses session credentials. */
 export const AGENT_UNARCHIVE_ERROR = "session credentials may archive descendants, but cannot unarchive them";
 
 /** Stopping one background job (#1780) belongs to the session owner and to the controlling

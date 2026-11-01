@@ -106,10 +106,10 @@ test("an agent credential's command permissions follow descendant confinement an
     organizationId: "org_1", delegatedScope: scope,
   };
   const child = { id: "s_child", parentSessionId: "s_parent" };
-  const descendant = { ownsSession: false, isDescendant: true };
+  const descendant = { ownsSession: false, isDescendant: true, archivedWorktreeRecoveryError: null };
   assert.deepEqual(sessionCommandPermissions(orchestrator, child, descendant), {
     ...ALL_ALLOWED,
-    unarchive: { allowed: false, reason: AGENT_UNARCHIVE },
+    unarchive: { allowed: true },
     delete: { allowed: false, reason: AGENT_DELETE },
     cancelTurn: { allowed: false, reason: AGENT_ROUTE },
     manageQueue: { allowed: false, reason: AGENT_ROUTE },
@@ -120,9 +120,13 @@ test("an agent credential's command permissions follow descendant confinement an
     manageReviewFindings: { allowed: false, reason: AGENT_ROUTE },
     worktreeSetup: { allowed: false, reason: AGENT_ROUTE },
     gitActions: { allowed: false, reason: AGENT_ROUTE },
-  }, "the controlling Orchestrator may stop, restart, stop one job of, archive, prompt and configure its child, but never unarchive or delete it or use a route outside its allowlist");
+  }, "the controlling Orchestrator may also unarchive its child, but cannot delete it or use a route outside its allowlist");
+  assert.deepEqual(sessionCommandPermissions(orchestrator, child, { ...descendant,
+    archivedWorktreeRecoveryError: "campaignWorktreeRecovery is required" }).unarchive,
+    { allowed: false, reason: "campaignWorktreeRecovery is required" });
 
   const grandchild = sessionCommandPermissions(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" }, descendant);
+  assert.equal(grandchild.unarchive?.allowed, false);
   assert.deepEqual(grandchild.stop, { allowed: true });
   assert.deepEqual(grandchild.stopBackgroundJob, { allowed: false, reason: STOP_JOB_OWNER },
     "a grandchild's jobs belong to its own parent's campaign");

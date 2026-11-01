@@ -257,12 +257,12 @@ for (const formFactor of ["desktop", "phone"] as const) {
     let dialog = page.getByRole("dialog", { name: "Manage Person" });
     await expect(dialog).toBeVisible();
     await expectNoEmailLeak(page);
-    await dialog.getByRole("button", { name: "Show Person Name" }).click();
+    await dialog.getByRole("button", { name: "Show Name", exact: true }).click();
     await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
     await memberRow.getByRole("button", { name: "Manage", exact: true }).click();
     dialog = page.getByRole("dialog", { name: "Manage Person" });
-    await expect(dialog.getByRole("button", { name: "Show Person Name" })).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Show Name", exact: true })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 

@@ -1370,6 +1370,7 @@ async function collectGitStatus(
     status: {
       branch,
       files,
+      changedPathCount: allFiles.length,
       hasChanges: allFiles.length > 0,
       ahead: baseCounts?.right ?? upstreamCounts?.right ?? 0,
       remoteUrl: remoteText.trim() || null,

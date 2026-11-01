@@ -1257,6 +1257,32 @@ export class Hub {
     }
   }
 
+  /** A member's own role or status changed (#2606). Close every socket that member opened, in any
+   * organization and on any device, with the authorization close (1008), so no cached pre-change
+   * privilege survives until reconnect. Status belongs to the user rather than one membership. */
+  closeUserUiClients(userId: string): void {
+    for (const [client, info] of this.uiClients) {
+      if (info.principal?.kind !== "human" || info.principal.userId !== userId) continue;
+      try {
+        info.close();
+      } catch {
+        /* already closing */
+      }
+      this.removeUiClient(client);
+    }
+  }
+
+  /** The organization's member directory changed without changing any connected principal's own
+   * access (#2606), so its dashboards refetch their identity in place instead of reconnecting.
+   * Callers close the sockets of a member whose own access changed first. The command-permission
+   * verdicts already sent are rechecked too, so a verdict that reads another member's facts cannot
+   * go stale on a socket that stays open. */
+  identityDirectoryChanged(organizationId: string): void {
+    this.broadcast({ type: "identity_directory_changed" },
+      (principal) => principal?.organizationId === organizationId);
+    this.refreshSessionCommandPermissions();
+  }
+
   /* --------------------------- Broadcasts -------------------------------- */
 
   runnerChanged(runnerId: string): void {
@@ -1702,6 +1728,9 @@ export class Hub {
         return false;
       case "session_subscriptions_applied":
         return true;
+      // Scoped to one organization by identityDirectoryChanged's own predicate.
+      case "identity_directory_changed":
+        return false;
     }
   }
 

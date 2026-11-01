@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import { State } from "./State.js";
@@ -6,14 +6,12 @@ import type {
   DeviceView,
   IdentityAdministrationView,
   OrganizationMembershipView,
-  OrganizationRole,
   TeamView,
-  UserStatus,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { pairingLinks } from "../device-token.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
-import { accountLabelText, isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
+import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { CopyButton, Modal } from "./common.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { ChevronRightIcon, DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
@@ -21,10 +19,10 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { TeamDialog } from "./TeamDialog.js";
 import {
   PersonalIdentifier,
-  PersonalIdentifierMask,
   PersonalIdentifierRevealButton,
   usePersonalIdentifierReveal,
 } from "./PersonalIdentifier.js";
+import { AddPersonDialog, ManagePersonDialog } from "./PersonAccessDialogs.js";
 
 type AccessDialog =
   | { kind: "add-person" }
@@ -35,186 +33,8 @@ type AccessDialog =
 
 const QRCodeSVG = lazy(() => import("qrcode.react").then((module) => ({ default: module.QRCodeSVG })));
 
-const ROLE_HELP: Record<OrganizationRole, string> = {
-  owner: "Full organization control, including ownership and administrator changes.",
-  admin: "Manage connections, people, teams, and paired devices.",
-  operator: "Run and manage work without changing organization access.",
-  viewer: "Read-only access to shared work and connection status.",
-};
-
-function RoleOptions({ actorRole }: { actorRole: OrganizationRole }) {
-  return (
-    <>
-      <option value="owner" disabled={actorRole !== "owner"}>Owner</option>
-      <option value="admin">Admin</option>
-      <option value="operator">Operator</option>
-      <option value="viewer">Viewer</option>
-    </>
-  );
-}
-
 function DialogError({ error }: { error: string | null }) {
   return error ? <div className="form-error" role="alert">{error}</div> : null;
-}
-
-function AddPersonDialog({
-  actorRole,
-  onClose,
-  onSaved,
-}: {
-  actorRole: OrganizationRole;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const api = useApi();
-  const [name, setName] = useState("");
-  const [role, setRole] = useState<OrganizationRole>("viewer");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (busy || !name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.createIdentityMember({ displayName: name.trim(), role });
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Modal
-      title="Add a Person"
-      onClose={onClose}
-      describedBy="add-person-description"
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || !name.trim()}>
-            {busy ? "Adding…" : "Add Person"}
-          </button>
-        </>
-      }
-    >
-      <p className="access-dialog-intro" id="add-person-description">
-        Add the person first. You can pair a device for them after their access level is set.
-      </p>
-      <div className="access-form">
-        <label>
-          <span>Name</span>
-          <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Person name" />
-        </label>
-        <label>
-          <span>Access Level</span>
-          <select value={role} onChange={(event) => setRole(event.target.value as OrganizationRole)}>
-            <RoleOptions actorRole={actorRole} />
-          </select>
-          <small>{ROLE_HELP[role]}</small>
-        </label>
-        <DialogError error={error} />
-      </div>
-    </Modal>
-  );
-}
-
-export function ManagePersonDialog({
-  actorRole,
-  member,
-  onClose,
-  onSaved,
-}: {
-  actorRole: OrganizationRole;
-  member: OrganizationMembershipView;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const api = useApi();
-  const [displayName, setDisplayName] = useState(member.userName);
-  // An email-shaped name stays out of the editable field until the admin deliberately shows it.
-  const nameIsPersonal = isPersonalIdentifier(member.userName);
-  const [nameShown, setNameShown] = useState(!nameIsPersonal);
-  const nameId = useId();
-  const [role, setRole] = useState(member.role);
-  const [status, setStatus] = useState<UserStatus>(member.userStatus);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (busy || !displayName.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.updateIdentityMember(member.userId, {
-        displayName: displayName.trim(),
-        role,
-        status,
-      });
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Modal
-      title={`Manage ${accountLabelText(member.userName, "Person")}`}
-      onClose={onClose}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || !displayName.trim()}>
-            {busy ? "Saving…" : "Save Changes"}
-          </button>
-        </>
-      }
-    >
-      <div className="access-form">
-        {nameIsPersonal ? (
-          <div className="access-form-field">
-            <div className="pid-field-head">
-              {nameShown ? <label htmlFor={nameId}>Name</label> : <span>Name</span>}
-              <PersonalIdentifierRevealButton
-                label="Person Name"
-                revealed={nameShown}
-                onToggle={() => setNameShown((shown) => !shown)}
-                controls={nameShown ? nameId : undefined}
-                withText
-              />
-            </div>
-            {nameShown
-              // No autofocus: a keyboard reveal keeps focus on the toggle so Enter can hide it again.
-              ? <input id={nameId} value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-              : <PersonalIdentifierMask />}
-          </div>
-        ) : (
-          <label>
-            <span>Name</span>
-            <input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-          </label>
-        )}
-        <label>
-          <span>Access Level</span>
-          <select value={role} onChange={(event) => setRole(event.target.value as OrganizationRole)}>
-            <RoleOptions actorRole={actorRole} />
-          </select>
-          <small>{ROLE_HELP[role]}</small>
-        </label>
-        <label>
-          <span>Account Status</span>
-          <select value={status} onChange={(event) => setStatus(event.target.value as UserStatus)}>
-            <option value="active">Active</option>
-            <option value="suspended">Suspended</option>
-          </select>
-          <small>Suspending access invalidates this person's authenticated requests.</small>
-        </label>
-        <DialogError error={error} />
-      </div>
-    </Modal>
-  );
 }
 
 export function PairDeviceDialog({
@@ -642,6 +462,9 @@ export function PeopleDevicesPanel({
         <ManagePersonDialog
           actorRole={identity.context.role}
           member={dialog.member}
+          pairedDevices={canPair && devices
+            ? devices.filter((device) => device.userId === dialog.member.userId).length
+            : null}
           onClose={() => setDialog(null)}
           onSaved={refresh}
         />

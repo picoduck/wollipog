@@ -171,10 +171,9 @@ test("Re-Pair… opens the provider's one dialog from the Instances list, the re
   try {
     assert.equal(app.manager().phase, "failed");
     assert.equal(app.manager().statusByProfile[studio.id]?.availability, "authentication-required");
-    const card = Array.from(app.body.querySelectorAll<HTMLElement>(".instance-card"))
-      .find((candidate) => candidate.querySelector("h2")?.textContent === "Studio")!;
+    const row = app.body.querySelector<HTMLElement>(`.instance-row[data-instance-id="${studio.id}"]`)!;
     const openers: Array<[string, HTMLButtonElement | null]> = [
-      ["the Instances list", byText(card, "button", "Re-Pair")],
+      ["the Instances list", byText(row, "button", "Re-Pair…")],
       ["the recovery screen", byText(app.body.querySelector(".instance-recovery-state")!, "button", "Re-Pair…")],
       ["the remote banner", byText(app.body.querySelector(".notice.page-banner")!, "button", "Re-Pair…")],
     ];
@@ -186,7 +185,7 @@ test("Re-Pair… opens the provider's one dialog from the Instances list, the re
       assert.equal(app.dialogs().length, 1, `${where} opens one dialog`);
       assert.equal(app.dialogs()[0]!.querySelector("h2")?.textContent, "Re-Pair Instance", where);
       assert.match(app.dialogs()[0]!.textContent ?? "", /Studio no longer accepts this app's saved pairing\./);
-      assert.ok(!app.body.querySelector(".instances-page")?.contains(app.dialogs()[0]!), "the page does not render it");
+      assert.ok(!app.body.querySelector(".instance-list")?.contains(app.dialogs()[0]!), "the page does not render it");
       const surface = app.dialogs()[0]!.closest(".modal-backdrop") ?? app.dialogs()[0]!;
       assert.ok(surface.contains(domWindow.document.activeElement as never), "focus moved into the dialog");
       await app.cancel();
@@ -211,7 +210,7 @@ test("Re-Pair… opens the provider's one dialog from the Instances list, the re
 test("the dialog outlives the page that opened it, keeping what was typed", async () => {
   const app = await mountApp();
   try {
-    await act(async () => { byText(app.body, ".instances-page button", "Add Remote Instance")!.click(); });
+    await act(async () => { byText(app.body, ".instance-recovery-state button", "Add Remote Instance…")!.click(); });
     await settle();
     const name = app.dialogs()[0]!.querySelector<HTMLInputElement>("input")!;
     await act(async () => {
@@ -230,7 +229,7 @@ test("the dialog outlives the page that opened it, keeping what was typed", asyn
 test("a dialog replaced while its request runs does not close its replacement when the request ends", async () => {
   const app = await mountApp();
   try {
-    await act(async () => { byText(app.body, ".instances-page button", "Add Remote Instance")!.click(); });
+    await act(async () => { byText(app.body, ".instance-recovery-state button", "Add Remote Instance…")!.click(); });
     await settle();
     const first = app.dialogs()[0]!;
     const [name, link] = Array.from(first.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])'));
@@ -265,7 +264,7 @@ test("Add Instance saves without switching when Switch After Adding is unchecked
   const app = await mountApp();
   try {
     const add = async (label: string, origin: string, switchAfter: boolean) => {
-      await act(async () => { byText(app.body, ".instances-page button", "Add Remote Instance")!.click(); });
+      await act(async () => { byText(app.body, ".instance-recovery-state button", "Add Remote Instance…")!.click(); });
       await settle();
       const dialog = app.dialogs()[0]!;
       const [name, link] = Array.from(dialog.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])'));

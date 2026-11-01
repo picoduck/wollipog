@@ -12459,7 +12459,9 @@ export class ControlPlaneDb {
         }
       }
       const permissions = principal.kind === "human" && humanPermissions.get(row.summary_owns) ||
-        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant });
+        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant,
+          archivedWorktreeRecoveryError: principal.kind === "agent" && principal.orchestrator &&
+            row.parent_session_id === principal.credentialSessionId ? this.campaignWorktreeRecoveryError(view.id) : undefined });
       if (principal.kind === "human") humanPermissions.set(row.summary_owns, permissions);
       // This row has not escaped the generator yet; avoid copying its projection just to add
       // requester-owned verdicts. Only held rows need the advice rewrite.
@@ -17045,17 +17047,27 @@ export class ControlPlaneDb {
 
   /** Apply a registration batch of existing snapshots in one durable transaction. The caller
    * must reserve this for sessions whose service-level reconciliation is read-only; active
-   * sessions and sessions with pending durable work stay on the per-session path. */
+   * sessions with pending durable work stay on the per-session path. With fallbackOnRollback,
+   * an empty result for a nonempty batch means nothing committed; retry on the service path. */
   updateSessionsFromSnapshots(
     snapshots: readonly SessionSnapshot[],
     now: number,
+    options: { fallbackOnRollback?: boolean } = {},
   ): Array<RunnerHistoryReconciliation | null> {
     if (snapshots.length === 0) return [];
     if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
       throw new Error("updateSessionsFromSnapshots requires an autocommit connection");
     }
-    const histories = this.atomic(() => snapshots.map((snap) =>
-      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    let histories: Array<RunnerHistoryReconciliation | null>;
+    try {
+      histories = this.atomic(() => snapshots.map((snap) =>
+        this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    } catch (error) {
+      // Only a rolled-back transaction may fall back. Maintenance below runs after COMMIT;
+      // its failure must never be mistaken for an unapplied batch and retried.
+      if (options.fallbackOnRollback && !this.db.isTransaction) return [];
+      throw error;
+    }
     if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
@@ -20564,6 +20576,21 @@ export class ControlPlaneDb {
 
   campaignChildWorktreesRetired(sessionId: string): boolean {
     return this.campaignWorktreeCleanup(sessionId).length === 0;
+  }
+
+  /** Agent restoration only recovers a settled campaign archive whose dirty cleanup was refused. */
+  campaignWorktreeRecoveryError(sessionId: string): string | null {
+    const session = this.getSession(sessionId);
+    if (!session?.archived || session.archiveStatus || this.hasSessionStopIntent(sessionId) ||
+        !this.campaignForVerifiedChild(sessionId)) {
+      return "Only a fully archived, verified campaign child with refused dirty-worktree cleanup can be recovered.";
+    }
+    if (!runnerSupportsProtocol(this.getRunner(session.runnerId)?.protocolVersion, "campaignWorktreeRecovery")) {
+      return "Update Wollipog on the child's runner: campaignWorktreeRecovery is required.";
+    }
+    return this.campaignWorktreeCleanup(sessionId).some((item) => item.status === "refused" &&
+      item.reason?.startsWith("the worktree has uncommitted changes"))
+      ? null : "Only a fully archived, verified campaign child with refused dirty-worktree cleanup can be recovered.";
   }
 
   /** The campaign's status and the counts behind it, derived once for both the full projection and
