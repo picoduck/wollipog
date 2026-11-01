@@ -89,9 +89,13 @@ plaintext once:
 http://<host>:<port>/#pair=<token>
 ```
 
-The link is offered only when the control plane serves the built dashboard and is reachable beyond
-loopback. Otherwise the panel supplies the fragment and explains which prerequisite is missing.
-Opening it uses the same store-and-scrub flow as local startup pairing.
+The link is offered, with a QR code, only when the control plane serves the built dashboard and is
+reachable beyond loopback. Otherwise **Pair Device** says in plain words why other devices can't
+reach this computer yet (loopback only, pages not served, no network address, or remote access
+needing attention), keeps the environment variables and build command behind **Show Details**, and
+still copies a link that works in another browser on the same computer. **Manual Setup** holds the
+fragment and the bare pairing code. Opening the link uses the same store-and-scrub flow as local
+startup pairing.
 
 From an SSH terminal on the host, `wollipog admin device create --name <name>` mints the same kind
 of credential with the protected startup credential and prints a complete link. Set

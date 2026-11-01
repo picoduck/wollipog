@@ -1,1 +1,0 @@
-|.access-pairing-qr h3|font-size|14
