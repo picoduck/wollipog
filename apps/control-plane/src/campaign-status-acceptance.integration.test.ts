@@ -866,7 +866,7 @@ test("worktree inspection gates archival, while Retain verification supports leg
         assert.equal(db.getSession(worker)?.archived, false, "no unavailable inspection archives a child");
         assert.equal(sentToRunner.length, sentBefore, "no worktree action is sent without supported online inspection");
         if (completion === "stop_and_archive") assert.match(result.error!,
-          unavailable === "legacy" ? /campaignWorktreeRecovery/u : /runner is offline/u);
+          unavailable === "legacy" ? /campaign worktree inspection/u : /runner is offline/u);
       } finally {
         await close();
       }

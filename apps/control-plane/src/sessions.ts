@@ -8335,7 +8335,7 @@ export class SessionsService {
       // in that mode. Only archival needs fresh runner inspection before making the child inaccessible.
       if (paths.length && completion === "stop_and_archive") {
         const unsupported = this.capabilityFailure(child.runnerId, "campaignWorktreeRecovery",
-          "campaign worktree inspection (campaignWorktreeRecovery)");
+          "campaign worktree inspection");
         if (unsupported) return unsupported;
         if (!this.hub.isRunnerOnline(child.runnerId)) return fail("runner is offline; cannot inspect child worktrees before archival", 409);
         for (const worktreePath of paths) {
