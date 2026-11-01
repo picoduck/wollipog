@@ -117,21 +117,23 @@ export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdm
 };
 
 /** The accepted recommendation a consumed publication delivered as `issue`. A bounded grant names it.
- * A person-approved publication never does: the fallback strips that claim (#3063). It binds only
- * to exactly one accepted, non-duplicate recommendation of this campaign that records `issue` as its
- * result and whose title has the approved payload's subject. */
+ * A person-approved publication may name it too, as its requester sent it (#3918). Either way it
+ * binds only to exactly one accepted, non-duplicate recommendation of this campaign in the payload's
+ * repository that records `issue` as its result and whose title has the approved payload's subject:
+ * a name narrows that match and never replaces it. */
 export function scopePublicationRecommendation(db: ControlPlaneDb, rootId: string, publication: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>,
   issue: number): { recommendation: CampaignRecommendation } | { failure: CampaignScopeAdmissionFailure } {
   const usable = (r: CampaignRecommendation) => r.disposition === "accepted" && !r.duplicateOfId;
   const delivered = (r: CampaignRecommendation) => r.resultingIssue?.number === issue && r.resultingIssue.repository.toLowerCase() === publication.repository;
+  const subject = campaignPublicationTitle(publication.sanitizedTitle);
+  const titledAs = (r: CampaignRecommendation) => r.repository.toLowerCase() === publication.repository && campaignPublicationTitle(r.title) === subject;
   if (publication.recommendationId) {
     const named = db.campaignWorkLedger.recommendation(rootId, publication.recommendationId);
+    if (named && !titledAs(named)) return { failure: "recommendation_not_found" };
     if (!named || !usable(named)) return { failure: "recommendation_not_accepted" };
     return delivered(named) ? { recommendation: named } : { failure: "resulting_issue_mismatch" };
   }
-  const subject = campaignPublicationTitle(publication.sanitizedTitle);
-  const titled = db.campaignWorkLedger.recommendations(rootId).filter((r) =>
-    r.repository.toLowerCase() === publication.repository && campaignPublicationTitle(r.title) === subject);
+  const titled = db.campaignWorkLedger.recommendations(rootId).filter(titledAs);
   if (!titled.length) return { failure: "recommendation_not_found" };
   const accepted = titled.filter(usable);
   if (!accepted.length) return { failure: "recommendation_not_accepted" };

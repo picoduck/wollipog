@@ -457,8 +457,8 @@ test("a child's publication outside the proof routes to the person with a visibl
       assert.ok(p.ok,`${c.name}: ${p.error}`);
       assert.equal(p.data!.authority,"human",c.name);
       assert.equal(p.data!.authorityEvaluation?.admissionFailure,c.expected,c.name);
-      assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && !p.data!.resourceSnapshot.recommendationId &&
-        !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim carries no lineage or admission`);
+      assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && p.data!.resourceSnapshot.recommendationId === recommendationId &&
+        !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim is kept as sent (#3918) and carries no admission`);
     } finally { h.db.close(); }
   }
   const failedInspection = harness();
@@ -1412,8 +1412,8 @@ test("#2940 an excluded pull request reopened during scope synchronization is ne
 });
 
 // #2940, observed live: before #3824 a child's in-boundary publication was routed to the person,
-// who approved its exact payload. The fallback strips the recommendation claim, so the Orchestrator
-// could never admit the published issue: the bounded path needed an issueAdmission it never got.
+// who approved its exact payload. The fallback carries no issueAdmission, so the Orchestrator could
+// never admit the published issue: the bounded path needed an admission it never got.
 type ScopeHarness = ReturnType<typeof harness>;
 
 function member(h: ScopeHarness, userId: string, role: "owner" | "admin" | "operator" | "viewer") {
@@ -1433,7 +1433,7 @@ async function humanApprovedPublication(h: ScopeHarness, options: { approver?: s
   h.state.publicationOk = true;
   assert.ok(created.ok,created.error ?? "publication"); const decision = created.data!;
   assert.equal(decision.authority,"human");
-  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && !decision.resourceSnapshot.recommendationId);
+  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && decision.resourceSnapshot.recommendationId === rec.data!.id);
   const approved = h.svc.resolveWorkflowDecision("root","child",decision.occurrenceId,
     { outcome: "approve", ...options.resolution } as import("@wollipog/protocol").ResolveWorkflowDecisionRequest,"human",{kind:"human",id:approver},()=>true);
   assert.ok(approved.ok,approved.error ?? "human approval");
@@ -1723,4 +1723,170 @@ test("#2940 Custom campaigns and the owner's Campaign Status route treat a perso
     assert.ok(full.approve(direct.data!).ok);
     assert.deepEqual(full.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100, 101]);
   } finally { full.db.close(); }
+});
+
+// #3918, observed live: a Custom campaign's publication dropped the recommendation it named, so
+// consuming with the requested snapshot was refused as stale and revoked the approval, and nothing
+// linked the published issue back to the accepted recommendation.
+const workSummary = (h: ReturnType<typeof harness>) => h.db.campaignWorkLedger.summary("root",
+  { campaignCreatedAt: 1, complete: false, childSessionIds: ["child"], cleanupPending: 0 });
+const workItemCount = (h: ReturnType<typeof harness>) => {
+  const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now());
+  assert.ok(page.ok); return page.data.items.length;
+};
+const humanApprove = (h: ReturnType<typeof harness>, requester: string, d: WorkflowDecisionView) =>
+  h.svc.resolveWorkflowDecision("root", requester, d.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: h.principal.userId }, () => true);
+
+/** The documented step after publishing (#3918): record the issue on the accepted recommendation. */
+function linksPublishedIssue(h: ReturnType<typeof harness>, recommendationId: string, issue: number) {
+  const before = h.db.campaignWorkLedger.recommendation("root", recommendationId)!;
+  assert.equal(before.publication, "awaiting_publication");
+  assert.ok(before.resultingWorkItemId, "acceptance created the follow-up work item");
+  const items = workItemCount(h);
+  assert.equal(workSummary(h).obligations.publication, 1);
+  const linked = h.svc.adjudicateCampaignRecommendation("root", { recommendationId, disposition: "accepted", reason: "Published payload read back",
+    resultingIssue: { repository: "team/repo", number: issue } });
+  assert.ok(linked.ok, linked.error ?? "link");
+  assert.equal(linked.data!.workItem?.id, before.resultingWorkItemId, "the existing work item is linked");
+  assert.equal(workItemCount(h), items, "no second work item is created");
+  assert.deepEqual(linked.data!.workItem?.issue, { repository: "team/repo", number: issue });
+  const after = h.db.campaignWorkLedger.recommendation("root", recommendationId)!;
+  assert.equal(after.publication, "published");
+  assert.deepEqual(after.resultingIssue, { repository: "team/repo", number: issue });
+  assert.equal(workSummary(h).obligations.publication, 0);
+}
+
+for (const named of [true, false]) {
+  test(`#3918 a Custom child's publication ${named ? "naming" : "without"} its recommendation is consumed as requested and links its existing item`, async () => {
+    const h = harness(false);
+    try {
+      const recommendationId = acceptedRecommendation(h);
+      const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Feature]: Related repair",
+        sanitizedBody: body, labels: ["enhancement"], ...(named ? { recommendationId } : {}) };
+      const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "custom", resourceKey: "custom", resourceSnapshot: requested });
+      assert.ok(created.ok, created.error ?? "request");
+      const decision = created.data!;
+      assert.equal(decision.authority, "human");
+      assert.equal(decision.controllingSessionId, "root");
+      assert.deepEqual(decision.resourceSnapshot, requested, "the stored snapshot is exactly the requested one");
+      assert.deepEqual(h.svc.workflowDecision("child", decision.occurrenceId).data!.resourceSnapshot, requested);
+      if (named) assert.equal(decision.authorityEvaluation?.admissionFailure, "no_issue_boundary", "the person sees why it is theirs");
+      assert.equal(h.db.campaignPublicationReservations("root").length, 0, "a named recommendation reserves no bounded slot");
+      assert.ok(humanApprove(h, "child", decision).ok);
+      const consumed = await h.svc.consumeWorkflowDecision("child", decision.occurrenceId, { resourceSnapshot: requested });
+      assert.ok(consumed.ok, consumed.error ?? "consume");
+      assert.equal(consumed.data!.status, "consumed");
+      linksPublishedIssue(h, recommendationId, 101);
+    } finally { h.db.close(); }
+  });
+}
+
+test("#3918 a person-approved publication's named recommendation never replaces the title match or makes it bounded", async () => {
+  const h = harness(true, 3);
+  try {
+    const alpha = acceptedRecommendation(h, "Alpha repair");
+    h.state.publicationOk = true;
+    // The name claims Alpha for a Beta payload: bounded admission refuses, and the person decides.
+    const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Feature]: Beta repair",
+      sanitizedBody: body, labels: [], recommendationId: alpha };
+    const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
+    assert.ok(created.ok, created.error ?? "request");
+    assert.equal(created.data!.authority, "human");
+    assert.equal(created.data!.authorityEvaluation?.admissionFailure, "title_mismatch");
+    assert.deepEqual(created.data!.resourceSnapshot, requested);
+    assert.equal(h.db.campaignPublicationReservations("root").length, 0);
+    assert.ok(humanApprove(h, "child", created.data!).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("child", created.data!.occurrenceId, { resourceSnapshot: requested })).ok);
+    h.state.publicationTitles[101] = requested.sanitizedTitle;
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: alpha, disposition: "accepted", reason: "Claimed delivery",
+      resultingIssue: { repository: "team/repo", number: 101 } }).ok);
+    const scope = await followUpScope(h, "named-other-title", created.data!.occurrenceId);
+    assert.equal(refusalCode(scope), "recommendation_not_found");
+    assert.deepEqual(h.db.getSession("root")!.orchestratorPolicy!.issueNumbers, [100]);
+  } finally { h.db.close(); }
+});
+
+// #3919, observed live: a Custom root that drafted a follow-up itself was refused with "no
+// controlling Orchestrator ancestor" and had to create a child only to publish it.
+test("#3919 a Custom root requests its own publication, only the campaign owner decides it, and consume stays exact and one-shot", async () => {
+  const h = harness(false);
+  try {
+    // Even a delegated publication policy never lets the root own its own request.
+    assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, follow_up_issue_publication: "orchestrator" }).ok);
+    const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Bug]: Root drafted repair",
+      sanitizedBody: body, labels: ["bug"] };
+    const created = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "root-draft", resourceKey: "root-draft", resourceSnapshot: requested });
+    assert.ok(created.ok, created.error ?? "root request");
+    const decision = created.data!;
+    assert.equal(decision.status, "pending");
+    assert.equal(decision.authority, "human");
+    assert.equal(decision.sessionId, "root");
+    assert.equal(decision.controllingSessionId, "root");
+    assert.deepEqual(decision.resourceSnapshot, requested);
+    assert.equal(h.db.getSession("root")!.status, "input_required");
+    // The root's agent cannot approve its own occurrence by any route.
+    const asOrchestrator = h.svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asOrchestrator.ok, false); assert.equal(asOrchestrator.status, 403);
+    const asAgent = h.svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "agent", id: "root" }, () => true);
+    assert.equal(asAgent.ok, false); assert.equal(asAgent.status, 403);
+    const descendant = h.svc.resolveDescendantRequest("root", "root", decision.occurrenceId, { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(descendant.ok, false);
+    const viaCard = h.svc.approve("root", decision.occurrenceId, "approve", { kind: "agent", id: "root" });
+    assert.equal(viaCard.ok, false); assert.equal(viaCard.status, 403);
+    // A person who is not the campaign's owner cannot decide it either.
+    member(h, "usr_operator", "operator");
+    const other = h.svc.resolveWorkflowDecision("root", "root", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: "usr_operator" }, () => true);
+    assert.equal(other.ok, false); assert.equal(other.status, 403);
+    assert.match(other.error!, /Only the campaign owner/);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "pending");
+    // The owner approves it from the root's card.
+    const approved = h.svc.approve("root", decision.occurrenceId, "approve", { kind: "human", id: h.principal.userId });
+    assert.ok(approved.ok, approved.error ?? "owner approval");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    // A changed snapshot is refused and revokes the approval, which can then never be consumed.
+    const changed = await h.svc.consumeWorkflowDecision("root", decision.occurrenceId, { resourceSnapshot: { ...requested, sanitizedTitle: "[Bug]: Another repair" } });
+    assert.equal(changed.ok, false); assert.equal(changed.status, 409); assert.match(changed.error!, /stale/);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    const revoked = await h.svc.consumeWorkflowDecision("root", decision.occurrenceId, { resourceSnapshot: requested });
+    assert.equal(revoked.ok, false); assert.equal(revoked.status, 409);
+    // A fresh request naming an accepted recommendation is consumed once, then linked.
+    const recommendationId = acceptedRecommendation(h, "Root drafted repair");
+    const again = { ...requested, recommendationId };
+    const second = await h.svc.createWorkflowDecisionWithVideo("root", { requestId: "root-draft-2", resourceKey: "root-draft", resourceSnapshot: again });
+    assert.ok(second.ok, second.error ?? "second request");
+    assert.equal(second.data!.authority, "human");
+    assert.deepEqual(second.data!.resourceSnapshot, again);
+    assert.ok(h.svc.approve("root", second.data!.occurrenceId, "approve", { kind: "human", id: h.principal.userId }).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("root", second.data!.occurrenceId, { resourceSnapshot: again });
+    assert.ok(consumed.ok, consumed.error ?? "consume"); assert.equal(consumed.data!.status, "consumed");
+    const reused = await h.svc.consumeWorkflowDecision("root", second.data!.occurrenceId, { resourceSnapshot: again });
+    assert.equal(reused.ok, false); assert.equal(reused.status, 409);
+    linksPublishedIssue(h, recommendationId, 101);
+  } finally { h.db.close(); }
+});
+
+test("#3919 a root's own publication leaves child, nested and non-campaign requesters as before", async () => {
+  const h = harness(false);
+  try {
+    assert.ok(h.svc.setParentControlPolicy("root", { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, follow_up_issue_publication: "orchestrator" }).ok);
+    const policy = h.db.getSession("root")!.parentControlPolicy!;
+    h.db.createSession({ id: "nested", runnerId: "r", workspaceId: "w", agentId: "codex", title: "nested", useWorktree: false, driver: "codex-app-server", now: 1, config: {},
+      role: "orchestrator", parentSessionId: "root", parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } } });
+    h.db.createSession({ id: "solo", runnerId: "r", workspaceId: "w", agentId: "codex", title: "solo", useWorktree: false, driver: "codex-app-server", now: 1, config: {} });
+    for (const id of ["nested", "solo"]) h.db.updateSessionStatus(id, "running", 2);
+    const snapshot = (title: string) => ({ category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: title, sanitizedBody: body, labels: [] });
+    // A child's publication still follows the root's saved policy.
+    const child = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "child", resourceKey: "child", resourceSnapshot: snapshot("Child repair") });
+    assert.ok(child.ok, child.error ?? "child");
+    assert.equal(child.data!.controllingSessionId, "root"); assert.equal(child.data!.authority, "orchestrator");
+    assert.equal(child.data!.policyRevision, policy.revision);
+    // A nested Orchestrator's publication belongs to the root, not to itself.
+    const nested = await h.svc.createWorkflowDecisionWithVideo("nested", { requestId: "nested", resourceKey: "nested", resourceSnapshot: snapshot("Nested repair") });
+    assert.ok(nested.ok, nested.error ?? "nested");
+    assert.equal(nested.data!.controllingSessionId, "root"); assert.equal(nested.data!.authority, "orchestrator");
+    // A session outside any campaign still has nobody to control its publication.
+    const solo = await h.svc.createWorkflowDecisionWithVideo("solo", { requestId: "solo", resourceKey: "solo", resourceSnapshot: snapshot("Solo repair") });
+    assert.equal(solo.ok, false); assert.equal(solo.status, 409);
+    assert.match(solo.error!, /no controlling Orchestrator ancestor/);
+  } finally { h.db.close(); }
 });
