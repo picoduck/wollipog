@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionLaunchSpec } from "@wollipog/protocol";
 import { providerAccountEnvironment } from "./provider-accounts.js";
-import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { providerHomeLeaseEnv, SessionManager, type LaunchPreparationCancellation } from "./session-manager.js";
+import { providerHomeLeaseEnv, providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
+import { SessionManager, type LaunchPreparationCancellation } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { layerLaunchEnvironment } from "./spawn.js";
 

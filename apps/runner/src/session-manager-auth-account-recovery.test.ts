@@ -7,6 +7,7 @@ import type { AgentDriverKind, RunnerToControlPlane, SessionLaunchSpec } from "@
 import type { Driver, DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import type { ProviderAuthObservation, ProviderAuthRecoveryController } from "./provider-auth-recovery.js";
 import { transferClaudeAccountTranscript } from "./claude-account-transcript.js";
+import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { SessionManager, type ProviderAccountResolver } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -641,6 +642,33 @@ test("default-sign-in recovery rechecks, pins, and resumes the chosen Machine ac
     assert.equal(meta.providerAuthBlock, undefined);
     assert.deepEqual(h.transfers, [{ source: join(h.root, "agent-home"), target: "/claude/personal" }],
       "the default transcript store must be transferred before resuming under the new account");
+  } finally { h.cleanup(); }
+});
+
+test("the chosen account's probe leases its credential home, not the runner's own provider home (#3903)", async () => {
+  const h = harness({
+    "/claude/work": { observations: [{ status: "authenticated", identityId: "identity-intruder" }] },
+    "/claude/personal": { observations: [{ status: "authenticated", identityId: "identity-personal" }] },
+  });
+  try {
+    unbind(h);
+    const requestId = await parkOnMismatch(h);
+    const leased: string[] = [];
+    const internals = h.manager as unknown as { providerHomeLeases: unknown; runnerEnvironment: NodeJS.ProcessEnv };
+    internals.runnerEnvironment = { CLAUDE_CONFIG_DIR: "/runner/claude", HOME: "/runner" };
+    internals.providerHomeLeases = {
+      async acquireReference(request: ProviderHomeLeaseRequest) {
+        const target = providerHomeLeaseTarget(request);
+        if (target) leased.push(target.home);
+        return target ? { first: true, release: async () => true, retain: async () => {} } : null;
+      },
+      stopAcquisitions() {},
+      async close() { return true; },
+    };
+    assert.deepEqual(await h.manager.selectProviderAuthenticationAccount(SESSION, requestId, "claude-personal", null), { ok: true });
+    assert.equal(leased[0], "/claude/personal", "the probe is keyed on the chosen binding's home");
+    assert.equal(leased.includes("/runner/claude"), false);
+    await h.manager.providerAuthSelections.get(SESSION);
   } finally { h.cleanup(); }
 });
 

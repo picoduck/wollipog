@@ -20,6 +20,7 @@ import { homedir, hostname as systemHostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
+import type { SessionMeta } from "./session-store.js";
 import type { SpawnIsolation } from "./spawn.js";
 import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
@@ -253,6 +254,37 @@ function providerKey(driver: AgentDriverKind, command: string): string {
   if (driver === "codex" || driver === "codex-app-server") return "codex";
   if (driver === "pi") return "pi";
   return `acp-${createHash("sha256").update(command).digest("hex").slice(0, 16)}`;
+}
+
+/** The environment that decides which provider home a provider process uses: an Agent TUI's
+ * (#3338), a structured session driver's, a provider fork's (#3858), or a non-launch provider
+ * process's: a recovery sign-in, an auth or discovery probe, or a naming helper (#3903). A native
+ * provider is spawned with its launch environment layered over the runner's own, so a runner-level
+ * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is its home whenever the launch sets none: the lease must be
+ * keyed on that home, not on the home directory. A bound account's credential home is set by the
+ * launch environment, so it still wins. On Windows a name matches in any case and its last
+ * spelling wins, the launch's over the runner's, exactly as the ConPTY launch
+ * (`windowsEnvironmentForLaunch`) and `spawnAgent` (`layerLaunchEnvironment`) merge them. A WSL
+ * provider receives only its explicit environment. Only the lease reads the result: it is neither
+ * the launch environment nor persisted. */
+export function providerHomeLeaseEnv(
+  meta: Pick<SessionMeta, "context" | "env">,
+  runnerEnv: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  if (meta.context.kind !== "native") return { ...meta.env };
+  const env = { ...meta.env };
+  const matches = (key: string, name: string) => platform === "win32" ? key.toUpperCase() === name : key === name;
+  for (const name of ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const) {
+    let effective: string | undefined;
+    for (const source of [runnerEnv, meta.env]) {
+      for (const [key, value] of Object.entries(source)) {
+        if (value !== undefined && matches(key, name)) effective = value;
+      }
+    }
+    if (effective !== undefined) env[name] = effective;
+  }
+  return env;
 }
 
 /** Ordinary bwrap redirects mutable transcripts; a protected managed worktree can instead keep

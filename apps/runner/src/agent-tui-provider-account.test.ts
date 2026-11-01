@@ -5,8 +5,8 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
-import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { providerHomeLeaseEnv, SessionManager } from "./session-manager.js";
+import { providerHomeLeaseEnv, providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
+import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { windowsEnvironmentForLaunch } from "./windows-conpty.js";
 
