@@ -11,12 +11,26 @@ export function RemoteInstanceBanner({ authenticationRequired = false }: { authe
   return (
     <Notice pageBanner tone="warning" role="status" actions={(
       <>
-        {!authenticationRequired && (
-          <button type="button" className="btn primary sm" onClick={() => void instances.retryActive()}>Retry</button>
+        {authenticationRequired ? (
+          // Opens the provider's Re-Pair Instance dialog in place (#3003), not the Instances tab.
+          <button
+            type="button"
+            className="btn primary sm"
+            aria-haspopup="dialog"
+            onClick={(event) => instances.openInstanceDialog({
+              mode: "repair",
+              profileId: instances.activeProfile.id,
+              returnFocus: event.currentTarget,
+            })}
+          >
+            Re-Pair…
+          </button>
+        ) : (
+          <>
+            <button type="button" className="btn primary sm" onClick={() => void instances.retryActive()}>Retry</button>
+            <button type="button" className="btn sm" onClick={instances.manageInstances}>Manage Instances</button>
+          </>
         )}
-        <button type="button" className="btn sm" onClick={instances.manageInstances}>
-          {authenticationRequired ? "Re-Pair in Instances" : "Manage Instances"}
-        </button>
       </>
     )}>
       {authenticationRequired

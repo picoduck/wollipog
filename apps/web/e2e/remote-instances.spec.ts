@@ -11,8 +11,9 @@ async function addInstance(page: Page, name: string, link: string) {
   await page.locator(".instances-page").getByRole("button", { name: "Add Remote Instance" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Remote Instance" });
   await dialog.getByLabel("Instance Name").fill(name);
-  await dialog.getByLabel("Pairing Link").fill(link);
-  await dialog.getByRole("button", { name: "Add and Switch" }).click();
+  await dialog.getByLabel("Pairing Link", { exact: true }).fill(link);
+  await expect(dialog.getByRole("checkbox", { name: "Switch After Adding" })).toBeChecked();
+  await dialog.getByRole("button", { name: "Add Instance" }).click();
   await expect(dialog).toBeHidden();
   await expect(tile(page, name)).toBeVisible();
 }
@@ -243,9 +244,33 @@ test("pairs, switches, edits, re-pairs, persists, and removes remote instances",
   const renamed = page.getByRole("article").filter({ hasText: "Home Studio" });
   await renamed.getByRole("button", { name: "Re-Pair" }).click();
   const repair = page.getByRole("dialog", { name: "Re-Pair Instance" });
-  await repair.getByLabel("Pairing Link").fill(`http://100.64.10.11:4317/#pair=${TOKEN_A}`);
+  await expect(repair.getByLabel("Server Address")).toHaveValue("http://100.64.10.11:4317");
+  await expect(repair.getByLabel("Server Address")).toHaveAttribute("readonly", "");
+  // A link for another address is refused under the link, before anything is sent.
+  const repairLink = repair.getByLabel("Pairing Link", { exact: true });
+  await repairLink.fill(`https://laptop.example/#pair=${TOKEN_A}`);
+  await repair.getByRole("button", { name: "Re-Pair" }).click();
+  await expect(repairLink).toHaveAttribute("aria-invalid", "true");
+  await expect(repairLink).toBeFocused();
+  await expect(repair.locator(".field-error")).toHaveText(
+    "This link is for a different address than Home Studio. Create the link on Home Studio.",
+  );
+  await repairLink.fill(`http://100.64.10.11:4317/#pair=${TOKEN_A}`);
   await repair.getByRole("button", { name: "Re-Pair" }).click();
   await expect(repair).toBeHidden();
+
+  // A changed address needs a fresh link for that address.
+  await renamed.getByRole("button", { name: "Edit" }).click();
+  await edit.getByLabel("Server Address").fill("https://studio.example");
+  const newLink = edit.getByLabel("Pairing Link for the New Address");
+  await newLink.fill(`https://laptop.example/#pair=${TOKEN_A}`);
+  await edit.getByRole("button", { name: "Save Changes" }).click();
+  await expect(newLink).toHaveAttribute("aria-invalid", "true");
+  await expect(edit.locator(".field-error")).toContainText("This link is for a different address than https://studio.example.");
+  await newLink.fill(`https://studio.example/#pair=${TOKEN_A}`);
+  await edit.getByRole("button", { name: "Save Changes" }).click();
+  await expect(edit).toBeHidden();
+  await expect(renamed).toContainText("https://studio.example");
 
   await page.goto("/remote-instances-e2e.html");
   await expect(tile(page, "Home Studio")).toBeVisible();
@@ -264,16 +289,58 @@ test("shows deterministic validation and authentication recovery", async ({ page
   await page.locator(".instances-page").getByRole("button", { name: "Add Remote Instance" }).click();
   const dialog = page.getByRole("dialog", { name: "Add Remote Instance" });
   await dialog.getByLabel("Instance Name").fill("Broken");
-  await dialog.getByLabel("Pairing Link").fill("http://192.168.1.10:4317/#pair=short");
-  await dialog.getByRole("button", { name: "Add and Switch" }).click();
-  await expect(dialog.getByRole("alert")).toBeVisible();
+  const link = dialog.getByLabel("Pairing Link", { exact: true });
+  await link.fill("http://192.168.1.10:4317/#pair=short");
+  await dialog.getByRole("button", { name: "Add Instance" }).click();
+  // Each error sits under its field, never in a form-level error (§8.5).
+  await expect(link).toHaveAttribute("aria-invalid", "true");
+  await expect(link).toBeFocused();
+  await expect(dialog.locator(".field-error")).toHaveText(
+    "Use an https:// address. http:// works only for this computer or a Tailscale address.",
+  );
+  await link.fill("https://studio.example/");
+  await expect(dialog.locator(".field-error")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Add Instance" }).click();
+  await expect(dialog.locator(".field-error")).toHaveText("This isn't a Wollipog pairing link. Copy the whole link, including #pair=.");
+  await expect(dialog.locator(".form-error")).toHaveCount(0);
+  // Address and Code replaces the link, and its error goes with it.
+  await dialog.getByRole("radio", { name: "Address and Code" }).click();
+  await expect(dialog.getByLabel("Pairing Link", { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel("Server Address")).toBeVisible();
+  await expect(dialog.getByLabel("Pairing Code")).toBeVisible();
+  await expect(dialog.locator(".field-error")).toHaveCount(0);
+  await dialog.getByRole("button", { name: "Add Instance" }).click();
+  await expect(dialog.getByLabel("Server Address")).toBeFocused();
+  await expect(dialog.locator(".field-error")).toHaveText(["Enter the server address.", "Enter the pairing code."]);
+
+  // A refusal after submit is a titled danger notice, its raw words behind Show Details.
+  await dialog.getByLabel("Server Address").fill("https://studio.example");
+  await dialog.getByLabel("Pairing Code").fill(TOKEN_A);
+  await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.failNextMutation("Could not connect to the remote Wollipog instance."));
+  await dialog.getByRole("button", { name: "Add Instance" }).click();
+  const failure = dialog.locator(".notice.t-danger");
+  await expect(failure.locator(".notice-title")).toHaveText("Couldn't Add the Instance");
+  await expect(failure).toContainText("This app couldn't reach that address.");
+  await expect(failure).not.toContainText("Could not connect");
+  await failure.getByRole("button", { name: "Show Details" }).click();
+  await expect(failure).toContainText("Could not connect to the remote Wollipog instance.");
   await dialog.getByRole("button", { name: "Cancel" }).click();
+
+  // Unchecked, Switch After Adding saves the instance and stays where it is.
+  await page.locator(".instances-page").getByRole("button", { name: "Add Remote Instance" }).click();
+  await dialog.getByLabel("Instance Name").fill("Laptop");
+  await dialog.getByLabel("Pairing Link", { exact: true }).fill(`https://laptop.example/#pair=${TOKEN_B}`);
+  await dialog.getByRole("checkbox", { name: "Switch After Adding" }).uncheck();
+  await dialog.getByRole("button", { name: "Add Instance" }).click();
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole("article").filter({ hasText: "Laptop" })).toBeVisible();
+  await expect(tile(page, "This Machine")).toBeVisible();
 
   await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
   await tile(page, "Studio").click();
   await page.getByRole("menuitemradio", { name: /This Machine/ }).click();
   await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.failNextOpen(
-    "remote-1",
+    "remote-2",
     "authentication-required",
     "The pairing token was rejected.",
   ));

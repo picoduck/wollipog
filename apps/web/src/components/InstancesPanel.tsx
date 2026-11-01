@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import React, { useRef, useState, type MouseEvent } from "react";
 import type { InstanceProfile } from "../desktop-instances.js";
 import { relativeTime } from "../format.js";
 import {
@@ -10,13 +10,6 @@ import {
 import { StatusBadge, statusToneClass } from "./StatusBadge.js";
 import { CloseIcon, EditIcon, PlusIcon, RefreshIcon, UpdateIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
-
-type DialogState =
-  | { mode: "add" }
-  | { mode: "edit"; profile: InstanceProfile }
-  | { mode: "repair"; profile: InstanceProfile };
-
 
 function lastConnected(value: string | undefined): string {
   if (!value) return "Never";
@@ -29,7 +22,9 @@ export function InstancesPanel() {
   const activeConnection = useActiveInstanceConnection();
   const { confirm } = useFeedback();
   const addButtonRef = useRef<HTMLButtonElement>(null);
-  const [dialog, setDialog] = useState<DialogState | null>(null);
+  // The provider owns the dialog (#3003); the button pressed is where focus returns.
+  const openDialog = (mode: "edit" | "repair", profile: InstanceProfile) => (event: MouseEvent<HTMLButtonElement>) =>
+    instances.openInstanceDialog({ mode, profileId: profile.id, returnFocus: event.currentTarget });
   const [busy, setBusy] = useState<Record<string, boolean>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
 
@@ -72,7 +67,7 @@ export function InstancesPanel() {
           {instances.registry.profiles.length} Instance{instances.registry.profiles.length === 1 ? "" : "s"}
         </span>
         <div className="toolbar-actions">
-          <button ref={addButtonRef} type="button" className="btn primary" onClick={() => setDialog({ mode: "add" })}>
+          <button ref={addButtonRef} type="button" className="btn primary" onClick={(event) => instances.openInstanceDialog({ mode: "add", returnFocus: event.currentTarget })}>
             <PlusIcon />
             <span>Add Remote Instance</span>
           </button>
@@ -138,17 +133,17 @@ export function InstancesPanel() {
                 {profile.kind === "remote" && (
                   <>
                     {needsRepair && (
-                      <button type="button" className="btn primary sm" disabled={pending} onClick={() => setDialog({ mode: "repair", profile })}>
+                      <button type="button" className="btn primary sm" disabled={pending} onClick={openDialog("repair", profile)}>
                         <UpdateIcon />
                         <span>Re-Pair</span>
                       </button>
                     )}
-                    <button type="button" className="btn sm" disabled={pending} onClick={() => setDialog({ mode: "edit", profile })}>
+                    <button type="button" className="btn sm" disabled={pending} onClick={openDialog("edit", profile)}>
                       <EditIcon />
                       <span>Edit</span>
                     </button>
                     {!needsRepair && (
-                      <button type="button" className="btn sm" disabled={pending} onClick={() => setDialog({ mode: "repair", profile })}>
+                      <button type="button" className="btn sm" disabled={pending} onClick={openDialog("repair", profile)}>
                         <UpdateIcon />
                         <span>Re-Pair</span>
                       </button>
@@ -164,13 +159,6 @@ export function InstancesPanel() {
           );
         })}
       </div>
-      {dialog?.mode === "add" && <RemoteInstanceDialog mode="add" onClose={() => setDialog(null)} />}
-      {dialog?.mode === "edit" && (
-        <RemoteInstanceDialog mode="edit" profile={dialog.profile} onClose={() => setDialog(null)} />
-      )}
-      {dialog?.mode === "repair" && (
-        <RemoteInstanceDialog mode="repair" profile={dialog.profile} onClose={() => setDialog(null)} />
-      )}
     </div>
   );
 }
