@@ -230,7 +230,7 @@ import {
 import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfileBinding, type ProviderHomeReference, type ProviderProfileAccessSource } from "./provider-home-lease-async.js";
 import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
-import { providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
+import { providerHomeLeaseEnv, providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
 import { LEASE_WORKER_ERRORS, type LeaseWorkerInspection } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -350,36 +350,6 @@ export interface LaunchProviderHome extends ProviderProcessObserver {
   /** Something that may write the HOME ran outside any provable boundary (or a write failed
    * partway): the reference is kept until runner shutdown whatever the proofs say. */
   markUnprovable(): void;
-}
-
-/** The environment that decides which provider home a provider process uses: an Agent TUI's
- * (#3338), a structured session driver's, or a provider fork's (#3858). A native provider is
- * spawned with its launch environment layered over the runner's own, so a runner-level
- * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is its home whenever the launch sets none: the lease must be
- * keyed on that home, not on the home directory. A bound account's credential home is set by the
- * launch environment, so it still wins. On Windows a name matches in any case and its last
- * spelling wins, the launch's over the runner's, exactly as the ConPTY launch
- * (`windowsEnvironmentForLaunch`) and `spawnAgent` (`layerLaunchEnvironment`) merge them. A WSL
- * provider receives only its explicit environment. Only the lease reads the result: it is neither
- * the launch environment nor persisted. */
-export function providerHomeLeaseEnv(
-  meta: Pick<SessionMeta, "context" | "env">,
-  runnerEnv: NodeJS.ProcessEnv = process.env,
-  platform: NodeJS.Platform = process.platform,
-): Record<string, string> {
-  if (meta.context.kind !== "native") return { ...meta.env };
-  const env = { ...meta.env };
-  const matches = (key: string, name: string) => platform === "win32" ? key.toUpperCase() === name : key === name;
-  for (const name of ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const) {
-    let effective: string | undefined;
-    for (const source of [runnerEnv, meta.env]) {
-      for (const [key, value] of Object.entries(source)) {
-        if (value !== undefined && matches(key, name)) effective = value;
-      }
-    }
-    if (effective !== undefined) env[name] = effective;
-  }
-  return env;
 }
 
 /** Provider profiles (#3239): the profile id a session's account binding recorded is the expected id
@@ -5485,8 +5455,9 @@ export class SessionManager {
     } satisfies SessionMeta;
     const scope = controller.describe(meta);
     if (!scope) return "unknown";
-    const reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context, env: meta.env },
-      { isCurrent: () => !this.shuttingDown });
+    // The status command inherits the runner's environment beneath the account's (#3903).
+    const reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context,
+      env: providerHomeLeaseEnv(meta, this.runnerEnvironment) }, { isCurrent: () => !this.shuttingDown });
     const processes: Promise<boolean>[] = [];
     try {
       if (this.shuttingDown) return "unknown";
@@ -5505,9 +5476,9 @@ export class SessionManager {
     // admission cannot own an in-distro HOME; session isolation handles that context separately.
     if (context.kind === "wsl") return { settle: async () => {} };
     if (!this.providerHomeLeases) throw new Error("provider-HOME ownership is unavailable");
-    // Discovery inherits process.env, including provider-specific HOME overrides. Lease that
-    // actual effective environment, not just the configured overlay.
-    const effectiveEnv = Object.fromEntries(Object.entries({ ...process.env, ...env }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    // Discovery inherits the runner's environment, including HOME and provider-specific HOME
+    // overrides. Lease that actual effective environment, not just the configured overlay.
+    const effectiveEnv = Object.fromEntries(Object.entries({ ...this.runnerEnvironment, ...env }).filter((entry): entry is [string, string] => entry[1] !== undefined));
     const reference = await this.providerHomeLeases.acquireReference({ driver: agent.driver ?? "acp", command: agent.command, context, env: effectiveEnv },
       { isCurrent: () => !this.shuttingDown });
     if (this.shuttingDown) {
@@ -5547,7 +5518,8 @@ export class SessionManager {
       driver: agent.driver ?? "acp",
       command: agent.command,
       context,
-      env,
+      // A native probe inherits the runner's provider home beneath `env` (#3903).
+      env: providerHomeLeaseEnv({ context, env }, this.runnerEnvironment),
       isolation,
     }, { isCurrent: () => !this.shuttingDown });
     if (this.shuttingDown) {
@@ -5652,8 +5624,9 @@ export class SessionManager {
         cwd,
         ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}),
       });
-      reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context, env, isolation },
-        { isCurrent: () => !this.shuttingDown });
+      // A native naming helper inherits the runner's provider home beneath `env` (#3903).
+      reference = await this.providerHomeLeases?.acquireReference({ driver, command: agent.command, context,
+        env: providerHomeLeaseEnv({ context, env }, this.runnerEnvironment), isolation }, { isCurrent: () => !this.shuttingDown });
       if (this.shuttingDown) throw new Error("session naming was cancelled by shutdown");
       return { ...(isolation ? { isolation } : {}), cleanup };
     } catch (error) {
@@ -13654,7 +13627,8 @@ export class SessionManager {
           driver: probe.driver,
           command: probe.command,
           context: probe.context,
-          env: probe.env,
+          // An unbound target inherits the runner's provider home (#3903).
+          env: providerHomeLeaseEnv(probe, this.runnerEnvironment),
         }, { isCurrent: () => !this.shuttingDown &&
           this.openProviderAuthenticationCard(this.store.readMeta(sessionId), recoveryRequestId)?.recoveryId === block.recoveryId });
         // The probe's reference covers only its status command; later steps take their own.

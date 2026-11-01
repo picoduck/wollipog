@@ -164,6 +164,8 @@ test("session naming resolves runner isolation, leases provider HOME, and cleans
   let leaseRequest: unknown;
   let removedSessionId: string | undefined;
   (manager as unknown as { executionIsolation: typeof policy }).executionIsolation = policy;
+  // The lease also reads the runner's own provider home (#3903); this runner names none.
+  (manager as unknown as { runnerEnvironment: NodeJS.ProcessEnv }).runnerEnvironment = {};
   (manager as unknown as { resolveIsolation: (...args: unknown[]) => Promise<typeof isolation> }).resolveIsolation =
     async (...args: unknown[]) => {
       resolvedState = args[3] as { sessionId: string; cwd: string };
