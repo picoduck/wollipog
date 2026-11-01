@@ -2586,7 +2586,7 @@ interface CommandSegment { operands: Array<string | null>; words: string[] | nul
  * not model — in which case nothing in it is an inspection and the caller refuses every related
  * operand, exactly as it did before #1334.
  */
-function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null {
+function commandSegments(tokens: readonly ShellToken[], allowPipe = false): CommandSegment[] | null {
   const segments: CommandSegment[] = [];
   let operands: Array<string | null> = [];
   let words: string[] | null = [];
@@ -2606,7 +2606,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       previousWord = text;
       continue;
     }
-    if (SEGMENT_SEPARATORS.has(op)) {
+    if (SEGMENT_SEPARATORS.has(op) || (allowPipe && op === "|")) {
       segments.push({ operands, words, redirects });
       operands = [];
       words = [];
@@ -2826,6 +2826,79 @@ function matchStrippableHeredoc(command: string): string | null {
   return commandLine;
 }
 
+/** A complete positive whitelist, not a shell rewrite. Code passed on stdin has the same reach as
+ * an already-permitted `python3 ./x.py` / `node x.mjs`. Its body is NOT inert and is never stripped
+ * from the literal scan. Only these literal executable names, `-`, a quoted plain delimiter, and
+ * optionally one literal cd are admitted; any suffix after the first terminator disqualifies it. */
+function interpreterHeredoc(command: string): { body: string; cd: string | undefined } | null {
+  const newline = command.indexOf("\n");
+  if (newline < 0) return null;
+  const header = /^(?:cd ([A-Za-z0-9._/@:+-]+) && )?(?:python3|node) - <<(['"])([A-Za-z_][A-Za-z0-9_]*)\2$/u.exec(command.slice(0, newline));
+  if (!header) return null;
+  const lines = command.slice(newline + 1).split("\n");
+  const end = lines.indexOf(header[3]!);
+  const last = lines.length - 1;
+  if (end < 0 || (end !== last && !(end === last - 1 && lines[last] === ""))) return null;
+  return { body: lines.slice(0, end).join("\n"), cd: header[1] };
+}
+
+/** Language-neutral, additive path readings of executable heredoc text. This is not an interpreter
+ * parser: quoted spans and punctuation-separated words are all judged, including comments. Simple
+ * escapes add a decoded reading; encoded/unknown escapes and non-ASCII code fail closed. In
+ * particular `${...}` is never sent through shell-quote: a quoted heredoc has no shell expansion.
+ * Computed paths have the same documented limitation as code in an already-allowed script file. */
+function interpreterBodyRefusal(body: string, cwd: string, root: string): string | null {
+  let whitelisted = /^[\t\n\r\x20-\x7e]*$/u.test(body);
+  for (let index = 0; whitelisted && index < body.length; index += 1) {
+    if (body[index] !== "\\") continue;
+    const escaped = body[index + 1];
+    if (escaped === undefined || !"\\/'\"nrt".includes(escaped)) whitelisted = false;
+    index += 1; // consume the whole whitelisted pair, never reinterpret its second character
+  }
+  if (!whitelisted) {
+    return guardStateUninspectableRefusal("the interpreter body is outside the literal-path inspection whitelist");
+  }
+  const decoded = body.replace(/\\([\\/'"nrt])/gu, (_, c: string) =>
+    ({ n: "\n", r: "\r", t: "\t" }[c] ?? c));
+  const readings = new Set<string>();
+  const quotedSlashes = new Set<string>();
+  // HOME can be expanded by a shell the interpreter invokes. Add that reading as well; never
+  // replace the raw one, since a literal filename may itself contain a dollar sign.
+  const expandBodyHome = (text: string): string => text.replace(/\$(?:HOME\b|\{HOME\})/gu, homedir());
+  for (const text of new Set([body, decoded, expandBodyHome(body), expandBodyHome(decoded)])) {
+    for (const match of text.matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`|[^\s'"`()\[\]{},;=+*!?&|$<>]+/gu)) {
+      readings.add(match[1] ?? match[2] ?? match[3] ?? match[0]);
+      // Strings can themselves contain commands/code. Keep the whole span AND every lexical
+      // piece inside it, so os.system("cat alias/secret") cannot hide an alias in an opaque string.
+      const quoted = match[1] !== undefined || match[2] !== undefined || match[3] !== undefined;
+      for (const piece of match[0].matchAll(/[^\s'"`()\[\]{},;=+*!?&|$<>]+/gu)) {
+        readings.add(piece[0]);
+        if (quoted && /^\/+$/u.test(piece[0])) quotedSlashes.add(piece[0]);
+      }
+      if (readings.size > 4096) return guardStateUninspectableRefusal("the interpreter body has too many path readings");
+    }
+  }
+  for (const word of readings) {
+    // Bare slashes are also division and JS comments. They cannot resolve inside state, but the
+    // body still retains its full raw-text scan. Every other ancestor remains conservative.
+    if (!word || (/^\/+$/u.test(word) && !quotedSlashes.has(word))) continue;
+    if (word.length > 4096) return guardStateUninspectableRefusal("an interpreter path reading is too long");
+    const relation = guardStateRelation(word, cwd, root);
+    if (relation?.kind === "inside") return GUARD_STATE_REFUSAL;
+    if (relation?.kind === "ancestor") return guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON);
+  }
+  return null;
+}
+
+/** Each downstream command consumes stdin only: no filenames, variable destinations, execution,
+ * output files or recursive options. Explicit -- prevents a grep pattern becoming an option. */
+const GUARD_STATE_PIPE_CONSUMER = /^(?:cat|wc(?: -[lwc])?|(?:head|tail)(?: -n [0-9]{1,9})?|grep(?: -[FEivnc])* -- '[^'\r\n]*')$/u;
+function readOnlyPipelineWhitelisted(command: string): boolean {
+  const parts = command.split(" | ");
+  return parts.length > 1 && /^(?:ls|stat|du|find) /u.test(parts[0]!) &&
+    parts.every(ac1CommandWhitelisted) && parts.slice(1).every((part) => GUARD_STATE_PIPE_CONSUMER.test(part));
+}
+
 /** The two readings of a command the guard needs: `scan` for the literal-path text scan (only a
  *  provably-inert stripped heredoc body removed), `parse` for the tokenizer. */
 export interface PreparedGuardStateCommand { scan: string; parse: string }
@@ -2888,6 +2961,17 @@ export function commandTargetsGuardState(
 ): string | null {
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
+  // A cd-prefixed COPY-ONLY heredoc can use the existing inert-body whitelist. Inspect its cd
+  // separately and judge the untouched inner command at the directory where its relative target
+  // actually resolves. No generic command-text normalization or cd emulation is involved.
+  const copyPrefix = /^cd ([A-Za-z0-9._/@:+-]+) && (cat |tee )/u.exec(command);
+  if (copyPrefix) {
+    const inner = command.slice(command.indexOf(" && ") + 4);
+    if (matchStrippableHeredoc(inner) !== null) {
+      if (guardStateRelation(copyPrefix[1]!, cwd, root) !== null) return GUARD_STATE_REFUSAL;
+      return commandTargetsGuardState(inner, canonicalPath(resolve(cwd, copyPrefix[1]!)), directory);
+    }
+  }
   // Two readings (#1734): a whitelisted `cat`/`tee` heredoc has its body removed, and every `#` is
   // escaped so the tokenizer cannot run a comment to the end of the command. The text scan reads
   // `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
@@ -2898,6 +2982,13 @@ export function commandTargetsGuardState(
   // in ways a path comparison would miss still name the directory verbatim.
   for (const candidate of [root, root.split(sep).join("/")]) {
     if (haystack.includes(foldCase ? candidate.toLowerCase() : candidate)) return GUARD_STATE_REFUSAL;
+  }
+  const interpreter = interpreterHeredoc(command);
+  if (interpreter !== null) {
+    if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
+    if (interpreter.cd !== undefined && guardStateRelation(interpreter.cd, cwd, root) !== null) return GUARD_STATE_REFUSAL;
+    const bodyCwd = interpreter.cd === undefined ? cwd : canonicalPath(resolve(cwd, interpreter.cd));
+    return interpreterBodyRefusal(interpreter.body, bodyCwd, root);
   }
   let tokens: ShellToken[];
   try {
@@ -2977,7 +3068,8 @@ export function commandTargetsGuardState(
   };
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
-  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens);
+  const pipeline = readOnlyPipelineWhitelisted(command);
+  const segments = /[`\n\r]/u.test(parseText) ? null : commandSegments(tokens, pipeline);
   if (segments === null) {
     // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
     // names the guard state itself. One that only encloses it is refused because the command cannot
@@ -3039,7 +3131,10 @@ export function commandTargetsGuardState(
     const relation = relationOf(start);
     return relation?.kind === "ancestor" ? relation.depth : null;
   };
-  const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words, depthBelow));
+  const inspection = segments.every(({ words }, index) => words !== null &&
+    (pipeline && index > 0 ? GUARD_STATE_PIPE_CONSUMER.test(words.join(" ")) ||
+      // Single-quoted grep's pattern may contain spaces; its exact source shape was checked above.
+      words[0] === "grep" : inspectsAncestorOnly(words, depthBelow)));
   return inspection ? null : GUARD_STATE_REFUSAL;
 }
 

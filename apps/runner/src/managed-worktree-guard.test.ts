@@ -1323,7 +1323,6 @@ test("a ${...} the tokenizer cannot parse is refused as a documented residual, n
   for (const command of [
     "echo ${r%% *}", "echo ${scrollHeight - 500}", "echo ${x", "echo \"${y",
     "echo ${X:-$(cat ../.wollipog-data/hooks/s1.protections.json)}",
-    "node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF",
   ]) {
     assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
   }
