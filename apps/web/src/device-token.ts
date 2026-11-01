@@ -112,11 +112,18 @@ export function pairingLinks(token: string, reach: PairingReach): { links: strin
 
 /**
  * The pairing link for another browser on this computer, at the page's own origin, for when no
- * other device can reach one. Null where the page is not served over http(s) (the desktop app's
- * own scheme), since no browser could open that.
+ * other device can reach one. Null where no browser could open it: a page not served over http(s),
+ * or the packaged desktop app's `tauri.localhost`, which exists only inside that process (the rule
+ * `resolveDashboardOrigin` in config.ts applies).
  */
 export function sameComputerPairingLink(token: string, origin: string): string | null {
-  return /^https?:\/\//u.test(origin) ? `${origin}/#pair=${token}` : null;
+  try {
+    const url = new URL(origin);
+    if ((url.protocol !== "http:" && url.protocol !== "https:") || url.hostname === "tauri.localhost") return null;
+    return `${url.origin}/#pair=${token}`;
+  } catch {
+    return null;
+  }
 }
 
 /**

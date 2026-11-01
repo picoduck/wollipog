@@ -345,6 +345,41 @@ for (const [reason, expected] of Object.entries(EXPECTED) as Array<[PairingBlock
   });
 }
 
+async function copiedBy(button: HTMLElement | null): Promise<string[]> {
+  const copied: string[] = [];
+  const clipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { copied.push(text); } },
+  });
+  try {
+    await click(button);
+  } finally {
+    if (clipboard) Object.defineProperty(domWindow.navigator, "clipboard", clipboard);
+    else delete (domWindow.navigator as { clipboard?: unknown }).clipboard;
+  }
+  return copied;
+}
+
+test("with no reachable link, Copy Pairing Link copies a link this computer's browsers can open", async () => {
+  const view = await mount({ reach: REACH_FOR.loopback });
+  await createLink(view);
+  assert.deepEqual(await copiedBy(buttonNamed(view.dialog(), "Copy Pairing Link")), [`http://localhost:4317/#pair=${TOKEN}`]);
+});
+
+test("in the packaged desktop app, a blocked result copies the pairing fragment and promises no browser link", async () => {
+  domWindow.happyDOM.setURL("http://tauri.localhost/");
+  try {
+    const view = await mount({ reach: REACH_FOR.loopback });
+    await createLink(view);
+    const dialog = view.dialog();
+    assert.doesNotMatch(dialog.textContent ?? "", /another browser on this computer/);
+    assert.deepEqual(await copiedBy(buttonNamed(dialog, "Copy Pairing Link")), [`#pair=${TOKEN}`]);
+  } finally {
+    domWindow.happyDOM.setURL("http://localhost:4317/");
+  }
+});
+
 test("Open Network Settings leaves the dialog", async () => {
   const view = await mount({ reach: REACH_FOR.loopback });
   await createLink(view);

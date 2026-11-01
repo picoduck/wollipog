@@ -126,5 +126,8 @@ test("sameComputerPairingLink: a link at the page's own origin, only where a bro
   assert.equal(sameComputerPairingLink("T", "http://127.0.0.1:4317"), "http://127.0.0.1:4317/#pair=T");
   assert.equal(sameComputerPairingLink("T", "https://box.example"), "https://box.example/#pair=T");
   assert.equal(sameComputerPairingLink("T", "tauri://localhost"), null);
+  // The packaged desktop app's http(s) origin exists only inside that process.
+  assert.equal(sameComputerPairingLink("T", "http://tauri.localhost"), null);
+  assert.equal(sameComputerPairingLink("T", "https://tauri.localhost"), null);
   assert.equal(sameComputerPairingLink("T", "null"), null);
 });
