@@ -253,29 +253,40 @@ const namesCredentialPath = (text: string) => text.replace(/[^\p{L}\p{N}._~\/\\-
   return /[\\/]|^[.~]/u.test(path) && protectedPath.test(path);
 });
 // Mention-only masks (#3913). The word screens match words, not what a question asks, so one that
-// only names a protected subject was declined: a compound adjective, a quoted decline notice, a
-// design choosing a CI workflow's permissions. Before those screens run, a question loses exactly
-// the spans below, each blanked to the same length so no window between other words changes:
-//   1. "read-only" and "write-only", and a credential noun's "-free"/"-less" compound when the form
-//      neither handles nor discloses a credential;
-//   2. the server's own decline wording, and a declarative negation of a request verb (with its
-//      credential object) by a non-reader subject ("the campaign cannot supply credentials"). The
-//      form must then be only that report: every other sentence is a fixed next-step question
-//      ("Should I continue…?", "Which design should…?") or a short option label, and nothing left
-//      is a request verb, reader-directed ask, protected noun, pronoun or back-reference;
-//   3. a widening phrase whose whole grantee is a repository CI workflow or job, followed only by
-//      its declared permission block, or a comparison with the workflow's default permissions, a
-//      code artifact, only when nothing after it names another recipient, the form names no
-//      reader, session, agent, provider, account, other grantee or lasting grant, and the sentence
-//      names no credential and no other request verb;
-//   4. the "CI" qualifier of a credential noun, only when the form has no handling or disclosure verb.
-// Every other word still meets every pattern. Value literals, store paths, email values, sinks, the
-// secret and email fields and the tool screen never see masked text, so no mask can admit one.
-/** A question's fields: free prose, and the short labels (its id and option labels). */
-interface QuestionFields { prose: string[]; labels: string[] }
-/** Masks keep sentence punctuation, so a masked sentence still ends where it ended. */
+// only names a protected subject was declined: a quoted decline notice, a design choosing a CI
+// workflow's permissions, "the CI token". A question form is masked only when every field is from
+// a closed grammar; otherwise it is screened exactly as before. Every prose sentence must be one of:
+//   1. a decline report: the server's own decline wording, or a declarative negation of a request
+//      verb (with its credential object) by a non-reader subject ("the campaign cannot supply
+//      credentials"), with only a fixed report frame before it ("The child's question was refused
+//      because") and only punctuation after it;
+//   2. a CI permission-block sentence: a fixed lead ("Should the design", "Option B would"), a
+//      widening whose whole grantee is the workflow or job followed only by permission-block
+//      vocabulary, or a comparison with the workflow's default permissions, and a fixed tail ("so it
+//      can poll the GitHub Actions API"); compound adjectives ("read-only, secret-free") count as
+//      vocabulary only inside it;
+//   3. the fixed sentence "<option> would need the CI token to <read> the GitHub Actions API";
+//   4. a next-step question from a closed set ("Should I continue without that design input?").
+// The id and header are identifiers and every option label comes from a closed set. On top of the
+// grammar, a decline report is void when anything left could still ask (a request verb, reader ask,
+// protected noun, pronoun or back-reference), and the CI sentence when the form names any reader,
+// session, agent, provider, account, other grantee or lasting grant. Each mask blanks only its own
+// span, keeping sentence punctuation and length, and every other word still meets every pattern.
+// Value literals, store paths, email values, sinks, secret and email fields and the tool screen
+// never see masked text, so no mask can admit one.
+interface QuestionPart { text: string | undefined; role: "id" | "header" | "prose" | "label" }
+type Span = [number, number];
 const blank = (span: string) => span.replace(/[^.?!;\n]/gu, " ");
-const marked = (span: string) => span.replace(/[^.?!;\n]/gu, "\u0001");
+const fill = (text: string, spans: Span[], with_: (span: string) => string) =>
+  spans.reduce((out, [start, end]) => out.slice(0, start) + with_(out.slice(start, end)) + out.slice(end), text);
+const spansOf = (pattern: RegExp, text: string, accept: (match: RegExpExecArray) => Span | null): Span[] => {
+  const spans: Span[] = [];
+  for (const match of text.matchAll(pattern)) { const span = accept(match); if (span) spans.push(span); }
+  return spans;
+};
+/** Each sentence of a field, with its offset, as the masks see it: punctuation ends a sentence. */
+const sentencesOf = (text: string) => [...text.matchAll(/[^.?!;\n]+[.?!;]*/gu)].map((match) => ({ text: match[0], start: match.index! }));
+const normalized = (text: string) => withoutQuoting(text).replace(/\s+/gu, " ").trim();
 const handlingOrDisclosure = new RegExp(String.raw`\b${handlingVerb}\b|\b${disclosureVerb}\b`, "iu");
 const readWriteCompound = /\b(?:read|write)-only\b/giu;
 const credentialCompound = /\b(?:secrets?|tokens?|credentials?|passwords?|passphrases?|(?:api[ _-]?)?keys?|cookies?|sign-?in|log-?in|auth)-(?:free|less)\b/giu;
@@ -283,7 +294,7 @@ const requestVerb = String.raw`(?:paste|enter|provide|supply|reveal|show|print|d
 const modal = String.raw`(?:can|could|would|will|may|might|shall|should|must|do|does|did)`;
 const negatedModal = String.raw`(?:cannot|can[’'\s]*t|couldn[’'\s]*t|wouldn[’'\s]*t|won[’'\s]*t|shouldn[’'\s]*t|mustn[’'\s]*t|don[’'\s]*t|doesn[’'\s]*t|didn[’'\s]*t)`;
 const protectedNoun = String.raw`(?:${anyCredential}|${designCredentialNoun}|auth(?:entication)?|oauth|identity|logins?|log-?ins?|sign-?ins?|accounts?|permissions?|access|scopes?)`;
-/** Anything left that could still ask the reader for something voids the decline-wording mask. */
+/** Anything left that could still ask the reader for something voids a decline report. */
 const remainingRequest = new RegExp([
   String.raw`\b${requestVerb}\w*`, String.raw`\b${handlingVerb}\b`, String.raw`\bplease\b`, String.raw`\bwhy\s+not\b`,
   String.raw`\b(?:${modal}(?:\s+not)?|${negatedModal})\s+(?:you|u)\b`, String.raw`\byou\s+(?:${modal}|need|have)\b`,
@@ -313,14 +324,23 @@ function asked(text: string, start: number, end: number): boolean {
   const next = /[.!]$/u.test(text.slice(start, end)) ? -1 : text.slice(end).search(/[.?!\n]/u);
   return (next >= 0 && text[end + next] === "?") || interrogative.test(text.slice(sentenceStart, start));
 }
-function maskDeclineWording(text: string, fill: (span: string) => string): string {
-  const notices = text.replace(declineNotice, (match: string, offset: number) =>
-    /\b(?:you|u|i)\s*$/iu.test(text.slice(0, offset)) || asked(text, offset, offset + match.length) ? match : fill(match));
-  return notices.replace(declarativeNegation, (match: string, lead: string, clause: string, offset: number) =>
-    asked(notices, offset + lead.length, offset + match.length) ? match : lead + fill(clause));
+function declineSpans(text: string): Span[] {
+  const notices = spansOf(declineNotice, text, (match) => {
+    const start = match.index!, end = start + match[0].length;
+    return /\b(?:you|u|i)\s*$/iu.test(text.slice(0, start)) || asked(text, start, end) ? null : [start, end];
+  });
+  const rest = fill(text, notices, blank);
+  return [...notices, ...spansOf(declarativeNegation, rest, (match) => {
+    const start = match.index! + match[1]!.length, end = match.index! + match[0].length;
+    return asked(rest, start, end) ? null : [start, end];
+  })];
 }
-/** The only questions a decline report may go on to ask: what the asker should do next, word for
- * word from a closed set, so no tail can name a person, a source or something to bring along. */
+/** The fixed frame a decline report may open with, whole: "The child's question was refused because". */
+const reportFrame = new RegExp(String.raw`^(?:${nonReaderSubject}|(?:(?:the\s+child(?:\s*[’']?\s*s)?|the\s+orchestrator(?:\s*[’']?\s*s)?|its|this|that)\s+(?:(?:design|implementation|provider)\s+)?(?:question|request)|the\s+child|full\s+control|the\s+server)` +
+  String.raw`(?:\s+(?:was|were|has\s+been|had\s+been|is))?\s+(?:refused|declined|rejected|denied|blocked|dismissed|reported|answered|replied|returned|recorded)` +
+  String.raw`(?:\s+(?:with|because|since|as|saying))?(?:\s+(?:the\s+campaign|full\s+control|the\s+server|the\s+orchestrator))?)?$`, "iu");
+const reportRest = /^[\s"'\x60‘’“”()[\]:,.!;]*$/u;
+/** The only questions a form may go on to ask: what the asker should do next, word for word. */
 const forTheDesign = String.raw`for\s+(?:the|this)\s+(?:design|option|change)`;
 const nextStepQuestion = new RegExp([
   String.raw`^(?:should|shall)\s+(?:I|we|the\s+(?:child|campaign|orchestrator|design|importer|workflow|job|feature|implementation))\s+(?:continue|proceed|stop|wait|skip|retry|keep\s+going|move\s+on|go\s+ahead)` +
@@ -328,25 +348,9 @@ const nextStepQuestion = new RegExp([
   String.raw`^which\s+(?:option|design|approach|fallback|alternative|choice|path|plan)\s+should\s+(?:I|we|the\s+(?:child|campaign|orchestrator|design|importer))\s+(?:take|choose|pick|implement|follow)` +
     String.raw`(?:\s+(?:next|now|instead|${forTheDesign}))*\s*\?$`,
 ].join("|"), "iu");
-/** A label that names something to bring along: a possessive, "with", "from" or "of". */
-const carriedObject = /[’']s\b|\b(?:with|from|of)\b/iu;
-const reportFrame = /\b(?:refused|declined|rejected|denied|blocked|dismissed|reported|said|says|told|answered|replied|returned|failed|recorded|stopped)\b/iu;
-const reportSubject = new RegExp(String.raw`^${nonReaderSubject}$`, "iu");
-const reportRest = /^(?:[\s"'\x60‘’“”()[\]:,.!;]|(?:the|this|campaign|server|orchestrator|system|full|control)\b)*$/iu;
-const unquote = (sentence: string) => sentence.replace(/^[\s"'\x60‘’“”(\[]+/u, "").trimEnd();
-/** The decline-wording mask holds only when the masked form is that report and nothing else. */
-function onlyDeclineReport(fields: QuestionFields, quoting: (text: string) => string): boolean {
-  const prose = fields.prose.map((text) => maskDeclineWording(quoting(text), marked));
-  const sentences = prose.flatMap((text) => text.match(/[^.?!;\n]+[.?!;]*/gu) ?? []).map(unquote).filter((s) => /[^\s.?!;]/u.test(s));
-  const reported = sentences.every((sentence) => {
-    const first = sentence.indexOf("\u0001");
-    if (first < 0) return nextStepQuestion.test(sentence);
-    const prefix = sentence.slice(0, first).replace(/[\s"'\x60‘’“”(\[:]+$/u, "").trim();
-    return (!prefix || reportSubject.test(prefix) || reportFrame.test(prefix)) && reportRest.test(sentence.slice(first).replace(/\u0001+/gu, " "));
-  });
-  const labels = fields.labels.map(quoting).every((label) => !label.includes("?") && !carriedObject.test(label) && label.trim().split(/\s+/u).length <= 4);
-  return reported && labels && prose.some((text) => text.includes("\u0001"));
-}
+const idWord = /^[\w.-]{0,64}$/u;
+const headerWord = /^(?:design|approach|decision|workflow|ci|options?|next\s+step|choice|plan|implementation)?$/iu;
+const labelWord = /^(?:yes|no|ok|okay|continue|proceed|stop|wait|skip|retry|go\s+ahead|keep\s+going|move\s+on|stop\s+and\s+report|(?:option\s+)?[a-z0-9]{1,2})?$/iu;
 /** A repository CI workflow or job's declared permission block: the design subject, not a grant.
  * `id-token: write` mints a credential, so it is never a permission key here. */
 const permissionKey = String.raw`\b(?:actions|attestations|checks|contents|deployments|discussions|issues|models|packages|pages|pull-requests|repository-projects|security-events|statuses)\s*:\s*(?:read|write|none)\b`;
@@ -361,58 +365,96 @@ const permissionBlock = new RegExp([
 const ciBlockWord = String.raw`(?:the|a|an|its|default|declared|read|write|none|workflows?|jobs?|actions|attestations|checks|contents|deployments|discussions|issues|models|packages|pages|pull-requests|repository-projects|security-events|statuses)`;
 const ciGrant = new RegExp(String.raw`\b(?:grant|give|broaden|widen|expand|extend|increase|elevate)\s+(?:the|its|this|that|each|every)\s+(?:ci\s+|github\s+actions\s+)?(?:workflow|job)(?:[’'\s]?s)?\b(?:[\s,:]|${ciBlockWord}\b){0,80}?\b(?:permissions?|scopes?|access)\b`, "giu");
 const ciComparison = /\b(?:more|wider|broader|additional|extra)\s+(?:access|permissions?|scopes?)\s+(?:to\s+(?:the\s+)?github(?:\s+actions)?(?:\s+api)?\s+)?than\s+(?:the\s+|its\s+)?(?:default\s+)?(?:workflow|job)(?:[’'\s]?s)?\s+permissions?\b/giu;
-/** Who needs the wider comparison: an option, the design, the workflow or its job, never a person. */
-const ciComparisonSubject = /(?:\boption\s+[a-z0-9]+|\b(?:the|this|that|its)\s+(?:design|workflow|job|option|approach|alternative|change)|\bit)\s+(?:(?:would|will|might|could|may|does|do|should)\s+)?(?:still\s+)?(?:need|needs|require|requires|get|gets|have|has)\s+$/iu;
-/** The whole rest of the change's sentence, from a closed set: nothing that names a recipient or
- * another resource ("so it can poll the GitHub Actions API", "for the design"). */
-const ciContinuation = new RegExp(String.raw`^\s*(?:(?:so\s+(?:that\s+)?(?:it|the\s+(?:workflow|job))\s+can\s+(?:poll|call|query|read|reach|list)\s+the\s+github(?:\s+actions)?\s+api` +
-  String.raw`|to\s+(?:the\s+)?github(?:\s+actions)?\s+api|in\s+the\s+(?:workflow|job)(?:\s+file)?|${forTheDesign})\s*)*["'\x60)\]]*\s*$`, "iu");
+/** The whole lead of the sentence before the change, from a closed set. */
+const ciOption = String.raw`(?:option\s+[a-z0-9]{1,2}|(?:the|this)\s+(?:design|option|approach|alternative|change|fix|plan))`;
+const ciGrantLead = new RegExp(String.raw`^\s*(?:${ciOption}\s+(?:would|will|should|could|might|may|can|must)\s+|(?:should|shall|would|will|could|can|may|might|must|does|do)\s+${ciOption}\s+)?$`, "iu");
+const ciComparisonLead = new RegExp(String.raw`^\s*(?:${ciOption}|(?:the|its)\s+(?:workflow|job)|it)\s+(?:(?:would|will|might|could|may|does|do|should)\s+)?(?:still\s+)?(?:need|needs|require|requires|get|gets|have|has)\s+$`, "iu");
+/** The whole tail of the sentence after the change, from a closed set. */
+const ciTail = new RegExp(String.raw`^\s*(?:(?:so\s+(?:that\s+)?(?:it|the\s+(?:workflow|job))\s+can\s+(?:poll|call|query|read|reach|list)\s+the\s+github(?:\s+actions)?\s+api` +
+  String.raw`|to\s+(?:the\s+)?github(?:\s+actions)?\s+api|in\s+the\s+(?:workflow|job)(?:\s+file)?|${forTheDesign})\s*)*[.?!;"'\x60)\]]*\s*$`, "iu");
+/** The one sentence in which "the CI token" is excused, whole. */
+const ciTokenSentence = new RegExp(String.raw`^${ciOption}\s+(?:(?:would|will|might|could|may|does|should)\s+)?(?:still\s+)?(?:need|needs|require|requires)\s+the\s+(ci)\s+token\s+to\s+(?:poll|call|query|read|reach|list)\s+the\s+github(?:\s+actions)?\s+api\s*[.!]?$`, "iu");
 /** Anyone or anything but the workflow being given scope, or a lasting grant, voids the CI mask. */
 const ciScopeVeto = /\b(?:i|me|my|mine|myself|you|your|yours|yourself|u|us|our|ours|ourselves|sessions?|agents?|child|children|orchestrators?|runners?|campaigns?|wollipog|providers?|accounts?|users?|humans?|persons?|people|operators?|owners?|admins?|administrators?|root|sudo|sandbox(?:es)?|guardrails?|polic(?:y|ies)|limits?|protections?|bypass|disable|always|forever|permanent(?:ly)?|persistent(?:ly)?|lasting|standing|durable|indefinitely|organi[sz]ations?|org|enterprise|claude|codex|reader|answerer|whoever|anyone|everyone|everybody|someone|production|prod|bots?|apps?|applications?|teams?|services?|deploy(?:ments?)?|integrations?|installations?|repositor(?:y|ies)|repos?|browsers?|devices?|machines?|hosts?|computers?|clients?|servers?|members?|contributors?|maintainers?|collaborators?|authors?|forks?)\b/iu;
 const ciSentenceForbidden = new RegExp(String.raw`\bwe\b|\b(?:${anyCredential}|${designCredentialNoun}|sign-?ins?|log-?ins?|logins?|sessions?|id-token)\b|\b(?:${disclosureVerb}|paste|enter|provide|supply|share|tell|send)\b`, "iu");
-function maskCiScope(text: string): string {
-  const sentenceOf = (offset: number, length: number) => {
-    const before = text.slice(0, offset), after = text.slice(offset + length);
-    const start = Math.max(...[".", "?", "!", ";", "\n"].map((mark) => before.lastIndexOf(mark))) + 1;
-    const end = after.search(/[.?!;\n]/u);
-    const rest = end < 0 ? after : after.slice(0, end);
-    return { prefix: before.slice(start), sentence: before.slice(start) + text.slice(offset, offset + length) + rest, rest };
+/** CI spans in a compound-neutralized field: the lead, the change and the tail are its whole sentence. */
+function ciSpans(text: string): Span[] {
+  const sentence = (start: number, end: number) => sentencesOf(text).find((s) => s.start <= start && end <= s.start + s.text.length);
+  const accept = (lead: RegExp) => (match: RegExpExecArray): Span | null => {
+    const start = match.index!, end = start + match[0].length, holder = sentence(start, end);
+    if (!holder) return null;
+    const before = text.slice(holder.start, start), after = text.slice(end, holder.start + holder.text.length);
+    const whole = before + match[0] + after;
+    return lead.test(before) && ciTail.test(after) && permissionBlock.test(whole) && !ciSentenceForbidden.test(whole.replace(permissionKeys, blank)) ? [start, end] : null;
   };
-  const allowed = (match: string, offset: number, subject: boolean) => {
-    const { prefix, sentence, rest } = sentenceOf(offset, match.length);
-    return (!subject || ciComparisonSubject.test(prefix)) && permissionBlock.test(sentence) && ciContinuation.test(rest) &&
-      !ciSentenceForbidden.test(sentence.replace(permissionKeys, blank));
-  };
-  const granted = text.replace(ciGrant, (match: string, offset: number) => allowed(match, offset, false) ? blank(match) : match);
-  return granted.replace(ciComparison, (match: string, offset: number) => allowed(match, offset, true) ? blank(match) : match);
+  return [...spansOf(ciGrant, text, accept(ciGrantLead)), ...spansOf(ciComparison, text, accept(ciComparisonLead))];
 }
-const ciQualifier = new RegExp(String.raw`\bci\b(?=.{0,50}\b(?:tokens?|(?:api[ _-]?)?keys?|access[ _-]?tokens?|private[ _-]?keys?|passwords?|passphrases?|secrets?|credentials?|cookies?)\b)`, "giu");
-/** The raw and quote-stripped forms with the mention-only masks applied. Each mask's guard reads
- * both forms, so quoting can neither hide a request from a guard nor create a mask. */
-function mentionOnlyForms(raw: string, fields: QuestionFields): [string, string] {
-  const quotings = [(text: string) => text, withoutQuoting];
-  const unmasked = quotings.map((quoting) => quoting(raw));
+/** One prose field's masked text and whether every sentence in it is from the closed grammar. */
+function maskProse(text: string, handles: boolean, ciAllowed: boolean): { masked: string; closed: boolean; spans: number; declines: number } {
+  const neutral = handles ? text.replace(readWriteCompound, blank) : text.replace(readWriteCompound, blank).replace(credentialCompound, blank);
+  const ci = ciAllowed ? ciSpans(neutral) : [];
+  const afterCi = fill(text, ci, blank);
+  const declines = declineSpans(afterCi);
+  const afterDeclines = fill(afterCi, declines, blank);
+  const tokens: Span[] = [];
+  const closed = sentencesOf(text).every(({ text: sentence, start }) => {
+    const end = start + sentence.length;
+    if (ci.some(([a, b]) => a >= start && b <= end)) return true;
+    // A decline report may run across sentences; the frame is read before its last span.
+    const declined = declines.filter(([a, b]) => a < end && b > start);
+    if (declined.length) {
+      const last = declined.reduce((latest, span) => span[0] > latest[0] ? span : latest);
+      const frame = normalized(afterDeclines.slice(start, Math.max(start, last[0]))).replace(/[\s:,]+$/u, "");
+      return reportFrame.test(frame) && reportRest.test(afterDeclines.slice(Math.min(end, last[1]), end));
+    }
+    const trimmed = normalized(sentence);
+    const token = ciTokenSentence.exec(trimmed);
+    if (token) {
+      const at = sentence.search(/\bci\b/iu);
+      if (at >= 0) tokens.push([start + at, start + at + 2]);
+      return at >= 0;
+    }
+    return !trimmed || nextStepQuestion.test(trimmed);
+  });
+  return { masked: fill(afterDeclines, tokens, blank), closed, spans: ci.length + declines.length + tokens.length, declines: declines.length };
+}
+/** The raw and quote-stripped forms with the mention-only masks applied, or both unmasked unless
+ * every field of both forms is from the closed grammar. Guards read both forms, so quoting can
+ * neither hide a request from a guard nor create a mask. */
+function mentionOnlyForms(raw: string, parts: QuestionPart[]): [string, string] {
+  const unmasked: [string, string] = [raw, withoutQuoting(raw)];
   const handles = unmasked.some((text) => handlingOrDisclosure.test(text));
-  const compound = (text: string) => handles ? text.replace(readWriteCompound, blank) : text.replace(readWriteCompound, blank).replace(credentialCompound, blank);
-  const compounds = unmasked.map(compound) as [string, string];
-  const declines = compounds.map((text) => maskDeclineWording(text, blank)) as [string, string];
-  const reportOnly = quotings.every((quoting) => onlyDeclineReport({ prose: fields.prose.map(compound), labels: fields.labels }, quoting));
-  const worded = !reportOnly || declines.some((text) => remainingRequest.test(text)) ? compounds : declines;
-  const scoped = worded.some((text) => ciScopeVeto.test(text.replace(permissionKeys, blank))) ? worded : worded.map(maskCiScope) as [string, string];
-  return scoped.some((text) => handlingOrDisclosure.test(text)) ? scoped : scoped.map((text) => text.replace(ciQualifier, blank)) as [string, string];
+  const neutral = (text: string) => handles ? text.replace(readWriteCompound, blank) : text.replace(readWriteCompound, blank).replace(credentialCompound, blank);
+  const ciAllowed = !unmasked.some((text) => ciScopeVeto.test(neutral(text).replace(permissionKeys, blank)));
+  const forms = [(text: string) => text, withoutQuoting].map((quoting) => {
+    let closed = true, spans = 0, declines = 0;
+    const masked = parts.map(({ text, role }) => {
+      if (text === undefined) return text;
+      const value = quoting(text);
+      if (role === "id") closed &&= idWord.test(value);
+      if (role === "header") closed &&= headerWord.test(value.trim());
+      if (role === "label") closed &&= labelWord.test(value.trim());
+      if (role !== "prose") return value;
+      const result = maskProse(value, handles, ciAllowed);
+      closed &&= result.closed; spans += result.spans; declines += result.declines;
+      return result.masked;
+    }).join(" ");
+    return { masked, admitted: closed && spans > 0 && !(declines > 0 && remainingRequest.test(masked)) };
+  });
+  return forms.every((form) => form.admitted) ? [forms[0]!.masked, forms[1]!.masked] : unmasked;
 }
 /** Values a form carries itself, screened on the unmasked text of every question route. */
 const protectedValue = /\b(?:sk-[a-z0-9]{12,}|gh[pousr]_[a-z0-9]{12,})\b|\b(?:chmod|chown|sudo)\b|(?:\.ssh|\.aws|\.env)(?:\/|\b)|\b(?:gh|railway|vercel|npm|aws)\s+(?:auth\s+)?login\b/iu;
 const emailValue = /[^\s@]+@[^\s@]+\.[a-z]{2,}/iu;
-function providerQuestionProtected(raw: string, verifiedPlanning: boolean, fields: QuestionFields): boolean {
-  const forms = mentionOnlyForms(raw, fields);
+function providerQuestionProtected(raw: string, verifiedPlanning: boolean, parts: QuestionPart[]): boolean {
+  const forms = mentionOnlyForms(raw, parts);
   const any = (pattern: RegExp) => forms.some((text) => pattern.test(text));
   return protectedValue.test(raw) || protectedValue.test(withoutQuoting(raw)) || any(protectedAction) || any(credentialIdentity) ||
     any(credentialValueChoice) || (any(sensitiveSubject) && (!verifiedPlanning || !planningIntent.test(forms[0])));
 }
-function designQuestionProtected(raw: string, verifiedPlanning: boolean, fields: QuestionFields): boolean {
+function designQuestionProtected(raw: string, verifiedPlanning: boolean, parts: QuestionPart[]): boolean {
   const unmasked = [raw, withoutQuoting(raw)];
-  const forms = mentionOnlyForms(raw, fields);
+  const forms = mentionOnlyForms(raw, parts);
   const any = (pattern: RegExp) => forms.some((text) => pattern.test(text));
   const sink = designCredentialSink.test(unmasked[1]!);
   const localHandlingOnly = !any(protectedActionBeyondLocalHandling) && !sink;
@@ -485,11 +527,11 @@ function protectedRequestClass(request: PendingApproval, verifiedPlanning: boole
   if (request.kind === "question") {
     if (request.questions?.some((q) => {
       if (q.secret || q.inputFormat === "email") return true;
-      const text = [q.id, q.header, q.question, q.context, ...q.options.flatMap((o) => [o.label, o.description])].join(" ");
-      const present = (values: Array<string | undefined>) => values.filter((value): value is string => typeof value === "string");
-      const fields = { prose: present([q.header, q.question, q.context, ...q.options.map((o) => o.description)]), labels: present([q.id, ...q.options.map((o) => o.label)]) };
-      if (designForm) return designQuestionProtected(text, verifiedPlanning, fields);
-      return providerQuestionProtected(text, verifiedPlanning, fields);
+      const parts: QuestionPart[] = [{ text: q.id, role: "id" }, { text: q.header, role: "header" }, { text: q.question, role: "prose" },
+        { text: q.context, role: "prose" }, ...q.options.flatMap((o): QuestionPart[] => [{ text: o.label, role: "label" }, { text: o.description, role: "prose" }])];
+      const text = parts.map((part) => part.text).join(" ");
+      if (designForm) return designQuestionProtected(text, verifiedPlanning, parts);
+      return providerQuestionProtected(text, verifiedPlanning, parts);
     })) return "secrets_and_sign_in";
   } else {
     // Arbitrary tool text cannot attest that reading credentials is implementation work.

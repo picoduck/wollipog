@@ -411,7 +411,14 @@ test("only declarative negation by a non-reader is masked; interrogative, tag an
     "The campaign cannot supply credentials, but Alice's are needed for the design.",
     "The campaign cannot supply credentials. Should I continue with Alice's for the design?",
     "The campaign cannot supply credentials. Whose should the design take?",
+    // Review round 3: the whole report frame is fixed, not any sentence holding a report word.
+    "I need Alice's despite the reported refusal: the campaign cannot supply credentials. Which design should I choose?",
+    "Alice's were refused because the campaign cannot supply credentials. Should I continue without that design input?",
+    "The campaign cannot supply credentials (Alice can). Should I continue without that design input?",
   ]) declinedEverywhere(text);
+  // A header outside the closed set voids the report as well.
+  const headed = question(mentionOnly[4]!, { questions: [{ id: "choice", header: "From Alice", question: mentionOnly[4]!, options: [{ label: "Continue" }, { label: "Stop" }] }] });
+  for (const root of [false, true]) declined(evaluate(headed, { root }), "secrets_and_sign_in", "header");
   // A label that names something to bring along voids the report too.
   const report = mentionOnly[4]!;
   const labelled = (label: string) => question(report, { questions: [{ id: "choice", question: report, options: [{ label: "Continue" }, { label }] }] });
@@ -447,6 +454,11 @@ test("the CI permission-block mask covers a workflow's declared permissions, nev
     "Should the design grant the workflow maintainer's job the actions: read permission?",
     "Should the design grant the workflow job the id-token: write permission?",
     "Should the design grant the workflow job contents: write access to Alice?",
+    // Review round 3: the lead before the change is fixed too, so no recipient can precede it.
+    "To Alice, grant the workflow's contents: write access for the design.",
+    "For Alice, should the design grant its job the actions: read permission?",
+    "Alice says option B would grant its job the actions: read permission so it can poll the GitHub Actions API.",
+    "Should the design grant its job the actions: read permission? Alice too.",
   ]) declinedEverywhere(text);
   // main's child screen never matched a plural grant, so these are declined on the design routes.
   for (const text of ["Should the design give the workflow job's permissions to Alice?", "Should the design widen the job's permissions for Alice?",
