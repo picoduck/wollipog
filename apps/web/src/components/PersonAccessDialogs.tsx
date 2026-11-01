@@ -325,7 +325,26 @@ export function ManagePersonDialog({
   const restoreRef = useRef<HTMLButtonElement>(null);
   /** The action that just changed `status`, so focus can follow it to the control that replaced it. */
   const statusChangedRef = useRef(false);
+  /** A hidden name that failed validation is revealed first, so focus waits for its input to mount. */
+  const focusNameRef = useRef(false);
   const working = saving || restoring;
+
+  useEffect(() => {
+    if (!focusNameRef.current || !nameShown) return;
+    focusNameRef.current = false;
+    nameRef.current?.focus();
+  }, [nameShown]);
+
+  /** Show the name's error on its input, revealing a hidden name that still holds an edit. */
+  const showNameError = (problem: string) => {
+    setNameError(problem);
+    if (nameShown) {
+      nameRef.current?.focus();
+    } else {
+      focusNameRef.current = true;
+      setNameShown(true);
+    }
+  };
 
   // Suspend Access… and the notice's Restore Access replace each other, so focus moves to whichever
   // took the place of the one just used. A confirmation closing in the same commit leaves focus that
@@ -342,13 +361,14 @@ export function ManagePersonDialog({
 
   const save = async () => {
     if (workingRef.current) return;
-    const problem = nameShown ? nameProblem(displayName) : null;
-    setNameError(problem);
+    // An edit made while the name was shown stays after Hide Name, so the draft is always checked.
+    const problem = nameProblem(displayName);
     setEdited(true);
     if (problem) {
-      nameRef.current?.focus();
+      showNameError(problem);
       return;
     }
+    setNameError(null);
     const nextName = displayName.trim();
     if (nextName === member.userName && role === member.role) {
       onClose();
@@ -363,9 +383,8 @@ export function ManagePersonDialog({
     } catch (cause) {
       workingRef.current = false;
       setSaving(false);
-      if (refusedName(cause) && nameShown) {
-        setNameError(nameProblem(displayName) ?? NAME_TOO_LONG);
-        nameRef.current?.focus();
+      if (refusedName(cause)) {
+        showNameError(nameProblem(displayName) ?? NAME_TOO_LONG);
         return;
       }
       setFailure(saveFailure(cause, "Couldn't Save Changes", "Wollipog didn't save the change. Nothing changed; try again."));
@@ -385,7 +404,11 @@ export function ManagePersonDialog({
       confirmLabel: "Suspend Access",
       tone: "danger",
       progress: "Suspending access…",
+      // The request cannot be withdrawn once sent, so the confirmation stays until it settles rather
+      // than closing on a suspension that may still land.
+      cancelWhileRunning: false,
       onConfirm: async () => {
+        workingRef.current = true;
         try {
           await api.updateIdentityMember(member.userId, { status: "suspended" });
         } catch (cause) {
@@ -393,6 +416,8 @@ export function ManagePersonDialog({
             refusedOwner(cause) ? OWNER_REFUSED : "Wollipog didn't suspend access. Nothing changed; try again.",
             failureDetail(cause),
           );
+        } finally {
+          workingRef.current = false;
         }
         statusChangedRef.current = true;
         setStatus("suspended");

@@ -453,6 +453,68 @@ describe("Add Person and Manage Person (#2998)", () => {
     }
   });
 
+  test("a running suspension cannot be cancelled, and the dialog under it cannot close or save", async () => {
+    const updates: UpdateBody[] = [];
+    let settle!: () => void;
+    let closes = 0;
+    const view = await renderManage({
+      updateIdentityMember: (_userId, body) => {
+        updates.push(body);
+        return new Promise((resolve) => { settle = () => resolve({} as never); });
+      },
+      onClose: () => { closes += 1; },
+    });
+    try {
+      const manage = dialog("Manage Pat Jones");
+      await press(buttonIn(manage, "Suspend Access…"));
+      await press(buttonIn(dialog("Suspend Access"), "Suspend Access"));
+      assert.equal(updates.length, 1);
+
+      const cancel = buttonIn(dialog("Suspend Access"), "Cancel")!;
+      assert.equal(cancel.disabled, true, "Cancel is locked while the request runs");
+      await act(async () => {
+        domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+        await tick();
+      });
+      assert.ok(dialog("Suspend Access"), "Escape does not close it either");
+      // The dialog underneath refuses to close or save until the suspension settles.
+      await press(buttonIn(manage, "Save Changes"));
+      assert.equal(closes, 0);
+      assert.equal(updates.length, 1);
+
+      await act(async () => { settle(); await tick(); });
+      await act(async () => { await tick(); });
+      assert.equal(dialogs().length, 1, "the confirmation closes once the request settles");
+      assert.match(dialog("Manage Pat Jones").querySelector(".notice")?.textContent ?? "", /Access is suspended\./);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an edited name that was hidden again is still validated, and revealed with its error", async () => {
+    const updates: UpdateBody[] = [];
+    const view = await renderManage({
+      person: member({ userName: "pat@example.com" }),
+      updateIdentityMember: async (_userId, body) => { updates.push(body); return {} as never; },
+    });
+    try {
+      const manage = dialog("Manage Person");
+      await act(async () => { buttonIn(manage, "Show Name")!.click(); });
+      await type(nameField(manage), "");
+      await act(async () => { buttonIn(manage, "Hide Name")!.click(); });
+      assert.ok(manage.querySelector(".pid-field-box"));
+
+      await press(buttonIn(manage, "Save Changes"));
+      assert.equal(updates.length, 0, "an empty name is not sent");
+      const name = nameField(manage);
+      assert.equal(name.getAttribute("aria-invalid"), "true", "the field is revealed with its error");
+      assert.equal(manage.querySelector(".field-error")?.textContent, "Enter the person's name.");
+      assert.ok(domWindow.document.activeElement === (name as unknown), "focus moves to the revealed input");
+    } finally {
+      await view.unmount();
+    }
+  });
+
   test("a failed save is a titled danger notice with the server's words only under Show Details", async () => {
     const raw = "identity store is locked (SQLITE_BUSY)";
     const view = await renderManage({
