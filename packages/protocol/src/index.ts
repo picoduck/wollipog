@@ -5589,6 +5589,56 @@ export interface ReviewDecision {
   approvalReviewReceipt?: ReviewDecisionApprovalReviewReceipt;
 }
 
+/**
+ * Why the server revoked a typed workflow decision (#3916). Every `revoked` workflow-decision
+ * audit records one, with a `system` actor; the campaign continuation reports it beside
+ * `resolvedBy: "system"`. Values are stable, machine-readable identifiers: add new ones, never
+ * rename or reuse one.
+ *
+ * - `approval_refused_stale`: an attempt to approve found the bound snapshot, digest or campaign
+ *   scope changed (for a scope change: its affected child work).
+ * - `approval_refused_precondition`: an attempt to approve failed a check the snapshot does not
+ *   carry, such as merge review evidence, a runner capability or a review-round limit.
+ * - `consume_refused_stale`: the requester's attempt to act on its approval found the approved
+ *   payload, its forge state or its bound work changed.
+ * - `consume_refused_precondition`: the requester's attempt to act on its approval failed a check
+ *   other than staleness, such as review evidence, a runner capability or the provider's evidence.
+ * - `authority_superseded`: a check found the authority the decision was bound to gone: its policy
+ *   revision, owner, ancestry, or a live requester or controller.
+ * - `action_admission_refused`: the runner's admission of the approved command found it unbound.
+ * - `superseded_by_scope_change`: an approved campaign issue-scope change revoked it.
+ * - `parent_control_policy_changed`, `campaign_control_changed`,
+ *   `campaign_follow_up_limit_changed`, `campaign_boundary_restored`: a change to the controlling
+ *   campaign's policy or boundary revoked it.
+ * - `session_ended`, `session_restarted`: the requesting session ended or restarted.
+ * - `automation_approval_expired`: an automation proposal's approval deadline passed.
+ */
+export const WORKFLOW_DECISION_REVOCATION_REASONS = [
+  "approval_refused_stale",
+  "approval_refused_precondition",
+  "consume_refused_stale",
+  "consume_refused_precondition",
+  "authority_superseded",
+  "action_admission_refused",
+  "superseded_by_scope_change",
+  "parent_control_policy_changed",
+  "campaign_control_changed",
+  "campaign_follow_up_limit_changed",
+  "campaign_boundary_restored",
+  "session_ended",
+  "session_restarted",
+  "automation_approval_expired",
+] as const;
+export type WorkflowDecisionRevocationReason = typeof WORKFLOW_DECISION_REVOCATION_REASONS[number];
+
+/** A server revocation's reason and, when an actor's request led to it, who that was (#3916). The
+ * trigger is never the resolver: a person whose approval was refused as stale is recorded here,
+ * not as the actor who revoked the decision. */
+export interface WorkflowDecisionRevocation {
+  reason: WorkflowDecisionRevocationReason;
+  triggeredBy?: GovernanceActor;
+}
+
 /** Durable content-safe approval provenance. Raw tool input and question answers are never stored. */
 export interface GovernanceAuditEntry {
   auditId: string;
@@ -5633,6 +5683,8 @@ export interface GovernanceAuditEntry {
     /** #2940: the Full Control issue boundary a person's approval of a follow-up publication was
      * made under, written by the server from the controller's boundary, never from a request. */
     publicationAuthority?: { authorizedByUserId: string; objectiveDigest: string };
+    /** #3916: on a server revocation, why, and who acted when it happened. */
+    revocation?: WorkflowDecisionRevocation;
   };
   timestamp: number;
 }

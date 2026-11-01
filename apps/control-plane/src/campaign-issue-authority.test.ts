@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -179,6 +179,144 @@ test("scope rejects incidental references, unapproved epics, foreign repositorie
   } finally { h.db.close(); }
   const limited = harness(true,1);
   try { assert.equal((await limited.proposal("capacity")).ok,false); } finally { limited.db.close(); }
+});
+
+/** Deliver the next campaign continuation the idle root is woken with, if any: its text, and
+ * whether a prompt event woke it. The delivery completes, so a later one can follow. */
+function nextContinuation(h: ReturnType<typeof harness>): { text: string; prompt: boolean } | null {
+  h.db.updateSessionStatus("root", "idle", Date.now());
+  const prompt = h.db.campaignContinuationPromptEventAt("root") !== null;
+  const sent: Array<{ type: string; requestId?: string; commandId?: string; command?: { type: string; text?: string; campaignContinuation?: unknown } }> = [];
+  h.hub.sendToRunner = (_id, message) => { sent.push(message as (typeof sent)[number]); return true; };
+  h.svc.retryDuePrompts(Date.now() + 120_000);
+  h.hub.sendToRunner = () => true;
+  const delivery = sent.find((message) => message.type === "durable_session_command" && message.command?.campaignContinuation);
+  if (!delivery) return null;
+  assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: delivery.requestId!,
+    commandId: delivery.commandId!, sessionId: "root", state: "accepted", revision: 1, duplicate: false }));
+  assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId: delivery.commandId!,
+    sessionId: "root", state: "completed", revision: 2 }));
+  return { text: delivery.command!.text!, prompt };
+}
+
+function requiredContinuation(h: ReturnType<typeof harness>): { text: string; prompt: boolean } {
+  const continuation = nextContinuation(h);
+  assert.ok(continuation, "a continuation was delivered");
+  return continuation;
+}
+
+function revocationAudit(h: ReturnType<typeof harness>, sessionId: string, occurrenceId: string) {
+  const entries = h.db.listGovernanceAudit(sessionId).filter((entry) => entry.requestId === occurrenceId && entry.outcome === "revoked");
+  assert.equal(entries.length, 1);
+  return entries[0]!;
+}
+
+test("#3916 a person's scope approval refused as stale is the system's revocation, with its reason and the person as trigger", async () => {
+  const h = harness(false);
+  try {
+    const proposed = await h.proposal("stale-human"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    const occurrenceId = proposed.data!.occurrenceId;
+    assert.equal(proposed.data!.authority, "human");
+    nextContinuation(h);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    // Affected child work changes while the request waits for the person.
+    h.db.createSession({ id: "later", runnerId: "r", workspaceId: "w", agentId: "codex", title: "Later", parentSessionId: "root",
+      driver: "codex-app-server", config: {}, useWorktree: false, now: Date.now() });
+    const refused = h.approve(proposed.data!);
+    assert.equal(refused.ok, false);
+    assert.equal(refused.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+
+    const resolution = h.db.campaignRequestResolution("root", campaignRequestToken("typed", "root", occurrenceId));
+    assert.deepEqual({ outcome: resolution?.outcome, resolvedBy: resolution?.resolvedBy,
+      revocationReason: resolution?.revocationReason, triggeredBy: resolution?.triggeredBy },
+    { outcome: "revoked", resolvedBy: "system", revocationReason: "approval_refused_stale", triggeredBy: "human" });
+    const audit = revocationAudit(h, "root", occurrenceId);
+    assert.deepEqual(audit.actor, { kind: "system", id: "approval_refused_stale" });
+    assert.deepEqual(audit.workflowDecision?.revocation,
+      { reason: "approval_refused_stale", triggeredBy: { kind: "human", id: h.principal.userId } });
+
+    const { text, prompt } = requiredContinuation(h);
+    assert.match(text, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${occurrenceId}","owner":"human",.*` +
+      `"outcome":"revoked","resolvedBy":"system","revocationReason":"approval_refused_stale","triggeredBy":"human"`, "u"));
+    assert.doesNotMatch(text, /"resolvedBy":"human"/u, "the person approved; they did not revoke it");
+    assert.equal(prompt, true, "a refused human approval wakes the Orchestrator as promptly as the approval would have");
+    assert.match(text, /Action needed: yes/u);
+  } finally { h.db.close(); }
+});
+
+test("#3916 decisions a person's scope approval revokes are reported as the system's, superseded by that change", async () => {
+  const h = harness(false);
+  try {
+    const other = h.svc.createWorkflowDecision("child", { requestId: "question", resourceKey: "question",
+      resourceSnapshot: { category: "implementation_question", question: "Which test?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(other.ok, other.error ?? "question");
+    assert.equal(other.data!.authority, "human");
+    const proposed = await h.proposal("side-effect"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    nextContinuation(h);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    assert.ok(h.approve(proposed.data!).ok);
+    const occurrenceId = other.data!.occurrenceId;
+    assert.equal(h.db.workflowDecisionByOccurrence(occurrenceId)!.status, "revoked");
+
+    const resolution = h.db.campaignRequestResolution("root", campaignRequestToken("typed", "child", occurrenceId));
+    assert.deepEqual({ outcome: resolution?.outcome, resolvedBy: resolution?.resolvedBy,
+      revocationReason: resolution?.revocationReason, triggeredBy: resolution?.triggeredBy },
+    { outcome: "revoked", resolvedBy: "system", revocationReason: "superseded_by_scope_change", triggeredBy: "human" });
+    const audit = revocationAudit(h, "child", occurrenceId);
+    assert.deepEqual(audit.actor, { kind: "system", id: "superseded_by_scope_change" });
+    assert.deepEqual(audit.workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
+
+    const { text } = requiredContinuation(h);
+    assert.match(text, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${occurrenceId}","owner":"human",.*` +
+      `"outcome":"revoked","resolvedBy":"system","revocationReason":"superseded_by_scope_change","triggeredBy":"human"`, "u"));
+    assert.match(text, new RegExp(`"occurrenceId":"${proposed.data!.occurrenceId}","owner":"human",.*"outcome":"allowed","resolvedBy":"human"`, "u"),
+      "the person's own approval is still theirs");
+  } finally { h.db.close(); }
+});
+
+test("#3916 decisions the Orchestrator's own scope approval revokes record it as the trigger and do not wake it", async () => {
+  const h = harness();
+  try {
+    const other = h.svc.createWorkflowDecision("child", { requestId: "question", resourceKey: "question",
+      resourceSnapshot: { category: "implementation_question", question: "Which test?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } });
+    assert.ok(other.ok, other.error ?? "question");
+    const proposed = await h.proposal("orchestrator-side-effect"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    assert.equal(proposed.data!.authority, "orchestrator");
+    const eventsBefore = h.db.campaignContinuationEvents("root").length;
+    assert.ok(h.approve(proposed.data!).ok);
+    const occurrenceId = other.data!.occurrenceId;
+    const token = campaignRequestToken("typed", "child", occurrenceId);
+    const resolution = h.db.campaignRequestResolution("root", token);
+    assert.deepEqual({ resolvedBy: resolution?.resolvedBy, revocationReason: resolution?.revocationReason, triggeredBy: resolution?.triggeredBy },
+      { resolvedBy: "system", revocationReason: "superseded_by_scope_change", triggeredBy: "orchestrator" });
+    assert.deepEqual(revocationAudit(h, "child", occurrenceId).workflowDecision?.revocation,
+      { reason: "superseded_by_scope_change", triggeredBy: { kind: "agent", id: "root" } });
+    assert.equal(h.db.campaignContinuationEvents("root").slice(eventsBefore)
+      .some((event) => event.kind === "request_resolved" && event.occurrenceId === token), false,
+    "the Orchestrator caused it and already has the result");
+  } finally { h.db.close(); }
+});
+
+test("#3916 a person's denial of a scope change is still reported as theirs, with no revocation reason", async () => {
+  const h = harness(false);
+  try {
+    const proposed = await h.proposal("human-denial"); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    const occurrenceId = proposed.data!.occurrenceId;
+    nextContinuation(h);
+    h.db.updateSessionStatus("root", "running", Date.now());
+    assert.ok(h.svc.resolveWorkflowDecision("root", "root", occurrenceId, { outcome: "deny" }, "human",
+      { kind: "human", id: h.principal.userId }, () => true).ok);
+    const resolution = h.db.campaignRequestResolution("root", campaignRequestToken("typed", "root", occurrenceId));
+    assert.equal(resolution?.resolvedBy, "human");
+    assert.equal(resolution?.outcome, "denied");
+    assert.equal(resolution?.revocationReason, undefined);
+    assert.equal(resolution?.triggeredBy, undefined);
+    const { text, prompt } = requiredContinuation(h);
+    assert.match(text, new RegExp(`"occurrenceId":"${occurrenceId}","owner":"human",.*"outcome":"denied","resolvedBy":"human"\\}`, "u"));
+    assert.equal(prompt, true);
+  } finally { h.db.close(); }
 });
 
 test("Custom scope and closure stay human-owned, and old peers cannot execute the bounded issue contract", async () => {

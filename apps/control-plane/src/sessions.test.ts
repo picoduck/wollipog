@@ -2370,7 +2370,7 @@ test("resolving a child's typed decision with resolve_descendant_workflow_decisi
     svc.onSessionStatus(child.id, "stopped");
     const ended = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
     assert.ok(ended, "the stopped child's report wakes the Orchestrator promptly");
-    assert.match(ended, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${replacement.data.occurrenceId}","owner":"orchestrator","category":"pr_merge","title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#124","outcome":"revoked","resolvedBy":"system"`, "u"),
+    assert.match(ended, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${replacement.data.occurrenceId}","owner":"orchestrator","category":"pr_merge","title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#124","outcome":"revoked","resolvedBy":"system","revocationReason":"session_ended"\\}`, "u"),
       "a request that left without the Orchestrator's answer still reaches it, with how it ended");
     assert.match(ended, /"kind":"child_ready",.*"childStatus":"stopped","status":"stopped"/u);
   } finally {
@@ -5717,8 +5717,11 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       entry.actor.kind === "agent"));
     assert.ok(audits.some((entry) => entry.outcome === "consumed"));
     assert.ok(audits.some((entry) => entry.requestId === pending.data!.occurrenceId &&
-      entry.outcome === "revoked" && entry.actor.kind === "human" && entry.actor.id === "policy-owner"),
-    "policy-change revocation audits name the authenticated human actor");
+      entry.outcome === "revoked" && entry.actor.kind === "system" && entry.actor.id === "parent_control_policy_changed" &&
+      entry.workflowDecision?.revocation?.reason === "parent_control_policy_changed" &&
+      entry.workflowDecision.revocation.triggeredBy?.kind === "human" &&
+      entry.workflowDecision.revocation.triggeredBy.id === "policy-owner"),
+    "a policy-change revocation is the system's, and its audit names the authenticated human who changed the policy (#3916)");
     assert.ok(audits.every((entry) => !JSON.stringify(entry).includes("Reviewed exact head and checks.")),
       "audit stores a rationale digest rather than raw rationale");
     assert.equal(hub.sentOfType("resolve_permission").some((message) =>
