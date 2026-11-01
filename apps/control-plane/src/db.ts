@@ -31,7 +31,7 @@ import {
   validProviderHomeLaunchRefusal, validProviderHomeWait, validWorktreeSwitch,
 } from "@wollipog/protocol";
 import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-permissions.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
@@ -16493,7 +16493,7 @@ export class ControlPlaneDb {
       // the boundary is re-minted from that Human in this transaction, so the campaign never holds a
       // scope its boundary does not name. A boundary stale for any other reason is not extended.
       const reminted = !agentSessionId && boundary && this.boundaryTrailsHumanScope(root.id, policy)
-        ? remintCampaignBoundary(boundary, scope, userId, now) : null;
+        ? remintCampaignBoundary(boundaryWithScopedEpics(boundary, scope.issueNumbers), scope, userId, now) : null;
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
       if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
@@ -16510,10 +16510,14 @@ export class ControlPlaneDb {
         memberPolicy.issueNumbers = [...memberScope.issueNumbers];
         memberPolicy.issueScope = memberScope;
         if (reminted && memberPolicy.control?.mode === "full_control") memberPolicy.control = structuredClone(reminted);
-        else if (agentSessionId && memberPolicy.control?.mode === "full_control") {
-          memberPolicy.control.boundary.issueScopeRevision = scope.revision;
-          // Evidence authority names the scope revision too; a stale copy invalidates the boundary.
-          if (memberPolicy.control.boundary.evidenceAuthority) memberPolicy.control.boundary.evidenceAuthority.issueScopeRevision = scope.revision;
+        else if (memberPolicy.control?.mode === "full_control") {
+          // Whoever approved it, an issue the scope no longer holds is no longer an epic (#3920).
+          memberPolicy.control = { ...memberPolicy.control, boundary: boundaryWithScopedEpics(memberPolicy.control.boundary, scope.issueNumbers) };
+          if (agentSessionId) {
+            memberPolicy.control.boundary.issueScopeRevision = scope.revision;
+            // Evidence authority names the scope revision too; a stale copy invalidates the boundary.
+            if (memberPolicy.control.boundary.evidenceAuthority) memberPolicy.control.boundary.evidenceAuthority.issueScopeRevision = scope.revision;
+          }
         }
         this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
       }
@@ -16604,7 +16608,7 @@ export class ControlPlaneDb {
       const control = policy?.control, scope = policy?.issueScope;
       const reminted = policy && control?.mode === "full_control" && scope && scope.revision !== control.boundary.issueScopeRevision &&
         scope.authorizedByUserId === userId && this.boundaryTrailsHumanScope(rootId, policy)
-        ? remintCampaignBoundary(control.boundary, scope, userId, scope.authorizedAt) : null;
+        ? remintCampaignBoundary(boundaryWithScopedEpics(control.boundary, scope.issueNumbers), scope, userId, scope.authorizedAt) : null;
       if (reminted?.mode !== "full_control" || reminted.boundary.issueAuthority &&
           scope!.issueNumbers.length + this.unsettledPublicationSlots(rootId) > this.campaignIssueLimit(rootId, reminted.boundary.issueAuthority.maxIssues)) {
         this.db.exec("ROLLBACK"); return null;
@@ -19624,7 +19628,7 @@ export class ControlPlaneDb {
    * never lets another message reach it first. Only the service's authenticated Human
    * first-message path calls this; the boundary's own author is the only accepted Human. */
   establishFirstMessageScope(id: string, input: { control: CampaignControl; scope: import("@wollipog/protocol").CampaignIssueScope; messageDigest: string;
-    deliveryId: string; expectedRevision: number; now: number }): boolean {
+    deliveryId: string; expectedRevision: number; now: number; contextIssueNumbers?: number[] }): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
     const previous = policy?.control?.mode === "full_control" ? policy.control.boundary : null;
     const { control, scope } = input;
@@ -19637,12 +19641,15 @@ export class ControlPlaneDb {
         boundary.issueScopeRevision !== scope.revision || scope.authorizedAt > boundary.authorizedAt ||
         JSON.stringify(boundary.issueAuthority?.epics ?? []) !== JSON.stringify(scope.issueNumbers) ||
         !/^[a-f0-9]{64}$/.test(input.messageDigest) || !/^first_message_[a-f0-9-]{36}$/.test(input.deliveryId)) return false;
+    // Context-only references (#3920) are disjoint from the scope and grant nothing.
+    const context = input.contextIssueNumbers ?? [];
+    if (!validContextIssueNumbers(context) || context.some((n) => scope.issueNumbers.includes(n))) return false;
     policy.control = structuredClone(control);
     policy.issueScope = structuredClone(scope);
     policy.issueNumbers = [...scope.issueNumbers];
     const derivedLimits = policy.firstMessageScope.derivedLimits;
     policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, deliveryId: input.deliveryId,
-      ...(derivedLimits ? { derivedLimits } : {}) };
+      ...(derivedLimits ? { derivedLimits } : {}), ...(context.length ? { contextIssueNumbers: [...context] } : {}) };
     return this.atomic(() => {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
         updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(policy), input.now, id, input.expectedRevision);
@@ -19659,7 +19666,8 @@ export class ControlPlaneDb {
     const policy = this.sessionOrchestratorPolicy(id);
     const first = policy?.firstMessageScope;
     if (!policy || first?.state !== "delivering" || first.messageDigest !== messageDigest) return false;
-    policy.firstMessageScope = delivered ? { state: "established", messageDigest, establishedAt: now }
+    policy.firstMessageScope = delivered ? { state: "established", messageDigest, establishedAt: now,
+      ...(first.contextIssueNumbers?.length ? { contextIssueNumbers: first.contextIssueNumbers } : {}) }
       : { state: "pending", ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
       .run(JSON.stringify(policy), now, id).changes) === 1;
@@ -32135,6 +32143,12 @@ function canonicalChildHarness(value: unknown): AgentHarnessIdentity | null {
   return identity && canonicalAgentHarnessIdentity(identity);
 }
 
+/** A first message's context-only references (#3920): at most 100 distinct positive issue numbers. */
+function validContextIssueNumbers(value: unknown): value is number[] {
+  return Array.isArray(value) && value.length <= 100 && new Set(value).size === value.length &&
+    value.every((n) => Number.isSafeInteger(n) && n > 0);
+}
+
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
   if (!value || value.version !== 1 ||
@@ -32206,10 +32220,11 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   const digest = (v: unknown) => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
   const limits = (v: unknown) => v === undefined || Boolean(v && typeof v === "object" && Object.keys(v).length === 2 &&
     typeof (v as Record<string, unknown>).acceptedFollowUps === "boolean" && typeof (v as Record<string, unknown>).maxIssues === "boolean");
+  const context = (v: unknown) => v === undefined || validContextIssueNumbers(v);
   if (first !== undefined && !(first && (first.state === "pending" && limits(first.derivedLimits) ||
       first.state === "delivering" && digest(first.messageDigest) && typeof first.deliveryId === "string" &&
-        /^first_message_[a-f0-9-]{36}$/.test(first.deliveryId) && limits(first.derivedLimits) ||
-      first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt)))) return null;
+        /^first_message_[a-f0-9-]{36}$/.test(first.deliveryId) && limits(first.derivedLimits) && context(first.contextIssueNumbers) ||
+      first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt) && context(first.contextIssueNumbers)))) return null;
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",

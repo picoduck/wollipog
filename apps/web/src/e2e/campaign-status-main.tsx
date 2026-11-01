@@ -369,6 +369,10 @@ const client = {
     ...scopeCompatibility, outsideScope: [{ workItemId: "scope-fixture", title: "Member work", issue: { repository: "team/repo", number: 124 }, sessionId: "s_child" }],
     candidates: [{ issue: { repository: "team/repo", number: 123 }, title: "Composer Epic", source: "umbrella" as const },
       { issue: { repository: "team/repo", number: 124 }, title: "Member Work", source: "member_checklist" as const }],
+    // A Full Control first message's derived scope and its context-only references (#3920).
+    ...(params.get("scope") === "first-message" ? {
+      issueNumbers: [123, 124, 125], revision: 2, outsideScope: [], candidates: [], contextIssueNumbers: [126, 127],
+    } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],

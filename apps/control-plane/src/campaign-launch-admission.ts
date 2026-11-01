@@ -12,6 +12,7 @@ import {
   type PreparedCampaignLaunch, type RunnerView,
 } from "@wollipog/protocol";
 import type { UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
+import { issueReferenceSpans, MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 
 const keys = ["repository", "issueNumbers", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"];
 
@@ -108,34 +109,12 @@ export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task
   return request.task === undefined && !request.issueNumbers?.length && request.overrides?.objective === undefined;
 }
 
-const MAX_MESSAGE_ISSUES = 100;
-
-/** Issue references in the owner's first message that name the campaign's own repository: `#123`,
- * `owner/repo#123` and `https://github.com/owner/repo/issues/123`, or for a GitLab project (#3539)
- * `http(s)://<host>/<project>/-/issues/123`. References to another repository and pull or merge
- * request URLs are ignored. These are candidates only; the runner still verifies each one
- * is an issue of the repository before it enters the scope. */
+/** Issue references in the owner's first message that name the campaign's own repository (see
+ * `issueReferenceSpans`), distinct and bounded. These are candidates only: since #3920 only those
+ * `firstMessageIssueIntent` finds the message asking to act on become scope, and the runner still
+ * verifies each one is an issue of the repository before it enters the scope. */
 export function issueReferencesInMessage(text: string, repository: string): number[] {
-  const own = repository.toLowerCase();
-  const found = new Set<number>();
-  const add = (value: string) => {
-    const n = Number(value);
-    if (Number.isSafeInteger(n) && n > 0) found.add(n);
-  };
-  for (const match of text.matchAll(/(?<![\w./#-])#([1-9][0-9]{0,15})(?![\w-])/gu)) add(match[1]!);
-  for (const match of text.matchAll(/(?<![\w./-])([\w.-]+\/[\w.-]+)#([1-9][0-9]{0,15})(?![\w-])/gu)) {
-    if (match[1]!.toLowerCase() === own) add(match[2]!);
-  }
-  for (const match of text.matchAll(/\bhttps?:\/\/(?:www\.)?github\.com\/([\w.-]+\/[\w.-]+)\/issues\/([1-9][0-9]{0,15})(?![\w-])/giu)) {
-    if (match[1]!.toLowerCase() === own) add(match[2]!);
-  }
-  if (campaignRepositoryLocation(repository)?.forge === "gitlab") {
-    for (const match of text.matchAll(/\bhttps?:\/\/([^\s/?#@]+\/[^\s?#]+?)\/-\/issues\/([1-9][0-9]{0,15})(?![\w-])/giu)) {
-      if (match[1]!.toLowerCase() === own) add(match[2]!);
-    }
-  }
-  const numbers = [...found].sort((a, b) => a - b);
-  return numbers.length <= MAX_MESSAGE_ISSUES ? numbers : numbers.slice(0, MAX_MESSAGE_ISSUES);
+  return [...new Set(issueReferenceSpans(text, repository).map((r) => r.number))].sort((a, b) => a - b).slice(0, MAX_MESSAGE_ISSUES);
 }
 
 /** The boundary objective a first message states: its text on one line (the boundary refuses
