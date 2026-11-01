@@ -12448,6 +12448,14 @@ export interface UiSessionSubscriptionsAppliedMessage {
   podIds: string[];
 }
 
+/** The organization's member directory changed without changing this viewer's access (#2606): a
+ * member was added or renamed, or another member's role or status changed. Dashboards refetch
+ * their identity in place instead of reconnecting. A change to the viewer's own access still
+ * closes the socket. Older dashboards ignore it and pick the change up on their next connect. */
+export interface UiIdentityDirectoryChangedMessage {
+  type: "identity_directory_changed";
+}
+
 export type ControlPlaneToUi =
   | UiSnapshotMessage
   | UiSessionSnapshotPageMessage
@@ -12472,7 +12480,8 @@ export type ControlPlaneToUi =
   | UiPodUpsertMessage
   | UiPodRemovedMessage
   | UiPodContextEntryMessage
-  | UiSessionSubscriptionsAppliedMessage;
+  | UiSessionSubscriptionsAppliedMessage
+  | UiIdentityDirectoryChangedMessage;
 
 /** One dashboard view can display one pod (at most 12 members today) or a larger parallel run.
  * Leave headroom for future run sizes without admitting multi-thousand-query subscription frames. */

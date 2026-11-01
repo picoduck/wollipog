@@ -908,6 +908,40 @@ test("closeUiClientsForDevice force-closes only the revoked device's sockets", (
   assert.equal(sends.length, 0, "revoked client no longer receives broadcasts");
 });
 
+test("a directory change refreshes its organization in place; a member's own access change closes only theirs (#2606)", () => {
+  const hub = new Hub(snapshotDb);
+  const closed: string[] = [];
+  const refreshed: string[] = [];
+  const add = (label: string, organizationId: string, userId: string) => {
+    const principal = {
+      kind: "human" as const, actorId: userId, userId, userName: label, organizationId, organizationName: organizationId,
+      role: "operator" as const, deviceId: `dev_${label}`, localBootstrap: false,
+    };
+    hub.addUiClient({
+      send: (data: string) => {
+        if ((JSON.parse(data) as { type: string }).type === "identity_directory_changed") refreshed.push(label);
+      },
+    }, { deviceId: principal.deviceId, principal, close: () => closed.push(label) });
+  };
+  add("ada-phone", "org_a", "usr_ada");
+  add("ada-laptop", "org_a", "usr_ada");
+  add("ada-other-org", "org_b", "usr_ada");
+  add("lin", "org_a", "usr_lin");
+  add("outsider", "org_b", "usr_out");
+  hub.addUiClient({ send: () => {} }); // a client with no principal belongs to no organization
+
+  hub.identityDirectoryChanged("org_a");
+  assert.deepEqual(refreshed, ["ada-phone", "ada-laptop", "lin"], "only the changed organization refreshes");
+  assert.deepEqual(closed, [], "a refresh closes nothing");
+
+  // Status belongs to the user, so every socket of theirs closes, in any organization.
+  refreshed.length = 0;
+  hub.closeUserUiClients("usr_ada");
+  hub.identityDirectoryChanged("org_a");
+  assert.deepEqual(closed, ["ada-phone", "ada-laptop", "ada-other-org"]);
+  assert.deepEqual(refreshed, ["lin"], "closed sockets are dropped from the fan-out");
+});
+
 test("pod context entries fan out as one attributed websocket delta", () => {
   const hub = new Hub(snapshotDb);
   const sent: string[] = [];
