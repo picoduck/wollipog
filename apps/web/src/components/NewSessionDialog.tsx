@@ -87,7 +87,7 @@ import {
 import { OrchestratorPolicyDialog, OrchestratorPolicySummary } from "./OrchestratorPolicyDialog.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
-import { BotIcon, BranchIcon, ComputerIcon, FolderIcon, ShieldIcon, TerminalIcon } from "./Icons.js";
+import { BranchIcon, ComputerIcon, FolderIcon, ShieldIcon, TerminalIcon } from "./Icons.js";
 import { SessionOptions, describeBoundaries, type SessionOptionsAttention } from "./SessionOptions.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, ValueRow } from "./ui/SettingsRows.js";
 import {
@@ -150,10 +150,12 @@ type ProblemControl =
   | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
   | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
 
-/** The controls that live inside Options, which a submit problem opens before focusing. */
+/**
+ * The controls that live inside Options, which a submit problem opens before focusing. Role and its
+ * Orchestrator policy sit above Options, always visible (#3929), so their problems never open it.
+ */
 const OPTIONS_CONTROLS: ReadonlySet<ProblemControl> = new Set<ProblemControl>([
-  "role", "defaults", "orchestrator-retry", "orchestrator",
-  "harness", "mode", "execution-target", "cloud-budget",
+  "defaults", "harness", "mode", "execution-target", "cloud-budget",
 ]);
 
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
@@ -1504,7 +1506,6 @@ export function NewSessionDialog({
     {!(orchestrator && orchestratorSettingsReady) && problemFor("role")}
   </>;
   const optionsSummary = [
-    { key: "role", icon: <BotIcon size={14} />, label: orchestrator ? "Orchestrator" : "Normal" },
     { key: "harness", icon: <TerminalIcon size={14} />, label: launchSurface === "native_tui" ? "Native TUI" : "Direct" },
     { key: "working-copy", icon: useWorktree ? <BranchIcon size={14} /> : <FolderIcon size={14} />, label: useWorktree ? "Worktree" : "In Place" },
     ...(runOnOffered && executionTarget ? [{ key: "run-on", icon: <ComputerIcon size={14} />, label: executionTarget.name }] : []),
@@ -1513,12 +1514,6 @@ export function NewSessionDialog({
   const optionsAttention: SessionOptionsAttention[] = [
     ...(skillsUnavailable ? [{ key: "skills", label: "Skills Unavailable" }] : []),
     ...(!defaultsReady && harnessDefaults?.error ? [{ key: "defaults", label: "Permissions Not Loaded" }] : []),
-    ...(savedOrchestratorUnavailable ? [{ key: "orchestrator-unavailable", label: "Orchestrator Unavailable" }] : []),
-    ...(orchestratorRequired ? [{ key: "orchestrator-required", label: "Orchestrator Required" }] : []),
-    ...(orchestrator && !orchestratorSettingsReady && orchestratorSettings?.error
-      ? [{ key: "policy-error", label: "Policy Not Loaded" }] : []),
-    ...(orchestrator && orchestratorSettingsReady && policyProblem
-      ? [{ key: "policy-invalid", label: "Policy Needs a Change" }] : []),
     ...(!cloudBudgetValid ? [{ key: "cloud-budget", label: "Budget Out of Range" }] : []),
   ];
 
@@ -1679,65 +1674,70 @@ export function NewSessionDialog({
             </div>
           )}
 
-          {/* Everything below Agent is one Options row (#2954), open when something in it needs the
-              person. The request it builds is the same as when every option was on the form. */}
+          {/* Role is always visible (#3929): it decides what kind of session this is, can't change
+              later, and is the choice people switch most. Its Orchestrator policy goes with it. */}
+          <SettingsGroup className="new-session-role">
+            <SegmentedRow
+              title="Role"
+              description={roleDescription}
+              value={orchestrator ? "orchestrator" : "normal"}
+              onChange={(value) => setRoleOverride(value === "orchestrator" ? "orchestrator" : "normal")}
+              block
+              describedBy={[roleNoteIds, controlDescribedBy("role")].filter(Boolean).join(" ") || undefined}
+              invalid={controlInvalid("role")}
+              error={roleNotes}
+              options={[
+                // An older control plane resolves a saved Orchestrator default itself and cannot be
+                // told otherwise, so Normal is unavailable rather than silently ignored.
+                { value: "normal", label: "Normal", disabled: normalUnavailable !== undefined, disabledReason: normalUnavailable },
+                // Kept in place while unavailable, so the row can say whether the runner, the agent,
+                // the context or the target is the reason.
+                { value: "orchestrator", label: "Orchestrator", disabled: !orchestratorSupported, disabledReason: orchestratorUnavailable },
+              ]}
+            />
+            {orchestrator && !orchestratorSettingsReady && !orchestratorSettings?.error && (
+              <SettingRow title="Orchestrator Policy" busy busyLabel="Loading your Orchestrator defaults…" />
+            )}
+            {orchestrator && !orchestratorSettingsReady && orchestratorSettings?.error && (
+              <div className="session-options-inset">
+                <Notice
+                  tone="danger"
+                  compact
+                  actions={(
+                    <button
+                      type="button"
+                      className="btn sm"
+                      data-validation-target="orchestrator-retry"
+                      aria-describedby={controlDescribedBy("orchestrator-retry", policyFailureId)}
+                      onClick={() => setDefaultsRetry((value) => value + 1)}
+                    >
+                      Retry
+                    </button>
+                  )}
+                >
+                  <span id={policyFailureId}>{orchestratorSettings.error}</span>
+                </Notice>
+              </div>
+            )}
+            {orchestrator && policy && (
+              <OrchestratorPolicySummary
+                draft={policyDraft}
+                evaluation={policy}
+                disabled={busy}
+                describedBy={controlDescribedBy("orchestrator")}
+                customizeRef={customizeRef}
+                onCustomize={() => setEditingPolicy(policyProblem?.tab ?? "behavior")}
+              />
+            )}
+            {orchestrator && orchestratorSettingsReady && fieldProblem?.field === "role" && (
+              <div className="session-options-inset">{problemFor("role")}</div>
+            )}
+          </SettingsGroup>
+
+          {/* Everything else below Agent is one Options row (#2954), open when something in it needs
+              the person. The request it builds is the same as when every option was on the form. */}
           <SessionOptions open={optionsOpen} onOpenChange={setOptionsOpen} summary={optionsSummary} attention={optionsAttention}>
             <SettingsGroup>
-              <SegmentedRow
-                title="Role"
-                description={roleDescription}
-                value={orchestrator ? "orchestrator" : "normal"}
-                onChange={(value) => setRoleOverride(value === "orchestrator" ? "orchestrator" : "normal")}
-                block
-                describedBy={[roleNoteIds, controlDescribedBy("role")].filter(Boolean).join(" ") || undefined}
-                invalid={controlInvalid("role")}
-                error={roleNotes}
-                options={[
-                  // An older control plane resolves a saved Orchestrator default itself and cannot be
-                  // told otherwise, so Normal is unavailable rather than silently ignored.
-                  { value: "normal", label: "Normal", disabled: normalUnavailable !== undefined, disabledReason: normalUnavailable },
-                  // Kept in place while unavailable, so the row can say whether the runner, the agent,
-                  // the context or the target is the reason.
-                  { value: "orchestrator", label: "Orchestrator", disabled: !orchestratorSupported, disabledReason: orchestratorUnavailable },
-                ]}
-              />
-              {orchestrator && !orchestratorSettingsReady && !orchestratorSettings?.error && (
-                <SettingRow title="Orchestrator Policy" busy busyLabel="Loading your Orchestrator defaults…" />
-              )}
-              {orchestrator && !orchestratorSettingsReady && orchestratorSettings?.error && (
-                <div className="session-options-inset">
-                  <Notice
-                    tone="danger"
-                    compact
-                    actions={(
-                      <button
-                        type="button"
-                        className="btn sm"
-                        data-validation-target="orchestrator-retry"
-                        aria-describedby={controlDescribedBy("orchestrator-retry", policyFailureId)}
-                        onClick={() => setDefaultsRetry((value) => value + 1)}
-                      >
-                        Retry
-                      </button>
-                    )}
-                  >
-                    <span id={policyFailureId}>{orchestratorSettings.error}</span>
-                  </Notice>
-                </div>
-              )}
-              {orchestrator && policy && (
-                <OrchestratorPolicySummary
-                  draft={policyDraft}
-                  evaluation={policy}
-                  disabled={busy}
-                  describedBy={controlDescribedBy("orchestrator")}
-                  customizeRef={customizeRef}
-                  onCustomize={() => setEditingPolicy(policyProblem?.tab ?? "behavior")}
-                />
-              )}
-              {orchestrator && orchestratorSettingsReady && fieldProblem?.field === "role" && (
-                <div className="session-options-inset">{problemFor("role")}</div>
-              )}
               <SegmentedRow
                 title="Harness"
                 value={launchSurface}
