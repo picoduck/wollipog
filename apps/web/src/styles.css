@@ -10083,30 +10083,14 @@ textarea {
   gap: 8px;
   margin-top: 14px;
 }
-.remote-instance-form {
+/* The instance dialog (#3003): Manual Setup's address and code share one helper, 4px under them as a
+   field's helper sits under its control (§8.1), and Re-Pair's saved address is a mono line. */
+.remote-instance-code {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: var(--space-1);
 }
-.remote-instance-intro {
-  margin: 0;
-}
-.remote-instance-advanced {
-  padding-top: 12px;
-  border-top: 1px solid var(--border);
-}
-.remote-instance-advanced > summary {
-  color: var(--text-dim);
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.remote-instance-advanced-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  padding-top: 14px;
-}
+.remote-instance-address { font-family: var(--font-mono); }
 .access-panel {
   max-width: 880px;
 }

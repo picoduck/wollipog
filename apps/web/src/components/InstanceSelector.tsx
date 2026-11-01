@@ -12,7 +12,6 @@ import type { StatusMeta } from "../status-meta.js";
 import { ListIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
-import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
 import { StatusBadge, statusToneClass } from "./StatusBadge.js";
 
 /** The instance menu is a 300px flyout beside the rail (§9.1, #1970). */
@@ -39,7 +38,6 @@ export function InstanceSelector({ labelled = false }: { labelled?: boolean }) {
   const instances = useInstances();
   const connection = useActiveInstanceConnection();
   const [open, setOpen] = useState(false);
-  const [adding, setAdding] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "instance-selector-menu");
   const tileRef = useRef<HTMLSpanElement>(null);
   const idPrefix = useId().replace(/:/g, "");
@@ -63,11 +61,11 @@ export function InstanceSelector({ labelled = false }: { labelled?: boolean }) {
     if (profileId !== active.id) void instances.switchInstance(profileId);
   };
   const add = () => {
-    // Focus the tile now rather than through close(true), which restores it a frame later: the
-    // dialog records what held focus as it mounts, and must return to the tile, not to this row.
+    // Focus the tile now rather than through close(true), which restores it a frame later; the row
+    // unmounts with the menu, so the dialog returns focus to the tile.
     menu.triggerRef.current?.focus();
     menu.close(false);
-    setAdding(true);
+    instances.openInstanceDialog({ mode: "add", returnFocus: menu.triggerRef.current });
   };
   const manage = () => {
     menu.close(true);
@@ -151,7 +149,6 @@ export function InstanceSelector({ labelled = false }: { labelled?: boolean }) {
           </MenuItem>
         </MenuSurface>
       )}
-      {adding && <RemoteInstanceDialog mode="add" onClose={() => setAdding(false)} />}
     </div>
   );
 }

@@ -35,9 +35,12 @@ import type { NativeUiRuntime } from "./native-ui-transport.js";
 import {
   InstancesContextProvider,
   type InstanceAvailability,
+  type InstanceDialogRequest,
   type InstanceManager,
   type InstanceStatus,
+  type OpenInstanceDialogOptions,
 } from "./instances-context.js";
+import { RemoteInstanceDialog } from "./components/RemoteInstanceDialog.js";
 import { viewFromPath, type View } from "./navigation.js";
 import { closeGuardLinks as appCloseGuardLinks, type CloseGuardLinks } from "./desktop-close-guard.js";
 import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
@@ -430,13 +433,16 @@ export function InstanceProvider({
     return operation;
   }, [switchTo]);
 
-  const addAndSwitch = useCallback(async (input: { label: string; origin: string; token: string }) => {
-    const registry = await enqueueRegistryMutation(() => addRemoteInstance(input, desktop));
+  const addInstance = useCallback(async (input: { label: string; origin: string; token: string; switchTo: boolean }) => {
+    const { switchTo: switchAfterAdding, ...profileInput } = input;
+    const registry = await enqueueRegistryMutation(() => addRemoteInstance(profileInput, desktop));
     const profile = registry.profiles.find((candidate) => candidate.kind === "remote" && candidate.origin === input.origin);
     if (!profile) throw new Error("The saved remote instance could not be found.");
     setState((current) => ({ ...current, registry }));
     stateRef.current = { ...stateRef.current, registry };
-    await switchTo(profile.id);
+    // The switch is started, not awaited: the dialog closes on the saved profile and the shell
+    // shows the connection opening, as any switch does. switchTo reports its own failure.
+    if (switchAfterAdding) void switchTo(profile.id);
   }, [desktop, enqueueRegistryMutation, switchTo]);
 
   const editInstance = useCallback(async (input: { profileId: string; label: string; origin: string; token?: string }) => {
@@ -547,6 +553,37 @@ export function InstanceProvider({
   );
   navigationRef.current = navigation;
 
+  // The one instance dialog (#3003). It lives here rather than in the page that opened it, so a
+  // switch or a reconnect that replaces that page does not discard what the person typed.
+  const [dialog, setDialog] = useState<{
+    key: number;
+    request: InstanceDialogRequest;
+    returnFocus: { current: HTMLElement | null };
+  } | null>(null);
+  const dialogKeyRef = useRef(0);
+  const openInstanceDialog = useCallback(({ returnFocus, ...request }: OpenInstanceDialogOptions) => {
+    if (request.mode !== "add" && !stateRef.current.registry.profiles.some(
+      (profile) => profile.id === request.profileId && profile.kind === "remote",
+    )) return;
+    const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    dialogKeyRef.current += 1;
+    setDialog({ key: dialogKeyRef.current, request, returnFocus: { current: returnFocus ?? focused } });
+  }, []);
+  // Closes only the dialog that asks: one replaced while its request ran still closes itself when
+  // that request finishes, and must not take its replacement with it.
+  const closeInstanceDialog = useCallback((key: number) => {
+    setDialog((current) => (current?.key === key ? null : current));
+  }, []);
+  const dialogRequest = dialog?.request;
+  const dialogProfile = dialogRequest && dialogRequest.mode !== "add"
+    ? state.registry.profiles.find((profile) => profile.id === dialogRequest.profileId && profile.kind === "remote")
+    : undefined;
+  // A profile removed while its dialog is open takes the dialog with it.
+  const dialogOrphaned = Boolean(dialogRequest && dialogRequest.mode !== "add" && !dialogProfile);
+  useEffect(() => {
+    if (dialogOrphaned) setDialog(null);
+  }, [dialogOrphaned]);
+
   const reportActiveStatus = useCallback((status: InstanceStatus) => {
     const profileId = stateRef.current.activeProfile.id;
     setState((current) => {
@@ -567,19 +604,21 @@ export function InstanceProvider({
     statusByProfile: state.statuses,
     switchInstance: (profileId) => switchTo(profileId),
     retryActive,
-    addAndSwitch,
+    addInstance,
     editInstance,
     repairInstance,
     removeInstance,
     manageInstances() {
       navigation.activate?.({ name: "runners", section: "instances" });
     },
+    openInstanceDialog,
     goToThisMachine: () => switchTo("local"),
     reportActiveStatus,
   }), [
-    addAndSwitch,
+    addInstance,
     editInstance,
     navigation,
+    openInstanceDialog,
     removeInstance,
     reportActiveStatus,
     repairInstance,
@@ -588,7 +627,28 @@ export function InstanceProvider({
     switchTo,
   ]);
 
-  return <InstancesContextProvider value={value}>{children}</InstancesContextProvider>;
+  return (
+    <InstancesContextProvider value={value}>
+      {children}
+      {dialogRequest?.mode === "add" && (
+        <RemoteInstanceDialog
+          key={dialog!.key}
+          mode="add"
+          returnFocusRef={dialog!.returnFocus}
+          onClose={() => closeInstanceDialog(dialog!.key)}
+        />
+      )}
+      {dialogRequest && dialogRequest.mode !== "add" && dialogProfile && (
+        <RemoteInstanceDialog
+          key={dialog!.key}
+          mode={dialogRequest.mode}
+          profile={dialogProfile}
+          returnFocusRef={dialog!.returnFocus}
+          onClose={() => closeInstanceDialog(dialog!.key)}
+        />
+      )}
+    </InstancesContextProvider>
+  );
 }
 
 export function desktopMultiInstanceAvailable(): boolean {

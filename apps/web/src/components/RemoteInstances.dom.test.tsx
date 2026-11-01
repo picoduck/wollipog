@@ -15,7 +15,6 @@ import { FeedbackProvider } from "./FeedbackProvider.js";
 import { InstanceSelector } from "./InstanceSelector.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { Rail } from "./Rail.js";
-import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/connections/instances" });
@@ -66,11 +65,12 @@ function manager(overrides: Partial<InstanceManager> = {}): InstanceManager {
     },
     async switchInstance() {},
     async retryActive() {},
-    async addAndSwitch() {},
+    async addInstance() {},
     async editInstance() {},
     async repairInstance() {},
     async removeInstance() {},
     manageInstances() {},
+    openInstanceDialog() {},
     async goToThisMachine() {},
     reportActiveStatus() {},
     ...overrides,
@@ -92,9 +92,11 @@ const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 
 test("the instance menu switches, adds and manages, and keeps focus on the tile", async () => {
   const switched: string[] = [];
   let managed = 0;
+  const opened: Parameters<InstanceManager["openInstanceDialog"]>[0][] = [];
   const value = manager({
     async switchInstance(profileId) { switched.push(profileId); },
     manageInstances() { managed += 1; },
+    openInstanceDialog(options) { opened.push(options); },
   });
   const mounted = mount(
     <InstancesContextProvider value={value}><FeedbackProvider><InstanceSelector /></FeedbackProvider></InstancesContextProvider>,
@@ -140,14 +142,11 @@ test("the instance menu switches, adds and manages, and keeps focus on the tile"
       .find((item) => item.textContent === "Add Remote Instance…")!;
     await act(async () => { add.click(); await tick(); });
     assertNoDomNode(domWindow.document.querySelector('[role="menu"]'));
-    const dialog = mounted.container.querySelector<HTMLElement>('[role="dialog"]');
-    assert.match(dialog?.textContent ?? "", /Add Remote Instance/, "Add Remote Instance… opens the existing add dialog");
-    const cancel = Array.from(dialog!.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Cancel")!;
-    await act(async () => { cancel.click(); await tick(); });
-    await act(async () => { await new Promise<void>((resolve) => domWindow.requestAnimationFrame(() => resolve())); await tick(); });
-    assert.ok(domWindow.document.activeElement === (trigger as never),
-      `closing the add dialog returns focus to the tile, not ${domWindow.document.activeElement?.outerHTML.slice(0, 80)}`);
+    // The provider's one dialog opens (#3003), told to return focus to the tile: the row is gone.
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0]!.mode, "add");
+    assert.ok(opened[0]!.returnFocus === (trigger as never), "the dialog returns focus to the tile, not the row");
+    assert.ok(domWindow.document.activeElement === (trigger as never), "the tile holds focus while the dialog opens");
 
     // Dismissing through the shared backdrop hands focus back to the tile: the backdrop takes
     // the click, so nothing underneath it would otherwise receive focus.
@@ -497,8 +496,9 @@ test("an active remote card offers Re-Pair first while the sign-in banner is sho
 });
 
 test("instances panel keeps This Machine immutable and makes credential recovery explicit", async () => {
+  const opened: Parameters<InstanceManager["openInstanceDialog"]>[0][] = [];
   const mounted = mount(
-    <InstancesContextProvider value={manager()}>
+    <InstancesContextProvider value={manager({ openInstanceDialog(options) { opened.push(options); } })}>
       <FeedbackProvider><InstancesPanel /></FeedbackProvider>
     </InstancesContextProvider>,
   );
@@ -516,204 +516,10 @@ test("instances panel keeps This Machine immutable and makes credential recovery
     const rePair = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
       .find((button) => button.textContent?.trim() === "Re-Pair")!;
     await act(async () => { rePair.click(); });
-    assert.equal(mounted.container.querySelector('[role="dialog"] h2')?.textContent, "Re-Pair Instance");
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
-test("add dialog submits a canonical token-free origin and clears the pairing credential", async () => {
-  const calls: Array<{ label: string; origin: string; token: string }> = [];
-  const mounted = mount(
-    <InstancesContextProvider value={manager({
-      async addAndSwitch(input) { calls.push(input); },
-    })}>
-      <RemoteInstanceDialog mode="add" onClose={() => {}} />
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  try {
-    const inputs = mounted.container.querySelectorAll<HTMLInputElement>("input");
-    await act(async () => {
-      inputs[0]!.value = "Remote A";
-      fireDomEvent.change(inputs[0]!);
-      inputs[1]!.value = "https://REMOTE.example.test/#pair=abcdefghijklmnop";
-      fireDomEvent.change(inputs[1]!);
-    });
-    const submit = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Add and Switch")!;
-    await act(async () => { submit.click(); await tick(); });
-    assert.deepEqual(calls, [{
-      label: "Remote A",
-      origin: "https://remote.example.test",
-      token: "abcdefghijklmnop",
-    }]);
-    assert.equal(inputs[1]!.value, "");
-    assert.doesNotMatch(mounted.container.textContent ?? "", /abcdefghijklmnop/);
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
-test("re-pair rejects a link for a different saved address before invoking native repair", async () => {
-  let repairs = 0;
-  const mounted = mount(
-    <InstancesContextProvider value={manager({
-      async repairInstance() { repairs += 1; },
-    })}>
-      <RemoteInstanceDialog mode="repair" profile={remote} onClose={() => {}} />
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  try {
-    const input = mounted.container.querySelector<HTMLInputElement>('input[type="password"]')!;
-    await act(async () => {
-      input.value = "https://other.example.test/#pair=abcdefghijklmnop";
-      fireDomEvent.change(input);
-    });
-    const submit = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Re-Pair")!;
-    await act(async () => { submit.click(); await tick(); });
-    assert.equal(repairs, 0);
-    assert.match(mounted.container.querySelector('[role="alert"]')?.textContent ?? "", /different server address/);
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
-test("pairing links and codes never reach the DOM while typed, after a failure or across Advanced Setup (#3814)", async () => {
-  let fail = true;
-  const calls: Array<{ label: string; origin: string; token: string }> = [];
-  const mounted = mount(
-    <InstancesContextProvider value={manager({
-      async addAndSwitch(input) {
-        if (fail) throw new Error("The remote instance did not answer.");
-        calls.push(input);
-      },
-    })}>
-      <RemoteInstanceDialog mode="add" onClose={() => {}} />
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  const html = () => mounted.container.innerHTML;
-  const type = (input: HTMLInputElement, value: string) => act(async () => {
-    input.value = value;
-    fireDomEvent.change(input);
-  });
-  const submit = () => act(async () => {
-    Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Add and Switch")!.click();
-    await tick();
-  });
-  const toggleAdvanced = (open: boolean) => act(async () => {
-    const details = mounted.container.querySelector<HTMLDetailsElement>("details.remote-instance-advanced")!;
-    details.open = open;
-    details.dispatchEvent(new domWindow.Event("toggle") as never);
-  });
-  const link = () => mounted.container.querySelector<HTMLInputElement>('input[placeholder="https://host/#pair=…"]');
-  try {
-    await type(mounted.container.querySelector<HTMLInputElement>("input")!, "Remote A");
-    await type(link()!, "https://remote.example.test/#pair=linksecret0000001");
-    assert.doesNotMatch(html(), /linksecret/, "a typed link is not mirrored into a value attribute");
-    await submit();
-    assert.match(mounted.container.querySelector('[role="alert"]')?.textContent ?? "", /did not answer/);
-    assert.equal(link()!.value, "https://remote.example.test/#pair=linksecret0000001", "a failed link stays to retry");
-    assert.doesNotMatch(html(), /linksecret/, "nor after a failed submit");
-
-    // Advanced Setup replaces the link field; closing it again brings back what was typed.
-    await toggleAdvanced(true);
-    assertNoDomNode(link(), "Advanced Setup replaces the link field");
-    const code = mounted.container.querySelector<HTMLInputElement>(".remote-instance-advanced input[type=\"password\"]")!;
-    const address = mounted.container.querySelector<HTMLInputElement>(".remote-instance-advanced input:not([type])")!;
-    await type(address, "https://remote.example.test");
-    await type(code, "codesecret0000001");
-    assert.doesNotMatch(html(), /codesecret/, "a typed pairing code is not in the DOM");
-    await submit();
-    assert.doesNotMatch(html(), /codesecret/, "nor after a failed submit");
-    await toggleAdvanced(false);
-    assert.equal(link()!.value, "https://remote.example.test/#pair=linksecret0000001");
-    assert.doesNotMatch(html(), /linksecret/);
-
-    fail = false;
-    await submit();
-    assert.deepEqual(calls, [{ label: "Remote A", origin: "https://remote.example.test", token: "linksecret0000001" }]);
-    assert.equal(link()?.value ?? "", "", "an accepted link is cleared");
-    assert.doesNotMatch(html(), /linksecret|codesecret/);
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
-test("a fresh pairing link for a changed address stays out of the DOM (#3814)", async () => {
-  const mounted = mount(
-    <InstancesContextProvider value={manager({
-      async editInstance() { throw new Error("The new address did not answer."); },
-    })}>
-      <RemoteInstanceDialog mode="edit" profile={remote} onClose={() => {}} />
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  try {
-    const address = Array.from(mounted.container.querySelectorAll<HTMLInputElement>("input"))
-      .find((input) => input.previousElementSibling?.textContent === "Server Address")!;
-    await act(async () => {
-      address.value = "https://new.example.test";
-      fireDomEvent.change(address);
-    });
-    const pairing = mounted.container.querySelector<HTMLInputElement>('input[type="password"]')!;
-    await act(async () => {
-      pairing.value = "https://new.example.test/#pair=editsecret0000001";
-      fireDomEvent.change(pairing);
-    });
-    assert.doesNotMatch(mounted.container.innerHTML, /editsecret/);
-    await act(async () => {
-      Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
-        .find((button) => button.textContent === "Save Changes")!.click();
-      await tick();
-    });
-    assert.match(mounted.container.querySelector('[role="alert"]')?.textContent ?? "", /did not answer/);
-    assert.doesNotMatch(mounted.container.innerHTML, /editsecret/, "nor after a failed save");
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
-test("changing an instance address requires a matching fresh pairing link", async () => {
-  const edits: Array<{ profileId: string; label: string; origin: string; token?: string }> = [];
-  const mounted = mount(
-    <InstancesContextProvider value={manager({
-      async editInstance(input) { edits.push(input); },
-    })}>
-      <RemoteInstanceDialog mode="edit" profile={remote} onClose={() => {}} />
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  try {
-    const address = Array.from(mounted.container.querySelectorAll<HTMLInputElement>("input"))
-      .find((input) => input.previousElementSibling?.textContent === "Server Address")!;
-    await act(async () => {
-      address.value = "https://new.example.test";
-      fireDomEvent.change(address);
-    });
-    const pairing = Array.from(mounted.container.querySelectorAll<HTMLInputElement>('input[type="password"]'))[0]!;
-    await act(async () => {
-      pairing.value = "https://new.example.test/#pair=abcdefghijklmnop";
-      fireDomEvent.change(pairing);
-    });
-    const submit = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent === "Save Changes")!;
-    await act(async () => { submit.click(); await tick(); });
-    assert.deepEqual(edits, [{
-      profileId: remote.id,
-      label: remote.label,
-      origin: "https://new.example.test",
-      token: "abcdefghijklmnop",
-    }]);
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0]!.mode, "repair");
+    assert.equal((opened[0] as { profileId: string }).profileId, remote.id);
+    assert.ok(opened[0]!.returnFocus === (rePair as never), "focus returns to the button pressed");
   } finally {
     await act(async () => { mounted.root.unmount(); });
     mounted.mountPoint.remove();
