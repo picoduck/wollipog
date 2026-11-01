@@ -987,7 +987,7 @@ test("a review notification staged before a runner downgrade returns to the ques
     const outbox = new SessionPromptOutbox(h.db, h.hub, { warn() {} });
     const row = outbox.stageReviewContinuation([view.reviewSessionId], "s1", "r",
       { type: "prompt_session", sessionId: "s1", text: "Automatic review result", reviewContinuation: true }, Date.now());
-    h.db.registerRunner(h.metadata, 13, 263);
+    h.db.registerRunner(h.metadata, 13, 267);
     h.db.updateSessionStatus("s1", "idle", 14);
     outbox.flush(Date.now());
     assert.equal(h.db.getSessionPromptCommand(row.commandId)?.state, "failed");
@@ -1009,7 +1009,7 @@ test("a downgraded review notification settles its real queued admission before 
     h.db.stageReviewContinuation = (...args) => {
       const row = stage(...args);
       // Downgrade after admission has chosen the marked durable lane, before its first send.
-      h.db.registerRunner(h.metadata, Date.now(), 263);
+      h.db.registerRunner(h.metadata, Date.now(), 267);
       return row;
     };
     h.db.updateSessionStatus("s1", "idle", 10);
