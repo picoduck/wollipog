@@ -10585,6 +10585,9 @@ export class SessionsService {
         this.db.listOpenPolicyHookApprovals(sessionId).length || this.gateOnPolicy(sessionId, now)) {
       return fail("resolve the session's pending requests and guardrails before executing issue closure", 409);
     }
+    // Synchronization reads the scope before its first await: this is the revision every runner
+    // acknowledges when it succeeds, and the only one a closure may be dispatched at (#3915).
+    const synchronizedScopeRevision = this.db.getSession(sessionId)?.orchestratorPolicy?.issueScope?.revision;
     if (session.orchestratorPolicy?.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every runner and retry.", 409);
     // The uncached read is the last await: a pull request reopened during synchronization is seen,
     // and only synchronous rechecks of every current-state condition separate it from consumption.
@@ -10595,7 +10598,7 @@ export class SessionsService {
     }
     const freshSession = this.db.getSession(sessionId);
     if (!freshSession || isTerminal(freshSession.status) || !freshSession.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue) ||
-        !this.closureScopeCurrent(freshSession, snapshot) ||
+        freshSession.orchestratorPolicy.issueScope?.revision !== synchronizedScopeRevision || !this.closureScopeCurrent(freshSession, snapshot) ||
         !this.workflowDecisionAuthorityCurrent(freshSession, freshSession.parentControlPolicy!, decision) ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !== auditDigest(snapshot.activeChildren) ||
         decision.authority === "orchestrator" && (scopeCompatibility(this.db, freshSession) || issueEvidenceDigest(closureEvidence(this.db, freshSession, snapshot)) !== snapshot.issueAdmission?.evidenceDigest)) return fail("Campaign authority, work or delivery changed during synchronization; request renewed exact review.", 409);
@@ -10612,11 +10615,10 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     let result: GithubIssueClosureResult = { outcome: "uncertain", completedAt: now };
     // The runner fences the mutation on the scope revision it was just synchronized to. A closure
-    // carried across scope changes that left its issue alone (#3915) is dispatched at that current
-    // revision, which the checks above proved still names its authority; the runner's own scope,
-    // issue, bounded-authority and mutation-fence checks then apply unchanged.
-    const currentScopeRevision = freshSession.orchestratorPolicy?.issueScope?.revision;
-    const dispatched = currentScopeRevision === undefined ? snapshot : { ...snapshot, scopeRevision: currentScopeRevision };
+    // carried across scope changes that left its issue alone (#3915) is dispatched at that revision,
+    // which the checks above proved is still current and still names its authority; the runner's
+    // own scope, issue, bounded-authority and mutation-fence checks then apply unchanged.
+    const dispatched = synchronizedScopeRevision === undefined ? snapshot : { ...snapshot, scopeRevision: synchronizedScopeRevision };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(session.runnerId, requestId, {

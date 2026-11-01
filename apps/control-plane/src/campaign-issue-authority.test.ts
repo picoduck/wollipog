@@ -2208,6 +2208,49 @@ test("#3915 adding an issue leaves unrelated decisions as they were and revokes 
   } finally { h.db.close(); }
 });
 
+test("#3915 a scope change during closure synchronization defers the closure without consuming it", async () => {
+  const h = harness(false);
+  try {
+    const f = scopeImpactFixture(h);
+    const closure = await f.closure(100);
+    assert.ok(h.approve(closure).ok);
+    const first = await h.proposal("add-101"); assert.ok(first.ok, first.error ?? "proposal");
+    assert.ok(h.approve(first.data!).ok);
+    const second = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-102", expectedRevision: 2, additions: [{ repository: "team/repo", number: 102 }],
+      removals: [], explanation: "Verified intended member" });
+    assert.ok(second.ok, second.error ?? "proposal");
+
+    // The runner acknowledges only what reaches it. During execution's synchronization at revision
+    // 2, the unrelated addition of 102 is approved; its own synchronization never reaches the runner.
+    let runnerRevision = 0;
+    let raced = false;
+    let holdLater = true;
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type === "campaign_issue_scope" && message.operation === "synchronize") {
+        if (message.scope.revision === 3 && holdLater) return new Promise(() => {});
+        runnerRevision = message.scope.revision;
+        if (!raced) { raced = true; assert.ok(h.approve(second.data!).ok); }
+      }
+      if (message.type === "github_issue_closure" && message.operation === "execute" && message.snapshot.scopeRevision !== runnerRevision) {
+        return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: false, error: "Campaign scope revision is stale" };
+      }
+      return runner(runnerId, requestId, message, timeout);
+    };
+    const deferred = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
+    assert.equal(deferred.status, 409);
+    assert.equal(h.db.getSession("root")!.orchestratorPolicy!.issueScope!.revision, 3);
+    assert.equal(f.status(closure.occurrenceId), "approved", "nothing was consumed or dispatched");
+    assert.equal(h.state.executes, 0);
+
+    holdLater = false;
+    const executed = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "refused");
+    assert.equal(runnerRevision, 3);
+    assert.equal(h.state.executes, 1, "once synchronized, the closure runs at the revision the runner holds");
+  } finally { h.db.close(); }
+});
+
 test("#3915 a pending scope request stays approvable through unrelated child activity and goes stale on related activity", async () => {
   const h = harness(false);
   try {

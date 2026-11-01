@@ -30,7 +30,8 @@ closures, merges, evidence reviews and questions stay as they were and are still
 resolved or consumed. A closure bound to an earlier scope revision still executes when every later
 revision was written by a consumed scope decision that left its issue alone; the control plane then
 dispatches it at the revision it has just synchronized to the runner, whose own scope, issue, bounded
-authority and mutation-fence checks apply unchanged at that revision. An armed merge survives
+authority and mutation-fence checks apply unchanged at that revision. If scope moved again while it
+was synchronizing, execution refuses without consuming the approval, and a retry synchronizes first. An armed merge survives
 a change that only adds issues; one a removal revokes can still be reconciled, which only records a
 forge-proven merge at the approved head. A person's approval under Full Control re-authorizes the
 boundary every decision was evaluated under, so it still revokes all of them.
