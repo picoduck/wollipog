@@ -245,7 +245,9 @@ export class SessionPromptOutbox {
         ? "resumableQuestionAnswers"
         : command.type === "prompt_session" && command.campaignContinuation
           ? "campaignContinuations"
-          : "durablePromptQueueIdentity";
+          : command.type === "prompt_session" && command.reviewContinuation
+            ? "reviewContinuationQuestions"
+            : "durablePromptQueueIdentity";
       if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
@@ -257,7 +259,9 @@ export class SessionPromptOutbox {
             ? "runner no longer supports resumable structured-question answers"
             : command.type === "prompt_session" && command.campaignContinuation
               ? "runner no longer supports durable campaign continuations"
-              : "runner no longer supports durable queued prompt identity",
+              : command.type === "prompt_session" && command.reviewContinuation
+                ? "runner no longer supports question-preserving review continuations"
+                : "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

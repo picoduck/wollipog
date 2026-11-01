@@ -799,7 +799,10 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
-export const PROTOCOL_VERSION = 265;
+// 268: automatic review continuations preserve pending async questions (#3938). The control
+//      plane marks durable review prompts with reviewContinuation; older runners hold these
+//      notifications while a question is pending instead of treating them as human input.
+export const PROTOCOL_VERSION = 268;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1052,6 +1055,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
   reviewSession: 226,
+  reviewContinuationQuestions: 268,
   /** v227 runner deletes an isolated session's own sequencer leftovers and recorded branches
    * (#3316); the session tools check the same floor against the connected control plane. */
   sessionWorktreeRefDeletion: 227,
@@ -6250,7 +6254,8 @@ export type SessionEventPayload =
       kind: "user_message";
       text: string;
       images?: PromptImageInput[];
-      /** Runner-authenticated automatic campaign turn; preserves earlier async questions. */
+      /** Runner-authenticated automatic campaign or review turn; preserves earlier async questions.
+       * The historical field name is retained for persisted event compatibility. */
       campaignContinuation?: true;
       final?: boolean;
       commandId?: string;
@@ -10319,6 +10324,9 @@ export interface PromptSessionMessage {
   config?: SessionConfig;
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
+  /** Trusted automatic review notification; never supplied by the person-authored prompt API.
+   * Requires reviewContinuationQuestions and uses the durable prompt lane. */
+  reviewContinuation?: true;
   /** Control-plane-authenticated synthetic campaign turn. Event bounds contain identities and
    * metadata only; the provider must query scoped management tools for authorized details. */
   campaignContinuation?: {

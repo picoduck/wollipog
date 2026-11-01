@@ -5767,6 +5767,8 @@ export class SessionsService {
       admitAs?: "queued";
       /** Always admit through the durable queue when the runner supports its identity. */
       durable?: boolean;
+      /** Only server-created review notifications may preserve pending async questions. */
+      reviewContinuation?: true;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -5970,6 +5972,7 @@ export class SessionsService {
       type: "prompt_session",
       sessionId,
       text: effectiveText,
+      ...(binding?.reviewContinuation ? { reviewContinuation: true as const } : {}),
       images: nonEmpty(commandImages),
       slashCommand: effectiveSlashCommand,
       config: {
@@ -9786,11 +9789,21 @@ export class SessionsService {
     if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
     const daily = this.dailyBudgetFor(requesterSessionId);
     if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    const supportsQuestionRetention = runnerSupportsProtocol(
+      this.db.getRunner(session.runnerId)?.protocolVersion, "reviewContinuationQuestions",
+    );
+    // Older runners mistake this automatic prompt for human input and dismiss the async card.
+    // Keep the review owed until the person answers or the runner upgrades.
+    if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async)) {
+      return "runner upgrade is required to preserve a pending async question";
+    }
     const ids = held.map((review) => review.reviewSessionId);
     let claimed = false;
     const sent = this.prompt(
       requesterSessionId, reviewContinuationPrompt(held), [], undefined, undefined, undefined, "session", true, {
         admitAs: "queued" as const,
+        // The durable lane is where the runner validates this trusted continuation marker.
+        ...(supportsQuestionRetention ? { durable: true, reviewContinuation: true as const } : {}),
         stage: (runnerId, command, at) => this.promptOutbox.stageReviewContinuation(ids, requesterSessionId, runnerId, command, at),
         // Without a durable command there is no receipt to follow: recorded delivered before the
         // send, so a crash between the two can lose it but never send it twice.

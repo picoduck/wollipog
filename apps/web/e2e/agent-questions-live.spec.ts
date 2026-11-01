@@ -1,3 +1,4 @@
+import { ControlPlaneDb } from "../../control-plane/src/db.js";
 import { openMobileQuestion } from "./open-mobile-question.js";
 import { expect, test, type Page } from "@playwright/test";
 import { spawn, type ChildProcess } from "node:child_process";
@@ -31,6 +32,7 @@ interface LiveStack {
   httpBase: string;
   ownerToken: string;
   receiptPath: string;
+  completeReview(): void;
   sessionId: string;
   logs(): string;
   restart(restartRunner?: boolean): Promise<void>;
@@ -374,7 +376,19 @@ async function startLiveStack(
       }
       throw new Error(`recovered question never became resumable: ${JSON.stringify(lastSession)}\n${logs()}`);
     };
-    const stack = { httpBase, ownerToken, receiptPath, sessionId, logs, restart, stop };
+    // Seed only the synthetic reviewer result; the real control-plane sweep, durable transport,
+    // runner, provider adapter, and browser handle its notification and the original question.
+    const completeReview = () => {
+      const db = ControlPlaneDb.attach(databasePath);
+      try {
+        db.reviewSessions.record({ reviewSessionId: "fixture-review", requesterSessionId: sessionId,
+          runnerId: RUNNER_ID, reviewer: "claude-code", headSha: "a".repeat(40),
+          pullRequest: { repository: "example/project", number: 1 } }, Date.now());
+        db.reviewSessions.accept(RUNNER_ID, { type: "review_session_update", sessionId: "fixture-review",
+          state: "completed", output: "Synthetic reviewer result for the notification regression." }, Date.now());
+      } finally { db.close(); }
+    };
+    const stack = { httpBase, ownerToken, receiptPath, sessionId, logs, restart, stop, completeReview };
     // An async question arrives mid-turn, and the turn's completion reaches the control plane as a
     // separate update, so a question alone is not settled yet. Delivery runs hold the turn open.
     const awaitIdle = codexScenario === "async-question" && !asyncDelivery;
@@ -399,6 +413,83 @@ async function startLiveStack(
     throw error;
   }
 }
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "phone", width: 390, height: 844 },
+]) test(`review notification preserves a Codex async question on ${viewport.name} (#3938)`, async ({ page: fixturePage, browser, baseURL }) => {
+  test.setTimeout(120_000);
+  const stack = await startLiveStack("codex", "async-question");
+  const evidenceDir = process.env.WOLLIPOG_ISSUE_3938_EVIDENCE_DIR;
+  const context = evidenceDir ? await browser.newContext({ baseURL, viewport,
+    recordVideo: { dir: evidenceDir, size: { width: viewport.width, height: viewport.height } } }) : null;
+  const page = context ? await context.newPage() : fixturePage;
+  await page.setViewportSize(viewport);
+  const beat = async (ms: number) => { if (evidenceDir) await page.waitForTimeout(ms); };
+  try {
+    const original = (await fetchSession(stack)).pendingApproval!;
+    const fragment = new URLSearchParams({ origin: stack.httpBase, token: stack.ownerToken, sessionId: stack.sessionId });
+    await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
+    await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    const card = page.getByRole("region", { name: "Agent Questions" });
+    await openMobileQuestion(page);
+    await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
+    if (evidenceDir) {
+      await page.evaluate(() => {
+        const note = document.createElement("div"); note.id = "capture-note";
+        note.textContent = "Live service regression • Synthetic provider/reviewer • Question pending";
+        note.style.cssText = "position:fixed;top:0;left:0;right:0;z-index:99999;background:#172b4d;color:white;padding:10px;font:14px sans-serif";
+        document.body.append(note);
+      });
+    }
+    await beat(2500);
+    stack.completeReview();
+    await expect.poll(async () => (await fetchEvents(stack)).events.some((event) =>
+      event.payload.kind === "user_message" && event.payload.text.includes("[Wollipog Cross-Model Review")),
+    { timeout: 30_000 }).toBe(true);
+    await expect.poll(async () => (await fetchSession(stack)).status).toBe("idle");
+    const retained = (await fetchSession(stack)).pendingApproval!;
+    expect(retained.occurrenceId).toBe(original.occurrenceId);
+    expect((await fetchEvents(stack)).events.some((event) => event.payload.kind === "question_resolved")).toBe(false);
+    if (evidenceDir) await page.evaluate(() => {
+      document.getElementById("capture-note")!.textContent = "Review notification delivered • Original question remains answerable";
+    });
+    await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
+    await beat(3000);
+    await page.reload();
+    await openMobileQuestion(page);
+    await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
+    await stack.restart();
+    await page.reload();
+    await openMobileQuestion(page);
+    await expect(card.locator(".request-card-kind")).toHaveText("Async Question");
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      for (const theme of ["dark", "light"] as const) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await beat(2000);
+        await page.screenshot({ path: join(evidenceDir, `review-question-${viewport.name}-${theme}.png`) });
+      }
+    }
+    await card.getByRole("radio", { name: "Patch" }).click();
+    await beat(1500);
+    await card.getByRole("button", { name: "Submit Answers" }).click();
+    await expect.poll(async () => {
+      try { return JSON.parse(await readFile(stack.receiptPath, "utf8")); } catch { return null; }
+    }, { timeout: 30_000 }).toEqual({ requestId: "codex-async:async-ask", answer: "Patch" });
+    await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
+    await expect.poll(async () => (await fetchEvents(stack)).events.filter((event) =>
+      event.payload.kind === "question_resolved" && event.payload.startsTurn === true)).toHaveLength(1);
+    await beat(3500);
+  } catch (error) { throw new Error(`${String(error)}\n${stack.logs()}`); }
+  finally {
+    if (context) {
+      const video = page.video(); await context.close();
+      if (video) await video.saveAs(join(evidenceDir!, `review-question-${viewport.name}.webm`));
+    }
+    await stack.stop();
+  }
+});
 
 for (const style of ["interactive", "composer"] as const) test(`Claude AskUserQuestion answers cross the live stack in ${style} style`, async ({ page }) => {
   test.setTimeout(120_000);

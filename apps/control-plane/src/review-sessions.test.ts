@@ -894,8 +894,8 @@ function immediatePrompts(h: ReturnType<typeof harness>): string[] {
     .map((message) => String((message as { text?: unknown }).text ?? ""));
 }
 
-test("without a worktree the continuation goes out once on the immediate lane, claimed before the send", () => {
-  const h = harness();
+test("an older runner without a worktree gets one immediately claimed review continuation", () => {
+  const h = harness({ protocol: 267 });
   try {
     h.db.updateSessionStatus("s1", "idle", 10);
     const view = requested(h);
@@ -906,6 +906,50 @@ test("without a worktree the continuation goes out once on the immediate lane, c
     assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered");
     h.svc.retryDuePrompts();
     assert.equal(immediatePrompts(h).length, 1, "a later sweep sends nothing again");
+  } finally { h.db.close(); }
+});
+
+test("review completion preserves an unanswered async question (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.svc.onSessionEvent("s1", {
+      kind: "question_request", async: true, requestId: "async-ui-approval", occurrenceId: "question-occurrence",
+      questions: [{ id: "0", question: "Approve the UI evidence?", options: [{ label: "Approve" }] }],
+    }, 1, 10);
+    const question = h.db.getSession("s1")!.pendingApproval;
+    assert.equal(question?.async, true);
+    h.db.updateSessionStatus("s1", "idle", 11);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const command = h.sent.find((message) => message.type === "durable_session_command")?.command;
+    assert.ok(command);
+    assert.equal((command as { reviewContinuation?: boolean }).reviewContinuation, true,
+      "the runner must receive a trusted automatic-continuation marker, not a human prompt");
+    assert.equal(h.db.getSession("s1")!.pendingApproval?.occurrenceId, question?.occurrenceId);
+  } finally { h.db.close(); }
+});
+
+test("older runners hold review notifications until the pending async question is answered (#3938)", () => {
+  const h = harness({ driver: "codex-app-server", protocol: 267 });
+  try {
+    h.db.setWorktreePath("s1", "/repo/worktrees/s1");
+    const view = requested(h);
+    h.svc.onSessionEvent("s1", { kind: "question_request", async: true, requestId: "async-approval",
+      occurrenceId: "occurrence", questions: [{ id: "0", question: "Approve?", options: [] }] }, 1, 10);
+    h.db.updateSessionStatus("s1", "idle", 11);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(continuationCommands(h).size, 0);
+    assert.equal(h.db.getSession("s1")!.pendingApproval?.occurrenceId, "occurrence");
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 0);
+    h.svc.onSessionEvent("s1", { kind: "question_resolved", requestId: "async-approval",
+      occurrenceId: "occurrence", answered: true, resolutionReason: "submitted" }, 2, 12);
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 1);
+    const command = h.sent.find((message) => message.type === "durable_session_command")?.command;
+    assert.equal((command as { reviewContinuation?: boolean }).reviewContinuation, undefined);
   } finally { h.db.close(); }
 });
 
@@ -962,7 +1006,7 @@ test("a failed review is reported to its requester; one it cancelled is not", ()
     h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: failed.reviewSessionId, state: "failed",
       reason: "the reviewer timed out", round: ROUND,
       verdict: { valid: false, consumed: false, effectiveVote: null, failureClass: "timeout", validationErrors: ["the reviewer timed out"] } } as never);
-    const text = immediatePrompts(h)[0]!;
+    const text = [...continuationCommands(h).values()][0]!;
     assert.match(text, /ended with an invalid attempt that does not count as a review: "the reviewer timed out" \(it did not use one of the round's attempts\)\./u);
     // Cancelled by the requester itself: nothing is owed.
     h.db.updateSessionStatus("s1", "idle", 11);
@@ -971,7 +1015,7 @@ test("a failed review is reported to its requester; one it cancelled is not", ()
       reason: "the review was cancelled" });
     h.svc.retryDuePrompts();
     assert.equal(h.db.reviewSessions.view(cancelled.reviewSessionId)!.continuation, null);
-    assert.equal(immediatePrompts(h).length, 1);
+    assert.equal(continuationCommands(h).size, 1);
   } finally { h.db.close(); }
 });
 

@@ -625,7 +625,8 @@ interface QueuedPrompt {
   providerRecovery?: boolean;
   /** The worktree a `providerRecovery` continuation resumes the session's task in (#3810). */
   worktreeContinuation?: { path: string; branch: string };
-  /** Control-plane-authenticated automatic campaign turn, distinct from a human prompt. */
+  /** Control-plane-authenticated campaign or review continuation, distinct from human input.
+   * This historical name also persists in user_message and authentication-retry records. */
   campaignContinuation?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
