@@ -37,7 +37,7 @@ import type { BoxStatus, RunnerCredentialSecret } from "@wollipog/protocol";
 import type { BoxConfig, ControlPlaneDb } from "./db.js";
 import { readCompatibleEnv, type Environment } from "./env-compat.js";
 import type { Hub } from "./hub.js";
-import { sshLaunchDiagnostic, supervisedSshCommand } from "./ssh-runner-launch.js";
+import { localSshSupportsStdinNull, SSH_TEARDOWN_TIMEOUT_MS, sshLaunchDiagnostic, supervisedSshCommand } from "./ssh-runner-launch.js";
 import { runnerHarnessReadiness } from "./host-admin-route.js";
 
 /** Home-relative path the runner binary is deployed to on the box (cwd is $HOME over SSH). */
@@ -124,15 +124,14 @@ export function buildSshArgs(o: {
   remotePort: number;
   cpPort: number;
   remoteCommand: string;
+  stdinNullSupported?: boolean;
 }): string[] {
   return [
     "-p", String(o.sshPort),
     ...SSH_BASE_OPTS,
     "-T",
-    // IgnoreUnknown predates our existing accept-new requirement. StdinNull arrived in 8.7;
-    // older clients already keep stdin open by default and must not reject this override.
-    "-o", "IgnoreUnknown=StdinNull",
-    "-o", "StdinNull=no",
+    // Only emit the newer override when this local client proved it accepts the option.
+    ...(o.stdinNullSupported ? ["-o", "StdinNull=no"] : []),
     "-o", "ControlMaster=no",
     "-o", "ControlPath=none",
     "-o", "ServerAliveInterval=15",
@@ -1638,7 +1637,9 @@ export class BoxOrchestrator {
         fresh.pendingLegacyDataAdoptionEpoch,
         adoptionEpoch,
       )) return;
-      this.launch(fresh, rt, epoch, tokenFile, adoptionEpoch, binaryReadiness.runnerPath);
+      const stdinNullSupported = await localSshSupportsStdinNull();
+      if (!this.live(rt, epoch)) return;
+      this.launch(fresh, rt, epoch, tokenFile, adoptionEpoch, binaryReadiness.runnerPath, stdinNullSupported);
     } catch (err) {
       if (!this.live(rt, epoch)) return;
       const msg = bootstrapFailureMessage(stage, (err as Error).message);
@@ -1655,6 +1656,7 @@ export class BoxOrchestrator {
     tokenFile: string,
     adoptionEpoch: string | null,
     runnerPath: string,
+    stdinNullSupported = false,
   ): void {
     const controlPlaneUrl = `ws://127.0.0.1:${rt.remotePort}/runner`;
     const baseline = rt.readiness?.baseline;
@@ -1685,6 +1687,7 @@ export class BoxOrchestrator {
       remotePort: rt.remotePort,
       cpPort: this.deps.cpPort,
       remoteCommand: supervisedSshCommand(remoteCommand, `wollipog-ssh-${randomUUID()}.scope`),
+      stdinNullSupported,
     });
     this.log(`${cfg.boxId} launching ssh ${cfg.sshTarget} (tunnel :${rt.remotePort} → CP :${this.deps.cpPort})`);
     const child = this.spawnTunnel(args);
@@ -1803,7 +1806,7 @@ export class BoxOrchestrator {
       try {
         if (rt.child.stdin) {
           // Keep the child and drain timer owned even when Remove drops its Machine runtime.
-          stopped = stopAndWaitForManagedChild(rt.child).catch(() => {
+          stopped = stopAndWaitForManagedChild(rt.child, SSH_TEARDOWN_TIMEOUT_MS).catch(() => {
             this.log(JSON.stringify({ event: "ssh_runner_stop", boxId, outcome: "unacknowledged" }));
           });
         } else rt.child.kill();

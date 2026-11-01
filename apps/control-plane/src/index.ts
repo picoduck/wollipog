@@ -180,6 +180,7 @@ import {
 import { RemoteAccess } from "./remote-access.js";
 import { registerRemoteAccessRoutes } from "./remote-access-route.js";
 import { probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness } from "./host-admin-route.js";
+import { finishControlPlaneShutdown } from "./control-plane-shutdown.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
@@ -7145,14 +7146,7 @@ function gracefulShutdown(exitCode: number, reason: string): void {
   // app.close() fires the onClose hook, which runs orchestrator.shutdown() to kill the box SSH
   // children — the same path SIGINT/SIGTERM use. Force-exit on a bounded failsafe so a hung close
   // (possible after an uncaughtException left state corrupt) can never wedge the process forever.
-  // Start the owned tunnel drains before app.close(), whose other hooks may themselves hang.
-  // Allow the 35s drain/forced-local-transport deadline to run before the overall failsafe.
-  const runnersStopped = orchestrator.shutdown();
-  const failsafe = setTimeout(() => process.exit(exitCode), 40_000);
-  void Promise.allSettled([app.close(), runnersStopped]).finally(() => {
-    clearTimeout(failsafe);
-    process.exit(exitCode);
-  });
+  finishControlPlaneShutdown(orchestrator.shutdown(), () => app.close(), () => process.exit(exitCode));
 }
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.once(sig, () => gracefulShutdown(0, sig));

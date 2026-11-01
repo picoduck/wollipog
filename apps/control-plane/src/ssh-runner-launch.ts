@@ -1,4 +1,20 @@
 /** The remote shell receives only quoted runner arguments, never a plaintext credential. */
+import { execFile } from "node:child_process";
+import { devNull } from "node:os";
+
+/** Remove/shutdown must leave time for cleanup within the service's 30s stop budget. */
+export const SSH_TEARDOWN_TIMEOUT_MS = 20_000;
+
+let stdinNullSupport: Promise<boolean> | undefined;
+export function localSshSupportsStdinNull(): Promise<boolean> {
+  // Parse only, without connecting or loading user configuration. IgnoreUnknown is deliberately
+  // untouched: overriding its first-value-wins string would mask portable user SSH settings.
+  return stdinNullSupport ??= new Promise(resolve => {
+    execFile("ssh", ["-G", "-F", devNull, "-o", "StdinNull=no", "localhost"],
+      { timeout: 2_000, maxBuffer: 64 * 1024, windowsHide: true }, error => resolve(!error));
+  });
+}
+
 function quote(value: string): string { return "'" + value.replace(/'/g, "'\\''") + "'"; }
 
 /** Only fixed diagnostic fields cross into control-plane logs; never forward arbitrary stderr. */

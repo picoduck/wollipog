@@ -839,8 +839,11 @@ test("buildSshArgs opens the reverse tunnel and runs the remote command last", (
   });
   assert.deepEqual(args.slice(0, 2), ["-p", "2222"]);
   assert.ok(args.includes("ExitOnForwardFailure=yes"));
-  assert.ok(args.indexOf("IgnoreUnknown=StdinNull") < args.indexOf("StdinNull=no"),
-    "OpenSSH before 8.7 must ignore the newer stdin override");
+  assert.equal(args.some(arg => arg.startsWith("IgnoreUnknown=")), false, "preserve user SSH configuration");
+  assert.equal(args.includes("StdinNull=no"), false, "unprobed/older clients keep stdin open by default");
+  const modern = buildSshArgs({ sshTarget: "host", sshPort: 22, remotePort: 47100, cpPort: 4317,
+    remoteCommand: "runner", stdinNullSupported: true });
+  assert.ok(modern.includes("StdinNull=no"));
   const ri = args.indexOf("-R");
   assert.equal(args[ri + 1], "47100:127.0.0.1:4317");
   // `--` then target then the remote command are the final positional args (option terminator

@@ -118,7 +118,7 @@ for (const action of ["remove", "shutdown"] as const) {
     assert.equal(closed, false, "control-plane shutdown must await transports whose Machine was already removed");
     assert.equal(child.stdin?.writableEnded, true, "request graceful shutdown first");
     assert.equal(child.killed, false);
-    t.mock.timers.tick(35_000);
+    t.mock.timers.tick(20_000);
     await stopped;
     await closing;
     assert.equal(child.killed, true, "never leave a legacy tunnel running after the drain deadline");

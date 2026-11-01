@@ -4,7 +4,20 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { sshLaunchDiagnostic, supervisedSshCommand } from "./ssh-runner-launch.js";
+import { localSshSupportsStdinNull, sshLaunchDiagnostic, supervisedSshCommand } from "./ssh-runner-launch.js";
+import { buildSshArgs } from "./box-orchestrator.js";
+
+test("owned SSH options preserve the user's portable IgnoreUnknown configuration", async t => {
+  if (spawnSync("ssh", ["-V"]).error) { t.skip("OpenSSH client unavailable"); return; }
+  const root = mkdtempSync(join(tmpdir(), "ssh-user-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "config");
+  writeFileSync(config, "IgnoreUnknown WollipogFixtureUnsupported\nWollipogFixtureUnsupported yes\n");
+  const args = buildSshArgs({ sshTarget: "localhost", sshPort: 22, remotePort: 47100, cpPort: 4317, remoteCommand: "runner",
+    stdinNullSupported: await localSshSupportsStdinNull() });
+  const result = spawnSync("ssh", ["-F", config, "-G", ...args], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+});
 
 test("SSH diagnostics retain fixed launch evidence without copying stderr content", () => {
   assert.deepEqual(sshLaunchDiagnostic("[runner] ssh_launch mode=process-scan reason=user-manager-unavailable; private details"),

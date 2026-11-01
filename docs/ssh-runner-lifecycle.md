@@ -32,12 +32,17 @@ shutdown and provider cleanup. Reconnect/update closes stdin and waits up to 35 
 successful SSH exit before launching a replacement; failure or timeout refuses replacement.
 On timeout the owned local SSH process is killed, including for older fallback runners that
 ignore EOF. This is transport cleanup, not acknowledgment of remote provider cleanup. Remove
-also bounds transport cleanup, and control-plane shutdown awaits these drains before exiting.
+and control-plane shutdown use a shorter 20-second transport deadline. Shutdown awaits these
+drains, then retains the normal five-second hung-close failsafe, with a 25-second overall limit
+inside the generated service's 30-second stop budget. With no pending SSH drains a hung close
+still exits after five seconds.
 EOF cancellation is armed before control-plane attestation so an unavailable control plane cannot
 strand a starting runner in its attestation retry loop.
 SSH multiplexing and TTY allocation are disabled on this owned connection so another SSH master
 cannot outlive the owning process or retain the shutdown channel. Use matching current control-plane
 and runner builds: older runners do not implement the stdin shutdown contract.
+The local client is probed without connecting or reading user configuration before passing the
+newer stdin override. User-configured `IgnoreUnknown` settings remain intact.
 
 If a Linux host lacks a usable user manager, the runner retains process-scan containment and emits
 `ssh_launch mode=process-scan reason=user-manager-unavailable`. macOS keeps its existing native

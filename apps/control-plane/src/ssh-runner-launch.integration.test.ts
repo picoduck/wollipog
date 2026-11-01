@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { createInterface } from "node:readline";
 import { test } from "node:test";
 import { buildSshArgs, posixQuote } from "./box-orchestrator.js";
-import { supervisedSshCommand } from "./ssh-runner-launch.js";
+import { localSshSupportsStdinNull, supervisedSshCommand } from "./ssh-runner-launch.js";
 
 // Opt-in, isolated Linux SSH fixture: requires python3, no runner credential or provider HOME.
 // Never replaces or signals a deployed runner. The remote unit and reverse port are attempt-private.
@@ -27,6 +27,7 @@ sys.stdin.read()
   const args = buildSshArgs({
     sshTarget: process.env.WOLLIPOG_TEST_SSH_TARGET!, sshPort: 22, remotePort: randomInt(47100, 48000), cpPort: 9,
     remoteCommand: supervisedSshCommand("python3 -c " + posixQuote(fixture), unit),
+    stdinNullSupported: await localSshSupportsStdinNull(),
   });
   if (process.env.WOLLIPOG_TEST_SSH_KNOWN_HOSTS) {
     args.unshift("-o", "StrictHostKeyChecking=yes", "-o", "UserKnownHostsFile=" + process.env.WOLLIPOG_TEST_SSH_KNOWN_HOSTS);
