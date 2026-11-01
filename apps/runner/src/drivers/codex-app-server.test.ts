@@ -3943,6 +3943,9 @@ test("same-turn reconciliation trusts only terminal provider items with an exact
   }
   turn.items = [admission, item, { ...item, id: "duplicate" }];
   assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  turn.items = [admission, item, { ...item, id: "running-duplicate", status: "inProgress", exitCode: null }] as typeof turn.items;
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null,
+    "a second exact invocation still running makes the proof ambiguous");
   turn.items = [item, admission];
   assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
   thread.turns = [{ ...turn, items: [admission] }, { ...turn, id: "another-turn", items: [item] }];
