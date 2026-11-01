@@ -332,9 +332,14 @@ test("a failed switch shows a danger notice under its row in the list that repla
   // As InstanceProvider does: the switch makes the profile active and opening, the boundary
   // unmounts the shell's list, and a failed connection resolves the switch with the failed phase.
   let finish: () => void = () => undefined;
+  let connection = 1;
   const value = manager({
     statusByProfile: { local: { availability: "online" } },
-    switchInstance: () => new Promise<void>((resolve) => { finish = resolve; }),
+    switchInstance: () => {
+      connection += 1;
+      return new Promise<void>((resolve) => { finish = resolve; });
+    },
+    currentConnection: () => connection,
   });
   const shell = mount(value);
   await shell.render();
@@ -380,6 +385,38 @@ test("a failed switch shows a danger notice under its row in the list that repla
     const dismiss = notice.querySelector<HTMLButtonElement>(".notice-dismiss")!;
     await act(async () => { dismiss.click(); });
     assertNoDomNode(view.mountPoint.querySelector(".instance-list > .notice"));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a finished Switch never speaks for a later connection of the same instance that fails", async () => {
+  let connection = 1;
+  const value = manager({
+    async switchInstance() { connection += 1; },
+    currentConnection: () => connection,
+  });
+  const view = mount(value);
+  await view.render();
+  try {
+    // The switch opens Home Workstation, and the list shows it current and online.
+    await act(async () => { buttons(rowOf(view.mountPoint, remote))[0]!.click(); await tick(); });
+    const switched = { registry: { profiles: [local, remote], activeInstanceId: remote.id }, activeProfile: remote };
+    await view.render(manager({ ...value, ...switched, statusByProfile: { [remote.id]: { availability: "online" } } }));
+    assert.equal(rowOf(view.mountPoint, remote).querySelector(".instance-row-current")?.textContent, "Current");
+
+    // Later an edit, a re-pair or the recovery screen's Retry opens it again, and that fails.
+    connection += 1;
+    await view.render(manager({
+      ...value,
+      ...switched,
+      phase: "failed",
+      error: "error sending request for url",
+      statusByProfile: { [remote.id]: { availability: "offline", message: "error sending request for url" } },
+    }));
+    const row = rowOf(view.mountPoint, remote);
+    assert.equal(row.querySelector(".status")?.textContent, "Offline", "the row still says what is wrong");
+    assertNoDomNode(view.mountPoint.querySelector(".instance-list > .notice"), "but no notice claims the switch failed");
   } finally {
     await view.unmount();
   }

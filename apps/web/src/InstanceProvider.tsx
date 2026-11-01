@@ -612,6 +612,8 @@ export function InstanceProvider({
       navigation.activate?.({ name: "runners", section: "instances" });
     },
     openInstanceDialog,
+    // The generation that every open, and every removal of the active instance, advances (#3002).
+    currentConnection: () => generationRef.current,
     goToThisMachine: () => switchTo("local"),
     reportActiveStatus,
   }), [

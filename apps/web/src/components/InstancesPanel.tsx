@@ -54,11 +54,18 @@ interface RowFailure {
  * unmounts this list and mounts the recovery screen's own, and the shell's list again once it is
  * open. So the state lives beside the component, keyed by profile, and the list on screen shows the
  * busy button and then the notice under the row that was pressed. `attempts` remembers a finished
- * Switch or Retry: the provider reports a failed connection as its `failed` phase, not by throwing.
+ * Switch or Retry and the connection it opened (`InstanceManager.currentConnection`): the provider
+ * reports a failed connection as its `failed` phase, not by throwing, and the row speaks for that
+ * connection only, never for a later one (an edit, a re-pair or another Retry) that fails too.
  */
+interface RowAttempt {
+  action: Exclude<RowAction, "remove">;
+  connection: number;
+}
+
 interface RowFeedback {
   pending: Readonly<Record<string, RowAction>>;
-  attempts: Readonly<Record<string, Exclude<RowAction, "remove">>>;
+  attempts: Readonly<Record<string, RowAttempt>>;
   failures: Readonly<Record<string, RowFailure>>;
 }
 
@@ -203,8 +210,12 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
     }));
     try {
       await operation();
-      // A switch or retry reports a failed connection through the provider's phase, not by throwing.
-      if (action !== "remove") updateRowFeedback((current) => ({ ...current, attempts: { ...current.attempts, [profile.id]: action } }));
+      // A switch or retry reports a failed connection through the provider's phase, not by throwing;
+      // once it settles, the provider's current connection is the one it opened.
+      const opened = instances.currentConnection?.();
+      if (action !== "remove" && opened !== undefined) {
+        updateRowFeedback((current) => ({ ...current, attempts: { ...current.attempts, [profile.id]: { action, connection: opened } } }));
+      }
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
       updateRowFeedback((current) => ({
@@ -245,11 +256,12 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
         const pending = busy[profile.id];
         const problem = profile.kind === "remote" ? describeInstanceFailure(status) : null;
         const pairing = status.availability === "authentication-required" || status.availability === "missing-credential";
-        // A thrown failure (a removal), else a Switch or Retry from a list whose connection then failed.
+        // A thrown failure (a removal), else a Switch or Retry from a list whose own connection failed.
         const attempt = attempts[profile.id];
-        const opened = active && instances.phase === "failed" && attempt !== undefined;
-        const failure: RowFailure | undefined = failures[profile.id] ?? (opened ? {
-          message: FAILURE_SENTENCES[attempt](profile.label),
+        const attemptFailed = attempt !== undefined && active && instances.phase === "failed"
+          && attempt.connection === instances.currentConnection?.();
+        const failure: RowFailure | undefined = failures[profile.id] ?? (attemptFailed ? {
+          message: FAILURE_SENTENCES[attempt.action](profile.label),
           detail: instances.error ?? status.message ?? "",
         } : undefined);
 

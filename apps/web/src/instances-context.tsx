@@ -192,6 +192,13 @@ export interface InstanceManager {
    * ignored. Outside the desktop app it does nothing.
    */
   openInstanceDialog(options: OpenInstanceDialogOptions): void;
+  /**
+   * Identifies the connection the provider last started for the active instance: every switch,
+   * retry, edit or re-pair of the active instance, and every removal, starts a new one. Read once a
+   * switch or retry settles, it names that switch's connection, so a later failed phase can be told
+   * apart from it (#3002). Absent outside the desktop app.
+   */
+  currentConnection?(): number;
   goToThisMachine(): Promise<void>;
   reportActiveStatus(status: InstanceStatus): void;
 }

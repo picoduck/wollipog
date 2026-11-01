@@ -587,6 +587,24 @@ test("a failed switch and a failed Retry each say so under their row, through th
   await expect(notice).toHaveCount(0);
 });
 
+test("a switch that worked is not blamed when a later edit's connection fails", async ({ page }) => {
+  await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
+  await tile(page, "Studio").click();
+  await page.getByRole("menuitemradio", { name: /This Machine/ }).click();
+  await row(page, "Studio").getByRole("button", { name: "Switch" }).click();
+  await expect(row(page, "Studio").locator(".instance-row-current")).toHaveText("Current");
+
+  // Editing the active instance opens it again; that connection fails.
+  await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.failNextOpen("remote-1", "unreachable", "error sending request for url"));
+  await rowAction(page, "Studio", "Edit…");
+  const edit = page.getByRole("dialog", { name: "Edit Instance" });
+  await edit.getByLabel("Instance Name").fill("Home Studio");
+  await edit.getByRole("button", { name: "Save Changes" }).click();
+  await expect(row(page, "Home Studio").locator(".status")).toHaveText("Offline");
+  await expect(page.locator(".instance-recovery-body")).toContainText("Home Studio Is Unavailable");
+  await expect(page.locator(".instance-list > .notice")).toHaveCount(0);
+});
+
 test("Copy Address copies the full origin and confirms", async ({ page }) => {
   await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
   await page.evaluate(() => {
