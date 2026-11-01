@@ -1,14 +1,13 @@
 import React, { useId, useRef, useState } from "react";
 import type { InstanceProfile } from "../desktop-instances.js";
 import {
-  activeInstanceStatusMeta,
   instanceAvailabilityMeta,
   instanceMonogram,
+  instanceStatus,
   useActiveInstanceConnection,
   useInstances,
-  type InstanceAvailability,
 } from "../instances-context.js";
-import type { StatusMeta } from "../status-meta.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { ListIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
@@ -20,7 +19,7 @@ export const INSTANCE_MENU_WIDTH = 300;
 /** The ancestors the flyout opens beside: the desktop rail, or the recovery shell's navigation. */
 const INSTANCE_MENU_BESIDE = ".app-rail, .instance-recovery-nav";
 
-/** A status label as tooltip text, which is sentence case (§9.3): "Sign-In Required" → "Sign-in required". */
+/** A status label as tooltip text, which is sentence case (§9.3): "Pairing Required" → "Pairing required". */
 function sentenceCase(label: string): string {
   return label.charAt(0) + label.slice(1).toLowerCase();
 }
@@ -44,16 +43,15 @@ export function InstanceSelector({ labelled = false }: { labelled?: boolean }) {
   if (!instances.desktopMultiInstance) return null;
 
   const active = instances.activeProfile;
-  const activeAvailability: InstanceAvailability = instances.statusByProfile[active.id]?.availability
-    ?? (instances.phase === "opening" ? "connecting" : "saved");
   /** The status a row shows as text: only one that is known and is not Online. */
   const rowStatus = (profile: InstanceProfile): StatusMeta | null => {
-    const current = profile.id === active.id;
-    if (current && connection) return activeInstanceStatusMeta(connection, activeAvailability);
-    const availability = current ? activeAvailability : instances.statusByProfile[profile.id]?.availability ?? "saved";
-    return availability === "online" || availability === "saved" ? null : instanceAvailabilityMeta(availability);
+    const { availability } = instanceStatus(instances, connection, profile.id);
+    return availability === "online" ? null : instanceAvailabilityMeta(availability);
   };
-  const tileStatus = rowStatus(active) ?? instanceAvailabilityMeta(activeAvailability);
+  // The tile always has a dot. An active instance with nothing recorded is opening (Connecting) or
+  // was lost from the registry; the latter is not known to be current, so it reads hollow Offline.
+  const tileStatus = instanceAvailabilityMeta(instanceStatus(instances, connection, active.id).availability)
+    ?? statusMeta("machine", "offline");
   const statusId = `${idPrefix}-status`;
 
   const select = (profileId: string) => {

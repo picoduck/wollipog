@@ -30,7 +30,7 @@ import {
   ComputerIcon,
 } from "./Icons.js";
 import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
-import { InstancesPanel } from "./InstancesPanel.js";
+import { addRemoteInstanceAction, InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
 import { MachineCapacitySection } from "./MachineCapacitySection.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
@@ -212,6 +212,8 @@ export function RunnersView() {
   // tab as the one-instance app does, and its route lands on Machines in place.
   const isMobile = useIsMobile();
   const instancesTab = instances.desktopMultiInstance && !isMobile;
+  /** The Instances tab's Add Remote Instance…, where focus returns after a removal (#3002). */
+  const addInstanceRef = useRef<HTMLButtonElement>(null);
   const requestedSection = view.name === "runners" ? view.section ?? "machines" : "machines";
   const section: ConnectionSection = !instancesTab && requestedSection === "instances"
     ? "machines"
@@ -371,6 +373,7 @@ export function RunnersView() {
   // Each tab supplies the header's actions (§3.3). Only owners and admins add machines, and while the
   // tab is empty its state offers the same methods, so the header does not repeat them (§12.1).
   const tabActions = (tab: ConnectionSection): PageHeaderActions => {
+    if (tab === "instances") return { primary: addRemoteInstanceAction(instances, addInstanceRef) };
     if (tab === "machines" && canManageMachines && !machinesEmpty) {
       return {
         primary: {
@@ -485,7 +488,7 @@ export function RunnersView() {
           aria-labelledby="connections-instances-tab"
           className="connections-panel"
         >
-          <InstancesPanel />
+          <InstancesPanel addButtonRef={addInstanceRef} />
         </div>
       ) : section === "people" ? (
         <div
