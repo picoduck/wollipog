@@ -594,11 +594,18 @@ export function SessionHeader({
               void run(async () => {
                 if (historicalResultRecovery && !await confirm({
                   title: "Restart Session",
-                  message: "This starts a new conversation and ends every background job; " +
+                  message: "This restarts the agent process and ends every background job; " +
                     (runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")
-                      ? "finished results are reported to the new conversation."
+                      ? "finished results are reported after the restart."
                       : "held results are discarded.") +
-                    " The original job commands are not rerun; review the conversation before continuing.",
+                    (runnerSupportsProtocol(runnerProtocolVersion, "sessionRestartResume") &&
+                      session.agentCapabilities?.restartResumesConversation === true
+                      ? " The established conversation will resume"
+                      : runnerSupportsProtocol(runnerProtocolVersion, "sessionRestartResume") &&
+                        session.agentCapabilities?.restartResumesConversation === false
+                        ? " This starts a new conversation"
+                        : " The runner has not confirmed conversation continuity") +
+                    "; original job commands are not rerun, so review the conversation before continuing.",
                   confirmLabel: "Restart Session",
                   tone: "danger",
                 })) return;

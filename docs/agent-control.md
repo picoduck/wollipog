@@ -1717,12 +1717,16 @@ queued behind a turn that had never started.
   on the runner, and the hold says which applies (`restartKeepsQueue`, v191):
   - **A v191 runner keeps the queued work (#1779).** Every prompt still in the queue, decision
     resumes included, runs after the restart in its original order and can still be removed
-    before it starts. A Claude Code restart starts a new conversation, and the old provider
-    process ends with every job it ran, so the runner carries the job records instead of dropping
-    them: an unfinished job, and a pending or orphaned task id with no record, is recorded as
+    before it starts. Restart ends the old provider process with every job it ran, so the runner
+    carries the job records instead of dropping them: an unfinished job, and a pending or orphaned
+    task id with no record, is recorded as
     `killed` by the restart, and its result is unrecoverable. A finished job whose result still
-    waited for its continuation joins one managed continuation into the new conversation. That
-    continuation names each job, its status, and a finished job's provider output file, under
+    waited for its continuation joins one managed continuation after the restart. Current runners
+    resume established Claude Code, Codex App Server and Pi conversations; the session-scoped
+    `agentCapabilities.restartResumesConversation` capability (v263) advertises that guarantee.
+    A session without an established provider id starts fresh. Older runners omit the capability,
+    so clients keep Retry Turn disabled for terminal sessions rather than assuming continuity.
+    The continuation names each job, its status, and a finished job's provider output file, under
     the ordinary at-most-once fences and governance holds. A continuation already submitted to the
     old conversation is never repeated; it is recorded as missing its result, as is an owed result
     when the restart moves the session to another provider. Prompts the overtaken launch of a
@@ -1746,7 +1750,7 @@ queued behind a turn that had never started.
   different snapshot identity and raises fresh attention. Background Work keeps acknowledged
   entries inspectable. Recovery remains separate (ask the
   session to stop the unfinished job; a stop or a restart ends every job, a stop discards the result,
-  and a v191 restart reports it to the new conversation), rather than **Result Pending** with "No
+  and a v191 restart reports it after the relaunch), rather than **Result Pending** with "No
   action is needed".
   Older runners leave all of this absent, and a queued prompt behind such a barrier stays invisible
   to them as before.

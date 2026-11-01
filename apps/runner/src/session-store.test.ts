@@ -831,6 +831,36 @@ test("rate-priced usage rides registration and v219 snapshots but never an older
   assert.equal("ratePricedUsage" in metaToSnapshot(meta(), 219), false);
 });
 
+test("restart capability describes the retained provider coordinate without exposing it", () => {
+  for (const driver of ["claude-code", "codex-app-server", "pi", "codex", "acp"] as const) {
+    for (const agentSessionId of [null, "", "established-conversation"]) {
+      const stored = meta({ driver, agentSessionId });
+      const expected = !!agentSessionId && ["claude-code", "codex-app-server", "pi"].includes(driver);
+      const snap = metaToSnapshot(stored, 263);
+      assert.equal(snap.agentCapabilities?.restartResumesConversation, expected, `${driver} ${agentSessionId}`);
+      assert.equal((snap as unknown as Record<string, unknown>).agentSessionId, undefined);
+      for (const version of [null, 260, 261, 262]) {
+        assert.equal(metaToSnapshot(stored, version).agentCapabilities?.restartResumesConversation, undefined);
+      }
+    }
+  }
+});
+
+test("registration withholds restart continuity until a supported peer negotiates", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta({ driver: "claude-code", agentSessionId: "established-conversation" }));
+    assert.equal(store.registrationSnapshots()[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(260)[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(262)[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(263)[0]?.agentCapabilities?.restartResumesConversation, true);
+    assert.equal(store.registrationSnapshots()[0]?.agentCapabilities?.restartResumesConversation, undefined,
+      "a reconnect must negotiate again rather than reuse the previous peer version");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command provenance)", () => {
   const snap = metaToSnapshot(meta({
     controlPlaneLaunchId: "launch-proof-1",

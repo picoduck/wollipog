@@ -901,8 +901,8 @@ for (const viewport of [
     await expect(entry.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(entry).toContainText(
       "restart the session with restart_session, knowing what that costs: the provider and its background job end, " +
-      "with unfinished work recorded as killed and unrecoverable and a finished result still owed reported to the new " +
-      "conversation; the queued messages are kept and run after the restart; and any approved workflow " +
+      "with unfinished work recorded as killed and unrecoverable and a finished result still owed reported after the " +
+      "restart; the queued messages are kept and run after the restart; and any approved workflow " +
       "decision the session has not yet consumed is revoked, and the " +
       "restarted session is told which ones to request again.");
     await expect(entry).not.toContainText("discarded");
@@ -911,7 +911,7 @@ for (const viewport of [
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=1&restart=keeps");
     await expect(entry).toHaveCount(1);
     await expect(entry).toContainText("Prefer waiting to restarting the session: a restart keeps the queued messages but " +
-      "ends every background job and starts a new conversation.");
+      "ends every background job and relaunches the provider.");
     await expect(entry).not.toContainText("discards");
     await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
