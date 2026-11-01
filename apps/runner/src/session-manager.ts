@@ -5476,10 +5476,10 @@ export class SessionManager {
     // admission cannot own an in-distro HOME; session isolation handles that context separately.
     if (context.kind === "wsl") return { settle: async () => {} };
     if (!this.providerHomeLeases) throw new Error("provider-HOME ownership is unavailable");
-    // Discovery inherits the runner's environment, including provider-specific HOME overrides.
-    // Lease that actual effective home, not just the configured overlay's (#3903).
-    const reference = await this.providerHomeLeases.acquireReference({ driver: agent.driver ?? "acp", command: agent.command, context,
-      env: providerHomeLeaseEnv({ context, env }, this.runnerEnvironment) },
+    // Discovery inherits the runner's environment, including HOME and provider-specific HOME
+    // overrides. Lease that actual effective environment, not just the configured overlay.
+    const effectiveEnv = Object.fromEntries(Object.entries({ ...this.runnerEnvironment, ...env }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    const reference = await this.providerHomeLeases.acquireReference({ driver: agent.driver ?? "acp", command: agent.command, context, env: effectiveEnv },
       { isCurrent: () => !this.shuttingDown });
     if (this.shuttingDown) {
       if (reference) await this.releaseProviderHomeReference(reference);

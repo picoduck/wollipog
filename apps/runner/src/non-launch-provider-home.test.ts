@@ -140,6 +140,17 @@ const PATHS: Record<string, (h: ReturnType<typeof managerFixture>, provider: Pro
     (await h.manager.prepareSessionNamingExecution(agent(provider), env, h.root)).cleanup([]),
 };
 
+test("a discovery probe without any provider home leases the HOME it inherits, not the platform default", async () => {
+  const h = managerFixture("claude");
+  try {
+    (h.manager as unknown as { runnerEnvironment: NodeJS.ProcessEnv }).runnerEnvironment = { HOME: "/runner/inherited" };
+    await (await h.manager.prepareDiscoveryProbe(agent("claude"), {})).settle([]);
+    await (await h.manager.prepareDiscoveryProbe({ ...agent("claude"), driver: "acp" }, {})).settle([]);
+    assert.deepEqual(h.registry.homes, ["/runner/inherited", "/runner/inherited"],
+      "on Windows `os.homedir()` reads USERPROFILE, which can differ from the inherited HOME");
+  } finally { h.cleanup(); }
+});
+
 for (const [path, run] of Object.entries(PATHS)) {
   for (const provider of ["claude", "codex"] as const) {
     const variable = HOME_VARIABLE[provider];
