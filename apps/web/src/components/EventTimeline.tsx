@@ -559,7 +559,6 @@ export type TimelineRenderRow =
       attempts?: readonly ToolItem[];
     };
 
-const timelineRowKey = (row: TimelineRenderRow) => row.key;
 export const estimateTimelineRow = (row: TimelineRenderRow): number => {
   if (row.kind === "work_summary") return 28;
   if (row.kind === "subagent_summary" || row.kind === "subagent_output") return 28;
@@ -845,6 +844,20 @@ function EventTimelineBody({
   // the row also closes the turn and so carries its footer.
   const collapsedRow = (row: TimelineRenderRow | undefined) =>
     row !== undefined && artifactSlots.get(row.key)?.role === "hidden" && !turnFooters.has(row.key);
+  // Nor in the virtual list's geometry while unmounted: a hidden row is estimated at zero, and keyed
+  // apart from the preview it may have been (before history was prepended), so no height measured
+  // for that preview is kept for it. A row only turns hidden when rows are inserted before it, which
+  // the projection already reports as dirty from there. Read through a ref, so both callbacks keep
+  // their identity, and the list its key index, while other rows stream.
+  const hiddenArtifactKeysRef = useRef<ReadonlySet<string>>(new Set());
+  hiddenArtifactKeysRef.current = useMemo(
+    () => new Set([...artifactSlots].filter(([, slot]) => slot.role === "hidden").map(([key]) => key)),
+    [artifactSlots],
+  );
+  const virtualRowKey = useCallback((row: TimelineRenderRow) =>
+    hiddenArtifactKeysRef.current.has(row.key) ? `${row.key}:hidden` : row.key, []);
+  const estimateVirtualRow = useCallback((row: TimelineRenderRow) =>
+    hiddenArtifactKeysRef.current.has(row.key) ? 0 : estimateTimelineRow(row), []);
   // Prompts a settled turn's More Turn Actions already lists; on a coarse pointer every other user
   // message (a steer, a running or footerless turn's prompt) keeps a menu of its own.
   const turnMenuPrompts = useMemo(() => {
@@ -998,10 +1011,10 @@ function EventTimelineBody({
   const timeline = scrollRef ? (
     <MeasuredVirtualList
       items={rows}
-      getKey={timelineRowKey}
+      getKey={virtualRowKey}
       renderItem={renderRow}
       scrollRef={scrollRef}
-      estimateSize={estimateTimelineRow}
+      estimateSize={estimateVirtualRow}
       overscan={8}
       rowGap={rowGap}
       className="timeline"
