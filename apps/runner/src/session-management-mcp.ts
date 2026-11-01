@@ -1096,7 +1096,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
-  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "set_guardrails", "create_worktree",
+  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
@@ -3276,6 +3276,27 @@ export const TOOLS: McpTool[] = [
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
       if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot archive its own session");
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: true });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "unarchive_session",
+    description: "Restore an archived child so it can be restarted to preserve and clean its worktree. Only its controlling Orchestrator may do this. Does not delete files or restart the child.",
+    inputSchema: {
+      type: "object", properties: { sessionId: { type: "string" } },
+      required: ["sessionId"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.orchestrator) return errorResult("only the controlling Orchestrator may unarchive a child");
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot unarchive its own session");
+      const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+      const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorktreeRecovery;
+      if (!compatibility.ok || !Number.isInteger(compatibility.data?.protocolVersion) || compatibility.data.protocolVersion < required) {
+        return errorResult("Update Wollipog before recovering an archived child (campaign worktree recovery is unsupported).");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: false });
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data) });
     },

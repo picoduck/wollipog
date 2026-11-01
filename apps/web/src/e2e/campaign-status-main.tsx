@@ -180,7 +180,7 @@ details.cwi_3 = itemDetail(items[2]!, {
     // A reader who can open the campaign but not the runner whose GitHub CLI reads it.
     pullRequests: [{ ref: { repository: "picoduck/wollipog", number: 2436 }, fact: { availability: "unavailable", reason: "not_authorized" } }],
     session: { availability: "stale", value: { sessionId: "s_child_3", status: "idle", archived: false, held: true, pendingRequests: 1 }, observedAt: NOW - 6 * MINUTE },
-    cleanup: { availability: "fresh", value: { sessionId: "s_child_3", worktrees: [{ path: "/w/3", status: "pending", reason: null }] }, observedAt: NOW - 6 * MINUTE },
+    cleanup: { availability: "fresh", value: { sessionId: "s_child_3", worktrees: [{ path: "/w/3", status: "refused", reason: 'the worktree has uncommitted changes (10 paths): "report.md", "notes.txt", "scratch-a.txt", "scratch-b.txt", "scratch-c.txt", "scratch-d.txt", "scratch-e.txt", "scratch-f.txt"; 2 more' }] }, observedAt: NOW - 6 * MINUTE },
   },
 });
 if (params.get("forge") === "gitlab") {

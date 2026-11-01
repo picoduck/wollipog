@@ -4734,7 +4734,7 @@ export class SessionManager {
           not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
           unavailable: "Git state is unavailable or changed during cleanup",
         } as const;
-        return { removed: false, reason: reasons[result.reason] };
+        return { removed: false, reason: result.dirtyPathsReason ?? reasons[result.reason] };
       }
       cleanup.worktreeRemovedAt = Date.now();
       this.cleanupJournal.add(cleanup);
@@ -17259,7 +17259,7 @@ export class SessionManager {
                 : {
                     detached_head: "the worktree has a detached HEAD",
                     not_runner_owned: "runner ownership could not be proven",
-                    dirty: "the worktree has uncommitted changes",
+                    dirty: removal.dirtyPathsReason ?? "the worktree has uncommitted changes",
                     no_upstream: "the branch has no upstream",
                     unpushed: "the branch has unpushed commits",
                     not_delivered: "the worktree head is not on the default branch or a verified merged pull request",

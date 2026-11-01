@@ -25,6 +25,7 @@ wollipog session create --runner <id> --agent <id> --workspace <id> --prompt <ta
 wollipog session prompt <session-id> <message> --json
 wollipog session wait <session-id> --for input_required,completed,failed,stopped --json
 wollipog session stop <session-id> --json
+wollipog session unarchive <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
 wollipog session release-hold <session-id> <hold-id> --json
 wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
@@ -47,6 +48,12 @@ wollipog decision list [--session <descendant-id>] [--limit <1-100>] [--cursor <
 wollipog decision consume <occurrence-id> --snapshot '<json>' [--action '<json>'] --json
 wollipog decision reconcile <occurrence-id> --snapshot '<json>' --json
 ```
+
+For a refused archived child's worktree, only its controlling Orchestrator may use `session unarchive`
+(protocol 266+ on control plane and runner). This restores visibility without restarting or deleting
+files. Then restart the child and ask it to preserve and clean its work, verify its new final report,
+and archive again. Retirement still refuses dirty, unpushed or undelivered work; an older runner
+refuses recovery explicitly. Keep scratch reports outside managed worktrees.
 
 Without `--after`, `session events` returns the newest `--limit` events (default 30, maximum 100).
 To read a long range, such as everything a child did since a known point, page forward: start with

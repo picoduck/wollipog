@@ -15,6 +15,7 @@ import Fastify from "fastify";
 import {
   CAMPAIGN_WORK_REVISION_CHANGED,
   PROTOCOL_VERSION,
+  worktreeDirtyPaths,
   type CampaignWorkItemDetailResponse,
   type CampaignWorkItemPrimaryState,
   type CampaignWorkItemsPage,
@@ -26,6 +27,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { registerCampaignStatusRoutes } from "./campaign-status-routes.js";
+import { registerSessionArchiveRoute } from "./session-archive-route.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub, type Socket } from "./hub.js";
@@ -126,6 +128,11 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
   assert.ok(hub.addUiClient(owner, { deviceId: "device-owner", principal: human("owner"), close() {} }));
 
   const app = Fastify();
+  let controllerId = "";
+  registerSessionArchiveRoute(app, { db, svc, requestPrincipal: () => ({
+    kind: "agent", actorId: controllerId, credentialSessionId: controllerId, orchestrator: true,
+    organizationId: ORG, delegatedScope: { organizationId: ORG, owner: { kind: "user", userId: "owner" } },
+  }) });
   registerCampaignStatusRoutes(app, { db, requestPrincipal: () => human("owner") });
   await app.ready();
   const get = async <T>(url: string) => {
@@ -161,6 +168,7 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
     return created.data.id;
   };
   const root = createRoot("Acceptance Campaign");
+  controllerId = root;
 
   let sequence = 0;
   /** A child session as the runner reports it: created, then running, each through the hub. */
@@ -226,6 +234,7 @@ async function acceptanceStack(options: { completion?: "retain" | "stop_and_arch
   return {
     db, hub, svc, observations, owner, root, createRoot, child, report, get, listAll, byKey, summary, until, close,
     sentToRunner, setRunnerReply: (next: RunnerReply | null) => { reply = next; },
+    unarchive: (id: string) => app.inject({ method: "POST", url: `/api/sessions/${id}/archive`, payload: { archived: false } }),
   };
 }
 
@@ -805,10 +814,30 @@ test("AC14 (pending cleanup): a verified child's refused worktree retirement is 
     setRunnerReply((message, hub) => {
       if (message.type !== "session_worktree" || message.operation !== "discard") return;
       hub.resolveRunnerRequest({ type: "session_worktree_result", requestId: message.requestId, sessionId: message.sessionId,
-        operation: "discard", ok: false, error: "worktree retained: the worktree has uncommitted changes" });
+        operation: "discard", ok: false, error: `worktree retained: ${worktreeDirtyPaths(10, ["report.md", "notes.txt"])}` });
     });
     svc.onSessionStatus(worker, "completed");
     const seq = report(worker, "Delivered; the worktree is still here.");
+    // History is already in this fixture's durable DB; exercise the production async verification
+    // entry point and its runner status read without importing another history snapshot.
+    svc.hydrateHistory = async () => {};
+    setRunnerReply((message, hub) => {
+      if (message.type === "git_action") hub.resolveRunnerRequest({ type: "git_result", requestId: message.requestId,
+        ok: true, data: { status: { branch: "fix/cleanup", hasChanges: true, ahead: 0, remoteUrl: null,
+          changedPathCount: 10, files: [{ path: "report.md", status: "??" }, { path: "tracked.txt", status: "M" }] } } });
+    });
+    const dirty = await svc.verifyCampaignChildWithHistory(root, {
+      childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true,
+    });
+    assert.equal(dirty.ok, false);
+    assert.match(dirty.error!, /10 paths.*report.md.*tracked.txt.*8 more/u);
+    assert.equal(db.getSession(worker)?.archived, false, "diagnostics arrive before archival");
+    // Legacy archival (or dirt created after inspection) still produces a bounded refusal.
+    setRunnerReply((message, hub) => {
+      if (message.type !== "session_worktree" || message.operation !== "discard") return;
+      hub.resolveRunnerRequest({ type: "session_worktree_result", requestId: message.requestId, sessionId: worker,
+        operation: "discard", ok: false, error: `worktree retained: ${worktreeDirtyPaths(10, ["report.md", "notes.txt"])}` });
+    });
     const verified = svc.verifyCampaignChild(root, {
       childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: itemId, outcome: "delivered" },
     });
@@ -821,18 +850,28 @@ test("AC14 (pending cleanup): a verified child's refused worktree retirement is 
     let item = await byKey("cleanup");
     assert.equal(item.primaryState, "delivered", "delivery and cleanup are separate facts");
     assert.deepEqual(item.observed.cleanup?.availability === "fresh" && item.observed.cleanup.value.worktrees,
-      [{ path, status: "refused", reason: "the worktree has uncommitted changes" }]);
+      [{ path, status: "refused", reason: worktreeDirtyPaths(10, ["report.md", "notes.txt"]) }]);
     assert.notEqual(owner.session(root)?.orchestratorCampaign?.status, "verified_complete",
       "pending cleanup keeps the campaign from completing");
 
-    // The operator resolves it and the runner reports the worktree gone.
+    // Supported archived-child recovery: unarchive, restart, let the child preserve/clean its
+    // files, then retire through the runner. No person needs to run Git in a foreign worktree.
+    assert.equal(db.getSession(worker)?.archived, true);
+    assert.equal((await stack.unarchive(root)).statusCode, 403, "an Orchestrator cannot restore itself");
+    db.registerRunner(runnerMeta(), Date.now(), 265);
+    assert.equal((await stack.unarchive(worker)).statusCode, 409, "old runners refuse explicitly");
+    assert.equal(db.getSession(worker)?.archived, true);
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    assert.equal((await stack.unarchive(worker)).statusCode, 200);
+    assert.equal(svc.restart(worker).ok, true);
+    svc.onSessionStatus(worker, "completed");
     db.raw().prepare("UPDATE sessions SET worktrees='[]' WHERE id=?").run(worker);
     stack.hub.sessionChangedById(worker);
     stack.hub.sessionChangedById(root);
     await stack.until("the obligation clears", () => owner.work(root).obligations.cleanup === 0);
     item = await byKey("cleanup");
     assert.deepEqual(item.observed.cleanup?.availability === "fresh" && item.observed.cleanup.value.worktrees,
-      [{ path, status: "retired", reason: null }]);
+      []);
   } finally {
     setRunnerReply(null);
     await close();

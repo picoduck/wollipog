@@ -156,10 +156,11 @@ export function sessionCommandPermissions(
     restart: permission(routeRefusal(RESTART_ROUTE, principal, target, facts)),
     stopBackgroundJob: permission(stopJobRefusal),
     archive: permission(routeRefusal(ARCHIVE_ROUTE, principal, target, facts)),
-    // Both restore routes refuse every agent credential first; for a person they apply the same
-    // role gate, so Unarchive and Unarchive and Restart share one verdict.
+    // Only plain Unarchive is available to the controlling Orchestrator; combined restart stays human-only.
     unarchive: permission(principal.kind === "agent"
-      ? sentence(AGENT_UNARCHIVE_ERROR)
+      ? principal.orchestrator && target.parentSessionId === principal.credentialSessionId && target.id !== principal.credentialSessionId
+        ? routeRefusal(ARCHIVE_ROUTE, principal, target, facts)
+        : sentence(AGENT_UNARCHIVE_ERROR)
       : routeRefusal(UNARCHIVE_AND_RESTART_ROUTE, principal, target, facts)),
     prompt: permission(routeRefusal(PROMPT_ROUTE, principal, target, facts)),
     delete: permission(principal.kind === "agent"
