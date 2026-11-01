@@ -3282,7 +3282,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "unarchive_session",
-    description: "Restore an archived child so it can be restarted to preserve and clean its worktree. Only its controlling Orchestrator may do this. Does not delete files or restart the child.",
+    description: "Recover a fully archived, verified campaign child whose dirty-worktree cleanup was refused. Only its controlling Orchestrator may do this. Does not delete files or restart the child; cannot cancel a pending archive.",
     inputSchema: {
       type: "object", properties: { sessionId: { type: "string" } },
       required: ["sessionId"], additionalProperties: false,

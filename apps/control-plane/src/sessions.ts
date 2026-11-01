@@ -8324,8 +8324,11 @@ export class SessionsService {
       }
       const child = this.db.getSession(request.childSessionId);
       if (!child) return fail("campaign child not found", 404);
-      const paths = [...new Set([...(child.worktrees ?? []).map((tree) => tree.path),
-        ...(child.worktreePath ? [child.worktreePath] : [])])];
+      const preflight = this.verifyCampaignChild(campaignSessionId, request, canAccess, true);
+      if (!preflight.ok) return preflight;
+      const paths = [...new Set([...(child.worktrees ?? []).filter((tree) => tree.source !== "attached").map((tree) => tree.path),
+        ...(child.worktreePath && !child.worktrees?.some((tree) => tree.path === child.worktreePath)
+          ? [child.worktreePath] : [])])];
       const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
       const completion = rootId ? this.db.getSession(rootId)?.orchestratorPolicy?.behavior.completion : undefined;
       // Retain attests delivery without retiring the worktree; preserve offline/legacy verification
@@ -8362,6 +8365,7 @@ export class SessionsService {
     campaignSessionId: string,
     request: VerifyOrchestratorChildRequest,
     canAccess: (sessionId: string) => boolean = () => true,
+    checkOnly = false,
   ): ServiceResult<{ campaign: OrchestratorCampaignProjection; child: SessionView }> {
     const campaign = this.db.getSession(campaignSessionId);
     if (!campaign?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
@@ -8455,6 +8459,7 @@ export class SessionsService {
         workItem.outcome, this.db.campaignReportIdentity(child.id, request.reportEventSeq));
       if (!target.ok) return fail(target.error, target.status);
     }
+    if (checkOnly) return ok({ campaign: this.db.campaignProjection(campaignSessionId)!, child });
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
     const now = Date.now();
     for (const decision of spentApprovals) {

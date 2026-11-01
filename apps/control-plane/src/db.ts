@@ -12407,7 +12407,9 @@ export class ControlPlaneDb {
         }
       }
       const permissions = principal.kind === "human" && humanPermissions.get(row.summary_owns) ||
-        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant });
+        sessionCommandPermissions(principal, view, { ownsSession: row.summary_owns === 1, isDescendant: descendant,
+          archivedWorktreeRecoveryError: principal.kind === "agent" && principal.orchestrator &&
+            row.parent_session_id === principal.credentialSessionId ? this.campaignWorktreeRecoveryError(view.id) : undefined });
       if (principal.kind === "human") humanPermissions.set(row.summary_owns, permissions);
       // This row has not escaped the generator yet; avoid copying its projection just to add
       // requester-owned verdicts. Only held rows need the advice rewrite.
@@ -20504,6 +20506,21 @@ export class ControlPlaneDb {
 
   campaignChildWorktreesRetired(sessionId: string): boolean {
     return this.campaignWorktreeCleanup(sessionId).length === 0;
+  }
+
+  /** Agent restoration only recovers a settled campaign archive whose dirty cleanup was refused. */
+  campaignWorktreeRecoveryError(sessionId: string): string | null {
+    const session = this.getSession(sessionId);
+    if (!session?.archived || session.archiveStatus || this.hasSessionStopIntent(sessionId) ||
+        !this.campaignForVerifiedChild(sessionId)) {
+      return "Only a fully archived, verified campaign child with refused dirty-worktree cleanup can be recovered.";
+    }
+    if (!runnerSupportsProtocol(this.getRunner(session.runnerId)?.protocolVersion, "campaignWorktreeRecovery")) {
+      return "Update Wollipog on the child's runner: campaignWorktreeRecovery is required.";
+    }
+    return this.campaignWorktreeCleanup(sessionId).some((item) => item.status === "refused" &&
+      item.reason?.startsWith("the worktree has uncommitted changes"))
+      ? null : "Only a fully archived, verified campaign child with refused dirty-worktree cleanup can be recovered.";
   }
 
   /** The campaign's status and the counts behind it, derived once for both the full projection and

@@ -799,6 +799,51 @@ test("AC12: a session outside every campaign has no membership or Campaign Statu
   }
 });
 
+test("inspection skips attached operator worktrees and refuses a running child before runner I/O", async () => {
+  const stack = await acceptanceStack({ completion: "stop_and_archive" });
+  const { db, svc, root, child, report, setRunnerReply, sentToRunner, close } = stack;
+  try {
+    const worker = child(root, "Operator Worktree");
+    db.raw().prepare("UPDATE sessions SET worktree_path=?,worktrees=? WHERE id=?")
+      .run("/operator/tree", JSON.stringify([{ id: "wt", path: "/operator/tree", branch: "operator", source: "attached" }]), worker);
+    svc.hydrateHistory = async () => {};
+    const seq = report(worker, "Report while still working.");
+    const sentBefore = sentToRunner.length;
+    const running = await svc.verifyCampaignChildWithHistory(root, { childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true });
+    assert.equal(running.ok, false);
+    assert.match(running.error!, /must be idle, completed, or stopped/u);
+    assert.equal(sentToRunner.length, sentBefore);
+    setRunnerReply((message, hub) => {
+      if (message.type === "session_worktree") hub.resolveRunnerRequest({ type: "session_worktree_result",
+        requestId: message.requestId, sessionId: worker, operation: "discard", ok: false,
+        error: "worktree retained: attached operator-owned worktrees are not retired" });
+    });
+    svc.onSessionStatus(worker, "completed");
+    const verified = await svc.verifyCampaignChildWithHistory(root, { childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true });
+    assert.equal(verified.ok, true, String(verified.error));
+    await stack.until("operator worktree refusal", () => db.campaignWorktreeCleanup(worker).some((item) => item.status === "refused"));
+    assert.equal(sentToRunner.slice(sentBefore).some((message) => message.type === "git_action"), false,
+      "no inspection or instruction to clean the operator's checkout");
+  } finally { await close(); }
+});
+
+test("agent recovery cannot restore an ordinary archive or cancel a pending archive", async () => {
+  const stack = await acceptanceStack({ completion: "stop_and_archive" });
+  const { db, svc, root, child, close } = stack;
+  try {
+    const archived = child(root, "Human Archived");
+    svc.onSessionStatus(archived, "completed");
+    assert.ok(svc.setArchived(archived, true).ok);
+    assert.equal((await stack.unarchive(archived)).statusCode, 409);
+    assert.equal(db.getSession(archived)?.archived, true);
+    const pending = child(root, "Archive Pending");
+    assert.ok(svc.setArchived(pending, true).ok);
+    assert.equal(db.hasSessionStopIntent(pending), true);
+    assert.equal((await stack.unarchive(pending)).statusCode, 409);
+    assert.equal(db.hasSessionStopIntent(pending), true, "recovery never cancels the person's Stop intent");
+  } finally { await close(); }
+});
+
 test("worktree inspection gates archival, while Retain verification supports legacy and offline runners", async () => {
   for (const completion of ["retain", "stop_and_archive"] as const) {
     for (const unavailable of ["legacy", "offline"] as const) {
@@ -862,13 +907,18 @@ test("AC14 (pending cleanup): a verified child's refused worktree retirement is 
     assert.equal(dirty.ok, false);
     assert.match(dirty.error!, /10 paths.*report.md.*tracked.txt.*8 more/u);
     assert.equal(db.getSession(worker)?.archived, false, "diagnostics arrive before archival");
-    // Legacy archival (or dirt created after inspection) still produces a bounded refusal.
+    // A clean verification followed by dirt created before retirement still produces a bounded refusal.
     setRunnerReply((message, hub) => {
+      if (message.type === "git_action") {
+        hub.resolveRunnerRequest({ type: "git_result", requestId: message.requestId, ok: true,
+          data: { status: { branch: "fix/cleanup", hasChanges: false, changedPathCount: 0, files: [], ahead: 0, remoteUrl: null } } });
+        return;
+      }
       if (message.type !== "session_worktree" || message.operation !== "discard") return;
       hub.resolveRunnerRequest({ type: "session_worktree_result", requestId: message.requestId, sessionId: worker,
         operation: "discard", ok: false, error: `worktree retained: ${worktreeDirtyPaths(10, ["report.md", "notes.txt"])}` });
     });
-    const verified = svc.verifyCampaignChild(root, {
+    const verified = await svc.verifyCampaignChildWithHistory(root, {
       childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true, workItem: { id: itemId, outcome: "delivered" },
     });
     assert.ok(verified.ok, String(verified.error));

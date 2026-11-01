@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { AGENT_UNARCHIVE_ERROR, type AuthPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
 import type { SessionsService } from "./sessions.js";
@@ -21,9 +20,8 @@ export function registerSessionArchiveRoute(app: FastifyInstance, deps: {
       if (!principal.orchestrator || !principal.credentialSessionId || target?.parentSessionId !== principal.credentialSessionId) {
         return reply.code(403).send({ error: AGENT_UNARCHIVE_ERROR });
       }
-      if (!runnerSupportsProtocol(deps.db.getRunner(target.runnerId)?.protocolVersion, "campaignWorktreeRecovery")) {
-        return reply.code(409).send({ error: "Update Wollipog on the child's runner before recovering an archived child." });
-      }
+      const refusal = deps.db.campaignWorktreeRecoveryError(id);
+      if (refusal) return reply.code(409).send({ error: refusal });
     }
     const result = deps.svc.setArchived(id, body.archived);
     return reply.code(result.status).send(result.ok ? result.data : failureBody(result));

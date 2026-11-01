@@ -336,7 +336,7 @@ export const BUILT_IN_SKILL_SOURCES: readonly BuiltInSkillSource[] = [
           "wollipog decision reconcile <occurrence-id> --snapshot '<json>' --json",
           "```",
           "",
-          "For a refused archived child's worktree, only its controlling Orchestrator may use `session unarchive`",
+          "For a verified, fully archived campaign child's refused dirty worktree, only its controlling Orchestrator may use `session unarchive`",
           "(protocol 266+ on control plane and runner). This restores visibility without restarting or deleting",
           "files. Then restart the child and ask it to preserve and clean its work, verify its new final report,",
           "and archive again. Retirement still refuses dirty, unpushed or undelivered work; an older runner",
