@@ -205,7 +205,8 @@ import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
-import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
+import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, TeamMemberContainmentError } from "./db.js";
+import { registerIdentityTeamRoutes, TEAM_NAME_TAKEN } from "./identity-team-route.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import { registerSideChatRoutes } from "./side-chat-routes.js";
@@ -2932,6 +2933,9 @@ app.post("/api/identity/teams", async (req, reply) => {
     ? [...new Set(body.memberUserIds as string[])] : null;
   if (!name || name.length > 80) return reply.code(400).send({ error: "team name must be 1-80 characters" });
   if (!memberUserIds || memberUserIds.length > 100) return reply.code(400).send({ error: "memberUserIds must contain at most 100 unique user ids" });
+  if (db.identityTeamNameTaken(principal.organizationId, name)) {
+    return reply.code(409).send({ error: "another team in this organization already has this name", code: TEAM_NAME_TAKEN });
+  }
   try {
     const team = db.createIdentityTeam({
       teamId: `team_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
@@ -2965,9 +2969,14 @@ app.put("/api/identity/teams/:teamId/members", async (req, reply) => {
     hub.closeScopedUiClients();
     return { team };
   } catch (error) {
-    return reply.code(409).send({ error: error instanceof Error ? error.message : "team update failed" });
+    return reply.code(409).send({
+      error: error instanceof Error ? error.message : "team update failed",
+      ...(error instanceof TeamMemberContainmentError ? { code: "team_member_containment" } : {}),
+    });
   }
 });
+
+registerIdentityTeamRoutes(app, { db, requestHuman });
 
 app.delete("/api/identity/teams/:teamId", async (req, reply) => {
   const principal = requestHuman(req)!;

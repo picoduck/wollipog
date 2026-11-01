@@ -41,7 +41,7 @@ const BASELINE: Readonly<Record<string, number>> = {
   // Moved with the pairing banner from App.tsx (#2303), which kept its behaviour as it was.
   "components/PairingBanner.tsx": 2,
   "components/PendingPromptBubbles.tsx": 3,
-  "components/PeopleDevicesPanel.tsx": 4,
+  "components/PeopleDevicesPanel.tsx": 3,
   "components/UsageView.tsx": 4,
 };
 
