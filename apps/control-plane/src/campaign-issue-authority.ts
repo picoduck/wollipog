@@ -33,6 +33,15 @@ export function issueBoundary(root: SessionView) {
 }
 
 export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number): CampaignWorkItemDetail[] {
+  const repository = root.orchestratorPolicy?.issueScope?.repository;
+  const fixedBy = repository && db.campaignWorkLedger.fixedBy(root.id, repository, issue);
+  if (fixedBy) {
+    const items = fixedBy.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now()));
+    // Do not silently drop a missing or out-of-scope unit and prove only a subset.
+    if (items.some((item) => !item || !item.issue || item.issue.repository.toLowerCase() !== repository!.toLowerCase() ||
+        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number))) return [];
+    return items as CampaignWorkItemDetail[];
+  }
   const items: CampaignWorkItemDetail[] = [];
   let cursor: string | undefined;
   do {
@@ -229,6 +238,8 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
       snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase() || snapshot.openPullRequests.length ||
       !root.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue)) return null;
   const items = issueWork(db, root, snapshot.issue);
+  // Fixed-by evidence is completion-only; it cannot cancel another issue's units.
+  if (snapshot.reason !== "completed" && db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue)) return null;
   if (snapshot.reason === "not_planned") {
     const disposition = snapshot.dispositionRecommendationId && db.campaignWorkLedger.recommendation(root.id, snapshot.dispositionRecommendationId);
     if (snapshot.dispositionRecommendationId && (!disposition || !["rejected", "duplicate"].includes(disposition.disposition) || !disposition.dispositionReason ||
@@ -255,4 +266,26 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
   }
   return { items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
+}
+
+/** Stable server-derived gap information; never infer authority from explanation/evidence prose. */
+export function closureDeliveryFailure(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot): string {
+  const ids = db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
+  if (ids) for (const id of ids) {
+    const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
+    if (!item) return `missing_work_item:${id}`;
+    if (!item.issue || item.issue.repository.toLowerCase() !== snapshot.repository.toLowerCase() ||
+        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) return `outside_scope:${id}`;
+    if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return `unverified_work_item:${id}`;
+    if (item.primaryState !== "delivered" || item.currentAttempt) return `undelivered_work_item:${id}`;
+    const candidates = deliveryCandidates(db, root, item);
+    if (!candidates.some(({ fact }) => fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha)) return `unmerged_work_item:${id}`;
+    if (candidates.some(({ fact }) => fact.availability !== "fresh")) return `stale_delivery:${id}`;
+    for (const { ref, fact, approvedHeads } of candidates) {
+      if (fact.availability !== "fresh" || fact.value.state === "closed") continue;
+      if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) return `unmerged_work_item:${id}`;
+      if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) return `delivery_not_verified_at_exact_head:${id}`;
+    }
+  }
+  return ids ? "delivery_not_verified_at_exact_head" : "delivery_or_disposition_unverified";
 }

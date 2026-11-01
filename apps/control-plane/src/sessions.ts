@@ -29,7 +29,7 @@ import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMess
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryFailure, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
@@ -8577,6 +8577,14 @@ export class SessionsService {
   ): ServiceResult<RecordCampaignPlanResponse> {
     const scope = this.campaignLedgerScope(callerSessionId, canAccess);
     if (!scope.ok || !scope.data) return failAs(scope);
+    if (Array.isArray(request?.fixedBy) && request.fixedBy.length) {
+      const root = scope.data.root;
+      const issueScope = root.orchestratorPolicy?.issueScope;
+      if (this.db.campaignDescendantIds(root.id).length) return fail("fixedBy relationships must be recorded before creating any campaign child", 409);
+      if (callerSessionId !== root.id || !issueScope || request.fixedBy.some((link) =>
+        typeof link?.issue?.repository !== "string" || link.issue.repository.toLowerCase() !== issueScope.repository.toLowerCase() ||
+        !issueScope.issueNumbers.includes(link.issue.number))) return fail("fixedBy relationships must stay inside the root's established issue scope", 409);
+    }
     return this.ledgerWrite(scope.data, () =>
       this.db.campaignWorkLedger.recordPlan(scope.data!.root.id, callerSessionId, request, Date.now()));
   }
@@ -10455,6 +10463,7 @@ export class SessionsService {
         }
         const proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
         if (!proof) {
+          snapshot.deliveryFailure = closureDeliveryFailure(this.db, this.db.getSession(sessionId)!, snapshot);
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
             boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback", reason: "delivery_or_disposition_unverified" }));
         }

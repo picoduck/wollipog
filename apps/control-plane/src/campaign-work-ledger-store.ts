@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS campaign_work_ledgers (
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
+CREATE TABLE IF NOT EXISTS campaign_fixed_by (
+  campaign_session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+  issue_repository TEXT NOT NULL,
+  issue_number INTEGER NOT NULL,
+  work_item_ids TEXT NOT NULL,
+  PRIMARY KEY (campaign_session_id, issue_repository, issue_number)
+);
+
 CREATE TABLE IF NOT EXISTS campaign_work_items (
   id                     TEXT PRIMARY KEY,
   campaign_session_id    TEXT NOT NULL,
@@ -819,6 +827,14 @@ export class CampaignWorkLedgerStore {
     if (request.items.length > L.planItemsPerCall) {
       return fail(`a plan call accepts at most ${L.planItemsPerCall} items`);
     }
+    if (request.fixedBy !== undefined && (!Array.isArray(request.fixedBy) || request.fixedBy.length > 100 ||
+        request.fixedBy.some((link) => !link || !validIssue(link.issue) || !Array.isArray(link.workItemKeys) ||
+          !link.workItemKeys.length || link.workItemKeys.length > 100 ||
+          !link.workItemKeys.every((key) => boundedText(key, L.keyLength))))) return fail("fixedBy must name issues and 1–100 work item keys");
+    if (request.fixedBy?.length && (actorSessionId !== campaignId || this.stmt(
+      "SELECT 1 FROM campaign_work_attempts WHERE campaign_session_id=? LIMIT 1").get(campaignId))) {
+      return fail("fixedBy relationships require the root's plan before any campaign dispatch", 409);
+    }
     const keys = new Set<string>();
     for (const [index, input] of request.items.entries()) {
       const at = `items[${index}]`;
@@ -924,6 +940,20 @@ export class CampaignWorkLedgerStore {
         changed = true;
       }
       const planState: CampaignPlanState = request.planComplete ? "recorded" : "partial";
+      for (const link of request.fixedBy ?? []) {
+        const ids = [...new Set(link.workItemKeys.map((key) => {
+          const item = this.itemByKey(campaignId, key);
+          if (!item) throw new LedgerRefusal(`fixedBy cites missing work item ${key}`, 400);
+          return item.id;
+        }))].sort();
+        const repository = link.issue.repository.toLowerCase();
+        const previous = this.fixedBy(campaignId, repository, link.issue.number);
+        if (previous && JSON.stringify(previous) !== JSON.stringify(ids)) throw new LedgerRefusal("fixedBy relationships are immutable", 409);
+        if (!previous) {
+          this.stmt("INSERT INTO campaign_fixed_by VALUES (?, ?, ?, ?)").run(campaignId, repository, link.issue.number, JSON.stringify(ids));
+          changed = true;
+        }
+      }
       const previousPlanState = this.planState(campaignId);
       const revision = changed || previousPlanState !== planState
         ? this.bump(campaignId, now, planState)
@@ -936,6 +966,12 @@ export class CampaignWorkLedgerStore {
     const row = this.stmt("SELECT plan_state FROM campaign_work_ledgers WHERE campaign_session_id=?")
       .get(campaignId) as { plan_state: CampaignPlanState } | undefined;
     return row?.plan_state ?? "not_recorded";
+  }
+
+  fixedBy(campaignId: string, repository: string, issue: number): string[] | null {
+    const row = this.stmt("SELECT work_item_ids FROM campaign_fixed_by WHERE campaign_session_id=? AND issue_repository=? AND issue_number=?")
+      .get(campaignId, repository.toLowerCase(), issue) as { work_item_ids: string } | undefined;
+    return row ? JSON.parse(row.work_item_ids) as string[] : null;
   }
 
   /* ------------------------------ update_campaign_work_item ------------------------------ */

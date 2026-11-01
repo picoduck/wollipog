@@ -689,6 +689,9 @@ export interface CampaignPlanItemInput {
  * It never changes commitment, attempts, or verification. */
 export interface RecordCampaignPlanRequest {
   items: CampaignPlanItemInput[];
+  /** Immutable closure relationships, recorded by the root before the first dispatch.
+   * Keys must name items in this call or already in this campaign. */
+  fixedBy?: Array<{ issue: CampaignIssueRef; workItemKeys: string[] }>;
   /** True when the ledger now lists the campaign's whole original scope. */
   planComplete: boolean;
 }

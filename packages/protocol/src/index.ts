@@ -798,7 +798,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      for older control planes, whose enum validation would otherwise discard the whole hold.
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
-export const PROTOCOL_VERSION = 263;
+export const PROTOCOL_VERSION = 265;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1163,6 +1163,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
+  campaignFixedBy: 265,
   /** v220 control plane records a child's work-item attempt at creation (#3106). Checked by the
    * runner's create_session tool and CLI against the connected control plane. */
   campaignWorkItemAtCreation: 220,
@@ -5084,6 +5085,8 @@ export interface GithubIssueClosureRequest {
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
+  /** Server-derived reason delegated delivery could not be proven. */
+  deliveryFailure?: string;
   scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];
