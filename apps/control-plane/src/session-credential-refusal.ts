@@ -22,5 +22,5 @@ export function sessionCredentialRefusal(
   if (session.status === "stopped") {
     return { reason: "session_stopped", error: "session agent credential refused: session stopped; ask the Orchestrator to restart the session" };
   }
-  return { reason: "session_unavailable", error: "session agent credential refused: session unavailable for Agent Control; ask the Orchestrator to check the session state and restart it if needed" };
+  return { reason: "session_unavailable", error: "session agent credential refused: this request is unavailable to the session credential; check the requested operation, session state and delegated access with the Orchestrator" };
 }

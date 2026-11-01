@@ -3881,7 +3881,20 @@ test("refused session credentials disclose stop provenance only to the matching 
     db.updateSessionStatus("agent-session", "running", 4);
     assert.equal(isAuthenticatedAgentControlClaim({ credentialValid: true, claimedSessionId: "agent-session",
       session: db.getSession("agent-session") }), true);
-    assert.deepEqual(reasons, ["runner_reconnecting", "unknown_credential", "unknown_credential", "unknown_credential", "session_stopped"]);
+    for (const state of ["running", "idle"] as const) {
+      db.updateSessionStatus("agent-session", state, 5);
+      const unavailable = await request("known-secret");
+      assert.equal(unavailable.statusCode, 401);
+      assert.match(unavailable.json().error, /check the requested operation, session state and delegated access/);
+      assert.doesNotMatch(unavailable.json().error, /restart|reconnect|stopped/);
+    }
+    db.raw().prepare(`INSERT INTO session_role_conversions
+      (session_id, conversion_id, command, state, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run("agent-session", "conversion-test", "{}", "preparing", 6);
+    const fenced = await request("known-secret");
+    assert.equal(fenced.statusCode, 401);
+    assert.equal(fenced.json().error, UNAUTHORIZED);
+    assert.deepEqual(reasons, ["runner_reconnecting", "unknown_credential", "unknown_credential", "unknown_credential", "session_stopped", "session_unavailable", "session_unavailable", "unknown_credential"]);
     assert.doesNotMatch(JSON.stringify(reasons), /known-secret|agent-session|runner-1/);
   } finally { await app.close(); db.close(); }
 });
