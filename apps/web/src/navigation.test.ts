@@ -73,6 +73,24 @@ test("attention routes retain exact opaque request identity and epoch through re
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
 });
 
+test("an artifact link names its session's Browser tab and, optionally, one artifact (#3924)", () => {
+  for (const artifacts of [{}, { artifactId: "art_1" }, { artifactId: "artifact / ..? # % ✅" }]) {
+    const view: View = { name: "session", id: "session / ✅", artifacts };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+    assert.equal(sameView(view, { name: "session", id: "session / ✅" }), false);
+  }
+  // The ephemeral activation never reaches the address.
+  assert.equal(
+    viewPath({ name: "session", id: "s", artifacts: { artifactId: "a", activationId: 7 } }),
+    `/sessions/~${encodeResourceId("s")}/artifacts/~${encodeResourceId("a")}`,
+  );
+  const path = `/sessions/~${encodeResourceId("s")}/artifacts/~${encodeResourceId("a")}`;
+  assert.equal(viewFromPath(path, "?epoch=1"), null);
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/~!`), null);
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/`)?.name, "session");
+});
+
 test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
   const path = `/runs/~${encodeResourceId("run_abc")}`;
   for (const member of ["s_claude", "member / ✅ &?#"]) {

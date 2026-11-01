@@ -385,6 +385,15 @@ export function Shell() {
     // The scalar route key is the trigger; panel callbacks are intentionally app-state methods.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLocationKey]);
+  // An artifact link (#3924) opens Browser → Artifacts on its artifact, again on each arrival.
+  const artifactsTarget = view.name === "session" ? view.artifacts : undefined;
+  const artifactsRouteKey = view.name === "session" && artifactsTarget
+    ? `${view.id}\0${artifactsTarget.artifactId ?? ""}\0${artifactsTarget.activationId ?? ""}`
+    : null;
+  useEffect(() => {
+    if (view.name === "session" && artifactsTarget) rightPanel.showArtifact?.(view.id, artifactsTarget.artifactId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifactsRouteKey]);
 
   // Bottom terminal dock visibility (Codex layout: toggled, never an always-visible bar).
   // Migrates the legacy wollipog.shelldock.collapsed pref on first run.

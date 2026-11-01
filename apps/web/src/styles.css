@@ -6115,10 +6115,124 @@ body.shell-dock-dragging * {
   height: 100%;
   object-fit: contain;
 }
-.tl-artifact { min-width: 0; max-width: 680px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); }
-.tl-artifact-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 12px; margin-bottom: 8px; }
-.tl-artifact-head strong { min-width: 0; overflow-wrap: anywhere; }
-.tl-artifact-head span { color: var(--text-dim); font-size: var(--text-sm); }
+/* A transcript attachment (#389, #3924): a card whose head names the artifact beside its actions,
+   over a bounded preview. A thumbnail never grows past 240px tall, so a turn's three previews fit
+   a phone's screen; the full size is the viewer's. */
+.tl-artifact {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 0;
+  max-width: 680px;
+  padding: var(--space-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+/* The name keeps room to be read: on a phone the actions move under it rather than squeezing it. */
+.tl-artifact-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  min-width: 0;
+}
+.tl-artifact-title {
+  display: flex;
+  flex: 1 1 160px;
+  flex-direction: column;
+  min-width: 0;
+}
+.tl-artifact-title > strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tl-artifact-title > span,
+.tl-artifact-note {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.tl-artifact-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+.tl-artifact-note { margin: 0; }
+.tl-artifact .art-image { max-height: 240px; }
+.tl-artifact .art-video { max-height: 240px; }
+.tl-artifact .art-checker { padding: var(--space-2); }
+/* The turn's View All, where its fourth artifact would be: one counted action and how many it adds. */
+.tl-artifact.tl-artifact-more {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+}
+/* A shown image is the button that opens the viewer: the image is its face, its focus ring the well's. */
+.art-image-open {
+  display: block;
+  max-width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-xs);
+  background: none;
+  cursor: zoom-in;
+}
+/* The artifact viewer (#3924): a full dialog, a full-height sheet on phones, its stage taking what the
+   header and footer leave. An image's stage takes every touch, so a pinch zooms the image and not the
+   page; any other stage leaves vertical scrolling to the browser and reads horizontal swipes. */
+.art-gallery .modal-body { gap: var(--space-3); }
+.art-gallery-stage {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 160px;
+  overflow: hidden;
+  border-radius: var(--radius-md);
+  background: var(--bg);
+}
+.art-gallery-scroll {
+  justify-content: safe center;
+  padding: var(--space-3);
+  overflow-y: auto;
+  touch-action: pan-y;
+}
+.art-gallery-zoomable {
+  touch-action: none;
+  user-select: none;
+}
+.art-gallery-zoomable[data-zoomed] { cursor: grab; }
+.art-gallery-zoomable[data-zoomed]:active { cursor: grabbing; }
+.art-gallery-media {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+}
+.art-gallery-zoom {
+  position: absolute;
+  right: var(--space-2);
+  bottom: var(--space-2);
+  display: flex;
+  gap: var(--space-1);
+}
+.art-gallery-position {
+  margin: 0 auto 0 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 760px) {
+  /* As in the Evidence Viewer: Previous and Next keep 48px squares named by their hidden words, the
+     position takes its own row, and Download takes what Done's one short word leaves, on one line. */
+  .art-gallery-position { flex-basis: 100%; }
+  .modal-foot > .btn.art-gallery-done { flex: none; }
+  .art-gallery .modal-foot > .btn { white-space: nowrap; }
+}
 
 .state-body > .notice { margin-top: var(--space-2); }
 

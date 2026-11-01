@@ -68,7 +68,12 @@ import { statusMeta, toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ReadonlyReferenceChip } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
-import { ArtifactInlinePreview } from "./ArtifactPreview.js";
+import {
+  INLINE_ARTIFACT_LIMIT,
+  TranscriptArtifact,
+  TranscriptArtifactViewerProvider,
+  type TranscriptArtifactSlot,
+} from "./TranscriptArtifacts.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
@@ -83,26 +88,6 @@ type UserMessageItem = Extract<TimelineItem, { kind: "user_message" }>;
 /** A reply in the transcript: one agent message, which Side Chat's Insert into Draft takes (#2862). */
 export type AgentReplyItem = Extract<TimelineItem, { kind: "agent_message" }>;
 
-function TranscriptArtifact({ artifact }: { artifact: WorkflowArtifactView }) {
-  const [load, setLoad] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (load || artifact.kind === "video" || !ref.current) return;
-    if (typeof IntersectionObserver === "undefined") { setLoad(true); return; }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) { setLoad(true); observer.disconnect(); }
-    }, { rootMargin: "240px" });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [artifact.kind, load]);
-  return (
-    <div className="tl-artifact" ref={ref}>
-      <div className="tl-artifact-head"><strong>{artifact.name}</strong><span>{artifact.kind === "video" ? "Video" : "Image"} · {artifact.sizeBytes.toLocaleString()} Bytes</span></div>
-      {artifact.kind === "video" && !load && <button className="btn ghost sm" type="button" onClick={() => setLoad(true)}>Load Video</button>}
-      {load && <ArtifactInlinePreview artifact={artifact} />}
-    </div>
-  );
-}
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export interface TimelineRevealRequest {
@@ -503,6 +488,55 @@ export function layoutTurns(
   return { footers, turnStarts, standaloneReplies };
 }
 
+/**
+ * Each attachment row's place among its turn's artifacts (#3924): the first INLINE_ARTIFACT_LIMIT
+ * are previews, the next is the turn's counted View All, and the rest render nothing. An artifact
+ * delivered twice (a replayed or re-polled event) counts once, at its first row. `previous` is the
+ * last layout: a slot that did not change keeps its identity, so a memoized row holds while another
+ * row streams (#2763).
+ */
+export function layoutTranscriptArtifacts(
+  rows: readonly TimelineRenderRow[],
+  turns: TimelineTurns,
+  previous?: ReadonlyMap<string, TranscriptArtifactSlot>,
+): Map<string, TranscriptArtifactSlot> {
+  const groups = new Map<number, { artifacts: WorkflowArtifactView[]; seen: Set<string> }>();
+  const placed: Array<{ key: string; turn: number; index: number | null }> = [];
+  for (const row of rows) {
+    if (row.kind !== "item" || row.item.kind !== "artifact_attached") continue;
+    const turn = turns.segmentOf.get(row.item.id) ?? -1;
+    let group = groups.get(turn);
+    if (!group) groups.set(turn, group = { artifacts: [], seen: new Set() });
+    const { artifact } = row.item;
+    if (group.seen.has(artifact.artifactId)) {
+      placed.push({ key: row.key, turn, index: null });
+      continue;
+    }
+    group.seen.add(artifact.artifactId);
+    placed.push({ key: row.key, turn, index: group.artifacts.push(artifact) - 1 });
+  }
+  const sameGroup = (a: readonly WorkflowArtifactView[], b: readonly WorkflowArtifactView[]) =>
+    a.length === b.length && a.every((artifact, index) => artifact === b[index]);
+  // One array per turn, reused from the last layout while its artifacts are the same.
+  const stableGroups = new Map<number, readonly WorkflowArtifactView[]>();
+  const slots = new Map<string, TranscriptArtifactSlot>();
+  for (const { key, turn, index } of placed) {
+    const artifacts = groups.get(turn)!.artifacts;
+    let group = stableGroups.get(turn);
+    if (!group) {
+      const prior = previous?.get(key)?.group;
+      group = prior && sameGroup(prior, artifacts) ? prior : artifacts;
+      stableGroups.set(turn, group);
+    }
+    const role: TranscriptArtifactSlot["role"] = index === null || index > INLINE_ARTIFACT_LIMIT ? "hidden"
+      : index === INLINE_ARTIFACT_LIMIT ? "more" : "preview";
+    const slot = { role, group, index: index ?? 0 };
+    const prior = previous?.get(key);
+    slots.set(key, prior && prior.role === slot.role && prior.group === slot.group && prior.index === slot.index ? prior : slot);
+  }
+  return slots;
+}
+
 export type TimelineRenderRow =
   | ({
       kind: "work_summary";
@@ -525,7 +559,6 @@ export type TimelineRenderRow =
       attempts?: readonly ToolItem[];
     };
 
-const timelineRowKey = (row: TimelineRenderRow) => row.key;
 export const estimateTimelineRow = (row: TimelineRenderRow): number => {
   if (row.kind === "work_summary") return 28;
   if (row.kind === "subagent_summary" || row.kind === "subagent_output") return 28;
@@ -606,6 +639,7 @@ export const EventTimeline = memo(function EventTimeline({
   onOpenSession,
   onInsertReply,
   subagentStatus,
+  onOpenArtifact,
 }: {
   handoff?: HandoffControl;
   /** Current definitions on this session's runner; stored handoff IDs remain the fallback. */
@@ -662,6 +696,8 @@ export const EventTimeline = memo(function EventTimeline({
   /** The session's status, runner and worker requests, so an agent row's badge matches the Agents
    * roster's (#2857). Must be identity-stable. */
   subagentStatus?: SubagentStatusContextValue;
+  /** An attachment's Open in Browser: Browser → Artifacts on it (#3924). Must be identity-stable. */
+  onOpenArtifact?: (artifact: WorkflowArtifactView) => void;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -673,6 +709,7 @@ export const EventTimeline = memo(function EventTimeline({
     <SubagentStatusContext.Provider value={subagentStatus ?? DEFAULT_SUBAGENT_STATUS}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
+    <TranscriptArtifactViewerProvider onOpenInBrowser={onOpenArtifact}>
     <EventTimelineBody
       key={effectiveHistoryKey}
       items={items}
@@ -703,6 +740,7 @@ export const EventTimeline = memo(function EventTimeline({
       questionContext={questionContext}
       workspaceRoot={workspaceRoot}
     />
+    </TranscriptArtifactViewerProvider>
     </TranscriptImageCacheProvider>
     </TurnRetryContext.Provider>
     </SubagentStatusContext.Provider>
@@ -796,6 +834,30 @@ function EventTimelineBody({
     () => layoutTurns(rows, turns, sessionActive),
     [rows, projection.revision, turns, sessionActive],
   );
+  const artifactSlotsRef = useRef<ReadonlyMap<string, TranscriptArtifactSlot> | undefined>(undefined);
+  const artifactSlots = useMemo(() => {
+    const slots = layoutTranscriptArtifacts(rows, turns, artifactSlotsRef.current);
+    artifactSlotsRef.current = slots;
+    return slots;
+  }, [rows, projection.revision, turns]);
+  // A turn's artifacts past its View All take no room: their rows are empty and keep no gap, unless
+  // the row also closes the turn and so carries its footer.
+  const collapsedRow = (row: TimelineRenderRow | undefined) =>
+    row !== undefined && artifactSlots.get(row.key)?.role === "hidden" && !turnFooters.has(row.key);
+  // Nor in the virtual list's geometry while unmounted: a hidden row is estimated at zero, and keyed
+  // apart from the preview it may have been (before history was prepended), so no height measured
+  // for that preview is kept for it. A row only turns hidden when rows are inserted before it, which
+  // the projection already reports as dirty from there. Read through a ref, so both callbacks keep
+  // their identity, and the list its key index, while other rows stream.
+  const hiddenArtifactKeysRef = useRef<ReadonlySet<string>>(new Set());
+  hiddenArtifactKeysRef.current = useMemo(
+    () => new Set([...artifactSlots].filter(([, slot]) => slot.role === "hidden").map(([key]) => key)),
+    [artifactSlots],
+  );
+  const virtualRowKey = useCallback((row: TimelineRenderRow) =>
+    hiddenArtifactKeysRef.current.has(row.key) ? `${row.key}:hidden` : row.key, []);
+  const estimateVirtualRow = useCallback((row: TimelineRenderRow) =>
+    hiddenArtifactKeysRef.current.has(row.key) ? 0 : estimateTimelineRow(row), []);
   // Prompts a settled turn's More Turn Actions already lists; on a coarse pointer every other user
   // message (a steer, a running or footerless turn's prompt) keeps a menu of its own.
   const turnMenuPrompts = useMemo(() => {
@@ -809,9 +871,12 @@ function EventTimelineBody({
     (_row: TimelineRenderRow, index: number) => {
       const next = rows[index + 1];
       if (next && rowOnWorkRule(next)) return 0;
+      // The gap before a collapsed row is taken by the row after it instead.
+      if (collapsedRow(next)) return 0;
       return turnStarts.has(next?.key ?? "") ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP;
     },
-    [rows, turnStarts],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, turnStarts, artifactSlots, turnFooters],
   );
   const liveWorkKey = useMemo(
     () => sessionActive ? liveWorkSummaryKey(rows) : null,
@@ -865,13 +930,14 @@ function EventTimelineBody({
     const footer = turnFooters.get(row.key);
     // A stop's row is only its turn's footer, sitting where the footer would under the row before.
     const stopRow = row.kind === "item" && row.item.kind === "turn_interrupted";
-    const content = stopRow ? null : renderRowContent(row, state);
+    const hiddenArtifact = artifactSlots.get(row.key)?.role === "hidden";
+    const content = stopRow || hiddenArtifact ? null : renderRowContent(row, state);
     if (!footer) return content;
     return (
       <>
         {content}
         <TurnFooter
-          alone={stopRow}
+          alone={stopRow || hiddenArtifact}
           summary={footer}
           onFork={onFork}
           forkAvailability={footer.forkTurn == null ? undefined : forkAvailabilityByTurn?.get(footer.forkTurn)}
@@ -937,6 +1003,7 @@ function EventTimelineBody({
           inTurnMenu={item.kind === "user_message" && turnMenuPrompts.has(item.id)}
           failedTurnPrompt={item.kind === "error" ? turns.segments[turns.segmentOf.get(item.id) ?? -1]?.prompt : undefined}
           questionContext={item.kind === "question" ? questionContext : undefined}
+          artifactSlot={item.kind === "artifact_attached" ? artifactSlots.get(row.key) : undefined}
         />
       </WorkRule>
     );
@@ -944,10 +1011,10 @@ function EventTimelineBody({
   const timeline = scrollRef ? (
     <MeasuredVirtualList
       items={rows}
-      getKey={timelineRowKey}
+      getKey={virtualRowKey}
       renderItem={renderRow}
       scrollRef={scrollRef}
-      estimateSize={estimateTimelineRow}
+      estimateSize={estimateVirtualRow}
       overscan={8}
       rowGap={rowGap}
       className="timeline"
@@ -965,7 +1032,7 @@ function EventTimelineBody({
     />
   ) : (
     <div className="timeline" role="list" aria-label={ariaLabel}>
-      {rows.map((row, index) => (
+      {rows.map((row, index) => collapsedRow(row) ? null : (
         <div
           key={row.key}
           className={turnStarts.has(row.key) ? "tl-turn-start" : rowOnWorkRule(row) ? "tl-on-work-rule" : undefined}
@@ -2268,6 +2335,8 @@ interface TimelineRowContentProps {
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
   questionContext?: TimelineQuestionContext;
+  /** For an attachment: its place among its turn's artifacts (#3924). */
+  artifactSlot?: TranscriptArtifactSlot;
 }
 
 function TimelineRowContent({
@@ -2288,13 +2357,14 @@ function TimelineRowContent({
   disclosureOpen = false,
   onDisclosureToggle,
   questionContext,
+  artifactSlot,
 }: TimelineRowContentProps) {
   const sessionActive = useContext(TimelineActivityContext);
   const onInsertReply = useContext(InsertReplyContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
     case "artifact_attached":
-      return <TranscriptArtifact artifact={item.artifact} />;
+      return <TranscriptArtifact artifact={item.artifact} slot={artifactSlot} />;
     case "checkpoint_restored":
       return (
         <HistoryDivider
