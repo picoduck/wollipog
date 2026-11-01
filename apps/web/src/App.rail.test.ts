@@ -452,6 +452,13 @@ test("the software keyboard shrinks the layout viewport, not just the visual one
   assert.match(viewport!, /viewport-fit=cover/, "and the notch handling must survive");
 });
 
+test("a disabled rail item is faint ink with no hover fill (#3004)", () => {
+  assert.match(css, /\.rail-item\[aria-disabled="true"\] \{[^}]*color: var\(--text-faint\);[^}]*cursor: default;/,
+    "at rest it is the faint tier, below a normal item's --text-dim");
+  assert.match(css, /\.rail-item\[aria-disabled="true"\]:hover \{[^}]*color: var\(--text-faint\);[^}]*background: transparent;/,
+    "a hover neither brightens nor fills it");
+});
+
 test("an open More sheet suppresses the toast stack", () => {
   // The merged suppression named .menu-pop and .instance-selector-pop, and the More sheet was
   // neither, so persistent toasts still covered and intercepted taps on its lower destinations.
@@ -505,7 +512,8 @@ test("Settings survives the breakpoint because it is a route", () => {
     "the phone entry point is a routed row in the More sheet");
   // Gated on the breakpoint, not on overflowItems: hiding every optional destination by experiment
   // would otherwise unmount the trigger and leave Settings no entry point in the phone chrome.
-  assert.match(rail, /const showMore = isMobile;[\s\S]*?\{showMore && \(/,
+  // A disabled rail (the desktop recovery screen, #3004) has no More: nothing behind it opens.
+  assert.match(rail, /const showMore = isMobile && !disabled;[\s\S]*?\{showMore && \(/,
     "the sheet survives an empty overflow list");
   assert.doesNotMatch(app, /SettingsDialog/, "the dialog is replaced by the route, not kept beside it");
   assert.doesNotMatch(app, /settingsOpen/, "there is no open state to hoist once it is a route");

@@ -35,7 +35,8 @@ export function addRemoteInstanceAction(
   };
 }
 
-function lastConnection(profile: InstanceProfile): string {
+/** A remote's last connection as a fact (§5.2): "Last connected 5h ago", or "Never connected". */
+export function lastConnection(profile: InstanceProfile): string {
   const parsed = profile.lastConnectedAt ? Date.parse(profile.lastConnectedAt) : Number.NaN;
   return Number.isFinite(parsed) ? `Last connected ${relativeTime(parsed)}` : "Never connected";
 }
@@ -195,9 +196,19 @@ function InstanceMenu({ profile, busy, onRemove }: {
  * when something is wrong, what (`describeInstanceFailure`). It ends with at most one button chosen
  * by state, then ⋯ for a remote. Add Remote Instance… is the page header's primary
  * (`addRemoteInstanceAction`); `addButtonRef` is where focus goes after a removal.
+ *
+ * The `recovery` variant sits under the recovery screen's status panel (#3004), which already says
+ * what is wrong with the active instance and offers its next step. So the active row says it once
+ * there: line 2 is its address and last connection, its slot is empty and no notice follows it.
+ * While a link names an instance that is not saved (Not Found), no row is current, so This Machine
+ * offers Switch.
  */
-export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTMLButtonElement | null> }) {
+export function InstancesPanel({ addButtonRef, variant = "page" }: {
+  addButtonRef?: RefObject<HTMLButtonElement | null>;
+  variant?: "page" | "recovery";
+}) {
   const instances = useInstances();
+  const recovery = variant === "recovery";
   const connection = useActiveInstanceConnection();
   const { confirm } = useFeedback();
   const { pending: busy, attempts, failures } = useSyncExternalStore(subscribeRowFeedback, readRowFeedback);
@@ -250,15 +261,18 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
   return (
     <div className="surface instance-list">
       {instances.registry.profiles.map((profile) => {
-        const active = profile.id === instances.activeProfile.id;
+        // A missing instance is active only in name: nothing is open, so no row is current.
+        const active = profile.id === instances.activeProfile.id && !(recovery && instances.phase === "missing");
+        // The recovery screen's panel speaks for the active instance (#3004).
+        const panelSpeaks = recovery && active;
         const status = instanceStatus(instances, connection, profile.id);
         const meta = instanceAvailabilityMeta(status.availability);
         const pending = busy[profile.id];
-        const problem = profile.kind === "remote" ? describeInstanceFailure(status) : null;
+        const problem = profile.kind === "remote" && !panelSpeaks ? describeInstanceFailure(status) : null;
         const pairing = status.availability === "authentication-required" || status.availability === "missing-credential";
         // A thrown failure (a removal), else a Switch or Retry from a list whose own connection failed.
         const attempt = attempts[profile.id];
-        const attemptFailed = attempt !== undefined && active && instances.phase === "failed"
+        const attemptFailed = attempt !== undefined && active && !panelSpeaks && instances.phase === "failed"
           && attempt.connection === instances.currentConnection?.();
         const failure: RowFailure | undefined = failures[profile.id] ?? (attemptFailed ? {
           message: FAILURE_SENTENCES[attempt.action](profile.label),
@@ -267,7 +281,9 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
 
         // One slot, chosen by state (§5.2): a switch keeps its Switch through Connecting.
         let slot: ReactNode = null;
-        if (pending === "retry") {
+        if (panelSpeaks) {
+          // The panel above says how it is going, and holds the next step.
+        } else if (pending === "retry") {
           slot = <BusyButton className="btn sm" busy progress={`Reconnecting to ${profile.label}…`} icon={<RefreshIcon size={14} />}>Retry</BusyButton>;
         } else if (pending === "switch" || (active && status.availability === "connecting")) {
           slot = (

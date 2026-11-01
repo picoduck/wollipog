@@ -13,9 +13,11 @@ import { createCloseGuardLinks } from "../desktop-close-guard.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { InstanceRecoveryShell } from "./InstanceRecoveryShell.js";
 import { RemoteInstanceBanner } from "./RemoteInstanceBanner.js";
-import { assertSameDomNode } from "../dom-test-assertions.js";
+import { assertNoDomNode, assertSameDomNode } from "../dom-test-assertions.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "https://tauri.localhost/" });
+installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
@@ -166,14 +168,21 @@ async function mountApp() {
 const byText = (scope: ParentNode, selector: string, text: string) =>
   Array.from(scope.querySelectorAll<HTMLButtonElement>(selector)).find((element) => element.textContent?.trim() === text) ?? null;
 
-test("Re-Pair… opens the provider's one dialog from the Instances list, the recovery screen and the banner, and focus returns to each", async () => {
+/** Add Remote Instance… from the rail tile's instance menu, the recovery screen's way to add one. */
+const openAddDialog = async (body: HTMLElement) => {
+  await act(async () => { body.querySelector<HTMLButtonElement>(".instance-tile-trigger")!.click(); });
+  await act(async () => { byText(body, '[role="menuitem"]', "Add Remote Instance…")!.click(); });
+};
+
+test("Re-Pair… opens the provider's one dialog from the recovery screen and the banner, and focus returns to each", async () => {
   const app = await mountApp();
   try {
     assert.equal(app.manager().phase, "failed");
     assert.equal(app.manager().statusByProfile[studio.id]?.availability, "authentication-required");
+    // The recovery screen's panel holds the active instance's Re-Pair…, so its row's slot is empty (#3004).
     const row = app.body.querySelector<HTMLElement>(`.instance-row[data-instance-id="${studio.id}"]`)!;
+    assertNoDomNode(byText(row, "button", "Re-Pair…"));
     const openers: Array<[string, HTMLButtonElement | null]> = [
-      ["the Instances list", byText(row, "button", "Re-Pair…")],
       ["the recovery screen", byText(app.body.querySelector(".instance-recovery-state")!, "button", "Re-Pair…")],
       ["the remote banner", byText(app.body.querySelector(".notice.page-banner")!, "button", "Re-Pair…")],
     ];
@@ -210,7 +219,7 @@ test("Re-Pair… opens the provider's one dialog from the Instances list, the re
 test("the dialog outlives the page that opened it, keeping what was typed", async () => {
   const app = await mountApp();
   try {
-    await act(async () => { byText(app.body, ".instance-recovery-state button", "Add Remote Instance…")!.click(); });
+    await openAddDialog(app.body);
     await settle();
     const name = app.dialogs()[0]!.querySelector<HTMLInputElement>("input")!;
     await act(async () => {
@@ -229,7 +238,7 @@ test("the dialog outlives the page that opened it, keeping what was typed", asyn
 test("a dialog replaced while its request runs does not close its replacement when the request ends", async () => {
   const app = await mountApp();
   try {
-    await act(async () => { byText(app.body, ".instance-recovery-state button", "Add Remote Instance…")!.click(); });
+    await openAddDialog(app.body);
     await settle();
     const first = app.dialogs()[0]!;
     const [name, link] = Array.from(first.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])'));
@@ -264,7 +273,7 @@ test("Add Instance saves without switching when Switch After Adding is unchecked
   const app = await mountApp();
   try {
     const add = async (label: string, origin: string, switchAfter: boolean) => {
-      await act(async () => { byText(app.body, ".instance-recovery-state button", "Add Remote Instance…")!.click(); });
+      await openAddDialog(app.body);
       await settle();
       const dialog = app.dialogs()[0]!;
       const [name, link] = Array.from(dialog.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])'));

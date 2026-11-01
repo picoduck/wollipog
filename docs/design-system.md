@@ -664,6 +664,25 @@ Rules
   (ellipsized) and the status text, the monogram stays centred at x = 32px, and there is no
   tooltip. The browser build keeps the decorative brand. No phone bar
   carries a switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
+- **Instance recovery screen (desktop app).** While the chosen instance loads, connects, fails or is
+  missing, the shell keeps its frame (#3004): the 64px rail with the instance tile, every destination
+  and Settings `aria-disabled` in `--text-faint` with the tooltip "Open an instance first.", and no
+  Search, attention, More or labels switch (`Rail disabled`). The page is a `.page` whose heading is
+  one `State` (`h1#page-title`, `--type-page-title`, wrapping rather than clamping a long name; the
+  window title is its title) with an icon tile in the status word's tone (§11.2: Connecting is an
+  info spinner), one sentence, a fact line and the one next step, then Connections › Instances 40px
+  below in its `recovery` variant: the active row shows its address and last connection with an
+  empty slot, and while a link names a missing instance no row is current.
+
+  | State | Title | Sentence and actions |
+  | --- | --- | --- |
+  | Loading | Loading Instances | Skeleton rows after 300ms; no actions. |
+  | Connecting | Connecting to {name} | "Opening a secure connection to {host}." and "Trying for {n}s"; **Go to This Machine** at once, **Retry** after 20s. |
+  | Offline | Can't Reach {name} | "It didn't answer at {host}. It may be asleep, or Wollipog isn't running there." ("It refused the connection…" when refused); "Last connected 5h ago"; **Retry** (primary), **Go to This Machine**; the raw error behind Show Details. |
+  | Pairing Required | {name} Needs a New Pairing | "It no longer accepts this app's saved credential. Create a pairing link on {name} and paste it here to reconnect."; **Re-Pair…** (primary), **Go to This Machine**. |
+  | Update Required | {name} Needs an Update | "It runs an older Wollipog that this app can't use. Update Wollipog on that computer, then retry."; **Go to This Machine** (primary), **Retry**. |
+  | Not Found | Instance Not Found | "This link points to an instance that isn't saved in this app anymore. Choose one below, or go back to this computer."; **Go to This Machine**. |
+  | This Machine unavailable | Can't Reach Wollipog on This Machine | "Wollipog on this computer didn't answer. It may still be starting."; **Retry**. |
 - **Window (desktop app).** On macOS the window has no separate title bar (`titleBarStyle: "Overlay"`,
   `hiddenTitle`). The traffic lights sit in the rail's top-left (`trafficLightPosition` x 8, y 18,
   so all three clear the rail's 1px hairline) inside a `--title-bar-h` strip of rail padding, above
