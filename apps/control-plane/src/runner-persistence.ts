@@ -6,7 +6,7 @@ export function isSqliteBusy(error: unknown): boolean {
     (error as { errcode?: number }).errcode === 5;
 }
 
-type Contention = { active: boolean; retries: number; started: number; report: (retries: number, exhausted: boolean) => void };
+type Contention = { active: boolean; retries: number; waitMs: number; report: (retries: number, exhausted: boolean) => void };
 const context = new AsyncLocalStorage<Contention>();
 export const RUNNER_PERSISTENCE_MAX_RETRIES = 3;
 export const RUNNER_PERSISTENCE_RETRY_WINDOW_MS = 1_000;
@@ -15,7 +15,7 @@ export const RUNNER_PERSISTENCE_RETRY_WINDOW_MS = 1_000;
  * SQLite's existing 250ms busy handler paces attempts. A frame/run shares one budget even
  * across cooperative yields. No extra sleeps or larger connection timeout are introduced. */
 export function withRunnerPersistenceRetry<T>(work: () => Promise<T>, report: Contention["report"]): Promise<T> {
-  const state: Contention = { active: true, retries: 0, started: 0, report };
+  const state: Contention = { active: true, retries: 0, waitMs: 0, report };
   return context.run(state, async () => {
     try { return await work(); }
     finally { state.active = false; }
@@ -25,17 +25,23 @@ export function withRunnerPersistenceRetry<T>(work: () => Promise<T>, report: Co
 function retry<T>(work: () => T): T {
   const state = context.getStore();
   if (!state?.active) return work();
+  let retried = false;
   for (;;) {
-    try { return work(); }
+    const started = performance.now();
+    try {
+      const result = work();
+      if (retried) state.waitMs += performance.now() - started;
+      return result;
+    }
     catch (error) {
       if (!isSqliteBusy(error)) throw error;
-      const now = performance.now();
-      state.started ||= now;
+      state.waitMs += performance.now() - started;
       const exhausted = state.retries >= RUNNER_PERSISTENCE_MAX_RETRIES ||
-        now - state.started >= RUNNER_PERSISTENCE_RETRY_WINDOW_MS;
+        state.waitMs >= RUNNER_PERSISTENCE_RETRY_WINDOW_MS;
       state.report(state.retries, exhausted);
       if (exhausted) throw error;
       state.retries++;
+      retried = true;
     }
   }
 }
@@ -64,6 +70,13 @@ export function runnerRetryConnection(database: DatabaseSync): DatabaseSync {
       if (key === "exec") {
         const exec = target.exec.bind(target);
         return (sql: string) => {
+          // A deferred read transaction cannot wait out a write-lock upgrade: SQLite skips its
+          // busy handler (and a committed competing writer can invalidate the read snapshot).
+          // Runner frames intend to persist state. Acquire write intent before any reads, so
+          // contention happens at a replayable boundary, before transaction side effects.
+          if (context.getStore()?.active && /^\s*BEGIN(?: DEFERRED)?(?: TRANSACTION)?\s*;?\s*$/i.test(sql)) {
+            return retry(() => exec("BEGIN IMMEDIATE"));
+          }
           if (/^\s*(?:BEGIN(?: IMMEDIATE)?|COMMIT)\s*;?\s*$/i.test(sql)) {
             return retry(() => exec(sql));
           }

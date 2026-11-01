@@ -170,11 +170,13 @@ test(
     child.stderr?.on("data", capture);
 
     const sockets = new Set<StrictSocket>();
+    let inspectionDb: DatabaseSync | undefined;
     t.after(async () => {
       for (const socket of sockets) {
         if (socket.readyState < 2) socket.close();
       }
       await stopChild(child);
+      inspectionDb?.close();
       rmSync(temp, { recursive: true, force: true });
     });
 
@@ -182,8 +184,7 @@ test(
     const wsBase = `ws://127.0.0.1:${port}`;
     await waitForHealth(httpBase, child, () => output);
 
-    const lock = new DatabaseSync(databasePath);
-    t.after(() => lock.close());
+    const lock = inspectionDb = new DatabaseSync(databasePath);
     const snapshot = { id: "locked-session", workspaceId: "ws", agentId: "claude", driver: "claude-code",
       title: "After lock", status: "idle", useWorktree: false, worktreePath: null, config: {}, preview: null,
       pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: now, updatedAt: now };
@@ -194,6 +195,22 @@ test(
       }
       assert.fail(`condition did not become true\n${output}`);
     };
+    const invalid = new StrictWebSocket(`${wsBase}/runner`);
+    sockets.add(invalid);
+    await new Promise<void>((resolvePromise, reject) => {
+      invalid.once("open", resolvePromise);
+      invalid.once("error", reject);
+    });
+    lock.exec("BEGIN IMMEDIATE");
+    const invalidClosed = waitForClose(invalid);
+    const invalidStarted = performance.now();
+    invalid.send(registerFrame("runner-unknown", runnerToken));
+    const invalidResult = await invalidClosed;
+    lock.exec("COMMIT");
+    assert.equal(invalidResult.code, 1008);
+    assert.equal(invalidResult.reason, "invalid token");
+    assert.ok(performance.now() - invalidStarted < 750, "invalid registrations do not wait for write intent");
+    sockets.delete(invalid);
     const contender = new StrictWebSocket(`${wsBase}/runner`);
     sockets.add(contender);
     await new Promise<void>((resolvePromise, reject) => {
@@ -209,6 +226,25 @@ test(
     assert.equal(contender.readyState, 1, "registration survives a real lock longer than the busy timeout");
     assert.match(output, /runner_persistence_contention/);
     await waitUntil(() => output.includes("runner online: runner-frame-isolation"));
+
+    lock.exec("BEGIN IMMEDIATE");
+    contender.send(JSON.stringify({ type: "session_event", sessionId: snapshot.id, seq: 1,
+      ts: Date.now(), payload: { kind: "assistant_message", text: "After event lock" } }));
+    await delay(550);
+    lock.exec("COMMIT");
+    assert.equal(contender.readyState, 1, `event ingest survives a deferred-transaction lock upgrade\n${output}`);
+    await waitUntil(() => Boolean(lock.prepare("SELECT 1 FROM session_events WHERE session_id=? AND runner_seq=1")
+      .get(snapshot.id)));
+
+    const agentsBefore = lock.prepare("SELECT agents_refreshed_at AS refreshed FROM runners WHERE runner_id=?")
+      .get("runner-frame-isolation")?.refreshed;
+    lock.exec("BEGIN IMMEDIATE");
+    contender.send(JSON.stringify({ type: "agents_updated", runnerId: "runner-frame-isolation", agents: [] }));
+    await delay(550);
+    lock.exec("COMMIT");
+    await waitUntil(() => lock.prepare("SELECT agents_refreshed_at AS refreshed FROM runners WHERE runner_id=?")
+      .get("runner-frame-isolation")?.refreshed !== agentsBefore);
+    assert.equal(contender.readyState, 1, "agent updates acquire write intent before reading protocol metadata");
 
     // Single and queued runtime updates share the same ordering and retry boundary. Last wins.
     lock.exec("BEGIN IMMEDIATE");

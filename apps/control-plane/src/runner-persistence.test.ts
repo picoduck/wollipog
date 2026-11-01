@@ -36,11 +36,39 @@ test("elapsed time stops retries even before the count is spent; scripts never r
   const db = runnerRetryConnection({ exec() { calls++; clock += 1001; throw busy; } } as unknown as DatabaseSync);
   await withRunnerPersistenceRetry(async () => {
     assert.throws(() => db.exec("BEGIN IMMEDIATE"), (error) => error === busy);
-    assert.equal(calls, 2);
+    assert.equal(calls, 1);
   }, () => {});
   calls = 0;
   await withRunnerPersistenceRetry(async () => {
     assert.throws(() => db.exec("BEGIN; SELECT 1; COMMIT"), (error) => error === busy);
     assert.equal(calls, 1);
   }, () => {});
+});
+
+test("cooperative processing time does not consume the cumulative contention budget", async (t) => {
+  let clock = 1;
+  t.mock.method(performance, "now", () => clock);
+  let failures = 1;
+  const db = runnerRetryConnection({ exec() { clock += 50; if (failures-- > 0) throw busy; } } as unknown as DatabaseSync);
+  const reports: boolean[] = [];
+  await withRunnerPersistenceRetry(async () => {
+    db.exec("BEGIN");
+    await Promise.resolve();
+    clock += 20_000;
+    failures = 1;
+    db.exec("BEGIN");
+  }, (_, exhausted) => reports.push(exhausted));
+  assert.deepEqual(reports, [false, false]);
+});
+
+test("only runner-scoped deferred transaction boundaries acquire write intent", async () => {
+  const calls: string[] = [];
+  const db = runnerRetryConnection({ exec(sql: string) { calls.push(sql); } } as unknown as DatabaseSync);
+  db.exec("BEGIN");
+  await withRunnerPersistenceRetry(async () => {
+    db.exec("BEGIN");
+    db.exec("BEGIN DEFERRED TRANSACTION;");
+    db.exec("BEGIN; SELECT 1; COMMIT");
+  }, () => {});
+  assert.deepEqual(calls, ["BEGIN", "BEGIN IMMEDIATE", "BEGIN IMMEDIATE", "BEGIN; SELECT 1; COMMIT"]);
 });
