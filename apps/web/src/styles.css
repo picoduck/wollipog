@@ -10295,19 +10295,6 @@ textarea {
   font-weight: 400;
   line-height: 1.45;
 }
-.access-member-picker {
-  display: flex;
-  flex-direction: column;
-  gap: 5px;
-  margin: 0;
-  padding: 0;
-  border: 0;
-}
-.access-member-picker legend {
-  margin-bottom: 7px;
-  font-size: 12.5px;
-  font-weight: 600;
-}
 .access-success {
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
@@ -12564,7 +12551,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   font-weight: 600;
 }
 .access-form-field > .pid-mask { min-height: 38px; display: flex; align-items: center; padding: 0 var(--space-3); }
-.access-member-picker > .pid-toggle { margin-inline-start: auto; }
 
 /* Connect via SSH (#2987). What This Needs is a closed disclosure of three requirements. Workspace
    Folder takes the row beside the 96px Port (§8.3), and the row stacks under 480px as a `.field-row`

@@ -3062,3 +3062,94 @@ test("adding an organization member reconnects its UI clients so they reload the
   };
   assert.ok(identity.memberships.some((membership) => membership.userName === "Grace Hopper"));
 });
+
+test("renaming a team is audited and reconnects no UI client, unlike a membership change (#3000)", { timeout: 30_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-team-rename-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const operatorToken = "team-rename-operator-token";
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.createIdentityMember({
+    userId: "usr_team_operator", displayName: "Team Operator", organizationId: identity.organizationId, role: "operator", now: 1,
+  });
+  seed.createDevice({
+    id: "dev_team_operator", name: "Team Operator Device", tokenHash: hashToken(operatorToken),
+    userId: "usr_team_operator", organizationId: identity.organizationId, now: 2,
+  });
+  seed.close();
+
+  let output = "";
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "apps/control-plane/src/index.ts"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const capture = (chunk: unknown) => {
+    output = (output + String(chunk)).slice(-32_768);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const json = { "content-type": "application/json" };
+  const created = await fetchWithBearer(`${httpBase}/api/identity/teams`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ name: "Support", memberUserIds: [] }),
+  });
+  assert.equal(created.status, 201);
+  const { team } = await created.json() as { team: { teamId: string } };
+
+  // An admin's dashboard and a scoped member's: membership changes close the scoped one (and an
+  // organization directory change would close both); a rename closes neither.
+  const sockets = await Promise.all([ownerToken, operatorToken].map((token) =>
+    openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, token))));
+  const closedEarly: number[] = [];
+  sockets.forEach((socket, index) => socket.once("close", () => { closedEarly.push(index); }));
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/teams/${team.teamId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ name: "Help Desk" }),
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json() as { team: { name: string } }).team.name, "Help Desk");
+  await delay(250);
+  assert.deepEqual(closedEarly, [], "a rename changes nobody's access, so it closes no dashboard");
+  sockets.forEach((socket) => socket.removeAllListeners("close"));
+
+  // The member's socket is closed by a membership change, so the quiet rename was not a dead socket.
+  const closed = await closeAfter(sockets[1]!, () => {
+    void fetchWithBearer(`${httpBase}/api/identity/teams/${team.teamId}/members`, ownerToken, {
+      method: "PUT", headers: json, body: JSON.stringify({ memberUserIds: [] }),
+    });
+  });
+  assert.ok(closed.code > 0);
+  sockets[0]!.close();
+
+  // Creating a team under a taken name is refused with the same stable code as a rename.
+  const duplicate = await fetchWithBearer(`${httpBase}/api/identity/teams`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ name: " Help Desk ", memberUserIds: [] }),
+  });
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json() as { code?: string }).code, "team_name_taken");
+
+  const { audit } = await (await fetchWithBearer(`${httpBase}/api/identity/mutation-audit`, ownerToken)).json() as {
+    audit: Array<{ method: string; route: string; targetId?: string; statusCode: number }>;
+  };
+  assert.ok(audit.some((entry) => entry.method === "PATCH" && entry.route === "/api/identity/teams/:teamId" &&
+    entry.targetId === team.teamId && entry.statusCode === 200), "the rename is in the identity mutation audit");
+});

@@ -4349,6 +4349,9 @@ export type SkillAssignmentScopeKind = "instance" | "runner";
 
 export class SkillImportConflictError extends Error {}
 
+/** A team member's removal would leave their own work nested inside work shared with the team. */
+export class TeamMemberContainmentError extends Error {}
+
 export interface SkillVersionSummary {
   id: string;
   digest: string;
@@ -11142,6 +11145,30 @@ export class ControlPlaneDb {
     return this.identityAdministration(context).teams.find((item) => item.teamId === input.teamId)!;
   }
 
+  /** Team names are unique within an organization (exactly, as the table's constraint compares). */
+  identityTeamNameTaken(organizationId: string, name: string, exceptTeamId?: string): boolean {
+    return Boolean(this.stmt("SELECT 1 FROM identity_teams WHERE organization_id=? AND name=? AND team_id<>?")
+      .get(organizationId, name, exceptTeamId ?? ""));
+  }
+
+  /** Renames a team in its organization. The name is display-only: ids, members and every grant
+   * that names the team are unchanged. */
+  renameIdentityTeam(input: {
+    teamId: string;
+    organizationId: string;
+    name: string;
+    now: number;
+  }): TeamView | "not_found" | "name_taken" {
+    const team = this.stmt("SELECT 1 FROM identity_teams WHERE team_id=? AND organization_id=?")
+      .get(input.teamId, input.organizationId);
+    if (!team) return "not_found";
+    if (this.identityTeamNameTaken(input.organizationId, input.name, input.teamId)) return "name_taken";
+    this.stmt("UPDATE identity_teams SET name=?, updated_at=? WHERE team_id=? AND organization_id=?")
+      .run(input.name, input.now, input.teamId, input.organizationId);
+    const context = { ...this.localIdentityContext(), organizationId: input.organizationId };
+    return this.identityAdministration(context).teams.find((item) => item.teamId === input.teamId)!;
+  }
+
   /** Membership can be part of a persisted privacy invariant: a user-owned resource is safely
    * nested inside a team-owned parent only while that user remains a member of the team. */
   private assertTeamMemberRemovalPreservesResourceContainment(
@@ -11159,7 +11186,7 @@ export class ControlPlaneDb {
           wider.organizationId !== organizationId || narrower.owner.kind !== "user" ||
           wider.owner.kind !== "team" || wider.owner.teamId !== teamId ||
           !removedMemberIds.has(narrower.owner.userId)) return;
-      throw new Error(
+      throw new TeamMemberContainmentError(
         `cannot remove user '${narrower.owner.userId}' from this team because ${relationship} ` +
         "relies on that membership; change the related access scopes first",
       );

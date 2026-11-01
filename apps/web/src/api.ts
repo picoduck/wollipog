@@ -1692,6 +1692,10 @@ export function createApiClient(transport: ApiTransport) {
     req<{ team: TeamView }>(`/api/identity/teams/${encodeURIComponent(teamId)}/members`, {
       method: "PUT", body: JSON.stringify({ memberUserIds }),
     }),
+  renameIdentityTeam: (teamId: string, name: string) =>
+    req<{ team: TeamView }>(`/api/identity/teams/${encodeURIComponent(teamId)}`, {
+      method: "PATCH", body: JSON.stringify({ name }),
+    }),
   deleteIdentityTeam: (teamId: string) =>
     req<void>(`/api/identity/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
   listMutationAudit: (limit = 100) =>

@@ -6,7 +6,7 @@ import type {
   IdentityAdministrationView,
   UiSnapshotMessage,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { RunnersView } from "../components/RunnersView.js";
@@ -24,6 +24,12 @@ const member = "pat@example.org";
 const renamedMember = "pat.renamed@example.org";
 const organizationId = "organization-1";
 const organizationName = "Fixture Organization";
+// Opt-in states for the Team dialog's evidence (#3000), so the default directory the other specs
+// count stays as it is: a suspended member who is already on the team, and a members save the
+// server refuses.
+const params = new URLSearchParams(window.location.search);
+const withSuspendedMember = params.has("suspended");
+const failMembers = params.has("failMembers");
 
 function identity(ownerName: string, memberName: string): IdentityAdministrationView {
   return {
@@ -40,8 +46,14 @@ function identity(ownerName: string, memberName: string): IdentityAdministration
     memberships: [
       { organizationId, organizationName, userId: "owner-1", userName: ownerName, userStatus: "active", role: "owner", createdAt: 1 },
       { organizationId, organizationName, userId: "member-1", userName: memberName, userStatus: "active", role: "operator", createdAt: 2 },
+      ...(withSuspendedMember ? [{
+        organizationId, organizationName, userId: "member-2", userName: "Morgan Lee", userStatus: "suspended" as const, role: "viewer" as const, createdAt: 4,
+      }] : []),
     ],
-    teams: [{ teamId: "team-1", organizationId, name: "Support", memberUserIds: ["member-1"], createdAt: 3 }],
+    teams: [{
+      teamId: "team-1", organizationId, name: "Support",
+      memberUserIds: withSuspendedMember ? ["member-1", "member-2"] : ["member-1"], createdAt: 3,
+    }],
   };
 }
 
@@ -122,7 +134,24 @@ const client: ApiClient = {
     token: "fixture_pairing_token",
     pairing: { hosts: [], port: 443, webServed: false, boundBeyondLoopback: false },
   }),
+  renameIdentityTeam: async (teamId, name) => {
+    if (currentIdentity.teams.some((team) => team.teamId !== teamId && team.name === name)) {
+      throw new ApiError("another team in this organization already has this name", 409, "team_name_taken");
+    }
+    currentIdentity = {
+      ...currentIdentity,
+      teams: currentIdentity.teams.map((team) => team.teamId === teamId ? { ...team, name } : team),
+    };
+    return { team: currentIdentity.teams.find((team) => team.teamId === teamId)! };
+  },
   updateIdentityTeamMembers: async (teamId, memberUserIds) => {
+    if (failMembers) {
+      throw new ApiError(
+        "cannot remove user 'member-1' from this team because Session 's_1' containment in Project 'p_1' relies on that membership; change the related access scopes first",
+        409,
+        "team_member_containment",
+      );
+    }
     currentIdentity = {
       ...currentIdentity,
       teams: currentIdentity.teams.map((team) => team.teamId === teamId ? { ...team, memberUserIds } : team),
