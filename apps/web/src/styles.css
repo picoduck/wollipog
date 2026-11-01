@@ -2156,10 +2156,8 @@ button.status { cursor: pointer; }
 .notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
    in the tone below it. */
-/* The sentence wraps in its own column and the actions stay at the top right (#2465, #3005), as
-   Retry Now does; opened details take the line under both. */
 .notice.page-banner {
-  align-items: start;
+  align-items: center;
   min-height: 36px;
   padding: var(--space-1) var(--space-6);
   border: 0;
@@ -2167,24 +2165,33 @@ button.status { cursor: pointer; }
   border-radius: initial;
 }
 .notice.page-banner .notice-content {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: start;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   column-gap: var(--space-3);
 }
 .notice.page-banner .notice-actions { margin-top: 0; }
-.notice.page-banner .notice-details-body { grid-column: 1 / -1; }
+/* An untitled banner's sentence wraps in its own column and its actions stay at the top right
+   (#2465, #3005), as Retry Now does; opened details take the line under both. A titled banner
+   (Secure Dashboard Available) keeps the wrapping row above. */
+.notice.page-banner:not(.with-head) { align-items: start; }
+.notice.page-banner:not(.with-head) > .notice-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+}
+.notice.page-banner:not(.with-head) .notice-details-body { grid-column: 1 / -1; }
 @media (max-width: 760px) {
   .notice.page-banner {
     padding-inline: max(var(--space-4), env(safe-area-inset-left, 0px)) max(var(--space-4), env(safe-area-inset-right, 0px));
   }
   /* Two actions take one row under the sentence, each 44px tall even under a mouse; the tone icon
      stays on the sentence's first line. One action keeps the top right. */
-  .notice.page-banner:has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content {
+  .notice.page-banner:not(.with-head):has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content {
     grid-template-columns: minmax(0, 1fr);
     row-gap: var(--space-2);
   }
-  .notice.page-banner:has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content > .notice-actions {
+  .notice.page-banner:not(.with-head):has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content > .notice-actions {
     --control-h-sm: 44px;
     padding-bottom: var(--space-2);
   }
