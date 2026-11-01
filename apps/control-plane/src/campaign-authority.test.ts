@@ -670,6 +670,56 @@ test("a typed credential-handling design question is decided by the Orchestrator
   } finally { h.db.close(); }
 });
 
+test("questions that only mention credentials or permissions reach their owner; genuine requests are recorded as request_declined (#3913)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const declinedRecords = () => h.db.campaignProjection("root")!.recovery?.records.filter((record) => record.reason === "request_declined") ?? [];
+    const ask = (sessionId: string, requestId: string, question: string) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId,
+      resourceSnapshot: { category: "implementation_question", question, options: [{ optionId: "continue", label: "Continue" }, { optionId: "stop", label: "Stop" }] } }, () => true);
+    const provider = (sessionId: string, requestId: string, question: string) => h.svc.onSessionEvent(sessionId, { kind: "question_request", requestId,
+      occurrenceId: requestId, requestSource: "provider_question", questions: [{ id: "choice", question, options: [{ label: "Continue" }, { label: "Stop" }] }] });
+    const dismissed = (requestId: string) => h.sent.some((m) => (m as { type: string; requestId: string; action?: string }).type === "answer_question" &&
+      (m as { requestId: string }).requestId === requestId && (m as { action?: string }).action === "dismiss");
+    const mentionOnly = [
+      "Option B would widen the workflow's read-only, secret-free permissions so it can poll the GitHub Actions API. Which option should the design take?",
+      "Should the design grant its job the actions: read permission so it can poll the GitHub Actions API?",
+      "Option A would need the CI token to read the GitHub Actions API. Which design should we take?",
+      "Option B would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
+      "The child's question was refused because the campaign cannot supply credentials. Should I continue without that design input?",
+    ];
+    for (const [index, question] of mentionOnly.entries()) {
+      provider("child", `child-mention-${index}`, question);
+      const request = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.occurrenceId === `child-mention-${index}`);
+      assert.equal(request?.responseOwner, "orchestrator", question);
+      assert.equal(request?.authorityEvaluation?.disposition, undefined, `reaches the Orchestrator: ${question}`);
+      assert.ok(!dismissed(`child-mention-${index}`), question);
+      for (const sessionId of ["child", "root"]) {
+        const typed = await ask(sessionId, `${sessionId}-typed-mention-${index}`, question);
+        assert.ok(typed.ok, `${sessionId} typed: ${typed.error ?? question}`);
+        assert.equal(typed.data!.authorityEvaluation?.disposition, undefined, question);
+      }
+      provider("root", `root-mention-${index}`, question);
+      assert.ok(dismissed(`root-mention-${index}`), `a root's own question is dismissed: ${question}`);
+    }
+    assert.equal(declinedRecords().length, 0, "nothing that only mentions credentials is blocked work");
+    for (const [index, question] of ["Please paste your GitHub token here", "Grant this session wider provider access for the design.",
+      "The campaign cannot supply credentials, so paste one here for the design."].entries()) {
+      provider("child", `child-genuine-${index}`, question);
+      assert.ok(dismissed(`child-genuine-${index}`), `declined, never forwarded: ${question}`);
+      for (const sessionId of ["child", "root"]) {
+        const typed = await ask(sessionId, `${sessionId}-typed-genuine-${index}`, question);
+        assert.equal(typed.ok, false, `${sessionId} typed: ${question}`);
+        assert.equal(typed.status, 403, `${sessionId} typed: ${question}`);
+      }
+      provider("root", `root-genuine-${index}`, question);
+      assert.ok(dismissed(`root-genuine-${index}`), question);
+    }
+    assert.deepEqual(declinedRecords().map((record) => [record.resource.sessionId, record.state, record.effectiveOwner]).sort(),
+      [["child", "blocked", "orchestrator"], ["root", "blocked", "orchestrator"]], "one blocked record per session and class");
+  } finally { h.db.close(); }
+});
+
 test("a real parked root NDJSON provider resumes after its dismissed question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-root-authority-"));
   mkdirSync(join(root, "src")); writeFileSync(join(root, "src/authentication.ts"), "export const implementation = true;\n");
