@@ -211,19 +211,21 @@ export function InstanceRecoveryShell() {
   const content = instanceRecoveryContent(kind, instances);
   const connecting = kind === "connecting";
   // Each switch, retry or re-pair starts a new connection, and Connecting counts from its start.
-  const elapsed = useElapsed(`${kind}:${instances.activeProfile.id}:${instances.currentConnection?.() ?? ""}`, connecting);
+  const attempt = `${kind}:${instances.activeProfile.id}:${instances.currentConnection?.() ?? ""}`;
+  const elapsed = useElapsed(attempt, connecting);
   const seconds = Math.floor(elapsed / 1000);
   const skeleton = useDelayed(RECOVERY_SKELETON_DELAY_MS);
   useWindowTitle(content.title);
 
-  // The screen replaces the shell, or one state replaces another, and the control that had focus
-  // can go with it; focus then lands on the page's title, as a route change's does (§16.1).
+  // The screen replaces the shell, one state replaces another, or a new connection takes Retry away
+  // again, and the control that had focus can go with it; focus then lands on the page's title, as
+  // a route change's does (§16.1).
   useEffect(() => {
     const focused = document.activeElement;
     if (focused === null || focused === document.body) {
       document.getElementById("page-title")?.focus({ preventScroll: true });
     }
-  }, [kind]);
+  }, [attempt]);
 
   const actions = content.actions
     .filter((action) => !(connecting && action === "retry" && elapsed < RECOVERY_RETRY_AFTER_MS))
@@ -232,7 +234,13 @@ export function InstanceRecoveryShell() {
       const className = primary ? "btn primary" : "btn";
       switch (action) {
         case "retry":
-          return <button key={action} type="button" className={className} onClick={() => void instances.retryActive()}>Retry</button>;
+          // While Connecting, Retry gives up on the hung attempt, a retry included, and starts anew.
+          return (
+            <button key={action} type="button" className={className}
+              onClick={() => void instances.retryActive(connecting ? { restart: true } : undefined)}>
+              Retry
+            </button>
+          );
         case "go-to-this-machine":
           return (
             <button key={action} type="button" className={className} onClick={() => void instances.goToThisMachine()}>

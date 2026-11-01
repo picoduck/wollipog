@@ -63,7 +63,7 @@ function manager(overrides: Partial<InstanceManager>, calls: Call[] = []): Insta
     error: null,
     statusByProfile: { local: { availability: "saved" } },
     async switchInstance(profileId) { calls.push(`switch:${profileId}`); },
-    async retryActive() { calls.push("retry"); },
+    async retryActive(options) { calls.push(options?.restart ? "retry:restart" : "retry"); },
     async addInstance() {},
     async editInstance() {},
     async repairInstance() {},
@@ -393,14 +393,19 @@ test("Connecting offers Go to This Machine at once and Retry after 20 seconds, c
         await advance(1);
         assert.equal(fact(), "Trying for 20s");
         assert.deepEqual(view.actions(), [{ label: "Go to This Machine", primary: false }, { label: "Retry", primary: false }]);
-        await act(async () => { view.action("Retry").click(); });
-        assert.deepEqual(calls, ["retry"]);
+        // It gives up on the hung attempt, even one a retry started, rather than joining it.
+        const retry = view.action("Retry");
+        retry.focus();
+        await act(async () => { retry.click(); });
+        assert.deepEqual(calls, ["retry:restart"]);
 
-        // The retry starts a new connection, and its time starts again.
+        // The retry starts a new connection, and its time starts again. Retry leaves with the time,
+        // and focus goes to the page's title rather than the document.
         connection = 2;
         await view.render({ ...connecting });
         assert.equal(fact(), "Trying for 0s");
         assert.equal(view.action("Retry"), undefined);
+        assert.equal(domWindow.document.activeElement?.id, "page-title");
       } finally {
         await view.unmount();
       }
