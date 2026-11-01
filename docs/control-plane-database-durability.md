@@ -22,9 +22,13 @@ recovers it.
   effects or lets later socket frames overtake the failed write. Cooperative inventory yields
   retain that same budget, without counting time spent processing or yielding between operations.
   Single-statement deferred transaction starts acquire write intent within runner frame handling,
-  avoiding stale read transactions during lock upgrades. Registration first checks its credential
-  read-only, so invalid peers do not contend for write intent, then rechecks under the write lock
-  before activation. Other entry points retain their prior
+  avoiding stale read transactions during lock upgrades. Savepoint-based stores acquire the same
+  write intent with a zero-row update immediately after opening their savepoint, before any reads;
+  nested rollback and root RELEASE semantics are unchanged. Failed admission unwinds its savepoint.
+  Registration first checks for a recognized active or pending credential read-only, so unknown or
+  revoked tokens do not contend for write intent, then rechecks under the write lock before
+  activation. Recognized expired pending credentials retain their existing revoke-and-prune path.
+  Other entry points retain their prior
   behavior and timeout. Extended busy codes and arbitrary multi-statement scripts are not replayed.
   `runner_persistence_contention` identifies the message type, runner, retry count and exhaustion;
   an exhausted frame logs `runner_persistence_exhausted` and closes only that socket with 1011,

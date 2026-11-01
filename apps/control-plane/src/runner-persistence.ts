@@ -77,6 +77,23 @@ export function runnerRetryConnection(database: DatabaseSync): DatabaseSync {
           if (context.getStore()?.active && /^\s*BEGIN(?: DEFERRED)?(?: TRANSACTION)?\s*;?\s*$/i.test(sql)) {
             return retry(() => exec("BEGIN IMMEDIATE"));
           }
+          const savepoint = context.getStore()?.active && /^\s*SAVEPOINT\s+([a-z_][a-z0-9_]*)\s*;?\s*$/i.exec(sql);
+          if (savepoint) {
+            exec(sql);
+            try {
+              // A root SAVEPOINT also starts deferred. Acquire main-database write intent
+              // before its caller can read, without changing RELEASE/ROLLBACK semantics or
+              // introducing a hidden enclosing transaction. Zero matched rows means no row
+              // changes or trigger execution. Nested savepoints retain the existing write lock.
+              retry(() => target.prepare("UPDATE runners SET runner_id=runner_id WHERE 0").run());
+            } catch (error) {
+              // Callers open their savepoint before entering their own try/catch. If admission
+              // fails here, restore the caller's transaction state ourselves.
+              exec(`ROLLBACK TO ${savepoint[1]}; RELEASE ${savepoint[1]}`);
+              throw error;
+            }
+            return;
+          }
           if (/^\s*(?:BEGIN(?: IMMEDIATE)?|COMMIT)\s*;?\s*$/i.test(sql)) {
             return retry(() => exec(sql));
           }

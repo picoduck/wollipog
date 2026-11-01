@@ -10683,9 +10683,12 @@ export class ControlPlaneDb {
     now: number,
     protocolVersion: number | null = null,
   ): { credentialId: string; scope: ResourceScope; legacy: boolean; activated: boolean } | null {
-    // Reject unknown, expired or revoked credentials without competing for a write lock. This
+    // Reject unknown or revoked credentials without competing for a write lock. This
     // read is only a preflight: authentication is repeated under write intent before activation.
-    if (!this.verifyRunnerCredentialForAttestation(meta.runnerId, tokenHash, now)) return null;
+    // A known expired pending token still enters normal authentication so its revocation and
+    // bounded-history pruning retain their existing behavior.
+    if (!this.stmt("SELECT 1 FROM runner_credentials WHERE runner_id=? AND token_hash=? AND status IN ('pending','active')")
+      .get(meta.runnerId, tokenHash)) return null;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const credential = this.authenticateRunnerCredential(meta.runnerId, tokenHash, now, false);
