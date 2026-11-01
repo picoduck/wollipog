@@ -351,6 +351,79 @@ test("duplicate Retry clicks share one in-flight selection and remote open", asy
   domWindow.history.replaceState(null, "", "/");
 });
 
+test("a restarting Retry gives up on a stalled retry's open and starts a new connection (#3004)", async () => {
+  let manager!: InstanceManager;
+  const opens: Array<() => void> = [];
+  const desktop = {
+    isTauri: () => true,
+    invoke<T>(command: string): Promise<T> {
+      if (command === "instance_registry") return Promise.resolve(registry(profiles[1]!.id) as T);
+      if (command === "set_active_instance") return Promise.resolve(registry(profiles[1]!.id) as T);
+      return Promise.reject(new Error(`unexpected ${command}`));
+    },
+    channel<T>() { return { onmessage: (_event: T) => {} }; },
+  };
+  function Probe() {
+    manager = useInstances();
+    return null;
+  }
+  domWindow.history.replaceState(null, "", instanceViewPath(profiles[1]!.id, { name: "board" }));
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const flush = () => act(async () => { for (let index = 0; index < 4; index += 1) await Promise.resolve(); });
+  await act(async () => {
+    root.render(
+      <InstanceProvider
+        desktop={desktop}
+        createRemoteRuntime={(profileId) => {
+          // The first open fails; every later one hangs until the test releases it.
+          if (opens.length === 0) {
+            opens.push(() => undefined);
+            return Promise.reject({ code: "unreachable", message: "timed out" });
+          }
+          return new Promise((resolve) => { opens.push(() => resolve(runtime(profileId, []))); });
+        }}
+      >
+        <Probe />
+      </InstanceProvider>,
+    );
+  });
+  await flush();
+  assert.equal(manager.phase, "failed");
+
+  // Retry; its open hangs.
+  void manager.retryActive();
+  await flush();
+  assert.equal(manager.phase, "opening");
+  assert.equal(opens.length, 2);
+  const stalled = manager.currentConnection!();
+
+  // A plain second Retry shares the hung attempt...
+  void manager.retryActive();
+  await flush();
+  assert.equal(opens.length, 2, "a double click starts one connection");
+  assert.equal(manager.currentConnection!(), stalled);
+
+  // ...and the recovery screen's timed Retry starts a new one.
+  void manager.retryActive({ restart: true });
+  await flush();
+  assert.equal(opens.length, 3, "a fresh remote open starts");
+  assert.notEqual(manager.currentConnection!(), stalled, "it is a new connection");
+
+  // The abandoned open finishing late does not open the instance; the new one does.
+  await act(async () => { opens[1]!(); });
+  await flush();
+  assert.equal(manager.phase, "opening");
+  await act(async () => { opens[2]!(); });
+  await flush();
+  assert.equal(manager.phase, "ready");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  domWindow.history.replaceState(null, "", "/");
+});
+
 test("a superseded stalled retry cannot swallow a newer-generation Retry", async () => {
   let manager!: InstanceManager;
   let persisted = profiles[1]!.id;

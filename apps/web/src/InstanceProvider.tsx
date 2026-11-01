@@ -406,10 +406,11 @@ export function InstanceProvider({
     return () => window.removeEventListener("popstate", onPopState);
   }, [closeRuntime, switchTo]);
 
-  const retryActive = useCallback((): Promise<void> => {
+  const retryActive = useCallback((options: { restart?: boolean } = {}): Promise<void> => {
     const { activeProfile } = stateRef.current;
     if (
-      retryInFlightRef.current?.profileId === activeProfile.id
+      !options.restart
+      && retryInFlightRef.current?.profileId === activeProfile.id
       && retryInFlightRef.current.generation === generationRef.current
     ) {
       return retryInFlightRef.current.operation;

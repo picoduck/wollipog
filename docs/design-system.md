@@ -664,6 +664,25 @@ Rules
   (ellipsized) and the status text, the monogram stays centred at x = 32px, and there is no
   tooltip. The browser build keeps the decorative brand. No phone bar
   carries a switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
+- **Instance recovery screen (desktop app).** While the chosen instance loads, connects, fails or is
+  missing, the shell keeps its frame (#3004): the 64px rail with the instance tile, every destination
+  and Settings `aria-disabled` in `--text-faint` with the tooltip "Open an instance first.", and no
+  Search, attention, More or labels switch (`Rail disabled`). The page is a `.page` whose heading is
+  one `State` (`h1#page-title`, `--type-page-title`, wrapping rather than clamping a long name; the
+  window title is its title) with an icon tile in the status word's tone (§11.2: Connecting is an
+  info spinner), one sentence, a fact line and the one next step, then Connections › Instances 40px
+  below in its `recovery` variant: the active row shows its address and last connection with an
+  empty slot, and while a link names a missing instance no row is current.
+
+  | State | Title | Sentence and actions |
+  | --- | --- | --- |
+  | Loading | Loading Instances | Skeleton rows after 300ms; no actions. |
+  | Connecting | Connecting to {name} | "Opening a secure connection to {host}." and "Trying for {n}s"; **Go to This Machine** at once, **Retry** after 20s. |
+  | Offline | Can't Reach {name} | "It didn't answer at {host}. It may be asleep, or Wollipog isn't running there." ("It refused the connection…" when refused); "Last connected 5h ago"; **Retry** (primary), **Go to This Machine**; the raw error behind Show Details. |
+  | Pairing Required | {name} Needs a New Pairing | "It no longer accepts this app's saved credential. Create a pairing link on {name} and paste it here to reconnect."; **Re-Pair…** (primary), **Go to This Machine**. |
+  | Update Required | {name} Needs an Update | "It runs an older Wollipog that this app can't use. Update Wollipog on that computer, then retry."; **Go to This Machine** (primary), **Retry**. |
+  | Not Found | Instance Not Found | "This link points to an instance that isn't saved in this app anymore. Choose one below, or go back to this computer."; **Go to This Machine**. |
+  | This Machine unavailable | Can't Reach Wollipog on This Machine | "Wollipog on this computer didn't answer. It may still be starting."; **Retry**. |
 - **Window (desktop app).** On macOS the window has no separate title bar (`titleBarStyle: "Overlay"`,
   `hiddenTitle`). The traffic lights sit in the rail's top-left (`trafficLightPosition` x 8, y 18,
   so all three clear the rail's 1px hairline) inside a `--title-bar-h` strip of rail padding, above
@@ -1791,9 +1810,12 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 
 - Right-aligned: **Cancel** (`.btn`, secondary, never ghost) then the **primary**. The primary label
   repeats the dialog's verb ("Create Session", never "OK", "Submit" or "Continue").
-- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 3) the
+- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 2) the
   primary may be **Continue**, with Back as the secondary from step 2 on. The final step's primary
-  names the outcome ("Pair Device"), never Continue.
+  names the outcome ("Create Pairing Link"), never Continue. A stepper keeps one title; its
+  description names the step ("Step 2 of 2: Name the device."), and a stepper whose steps differ in
+  height anchors near the top (`Modal`'s `grows`, a local `data-grows` on the backdrop, §19.4) so
+  its top edge never moves.
 - A destructive tertiary action (Delete Team, Remove Location) goes far left as `.btn.ghost.danger`
   and opens its own confirmation.
 - A harmless extra action (Show Sessions) is a `.btn.ghost` after the spacer and before Cancel
@@ -2417,9 +2439,9 @@ uppercase transform.
 
 **Queue tray** (`QueuedMessages`, #2178). Messages not yet sent wait in `.queue`, docked on the
 composer card: inset `--space-3` from its edges with no gap, a solid `--border` edge, top corners
-`--radius-md`, and a hairline between rows. It starts collapsed to one summary line (#2788): a
-full-width §5.5 disclosure trigger, `--control-h` tall, reading "1 Queued Message" or "<n> Queued
-Messages" and carrying the one Held badge when the whole queue is held. While collapsed it also
+`--radius-md`, and a hairline between rows. Two or more messages start collapsed to one summary line
+(#2788): a full-width §5.5 disclosure trigger, `--control-h` tall, reading "<n> Queued Messages" and
+carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
 lasts while the session stays open, and every session starts collapsed. A queue held behind a
@@ -2441,6 +2463,16 @@ reason referenced by `aria-describedby`. Below 760px a row is its text and one 4
 Actions" ⋯ button whose menu sheet lists Steer into This Turn, Edit Message and Cancel Message (or
 Dismiss Message), each disabled one with its reason as the second line. A delivery failure's reason
 is a notice of the slot (§13.2), not part of the row.
+
+One queued message is its own row in place of the summary (#3962), so steering it takes one tap:
+the same single line, with the Held badge after its words when the queue is held. On desktop its
+row is the expanded row above, and what the expanded tray would say about it is said under it. Below
+760px, while the message can be steered and the reader may manage the queue, a 44px Steer
+(`.btn.sm.ghost`) sits before the ⋯ button and the sheet leaves Steer into This Turn out; otherwise
+there is no Steer button and the sheet lists Steer into This Turn, disabled, with its reason. When a
+second message arrives the summary returns as the person last left it, opened only if focus was in
+the lone row, so the control they hold stays shown; when the queue drops back to one, focus on the
+summary moves to the row.
 
 **Message receipts** (#2171). What happened to a message after it was sent is one `.tl-receipt` line
 under that message, inside the scrolling transcript: after the last canonical item and before the

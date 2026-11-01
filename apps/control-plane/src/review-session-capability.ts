@@ -1,4 +1,4 @@
-import type { ReviewSessionCapability } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type RunnerRuntimeInfo, type ReviewSessionCapability } from "@wollipog/protocol";
 
 /** A malformed entry must not remove the other harness. Normalize registration and refresh alike. */
 export function safeReviewSessionCapability(value: unknown): ReviewSessionCapability | undefined {
@@ -27,5 +27,19 @@ export function safeReviewSessionCapability(value: unknown): ReviewSessionCapabi
   }
   reviewers.sort((a, b) => input.reviewers.findIndex((entry) => entry?.harness === a.harness) -
     input.reviewers.findIndex((entry) => entry?.harness === b.harness));
-  return { reviewers, ...(input.configuration === true ? { configuration: true as const } : {}), ...(Object.keys(unavailable).length ? { unavailable } : {}) };
+  return {
+    reviewers,
+    ...(input.questionPreservation === true ? { questionPreservation: true as const } : {}),
+    ...(input.configuration === true ? { configuration: true as const } : {}),
+    ...(Object.keys(unavailable).length ? { unavailable } : {}),
+  };
+}
+
+/** Gate the trusted marker on actual support, never on an unrelated later protocol bump. */
+export function runnerSupportsReviewQuestionPreservation(runner: {
+  protocolVersion?: number | null;
+  runtime?: Pick<RunnerRuntimeInfo, "reviewSession"> | null;
+} | null | undefined): boolean {
+  return runnerSupportsProtocol(runner?.protocolVersion, "reviewSession") &&
+    runner?.runtime?.reviewSession?.questionPreservation === true;
 }

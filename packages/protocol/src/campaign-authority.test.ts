@@ -336,6 +336,191 @@ test("design-form parity: everything main's screen declines is still declined, e
   }
 });
 
+/** Every question route: a child's provider question, the typed implementation question (child and
+ * root), and the root's own question, which is dismissed as `root_questions` when nothing is declined. */
+const onEveryRoute = (text: string) => {
+  const snapshot: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question: text,
+    options: [{ optionId: "continue", label: "Continue" }, { optionId: "stop", label: "Stop" }] };
+  return { child: evaluate(question(text)), root: evaluate(question(text), { root: true }), typed: typed(snapshot), rootTyped: typed(snapshot, { root: true }) };
+};
+const reachesOwner = (text: string) => {
+  const routes = onEveryRoute(text);
+  decided(routes.child, undefined, "campaign_delegation", `child: ${text}`);
+  declined(routes.root, "root_questions", `root: ${text}`);
+  decided(routes.typed, undefined, "campaign_delegation", `typed: ${text}`);
+  decided(routes.rootTyped, undefined, "standing_authorization", `root typed: ${text}`);
+};
+const declinedEverywhere = (text: string) => {
+  for (const [route, result] of Object.entries(onEveryRoute(text))) declined(result, "secrets_and_sign_in", `${route}: ${text}`);
+};
+/** The #3913 table, written out as whole questions, plus quoted and verbatim decline wording. */
+const mentionOnly = [
+  "Option B would widen the workflow's read-only, secret-free permissions so it can poll the GitHub Actions API. Which option should the design take?",
+  "Should the design grant its job the actions: read permission so it can poll the GitHub Actions API?",
+  "Option A would need the CI token to read the GitHub Actions API. Which design should we take?",
+  "Option B would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
+  "The child's question was refused because the campaign cannot supply credentials. Should I continue without that design input?",
+  "The child's design question was declined with \"cannot supply credentials\". Should I continue without that design input?",
+  "The child's design question was declined with `the campaign cannot supply credentials`. Should I continue without that design input?",
+  "The child reported \"Full Control declined this question: the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.\" Which design should the child take next?",
+  "We cannot supply credentials. Which fallback should the importer implement for this design?",
+  "Should the workflow design stay token-free and read-only?",
+];
+/** Genuine requests for a credential value, a sign-in, wider provider access or a lasting grant. */
+const genuine = [
+  "Please paste your GitHub token here",
+  "Which API key should I use for the workflow design?",
+  "What is your password for the design test?",
+  "Provide the access token value for the design.",
+  "Sign in to the provider now so the design can be tested.",
+  "Grant this session wider provider access for the design.",
+  "Grant the agent a lasting permission to push for the design.",
+];
+
+test("questions that only mention credentials, tokens, permissions or access reach their owner on every route (#3913)", () => {
+  for (const text of mentionOnly) reachesOwner(text);
+});
+
+test("genuine requests are still declined on every route, alone or after a mention-only question (#3913)", () => {
+  for (const text of genuine) declinedEverywhere(text);
+  // No mask carries past its own span: a real request in the same form is still screened.
+  for (const mention of mentionOnly) for (const request of genuine) declinedEverywhere(`${mention} ${request}`);
+});
+
+test("only declarative negation by a non-reader is masked; interrogative, tag and reader negation stay screened (#3913)", () => {
+  for (const text of [
+    "Can't we supply credentials for the design?", "Couldn't you supply credentials for the design?",
+    "Won't you supply credentials for the design?", "Why can't the campaign supply credentials for the design?",
+    "The campaign cannot supply credentials for the design, can it?", "Why not supply credentials for the design?",
+    "Why the campaign cannot supply credentials for the design", "You cannot supply credentials for the design.",
+    // Decline wording followed by a request that refers back to it.
+    "The campaign cannot supply credentials, so paste one here for the design.",
+    "The campaign cannot supply credentials for the design, so could you paste one?",
+    "We cannot supply credentials for the design. Can you?",
+    "The campaign cannot supply credentials for the design; please share yours.",
+    "\"The campaign cannot supply credentials\" for the design, so share one with me.",
+    // Review round 1: a back-reference asks for what the mask removed.
+    "The campaign cannot supply credentials. What are yours for the design?",
+    "The campaign cannot supply credentials. Which one does the design need from the reader?",
+    "We cannot supply credentials for the design. What is it?",
+    "The campaign cannot supply credentials for the design. What is the value?",
+    "The campaign cannot supply credentials for the design. Which token does the importer need?",
+    // Review round 2: only a decline report followed by a next-step question is mention-only.
+    "The campaign cannot supply credentials. What are Alice's for the design?",
+    "The campaign cannot supply credentials. Alice's are needed for the design.",
+    "The campaign cannot supply credentials, but Alice's are needed for the design.",
+    "The campaign cannot supply credentials. Should I continue with Alice's for the design?",
+    "The campaign cannot supply credentials. Whose should the design take?",
+    // Review round 3: the whole report frame is fixed, not any sentence holding a report word.
+    "I need Alice's despite the reported refusal: the campaign cannot supply credentials. Which design should I choose?",
+    "Alice's were refused because the campaign cannot supply credentials. Should I continue without that design input?",
+    "The campaign cannot supply credentials (Alice can). Should I continue without that design input?",
+  ]) declinedEverywhere(text);
+  // A header outside the closed set voids the report as well.
+  const headed = question(mentionOnly[4]!, { questions: [{ id: "choice", header: "From Alice", question: mentionOnly[4]!, options: [{ label: "Continue" }, { label: "Stop" }] }] });
+  for (const root of [false, true]) declined(evaluate(headed, { root }), "secrets_and_sign_in", "header");
+  // A label that names something to bring along voids the report too.
+  const report = mentionOnly[4]!;
+  const labelled = (label: string) => question(report, { questions: [{ id: "choice", question: report, options: [{ label: "Continue" }, { label }] }] });
+  for (const label of ["Alice's", "Continue with Alice's", "Which one?"]) {
+    for (const root of [false, true]) declined(evaluate(labelled(label), { root }), "secrets_and_sign_in", label);
+    for (const root of [false, true]) declined(typed({ category: "implementation_question", question: report,
+      options: [{ optionId: "a", label: "Continue" }, { optionId: "b", label }] }, { root }), "secrets_and_sign_in", label);
+  }
+});
+
+test("the CI permission-block mask covers a workflow's declared permissions, never access for anyone or a lasting grant (#3913)", () => {
+  for (const text of [
+    "Should the design grant its job the actions: read permission and give me access too?",
+    "Should the design grant its job the actions: read permission for this session?",
+    "Should the design grant its job the actions: read permission for \"this session\"?",
+    "Should the design grant the workflow job's permission permanently?",
+    "Should the design grant the workflow job access to my account?",
+    "Should the design grant the provider wider workflow permission?",
+    "Should the design grant the agent the contents: write permission?",
+    "Should the design grant the workflow's permissions and the sandbox?",
+    "Should the design give the workflow job the API key and contents: write permissions?",
+    "Should the design grant the workflow job the token and the actions: read permission?",
+    // No permission block in the sentence: plain access stays declined.
+    "Should the design grant access to the GitHub API?", "Grant access to implement the workflow design",
+    // Review round 1: the grantee must be the workflow or job itself.
+    "Grant this browser access to GitHub with contents: write for the design.",
+    "Should the design grant the deploy bot access with contents: write?",
+    "Should the design grant the workflow job and this device access with contents: write?",
+    "Should the design grant its job the actions: read permission? Do the same for the browser.",
+    "Should we grant the workflow job access with contents: write for the design?",
+    // Review round 2: the whole grantee is the workflow or job, and nothing after it names a recipient.
+    "Grant the workflow author access to GitHub with contents: write for the design.",
+    "Should the design grant the workflow maintainer's job the actions: read permission?",
+    "Should the design grant the workflow job the id-token: write permission?",
+    "Should the design grant the workflow job contents: write access to Alice?",
+    // Review round 3: the lead before the change is fixed too, so no recipient can precede it.
+    "To Alice, grant the workflow's contents: write access for the design.",
+    "For Alice, should the design grant its job the actions: read permission?",
+    "Alice says option B would grant its job the actions: read permission so it can poll the GitHub Actions API.",
+    "Should the design grant its job the actions: read permission? Alice too.",
+  ]) declinedEverywhere(text);
+  // main's child screen never matched a plural grant, so these are declined on the design routes.
+  for (const text of ["Should the design give the workflow job's permissions to Alice?", "Should the design widen the job's permissions for Alice?",
+    "Alice would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?"]) {
+    for (const [route, result] of Object.entries(onEveryRoute(text))) if (route !== "child") declined(result, "secrets_and_sign_in", `${route}: ${text}`);
+  }
+  // A credential noun's "-only" compound is a credential, and a "-free" one beside a request is screened.
+  for (const text of ["Enter the secret-only value here for the design.", "Paste the token-free value here for the design."]) declinedEverywhere(text);
+  // Values, store paths and secret fields are screened on the unmasked text.
+  for (const text of ["Should the design grant the workflow job sk-abcdefghijklmnop with contents: write permissions?",
+    "Should the design grant the workflow job ~/.ssh/id_rsa with contents: write permissions?"]) declinedEverywhere(text);
+  for (const [route, result] of Object.entries(onEveryRoute("Should the design grant the workflow job ops@example.test with contents: write permissions?"))) {
+    if (route !== "child") declined(result, "secrets_and_sign_in", route);
+  }
+  for (const field of [{ secret: true }, { inputFormat: "email" as const }]) for (const root of [false, true]) {
+    declined(evaluate(question(mentionOnly[1]!, { questions: [{ id: "q", question: mentionOnly[1]!, options: [{ label: "A" }], ...field }] }), { root }), "secrets_and_sign_in");
+  }
+  // The CI qualifier is excused only while the form neither handles nor discloses the credential.
+  for (const root of [false, true]) for (const text of ["Should the design copy the CI token into the workflow?", "Should the design send the CI token to the job?"]) {
+    declined(typed({ category: "implementation_question", question: text, options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] }, { root }), "secrets_and_sign_in", text);
+  }
+  // The tool screen never sees a mask.
+  declined(evaluate({ ...tool, title: "Read-only, secret-free permissions", context: { input: "the campaign cannot supply credentials" } }), "secrets_and_sign_in");
+});
+
+test("a child's provider question asking for plural, widening or lasting grants is declined like a design form (#3968)", () => {
+  for (const text of [
+    // The #3968 table: each was forwarded to the Orchestrator on the child route.
+    "Can you grant my session permanent permissions?", "Grant the agent broader permissions for all future sessions",
+    "Widen the agent's permissions for every future session", "Expand the session scopes for the design",
+    "Should the design grant the workflow job's permissions permanently?",
+    // Plural nouns, widening verbs and lasting qualifiers, alone and together.
+    "Grant me permissions to push", "Grant the agent scopes to push for the design", "Broaden the session's scopes for the design",
+    "Extend the agent's permissions to the other repository", "Expand my access to the provider for the design",
+    "Should the design widen the child's permissions?", "Request additional scopes for the provider",
+    "Keep durable approvals for the design", "Permanently allow the agent to push", "Allow the agent to push for all future sessions",
+    "Should the design approve pushes in every new session?", "Trust this agent across all future campaigns",
+    // Previously declined on the design routes only (#3913).
+    "Should the design give the workflow job's permissions to Alice?", "Should the design widen the job's permissions for Alice?",
+    "Alice would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
+  ]) declinedEverywhere(text);
+  // A real request after a mention-only question is still screened on the child route.
+  for (const mention of mentionOnly) declined(evaluate(question(`${mention} Widen the agent's permissions for every future session.`)), "secrets_and_sign_in", mention);
+  // A lasting qualifier voids the CI mask, so a plural workflow grant with one is declined.
+  declinedEverywhere("Should the design grant its job the actions: read, checks: read permissions permanently so it can poll the GitHub Actions API?");
+});
+
+test("questions that only mention permissions, scopes or access still reach their owner on the child route (#3968)", () => {
+  for (const text of [
+    ...mentionOnly,
+    // A plural CI permission block is masked like a singular one.
+    "Should the design grant its job the actions: read, checks: read permissions so it can poll the GitHub Actions API?",
+    "Should the design widen the workflow's permissions so it can poll the GitHub Actions API?",
+    // No grant is asked for: the permissions, scopes or sessions are the design subject.
+    "Should the design keep the workflow's default permissions?",
+    "Should the settings page list each session's permissions?",
+    "Which scopes does the design document for the GitHub Actions API?",
+    "Should the design hide expired permissions from the overview?",
+    "Should the importer reuse the cache for all future sessions?",
+  ]) reachesOwner(text);
+});
+
 test("a persistent grant is never converted to anything but a one-time Orchestrator allow, and a grant offering none is declined", () => {
   decided(evaluate(tool), undefined);
   assert.ok(tool.options.some((o) => o.kind === "allow_always"), "the fixture offers a persistent option the Orchestrator cannot pick");

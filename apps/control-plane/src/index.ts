@@ -125,7 +125,6 @@ import {
   type RunnerToControlPlane,
   type RunnerProtocolCapability,
   type ResolveWorkflowGateRequest,
-  type SetArchivedRequest,
   type SetSessionReminderRequest,
   type SetColumnRequest,
   type SessionProviderAccountOptionsResponse,
@@ -227,6 +226,7 @@ import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { WorkflowEventRetention } from "./workflow-event-retention.js";
 import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
+import { registerSessionArchiveRoute } from "./session-archive-route.js";
 import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
 import { IncrementalVacuum, INCREMENTAL_VACUUM_ENV, parseIncrementalVacuum } from "./incremental-vacuum.js";
 import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
@@ -6471,15 +6471,7 @@ app.delete("/api/sessions/:id/reminder", async (req, reply) => {
   return respond(reply, svc.removeReminder(id, human.userId, revision, rawReminderId));
 });
 
-app.post("/api/sessions/:id/archive", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as SetArchivedRequest;
-  if (typeof body.archived !== "boolean") return reply.code(400).send({ error: "archived must be a boolean" });
-  if (requestPrincipal(req)?.kind === "agent" && !body.archived) {
-    return reply.code(403).send({ error: AGENT_UNARCHIVE_ERROR });
-  }
-  return respond(reply, svc.setArchived(id, body.archived));
-});
+registerSessionArchiveRoute(app, { db, svc, requestPrincipal });
 
 // One server-owned restore: restart preflight runs before the archive flag changes, so no client
 // ever composes unarchive + restart and observes a half-applied result. Session credentials never

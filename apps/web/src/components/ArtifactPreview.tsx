@@ -67,6 +67,12 @@ const KIND_ICONS: Readonly<Record<WorkflowArtifactKind, (props: { size?: number 
   video: VideoIcon,
 };
 
+/** An artifact's kind as its icon. */
+export function ArtifactKindIcon({ kind, size = 16 }: { kind: WorkflowArtifactKind; size?: number }) {
+  const KindIcon = KIND_ICONS[kind] ?? ReportIcon;
+  return <KindIcon size={size} />;
+}
+
 /** The download menu's one warning: a raw artifact is the agent's exact bytes, never redacted. */
 export const DOWNLOAD_WARNING = "Not redacted. It may contain secrets or personal data.";
 
@@ -252,7 +258,7 @@ export function ArtifactDownloadMenu({ model, inline = false }: { model: Artifac
 }
 
 /** Enlarge, for an image or an HTML preview once its checked bytes are shown; nothing otherwise. */
-function EnlargeButton({ model }: { model: ArtifactPreviewModel }) {
+function EnlargeButton({ model, onEnlarge }: { model: ArtifactPreviewModel; onEnlarge?: (opener: HTMLElement | null) => void }) {
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const { state, artifact } = model;
@@ -266,7 +272,7 @@ function EnlargeButton({ model }: { model: ArtifactPreviewModel }) {
         aria-label="Enlarge"
         title="Enlarge"
         aria-haspopup="dialog"
-        onClick={() => setOpen(true)}
+        onClick={() => (onEnlarge ? onEnlarge(buttonRef.current) : setOpen(true))}
       >
         <Maximize2Icon />
       </button>
@@ -322,17 +328,21 @@ function HtmlFrame({ artifact, source, className }: { artifact: WorkflowArtifact
  * of Enlarge and Download at its trailing edge. The artifact is a page of the side panel, whose
  * header carries its Back and its title, so the bar has neither.
  */
-export function ArtifactPreviewBar({ model }: { model: ArtifactPreviewModel }) {
+export function ArtifactPreviewBar({ model, onEnlarge }: {
+  model: ArtifactPreviewModel;
+  /** Enlarge opens the host's own viewer (the Browser's gallery, #3924) instead of the plain one. */
+  onEnlarge?: (opener: HTMLElement | null) => void;
+}) {
   return (
     <div className="toolbar art-bar">
-      <EnlargeButton model={model} />
+      <EnlargeButton model={model} onEnlarge={onEnlarge} />
       <ArtifactDownloadMenu model={model} />
     </div>
   );
 }
 
 /** The meta line's facts (§11.3): the kind, the size, who saved it and, once checked, Verified. */
-function ArtifactMetaFacts({ model }: { model: ArtifactPreviewModel }) {
+export function ArtifactMetaFacts({ model }: { model: ArtifactPreviewModel }) {
   const { artifact, state } = model;
   const author = useArtifactAuthor(artifact);
   return (
@@ -384,7 +394,11 @@ function CodeWell({ text, json }: { text: string; json: boolean }) {
 }
 
 /** The preview's body and its states (§12.3, §12.4): loading, a failed check, no preview, or the bytes. */
-export function ArtifactPreviewBody({ model }: { model: ArtifactPreviewModel }) {
+export function ArtifactPreviewBody({ model, onOpenImage }: {
+  model: ArtifactPreviewModel;
+  /** Tapping a shown image opens it in the host's full-screen viewer (#3924). */
+  onOpenImage?: (opener: HTMLElement) => void;
+}) {
   const { artifact, state } = model;
   const [mediaError, setMediaError] = useState<string | null>(null);
   const { busy, download } = useArtifactDownload(model);
@@ -427,7 +441,12 @@ export function ArtifactPreviewBody({ model }: { model: ArtifactPreviewModel }) 
       {mediaError && <Notice tone="danger" compact role="alert">{mediaError}</Notice>}
       {loaded?.kind === "image" && (
         <div className="art-well art-checker">
-          <img className="art-image" src={loaded.objectUrl} alt={artifact.name} />
+          {onOpenImage ? (
+            <button type="button" className="art-image-open" aria-haspopup="dialog" title="Open in Viewer"
+              onClick={(event) => onOpenImage(event.currentTarget)}>
+              <img className="art-image" src={loaded.objectUrl} alt={artifact.name} />
+            </button>
+          ) : <img className="art-image" src={loaded.objectUrl} alt={artifact.name} />}
         </div>
       )}
       {loaded?.kind === "video" && (

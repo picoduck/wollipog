@@ -208,7 +208,15 @@ createRoot(root).render(
     <FeedbackProvider>
       <InstanceProvider
         desktop={desktop}
-        createLocalRuntime={() => runtime("local", localProfile.origin)}
+        createLocalRuntime={() => {
+          // This Machine can fail to open too (#3004's Can't Reach Wollipog on This Machine).
+          const failure = openFailures.get("local");
+          if (failure) {
+            openFailures.delete("local");
+            throw failure;
+          }
+          return runtime("local", localProfile.origin);
+        }}
         createRemoteRuntime={async (profileId) => {
           if (heldOpen?.profileId === profileId) {
             const { released } = heldOpen;

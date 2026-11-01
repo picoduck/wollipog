@@ -98,10 +98,10 @@ test("a fresh phone follows the generated HTTPS pairing link, connects live, and
   await page.getByRole("button", { name: "Continue", exact: true }).click();
   await page.getByLabel("Device Name").fill("Test Phone");
   const created = page.waitForResponse((response) => response.url().endsWith("/api/devices") && response.request().method() === "POST");
-  await page.getByRole("button", { name: "Create Pairing", exact: true }).click();
+  await page.getByRole("button", { name: "Create Pairing Link", exact: true }).click();
   const pairing = await (await created).json() as { token: string; pairing: { publicOrigin: string } };
   expect(pairing.pairing.publicOrigin).toBe(fixture.origin);
-  await expect(page.getByRole("heading", { name: "Scan to Pair" })).toBeVisible();
+  await expect(page.locator(".pair-qr svg")).toBeVisible();
   const phone = await browser.newContext({ viewport: { width: 390, height: 844 }, ignoreHTTPSErrors: true });
   try {
     const remote = await phone.newPage();

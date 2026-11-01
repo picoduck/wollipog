@@ -643,6 +643,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "release_queue_hold",
       "restart_session",
       "archive_session",
+      "unarchive_session",
       "set_guardrails",
       "create_run",
     ],
@@ -2288,6 +2289,21 @@ test("archive_session sends only archived true, preserves scoped errors, and ref
   assert.equal((await callTool(denied.deps, "archive_session", { sessionId: "s_sibling" })).isError, true);
 });
 
+test("unarchive_session is explicit, Orchestrator-only, and refuses unsupported control planes", async () => {
+  const { deps, calls } = makeDeps((call) => ({ status: 200,
+    body: call.url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION } : { id: "s_child", archived: false } }));
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: "s_child" })).isError, true);
+  deps.orchestrator = true;
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: SELF_ID })).isError, true);
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: "s_child" })).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { archived: false });
+  assert.ok(calls.at(-1)?.url.endsWith("/api/sessions/s_child/archive"));
+  const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 263 } }));
+  old.deps.orchestrator = true;
+  assert.equal((await callTool(old.deps, "unarchive_session", { sessionId: "s_child" })).isError, true);
+  assert.equal(old.calls.length, 1, "never sends an unsupported mutation");
+});
+
 test("compact archive and inspection responses retain lifecycle progress without inventing legacy state", async () => {
   for (const archiveStatus of ["stop_pending", "stop_failed", null, undefined]) {
     const session = { id: "s_child", archived: archiveStatus === null, archiveStatus };
@@ -2919,6 +2935,16 @@ test("a lost issue closure response tells the agent to inspect before renewed re
   assert.match(resultText(result), /may already have been applied/);
   assert.match(resultText(result), /get_workflow_decision/);
   assert.match(resultText(result), /Never replay/);
+});
+
+test("fixedBy plan fields require a supporting server and reach it unchanged (#3943)", async () => {
+  const plan = { items: [], planComplete: true, fixedBy: [{ issue: { repository: "o/r", number: 1 }, workItemKeys: ["unit"] }] };
+  const old = makeDeps(); old.deps.orchestrator = true; old.deps.controlPlaneProtocolVersion = 267;
+  assert.equal((await callTool(old.deps, "record_campaign_plan", plan)).isError, true);
+  assert.equal(old.calls.length, 0);
+  const current = makeDeps(); current.deps.orchestrator = true; current.deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
+  assert.equal((await callTool(current.deps, "record_campaign_plan", plan)).isError, undefined);
+  assert.deepEqual(current.calls.at(-1)?.body, plan);
 });
 
 test("campaign work ledger tools require an Orchestrator and a v196 control plane (#2417)", async () => {

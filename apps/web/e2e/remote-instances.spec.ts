@@ -359,21 +359,27 @@ test("shows deterministic validation and authentication recovery", async ({ page
   ));
   await row(page, "Studio").getByRole("button", { name: "Switch" }).click();
   const studio = row(page, "Studio");
-  // A rejected pairing is Pairing Required, which names its fix (§11.2, #3002), and Re-Pair… is the slot.
+  // The recovery screen that replaced the shell names the failure once, in its panel, with the fix as
+  // its primary and the raw words behind Show Details (#3004). A rejected pairing is Pairing
+  // Required, which names its fix (§11.2, #3002); Retry cannot fix it, so it is not offered.
+  const panel = page.locator(".instance-recovery-state");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Studio Needs a New Pairing");
+  await expect(panel).toContainText("It no longer accepts this app's saved credential.");
+  await expect(panel.locator(".btn.primary")).toHaveText("Re-Pair…");
+  await expect(panel.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  await expect(page.locator("main")).not.toContainText("pairing token");
+  await panel.getByRole("button", { name: "Show Details" }).click();
+  await expect(panel).toContainText("The pairing token was rejected.");
+  // Its row has the status word, its address and last connection, and leaves the fix to the panel.
   await expect(studio.locator(".status")).toHaveText("Pairing Required");
-  await expect(studio.locator(".row-sub")).toContainText("No longer accepts the saved pairing.");
-  await expect(studio).not.toContainText("pairing token");
-  await expect(studio.getByRole("button", { name: "Re-Pair…" })).toBeVisible();
-  // The failed switch is said under the row it was pressed in, on the recovery screen that replaced
-  // the shell, with the raw words behind Show Details.
-  const notice = page.locator(".instance-recovery-body .instance-list > .notice.t-danger");
-  await expect(notice).toHaveText(/Couldn't switch to “Studio”\. Try again\./);
-  await notice.getByRole("button", { name: "Show Details" }).click();
-  await expect(notice).toContainText("The pairing token was rejected.");
-  // The tile and its menu say the same thing, as text and not only as a colour; the recovery
-  // screen's labelled tile shows the word beside the name (the rail's tooltip is tested with the banner).
+  await expect(studio.locator(".instance-row-address")).toHaveText("http://100.64.10.11:4317");
+  await expect(studio).not.toContainText("No longer accepts");
+  await expect(studio.getByRole("button", { name: "Re-Pair…" })).toHaveCount(0);
+  await expect(page.locator(".instance-list > .notice")).toHaveCount(0);
+  // The tile and its menu say the same thing, as text and not only as a colour (the rail's tooltip
+  // is tested with the banner).
   await expect(tile(page, "Studio").locator(".instance-tile-dot")).toHaveClass(/t-warning/);
-  await expect(tile(page, "Studio").locator(".instance-tile-status")).toHaveText("Pairing Required");
+  await expect(tile(page, "Studio").locator(".sr-only")).toHaveText("Pairing Required");
   await tile(page, "Studio").click();
   await expect(page.getByRole("menuitemradio", { name: /Studio/ }).locator(".status")).toHaveText("Pairing Required");
   await expect(page.locator("body")).not.toContainText("Sign-In Required");
@@ -391,8 +397,12 @@ test("an offline remote says Offline in its row", async ({ page }) => {
   ));
   await row(page, "Studio").getByRole("button", { name: "Switch" }).click();
   await expect(row(page, "Studio").locator(".status")).toHaveText("Offline");
-  await expect(row(page, "Studio").locator(".row-sub")).toContainText("Didn't answer.");
-  await expect(row(page, "Studio").getByRole("button", { name: "Retry" })).toBeVisible();
+  // The recovery screen's panel says what is wrong and offers Retry; the row does not repeat it.
+  const panel = page.locator(".instance-recovery-state");
+  await expect(panel).toContainText("It didn't answer at 100.64.10.11:4317.");
+  await expect(panel.locator(".btn.primary")).toHaveText("Retry");
+  await expect(row(page, "Studio").locator(".row-sub")).not.toContainText("Didn't answer.");
+  await expect(row(page, "Studio").getByRole("button", { name: "Retry" })).toHaveCount(0);
   const dot = tile(page, "Studio").locator(".instance-tile-dot");
   await expect(dot).toHaveClass(/hollow/);
   await expect(dot).toHaveClass(/t-neutral/);
@@ -528,31 +538,33 @@ for (const width of [1440, 940]) {
   });
 }
 
-test("Switch keeps its label and width with a spinner while the row reads Connecting", async ({ page }) => {
+test("while a switch connects, the recovery screen says so with a spinner and offers Go to This Machine", async ({ page }) => {
   await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
   await tile(page, "Studio").click();
   await page.getByRole("menuitemradio", { name: /This Machine/ }).click();
   await expect(tile(page, "This Machine")).toBeVisible();
   const studio = row(page, "Studio");
-  const switchButton = studio.getByRole("button", { name: "Switch" });
-  const idle = await switchButton.evaluate((element) => element.getBoundingClientRect().width);
   await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.holdNextOpen("remote-1"));
-  await switchButton.click();
-  // The shell gives way to the recovery screen while Studio opens (DesktopInstanceBoundary); its
-  // list shows the same row with Switch still pressed.
-  await expect(page.locator(".instance-recovery-body")).toContainText("Connecting to Studio");
-  await expect(page.locator(".instance-recovery-body .instance-list")).toBeVisible();
+  await studio.getByRole("button", { name: "Switch" }).click();
+  // The shell gives way to the recovery screen while Studio opens (DesktopInstanceBoundary). Its
+  // panel says Connecting in info with a spinner, never the success colour (#3004); the row reads
+  // Connecting and leaves the next step to the panel.
+  const panel = page.locator(".instance-recovery-state");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Connecting to Studio");
+  await expect(panel).toHaveClass(/t-info/);
+  await expect(panel.locator(".state-icon .spinner")).toBeVisible();
+  await expect(panel).toContainText("Opening a secure connection to 100.64.10.11:4317.");
+  await expect(panel.locator(".instance-recovery-fact")).toHaveText(/^Trying for \d+s$/);
+  await expect(panel.getByRole("button", { name: "Go to This Machine" })).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Retry" })).toHaveCount(0);
   await expect(studio.locator(".status")).toHaveText("Connecting");
-  await expect(switchButton).toHaveAttribute("aria-busy", "true");
-  await expect(switchButton.locator(".spinner")).toBeVisible();
-  await expect(switchButton).toHaveText("Switch");
-  expect(await switchButton.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(idle, 0);
+  await expect(studio.locator(".instance-row-actions .btn")).toHaveCount(0);
   await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.releaseOpen());
   await expect(studio.locator(".instance-row-current")).toHaveText("Current");
   await expect(studio.locator(".status")).toHaveText("Online");
 });
 
-test("a failed switch and a failed Retry each say so under their row, through the recovery screen", async ({ page }) => {
+test("a failed switch and a failed Retry are each said once, in the recovery screen's panel", async ({ page }) => {
   await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
   await tile(page, "Studio").click();
   await page.getByRole("menuitemradio", { name: /This Machine/ }).click();
@@ -560,32 +572,102 @@ test("a failed switch and a failed Retry each say so under their row, through th
   await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.failNextOpen("remote-1", "unreachable", "error sending request for url"));
   await row(page, "Studio").getByRole("button", { name: "Switch" }).click();
   const studio = row(page, "Studio");
+  const panel = page.locator(".instance-recovery-state");
   await expect(studio.locator(".status")).toHaveText("Offline");
-  const notice = page.locator(".instance-list > .notice.t-danger");
-  await expect(notice).toHaveCount(1);
-  await expect(notice).toHaveText(/Couldn't switch to “Studio”\. Try again\./);
-  expect(await studio.evaluate((element) => element.nextElementSibling?.classList.contains("notice"))).toBe(true);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Can't Reach Studio");
+  await expect(panel).toContainText("It didn't answer at 100.64.10.11:4317. It may be asleep, or Wollipog isn't running there.");
+  await expect(panel.locator(".instance-recovery-fact")).toHaveText(/^Last connected /);
+  await expect(page.locator(".instance-list > .notice")).toHaveCount(0);
+  await expect(studio.locator(".instance-row-address")).toHaveText("http://100.64.10.11:4317");
+  await expect(studio.locator(".instance-row-last")).toHaveText(/^Last connected /);
+  await expect(page.locator("main")).not.toContainText("error sending request");
 
-  // Retry from the row: busy Retry while it opens, then its own notice when it fails again.
-  const retry = studio.getByRole("button", { name: "Retry" });
-  const idle = await retry.evaluate((element) => element.getBoundingClientRect().width);
+  // Retry from the panel: Connecting while it opens, then the new failure in the panel's words.
   await page.evaluate(() => {
     window.__WOLLIPOG_INSTANCE_E2E__.failNextOpen("remote-1", "unreachable", "tcp connect error: Connection refused");
     window.__WOLLIPOG_INSTANCE_E2E__.holdNextOpen("remote-1");
   });
-  await retry.click();
-  await expect(notice).toHaveCount(0);
+  await panel.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Connecting to Studio");
   await expect(studio.locator(".status")).toHaveText("Connecting");
-  await expect(retry).toHaveAttribute("aria-busy", "true");
-  expect(await retry.evaluate((element) => element.getBoundingClientRect().width)).toBeCloseTo(idle, 0);
   await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.releaseOpen());
-  await expect(notice).toHaveText(/Couldn't reconnect to “Studio”\. Try again\./);
-  await expect(studio.locator(".row-sub")).toContainText("Refused the connection.");
-  await notice.getByRole("button", { name: "Show Details" }).click();
-  await expect(notice).toContainText("tcp connect error: Connection refused");
-  await notice.getByRole("button", { name: "Dismiss" }).click();
-  await expect(notice).toHaveCount(0);
+  await expect(panel).toContainText("It refused the connection at 100.64.10.11:4317. Wollipog may not be running there.");
+  await expect(page.locator(".instance-list > .notice")).toHaveCount(0);
+  await panel.getByRole("button", { name: "Show Details" }).click();
+  await expect(panel).toContainText("tcp connect error: Connection refused");
 });
+
+for (const viewport of [{ width: 940, height: 600 }, { width: 1440, height: 900 }]) {
+  test(`at ${viewport.width}×${viewport.height} the recovery screen keeps the 64px rail with the tile and disabled destinations`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
+    await tile(page, "Studio").click();
+    await page.getByRole("menuitemradio", { name: /This Machine/ }).click();
+    await expect(tile(page, "This Machine")).toBeVisible();
+    await page.evaluate(() => window.__WOLLIPOG_INSTANCE_E2E__.failNextOpen("remote-1", "unreachable", "error sending request for url"));
+    await row(page, "Studio").getByRole("button", { name: "Switch" }).click();
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Can't Reach Studio");
+
+    const frame = await page.evaluate(() => {
+      const rail = document.querySelector<HTMLElement>(".app-rail")!;
+      return {
+        railWidth: rail.getBoundingClientRect().width,
+        tileInRail: Boolean(rail.querySelector(".rail-instance .instance-tile-trigger")),
+        oldFrame: document.querySelectorAll(".instance-recovery-nav, .instance-recovery-app, .topbar").length,
+        headings: [...document.querySelectorAll("h1")].map((heading) => heading.textContent),
+        horizontalScroll: document.documentElement.scrollWidth - window.innerWidth,
+        titleLeft: document.querySelector<HTMLElement>("#page-title")!.getBoundingClientRect().left,
+      };
+    });
+    expect(frame).toEqual({
+      railWidth: 64,
+      tileInRail: true,
+      oldFrame: 0,
+      headings: ["Can't Reach Studio"],
+      horizontalScroll: 0,
+      // Every page title sits at the rail plus the 24px gutter (§4.5).
+      titleLeft: 88,
+    });
+    await expect(page.locator(".app-rail").getByRole("button", { name: "Search" })).toHaveCount(0);
+
+    // A destination is unavailable, in faint ink, says why on hover and focus, and goes nowhere.
+    const automations = page.locator(".app-rail").getByRole("link", { name: "Automations" });
+    await expect(automations).toHaveAttribute("aria-disabled", "true");
+    const ink = await page.evaluate(() => {
+      const resolve = (token: string) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${token})`;
+        document.body.append(probe);
+        const color = getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+      };
+      return {
+        items: [...document.querySelectorAll<HTMLElement>(".app-rail .rail-item")].map((item) => getComputedStyle(item).color),
+        faint: resolve("--text-faint"),
+        dim: resolve("--text-dim"),
+      };
+    });
+    expect(ink.faint).not.toBe(ink.dim);
+    expect(new Set(ink.items)).toEqual(new Set([ink.faint]));
+    await automations.hover();
+    await expect(page.locator(".rail-tooltip")).toHaveText("AutomationsOpen an instance first.");
+    // Playwright itself refuses an aria-disabled target, so the click is forced to prove it goes nowhere.
+    const before = page.url();
+    await automations.click({ force: true });
+    await expect(page.getByRole("heading", { level: 1 })).toHaveText("Can't Reach Studio");
+    expect(page.url()).toBe(before);
+    await page.mouse.move(viewport.width - 10, viewport.height - 10);
+    const settings = page.locator(".app-rail").getByRole("button", { name: "Settings" });
+    await expect(settings).toHaveAttribute("aria-disabled", "true");
+    // Reached from the keyboard, so its focus is visible and opens the tooltip.
+    await settings.focus();
+    await page.keyboard.press("Tab");
+    await page.keyboard.press("Shift+Tab");
+    await expect(settings).toBeFocused();
+    await expect(page.locator(".rail-tooltip")).toHaveText("SettingsOpen an instance first.");
+  });
+}
 
 test("a switch that worked is not blamed when a later edit's connection fails", async ({ page }) => {
   await addInstance(page, "Studio", `http://100.64.10.11:4317/#pair=${TOKEN_A}`);
@@ -601,7 +683,7 @@ test("a switch that worked is not blamed when a later edit's connection fails", 
   await edit.getByLabel("Instance Name").fill("Home Studio");
   await edit.getByRole("button", { name: "Save Changes" }).click();
   await expect(row(page, "Home Studio").locator(".status")).toHaveText("Offline");
-  await expect(page.locator(".instance-recovery-body")).toContainText("Home Studio Is Unavailable");
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Can't Reach Home Studio");
   await expect(page.locator(".instance-list > .notice")).toHaveCount(0);
 });
 

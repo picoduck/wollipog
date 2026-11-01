@@ -690,6 +690,7 @@ export function isDurableSessionCommandMessage(value: unknown): value is Durable
       (command.images === undefined || (Array.isArray(command.images) && validatePromptImageInputs(command.images as never[]).ok)) &&
       (command.slashCommand === undefined || typeof command.slashCommand === "string") &&
       (command.config === undefined || isObject(command.config)) &&
+      (command.reviewContinuation === undefined || command.reviewContinuation === true) &&
       (continuation === undefined || (
         isObject(continuation) && Object.keys(continuation).every((key) => [
           "campaignSessionId", "continuationId", "eventFromSeq", "eventThroughSeq",

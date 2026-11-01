@@ -2,6 +2,7 @@ import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type P
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
+export * from "./worktree-dirty-paths.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
@@ -798,8 +799,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      for older control planes, whose enum validation would otherwise discard the whole hold.
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
+// 264: reserved by the async-review question continuation change (#3938, PR #3939).
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
-export const PROTOCOL_VERSION = 265;
+// 266: campaign dirty-worktree diagnostics and controlling-Orchestrator recovery (#3942).
+// 268: immutable pre-dispatch fixedBy campaign plan relationships (#3943), with a client
+//      capability floor so older servers cannot silently ignore the new plan field.
+export const PROTOCOL_VERSION = 268;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1164,6 +1169,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
+  campaignFixedBy: 268,
   /** v220 control plane records a child's work-item attempt at creation (#3106). Checked by the
    * runner's create_session tool and CLI against the connected control plane. */
   campaignWorkItemAtCreation: 220,
@@ -1262,6 +1268,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeDiscard: 102,
   /** v159 reports durable deferred retirement instead of silently treating it as removal. */
   sessionWorktreeRetirement: 159,
+  campaignWorktreeRecovery: 266,
   /** v193 enforces delivery proof on archive-triggered managed retirement and replay. */
   archiveWorktreeRetirement: 193,
   progressAwareSessionWorktrees: 113,
@@ -5085,6 +5092,8 @@ export interface GithubIssueClosureRequest {
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
+  /** Server-derived reason delegated delivery could not be proven. */
+  deliveryFailure?: string;
   scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];
@@ -6250,7 +6259,8 @@ export type SessionEventPayload =
       kind: "user_message";
       text: string;
       images?: PromptImageInput[];
-      /** Runner-authenticated automatic campaign turn; preserves earlier async questions. */
+      /** Runner-authenticated automatic campaign or review turn; preserves earlier async questions.
+       * The historical field name is retained for persisted event compatibility. */
       campaignContinuation?: true;
       final?: boolean;
       commandId?: string;
@@ -10319,6 +10329,9 @@ export interface PromptSessionMessage {
   config?: SessionConfig;
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
+  /** Trusted automatic review notification; never supplied by the person-authored prompt API.
+   * Requires the runner's explicit reviewSession.questionPreservation advertisement. */
+  reviewContinuation?: true;
   /** Control-plane-authenticated synthetic campaign turn. Event bounds contain identities and
    * metadata only; the provider must query scoped management tools for authorized details. */
   campaignContinuation?: {
@@ -11858,6 +11871,8 @@ export interface GitRepositoryFacts {
 }
 
 export interface GitStatusInfo extends GitRepositoryFacts {
+  /** Total changed paths before transport truncation (v266). */
+  changedPathCount?: number;
   branch: string;
   files: GitFileChange[];
   /** True when files is capped for transport; aggregate counts and hasChanges still cover all paths. */

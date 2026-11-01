@@ -844,7 +844,13 @@ export function RightPanel({
           />
         );
       case "browser":
-        return <BrowserPanel session={session} />;
+        return (
+          <BrowserPanel
+            session={session}
+            openArtifact={state.artifactRequest?.sessionId === session.id ? state.artifactRequest : null}
+            onOpenArtifactHandled={state.consumeArtifactRequest}
+          />
+        );
       case "terminal":
         return terminalSupported ? (
           <ErrorBoundary name="Terminal" resetKey={session.id}>

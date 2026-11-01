@@ -1,6 +1,7 @@
 /** Context-native, externally stored per-session git worktrees. */
 
 import { createHash, randomUUID } from "node:crypto";
+import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -664,6 +665,21 @@ function repoKey(repoPath: string): string {
 
 async function command(context: AgentContext, cwd: string, args: string[], timeoutMs = 30_000): Promise<string> {
   return (await runContextCommand(context, "git", args, { cwd, timeoutMs })).stdout;
+}
+
+async function dirtyWorktreeReason(context: AgentContext, cwd: string): Promise<string | null> {
+  const porcelain = await command(context, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  if (!porcelain) return null;
+  const records = porcelain.split("\0");
+  const paths: string[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i]!;
+    if (!record) continue;
+    paths.push(record.slice(3));
+    // Porcelain -z rename/copy entries have a second, NUL-separated source path.
+    if (/[RC]/u.test(record.slice(0, 2))) i++;
+  }
+  return worktreeDirtyPaths(paths.length, paths);
 }
 
 async function wslHome(context: Extract<AgentContext, { kind: "wsl" }>): Promise<string> {
@@ -1775,6 +1791,7 @@ export type SafeWorktreeDiscardResult =
   | {
       removed: false;
       reason: "detached_head" | "not_runner_owned" | "dirty" | "no_upstream" | "unpushed" | "not_delivered" | "unavailable";
+      dirtyPathsReason?: string;
     };
 
 export type RetainedWorktreeRefReclaimResult =
@@ -2104,8 +2121,9 @@ export async function discardWorktreeIfSafe(
     const initialPathIdentity = await removalPathIdentity(context, handle.path);
     if (!initialPathIdentity) return { removed: false, reason: "unavailable" };
 
-    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-      return { removed: false, reason: "dirty" };
+    const initialDirty = await dirtyWorktreeReason(context, handle.path);
+    if (initialDirty) {
+      return { removed: false, reason: "dirty", dirtyPathsReason: initialDirty };
     }
     const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
@@ -2249,8 +2267,9 @@ export async function discardWorktreeIfSafe(
 
     // Close the widest observable race before the non-force removal. Git independently rejects
     // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
-    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-      return { removed: false, reason: "dirty" };
+    const finalDirty = await dirtyWorktreeReason(context, handle.path);
+    if (finalDirty) {
+      return { removed: false, reason: "dirty", dirtyPathsReason: finalDirty };
     }
     const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (finalHead !== head) return { removed: false, reason: "unpushed" };

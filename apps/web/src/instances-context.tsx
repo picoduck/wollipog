@@ -176,7 +176,12 @@ export interface InstanceManager {
   readonly error: string | null;
   readonly statusByProfile: Readonly<Record<string, InstanceStatus>>;
   switchInstance(profileId: string): Promise<void>;
-  retryActive(): Promise<void>;
+  /**
+   * Opens the active instance again. A second call while a retry is still opening shares it, so a
+   * double click starts one connection; `restart` abandons that attempt and starts a new one, for
+   * the recovery screen's Retry offered once a connection has hung for 20 seconds (#3004).
+   */
+  retryActive(options?: { restart?: boolean }): Promise<void>;
   /** Saves a remote profile. With `switchTo`, the switch to it has started when this resolves; its
    * connection then opens as any switch does. */
   addInstance(input: { label: string; origin: string; token: string; switchTo: boolean }): Promise<void>;

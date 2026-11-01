@@ -257,11 +257,11 @@ test("capability names one available native agent per reviewer harness and repor
   ] as unknown as AgentDefinition[];
   assert.equal(f.launcher.capability(agents, "darwin"), undefined);
   assert.deepEqual(f.launcher.capability(agents, "linux"), {
-    configuration: true, reviewers: [{ harness: "claude-code", agentId: "claude" }],
+    configuration: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }],
     unavailable: { codex: "no available native agent uses this harness" },
   });
   const noTools = fixture(t, { tools: { unavailable: "git is not installed" } });
-  assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], configuration: true, unavailable: { tools: "git is not installed" } });
+  assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "git is not installed" } });
 });
 
 test("long writer refusals stay within the control plane capability limit", () => {
@@ -315,15 +315,15 @@ test("capability contains tool-root and agent discovery exceptions and recovers 
     ...deps, tools: () => failure === "tools" ? tools() : { git: GIT, gh: "/trusted/gh" }, verifyCommand: () => {},
   });
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    reviewers: [], configuration: true, unavailable: { tools: "tool roots unavailable during startup" },
+    reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "tool roots unavailable during startup" },
   });
   failure = "agents";
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    reviewers: [], configuration: true, unavailable: { tools: "agent catalog unavailable during startup" },
+    reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "agent catalog unavailable during startup" },
   });
   failure = null;
   assert.deepEqual(launcher.capability(undefined, "linux"), {
-    configuration: true, reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
+    configuration: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
   });
 });
 

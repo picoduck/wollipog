@@ -9,6 +9,7 @@ const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", impo
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const teamDialog = readFileSync(new URL("./TeamDialog.tsx", import.meta.url), "utf8");
 const personAccess = readFileSync(new URL("./PersonAccessDialogs.tsx", import.meta.url), "utf8");
+const pairDevice = readFileSync(new URL("./PairDeviceDialog.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.meta.url), "utf8");
 const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
@@ -51,7 +52,8 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(access, /kind: "pair-device"/);
   assert.match(access, /kind: "create-team"/);
   assert.doesNotMatch(access, /Forms open only when|access-page-intro|access-context/);
-  assert.match(access, /<Modal/);
+  // The forms are dialogs of their own files; Pair Device is one (#2999).
+  assert.match(pairDevice, /<Modal/);
   // Nobody else asks for the device list, and theirs stays unloaded rather than empty (#2997).
   assert.match(access, /if \(canAdminister\(context\)\) \{\s*await loadDevices\(\);\s*\} else \{[\s\S]*?setDevices\(null\);/);
   assert.doesNotMatch(access, /\{ devices: \[\] \}/);

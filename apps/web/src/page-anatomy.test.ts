@@ -57,9 +57,8 @@ test("the page container is left-aligned and capped per kind", () => {
   assert.doesNotMatch(declarations(topLevelRule(css, ".settings-view"))["overflow-y"] ?? "", /auto|scroll/);
   assert.equal(declarations(topLevelRule(css, ".archive-view"))["overflow"], undefined);
   assert.equal(declarations(topLevelRule(css, ".main-body"))["padding"], undefined, "the page container is the only gutter");
-  // The instance recovery screen is not a routed page, so it keeps its own inset.
-  assert.equal(declarations(topLevelRule(css, ".main-body.instance-recovery-body"))["padding"],
-    "var(--space-5) var(--page-gutter) var(--space-8)");
+  // The instance recovery screen is a page in the page container like any other (#3004).
+  assert.doesNotMatch(css, /instance-recovery-body/);
   // Not a query container on phones, so the app bar never contains the switcher's fixed menu.
   assert.equal(inAtRule("media", "(max-width: 760px)", ".page-header")["container"], "none");
 });

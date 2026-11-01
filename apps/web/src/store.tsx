@@ -2270,6 +2270,10 @@ export class Store {
     if (view.name === "session" && view.attention) {
       return { view: { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }, activation: true };
     }
+    // An artifact link opens the Browser on its artifact each time it is followed (#3924).
+    if (view.name === "session" && view.artifacts) {
+      return { view: { ...view, artifacts: { ...view.artifacts, activationId: ++this.attentionActivation } }, activation: true };
+    }
     if (view.name === "settings" && view.focus) {
       return { view: { ...view, focus: { ...view.focus, activationId: ++this.attentionActivation } }, activation: true };
     }

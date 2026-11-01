@@ -166,6 +166,41 @@ test("publication inspection through the runner handler binds payload across dis
   assert.notEqual(changed.publicationDigest,proposal.publicationDigest,"actual payload changes invalidate the exact grant");
 });
 
+for (const moved of [false, true]) {
+  test(`a bounded closure carried across an unrelated scope change executes at the synchronized revision${moved ? " and its fence refuses a later change" : ""} (#3915)`, async (t) => {
+    const f = fixture(t);
+    const original = await f.snapshot();
+    const scope = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+    const control = (issueScopeRevision: number): import("@wollipog/protocol").CampaignControl => ({ mode: "full_control", boundary: {
+      version: 1, revision: 2, issueScopeRevision, repository: scope.repository, objective: "Retire scoped work",
+      authorizedByUserId: "owner", authorizedAt: 2000, operations: ["campaign_issue_scope", "issue_closure"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [], relatedFollowUps: false, maxIssues: 3, closureReasons: ["not_planned"] },
+    } });
+    assert.equal((await f.scope({ operation: "synchronize", scope, control: control(1) })).ok, true);
+    const approved: GithubIssueClosureSnapshot = { ...original, scopeRevision: 1, issueAdmission: { boundaryRevision: 2, evidenceDigest: "a".repeat(64) } };
+    // An Orchestrator-approved addition of another issue, synchronized before execution.
+    const added = { ...scope, issueNumbers: [issue, 124], revision: 2 };
+    assert.equal((await f.scope({ operation: "synchronize", scope: added, control: control(2) })).ok, true);
+    const stale = await f.execute(approved, "stale-revision");
+    assert.equal(stale.ok, false, "the runner still refuses a snapshot at an older revision");
+    assert.equal(f.mutations().length, 0);
+
+    // The control plane proves the revisions in between left the issue alone and dispatches the
+    // closure at the revision it synchronized.
+    const dispatched: GithubIssueClosureSnapshot = { ...approved, scopeRevision: 2 };
+    if (moved) {
+      f.beforeNextInspection(() => {
+        f.store().patchMeta(sessionId, { orchestrator: { ...f.diskMeta().orchestrator!,
+          issueScope: { ...added, revision: 3 }, control: control(3) } });
+      });
+    }
+    const result = await f.execute(dispatched);
+    assert.equal(result.ok, true, result.error ?? "Expected an inspected result");
+    assert.equal(result.result?.outcome, moved ? "refused" : "closed");
+    assert.equal(f.mutations().length, moved ? 0 : 1);
+  });
+}
+
 test("bounded Full Control scope synchronization persists the advanced boundary for restart", async (t) => {
   const f=fixture(t);
   const scope={repository:"example/project",issueNumbers:[issue],revision:2,authorizedByUserId:"owner",authorizedAt:1000,

@@ -16,8 +16,8 @@ import { StatusBadge, statusToneClass } from "./StatusBadge.js";
 /** The instance menu is a 300px flyout beside the rail (§9.1, #1970). */
 export const INSTANCE_MENU_WIDTH = 300;
 
-/** The ancestors the flyout opens beside: the desktop rail, or the recovery shell's navigation. */
-const INSTANCE_MENU_BESIDE = ".app-rail, .instance-recovery-nav";
+/** The ancestor the flyout opens beside: the desktop rail, the recovery screen's too (#3004). */
+const INSTANCE_MENU_BESIDE = ".app-rail";
 
 /** A status label as tooltip text, which is sentence case (§9.3): "Pairing Required" → "Pairing required". */
 function sentenceCase(label: string): string {
@@ -30,8 +30,8 @@ function sentenceCase(label: string): string {
  *
  * What the shell's banner says about the active instance (`useActiveInstanceConnection`) wins over
  * the status the instance manager last recorded, which can still read Online for a moment after the
- * socket drops. `labelled` shows the name and status beside the tile, for a navigation wide enough
- * to hold them (the recovery shell's).
+ * socket drops. `labelled` shows the name and status beside the tile, for the labelled rail, which
+ * is wide enough to hold them (#1968).
  */
 export function InstanceSelector({ labelled = false }: { labelled?: boolean }) {
   const instances = useInstances();

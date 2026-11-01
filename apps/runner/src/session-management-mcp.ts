@@ -370,8 +370,8 @@ async function campaignWorkItemAtCreationCompatibilityError(deps: McpDeps): Prom
 
 /** A pre-v196 control plane has no campaign work ledger. It would ignore an unknown `workItem` or
  * `originWorkItemIds` field, silently recording nothing, so refuse by name instead. */
-async function campaignWorkLedgerCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
+async function campaignWorkLedgerCompatibilityError(deps: McpDeps, fixedBy = false): Promise<ToolResult | null> {
+  const required = fixedBy ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignFixedBy : RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
@@ -1100,7 +1100,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
-  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "set_guardrails", "create_worktree",
+  "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
   "allocate_campaign_budget",
@@ -1560,6 +1560,10 @@ export const TOOLS: McpTool[] = [
             additionalProperties: false,
           },
         },
+        fixedBy: { type: "array", maxItems: 100, items: { type: "object", properties: {
+          issue: CAMPAIGN_ISSUE_SCHEMA,
+          workItemKeys: { type: "array", minItems: 1, maxItems: 100, items: { type: "string", maxLength: 256 } },
+        }, required: ["issue", "workItemKeys"], additionalProperties: false } },
         planComplete: { type: "boolean" },
       },
       required: ["items", "planComplete"],
@@ -1567,11 +1571,11 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (!deps.selfSessionId || !deps.orchestrator) return errorResult("this tool requires an Orchestrator session identity");
-      const incompatible = await campaignWorkLedgerCompatibilityError(deps);
+      const incompatible = await campaignWorkLedgerCompatibilityError(deps, args?.fixedBy !== undefined);
       if (incompatible) return incompatible;
       const r = await cpFetch(deps, "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/orchestrator-campaign/plan`,
-        { items: args?.items, planComplete: args?.planComplete });
+        { items: args?.items, planComplete: args?.planComplete, ...(args?.fixedBy === undefined ? {} : { fixedBy: args.fixedBy }) });
       return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
@@ -3313,6 +3317,27 @@ export const TOOLS: McpTool[] = [
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
       if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot archive its own session");
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: true });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "unarchive_session",
+    description: "Recover a fully archived, verified campaign child whose dirty-worktree cleanup was refused. Only its controlling Orchestrator may do this. Does not delete files or restart the child; cannot cancel a pending archive.",
+    inputSchema: {
+      type: "object", properties: { sessionId: { type: "string" } },
+      required: ["sessionId"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.orchestrator) return errorResult("only the controlling Orchestrator may unarchive a child");
+      if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
+      if (args.sessionId === deps.selfSessionId) return errorResult("refusing: an agent cannot unarchive its own session");
+      const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+      const required = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorktreeRecovery;
+      if (!compatibility.ok || !Number.isInteger(compatibility.data?.protocolVersion) || compatibility.data.protocolVersion < required) {
+        return errorResult("Update Wollipog before recovering an archived child (campaign worktree recovery is unsupported).");
+      }
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/archive`, { archived: false });
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data) });
     },

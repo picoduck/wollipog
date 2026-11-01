@@ -750,7 +750,7 @@ test("archive retirement requires delivery beyond a push while preserving dirty 
     assert.equal(existsSync(pushed.path), true);
     writeFileSync(join(pushed.path, "dirty.txt"), "retain\n");
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_archive", { ...pushed, source: "created" },
-      { dataDir, requireDelivered: true }), { removed: false, reason: "dirty" });
+      { dataDir, requireDelivered: true }), { removed: false, reason: "dirty", dirtyPathsReason: 'the worktree has uncommitted changes (1 paths): "dirty.txt"' });
     rmSync(join(pushed.path, "dirty.txt"));
     writeFileSync(join(pushed.path, "later.txt"), "local\n");
     execFileSync("git", ["-C", pushed.path, "add", "later.txt"]);
@@ -1105,7 +1105,7 @@ test("archive retirement proves delivery of a -u pushed squash-merged worktree w
     // pushed but undelivered successor head without any delivery check.
     writeFileSync(join(created.worktree.path, "followup.txt"), "not yet committed\n");
     await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
-      /the worktree has uncommitted changes/);
+      /the worktree has uncommitted changes \(1 paths\): "followup.txt"/);
     assert.equal(linkedPullRequest(), undefined, "live-upstream delivery proof is not persisted as a link");
     execFileSync("git", ["-C", created.worktree.path, "add", "followup.txt"]);
     execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "follow-up"]);
@@ -1157,7 +1157,7 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       ...dirty,
       source: "created",
-    }, { dataDir }), { removed: false, reason: "dirty" });
+    }, { dataDir }), { removed: false, reason: "dirty", dirtyPathsReason: 'the worktree has uncommitted changes (1 paths): "local.txt"' });
     assert.equal(existsSync(dirty.path), true);
 
     const unpushed = await createRequestedWorktree(repo, "s_safe", {
@@ -8058,7 +8058,7 @@ test("a running session discards its own finished worktrees despite the per-sess
     assert.equal(existsSync(unsafe.worktree.path), true);
     assert.deepEqual(sent.filter((message) => message.type === "session_worktree_retirement_refused" &&
       message.path === unsafe.worktree.path).map((message) => message.reason),
-    ["the worktree has uncommitted changes"]);
+    ['the worktree has uncommitted changes (1 paths): "local.txt"']);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

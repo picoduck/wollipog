@@ -46,6 +46,19 @@ export interface RightPanelState {
    */
   showSubagent: (sessionId: string, eventEpoch: number, subagentId: string, options?: { request?: boolean }) => void;
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
+  /** An artifact the Browser was asked to open (#3924), acted on once by the session it names.
+   * Optional with the two below for hosts that never link to an artifact. */
+  artifactRequest?: BrowserArtifactRequest | null;
+  /** Open the panel on Browser → Artifacts, on one artifact when `artifactId` names it (#3924). */
+  showArtifact?: (sessionId: string, artifactId?: string) => void;
+  consumeArtifactRequest?: (request: number) => void;
+}
+
+export interface BrowserArtifactRequest {
+  sessionId: string;
+  artifactId?: string;
+  /** Distinguishes asking for the same artifact again. */
+  request: number;
 }
 
 /**
@@ -113,6 +126,8 @@ export function useRightPanelState(navigationScope: string | null = null, attent
   const [dragging, setDragging] = useState(false);
   const [subagentTarget, setSubagentTarget] = useState<RightPanelState["subagentTarget"]>(null);
   const nextSubagentFocusRequest = useRef(0);
+  const [artifactRequest, setArtifactRequest] = useState<BrowserArtifactRequest | null>(null);
+  const nextArtifactRequest = useRef(0);
   const [previousNavigation, setPreviousNavigation] = useState({ scope: navigationScope, attention: attentionNavigation });
   // Adjust before children render, so navigation cannot commit an Agents panel for the new visit.
   // Other panel preferences and all session-scoped scratch stay intact.
@@ -182,6 +197,19 @@ export function useRightPanelState(navigationScope: string | null = null, attent
         const { focusRequest: _consumed, focusPendingRequest: _pendingRequest, ...target } = current;
         return target;
       });
+    },
+    artifactRequest,
+    showArtifact: (sessionId, artifactId) => {
+      setArtifactRequest({
+        sessionId,
+        ...(artifactId === undefined ? {} : { artifactId }),
+        request: ++nextArtifactRequest.current,
+      });
+      setOpen(true);
+      setMode("browser");
+    },
+    consumeArtifactRequest: (request) => {
+      setArtifactRequest((current) => current?.request === request ? null : current);
     },
   };
 }
