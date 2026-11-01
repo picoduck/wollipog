@@ -65,6 +65,13 @@ test("a negated occurrence withholds scope even where another clause asks for it
   assert.deepEqual(intent("Fix #2. Fix #1 instead of #2."), { scope: [1], context: [2] });
   assert.deepEqual(intent("Fix everything other than #2, apart from #3."), { scope: [], context: [2, 3] });
   assert.deepEqual(intent("Stop working on #4. Postpone fixing #5; hold off on closing #6."), { scope: [], context: [4, 5, 6] });
+  // Every negation around a citation still reaches the references inside it.
+  for (const cited of ['"#2"', "“#2”", "`#2`", "(#2)", "[#2]", '("#2")', '"`#2`"']) {
+    assert.deepEqual(intent(`Fix #1 and #2. Do not touch ${cited}.`), { scope: [1], context: [2] }, cited);
+    assert.deepEqual(intent(`Fix #1 and #2 (do not touch ${cited}).`), { scope: [1], context: [2] }, cited);
+    assert.deepEqual(intent(`Fix #1 and #2. Do not:\n- touch ${cited}`), { scope: [1], context: [2] }, cited);
+  }
+  assert.deepEqual(intent('Fix #1 and #2 "never `#2`".'), { scope: [1], context: [2] });
   // A question asks nothing unless it is phrased as a request.
   assert.deepEqual(intent("Should we fix #1? Is #2 worth fixing?"), { scope: [], context: [1, 2] });
   assert.deepEqual(intent("Can you fix #1? Please close #2? Could you work on #3?"), { scope: [1, 2, 3], context: [] });
@@ -139,5 +146,9 @@ test("the split covers every reference exactly once; citing or negating a refere
     assert.equal(intent(`Background:\n- ${request} close #${n}`).scope.includes(n), false);
     // Within one sentence: a full stop legitimately ends the negation's reach.
     assert.equal(intent(`Do not fix #9 or ${request.replaceAll(".", "")} close #${n}.`).scope.includes(n), false);
+    // A citation of n, however wrapped, never escapes the negation around it.
+    for (const wrap of [`"#${n}"`, `\`#${n}\``, `(#${n})`, `("#${n}")`]) {
+      assert.equal(intent(`${text}\nFix #${n}. Don't touch ${wrap}.`).scope.includes(n), false);
+    }
   }), { numRuns: 500 });
 });

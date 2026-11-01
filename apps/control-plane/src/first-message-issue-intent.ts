@@ -161,8 +161,10 @@ export function firstMessageIssueIntent(text: string, repository: string): First
     while (quotedNext < references.length && references[quotedNext]!.start <= match.index) quotedNext++;
     for (; quotedNext < references.length && references[quotedNext]!.start < end; quotedNext++) {
       const r = references[quotedNext]!;
-      if (cited.has(r) || r.end >= end) continue;
-      record(r.number, NEGATION.test(match[0]) ? "negated" : "background");
+      if (r.end >= end) continue;
+      // A negating quote reaches the code inside it too.
+      if (NEGATION.test(match[0])) record(r.number, "negated");
+      else if (!cited.has(r)) record(r.number, "background");
       cited.add(r);
     }
     blankKeepingReferences(match.index, end);
@@ -184,13 +186,21 @@ export function firstMessageIssueIntent(text: string, repository: string): First
   const plain = masked.join("");
   for (const r of references) {
     const index = group[r.start]!;
-    if (cited.has(r) || index < 0) continue;
-    record(r.number, negatedGroup[index] ? "negated" : "background");
+    if (index < 0) continue;
+    // A negating parenthetical reaches the quotes and code inside it too.
+    if (negatedGroup[index]) record(r.number, "negated");
+    else if (!cited.has(r)) record(r.number, "background");
     cited.add(r);
   }
 
   // References and clauses are both in text order, so one pointer walks them together.
-  const open = references.filter((r) => !cited.has(r));
+  // A citation (code, quote, parenthetical) grants nothing, but every negation around it still
+  // reaches it: "Do not touch \"#2\"" withholds #2.
+  const open = references;
+  const reach = (r: MessageIssueReference, cue: IssueReferenceIntent) => {
+    if (!cited.has(r)) record(r.number, cue);
+    else if (cue === "negated") record(r.number, "negated");
+  };
   let next = 0;
   // A line ending in a colon leads what follows it. A requesting lead passes its request only to
   // list items without a cue of their own. A withholding lead (negated or background) governs every
@@ -219,8 +229,8 @@ export function firstMessageIssueIntent(text: string, repository: string): First
         let cue = withholding(negated ? "negated" : own, quoted && governed !== "negated" ? "background" : governed);
         if (question && cue === "directive") cue = null;
         last = cue;
-        while (next < open.length && open[next]!.start < start) record(open[next++]!.number, "unclear");
-        while (next < open.length && open[next]!.start < end) record(open[next++]!.number, cue ?? "unclear");
+        while (next < open.length && open[next]!.start < start) reach(open[next++]!, "unclear");
+        while (next < open.length && open[next]!.start < end) reach(open[next++]!, cue ?? "unclear");
       }
     }
     if (line.trim()) {
@@ -229,7 +239,7 @@ export function firstMessageIssueIntent(text: string, repository: string): First
     }
     offset += line.length + 1;
   }
-  while (next < open.length) record(open[next++]!.number, "unclear");
+  while (next < open.length) reach(open[next++]!, "unclear");
 
   const scope: number[] = [];
   const context: number[] = [];
