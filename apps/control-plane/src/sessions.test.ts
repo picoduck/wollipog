@@ -6790,6 +6790,68 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     }
   });
 
+  await t.test("outer-boundary same-turn enqueue without a Guardian receipt consumes once and unblocks verification (#3889)", async () => {
+    const { CodexAppServerDriver } = await import("../../runner/src/drivers/codex-app-server.js");
+    const { SessionManager } = await import("../../runner/src/session-manager.js");
+    const { db, hub, svc, child, parent, arm } = setup();
+    try {
+      const armed = await arm(3889);
+      const admission = {
+        id: "admission-outer", type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+        arguments: { occurrenceId: armed.decision.occurrenceId,
+          action: { kind: "pr_merge_enqueue", command: armed.command } },
+        status: "completed", error: null,
+        result: { content: [{ type: "text", text: JSON.stringify({ decision: armed.armed.data }) }] },
+      };
+      const commandItem = { id: "command-outer", type: "commandExecution", command: armed.command,
+        status: "completed", exitCode: 0 };
+      const turn = { id: "provider-session-turn-1", status: "inProgress", itemsView: "full",
+        items: [admission, commandItem] };
+      const driver = new CodexAppServerDriver({ command: "never-spawned", args: [], cwd: "/fixture",
+        env: {}, config: {}, context: { kind: "native" } },
+      { onEvent() {}, onStderr() {}, onExit() {} });
+      Object.assign(driver, { threadId: "thread-1", peer: {
+        request: async () => ({ thread: { id: "thread-1", turns: [turn] } }),
+      }, readRolloutProof: async () => null });
+      // Exercise the real runner reconciliation with no command approval receipt, as under the
+      // outer-boundary fallback. Only history transport and the forge read are synthetic.
+      const manager = Object.create(SessionManager.prototype);
+      Object.assign(manager, {
+        store: { readMeta: () => ({ driver: "codex-app-server", agentSessionId: "thread-1",
+          repoPath: "/fixture", logEpoch: 0 }), readEvents: () => [] },
+        active: new Map([[child.id, { client: driver }]]),
+      });
+      let forgeHead = armed.snapshot.headSha;
+      manager.resolveWorktreePullRequestState = async () => ({ state: "merged", headOid: forgeHead });
+      let requests = 0;
+      hub.requestHandler = async (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        requests++;
+        const { type, requestId, sessionId, ...payload } = message;
+        return { type: "workflow_action_reconciliation_result", requestId, sessionId,
+          ...await manager.reconcileWorkflowAction(child.id, payload) };
+      };
+      const retry = () => svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+      forgeHead = "f".repeat(40);
+      assert.equal((await retry()).status, 409, "even a real successful command needs the approved merged head");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      forgeHead = armed.snapshot.headSha;
+      const result = await retry();
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed", "the active provider turn need not finish first");
+      turn.status = "completed";
+      hub.setSessionQueue(child.id, [], false, "session-turn-2");
+      assert.equal((await retry()).status, 409, "unchanged next-turn retry cannot consume twice");
+      assert.equal(requests, 2, "consumed occurrence rejects before asking the runner again");
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
   await t.test("a legacy successful Guardian enqueue reconciles only from exact provider and forge proof", async () => {
     const { db, hub, svc, child, arm } = setup();
     try {

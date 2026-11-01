@@ -803,7 +803,11 @@ export class CodexAppServerDriver implements Driver {
               const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
               if (logicalCommand !== command) continue;
               liveSawExactCommand = true;
-              if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
+              // The provider owns this item and its terminal exit status. The surrounding turn
+              // may still be waiting for reconciliation; requiring it to finish creates a cycle.
+              // Failed/interrupted/unknown turns remain ineligible, as do nonterminal items.
+              if (!boundedProviderCorrelationId(turn?.id) ||
+                  (turn?.status !== "completed" && turn?.status !== "inProgress") ||
                   (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
                   item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
               successfulExactCommands.push({ turnId: turn.id, itemId: item.id });

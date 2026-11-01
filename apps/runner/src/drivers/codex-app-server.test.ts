@@ -3899,6 +3899,60 @@ test("historical reconciliation proves one exact completed root command without 
   });
 });
 
+test("same-turn reconciliation trusts only terminal provider items with an exact preceding admission (#3889)", async () => {
+  const h = makeHarness({ resumeId: "thread-same-turn" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/3889 --squash --match-head-commit ${"a".repeat(40)}`;
+  const admission = {
+    id: "admission", type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+    arguments: { occurrenceId: "workflow-same-turn", action: { kind: "pr_merge_enqueue", command } },
+    status: "completed", error: null,
+    result: { content: [{ type: "text", text: JSON.stringify({ decision: {
+      occurrenceId: "workflow-same-turn", status: "approved",
+      actionAdmission: { kind: "pr_merge_enqueue", command },
+    } }) }] },
+  };
+  const item = { id: "command", type: "commandExecution", command, status: "completed", exitCode: 0 };
+  const turn = { id: "turn-same", status: "inProgress", itemsView: "full", items: [admission, item] };
+  const thread = { id: "thread-same-turn", turns: [turn] };
+  Object.assign(h.driver, { threadId: thread.id, peer: { request: async () => ({ thread }) },
+    readRolloutProof: async () => null });
+  const proof = await h.driver.reconcileCompletedCommand("workflow-same-turn", command);
+  assert.equal(proof?.providerItemId, "command");
+  assert.equal(proof?.providerAdmissionItemId, "admission");
+  turn.status = "completed";
+  assert.deepEqual(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), proof,
+    "unchanged next-turn retry returns identical coordinates without executing another command");
+  turn.status = "inProgress";
+  for (const invalidTurnStatus of ["failed", "interrupted", "unknown"]) {
+    turn.status = invalidTurnStatus;
+    assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  }
+  turn.status = "inProgress";
+  turn.itemsView = "summary";
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  turn.itemsView = "full";
+  turn.items = [admission, { ...admission, id: "duplicate-admission" }, item];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  for (const invalid of [
+    { ...item, status: "inProgress", exitCode: null },
+    { ...item, status: "failed" }, { ...item, exitCode: 1 },
+    { ...item, command: command.replace("a".repeat(40), "b".repeat(40)) },
+  ]) {
+    turn.items = [admission, invalid] as typeof turn.items;
+    assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  }
+  turn.items = [admission, item, { ...item, id: "duplicate" }];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  turn.items = [item, admission];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  thread.turns = [{ ...turn, items: [admission] }, { ...turn, id: "another-turn", items: [item] }];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null,
+    "admission in another turn cannot authorize the command");
+  thread.turns = [{ ...turn, items: [admission, item] }];
+  thread.id = "another-session-thread";
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+});
+
 test("historical reconciliation falls back to the durable rollout after App Server restart", async () => {
   const previousCodexHome = process.env.CODEX_HOME;
   delete process.env.CODEX_HOME;
