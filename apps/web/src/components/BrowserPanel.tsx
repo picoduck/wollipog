@@ -17,6 +17,9 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { ArtifactPreviewBar, ArtifactPreviewBody, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
+import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
+import { ArtifactGallery } from "./ArtifactGallery.js";
+import type { BrowserArtifactRequest } from "./right-panel-state.js";
 
 type BrowserMode = "artifacts" | "web";
 
@@ -24,7 +27,30 @@ type BrowserMode = "artifacts" | "web";
  * that refuses to be framed often never loads at all, and a blank white rectangle says nothing. */
 export const PAGE_BLOCKED_AFTER_MS = 8_000;
 
-export function BrowserPanel({ session }: { session: SessionView }) {
+export interface BrowserPanelProps {
+  session: SessionView;
+  /** An artifact link or the transcript's Open in Browser (#3924): the Artifacts tab, on the
+   * artifact it names, found however many list pages away it is. Acted on once per request. */
+  openArtifact?: BrowserArtifactRequest | null;
+  onOpenArtifactHandled?: (request: number) => void;
+}
+
+/** The checked image bytes are shared by the open page and its viewer, so Enlarge never fetches
+ * them again. */
+export function BrowserPanel(props: BrowserPanelProps) {
+  return (
+    <TranscriptImageCacheProvider>
+      <BrowserPanelBody {...props} />
+    </TranscriptImageCacheProvider>
+  );
+}
+
+/** What the Browser shows while it looks for, or failed to find, a linked artifact. */
+type ArtifactLookup =
+  | { phase: "searching"; artifactId: string }
+  | { phase: "missing" };
+
+function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled }: BrowserPanelProps) {
   const api = useApi();
   // Where this session's browsing was left. The panel unmounts on every mode switch, so without
   // this the tab and the address are gone on return (#1202). The empty string is "nothing opened
@@ -48,7 +74,9 @@ export function BrowserPanel({ session }: { session: SessionView }) {
   );
   const [artifacts, setArtifacts] = useState<WorkflowArtifactView[]>([]);
   const [cursor, setCursor] = useState<string | undefined>();
-  const [listBusy, setListBusy] = useState(false);
+  // Busy from the first render: the first page is asked for as the panel mounts, and a linked
+  // artifact must not be judged missing from a list that has not loaded yet.
+  const [listBusy, setListBusy] = useState(true);
   const [listError, setListError] = useState<string | null>(null);
   // Bumped by Retry: the first page loads again from the top.
   const [listAttempt, setListAttempt] = useState(0);
@@ -106,6 +134,47 @@ export function BrowserPanel({ session }: { session: SessionView }) {
     }
   };
 
+  // A linked artifact (#3924) opens on the Artifacts tab as a page from outside the panel, so Back
+  // goes to the list. One beyond the loaded pages is looked for page by page; the list holds at most
+  // a few hundred. One no page carries says so, and nothing else about it.
+  const [lookup, setLookup] = useState<ArtifactLookup | null>(null);
+  useEffect(() => {
+    if (!openArtifact) return;
+    setMode("artifacts");
+    // An artifact already open gives way at once: it is not the one asked for, and a link that finds
+    // nothing must show its notice over the list, not under that page.
+    if (openArtifact.artifactId !== pages.current) pages.clear();
+    setLookup(openArtifact.artifactId === undefined ? null : { phase: "searching", artifactId: openArtifact.artifactId });
+    onOpenArtifactHandled?.(openArtifact.request);
+    // Each request is acted on once, when it arrives.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openArtifact?.request]);
+  const searchingFor = lookup?.phase === "searching" ? lookup.artifactId : null;
+  useEffect(() => {
+    // While a page loads, wait for it; a failed page shows its own Retry, and the search resumes.
+    if (searchingFor === null || listBusy || listError) return;
+    if (artifacts.some((artifact) => artifact.artifactId === searchingFor)) {
+      setLookup(null);
+      pages.push(searchingFor, { root: true });
+    } else if (cursor) {
+      void loadMore();
+    } else {
+      setLookup({ phase: "missing" });
+    }
+    // loadMore reads this render's cursor and busy state, which are deps already.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchingFor, listBusy, listError, artifacts, cursor]);
+
+  // The viewer (#3924) over the loaded list, opened from the page's Enlarge or its image. Closing it
+  // leaves the page where it was, with focus back on what opened it.
+  const [galleryId, setGalleryId] = useState<string | null>(null);
+  const galleryOpenerRef = useRef<HTMLElement | null>(null);
+  const openGallery = (opener: HTMLElement | null) => {
+    if (!selected) return;
+    galleryOpenerRef.current = opener;
+    setGalleryId(selected.artifactId);
+  };
+
   // The tab's plain count is what has loaded; "+" while more pages wait behind Show More.
   const firstPageLoaded = !(listBusy && artifacts.length === 0) && !(listError && artifacts.length === 0);
   const count = firstPageLoaded ? `${artifacts.length}${cursor ? "+" : ""}` : null;
@@ -155,7 +224,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
           setUrl={setOpenUrl}
         />
       ) : (
-        <PanelToolLayout toolbar={preview && <ArtifactPreviewBar key={preview.artifact.artifactId} model={preview} />}>
+        <PanelToolLayout toolbar={preview && <ArtifactPreviewBar key={preview.artifact.artifactId} model={preview} onEnlarge={openGallery} />}>
           <div
             id="browser-artifacts-panel"
             role="tabpanel"
@@ -164,6 +233,17 @@ export function BrowserPanel({ session }: { session: SessionView }) {
             hidden={preview !== null}
           >
             <ArtifactUploadNotice />
+            {lookup?.phase === "missing" && (
+              <Notice
+                tone="warning"
+                compact
+                role="status"
+                title="Artifact Unavailable"
+                actions={<button type="button" className="btn sm" onClick={() => setLookup(null)}>Dismiss</button>}
+              >
+                This session has no artifact the link names. It may have been removed, or the link may be for another session.
+              </Notice>
+            )}
             {listBusy && artifacts.length === 0 ? (
               <Skeleton rows={3} announce="Loading artifacts…" />
             ) : listError && artifacts.length === 0 ? (
@@ -214,10 +294,19 @@ export function BrowserPanel({ session }: { session: SessionView }) {
             <div key={preview.artifact.artifactId} className="browser-artifacts">
               <PanelPageTitle>{preview.artifact.name}</PanelPageTitle>
               <ArtifactPreviewMeta model={preview} />
-              <ArtifactPreviewBody model={preview} />
+              <ArtifactPreviewBody model={preview} onOpenImage={openGallery} />
             </div>
           )}
         </PanelToolLayout>
+      )}
+      {galleryId !== null && artifacts.some((artifact) => artifact.artifactId === galleryId) && (
+        <ArtifactGallery
+          artifacts={artifacts}
+          initialId={galleryId}
+          sessionId={session.id}
+          returnFocusRef={galleryOpenerRef}
+          onClose={() => setGalleryId(null)}
+        />
       )}
     </>
   );

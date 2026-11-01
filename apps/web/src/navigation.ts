@@ -9,6 +9,10 @@ import {
  * same stable deep link must re-focus its exact request without creating duplicate browser history. */
 export type AttentionTarget = { eventEpoch: number; requestId?: string; activationId?: number };
 
+/** The session's Browser → Artifacts tab, optionally on one artifact (#3924). As for an attention
+ * target, `activationId` is ephemeral: arriving again on the same link opens the artifact again. */
+export type ArtifactsTarget = { artifactId?: string; activationId?: number };
+
 export type View =
   | { name: "inbox"; split?: SessionsTab }
   | { name: "board"; split?: SessionsTab }
@@ -22,7 +26,7 @@ export type View =
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
-  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget }
   /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
   | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
@@ -445,6 +449,8 @@ export function viewPath(view: View): string {
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
+      : view.artifacts
+      ? `/sessions/~${encodeResourceId(view.id)}/artifacts${view.artifacts.artifactId === undefined ? "" : `/~${encodeResourceId(view.artifacts.artifactId)}`}`
       : view.attention
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
@@ -596,6 +602,14 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     if (id === null || requestId === null || [...params.keys()].length !== 1 ||
         epoch === null || !/^(0|[1-9]\d*)$/.test(epoch) || !Number.isSafeInteger(Number(epoch))) return null;
     return { name: "session", id, attention: { eventEpoch: Number(epoch), ...(requestId === undefined ? {} : { requestId }) } };
+  }
+  const artifactsMatch = /^\/sessions\/~([^/]+)\/artifacts(?:\/~([^/]+))?$/.exec(path);
+  if (artifactsMatch) {
+    const id = decodeResourceId(artifactsMatch[1]!);
+    const artifactId = artifactsMatch[2] === undefined ? undefined : decodeResourceId(artifactsMatch[2]);
+    // The path names everything the link opens; a query makes it some other link.
+    if (id === null || artifactId === null || (search !== "" && search !== "?")) return null;
+    return { name: "session", id, artifacts: artifactId === undefined ? {} : { artifactId } };
   }
   const fileMatch = /^\/sessions\/~([^/]+)\/files\/~([^/]+)$/.exec(path);
   if (fileMatch) {

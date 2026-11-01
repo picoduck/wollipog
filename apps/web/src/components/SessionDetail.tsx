@@ -56,7 +56,7 @@ import {
 import { ApiError } from "../api.js";
 import { convertPreviewReadingState, timelineRowSource } from "../history-preview-handoff.js";
 import { useHistoryPreview, type PreviewAnchor, type PreviewHandoff } from "../use-history-preview.js";
-import type { SessionEventsResponse } from "@wollipog/protocol";
+import type { SessionEventsResponse, WorkflowArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { startVisiblePolling } from "../visible-polling.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
@@ -1224,6 +1224,11 @@ function SessionDetailLoaded({
   }, [navigate, sessionId]);
   const clearSourceLocation = useCallback(() => {
     navigate({ name: "session", id: sessionId });
+  }, [navigate, sessionId]);
+  // An attachment's Open in Browser (#3924) follows the artifact's own link, so the address bar
+  // holds the link Copy Link copies, and the shell opens Browser → Artifacts on it.
+  const openArtifactInBrowser = useCallback((artifact: WorkflowArtifactView) => {
+    navigate({ name: "session", id: sessionId, artifacts: { artifactId: artifact.artifactId } });
   }, [navigate, sessionId]);
   // A transcript edit's Open in Review (#2187): the Review tab, scrolled to that file once.
   const { focus: reviewFocus, request: requestReviewFocus, clear: clearReviewFocus } = useDiffFileFocus();
@@ -7522,6 +7527,7 @@ function SessionDetailLoaded({
                           (eventWindow?.openingStartSeq !== undefined && eventWindow.laterGap !== undefined)}
                         onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                         onOpenSourceLocation={openSourceLocation}
+                        onOpenArtifact={historyPreview.active ? undefined : openArtifactInBrowser}
                         onOpenInReview={mode === "expanded" ? openInReview : undefined}
                         onOpenSession={openSession}
                         workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
