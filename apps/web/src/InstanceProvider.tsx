@@ -569,7 +569,11 @@ export function InstanceProvider({
     dialogKeyRef.current += 1;
     setDialog({ key: dialogKeyRef.current, request, returnFocus: { current: returnFocus ?? focused } });
   }, []);
-  const closeInstanceDialog = useCallback(() => setDialog(null), []);
+  // Closes only the dialog that asks: one replaced while its request ran still closes itself when
+  // that request finishes, and must not take its replacement with it.
+  const closeInstanceDialog = useCallback((key: number) => {
+    setDialog((current) => (current?.key === key ? null : current));
+  }, []);
   const dialogRequest = dialog?.request;
   const dialogProfile = dialogRequest && dialogRequest.mode !== "add"
     ? state.registry.profiles.find((profile) => profile.id === dialogRequest.profileId && profile.kind === "remote")
@@ -627,7 +631,12 @@ export function InstanceProvider({
     <InstancesContextProvider value={value}>
       {children}
       {dialogRequest?.mode === "add" && (
-        <RemoteInstanceDialog key={dialog!.key} mode="add" returnFocusRef={dialog!.returnFocus} onClose={closeInstanceDialog} />
+        <RemoteInstanceDialog
+          key={dialog!.key}
+          mode="add"
+          returnFocusRef={dialog!.returnFocus}
+          onClose={() => closeInstanceDialog(dialog!.key)}
+        />
       )}
       {dialogRequest && dialogRequest.mode !== "add" && dialogProfile && (
         <RemoteInstanceDialog
@@ -635,7 +644,7 @@ export function InstanceProvider({
           mode={dialogRequest.mode}
           profile={dialogProfile}
           returnFocusRef={dialog!.returnFocus}
-          onClose={closeInstanceDialog}
+          onClose={() => closeInstanceDialog(dialog!.key)}
         />
       )}
     </InstancesContextProvider>

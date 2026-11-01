@@ -59,6 +59,13 @@ function runtime(instanceId: string): InstanceRuntime {
 function fixture() {
   let registry: InstanceRegistrySnapshot = { profiles: [local, studio], activeInstanceId: studio.id };
   let added = 0;
+  let addGate: Promise<void> | null = null;
+  /** Holds the next add until the returned function is called. */
+  const holdNextAdd = () => {
+    let release!: () => void;
+    addGate = new Promise<void>((resolve) => { release = resolve; });
+    return release;
+  };
   const desktop = {
     isTauri: () => true,
     async invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
@@ -66,6 +73,9 @@ function fixture() {
       if (command === "instance_registry") return structuredClone(registry) as T;
       if (command === "set_active_instance") registry = { ...registry, activeInstanceId: input.profileId! };
       else if (command === "add_remote_instance") {
+        const gate = addGate;
+        addGate = null;
+        if (gate) await gate;
         added += 1;
         const profile: InstanceProfile = {
           id: `bbbbbbbb-bbbb-4bbb-8bbb-00000000000${added}`,
@@ -85,7 +95,7 @@ function fixture() {
     if (profileId === studio.id) throw { code: "authentication-required", message: "The pairing token was rejected. Generate a new pairing link." };
     return runtime(profileId);
   };
-  return { desktop, createRemoteRuntime };
+  return { desktop, createRemoteRuntime, holdNextAdd };
 }
 
 const settle = async () => {
@@ -98,7 +108,9 @@ const settle = async () => {
 };
 
 async function mountApp() {
-  const { desktop, createRemoteRuntime } = fixture();
+  const { desktop, createRemoteRuntime, holdNextAdd } = fixture();
+  // A switch in an earlier test leaves its instance's address behind; each app starts at the root.
+  domWindow.history.replaceState(null, "", "/");
   let manager!: InstanceManager;
   let showPage!: (show: boolean) => void;
   function Page() {
@@ -140,7 +152,15 @@ async function mountApp() {
     await act(async () => { root.unmount(); });
     host.remove();
   };
-  return { body, dialogs, cancel, unmount, manager: () => manager, showPage: (show: boolean) => act(async () => { showPage(show); }) };
+  return {
+    body,
+    dialogs,
+    cancel,
+    unmount,
+    holdNextAdd,
+    manager: () => manager,
+    showPage: (show: boolean) => act(async () => { showPage(show); }),
+  };
 }
 
 const byText = (scope: ParentNode, selector: string, text: string) =>
@@ -202,6 +222,40 @@ test("the dialog outlives the page that opened it, keeping what was typed", asyn
     await settle();
     assert.equal(app.dialogs().length, 1, "the provider still holds the dialog");
     assert.equal(app.dialogs()[0]!.querySelector<HTMLInputElement>("input")!.value, "Build Farm");
+  } finally {
+    await app.unmount();
+  }
+});
+
+test("a dialog replaced while its request runs does not close its replacement when the request ends", async () => {
+  const app = await mountApp();
+  try {
+    await act(async () => { byText(app.body, ".instances-page button", "Add Remote Instance")!.click(); });
+    await settle();
+    const first = app.dialogs()[0]!;
+    const [name, link] = Array.from(first.querySelectorAll<HTMLInputElement>('input:not([type="checkbox"])'));
+    await act(async () => {
+      name!.value = "Laptop";
+      fireDomEvent.change(name!);
+      link!.value = `https://laptop.test/#pair=${TOKEN}`;
+      fireDomEvent.change(link!);
+    });
+    await act(async () => { first.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
+    const release = app.holdNextAdd();
+    await act(async () => { byText(first, "button", "Add Instance")!.click(); });
+    await settle();
+
+    // Something replaces the busy dialog through the manager, as the API allows.
+    await act(async () => { app.manager().openInstanceDialog({ mode: "repair", profileId: studio.id }); });
+    await settle();
+    assert.equal(app.dialogs().length, 1);
+    assert.equal(app.dialogs()[0]!.querySelector("h2")?.textContent, "Re-Pair Instance");
+
+    await act(async () => { release(); });
+    await settle();
+    assert.ok(app.manager().registry.profiles.some((profile) => profile.label === "Laptop"), "the first request finished");
+    assert.equal(app.dialogs().length, 1, "the replacement stays open");
+    assert.equal(app.dialogs()[0]!.querySelector("h2")?.textContent, "Re-Pair Instance");
   } finally {
     await app.unmount();
   }
