@@ -15,7 +15,7 @@ import {
 } from "./provider-profile-publication-store.js";
 import { CampaignBudgetLedger, FollowUpApprovalRequired, campaignFollowUpAdmissionKey, campaignFollowUpAdmissionTitle,
   campaignFollowUpIdentity, type CampaignFollowUpIdentityContent } from "./campaign-budget.js";
-import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef } from "@wollipog/protocol";
+import type { CampaignBudgetView, CampaignFollowUpSubject, CampaignIssueRef, WorkflowDecisionRevocationReason } from "@wollipog/protocol";
 
 import { CampaignReviewJobs } from "./campaign-review-jobs.js";
 import { SessionReviewJobs } from "./session-review-jobs.js";
@@ -1048,7 +1048,8 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
 -- (#3083). Written with the resolution's governance audit, read when the request's removal is
 -- published: a removal the campaign Orchestrator caused itself wakes nobody, and any other carries
 -- its outcome and resolver into the continuation. Rows are bounded by age, not by consumption, so
--- a deferred attention batch replaying the same removal still finds them.
+-- a deferred attention batch replaying the same removal still finds them. A server revocation
+-- records its reason and the kind of actor whose action led to it (#3916).
 CREATE TABLE IF NOT EXISTS orchestrator_campaign_request_resolutions (
   campaign_session_id TEXT NOT NULL,
   request_token       TEXT NOT NULL,
@@ -1060,6 +1061,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_request_resolutions (
   outcome             TEXT NOT NULL,
   resolved_by         TEXT NOT NULL,
   resolved_at         INTEGER NOT NULL,
+  revocation_reason   TEXT,
+  triggered_by        TEXT,
   PRIMARY KEY (campaign_session_id, request_token),
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -3753,6 +3756,11 @@ export interface CampaignRequestResolutionRecord {
   outcome: string;
   resolvedBy: CampaignRequestResolver;
   resolvedAt: number;
+  /** #3916: present when the server revoked the request, which it records as `system`. */
+  revocationReason?: WorkflowDecisionRevocationReason;
+  /** #3916: on a server revocation, the kind of actor whose action led to it, such as the person
+   * whose approval was refused as stale. Never the resolver. */
+  triggeredBy?: CampaignRequestResolver;
 }
 
 export interface CampaignContinuationRecord {
@@ -7854,6 +7862,14 @@ export class ControlPlaneDb {
     for (const column of ["report_event_epoch INTEGER", "report_ts INTEGER", "report_digest TEXT"]) {
       if (!campaignReportColumns.has(column.split(" ")[0]!)) {
         db.exec(`ALTER TABLE orchestrator_campaign_child_reports ADD COLUMN ${column}`);
+      }
+    }
+    // A server revocation's reason and trigger (#3916). Earlier rows have neither and read as before.
+    const requestResolutionColumns = new Set((db.prepare("PRAGMA table_info(orchestrator_campaign_request_resolutions)")
+      .all() as Array<{ name: string }>).map((column) => column.name));
+    for (const column of ["revocation_reason TEXT", "triggered_by TEXT"]) {
+      if (!requestResolutionColumns.has(column.split(" ")[0]!)) {
+        db.exec(`ALTER TABLE orchestrator_campaign_request_resolutions ADD COLUMN ${column}`);
       }
     }
     const controlPlane = new ControlPlaneDb(
@@ -19952,14 +19968,17 @@ export class ControlPlaneDb {
     this.stmt(`DELETE FROM orchestrator_campaign_request_resolutions WHERE campaign_session_id=? AND resolved_at<?`)
       .run(input.campaignSessionId, input.resolvedAt - CAMPAIGN_REQUEST_RESOLUTION_RETENTION_MS);
     this.stmt(`INSERT INTO orchestrator_campaign_request_resolutions
-      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,title,resource_key,outcome,resolved_by,resolved_at)
-      VALUES (?,?,?,?,?,?,?,?,?,?)
+      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,title,resource_key,outcome,resolved_by,resolved_at,
+        revocation_reason,triggered_by)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
       ON CONFLICT(campaign_session_id,request_token) DO UPDATE SET
         subject_session_id=excluded.subject_session_id,occurrence_id=excluded.occurrence_id,
         category=excluded.category,title=excluded.title,resource_key=excluded.resource_key,outcome=excluded.outcome,
-        resolved_by=excluded.resolved_by,resolved_at=excluded.resolved_at`)
+        resolved_by=excluded.resolved_by,resolved_at=excluded.resolved_at,
+        revocation_reason=excluded.revocation_reason,triggered_by=excluded.triggered_by`)
       .run(input.campaignSessionId, input.requestToken, input.subjectSessionId, input.occurrenceId,
-        input.category, input.title ?? null, input.resourceKey ?? null, input.outcome, input.resolvedBy, input.resolvedAt);
+        input.category, input.title ?? null, input.resourceKey ?? null, input.outcome, input.resolvedBy, input.resolvedAt,
+        input.revocationReason ?? null, input.triggeredBy ?? null);
   }
 
   /** A resolution whose delivery failed left its request pending; forget the recorded resolver. */
@@ -19973,6 +19992,7 @@ export class ControlPlaneDb {
       WHERE campaign_session_id=? AND request_token=?`).get(campaignSessionId, requestToken) as {
       request_token: string; subject_session_id: string; occurrence_id: string; category: string;
       title: string | null; resource_key: string | null; outcome: string; resolved_by: string; resolved_at: number;
+      revocation_reason: string | null; triggered_by: string | null;
     } | undefined;
     return row ? {
       requestToken: row.request_token,
@@ -19984,13 +20004,16 @@ export class ControlPlaneDb {
       outcome: row.outcome,
       resolvedBy: row.resolved_by as CampaignRequestResolver,
       resolvedAt: row.resolved_at,
+      ...(row.revocation_reason ? { revocationReason: row.revocation_reason as WorkflowDecisionRevocationReason } : {}),
+      ...(row.triggered_by ? { triggeredBy: row.triggered_by as CampaignRequestResolver } : {}),
     } : null;
   }
 
   /** When the earliest undelivered event that must wake the Orchestrator promptly was recorded,
    * across the whole pending queue rather than one bounded delivery slice (#3083). Prompt events are
    * a child becoming ready or held, the last human blocker clearing, and a request removal not
-   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. */
+   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. A server
+   * revocation a person's action led to (#3916) is as prompt as that person's own resolution. */
   campaignContinuationPromptEventAt(campaignSessionId: string): number | null {
     const row = this.stmt(
       `SELECT MIN(event.created_at) AS at FROM orchestrator_campaign_events event
@@ -20000,7 +20023,8 @@ export class ControlPlaneDb {
            SELECT 1 FROM orchestrator_campaign_request_resolutions resolution
            WHERE resolution.campaign_session_id=event.campaign_session_id
              AND resolution.request_token=event.occurrence_id
-             AND resolution.resolved_by!='human' AND resolution.resolved_at<=event.created_at)))`,
+             AND resolution.resolved_by!='human' AND COALESCE(resolution.triggered_by,'')!='human'
+             AND resolution.resolved_at<=event.created_at)))`,
     ).get(campaignSessionId, this.campaignContinuationCursor(campaignSessionId)) as { at: number | null };
     return row.at ?? null;
   }

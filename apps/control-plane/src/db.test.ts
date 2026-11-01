@@ -3768,6 +3768,35 @@ test("old campaign report tables migrate without losing an existing verification
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("old campaign request resolutions migrate, keep their resolver and record a server revocation's reason (#3916)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-resolution-migration-"));
+  const file = join(root, "cp.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
+    for (const column of ["revocation_reason", "triggered_by"]) {
+      db.raw().exec(`ALTER TABLE orchestrator_campaign_request_resolutions DROP COLUMN ${column}`);
+    }
+    db.raw().prepare(`INSERT INTO orchestrator_campaign_request_resolutions
+      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,outcome,resolved_by,resolved_at)
+      VALUES ('campaign','old','campaign','wd_old','campaign_issue_scope','revoked','human',?)`).run(Date.now());
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    const old = reopened.campaignRequestResolution("campaign", "old");
+    assert.equal(old?.resolvedBy, "human");
+    assert.equal(old?.revocationReason, undefined);
+    assert.equal(old?.triggeredBy, undefined);
+    reopened.recordCampaignRequestResolution({ campaignSessionId: "campaign", requestToken: "new", subjectSessionId: "campaign",
+      occurrenceId: "wd_new", category: "campaign_issue_scope", outcome: "revoked", resolvedBy: "system", resolvedAt: Date.now(),
+      revocationReason: "approval_refused_stale", triggeredBy: "human" });
+    const recorded = reopened.campaignRequestResolution("campaign", "new");
+    assert.equal(recorded?.revocationReason, "approval_refused_stale");
+    assert.equal(recorded?.triggeredBy, "human");
+    reopened.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {
