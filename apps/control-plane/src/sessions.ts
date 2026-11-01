@@ -12373,11 +12373,16 @@ export class SessionsService {
   private revokeWorkflowDecision(
     decision: WorkflowDecisionView, cause: WorkflowDecisionRevocationCause, oweRestartNotice = false, rationale?: string,
   ): void {
+    // A caller may hold a decision it read before an await. One that settled meanwhile (withdrawn,
+    // consumed or resolved) keeps its own record: a later refusal must not audit or report it again
+    // as this server revocation (#3917). The read and the write below run without yielding.
+    const current = this.db.workflowDecisionByOccurrence(decision.occurrenceId);
+    if (current?.status !== "pending" && current?.status !== "approved") return;
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
     this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-    this.recordWorkflowDecisionRevocation(decision, cause, now, rationale);
+    this.recordWorkflowDecisionRevocation(current, cause, now, rationale);
     this.hub.sessionChangedById(decision.sessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
   }

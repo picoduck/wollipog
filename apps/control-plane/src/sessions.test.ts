@@ -2552,6 +2552,52 @@ test("an Orchestrator's withdrawal of a pending request resumes the waiting chil
   } finally { db.close(); }
 });
 
+test("a consume in flight when its grant is withdrawn neither arms it nor relabels the withdrawal (#3917)", async () => {
+  const { db, svc, root, child, hub, deliver, mergeSnapshot, requestMerge, approve } = withdrawalCampaign();
+  try {
+    for (const [pullRequest, answer] of [
+      [130, { ok: false, refusal: "stale_head", reason: "The head moved." }],
+      [131, { ok: true, check: { checkedAt: 7, closures: [] } }],
+    ] as const) {
+      const granted = requestMerge(pullRequest);
+      approve(granted.occurrenceId);
+      let release: ((result: RunnerRequestResult) => void) | undefined;
+      let asked: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }> | undefined;
+      hub.githubMergePreflight = (msg) => {
+        asked = msg;
+        return new Promise<RunnerRequestResult>((resolve) => { release = resolve; });
+      };
+      const snapshot = mergeSnapshot(pullRequest);
+      const consuming = svc.consumeWorkflowDecision(child.id, granted.occurrenceId, { resourceSnapshot: snapshot,
+        action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) } });
+      for (let tick = 0; tick < 50 && !release; tick++) await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.ok(release && asked, "the consume is waiting on GitHub");
+      const reason = `Superseded while GitHub was read for #${pullRequest}.`;
+      assert.ok(svc.withdrawWorkflowDecision(child.id, granted.occurrenceId, { reason }).ok);
+      const audited = () => svc.governanceAudit(child.id).filter((entry) => entry.requestId === granted.occurrenceId);
+      const auditsBefore = audited().length;
+      release({ type: "github_merge_preflight_result", requestId: asked.requestId, sessionId: asked.sessionId,
+        ...answer } as RunnerRequestResult);
+      assert.equal((await consuming).status, 409, "the withdrawn grant is never armed");
+      const after = db.workflowDecisionByOccurrence(granted.occurrenceId)!;
+      assert.equal(after.status, "revoked");
+      assert.deepEqual(after.withdrawal, { bySessionId: child.id, reason });
+      assert.equal(after.actionAdmission, undefined);
+      assert.equal(audited().length, auditsBefore, "the late refusal adds no server revocation");
+      assert.equal(audited().some((entry) => entry.workflowDecision?.revocation), false);
+      assert.equal(db.campaignRequestResolution(root.id, campaignRequestToken("typed", child.id, granted.occurrenceId))?.outcome,
+        "withdrawn");
+      db.updateSessionStatus(root.id, "idle", Date.now());
+      const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+      assert.ok(text);
+      assert.match(text, new RegExp(`"occurrenceId":"${granted.occurrenceId}",.*"outcome":"withdrawn","resolvedBy":"agent",` +
+        `"withdrawal":\\{"bySessionId":"${child.id}","reason":"Superseded while GitHub was read for #${pullRequest}\\."\\}`, "u"));
+      db.updateSessionStatus(root.id, "running", Date.now());
+      hub.githubMergePreflight = undefined;
+    }
+  } finally { db.close(); }
+});
+
 test("withdrawal refuses consumed, armed, person-settled and other owners' decisions (#3917)", async () => {
   const { db, svc, root, child, requestMerge, approve } = withdrawalCampaign({ implementation_question: "human" });
   try {
