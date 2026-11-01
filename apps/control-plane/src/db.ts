@@ -8,6 +8,7 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
  */
 
 import { DatabaseSync } from "node:sqlite";
+import { runnerRetryConnection } from "./runner-persistence.js";
 import { AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 import {
   installProviderPublicationStore, ProviderProfilePublicationStore, ProviderPublicationUnavailable, validProviderPublicationInput,
@@ -5601,6 +5602,7 @@ export class ControlPlaneDb {
      * owner knows which blobs it is staging. */
     private readonly attached: boolean,
   ) {
+    this.db = db = runnerRetryConnection(db);
     if (!attached) {
       CampaignBudgetLedger.install(db);
       CampaignReviewJobs.install(db);
@@ -10681,7 +10683,7 @@ export class ControlPlaneDb {
     now: number,
     protocolVersion: number | null = null,
   ): { credentialId: string; scope: ResourceScope; legacy: boolean; activated: boolean } | null {
-    this.db.exec("BEGIN");
+    this.db.exec("BEGIN IMMEDIATE");
     try {
       const credential = this.authenticateRunnerCredential(meta.runnerId, tokenHash, now, false);
       if (!credential) {

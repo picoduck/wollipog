@@ -14,6 +14,18 @@ recovers it.
   hold the write lock. A statement that meets that lock now waits up to 250 ms instead of failing
   at once with `SQLITE_BUSY`. The wait blocks the event loop, so it stays short: a lock held longer
   still fails fast, and periodic work defers its tick as before.
+- Runner frame handling retries base `SQLITE_BUSY` (errcode 5) at the failed prepared statement
+  or transaction boundary, with three retries shared by the entire frame or runtime-update run.
+  A monotonic one-second window from the first busy failure also stops new retries; an in-flight
+  SQLite operation can add its existing 250 ms wait. These retries are synchronous: contention
+  can block the event loop for about one second, but never replays already-published frame side
+  effects or lets later socket frames overtake the failed write. Cooperative inventory yields
+  retain that same budget. Registration acquires write intent before reading its credential,
+  avoiding a stale read transaction during lock upgrade. Other entry points retain their prior
+  behavior and timeout. Extended busy codes and arbitrary multi-statement scripts are not replayed.
+  `runner_persistence_contention` identifies the message type, runner, retry count and exhaustion;
+  an exhausted frame logs `runner_persistence_exhausted` and closes only that socket with 1011,
+  `runner persistence unavailable`. Malformed frames keep their separate 1008 rejection.
 - A second connection beside a running control plane, such as a test that inspects or adjusts its
   database, uses `ControlPlaneDb.attach`, never `open` (#3789). `open` applies the schema and runs
   startup work, so it takes the write lock repeatedly. An attached connection applies no schema,
