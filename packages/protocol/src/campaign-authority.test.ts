@@ -363,7 +363,7 @@ const mentionOnly = [
   "The child's design question was declined with \"cannot supply credentials\". Should I continue without that design input?",
   "The child's design question was declined with `the campaign cannot supply credentials`. Should I continue without that design input?",
   "The child reported \"Full Control declined this question: the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.\" Which design should the child take next?",
-  "We cannot supply credentials for this design. Which fallback should the importer implement?",
+  "We cannot supply credentials. Which fallback should the importer implement for this design?",
   "Should the workflow design stay token-free and read-only?",
 ];
 /** Genuine requests for a credential value, a sign-in, wider provider access or a lasting grant. */
@@ -405,7 +405,21 @@ test("only declarative negation by a non-reader is masked; interrogative, tag an
     "We cannot supply credentials for the design. What is it?",
     "The campaign cannot supply credentials for the design. What is the value?",
     "The campaign cannot supply credentials for the design. Which token does the importer need?",
+    // Review round 2: only a decline report followed by a next-step question is mention-only.
+    "The campaign cannot supply credentials. What are Alice's for the design?",
+    "The campaign cannot supply credentials. Alice's are needed for the design.",
+    "The campaign cannot supply credentials, but Alice's are needed for the design.",
+    "The campaign cannot supply credentials. Should I continue with Alice's for the design?",
+    "The campaign cannot supply credentials. Whose should the design take?",
   ]) declinedEverywhere(text);
+  // A label that names something to bring along voids the report too.
+  const report = mentionOnly[4]!;
+  const labelled = (label: string) => question(report, { questions: [{ id: "choice", question: report, options: [{ label: "Continue" }, { label }] }] });
+  for (const label of ["Alice's", "Continue with Alice's", "Which one?"]) {
+    for (const root of [false, true]) declined(evaluate(labelled(label), { root }), "secrets_and_sign_in", label);
+    for (const root of [false, true]) declined(typed({ category: "implementation_question", question: report,
+      options: [{ optionId: "a", label: "Continue" }, { optionId: "b", label }] }, { root }), "secrets_and_sign_in", label);
+  }
 });
 
 test("the CI permission-block mask covers a workflow's declared permissions, never access for anyone or a lasting grant (#3913)", () => {
@@ -428,7 +442,17 @@ test("the CI permission-block mask covers a workflow's declared permissions, nev
     "Should the design grant the workflow job and this device access with contents: write?",
     "Should the design grant its job the actions: read permission? Do the same for the browser.",
     "Should we grant the workflow job access with contents: write for the design?",
+    // Review round 2: the whole grantee is the workflow or job, and nothing after it names a recipient.
+    "Grant the workflow author access to GitHub with contents: write for the design.",
+    "Should the design grant the workflow maintainer's job the actions: read permission?",
+    "Should the design grant the workflow job the id-token: write permission?",
+    "Should the design grant the workflow job contents: write access to Alice?",
   ]) declinedEverywhere(text);
+  // main's child screen never matched a plural grant, so these are declined on the design routes.
+  for (const text of ["Should the design give the workflow job's permissions to Alice?", "Should the design widen the job's permissions for Alice?",
+    "Alice would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?"]) {
+    for (const [route, result] of Object.entries(onEveryRoute(text))) if (route !== "child") declined(result, "secrets_and_sign_in", `${route}: ${text}`);
+  }
   // A credential noun's "-only" compound is a credential, and a "-free" one beside a request is screened.
   for (const text of ["Enter the secret-only value here for the design.", "Paste the token-free value here for the design."]) declinedEverywhere(text);
   // Values, store paths and secret fields are screened on the unmasked text.
