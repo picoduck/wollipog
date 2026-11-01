@@ -1,8 +1,9 @@
-import React from "react";
+import React, { useRef } from "react";
 import { useWindowTitle, windowDragRegion } from "../desktop-window.js";
 import { useInstances } from "../instances-context.js";
 import { InstanceSelector } from "./InstanceSelector.js";
-import { InstancesPanel } from "./InstancesPanel.js";
+import { PlusIcon } from "./Icons.js";
+import { addRemoteInstanceAction, InstancesPanel } from "./InstancesPanel.js";
 import { RailDragStrip } from "./Rail.js";
 
 /** The desktop app's screen while the active instance is loading, opening, failed or missing. */
@@ -13,6 +14,9 @@ export function InstanceRecoveryShell() {
   const repairable = instances.phase === "failed" && instances.activeProfile.kind === "remote"
     && (activeAvailability === "authentication-required" || activeAvailability === "missing-credential");
   useWindowTitle("Instances");
+  // This screen has no page header, so the Instances list's Add Remote Instance… sits with its actions.
+  const addButtonRef = useRef<HTMLButtonElement>(null);
+  const add = addRemoteInstanceAction(instances, addButtonRef);
   return (
     <div className="app instance-recovery-app">
       <aside className="instance-recovery-nav" aria-label="Instance Navigation">
@@ -62,9 +66,13 @@ export function InstanceRecoveryShell() {
                   {(instances.phase === "missing" || instances.activeProfile.id !== "local") && (
                     <button type="button" className="btn" onClick={() => void instances.goToThisMachine()}>Go to This Machine</button>
                   )}
+                  <button ref={addButtonRef} type="button" className="btn" aria-haspopup="dialog" onClick={add.onClick}>
+                    <PlusIcon />
+                    <span>{add.label}</span>
+                  </button>
                 </div>
               </div>
-              <InstancesPanel />
+              <InstancesPanel addButtonRef={addButtonRef} />
             </>
           )}
         </div>

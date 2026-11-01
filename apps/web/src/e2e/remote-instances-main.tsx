@@ -1,5 +1,5 @@
 import { browserRandomUUID } from "../browser-crypto.js";
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { createApiClient } from "../api.js";
 import type { InstanceProfile, InstanceRegistrySnapshot } from "../desktop-instances.js";
@@ -12,8 +12,9 @@ import {
 } from "../instances-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { InstanceSelector } from "../components/InstanceSelector.js";
-import { InstancesPanel } from "../components/InstancesPanel.js";
+import { addRemoteInstanceAction, InstancesPanel } from "../components/InstancesPanel.js";
 import { OfflineBanner } from "../components/OfflineBanner.js";
+import { PageHeader } from "../components/PageHeader.js";
 import { Rail } from "../components/Rail.js";
 import { RemoteInstanceBanner } from "../components/RemoteInstanceBanner.js";
 import { SettingsTrigger } from "../components/SettingsTrigger.js";
@@ -41,6 +42,8 @@ const openFailures = new Map<string, { code: string; message: string }>();
 const closedRuntimes: string[] = [];
 const MUTATIONS = new Set(["add_remote_instance", "edit_remote_instance", "repair_remote_instance"]);
 let nextMutationFailure: string | null = null;
+let heldOpen: { profileId: string; released: Promise<void> } | null = null;
+let releaseHeldOpen: () => void = () => undefined;
 
 function saveRegistry(next: InstanceRegistrySnapshot): InstanceRegistrySnapshot {
   registry = next;
@@ -124,6 +127,9 @@ declare global {
       failNextOpen(profileId: string, code: string, message: string): void;
       /** The next add, edit or re-pair rejects with this desktop message. */
       failNextMutation(message: string): void;
+      /** The next connection to this profile stays open (Connecting) until `releaseOpen`. */
+      holdNextOpen(profileId: string): void;
+      releaseOpen(): void;
       /** What the shell's banner says about the active instance's connection. */
       setConnection(connection: ActiveInstanceConnection | null): void;
       registry(): InstanceRegistrySnapshot;
@@ -135,6 +141,10 @@ declare global {
 window.__WOLLIPOG_INSTANCE_E2E__ = {
   failNextOpen(profileId, code, message) { openFailures.set(profileId, { code, message }); },
   failNextMutation(message) { nextMutationFailure = message; },
+  holdNextOpen(profileId) {
+    heldOpen = { profileId, released: new Promise<void>((resolve) => { releaseHeldOpen = resolve; }) };
+  },
+  releaseOpen() { releaseHeldOpen(); },
   setConnection(connection) { setHarnessConnection(connection); },
   registry: () => structuredClone(registry),
   closedRuntimes: () => [...closedRuntimes],
@@ -148,6 +158,7 @@ function Shell() {
   const [connection, setConnection] = useState<ActiveInstanceConnection | null>(null);
   setHarnessConnection = setConnection;
   const { labels } = useRailPreferences();
+  const addButtonRef = useRef<HTMLButtonElement>(null);
   return (
     <ActiveInstanceConnectionProvider value={connection}>
       <div className="app">
@@ -165,7 +176,13 @@ function Shell() {
           {connection && (instances.activeProfile.kind === "remote"
             ? <RemoteInstanceBanner authenticationRequired={connection === "sign-in-required"} />
             : connection === "reconnecting" && <OfflineBanner connecting={false} onRetryNow={() => false} developmentBuild={false} />)}
-          <div className="main-body"><div className="page"><InstancesPanel /></div></div>
+          {/* The Connections page's header and Instances tab, as RunnersView draws them (#3002). */}
+          <div className="main-body">
+            <div className="page">
+              <PageHeader title="Connections" primary={addRemoteInstanceAction(instances, addButtonRef)} />
+              <div className="connections-panel"><InstancesPanel addButtonRef={addButtonRef} /></div>
+            </div>
+          </div>
         </main>
       </div>
     </ActiveInstanceConnectionProvider>
@@ -181,6 +198,11 @@ createRoot(root).render(
         desktop={desktop}
         createLocalRuntime={() => runtime("local", localProfile.origin)}
         createRemoteRuntime={async (profileId) => {
+          if (heldOpen?.profileId === profileId) {
+            const { released } = heldOpen;
+            heldOpen = null;
+            await released;
+          }
           const failure = openFailures.get(profileId);
           if (failure) {
             openFailures.delete(profileId);
