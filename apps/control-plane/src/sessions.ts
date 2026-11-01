@@ -17315,7 +17315,7 @@ export class SessionsService {
       batches, snapshotBatchLimit: 32, affectedCampaigns, maxBatchMs: Math.round(maxBatchMs),
       durationMs: Math.round(performance.now() - started),
     }));
-    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; });
+    const steps = this.runnerSessionHydrationSteps(runnerId, snapshots, (count) => { affectedCampaigns = count; }, reconciliationId);
     diagnostic("runner_reconciliation_started");
     try {
       while (options.isCurrent()) {
@@ -17341,6 +17341,7 @@ export class SessionsService {
 
   private *runnerSessionHydrationSteps(
     runnerId: string, snapshots: SessionSnapshot[], onCampaignCount?: (count: number) => void,
+    reconciliationId = randomUUID(),
   ): Generator<void, void> {
     const now = Date.now();
     const byId = new Set(snapshots.map((s) => s.id));
@@ -17421,7 +17422,52 @@ export class SessionsService {
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
+      const activeBatchIndexes = new Set<number>();
+      let activeFallbackThrough = -1;
       for (const [snapshotIndex, incoming] of chunk.entries()) {
+        if (terminalBatchIndexes.has(snapshotIndex) || activeBatchIndexes.has(snapshotIndex)) continue;
+        // Keep active groups contiguous: an exceptional snapshot must settle on its original
+        // path before any later active group can commit or publish. Recheck eligibility after
+        // that work, rather than classifying the whole chunk against an obsolete view.
+        if (snapshotIndex > activeFallbackThrough) {
+          const run: SessionSnapshot[] = [];
+          for (let index = snapshotIndex; index < chunk.length; index++) {
+            const snap = chunk[index]!;
+            if (terminalBatchIndexes.has(index) || unsupportedCostSessions.has(snap.id) ||
+                duplicateSnapshotIds.has(snap.id) || changedSinceInventory(snap.id) ||
+                !this.batchableActiveRegistrationSnapshot(runnerId, snap)) break;
+            campaignBefore(this.db.getSession(snap.id));
+            run.push(snap);
+          }
+          if (run.length) {
+            const histories = this.db.updateSessionsFromSnapshots(run, now, { fallbackOnRollback: true });
+            if (histories.length === run.length) {
+              for (const [index, snap] of run.entries()) {
+                activeBatchIndexes.add(snapshotIndex + index);
+                this.synchronizeCostReconciliation(snap.id, snap.costReconciliationRevision ?? 0);
+                if (histories[index]?.reset) {
+                  const reset = this.db.getSession(snap.id)!;
+                  this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
+                  if (snap.seq > 0) this.rehydrate.add(snap.id);
+                }
+                this.gateOnPolicy(snap.id, now);
+                this.restorePendingWorkflowDecisionCards(snap.id);
+                // Policy evaluation can create new work after admission. Keep the original
+                // post-update delivery path, with its own FULL writes, for that fresh work.
+                this.deliverHeldWorkflowDecisionResumes(snap.id, now);
+                this.deliverHeldRestartNotices(snap.id, now);
+                this.applyStandingCampaignResponses(snap.id);
+                this.deliverHeldReviewContinuations(snap.id, now);
+                this.hub.sessionChangedById(snap.id);
+                recordAppliedVersion(snap.id);
+              }
+              continue;
+            }
+            activeFallbackThrough = snapshotIndex + run.length - 1;
+            this.log.warn(JSON.stringify({ event: "runner_reconciliation_batch_fallback",
+              entryPoint: "runner_registration", runnerId, reconciliationId, snapshotCount: run.length }));
+          }
+        }
         // Preserve possible costs/history/checkpoints through normal accounting while generic
         // snapshot status cannot overwrite an unresolved media dispatch/cancellation identity.
         const mediaSession = this.db.getSession(incoming.id);
@@ -17578,6 +17624,24 @@ export class SessionsService {
         }
       })();
     }
+  }
+
+  /** Active registration may share a FULL commit only when its pre-update service work is a
+   * no-op and it owes no post-update delivery. Policy evaluation still runs, durably, afterwards. */
+  private batchableActiveRegistrationSnapshot(runnerId: string, snap: SessionSnapshot): boolean {
+    if (snap.status !== "idle" && snap.status !== "running") return false;
+    const existing = this.db.getSession(snap.id);
+    if (!existing || existing.runnerId !== runnerId || existing.kind === "review" || existing.orchestratorCampaign ||
+        existing.pendingApproval || snap.pendingApproval || this.pendingMediaLifecycle(existing) ||
+        existing.worktreeRecovery || snap.worktreeRecovery ||
+        this.db.isTombstoned(snap.id) || this.db.hasSessionStopIntent(snap.id) ||
+        this.archivedSessionRequiresStop(existing) || this.db.hasActiveSessionPromptCommands(snap.id) ||
+        this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
+        this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
+        this.db.hasOpenRestartNotices(snap.id) || this.db.hasOpenReviewContinuations(snap.id) ||
+        this.db.listOpenPolicyHookApprovals(snap.id).length > 0 || this.db.policyResumeStatus(snap.id) !== null ||
+        reconciliationRevision(this.db, snap.id) !== 0 || latestReconciliationRepair(this.db, snap.id)) return false;
+    return true;
   }
 
   /** Apply one live runner-authoritative snapshot without treating every other box session as

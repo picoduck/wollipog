@@ -16993,17 +16993,27 @@ export class ControlPlaneDb {
 
   /** Apply a registration batch of existing snapshots in one durable transaction. The caller
    * must reserve this for sessions whose service-level reconciliation is read-only; active
-   * sessions and sessions with pending durable work stay on the per-session path. */
+   * sessions with pending durable work stay on the per-session path. With fallbackOnRollback,
+   * an empty result for a nonempty batch means nothing committed; retry on the service path. */
   updateSessionsFromSnapshots(
     snapshots: readonly SessionSnapshot[],
     now: number,
+    options: { fallbackOnRollback?: boolean } = {},
   ): Array<RunnerHistoryReconciliation | null> {
     if (snapshots.length === 0) return [];
     if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
       throw new Error("updateSessionsFromSnapshots requires an autocommit connection");
     }
-    const histories = this.atomic(() => snapshots.map((snap) =>
-      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    let histories: Array<RunnerHistoryReconciliation | null>;
+    try {
+      histories = this.atomic(() => snapshots.map((snap) =>
+        this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
+    } catch (error) {
+      // Only a rolled-back transaction may fall back. Maintenance below runs after COMMIT;
+      // its failure must never be mistaken for an unapplied batch and retried.
+      if (options.fallbackOnRollback && !this.db.isTransaction) return [];
+      throw error;
+    }
     if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
