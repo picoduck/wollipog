@@ -260,7 +260,7 @@ window.__WOLLIPOG_PEOPLE_DEVICES_E2E__ = {
 function FixtureBanner() {
   const conn = useStoreSelector((state) => state.conn);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
-  if (conn === "unauthorized") return <PairingBanner connecting={false} nativePairingFailure={null} />;
+  if (conn === "unauthorized") return <PairingBanner conn={conn} nativePairingFailure={null} />;
   if (snapshotLoaded && conn !== "online") return <OfflineBanner connecting={conn === "connecting"} onRetryNow={() => false} />;
   return null;
 }
