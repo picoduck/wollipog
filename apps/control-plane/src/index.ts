@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
+import { isSqliteBusy, withRunnerPersistenceRetry } from "./runner-persistence.js";
 import cors from "@fastify/cors";
 import { canMutateQuestionPolicy } from "./question-policy.js";
 import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
@@ -1287,12 +1288,17 @@ app.register(async (instance) => {
     await svc.flushRunnerAttention(runnerId, currentSocket);
     runtimeAttentionBatch = undefined;
   };
-  const handleRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
+  const handleRunnerFrame = (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) =>
+    withRunnerPersistenceRetry(() => applyRunnerFrame(msg, prepared), (retries, exhausted) => {
+      app.log.warn({ event: "runner_persistence_contention", entryPoint: "runner_socket", runnerId,
+        messageType: msg.type, retries, exhausted }, "runner frame encountered database lock contention");
+    });
+  const applyRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
     // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
-    // failure to the offending socket — log it, then close only this runner (the `register` case
-    // already handles its own rejections and returns, so it never reaches this catch).
+    // failure to the offending socket. Registration handles credential rejections locally, but
+    // snapshot hydration and later registration work also reach this catch.
     try {
     // Nothing but `register` is accepted until this socket has authenticated — an
     // unregistered client must not be able to inject events, queue overlays, or
@@ -1339,6 +1345,7 @@ app.register(async (instance) => {
             msg.protocolVersion ?? null,
           );
         } catch (error) {
+          if (isSqliteBusy(error)) throw error;
           app.log.warn({ err: error, runnerId: msg.runner.runnerId }, "runner registration persistence failed");
           send(socket, { type: "register_rejected", reason: "registration failed" });
           socket.close(1008, "registration failed");
@@ -1941,6 +1948,12 @@ app.register(async (instance) => {
       }
     }
     } catch (error) {
+      if (isSqliteBusy(error)) {
+        app.log.error({ event: "runner_persistence_exhausted", entryPoint: "runner_socket", runnerId,
+          messageType: msg.type }, "runner persistence retries exhausted");
+        try { socket.close(1011, "runner persistence unavailable"); } catch { /* tearing down */ }
+        return;
+      }
       app.log.error(
         { err: error, runnerId, messageType: msg.type },
         "runner frame handler threw — closing offending runner socket",
@@ -1957,7 +1970,12 @@ app.register(async (instance) => {
 
   // A run of consecutive queued runtime updates shares one durable commit (#2601). Each frame gets
   // the same authority checks, activity refresh and attention batching as in handleRunnerFrame.
-  const handleRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
+  const handleRuntimeUpdateRun = (messages: RunnerToControlPlane[]) =>
+    withRunnerPersistenceRetry(() => applyRuntimeUpdateRun(messages), (retries, exhausted) => {
+      app.log.warn({ event: "runner_persistence_contention", entryPoint: "runner_socket", runnerId,
+        messageType: "session_runtime_updated", retries, exhausted }, "runner frame encountered database lock contention");
+    });
+  const applyRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
     const updates = messages as Array<Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>>;
     try {
       if (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient)) return;
@@ -1992,6 +2010,12 @@ app.register(async (instance) => {
         }, "session runtime update blocked the control plane");
       }
     } catch (error) {
+      if (isSqliteBusy(error)) {
+        app.log.error({ event: "runner_persistence_exhausted", entryPoint: "runner_socket", runnerId,
+          messageType: "session_runtime_updated" }, "runner persistence retries exhausted");
+        try { socket.close(1011, "runner persistence unavailable"); } catch { /* tearing down */ }
+        return;
+      }
       app.log.error(
         { err: error, runnerId, messageType: "session_runtime_updated", frameCount: updates.length },
         "runner frame handler threw — closing offending runner socket",

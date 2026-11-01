@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
@@ -124,7 +125,7 @@ function waitForClose(socket: StrictSocket): Promise<{ code: number; reason: str
 }
 
 test(
-  "a malformed runner frame closes only the offending socket and never crashes the control plane",
+  "runner persistence recovery is bounded and FIFO while malformed frames remain socket-isolated",
   { timeout: 60_000 },
   async (t) => {
     const port = await reservePort();
@@ -147,6 +148,9 @@ test(
       now,
       expiresAt: now + 600_000,
     });
+    seed.registerRunner(JSON.parse(registerFrame("runner-frame-isolation", runnerToken)).runner, now, PROTOCOL_VERSION);
+    seed.createSession({ id: "locked-session", runnerId: "runner-frame-isolation", workspaceId: "ws",
+      agentId: "claude", driver: "claude-code", title: "Before lock", useWorktree: false, config: {}, now });
     seed.close();
 
     let output = "";
@@ -166,17 +170,109 @@ test(
     child.stderr?.on("data", capture);
 
     const sockets = new Set<StrictSocket>();
+    let inspectionDb: DatabaseSync | undefined;
     t.after(async () => {
       for (const socket of sockets) {
         if (socket.readyState < 2) socket.close();
       }
       await stopChild(child);
+      inspectionDb?.close();
       rmSync(temp, { recursive: true, force: true });
     });
 
     const httpBase = `http://127.0.0.1:${port}`;
     const wsBase = `ws://127.0.0.1:${port}`;
     await waitForHealth(httpBase, child, () => output);
+
+    const lock = inspectionDb = new DatabaseSync(databasePath);
+    const snapshot = { id: "locked-session", workspaceId: "ws", agentId: "claude", driver: "claude-code",
+      title: "After lock", status: "idle", useWorktree: false, worktreePath: null, config: {}, preview: null,
+      pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: now, updatedAt: now };
+    const waitUntil = async (predicate: () => boolean) => {
+      for (let i = 0; i < 150; i++) {
+        if (predicate()) return;
+        await delay(20);
+      }
+      assert.fail(`condition did not become true\n${output}`);
+    };
+    const invalid = new StrictWebSocket(`${wsBase}/runner`);
+    sockets.add(invalid);
+    await new Promise<void>((resolvePromise, reject) => {
+      invalid.once("open", resolvePromise);
+      invalid.once("error", reject);
+    });
+    lock.exec("BEGIN IMMEDIATE");
+    const invalidClosed = waitForClose(invalid);
+    const invalidStarted = performance.now();
+    invalid.send(registerFrame("runner-unknown", runnerToken));
+    const invalidResult = await invalidClosed;
+    lock.exec("COMMIT");
+    assert.equal(invalidResult.code, 1008);
+    assert.equal(invalidResult.reason, "invalid token");
+    assert.ok(performance.now() - invalidStarted < 750, "invalid registrations do not wait for write intent");
+    sockets.delete(invalid);
+    const contender = new StrictWebSocket(`${wsBase}/runner`);
+    sockets.add(contender);
+    await new Promise<void>((resolvePromise, reject) => {
+      contender.once("open", resolvePromise);
+      contender.once("error", reject);
+    });
+    lock.exec("BEGIN IMMEDIATE");
+    contender.send(JSON.stringify({ ...JSON.parse(registerFrame("runner-frame-isolation", runnerToken)),
+      sessionSnapshots: [snapshot] }));
+    await delay(550);
+    lock.exec("COMMIT");
+    await waitUntil(() => lock.prepare("SELECT title FROM sessions WHERE id=?").get(snapshot.id)?.title === "After lock");
+    assert.equal(contender.readyState, 1, "registration survives a real lock longer than the busy timeout");
+    assert.match(output, /runner_persistence_contention/);
+    await waitUntil(() => output.includes("runner online: runner-frame-isolation"));
+
+    lock.exec("BEGIN IMMEDIATE");
+    contender.send(JSON.stringify({ type: "session_event", sessionId: snapshot.id, seq: 1,
+      ts: Date.now(), payload: { kind: "assistant_message", text: "After event lock" } }));
+    await delay(550);
+    lock.exec("COMMIT");
+    assert.equal(contender.readyState, 1, `event ingest survives a deferred-transaction lock upgrade\n${output}`);
+    await waitUntil(() => Boolean(lock.prepare("SELECT 1 FROM session_events WHERE session_id=? AND runner_seq=1")
+      .get(snapshot.id)));
+
+    const agentsBefore = lock.prepare("SELECT agents_refreshed_at AS refreshed FROM runners WHERE runner_id=?")
+      .get("runner-frame-isolation")?.refreshed;
+    lock.exec("BEGIN IMMEDIATE");
+    contender.send(JSON.stringify({ type: "agents_updated", runnerId: "runner-frame-isolation", agents: [] }));
+    await delay(550);
+    lock.exec("COMMIT");
+    await waitUntil(() => lock.prepare("SELECT agents_refreshed_at AS refreshed FROM runners WHERE runner_id=?")
+      .get("runner-frame-isolation")?.refreshed !== agentsBefore);
+    assert.equal(contender.readyState, 1, "agent updates acquire write intent before reading protocol metadata");
+
+    // Single and queued runtime updates share the same ordering and retry boundary. Last wins.
+    lock.exec("BEGIN IMMEDIATE");
+    contender.send(JSON.stringify({ type: "session_runtime_updated", snapshot: { ...snapshot, title: "First update" } }));
+    contender.send(JSON.stringify({ type: "session_runtime_updated", snapshot: { ...snapshot, title: "Second update" } }));
+    contender.send(JSON.stringify({ type: "session_runtime_updated", snapshot: { ...snapshot, title: "Last update" } }));
+    await delay(550);
+    lock.exec("COMMIT");
+    await waitUntil(() => lock.prepare("SELECT title FROM sessions WHERE id=?").get(snapshot.id)?.title === "Last update");
+    assert.equal(contender.readyState, 1, `runtime updates survive contention and remain FIFO\n${output}`);
+
+    lock.exec("BEGIN IMMEDIATE");
+    const exhausted = waitForClose(contender);
+    const exhaustionStarted = performance.now();
+    // Socket close and child stdout are separate transports. Exercise delayed log delivery:
+    // hosted CI can observe the close before it receives the exhaustion log.
+    child.stdout?.pause();
+    contender.send(JSON.stringify({ type: "session_runtime_updated", snapshot }));
+    const exhaustedClose = await exhausted;
+    const exhaustionMs = performance.now() - exhaustionStarted;
+    child.stdout?.resume();
+    lock.exec("COMMIT");
+    assert.equal(exhaustedClose.code, 1011);
+    assert.equal(exhaustedClose.reason, "runner persistence unavailable");
+    await waitUntil(() => output.includes("runner_persistence_exhausted"));
+    assert.ok(exhaustionMs >= 700 && exhaustionMs < 3000, `bounded persistence close took ${exhaustionMs}ms`);
+    assert.doesNotMatch(output, /malformed runner frame|runner frame handler threw/);
+    sockets.delete(contender);
 
     // Each frame parses cleanly (cast-only parseMessage) but omits required fields, so the dispatch
     // throws — historically a fatal uncaughtException. Every one must instead close ONLY its socket.
