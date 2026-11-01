@@ -47,11 +47,44 @@ only) establishes the boundary before the Orchestrator's first turn:
   text: a slash command or image-only message is refused, so that the task is stated.
 - The objective is the message, normalized to one line and bounded to 4000 characters. The
   boundary records the SHA-256 digest of the exact message text (`messageDigest`).
-- The issue scope is the message's references to the campaign's own repository (`#123`,
-  `owner/repo#123`, `https://github.com/owner/repo/issues/123`). References to other repositories
-  and pull request URLs are ignored. The runner then reads each reference, and only verified
-  issues are kept: a pull request, a missing issue, or an unreadable origin leaves that reference
-  out. With none, the scope stays task-only.
+- The issue scope is the references to the campaign's own repository (`#123`, `owner/repo#123`,
+  `https://github.com/owner/repo/issues/123`, or a GitLab project's
+  `https://<host>/<project>/-/issues/123`) that the message asks the campaign to act on (#3920,
+  `firstMessageIssueIntent`). References to other repositories and pull or merge request URLs are
+  ignored. The message is split into sentences, and each sentence into clauses: at subordinating,
+  contrasting and sequencing words (`but`, `without`, `except`, `because`, `which`, `before`,
+  `so` and the like), at a dash, at `, not`, and at `and`, `or`, `then`, `also` or `plus` when a
+  word rather than another reference follows. A reference is a request only in a clause that asks
+  for action (deliver, implement, fix, close, claim, resolve, address, finish, ship, land, tackle,
+  solve, handle, orchestrate, work on, take on, pick up) and carries no background or negation
+  cue. Everything else is context: a reference in parentheses, brackets or inline code (a
+  citation), one in a background clause ("see", "related to", "known cause", "acceptance test
+  for", "handled elsewhere", "duplicate of", past tense such as "fixed" or "closed"), one in a
+  negated clause ("not", "don't touch", "never", "without", "leave"), including a negation inside
+  parentheses, and one whose intent is unclear (no request at all, or a clause mixing a request
+  with a background or negation cue). A list introduced by a line ending in a colon passes that
+  line's intent to each list item that has no cue of its own. One negated occurrence keeps an
+  issue out of scope even where another clause asks for it; a background occurrence does not. An
+  epic named as the target is scope like any other issue, so it is an authorized epic and its
+  verified members can be added through epic lineage. When in doubt a reference is context, never
+  scope. Classification runs in linear time and is bounded: a message longer than 64 KiB, or with
+  more than 1000 reference occurrences, scopes nothing and keeps every reference as context, since
+  truncating it could drop a negation.
+- The runner then reads every reference, requested or context, and only verified issues are kept:
+  a pull request, a missing issue, or an unreadable origin leaves that reference out. With no
+  verified requested issue, the scope stays task-only. Verified context references, and requested
+  issues an explicit Maximum Issues left out, are recorded on the first-message record
+  (`firstMessageScope.contextIssueNumbers`), disjoint from the scope. They grant nothing: they are
+  never in the scope or `issueAuthority.epics`.
+- After launch, Campaign Status's Authorized Issue Scope shows the derived scope as Authorized
+  Issues and the context references as Context-Only References (less any the scope has since
+  added). Nothing new is asked before launch. The owner can select a context reference and remove
+  a derived issue through the existing scope controls, Request Scope Approval, which opens the
+  ordinary scope review. Every approved scope change, whoever approves it, narrows
+  `issueAuthority.epics` to the issues the new scope still holds, so a removed issue is no longer an
+  authorized epic and its members can no longer be added by lineage. A promoted issue joins the
+  scope only; it does not become an epic. Boundaries established before #3920 keep the scope they
+  were given; only new first messages use this derivation.
 - The next issue-scope revision, and the boundary revision that names it, commit together in one
   compare-and-set on the policy revision (`establishFirstMessageScope`). Every authorization
   (launch, enable or a later reauthorization) records which limits it derived (`derivedLimits`, no

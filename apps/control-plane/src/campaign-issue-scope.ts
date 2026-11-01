@@ -53,9 +53,13 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
     cursor = result.data.nextCursor ?? undefined;
   } while (cursor);
   const requirement = scopeCompatibility(db, root);
+  // A first message's context-only references (#3920), less any the scope now holds.
+  const first = root.orchestratorPolicy?.firstMessageScope;
+  const context = first && first.state !== "pending" ? (first.contextIssueNumbers ?? []).filter((n) => !numbers.includes(n)) : [];
   return { campaignSessionId: root.id, repository, issueNumbers: numbers, revision: root.orchestratorPolicy?.issueScope?.revision ?? 0,
     ...(root.orchestratorPolicy?.issueScope ? { authorization: root.orchestratorPolicy.issueScope } : {}),
-    supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false, outsideScope };
+    supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false,
+    ...(context.length ? { contextIssueNumbers: context } : {}), outsideScope };
 }
 
 export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest): CampaignIssueScopeSnapshot | null {

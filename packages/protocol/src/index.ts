@@ -2873,12 +2873,15 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
  * limit grows to fit the first message's issues; an explicit ceiling never changes. */
 export interface FullControlDerivedLimits { acceptedFollowUps: boolean; maxIssues: boolean }
 
+/** `contextIssueNumbers` are the verified issues the first message referenced without asking the
+ * campaign to act on them (#3920): background, negated, cited or unclear. They grant nothing; the
+ * owner can promote one through the existing scope review. */
 export type FullControlFirstMessageScope =
   | { state: "pending"; derivedLimits?: FullControlDerivedLimits }
   /** `deliveryId` is the durable prompt command the message is admitted as, chosen before
    * admission: only that exact command, carrying the digest, can settle this delivery. */
-  | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits }
-  | { state: "established"; messageDigest: string; establishedAt: number };
+  | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits; contextIssueNumbers?: number[] }
+  | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[] };
 
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see
@@ -5028,6 +5031,9 @@ export interface CampaignIssueScopeView {
   runnerProtocolVersion?: number | null;
   canPropose: boolean;
   candidateMessage?: string;
+  /** Issues a Full Control first message referenced only as context (#3920), less the current
+   * scope. They carry no authority; adding one goes through scope review. */
+  contextIssueNumbers?: number[];
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
   candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
 }

@@ -28,7 +28,8 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
-import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
+import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
+import { firstMessageIssueIntent } from "./first-message-issue-intent.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
@@ -5487,8 +5488,9 @@ export class SessionsService {
   }
 
   /** The owner's first message establishes the Full Control boundary the launch left task-only:
-   * the message is the objective, and the issue references it makes to the campaign's own
-   * repository that the runner verifies as issues become the scope. Scope and boundary commit as
+   * the message is the objective, and the issue references it asks the campaign to act on (#3920)
+   * that the runner verifies as issues become the scope. Its other verified references are recorded
+   * as context for Campaign Status, with no authority. Scope and boundary commit as
    * the next revisions, bound to the message digest, and reach the runner before the message does,
    * so the Orchestrator's first turn already runs inside them. Only the Human who authorized the
    * launch can do this; any other message is refused until then, so agent-authored text can never
@@ -5512,8 +5514,12 @@ export class SessionsService {
     if (!text.trim() || slashCommand) return fail("Send this campaign's task as its first message.", 409);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
     const repository = control.boundary.repository.toLowerCase();
-    const references = issueReferencesInMessage(text, repository);
-    const issueNumbers = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
+    // Only references the message asks the campaign to act on become scope (#3920); the rest are
+    // verified the same way and recorded as context, which grants nothing.
+    const intent = firstMessageIssueIntent(text, repository);
+    const references = [...intent.scope, ...intent.context].sort((a, b) => a - b);
+    const verified = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
+    const issueNumbers = verified.filter((n) => intent.scope.includes(n));
     const current = this.db.getSession(sessionId);
     const revision = current?.parentControlPolicy?.revision ?? 0;
     const scope = current?.orchestratorPolicy?.issueScope;
@@ -5528,6 +5534,8 @@ export class SessionsService {
     // The durable prompt command the message is admitted as: its exact identity, chosen up front.
     const deliveryId = `first_message_${randomUUID()}`;
     const scoped = firstMessageIssues(currentControl.boundary, issueNumbers, pending.derivedLimits);
+    // Context also keeps a requested issue an explicit Maximum Issues left out, so the owner sees it.
+    const contextIssueNumbers = verified.filter((n) => !scoped.includes(n));
     const nextScope: CampaignIssueScope = { repository: scope.repository, issueNumbers: scoped, revision: scope.revision + 1,
       authorizedByUserId: principal.userId, authorizedAt: now };
     const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
@@ -5535,12 +5543,13 @@ export class SessionsService {
       pending.derivedLimits) };
     let established: boolean;
     try {
-      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, messageDigest, deliveryId,
-        expectedRevision: revision, now });
+      established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, contextIssueNumbers,
+        messageDigest, deliveryId, expectedRevision: revision, now });
     } catch (error) { return fail((error as Error).message, 409); }
     if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
     this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
-      scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length, messageDigest }));
+      scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length,
+      contextIssues: contextIssueNumbers.length, messageDigest }));
     // A runner that misses this keeps its older revision, which authorizes no issue write; every
     // issue operation synchronizes again before it acts.
     await this.synchronizeCampaignIssueScope(sessionId);

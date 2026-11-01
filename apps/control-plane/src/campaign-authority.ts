@@ -41,6 +41,14 @@ export function remintCampaignBoundary(boundary: CampaignAuthorityBoundary, scop
   return validCampaignControl(control) ? control : null;
 }
 
+/** The boundary with its authorized epics narrowed to the issue scope it will name (#3920): an
+ * issue removed from the scope is no longer an epic whose members lineage can add. Additions never
+ * become epics here; only an authorization that names them as its issues does. */
+export function boundaryWithScopedEpics(boundary: CampaignAuthorityBoundary, issueNumbers: readonly number[]): CampaignAuthorityBoundary {
+  const issues = boundary.issueAuthority;
+  return issues ? { ...boundary, issueAuthority: { ...issues, epics: issues.epics.filter((n) => issueNumbers.includes(n)) } } : boundary;
+}
+
 export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestratorPolicy" | "parentControlPolicy">): boolean {
   const control = controller.orchestratorPolicy?.control;
   if (!control || control.mode === "custom") return true;

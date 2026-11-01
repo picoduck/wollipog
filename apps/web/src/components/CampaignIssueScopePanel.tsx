@@ -35,6 +35,11 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
   const [busy, setBusy] = useState(false);
   const [pending, setPending] = useState(false);
   const revision = session.orchestratorPolicy?.issueScope?.revision ?? 0;
+  const context = view?.contextIssueNumbers ?? [];
+  // The owner selects context references in a group below; anyone else reads them as a fact row.
+  const selectable = context.length > 0 && Boolean(view?.supported && view.canPropose);
+  const contextLabelId = useId();
+  const contextHelpId = useId();
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
@@ -87,6 +92,7 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
         <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>
         <div><dt>Scope Revision</dt><dd>{view.revision}</dd></div>
         <div><dt>Authorized Issues</dt><dd>{view.issueNumbers.length ? view.issueNumbers.map((n) => `${view.repository}#${n}`).join(", ") : "None"}</dd></div>
+        {context.length > 0 && !selectable && <div><dt>Context-Only References</dt><dd>{context.map((n) => `${view.repository}#${n}`).join(", ")}</dd></div>}
       </dl>
       {view.candidateMessage && <Notice tone="warning" title="Epic Members Need Review">{view.candidateMessage}</Notice>}
       {!view.issueNumbers.length && <Notice tone="info" title="Issue Scope Needs Confirmation">Confirm the umbrella issue and intended members before delegating issue work. Recorded work and issue mentions do not grant authority.</Notice>}
@@ -103,6 +109,14 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
             onChange={(checked) => setSelected((current) => checked ? [...current, candidate.issue.number] : current.filter((n) => n !== candidate.issue.number))}
           /></li>)}</ul>
         </fieldset>}
+        {selectable && <div className="field" role="group" aria-labelledby={contextLabelId} aria-describedby={contextHelpId}>
+          <span id={contextLabelId}>Context-Only References</span>
+          <p className="field-helper" id={contextHelpId}>The first message mentioned these issues without asking the campaign to work on them, so they grant no authority. Select any to add them through scope approval.</p>
+          <ul className="campaign-detail-list">{context.map((n) => <li key={n}><Checkbox
+            checked={selected.includes(n)} disabled={busy} label={`${view.repository}#${n}`}
+            onChange={(checked) => setSelected((current) => checked ? [...current, n] : current.filter((value) => value !== n))}
+          /></li>)}</ul>
+        </div>}
         <label className="field"><span>Epic Issue Number</span><input type="text" inputMode="numeric" value={epic} onChange={(e) => setEpic(e.target.value)} disabled={busy} /></label>
         <BusyButton className="btn ghost sm" busy={busy} progress="Resolving epic members…" onClick={() => void resolveEpic()}>Resolve Epic Members</BusyButton>
         <label className="field"><span>Issue Additions</span><input type="text" value={additions} onChange={(e) => setAdditions(e.target.value)} disabled={busy} /></label>
