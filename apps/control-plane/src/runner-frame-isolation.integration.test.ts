@@ -259,13 +259,17 @@ test(
     lock.exec("BEGIN IMMEDIATE");
     const exhausted = waitForClose(contender);
     const exhaustionStarted = performance.now();
+    // Socket close and child stdout are separate transports. Exercise delayed log delivery:
+    // hosted CI can observe the close before it receives the exhaustion log.
+    child.stdout?.pause();
     contender.send(JSON.stringify({ type: "session_runtime_updated", snapshot }));
     const exhaustedClose = await exhausted;
     const exhaustionMs = performance.now() - exhaustionStarted;
+    child.stdout?.resume();
     lock.exec("COMMIT");
     assert.equal(exhaustedClose.code, 1011);
     assert.equal(exhaustedClose.reason, "runner persistence unavailable");
-    assert.match(output, /runner_persistence_exhausted/);
+    await waitUntil(() => output.includes("runner_persistence_exhausted"));
     assert.ok(exhaustionMs >= 700 && exhaustionMs < 3000, `bounded persistence close took ${exhaustionMs}ms`);
     assert.doesNotMatch(output, /malformed runner frame|runner frame handler threw/);
     sockets.delete(contender);
