@@ -42,6 +42,28 @@ test("a reply's references are its ids outside fenced code, each once, in order"
   assert.deepEqual(referencedArtifactIds("No ids here."), []);
 });
 
+test("references follow the rendered grammar: code in quotes and lists, inline triple backticks, links", () => {
+  const reply = [
+    "    art_dddddddddddd",
+    "",
+    "> ```",
+    "> art_aaaaaaaaaaaa",
+    "> ```",
+    "",
+    "- item",
+    "",
+    "  ```",
+    "  art_bbbbbbbbbbbb",
+    "  ```",
+    "",
+    // A valid inline code span opened by three backticks: a citation, and no fence follows it.
+    "Inline ```art_cccccccccccc``` then art_eeeeeeeeeeee.",
+    `[the ${SHORT} link](https://example.com) and \`  ${LONG}  \`.`,
+  ].join("\n");
+  assert.deepEqual(referencedArtifactIds(reply), ["art_cccccccccccc", "art_eeeeeeeeeeee"],
+    "quoted, listed and indented code, link text and a padded code span are not citations");
+});
+
 test("the rehype pass marks ids in prose and whole-id code spans, and leaves fenced code alone", () => {
   const text = (value: string) => ({ type: "text", value });
   const tree = {

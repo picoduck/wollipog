@@ -1,3 +1,7 @@
+import remarkGfm from "remark-gfm";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
+
 /**
  * Artifact ids an agent cites in its reply (#3970). The control plane names a session artifact
  * `art_` and 12 hex digits, or 32 for one derived from its content; nothing else is read as one.
@@ -21,28 +25,42 @@ export function splitArtifactIds(text: string): Array<{ text: string } | { id: s
   return parts.length > 0 ? parts : [{ text }];
 }
 
-const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+interface MdastNode {
+  type: string;
+  value?: string;
+  children?: MdastNode[];
+}
+
+/** The reply's grammar as the transcript renders it (CommonMark and GFM), parsed to Markdown's tree. */
+const parser = unified().use(remarkParse).use(remarkGfm);
 
 /**
- * The artifact ids a Markdown reply cites, each once, in order of first mention. A fenced code
- * block is quoted material, so ids inside one are not references.
+ * The artifact ids a Markdown reply cites, each once, in order of first mention: the ids the
+ * transcript's rendering marks, read from the same parse. Code blocks (fenced, indented, in a quote
+ * or a list) are quoted material, as is a code span with anything but the id, and link text holds
+ * no chip, so ids there are not references.
  */
 export function referencedArtifactIds(markdown: string): string[] {
   if (!markdown.includes("art_")) return [];
   const ids = new Set<string>();
-  let fence: { char: string; length: number } | null = null;
-  for (const line of markdown.split("\n")) {
-    const opener = FENCE.exec(line);
-    if (fence) {
-      if (opener && opener[1]![0] === fence.char && opener[1]!.length >= fence.length && line.trim() === opener[1]) fence = null;
-      continue;
+  const visit = (node: MdastNode): void => {
+    switch (node.type) {
+      case "code":
+      case "html":
+      case "link":
+      case "linkReference":
+        return;
+      case "inlineCode":
+        if (node.value !== undefined && isArtifactId(node.value)) ids.add(node.value);
+        return;
+      case "text":
+        for (const part of splitArtifactIds(node.value ?? "")) if ("id" in part) ids.add(part.id);
+        return;
+      default:
+        for (const child of node.children ?? []) visit(child);
     }
-    if (opener) {
-      fence = { char: opener[1]![0]!, length: opener[1]!.length };
-      continue;
-    }
-    for (const part of splitArtifactIds(line)) if ("id" in part) ids.add(part.id);
-  }
+  };
+  visit(parser.parse(markdown) as MdastNode);
   return [...ids];
 }
 
@@ -67,9 +85,10 @@ const referenceElement = (id: string, code: boolean): HastElement => ({
 
 /**
  * A rehype pass that marks each artifact id in prose, and each inline code span that is exactly
- * one, as an `artifact-reference` element holding the id as its text. Fenced code (`pre`) is left
- * alone. The element renders as the plain id wherever no session resolves it, so the pass changes
- * nothing a reader sees outside a session's transcript.
+ * one, as an `artifact-reference` element holding the id as its text. Code blocks (`pre`) and link
+ * text are left alone, as `referencedArtifactIds` leaves them, and a code span must be the id
+ * exactly, so its spacing is never changed. The element renders as the plain id wherever no session
+ * resolves it, so the pass changes nothing a reader sees outside a session's transcript.
  */
 export function rehypeArtifactReferences() {
   const visit = (node: HastNode): void => {
@@ -88,14 +107,14 @@ export function rehypeArtifactReferences() {
       }
       if (child.type === "element") {
         const element = child as HastElement;
-        if (element.tagName === "pre") {
+        if (element.tagName === "pre" || element.tagName === "a") {
           next.push(element);
           continue;
         }
         const only = element.children.length === 1 ? element.children[0] : undefined;
-        if (element.tagName === "code" && only?.type === "text" && isArtifactId((only as HastText).value.trim())) {
+        if (element.tagName === "code" && only?.type === "text" && isArtifactId((only as HastText).value)) {
           changed = true;
-          next.push(referenceElement((only as HastText).value.trim(), true));
+          next.push(referenceElement((only as HastText).value, true));
           continue;
         }
         // Any other code span is code: an id among its words is quoted, not cited.

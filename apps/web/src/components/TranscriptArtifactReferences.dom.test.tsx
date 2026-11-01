@@ -8,6 +8,7 @@ import type { WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/proto
 import { api } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { EventTimeline } from "./EventTimeline.js";
+import { referencedArtifactIds } from "../artifact-references.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -117,6 +118,30 @@ test("cited ids of the session's artifacts become chips; others, and fenced code
   assert.match(message.querySelector("pre")?.textContent ?? "", new RegExp(D), "fenced code is unchanged");
   assert.ok(!chips(message).some((chip) => chip.dataset.artifactId === D));
   assert.deepEqual(listed, [undefined, "2"], "the list was read only as far as the cited ids needed");
+});
+
+test("the chips are exactly the reply's citations, however its code and quotes are nested", async () => {
+  nextId = 1;
+  const text = [
+    `    ${D}`,
+    "",
+    "> ```",
+    `> ${A}`,
+    "> ```",
+    "",
+    `Inline \`\`\`${E}\`\`\` then ${B}.`,
+    "",
+    `Padded \`  ${A}  \` stays code.`,
+  ].join("\n");
+  await render([prompt("Which ones?"), reply(text)]);
+  const message = reply$();
+  assert.deepEqual(chips(message).map((chip) => chip.dataset.artifactId), referencedArtifactIds(text));
+  assert.deepEqual(referencedArtifactIds(text), [E, B], "indented and quoted code and a padded code span are not citations");
+  // CommonMark strips one space from each side of the span, and the pass keeps the rest.
+  const padded = [...message.querySelectorAll("p code")].find((code) => code.textContent?.includes(A));
+  assert.equal(padded?.textContent, ` ${A} `);
+  // Only the cited artifacts preview under the reply.
+  assert.deepEqual([...message.querySelectorAll<HTMLElement>(".tl-artifact-refs .tl-artifact")].map((card) => card.dataset.artifactId), [E, B]);
 });
 
 test("a chip opens the viewer on its artifact, stepping through the reply's cited artifacts", async () => {
