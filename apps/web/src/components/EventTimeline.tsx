@@ -70,11 +70,15 @@ import { ReadonlyReferenceChip } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
 import {
   INLINE_ARTIFACT_LIMIT,
+  ReplyArtifactScope,
   TranscriptArtifact,
   TranscriptArtifactViewerProvider,
+  useArtifactDirectory,
+  type ReplyArtifactPreviews,
   type TranscriptArtifactSlot,
 } from "./TranscriptArtifacts.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
+import { referencedArtifactIds } from "../artifact-references.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { deriveSubagentLifecycle } from "../subagents.js";
@@ -537,6 +541,63 @@ export function layoutTranscriptArtifacts(
   return slots;
 }
 
+/** A reply's cited ids, read once per reply text: items are cloned on write, so the text decides. */
+const replyIdsByText = new Map<string, readonly string[]>();
+function replyArtifactIds(text: string): readonly string[] {
+  if (!text.includes("art_")) return [];
+  let ids = replyIdsByText.get(text);
+  if (!ids) {
+    if (replyIdsByText.size > 500) replyIdsByText.clear();
+    ids = referencedArtifactIds(text);
+    replyIdsByText.set(text, ids);
+  }
+  return ids;
+}
+
+/**
+ * Which artifacts each top-level reply previews under it (#3970): those it cites that its turn did
+ * not attach and no earlier reply in the turn cited, within what the turn's attachment previews
+ * leave of INLINE_ARTIFACT_LIMIT. Read from the ids in the text alone, so the layout never waits on
+ * a lookup; an id that resolves to nothing previews nothing. `previous` keeps an unchanged entry's
+ * identity, so a memoized row holds while another streams (#2763).
+ */
+export function layoutReplyArtifactPreviews(
+  rows: readonly TimelineRenderRow[],
+  turns: TimelineTurns,
+  previous?: ReadonlyMap<string, ReplyArtifactPreviews>,
+): Map<string, ReplyArtifactPreviews> {
+  // The turn's attachments first, wherever its replies fall: they keep their own previews.
+  const turnState = new Map<number, { cited: Set<string>; previews: number }>();
+  const stateOf = (turn: number) => {
+    let state = turnState.get(turn);
+    if (!state) turnState.set(turn, state = { cited: new Set(), previews: 0 });
+    return state;
+  };
+  for (const row of rows) {
+    if (row.kind !== "item" || row.item.kind !== "artifact_attached") continue;
+    const state = stateOf(turns.segmentOf.get(row.item.id) ?? -1);
+    if (state.cited.has(row.item.artifact.artifactId)) continue;
+    state.cited.add(row.item.artifact.artifactId);
+    state.previews = Math.min(INLINE_ARTIFACT_LIMIT, state.previews + 1);
+  }
+  const layout = new Map<string, ReplyArtifactPreviews>();
+  for (const row of rows) {
+    if (row.kind !== "item" || row.depth > 0 || row.item.kind !== "agent_message" || row.item.parentToolUseId) continue;
+    const ids = replyArtifactIds(row.item.text);
+    if (ids.length === 0) continue;
+    const state = stateOf(turns.segmentOf.get(row.item.id) ?? -1);
+    const fresh = ids.filter((id) => !state.cited.has(id));
+    for (const id of fresh) state.cited.add(id);
+    const budget = Math.max(0, INLINE_ARTIFACT_LIMIT - state.previews);
+    state.previews += Math.min(budget, fresh.length);
+    const prior = previous?.get(row.key);
+    const same = prior && prior.budget === budget && prior.ids.length === fresh.length &&
+      prior.ids.every((id, index) => id === fresh[index]);
+    layout.set(row.key, same ? prior : { ids: fresh, budget });
+  }
+  return layout;
+}
+
 export type TimelineRenderRow =
   | ({
       kind: "work_summary";
@@ -640,6 +701,7 @@ export const EventTimeline = memo(function EventTimeline({
   onInsertReply,
   subagentStatus,
   onOpenArtifact,
+  artifactSessionId,
 }: {
   handoff?: HandoffControl;
   /** Current definitions on this session's runner; stored handoff IDs remain the fallback. */
@@ -698,6 +760,11 @@ export const EventTimeline = memo(function EventTimeline({
   subagentStatus?: SubagentStatusContextValue;
   /** An attachment's Open in Browser: Browser → Artifacts on it (#3924). Must be identity-stable. */
   onOpenArtifact?: (artifact: WorkflowArtifactView) => void;
+  /**
+   * The session whose artifacts a reply's cited ids name (#3970). Without it ids stay text, as in a
+   * public shared transcript, which never resolves them.
+   */
+  artifactSessionId?: string;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
@@ -709,7 +776,7 @@ export const EventTimeline = memo(function EventTimeline({
     <SubagentStatusContext.Provider value={subagentStatus ?? DEFAULT_SUBAGENT_STATUS}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
-    <TranscriptArtifactViewerProvider onOpenInBrowser={onOpenArtifact}>
+    <TranscriptArtifactViewerProvider onOpenInBrowser={onOpenArtifact} sessionId={artifactSessionId}>
     <EventTimelineBody
       key={effectiveHistoryKey}
       items={items}
@@ -840,6 +907,20 @@ function EventTimelineBody({
     artifactSlotsRef.current = slots;
     return slots;
   }, [rows, projection.revision, turns]);
+  const replyPreviewsRef = useRef<ReadonlyMap<string, ReplyArtifactPreviews> | undefined>(undefined);
+  const replyPreviews = useMemo(() => {
+    const layout = layoutReplyArtifactPreviews(rows, turns, replyPreviewsRef.current);
+    replyPreviewsRef.current = layout;
+    return layout;
+  }, [rows, projection.revision, turns]);
+  // The transcript's attachments name their ids for a reply's references without a list read.
+  const artifactDirectory = useArtifactDirectory();
+  useEffect(() => {
+    if (!artifactDirectory) return;
+    const attached = new Set<WorkflowArtifactView>();
+    for (const slot of artifactSlots.values()) for (const artifact of slot.group) attached.add(artifact);
+    artifactDirectory.remember(attached);
+  }, [artifactDirectory, artifactSlots]);
   // A turn's artifacts past its View All take no room: their rows are empty and keep no gap, unless
   // the row also closes the turn and so carries its footer.
   const collapsedRow = (row: TimelineRenderRow | undefined) =>
@@ -1004,6 +1085,7 @@ function EventTimelineBody({
           failedTurnPrompt={item.kind === "error" ? turns.segments[turns.segmentOf.get(item.id) ?? -1]?.prompt : undefined}
           questionContext={item.kind === "question" ? questionContext : undefined}
           artifactSlot={item.kind === "artifact_attached" ? artifactSlots.get(row.key) : undefined}
+          replyArtifacts={item.kind === "agent_message" ? replyPreviews.get(row.key) : undefined}
         />
       </WorkRule>
     );
@@ -2337,6 +2419,8 @@ interface TimelineRowContentProps {
   questionContext?: TimelineQuestionContext;
   /** For an attachment: its place among its turn's artifacts (#3924). */
   artifactSlot?: TranscriptArtifactSlot;
+  /** For a top-level reply: the cited artifacts it previews under it (#3970). */
+  replyArtifacts?: ReplyArtifactPreviews;
 }
 
 function TimelineRowContent({
@@ -2358,6 +2442,7 @@ function TimelineRowContent({
   onDisclosureToggle,
   questionContext,
   artifactSlot,
+  replyArtifacts,
 }: TimelineRowContentProps) {
   const sessionActive = useContext(TimelineActivityContext);
   const onInsertReply = useContext(InsertReplyContext);
@@ -2431,7 +2516,9 @@ function TimelineRowContent({
       const insertable = onInsertReply !== undefined && !item.parentToolUseId && item.text.trim() !== "";
       return (
         <div className="tl-agent-msg">
-          <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+          <ReplyArtifactScope text={item.text} settled={mediaSettled} previews={replyArtifacts}>
+            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+          </ReplyArtifactScope>
           {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
               <CopyButton text={item.text} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm" />

@@ -143,7 +143,8 @@ test.describe("desktop", () => {
     // The seventh capture is on the list's third page of three.
     await openLink(page, "settings-desktop");
     await expect(panel.locator(".art-image")).toHaveAttribute("alt", "settings-desktop.png");
-    expect(await listCursors(page)).toEqual([null, "3", "6"]);
+    // The Browser read the list as far as the link's page; the transcript's cited ids may read it too.
+    expect(await listCursors(page)).toEqual(expect.arrayContaining([null, "3", "6"]));
     // Tapping its image opens the same viewer over the Browser's list, stepping through what it loaded.
     await panel.locator(".art-image-open").click();
     await expect(position(page)).toHaveText(/^7 of \d+$/);
@@ -183,6 +184,44 @@ test("an artifact link opens its session's Browser on the artifact in the real s
   await tab.setViewportSize({ width: 1440, height: 900 });
   await tab.goto(url);
   await expectOpen(tab);
+});
+
+/** The last reply: it cites two artifacts the session saved but never attached, and one it has not. */
+async function citingReply(page: Page) {
+  await transcript(page).evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  const message = transcript(page).locator(".tl-agent-msg").filter({ hasText: "The two that matter are" });
+  await expect(message).toBeVisible();
+  await message.scrollIntoViewIfNeeded();
+  return message;
+}
+
+test.describe("cited artifacts (#3970)", () => {
+  test.use({ viewport: { width: 1280, height: 860 } });
+
+  test("ids a reply cites become chips that open the viewer, and the turn's unattached ones preview under it", async ({ page }) => {
+    await open(page);
+    const message = await citingReply(page);
+    const chips = message.locator(".art-ref");
+    await expect(chips).toHaveText(["review-summary.png", "checkout-flow.png"]);
+    // An id the session has no artifact for, and an id in fenced code, stay as written.
+    await expect(message).toContainText("art_f0e19e000ff0 belongs to another session");
+    await expect(message.locator("pre")).toContainText("art_c17ed0000a01");
+    const previews = message.locator(".tl-artifact-refs .tl-artifact");
+    await expect(previews).toHaveCount(2);
+    await expect(previews.locator(".art-image")).toHaveCount(2);
+    await snap(page, "desktop-cited-artifacts.png");
+
+    await chips.first().click();
+    await expect(position(page)).toHaveText("1 of 2");
+    await expect(viewer(page).locator(".art-gallery-media")).toHaveAttribute("alt", "review-summary.png");
+    await page.keyboard.press("ArrowRight");
+    await expect(position(page)).toHaveText("2 of 2");
+    await expect(viewer(page).getByRole("button", { name: "Open in Browser" })).toBeVisible();
+    await snap(page, "desktop-cited-viewer.png");
+    await page.keyboard.press("Escape");
+    await expect(viewer(page)).toHaveCount(0);
+    await expect(chips.first()).toBeFocused();
+  });
 });
 
 test.describe("phone", () => {
@@ -237,6 +276,21 @@ test.describe("phone", () => {
 
     await viewer(page).getByRole("button", { name: "Done" }).tap();
     await expect(viewer(page)).toHaveCount(0);
+  });
+
+  test("a tapped citation chip opens the viewer, and a swipe steps to the reply's other cited artifact", async ({ page }) => {
+    await open(page);
+    const cdp = await page.context().newCDPSession(page);
+    const message = await citingReply(page);
+    await expect(message.locator(".art-ref")).toHaveCount(2);
+    await snap(page, "phone-cited-artifacts.png");
+    await message.locator(".art-ref").first().tap();
+    await expect(position(page)).toHaveText("1 of 2");
+    await expect(viewer(page).locator(".art-gallery-media")).toBeVisible();
+    const [cx, cy] = await center(stage(page));
+    await touchPaths(cdp, [line([cx + 120, cy], [cx - 120, cy])]);
+    await expect(position(page)).toHaveText("2 of 2");
+    await snap(page, "phone-cited-viewer.png");
   });
 
   test("the Browser's image opens the same viewer, with the same pinch and swipe", async ({ page }) => {

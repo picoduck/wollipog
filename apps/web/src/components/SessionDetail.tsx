@@ -7529,6 +7529,7 @@ function SessionDetailLoaded({
                         onOpenSubagent={mode === "expanded" ? openSubagent : undefined}
                         onOpenSourceLocation={openSourceLocation}
                         onOpenArtifact={historyPreview.active ? undefined : openArtifactInBrowser}
+                        artifactSessionId={sessionId}
                         onOpenInReview={mode === "expanded" ? openInReview : undefined}
                         onOpenSession={openSession}
                         workspaceRoot={session.worktreePath ?? runner?.workspaces.find((workspace) => workspace.id === session.workspaceId)?.path}
