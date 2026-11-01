@@ -35,14 +35,14 @@ export function issueBoundary(root: SessionView) {
 export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number): CampaignWorkItemDetail[] {
   const repository = root.orchestratorPolicy?.issueScope?.repository;
   const fixedBy = repository && db.campaignWorkLedger.fixedBy(root.id, repository, issue);
-  if (fixedBy) {
-    const items = fixedBy.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now()));
-    // Do not silently drop a missing or out-of-scope unit and prove only a subset.
-    if (items.some((item) => !item || !item.issue || item.issue.repository.toLowerCase() !== repository!.toLowerCase() ||
-        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number))) return [];
-    return items as CampaignWorkItemDetail[];
-  }
   const items: CampaignWorkItemDetail[] = [];
+  if (fixedBy) {
+    const cited = fixedBy.map((id) => db.campaignWorkLedger.detail(root.id, id, Date.now()));
+    // Do not silently drop a missing or out-of-scope unit and prove only a subset.
+    if (cited.some((item) => !item || !item.issue || item.issue.repository.toLowerCase() !== repository!.toLowerCase() ||
+        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number))) return [];
+    items.push(...cited as CampaignWorkItemDetail[]);
+  }
   let cursor: string | undefined;
   do {
     const page = db.campaignWorkLedger.page(root.id, { state: "all", limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
@@ -50,7 +50,7 @@ export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number):
     for (const item of page.data.items) if (item.issue?.number === issue &&
         item.issue.repository.toLowerCase() === root.orchestratorPolicy?.issueScope?.repository.toLowerCase()) {
       const detail = db.campaignWorkLedger.detail(root.id, item.id, Date.now());
-      if (detail) items.push(detail);
+      if (detail && !items.some((existing) => existing.id === detail.id)) items.push(detail);
     }
     cursor = page.data.nextCursor ?? undefined;
   } while (cursor);
@@ -176,12 +176,13 @@ type DeliveryCandidate = ForgeFactEntry & { approvedHeads: string[] };
  * verified-delivered attempt's session passed inside that attempt (server-recorded at an exact
  * head), and every pull request the item's reported stage names. Each is only a candidate; its
  * forge fact decides. A gate from before the attempt began or after its verified report, or one
- * meant to close other issues but not this item's, belongs to other work and is never counted. */
-function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail): DeliveryCandidate[] {
+ * meant to close neither this item's issue nor the fixed-by target, belongs to other work. */
+function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail, closureIssue: number): DeliveryCandidate[] {
   const candidates = new Map<string, DeliveryCandidate>();
   for (const entry of item.observed.pullRequests ?? []) candidates.set(forgeRefKey(entry.ref), { ...entry, approvedHeads: [] });
   const repository = root.orchestratorPolicy?.issueScope?.repository.toLowerCase();
   const issue = item.issue ? `${item.issue.repository}#${item.issue.number}`.toLowerCase() : null;
+  const target = `${repository}#${closureIssue}`;
   const windows = (item.verifications ?? []).flatMap((v) => {
     const attempt = v.outcome === "delivered" ? (item.attempts ?? []).find((a) => a.id === v.attemptId) : undefined;
     const until = v.report.ts ?? attempt?.endedAt;
@@ -193,7 +194,8 @@ function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: Campaig
     const gate = decision.resourceSnapshot;
     if (gate.category !== "pr_merge" || gate.repository.toLowerCase() !== repository ||
         !windows.some((w) => w.sessionId === decision.sessionId && decision.createdAt >= w.from && decision.createdAt <= w.until) ||
-        gate.intendedClosures?.length && (!issue || !gate.intendedClosures.some((closure) => closure.toLowerCase() === issue))) continue;
+        gate.intendedClosures?.length && !gate.intendedClosures.some((closure) =>
+          closure.toLowerCase() === issue || closure.toLowerCase() === target)) continue;
     const ref = { repository: gate.repository, number: gate.pullRequest };
     const key = forgeRefKey(ref);
     gated.set(key, { ref, heads: [...(gated.get(key)?.heads ?? []), gate.headSha] });
@@ -207,7 +209,7 @@ function deliveryCandidates(db: ControlPlaneDb, root: SessionView, item: Campaig
 /** Every pull request a completed closure of this issue would read, for an on-demand refresh. */
 export function closureCandidateRefs(db: ControlPlaneDb, root: SessionView, issue: number): CampaignPullRequestRef[] {
   const refs = new Map<string, CampaignPullRequestRef>();
-  for (const item of issueWork(db, root, issue)) for (const { ref } of deliveryCandidates(db, root, item)) refs.set(forgeRefKey(ref), ref);
+  for (const item of issueWork(db, root, issue)) for (const { ref } of deliveryCandidates(db, root, item, issue)) refs.set(forgeRefKey(ref), ref);
   return [...refs.values()];
 }
 
@@ -220,7 +222,7 @@ export function closureExcludedRefs(proof: ReturnType<typeof closureEvidence>): 
 /** The candidates freshly observed merged, for the runner to re-verify at their exact heads. */
 export function closureDeliveryPullRequests(db: ControlPlaneDb, root: SessionView, issue: number) {
   const delivery = new Map<number, { number: number; headSha: string; mergeCommitSha: string }>();
-  for (const item of issueWork(db, root, issue)) for (const { ref, fact } of deliveryCandidates(db, root, item)) {
+  for (const item of issueWork(db, root, issue)) for (const { ref, fact } of deliveryCandidates(db, root, item, issue)) {
     if (fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha) {
       delivery.set(ref.number, { number: ref.number, headSha: fact.value.headSha, mergeCommitSha: fact.value.mergeCommitSha });
     }
@@ -253,7 +255,7 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
   const excluded = new Set<string>();
   for (const item of items) {
     let merged = 0;
-    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item)) {
+    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
       if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase() || fact.availability !== "fresh") return null;
       if (fact.value.state === "closed") { excluded.add(forgeRefKey(ref)); continue; }
       const value = fact.value;
@@ -270,7 +272,8 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
 
 /** Stable server-derived gap information; never infer authority from explanation/evidence prose. */
 export function closureDeliveryFailure(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot): string {
-  const ids = db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
+  const relationship = db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
+  const ids = relationship ? [...new Set([...relationship, ...issueWork(db, root, snapshot.issue).map((item) => item.id)])] : null;
   if (ids) for (const id of ids) {
     const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
     if (!item) return `missing_work_item:${id}`;
@@ -278,10 +281,10 @@ export function closureDeliveryFailure(db: ControlPlaneDb, root: SessionView, sn
         !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) return `outside_scope:${id}`;
     if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return `unverified_work_item:${id}`;
     if (item.primaryState !== "delivered" || item.currentAttempt) return `undelivered_work_item:${id}`;
-    const candidates = deliveryCandidates(db, root, item);
+    const candidates = deliveryCandidates(db, root, item, snapshot.issue);
     if (!candidates.some(({ fact }) => fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha)) return `unmerged_work_item:${id}`;
     if (candidates.some(({ fact }) => fact.availability !== "fresh")) return `stale_delivery:${id}`;
-    for (const { ref, fact, approvedHeads } of candidates) {
+    for (const { fact, approvedHeads } of candidates) {
       if (fact.availability !== "fresh" || fact.value.state === "closed") continue;
       if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) return `unmerged_work_item:${id}`;
       if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) return `delivery_not_verified_at_exact_head:${id}`;

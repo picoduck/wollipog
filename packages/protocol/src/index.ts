@@ -798,6 +798,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      for older control planes, whose enum validation would otherwise discard the whole hold.
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
+// 265: immutable pre-dispatch fixedBy campaign plan relationships (#3943), with a client
+//      capability floor so older servers cannot silently ignore the new plan field.
 export const PROTOCOL_VERSION = 265;
 
 export * from "./campaign-authority.js";

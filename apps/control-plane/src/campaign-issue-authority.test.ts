@@ -112,12 +112,28 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
     const original = h.db.campaignWorkLedger.detail.bind(h.db.campaignWorkLedger);
     h.db.campaignWorkLedger.detail = (campaign, id, now) => details.get(id) ?? original(campaign, id, now);
     const request = { requestId: "fixed-by-completed", issue: 100, reason: "completed" as const, explanation: "All required units verified", evidence: ["Merged reports"] };
+    const ownGap = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: "own-unit-still-queued" });
+    assert.ok(ownGap.ok);
+    assert.equal(ownGap.data!.decision!.authority, "human", "fixed-by units cannot bypass the target's own queued item");
+    const first = [...details.values()][0]!;
+    details.set(h.item.id, { ...structuredClone(first), id: h.item.id, issue: target });
     const closure = await h.svc.requestGithubIssueClosure("root", request);
     assert.ok(closure.ok, closure.error ?? "closure requested");
     assert.equal(closure.data!.decision!.authority, "orchestrator");
     const snapshot = closure.data!.decision!.resourceSnapshot;
     assert.equal(snapshot.category, "issue_closure");
     if (snapshot.category !== "issue_closure") return;
+    // A gate for the fixed-by target still constrains a cited unit's delivered head.
+    first.attempts = [{ id: "unit-attempt", sessionId: "unit-session", startedAt: 1, endedAt: 3 }] as CampaignWorkItemDetail["attempts"];
+    const firstVerifications = first.verifications;
+    first.verifications = [{ outcome: "delivered", attemptId: "unit-attempt", childSessionId: "unit-session", report: { ts: 3, digest: "d".repeat(64) } }] as CampaignWorkItemDetail["verifications"];
+    const originalGates = h.db.consumedPullRequestMerges.bind(h.db);
+    h.db.consumedPullRequestMerges = () => [{ sessionId: "unit-session", createdAt: 2, resourceSnapshot: {
+      category: "pr_merge", repository: "team/repo", pullRequest: 10, headSha: "e".repeat(40), intendedClosures: ["team/repo#100"],
+    } }] as unknown as ReturnType<typeof h.db.consumedPullRequestMerges>;
+    assert.equal(closureEvidence(h.db, h.db.getSession("root")!, snapshot), null, "a target-only approval cannot admit a different merged head");
+    h.db.consumedPullRequestMerges = originalGates;
+    first.verifications = firstVerifications;
     const second = [...details.values()][1]!;
     assert.ok(h.approve(closure.data!.decision!).ok);
     const verified = second.verifications;
@@ -140,6 +156,12 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
       Object.assign(second, saved);
       h.db.campaignWorkLedger.detail = (campaign, id, now) => details.get(id) ?? original(campaign, id, now);
     }
+    const lateOwn = h.svc.recordCampaignPlan("root", { items: [{ key: "late-own", issue: target }], planComplete: true });
+    assert.ok(lateOwn.ok);
+    const lateGap = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: "late-own-unit-queued" });
+    assert.ok(lateGap.ok); assert.equal(lateGap.data!.decision!.authority, "human");
+    const lateId = lateOwn.data!.items[0]!.workItemId;
+    details.set(lateId, { ...structuredClone(first), id: lateId, issue: target });
     const final = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: "fixed-by-final" });
     assert.ok(final.ok); assert.equal(final.data!.decision!.authority, "orchestrator");
     assert.ok(h.approve(final.data!.decision!).ok);

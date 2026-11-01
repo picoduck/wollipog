@@ -61,7 +61,8 @@ using `fixedBy: [{ issue: { repository, number }, workItemKeys: ["unit:a", "unit
 The target issue must already be in the human-established scope; every key must name an item in
 this campaign (including items in the same plan call). Record all required units together. These
 relationships are immutable and cannot be added after dispatch, including after an attempt ends.
-They grant no scope or delivery authority: every cited unit must remain in scope and independently
+They supplement the target issue's own work items, including items recorded later; every own item
+still needs its existing completion proof. They grant no scope or delivery authority: every cited unit must remain in scope and independently
 pass delivery, report verification and exact merged-PR checks before the completed closure can be
 Orchestrator-owned. Missing proof retains human ownership with a server-derived delivery gap.
 Existing closure requests never gain authority retroactively. Issues without relationships retain
