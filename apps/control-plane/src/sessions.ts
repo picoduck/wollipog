@@ -752,13 +752,13 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
-  const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
   const option = decision.selectedOptionId === undefined
     ? ""
     : ` with option ${decisionLiteral(decision.selectedOptionId)}`;
   return [
     `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
-    `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
+    `${resolver} ${decision.withdrawal ? "withdrew" : decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
       `(resource ${decisionLiteral(decision.resourceKey)})${option}` +
       (decision.childMessage ? " and left this message for you:" : "."),
     ...(decision.childMessage ? [decision.childMessage] : []),
@@ -12647,8 +12647,10 @@ export class SessionsService {
       const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
       // Each delivery can move the child, so the next resume reads it again.
       const child = this.db.getSession(sessionId);
-      // A decision revoked or superseded meanwhile has nothing to announce.
-      if (!child || !decision || !["approved", "denied", "consumed"].includes(decision.status)) {
+      // Ordinary revocations have nothing to announce. Explicit withdrawal owes the steering
+      // resume atomically recorded with it, even though its terminal status is also revoked.
+      if (!child || !decision || !(["approved", "denied", "consumed"].includes(decision.status) ||
+          decision.status === "revoked" && decision.withdrawal)) {
         this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
         continue;
       }
@@ -12925,6 +12927,7 @@ export class SessionsService {
       contentDigest: decision.resourceDigest,
       optionId: decision.selectedOptionId,
       workflowDecision: {
+        ...(decision.withdrawal ? { withdrawal: { reasonDigest: auditDigest(decision.withdrawal.reason)! } } : {}),
         occurrenceId: decision.occurrenceId,
         parentSessionId: decision.controllingSessionId,
         childSessionId: decision.sessionId,
@@ -13092,6 +13095,36 @@ export class SessionsService {
     }
     const child = this.db.getSession(childSessionId);
     if (!child) return fail("session not found", 404);
+    if (resolution.action === "withdraw_workflow_decision") {
+      // This explicit product allowlist does not delegate approval, governance, or access grants.
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId) {
+        return fail("workflow decision not found", 404);
+      }
+      if (decision.status !== "pending") return fail("only pending workflow requests can be withdrawn", 409);
+      if (decision.authority !== "human" || decision.category !== "review_round_extension") {
+        return fail("this category is not designated for Orchestrator withdrawal", 403);
+      }
+      if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+        return fail("a bounded nonempty withdrawal reason is required", 400);
+      }
+      if (this.workflowDecisionChildEnded(child) || isTerminal(parent.status) ||
+          typedPolicy.revision !== decision.policyRevision ||
+          !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision)) {
+        return fail("workflow decision authority was superseded", 409);
+      }
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(child);
+      const withdrawn = this.db.withdrawPendingWorkflowDecision(occurrenceId, parentSessionId,
+        resolution.reason.trim(), now, oweResume);
+      if (!withdrawn) return fail("workflow decision changed concurrently", 409);
+      this.recordWorkflowDecisionAudit(withdrawn, "revoked", { kind: "agent", id: parentSessionId }, now,
+        resolution.reason.trim());
+      this.settleResolvedWorkflowDecision(withdrawn, now, oweResume ? "held" : null);
+      this.hub.sessionChangedById(childSessionId);
+      this.publishCampaignAttentionTransition(parent);
+      return ok(this.db.getSession(childSessionId)!);
+    }
     if (resolution.action === "resolve_workflow_decision") {
       const resolved = this.resolveWorkflowDecision(
         parentSessionId,

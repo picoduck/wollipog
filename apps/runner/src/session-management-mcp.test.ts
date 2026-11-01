@@ -220,6 +220,25 @@ test("Parent Control tools are orchestrator-only and bind resolutions to exact o
   }
 });
 
+test("withdrawal binds the pending occurrence and refuses an older peer (#3941)", async () => {
+  const { deps, calls } = makeDeps();
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = 265;
+  const args = { sessionId: "child", occurrenceId: "workflow_1", reason: "Continue from the reviewed head." };
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "workflow_1",
+    resolution: { action: "withdraw_workflow_decision", reason: args.reason } });
+  const count = calls.length;
+  deps.controlPlaneProtocolVersion = 264;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.length, count);
+  deps.controlPlaneProtocolVersion = 265;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", { ...args, reason: " " })).isError, true);
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.length, count);
+});
+
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;

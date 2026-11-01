@@ -119,6 +119,50 @@ function stack(driver: "codex-app-server" | "claude-code", protocol = PROTOCOL_V
 }
 
 for (const driver of ["codex-app-server", "claude-code"] as const) {
+  test(`${driver}: pending human request withdrawal clears campaign attention and survives reopen (#3941)`, () => {
+    const h = stack(driver);
+    try {
+      assert.ok(h.enable().ok);
+      const seed = (sessionId: string, id: string) => {
+        // This is an already-admitted review gate, independent of review-history admission.
+        const policy = h.db.getSession("root")!.parentControlPolicy!;
+        const snapshot = { category: "review_round_extension" as const, repository: REPOSITORY, pullRequest: 1,
+          headSha: "a".repeat(40), epoch: 1, roundsUsed: 4, blockingFindings: 1, extraRounds: 1, reason: "Review the changed head" };
+        const decision = h.db.createWorkflowDecision({ occurrenceId: id, requestId: id, sessionId,
+          controllingSessionId: "root", category: "review_round_extension", resourceKey: id,
+          resourceSnapshot: snapshot, resourceDigest: createHash("sha256").update(JSON.stringify(snapshot)).digest("hex"),
+          policyRevision: policy.revision, authority: "human", createdAt: Date.now() })!.decision;
+        // Reconnect restoration projects the durable request card, just as after server recovery.
+        h.svc.onSessionStatus(sessionId, "idle");
+        return decision;
+      };
+      const first = seed("worker", "withdraw-first");
+      const second = seed("sibling", "withdraw-second");
+      assert.equal(h.db.campaignProjection("root")?.status, "waiting_human");
+      const withdraw = (sessionId: string, occurrenceId: string) => h.svc.resolveDescendantRequest("root", sessionId,
+        occurrenceId, { action: "withdraw_workflow_decision", reason: "Extra review is unnecessary. Continue from the reviewed head." }, () => true);
+      assert.ok(withdraw("worker", first.occurrenceId).ok);
+      assert.equal(h.db.campaignProjection("root")?.status, "waiting_human", "the other human request stays pending");
+      assert.equal(h.db.workflowDecisionByOccurrence(second.occurrenceId)?.status, "pending");
+      // Simulate a control-plane exit after the terminal write, before the resume is staged.
+      assert.ok(h.db.withdrawPendingWorkflowDecision(second.occurrenceId, "root", "Continue from the reviewed head.", Date.now(), true));
+      assert.notEqual(h.db.campaignProjection("root")?.status, "waiting_human");
+      h.reopen();
+      h.svc.retryDuePrompts(Date.now() + 5_000);
+      const resumes = () => h.sent.filter((message) => message.type === "durable_session_command" &&
+        message.command.type === "prompt_session" && message.command.text.includes(second.occurrenceId));
+      assert.equal(resumes().length, 1, "a held withdrawal resume survives server reopen");
+      h.svc.retryDuePrompts(Date.now() + 6_000);
+      assert.equal(new Set(resumes().map((message) => message.type === "durable_session_command" ? message.commandId : "")).size,
+        1, "transport retries reuse the same staged resume command");
+      assert.equal(h.db.workflowDecisionByOccurrence(first.occurrenceId)?.withdrawal?.bySessionId, "root");
+      assert.notEqual(h.db.campaignProjection("root")?.status, "waiting_human");
+      const audit = h.svc.governanceAudit("worker").find((entry) => entry.requestId === first.occurrenceId);
+      assert.deepEqual(audit?.actor, { kind: "agent", id: "root" });
+      assert.ok(audit?.workflowDecision?.withdrawal?.reasonDigest);
+    } finally { h.close(); }
+  });
+
   test(`${driver}: bounded fixture authority, transactional child assignment and launch attribution survive ledger refusal`, async () => {
     const h = stack(driver);
     try {
