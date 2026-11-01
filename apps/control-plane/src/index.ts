@@ -93,6 +93,7 @@ import {
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type WithdrawWorkflowDecisionRequest,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
   type GetCampaignWorkItemsRequest,
@@ -4668,6 +4669,32 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
     id,
     occurrenceId,
     req.body as Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+// #3917: `:id` is always the caller's own credential session, as for consume. The body names the
+// requesting session when the caller is its controlling Orchestrator; the service checks that
+// relationship and the decision's owner, and a withdrawal never approves or consumes anything.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/withdraw", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<WithdrawWorkflowDecisionRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  if (body?.sessionId !== undefined && body.sessionId !== id && principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "only an Orchestrator can withdraw another session's workflow decision" });
+  }
+  return respond(reply, svc.withdrawWorkflowDecision(
+    id,
+    occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });

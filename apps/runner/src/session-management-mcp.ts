@@ -582,6 +582,24 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
       "Update Wollipog before reconciling this approval."), required, actual);
 }
 
+/** A pre-v267 control plane has no withdrawal route (#3917). Refuse by name rather than letting the
+ * call 404, which a caller could misread as the decision being gone. */
+async function workflowDecisionWithdrawalCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("workflow decision withdrawal", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Workflow decision withdrawal needs",
+      "Update Wollipog; nothing was withdrawn."), required, actual);
+}
+
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
 const SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS = 5_000;
 
@@ -1097,7 +1115,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
-  "reconcile_workflow_decision", "list_workflow_decisions",
+  "reconcile_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "set_guardrails", "create_worktree",
@@ -2191,6 +2209,41 @@ export const TOOLS: McpTool[] = [
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/reconcile`,
         { resourceSnapshot: args.resourceSnapshot },
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "withdraw_workflow_decision",
+    description: "Withdraw one pending or approved workflow decision that is no longer needed and was never consumed or armed, with a reason. It approves and consumes nothing: the occurrence ends revoked with withdrawal provenance naming you and the reason, can never be consumed afterwards, and no longer blocks verify_campaign_child. Omit sessionId to withdraw your own; an Orchestrator may pass its controlled child's sessionId to withdraw a decision it owns. Consumed decisions, an armed pr_merge (reconcile it instead), another session's decisions, a human-owned decision you did not request, and human-owned issue closure, scope, follow-up admission and automation requests are refused. Requires control plane v267.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        occurrenceId: { type: "string" },
+        reason: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS },
+        sessionId: { type: "string", minLength: 1, maxLength: 256 },
+      },
+      required: ["occurrenceId", "reason"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+        return errorResult("occurrenceId and a session identity are required");
+      }
+      if (typeof args?.reason !== "string" || !args.reason.trim() ||
+          args.reason.length > WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS) {
+        return errorResult("a bounded nonempty reason is required");
+      }
+      if (args?.sessionId !== undefined && (typeof args.sessionId !== "string" || !args.sessionId)) {
+        return errorResult("sessionId must be a nonempty string");
+      }
+      const compatibilityError = await workflowDecisionWithdrawalCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/withdraw`,
+        { reason: args.reason, ...(args?.sessionId !== undefined ? { sessionId: args.sessionId } : {}) },
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
     },

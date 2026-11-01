@@ -9,6 +9,7 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
 } from "@wollipog/protocol";
 import {
   dispatch,
@@ -237,6 +238,35 @@ test("withdrawal binds the pending occurrence and refuses an older peer (#3941)"
   deps.orchestrator = false;
   assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
   assert.equal(calls.length, count);
+});
+
+test("withdraw_workflow_decision posts to the caller's own path and refuses an older peer (#3917)", async () => {
+  for (const orchestrator of [false, true]) {
+    const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "revoked" } }));
+    deps.orchestrator = orchestrator;
+    deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal;
+    const own = await callTool(deps, "withdraw_workflow_decision", { occurrenceId: "workflow_1", reason: "Superseded." });
+    assert.equal(own.isError, undefined, resultText(own));
+    assert.equal(calls.at(-1)?.method, "POST");
+    assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/withdraw`);
+    assert.deepEqual(calls.at(-1)?.body, { reason: "Superseded." });
+    assert.equal((await callTool(deps, "withdraw_workflow_decision",
+      { occurrenceId: "workflow_1", reason: "Not needed.", sessionId: "child" })).isError, undefined);
+    assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/withdraw`,
+      "the path is always the caller's own credential session");
+    assert.deepEqual(calls.at(-1)?.body, { reason: "Not needed.", sessionId: "child" });
+    const count = calls.length;
+    for (const args of [{ occurrenceId: "workflow_1" }, { occurrenceId: "workflow_1", reason: " " },
+      { occurrenceId: "workflow_1", reason: "x".repeat(WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS + 1) },
+      { reason: "Not needed." }, { occurrenceId: "workflow_1", reason: "Not needed.", sessionId: "" }]) {
+      assert.equal((await callTool(deps, "withdraw_workflow_decision", args)).isError, true, JSON.stringify(args));
+    }
+    deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal - 1;
+    const old = await callTool(deps, "withdraw_workflow_decision", { occurrenceId: "workflow_1", reason: "Superseded." });
+    assert.equal(old.isError, true);
+    assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":267/u);
+    assert.equal(calls.length, count, "nothing reaches an older control plane");
+  }
 });
 
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
@@ -602,6 +632,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "list_workflow_decisions",
       "consume_workflow_decision",
       "reconcile_workflow_decision",
+      "withdraw_workflow_decision",
       "get_session_events",
       "wait_session",
       "wait_pull_request",

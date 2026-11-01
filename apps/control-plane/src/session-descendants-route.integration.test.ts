@@ -251,6 +251,30 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       });
       assert.equal(response.status, 403, "ancestor cannot mutate child decision");
     }
+    // #3917: a withdrawal names the caller's own session in the path, and only an Orchestrator may
+    // name another session in the body; the service then requires its exact controller.
+    const withdraw = (path: string, token: string, actor: string, body: Record<string, unknown>) => fetch(
+      `http://127.0.0.1:${port}/api/sessions/${path}/workflow-decisions/inspect-pending/withdraw`, {
+        method: "POST", signal: AbortSignal.timeout(3000), body: JSON.stringify(body),
+        headers: { authorization: `Bearer ${token}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor, "content-type": "application/json" },
+      });
+    const reason = { reason: "No longer needed." };
+    assert.equal((await withdraw("inspection", "token-orchestrator", "orchestrator", reason)).status, 403,
+      "the path must be the caller's own credential session");
+    assert.equal((await withdraw("normal", "token-normal", "normal", { ...reason, sessionId: "inspection" })).status, 403,
+      "an ordinary agent cannot name another session's decision");
+    assert.equal((await withdraw("orchestrator", "token-orchestrator", "orchestrator", { ...reason, sessionId: 7 })).status, 400);
+    assert.equal((await withdraw("orchestrator", "token-orchestrator", "orchestrator", { sessionId: "inspection", reason: " " })).status, 400);
+    assert.equal((await withdraw("orchestrator", "token-orchestrator", "orchestrator", { ...reason, sessionId: "normal-child" })).status, 404,
+      "an occurrence of another session is concealed");
+    assert.equal((await withdraw("orchestrator-child", "token-orchestrator-child", "orchestrator-child",
+      { ...reason, sessionId: "inspection" })).status, 403, "an ancestor that is not an Orchestrator gains nothing");
+    const device = await fetch(`http://127.0.0.1:${port}/api/sessions/inspection/workflow-decisions/inspect-pending/withdraw`, {
+      method: "POST", signal: AbortSignal.timeout(3000), body: JSON.stringify(reason),
+      headers: { authorization: `Bearer device-${ownerId}`, "content-type": "application/json" },
+    });
+    assert.equal(device.status, 403, "withdrawal is an agent operation; a person denies the request instead");
+    assert.equal(liveDb.workflowDecisionByOccurrence("inspect-pending")?.status, "pending", "no refused withdrawal changed it");
     liveDb.deleteSession("inspection");
     await assertPolicies(`device-${ownerId}`, [...ordinary, ...humanQuestions, "fixture-unscoped-owner-question"]);
     await assertPolicies("device-policy-admin", [...ordinary, ...humanQuestions, "fixture-unscoped-admin-question"]);

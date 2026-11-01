@@ -21143,6 +21143,42 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
+  /** #3917: retire one pending or approved occurrence that was never consumed and whose action was
+   * never armed. Those conditions are part of the write, so a consume, arm or resolution that got
+   * there first leaves it untouched. `unheard` says the child has not heard the decision's outcome:
+   * it was still pending, or its approval's resume was never sent (and is recalled here). Only then
+   * does `oweResume` hold a resume that announces the withdrawal, so a finished child that already
+   * holds an approval is not woken into a new turn. */
+  withdrawWorkflowDecision(
+    occurrenceId: string,
+    sessionId: string,
+    withdrawal: NonNullable<WorkflowDecisionView["withdrawal"]>,
+    now: number,
+    oweResume: boolean,
+  ): { decision: WorkflowDecisionView; unheard: boolean } | null {
+    return this.atomic(() => {
+      const prior = this.stmt("SELECT status, resume_state FROM workflow_decisions WHERE occurrence_id=? AND session_id=?")
+        .get(occurrenceId, sessionId) as { status: WorkflowDecisionStatus; resume_state: WorkflowDecisionResumeState | null } | undefined;
+      const changed = Number(this.stmt(
+        `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?), withdrawal=?
+         WHERE occurrence_id=? AND session_id=? AND status IN ('pending','approved') AND consumed_at IS NULL
+           AND action_kind IS NULL AND action_command_digest IS NULL AND action_armed_at IS NULL`,
+      ).run(now, JSON.stringify(withdrawal), occurrenceId, sessionId).changes) === 1;
+      if (!changed || !prior) return null;
+      this.retireWorkflowDecisionResume(occurrenceId, now);
+      const after = this.stmt("SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?")
+        .get(occurrenceId) as { resume_state: WorkflowDecisionResumeState | null };
+      const unheard = prior.status === "pending" ||
+        (prior.resume_state === "held" || prior.resume_state === "delivering") && after.resume_state === "abandoned";
+      if (oweResume && unheard) {
+        this.stmt(`UPDATE workflow_decisions SET resume_state='held', resume_command_id=NULL, resume_updated_at=?
+          WHERE occurrence_id=?`).run(now, occurrenceId);
+      }
+      this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
+      return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, unheard };
+    });
+  }
+
   setWorkflowDecisionResume(
     occurrenceId: string,
     state: WorkflowDecisionResumeState,

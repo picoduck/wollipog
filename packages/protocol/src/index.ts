@@ -799,7 +799,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
-export const PROTOCOL_VERSION = 265;
+// 267: the requester or controlling Orchestrator withdraws a pending or approved, unconsumed and
+//      unarmed workflow decision with a reason (#3917), through
+//      POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw. Older control planes have
+//      no route, so current clients refuse by name rather than sending it.
+export const PROTOCOL_VERSION = 267;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1143,6 +1147,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   campaignBudgetAdmission: 218,
   workflowDecisionActionAdmission: 151,
   workflowDecisionActionReconciliation: 153,
+  /** v267 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
+  workflowDecisionWithdrawal: 267,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -5318,7 +5324,8 @@ export interface WorkflowDecisionView {
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
-  /** Explicit Orchestrator withdrawal; revoked is terminal and never grants authority. */
+  /** Explicit withdrawal by the controlling Orchestrator (#3941) or, from v267, by the requester
+   * itself (#3917). The status reads `revoked`, which is terminal and never grants authority. */
   withdrawal?: { bySessionId: string; reason: string };
 }
 
@@ -5352,6 +5359,15 @@ export interface ConsumeWorkflowDecisionRequest {
   /** Required for PR merge. The approved grant remains unconsumed until this exact command's
    * correlated provider decision evidence arrives; other decision categories consume directly. */
   action?: WorkflowDecisionAction;
+}
+
+/** v267 (#3917): retire one pending or approved, unconsumed and unarmed occurrence. It never
+ * approves or consumes anything. */
+export interface WithdrawWorkflowDecisionRequest {
+  /** Why it is withdrawn. Stored on the decision; audit records only its digest. */
+  reason: string;
+  /** The requesting session, when the caller is its controlling Orchestrator. Omit for self. */
+  sessionId?: string;
 }
 
 export interface PendingApproval {
