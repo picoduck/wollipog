@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { viewPath } from "../src/navigation.js";
 
 const path = (page: Page) => new URL(page.url()).searchParams.get("path") ?? "/";
 const selectedGroup = (page: Page) => page.locator('.sessions-group-picker, .tabs-bar .tab[aria-selected="true"]');
@@ -69,7 +70,7 @@ for (const width of [390, 1440]) {
     test("archiving from expanded detail and returning keeps the project", async ({ page }) => {
       await selectBilling(page);
       await expandBilling(page);
-      await page.locator(".session-bar").getByRole("button", { name: "More Actions", exact: true }).click();
+      await page.getByRole("button", { name: "More Actions", exact: true }).last().click();
       await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
       // Archive may advance to the next session; close it if detail remains open.
       if (await page.getByRole("button", { name: "Back to Sessions", exact: true }).isVisible()) {
@@ -79,6 +80,29 @@ for (const width of [390, 1440]) {
       await expect(page.locator(".inbox-row-title")).toHaveText(["Move the billing buckets to terraform"]);
       await page.reload();
       await expect(selectedGroup(page)).toContainText("Billing");
+    });
+
+    test("Archive closes detail opened outside the remembered project", async ({ page }) => {
+      await selectBilling(page);
+      await page.evaluate((sessionPath) => {
+        const url = new URL(location.href);
+        url.searchParams.set("path", sessionPath);
+        history.pushState(null, "", url);
+        window.dispatchEvent(new PopStateEvent("popstate"));
+      }, viewPath({ name: "session", id: "s-group-8" }));
+      await expect(page.getByRole("heading", { name: "Marketing Site Session", exact: true })).toBeVisible();
+      if (width === 1440) {
+        await page.getByRole("button", { name: "Back to Sessions", exact: true }).focus();
+        const openedPath = path(page);
+        await page.keyboard.press("j");
+        expect(path(page)).toBe(openedPath);
+        await page.keyboard.press("k");
+        expect(path(page)).toBe(openedPath);
+      }
+      await page.getByRole("button", { name: "More Actions", exact: true }).last().click();
+      await page.getByRole("menuitem", { name: "Archive", exact: true }).click();
+      await expect(selectedGroup(page)).toContainText("Billing");
+      await expect(page.getByRole("button", { name: "Back to Sessions", exact: true })).toHaveCount(0);
     });
 
     test("archiving an expanded session elsewhere keeps the originating project", async ({ page }) => {
