@@ -268,6 +268,11 @@ function sessionEnvironment(): NodeJS.ProcessEnv {
     HOME: fixtureHome,
     // A read-only sandbox has no writable temporary directory for the development loader's cache.
     TSX_DISABLE_CACHE: "1",
+    // Node propagates parent coverage even with an explicit env unless this key is present.
+    // Disable coverage in the probe and its CLI children: a read-only sandbox cannot write it,
+    // and the resulting stderr warning contaminates the fixture's combined CLI JSON output.
+    // The test process itself remains instrumented by the caller's coverage settings.
+    NODE_V8_COVERAGE: "",
     ...launch.env,
   };
 }
