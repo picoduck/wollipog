@@ -2416,9 +2416,9 @@ uppercase transform.
 
 **Queue tray** (`QueuedMessages`, #2178). Messages not yet sent wait in `.queue`, docked on the
 composer card: inset `--space-3` from its edges with no gap, a solid `--border` edge, top corners
-`--radius-md`, and a hairline between rows. It starts collapsed to one summary line (#2788): a
-full-width §5.5 disclosure trigger, `--control-h` tall, reading "1 Queued Message" or "<n> Queued
-Messages" and carrying the one Held badge when the whole queue is held. While collapsed it also
+`--radius-md`, and a hairline between rows. Two or more messages start collapsed to one summary line
+(#2788): a full-width §5.5 disclosure trigger, `--control-h` tall, reading "<n> Queued Messages" and
+carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
 lasts while the session stays open, and every session starts collapsed. A queue held behind a
@@ -2440,6 +2440,16 @@ reason referenced by `aria-describedby`. Below 760px a row is its text and one 4
 Actions" ⋯ button whose menu sheet lists Steer into This Turn, Edit Message and Cancel Message (or
 Dismiss Message), each disabled one with its reason as the second line. A delivery failure's reason
 is a notice of the slot (§13.2), not part of the row.
+
+One queued message is its own row in place of the summary (#3962), so steering it takes one tap:
+the same single line, with the Held badge after its words when the queue is held. On desktop its
+row is the expanded row above, and what the expanded tray would say about it is said under it. Below
+760px, while the message can be steered and the reader may manage the queue, a 44px Steer
+(`.btn.sm.ghost`) sits before the ⋯ button and the sheet leaves Steer into This Turn out; otherwise
+there is no Steer button and the sheet lists Steer into This Turn, disabled, with its reason. When a
+second message arrives the summary returns as the person last left it, opened only if focus was in
+the lone row, so the control they hold stays shown; when the queue drops back to one, focus on the
+summary moves to the row.
 
 **Message receipts** (#2171). What happened to a message after it was sent is one `.tl-receipt` line
 under that message, inside the scrolling transcript: after the last canonical item and before the

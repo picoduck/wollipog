@@ -6684,6 +6684,12 @@ body.shell-dock-dragging * {
   width: 44px;
   height: 44px;
 }
+/* A lone queued message is the tray's one line in place of the summary (#3962): no hairline above
+   it, the queue's Held badge after its words, and on a phone a Steer as tall as the actions button
+   beside it, so one tap steers. */
+.queue.is-single .queue-row { border-top: none; }
+.queue-held { flex: none; }
+.queue.is-phone .queue-steer { height: 44px; }
 /* The composer's mode strip (#2194): editing a queued message is a state of the card, so it is the
    card's first row, full bleed across its 10px/12px padding, 40px tall at every width. Its actions
    are `.btn.sm.ghost`, 8px apart so each keeps its 44px touch area (§2.8). A recovered edit takes
