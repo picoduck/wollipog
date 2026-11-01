@@ -15,7 +15,7 @@ import {
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
-import { StoreProvider } from "../store.js";
+import { StoreProvider, useStoreSelector } from "../store.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -3281,14 +3281,21 @@ test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (
   }
 });
 
-/** The phone Sessions app bar (#2211), mounted with two Projects: Alpha with two sessions waiting on
- * the user and one stalled, and Beta with one idle session and one snoozed. */
+function InboxSelectionProbe({ report }: { report: (split: string | null) => void }) {
+  report(useStoreSelector((state) => state.inbox.splitKey));
+  return null;
+}
+
+/** Sessions with Alpha (two blocked, one stalled) and Beta (one idle, one snoozed). */
 async function mountPhoneBar(name: string, options: {
+  desktop?: boolean;
+  initialRoute?: string;
+  reportSplit?: (split: string | null) => void;
   pushed?: Array<{ name: string; split?: string | null }>;
   presets?: unknown[];
   client?: ApiClient;
 } = {}) {
-  mobileViewport = true;
+  mobileViewport = !options.desktop;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -3308,19 +3315,20 @@ async function mountPhoneBar(name: string, options: {
   });
   const now = Date.now();
   /** Renders with the group the URL names, as Back and Forward do. */
-  const render = (routeSplit?: string | null) => act(async () => {
+  const render = (routeSplit?: string | null, expandedSessionId: string | null = null) => act(async () => {
     root.render(
       <ApiProvider client={options.client ?? api}>
         <StoreProvider connection={connection} navigation={spyNavigation}>
           <FeedbackProvider>
-            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
+            {options.reportSplit && <InboxSelectionProbe report={options.reportSplit} />}
+            <InboxView expandedSessionId={expandedSessionId} rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
               onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
           </FeedbackProvider>
         </StoreProvider>
       </ApiProvider>,
     );
   });
-  await render();
+  await render(options.initialRoute);
   await act(async () => {
     socket.push({
       type: "snapshot",
@@ -3702,3 +3710,43 @@ test("virtualizer corrections do not hold idle priority changes (#3301, CR-2.1)"
   await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
   assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "layout movement is not reader intent");
 });
+
+for (const desktop of [false, true]) {
+  for (const change of ["archive", "snooze", "reassign", "archive-all"] as const) {
+    test(`expanded session ${change} retains its project on ${desktop ? "desktop" : "phone"} (#3971)`, async () => {
+      let split: string | null = null;
+      const h = await mountPhoneBar(`project-retention-${desktop}-${change}`, {
+        desktop, reportSplit: (value) => { split = value; },
+      });
+      const projectKey = "project:alpha";
+      await h.render(projectKey);
+      assert.equal(split, projectKey);
+      await h.render(undefined, "alpha-blocked-1");
+      assert.equal(split, projectKey, "expanding keeps the originating project");
+      await act(async () => {
+        if (change === "snooze") {
+          h.socket.push({ type: "session_reminder_upsert", userId: "user", reminder: reminder("alpha-blocked-1") });
+        } else {
+          const ids = change === "archive-all"
+            ? ["alpha-blocked-1", "alpha-blocked-2", "alpha-stalled"] : ["alpha-blocked-1"];
+          for (const id of ids) h.socket.push({ type: "session_upsert", session: session(id, Date.now(), {
+            projectId: change === "reassign" ? "beta" : "alpha", archived: change !== "reassign",
+          }) });
+        }
+      });
+      assert.equal(split, projectKey, "a live update never broadens the remembered list");
+      await h.render();
+      assert.equal(split, projectKey, "closing retains the project even when it is empty");
+    });
+  }
+}
+
+for (const desktop of [false, true]) {
+  test(`a cold project URL waits for the snapshot on ${desktop ? "desktop" : "phone"} (#3971)`, async () => {
+    let split: string | null = null;
+    await mountPhoneBar(`cold-project-${desktop}`, {
+      desktop, initialRoute: "project:beta", reportSplit: (value) => { split = value; },
+    });
+    assert.equal(split, "project:beta");
+  });
+}

@@ -534,13 +534,10 @@ export function InboxView({
     if (!snapshotLoaded) return;
     if (expandedSessionId && sessions.has(expandedSessionId)) {
       const activeContainsExpanded = activeSplit?.sessions.some((session) => session.id === expandedSessionId) === true;
-      const destinationSplit = activeContainsExpanded ? activeSplit?.key ?? null : null;
-      if (!activeContainsExpanded && inbox.splitKey !== null) {
-        selectSplit(null);
-        return;
-      }
-      if (inbox.selectedSessionId !== expandedSessionId) {
-        selectSession(expandedSessionId, destinationSplit);
+      // Expanded detail can outlive its row (archive, snooze, or project reassignment).
+      // Keep the originating list's group; repair its row selection when detail closes.
+      if (activeContainsExpanded && inbox.selectedSessionId !== expandedSessionId) {
+        selectSession(expandedSessionId, activeSplit?.key ?? null);
       }
       return;
     }
@@ -555,7 +552,15 @@ export function InboxView({
     if (repairedSelection !== inbox.selectedSessionId) {
       selectSession(repairedSelection, activeSplit?.key ?? null, true);
     }
-  }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, selectSplit, sessions, snapshotLoaded]);
+  }, [activeSplit, expandedSessionId, inbox.selectedSessionId, inbox.splitKey, repairedSelection, selectSession, sessions, snapshotLoaded]);
+
+  // Return links and destination shortcuts can omit a tab. Once the snapshot has resolved
+  // the remembered group, name it in this history entry so a reload keeps it on phones too.
+  // Replace rather than push: restoring context must not add another Back destination.
+  useEffect(() => {
+    if (!snapshotLoaded || expandedSessionId !== null || routeSplit !== undefined || activeSplit?.key == null) return;
+    navigate({ name: viewMode === "board" ? "board" : "inbox", split: activeSplit.key }, { replace: true });
+  }, [activeSplit?.key, expandedSessionId, navigate, routeSplit, snapshotLoaded, viewMode]);
 
   const normalizedQuery = normalizeSessionsQuery(deferredQuery);
   // While a query is set, every tab counts its matches (#2200, §10.1).
@@ -1229,7 +1234,10 @@ export function InboxView({
       return;
     }
     if (!beginBusy(sessionId)) return;
-    const selectionAtRequest = selectedSessionIdRef.current;
+    // Detail opened from a link need not be the remembered project's selected row.
+    const expandedAtRequest = expandedSessionIdRef.current === sessionId;
+    const selectionAtRequest = expandedAtRequest ? sessionId : selectedSessionIdRef.current;
+    const belongsToDisplayedList = displayedIds.includes(sessionId);
     try {
       if (sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
         const retrying = session.archiveStatus === "stop_failed";
@@ -1272,13 +1280,17 @@ export function InboxView({
         return;
       }
       const archiveSelection = inboxSelectionAfterArchive(
-        displayedIds,
+        expandedAtRequest && !belongsToDisplayedList ? [] : displayedIds,
         sessionId,
         selectionAtRequest,
-        selectedSessionIdRef.current,
+        expandedAtRequest ? expandedSessionIdRef.current : selectedSessionIdRef.current,
       );
       if (archiveSelection.apply) {
-        selectSession(archiveSelection.sessionId, activeSplit?.key ?? null);
+        // Outside this list, close detail and retain its remembered selection rather than
+        // advancing to an unrelated project row. A late response cannot close another detail.
+        if (!expandedAtRequest || belongsToDisplayedList) {
+          selectSession(archiveSelection.sessionId, activeSplit?.key ?? null);
+        }
         if (mountedRef.current && expandedSessionIdRef.current === sessionId) {
           if (archiveSelection.sessionId) onExpand?.(archiveSelection.sessionId, false);
           else onCollapse?.();
@@ -1394,7 +1406,8 @@ export function InboxView({
   }, [api, beginBusy, endBusy, loadSession, beginSessionDetailLoad, openRequest, sessions, showToast]);
 
   const hopExpanded = useCallback((direction: "next" | "previous") => {
-    if (!expandedSessionId) return;
+    // A linked or filtered-out session has no neighbour in the remembered list.
+    if (!expandedSessionId || !displayedIds.includes(expandedSessionId)) return;
     holdOrderAfterNavigation();
     const next = inboxSelectionAfterMove(displayedIds, expandedSessionId, direction);
     if (!next || next === expandedSessionId) return;
