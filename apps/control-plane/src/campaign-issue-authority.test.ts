@@ -10,7 +10,7 @@ import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { closureEvidence, issueEvidenceDigest } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
-import type { HumanPrincipal } from "./identity.js";
+import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 
 function harness(full = true, maximum = 5) {
   const db = ControlPlaneDb.open(":memory:");
@@ -783,6 +783,61 @@ test("the actual Campaign Status HTTP route keeps a bounded Full Control human p
     assert.equal(result.json().resourceSnapshot.issueAdmission,undefined);
   } finally {await app.close();h.db.close();}
 });
+
+for (const [credentialSessionId, method, target] of [
+  ["child", "POST", "root"],
+  ["child", "POST", "child"],
+  ["other-root", "POST", "root"],
+  ["other-root", "GET", "root"],
+  ["child", "GET", "root"],
+  ["root", "POST", "root"],
+  ["root", "GET", "root"],
+] as const) {
+  test(`issue-scope agent route: ${credentialSessionId} ${method} ${target}`, async () => {
+    const h = harness();
+    const { default: Fastify } = await import("fastify");
+    const { registerCampaignIssueScopeRoutes } = await import("./campaign-issue-scope-routes.js");
+    const app = Fastify();
+    try {
+      h.db.createSession({ id: "other-root", runnerId: "r", workspaceId: "w", agentId: "codex", title: "Other campaign",
+        useWorktree: false, driver: "codex-app-server", now: 1, config: {}, role: "orchestrator",
+        orchestratorPolicy: h.db.getSession("root")!.orchestratorPolicy! });
+      const principal: AgentPrincipal = { kind: "agent", actorId: credentialSessionId, credentialSessionId,
+        orchestrator: credentialSessionId !== "child", organizationId: h.principal.organizationId,
+        delegatedScope: h.db.sessionScope(credentialSessionId)! };
+      // Same-owner access must succeed so the route's agent checks, rather than resource isolation, refuse the request.
+      assert.equal(h.db.canAccessSession(principal, target), true);
+      assert.equal(h.db.canAccessSession(principal, "root"), true);
+      assert.equal(h.db.resolvedCampaignSessionId("other-root"), "other-root");
+      registerCampaignIssueScopeRoutes(app, { db: h.db, svc: h.svc, requestPrincipal: () => principal });
+      const decisions = () => h.db.raw().prepare("SELECT * FROM workflow_decisions ORDER BY occurrence_id").all();
+      const before = decisions();
+      const result = await app.inject({ method,
+        url: `/api/sessions/${target}/campaign/issue-scope${method === "POST" ? "/proposals" : ""}`,
+        ...(method === "POST" ? { payload: { requestId: "agent-http", expectedRevision: 1,
+          additions: [{ repository: "team/repo", number: 101 }], removals: [], explanation: "Verified intended member",
+          lineage: { kind: "epic", epic: 100 } } } : {}) });
+      if (credentialSessionId !== "root") {
+        assert.equal(result.statusCode, 403, result.body);
+        assert.deepEqual(result.json(), { error: method === "POST"
+          ? "only the campaign owner or its root Orchestrator may propose a scope change"
+          : "campaign scope requires access to its Orchestrator" });
+        assert.deepEqual(decisions(), before, "refused requests create no scope proposal");
+      } else if (method === "POST") {
+        assert.equal(result.statusCode, 201, result.body);
+        assert.equal(result.json().resourceSnapshot.category, "campaign_issue_scope");
+        assert.equal(result.json().authority, "orchestrator");
+        assert.equal(decisions().length, before.length + 1);
+        assert.ok(h.db.workflowDecisionByOccurrence(result.json().occurrenceId));
+      } else {
+        assert.equal(result.statusCode, 200, result.body);
+        assert.deepEqual(result.json().issueNumbers, [100]);
+        assert.equal(result.json().repository, "team/repo");
+        assert.deepEqual(decisions(), before);
+      }
+    } finally { await app.close(); h.db.close(); }
+  });
+}
 
 test("non-delegated closure reasons and operations retain human review without demanding delivery inspection", async () => {
   for (const operations of [["campaign_issue_scope"],["campaign_issue_scope","issue_closure"]] as const) {
