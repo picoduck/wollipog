@@ -630,9 +630,26 @@ for (const viewport of [{ width: 940, height: 600 }, { width: 1440, height: 900 
     });
     await expect(page.locator(".app-rail").getByRole("button", { name: "Search" })).toHaveCount(0);
 
-    // A destination is unavailable, says why on hover and focus, and goes nowhere.
+    // A destination is unavailable, in faint ink, says why on hover and focus, and goes nowhere.
     const automations = page.locator(".app-rail").getByRole("link", { name: "Automations" });
     await expect(automations).toHaveAttribute("aria-disabled", "true");
+    const ink = await page.evaluate(() => {
+      const resolve = (token: string) => {
+        const probe = document.createElement("span");
+        probe.style.color = `var(${token})`;
+        document.body.append(probe);
+        const color = getComputedStyle(probe).color;
+        probe.remove();
+        return color;
+      };
+      return {
+        items: [...document.querySelectorAll<HTMLElement>(".app-rail .rail-item")].map((item) => getComputedStyle(item).color),
+        faint: resolve("--text-faint"),
+        dim: resolve("--text-dim"),
+      };
+    });
+    expect(ink.faint).not.toBe(ink.dim);
+    expect(new Set(ink.items)).toEqual(new Set([ink.faint]));
     await automations.hover();
     await expect(page.locator(".rail-tooltip")).toHaveText("AutomationsOpen an instance first.");
     // Playwright itself refuses an aria-disabled target, so the click is forced to prove it goes nowhere.
