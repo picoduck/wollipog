@@ -1080,7 +1080,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * must also report `runtime.providerCredentialImport`, which only supported hosts do. */
   providerCredentialImport: 260,
   /** Session-scoped assertion that Restart retains an established provider conversation (#2515). */
-  sessionRestartResume: 261,
+  sessionRestartResume: 263,
   /** v255 runner continues a session's own mid-turn worktree switch after its relaunch (#3810). */
   worktreeSwitchContinuation: 255,
   /** v256 runner reports `worktreeSwitch` while it relaunches a session in another worktree (#3810). */
@@ -2295,7 +2295,7 @@ export interface AgentCapabilities {
  * truth and must not be frozen into a long-lived session snapshot. An explicitly empty command
  * list is authoritative for that session; an absent field continues to inherit the catalog. */
 export interface SessionCapabilityOverlay {
-  /** v261: this session's next explicit Restart retains an established conversation. Missing is
+  /** v263: this session's next explicit Restart retains an established conversation. Missing is
    * unknown and must be treated as false; a never-run or unsupported session reports false. */
   restartResumesConversation?: boolean;
   elicitation?: NonNullable<AgentCapabilities["elicitation"]>;

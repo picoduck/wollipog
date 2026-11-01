@@ -367,10 +367,10 @@ test("a running turn keeps Fork Conversation… disabled with its reason; a sess
 
 test("historical restart confirmation states only the session's advertised continuity", async () => {
   for (const [version, capability, sentence] of [
-    [PROTOCOL_VERSION, true, "The established conversation will resume."],
-    [PROTOCOL_VERSION, false, "This starts a new conversation."],
-    [PROTOCOL_VERSION, undefined, "The runner has not confirmed conversation continuity."],
-    [260, true, "The runner has not confirmed conversation continuity."],
+    [PROTOCOL_VERSION, true, "The established conversation will resume;"],
+    [PROTOCOL_VERSION, false, "This starts a new conversation;"],
+    [PROTOCOL_VERSION, undefined, "The runner has not confirmed conversation continuity;"],
+    [260, true, "The runner has not confirmed conversation continuity;"],
   ] as const) {
     const session = { id: "historical", runnerId: "runner-1", title: "Historical", status: "idle",
       driver: "claude-code", agentCapabilities: capability === undefined ? undefined : { restartResumesConversation: capability },
@@ -403,7 +403,7 @@ test("historical idle-result recovery offers a confirmed restart and preserves c
       await act(async () => { menuItem(page(), "Restart Session").click(); await tick(); });
       assert.deepEqual(calls, accepted ? ["confirm", "restart:historical"] : ["confirm"]);
       assert.match(header.confirmations[0]!, /ends every background job/);
-      assert.match(header.confirmations[0]!, /The original job commands are not rerun/);
+      assert.match(header.confirmations[0]!, /original job commands are not rerun/);
       assert.match(header.confirmations[0]!, protocol === 190
         ? /held results are discarded/ : /finished results are reported after the restart/);
       assert.doesNotMatch(header.confirmations[0]!, protocol === 190

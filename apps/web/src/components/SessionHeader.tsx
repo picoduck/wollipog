@@ -600,12 +600,12 @@ export function SessionHeader({
                       : "held results are discarded.") +
                     (runnerSupportsProtocol(runnerProtocolVersion, "sessionRestartResume") &&
                       session.agentCapabilities?.restartResumesConversation === true
-                      ? " The established conversation will resume."
+                      ? " The established conversation will resume"
                       : runnerSupportsProtocol(runnerProtocolVersion, "sessionRestartResume") &&
                         session.agentCapabilities?.restartResumesConversation === false
-                        ? " This starts a new conversation."
-                        : " The runner has not confirmed conversation continuity.") +
-                    " The original job commands are not rerun; review the conversation before continuing.",
+                        ? " This starts a new conversation"
+                        : " The runner has not confirmed conversation continuity") +
+                    "; original job commands are not rerun, so review the conversation before continuing.",
                   confirmLabel: "Restart Session",
                   tone: "danger",
                 })) return;

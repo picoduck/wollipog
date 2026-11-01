@@ -51,7 +51,7 @@ const runner = {
   runnerId: "runner-1", hostname: "build-box.local", displayName: "Build Box", os: "linux", version: "1",
   status: "online",
   agents: [{ id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true }],
-  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 261,
+  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 263,
 } as RunnerView;
 
 class FakeSocket implements UiSocket {
@@ -83,7 +83,7 @@ interface FixtureOptions {
 }
 
 async function withFailedTurn(
-  { status, runnerStatus = "online", runnerProtocolVersion = 261, overrides = {}, restart }: FixtureOptions,
+  { status, runnerStatus = "online", runnerProtocolVersion = 263, overrides = {}, restart }: FixtureOptions,
   check: (view: { id: string; container: HTMLElement; calls: string[]; retry: () => HTMLButtonElement | undefined }) => Promise<void>,
 ) {
   sequence += 1;

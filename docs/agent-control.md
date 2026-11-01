@@ -1723,7 +1723,7 @@ queued behind a turn that had never started.
     `killed` by the restart, and its result is unrecoverable. A finished job whose result still
     waited for its continuation joins one managed continuation after the restart. Current runners
     resume established Claude Code, Codex App Server and Pi conversations; the session-scoped
-    `agentCapabilities.restartResumesConversation` capability (v261) advertises that guarantee.
+    `agentCapabilities.restartResumesConversation` capability (v263) advertises that guarantee.
     A session without an established provider id starts fresh. Older runners omit the capability,
     so clients keep Retry Turn disabled for terminal sessions rather than assuming continuity.
     The continuation names each job, its status, and a finished job's provider output file, under

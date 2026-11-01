@@ -76,7 +76,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     await restart.click();
     const confirmation = page.getByRole("dialog", { name: "Restart Session", exact: true });
     await expect(confirmation).toContainText("ends every background job");
-    await expect(confirmation).toContainText("The original job commands are not rerun");
+    await expect(confirmation).toContainText("original job commands are not rerun");
     await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await hold(4_000);
     if (process.env.ISSUE_3280_EVIDENCE_DIR) {

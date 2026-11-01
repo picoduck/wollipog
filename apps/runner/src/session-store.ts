@@ -4254,8 +4254,7 @@ export function metaToSnapshot(
   m: SessionMeta,
   controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
 ): SessionSnapshot {
-  const restartCapability = controlPlaneProtocolVersion === null ||
-    runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionRestartResume")
+  const restartCapability = runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionRestartResume")
     ? { restartResumesConversation: !!restartResumeId(m) } : undefined;
   const nativeElicitation = controlPlaneProtocolVersion != null &&
     controlPlaneProtocolVersion >= NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION

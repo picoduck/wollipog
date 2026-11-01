@@ -359,7 +359,8 @@ test("session restart capability overlays controls without freezing the agent ca
 test("PROTOCOL_VERSION is 263", () => {
   assert.equal(PROTOCOL_VERSION, 263);
   assert.equal(runnerSupportsProtocol(260, "sessionRestartResume"), false);
-  assert.equal(runnerSupportsProtocol(261, "sessionRestartResume"), true);
+  assert.equal(runnerSupportsProtocol(262, "sessionRestartResume"), false);
+  assert.equal(runnerSupportsProtocol(263, "sessionRestartResume"), true);
   // A v259 runner never receives an import, and a v260 runner only with a valid capability (#3719).
   assert.equal(runnerSupportsProtocol(259, "providerCredentialImport"), false);
   assert.equal(runnerSupportsProtocol(260, "providerCredentialImport"), true);
