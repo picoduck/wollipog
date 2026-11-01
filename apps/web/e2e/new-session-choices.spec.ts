@@ -731,7 +731,7 @@ test.describe("increased text size", () => {
       await expect(option).toBeVisible();
       expect(await textOverflow(option), "the option's label is not clipped").toBeLessThanOrEqual(1);
     }
-    for (const row of await page.locator(".session-options-body .setting-row").all()) {
+    for (const row of await page.locator(":is(.new-session-role, .session-options-body) .setting-row").all()) {
       expect((await overflow(row)).vertical).toBeLessThanOrEqual(1);
     }
     expect((await overflow(group)).vertical).toBeLessThanOrEqual(1);
@@ -764,13 +764,30 @@ test.describe("Options at 1440px (#2954)", () => {
     await openDialog(page);
     const head = page.getByRole("button", { name: "Options", exact: true });
     await expect(head).toHaveAttribute("aria-expanded", "false");
-    await expect(head.locator(".session-options-meta-item")).toHaveText(["Normal", "Direct", "In Place", "Harness Default"]);
+    await expect(head.locator(".session-options-meta-item")).toHaveText(["Direct", "In Place", "Harness Default"]);
+    // Role is always visible above Options (#3929), with both choices one click away.
+    const role = permissionPresets(page);
+    await expect(role).toBeVisible();
+    await expect(role.getByRole("radio")).toHaveText(["Normal", "Orchestrator"]);
     const description = (await page.locator(".modal-desc").boundingBox())!;
     const footer = (await page.locator(".modal-foot").boundingBox())!;
     const height = footer.y - (description.y + description.height);
     expect(height, `${height}px from the description to the footer`).toBeLessThanOrEqual(420);
     // One closed row: the head is the only thing Options draws.
     await expect(page.locator(".session-options-body")).toBeHidden();
+  });
+
+  test("one click on the visible Role chooses Orchestrator, shows its policy, and leaves Options closed (#3929)", async ({ page }) => {
+    await openDialog(page, "?policy=1&role=1");
+    const head = page.getByRole("button", { name: "Options", exact: true });
+    await permissionPresets(page).getByRole("radio", { name: "Orchestrator" }).click();
+    await expect(permissionPresets(page).getByRole("radio", { name: "Orchestrator" })).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByRole("button", { name: "Customize…" })).toBeVisible();
+    await expect(head).toHaveAttribute("aria-expanded", "false");
+    await expect(page.locator(".session-options-body")).toBeHidden();
+    await page.getByRole("button", { name: "Create Session" }).click();
+    const request = JSON.parse(await page.locator("html").getAttribute("data-create-session-request") ?? "{}");
+    expect(request.orchestrator).toBeTruthy();
   });
 
   test("a container target opens Options by itself and shows the skills notice under Run On", async ({ page }) => {
