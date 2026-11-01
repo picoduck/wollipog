@@ -37,6 +37,8 @@ import type { BoxStatus, RunnerCredentialSecret } from "@wollipog/protocol";
 import type { BoxConfig, ControlPlaneDb } from "./db.js";
 import { readCompatibleEnv, type Environment } from "./env-compat.js";
 import type { Hub } from "./hub.js";
+import { sshLaunchDiagnostic, supervisedSshCommand } from "./ssh-runner-launch.js";
+import { runnerHarnessReadiness } from "./host-admin-route.js";
 
 /** Home-relative path the runner binary is deployed to on the box (cwd is $HOME over SSH). */
 const REMOTE_RUNNER_PATH = ".agent-manager/agent-manager-runner";
@@ -126,6 +128,10 @@ export function buildSshArgs(o: {
   return [
     "-p", String(o.sshPort),
     ...SSH_BASE_OPTS,
+    "-T",
+    "-o", "StdinNull=no",
+    "-o", "ControlMaster=no",
+    "-o", "ControlPath=none",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=3",
     "-o", "ExitOnForwardFailure=yes",
@@ -1061,6 +1067,11 @@ interface BoxRuntime {
   /** Ports another listener held during the current run of occupied-port failures. Cleared once a
    * runner registers, so a later conflict starts a fresh bounded recovery. */
   occupiedRemotePorts: Set<number>;
+  readiness?: {
+    baseline: ReturnType<typeof runnerHarnessReadiness> | null;
+    registered: boolean;
+    timer: ReturnType<typeof setTimeout>;
+  };
 }
 
 interface BinaryReadiness {
@@ -1115,7 +1126,7 @@ export function legacySshAccountBoxes(
   return configs.filter((cfg) => cfg.runnerDataDir === null && managedBoxSshAccountKey(cfg) === key);
 }
 
-export function stopAndWaitForManagedChild(child: ChildProcess, timeoutMs = 10_000): Promise<void> {
+export function stopAndWaitForManagedChild(child: ChildProcess, timeoutMs = 35_000): Promise<void> {
   if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -1128,13 +1139,16 @@ export function stopAndWaitForManagedChild(child: ChildProcess, timeoutMs = 10_0
       child.off("error", onError);
       error ? reject(error) : resolve();
     };
-    const onExit = () => finish();
+    const onExit = (code: number | null) => finish(
+      child.stdin && code !== 0 ? new Error("SSH runner shutdown was not acknowledged; inspect remote cleanup before reconnecting") : undefined,
+    );
     const onError = (error: Error) => finish(error);
     child.once("exit", onExit);
     child.once("error", onError);
-    timer = setTimeout(() => finish(new Error("managed runner did not stop before the adoption timeout")), timeoutMs);
+    timer = setTimeout(() => finish(new Error("managed runner did not acknowledge shutdown before the timeout")), timeoutMs);
     try {
-      if (!child.killed && !child.kill()) finish(new Error("managed runner refused the stop signal"));
+      if (child.stdin && !child.stdin.destroyed) child.stdin.end();
+      else if (!child.killed && !child.kill()) finish(new Error("managed runner refused the stop signal"));
     } catch (error) {
       finish(error as Error);
     }
@@ -1192,7 +1206,7 @@ export class BoxOrchestrator {
   constructor(private readonly deps: OrchestratorDeps) {
     this.stopManagedChild = deps.stopManagedChild ?? stopAndWaitForManagedChild;
     this.spawnTunnel = deps.spawnTunnel
-      ?? ((args) => spawn("ssh", args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
+      ?? ((args) => spawn("ssh", args, { stdio: ["pipe", "pipe", "pipe"], windowsHide: true }));
     this.randomIndex = deps.randomIndex ?? ((span) => randomInt(span));
   }
 
@@ -1386,6 +1400,7 @@ export class BoxOrchestrator {
     const boxId = this.deps.db.boxIdForRunner(runnerId);
     if (!boxId) return;
     const rt = this.runtimes.get(boxId);
+    if (rt?.readiness && rt.activeCredentialId !== credentialId) return;
     if (rt) {
       rt.backoffMs = INITIAL_BACKOFF_MS; // a healthy connection resets backoff
       rt.occupiedRemotePorts.clear(); // and ends any occupied-port recovery
@@ -1408,13 +1423,43 @@ export class BoxOrchestrator {
         }
       }
     }
-    this.setStatus(boxId, "online");
+    if (rt?.readiness) {
+      rt.readiness.registered = true;
+      this.onRunnerAgentsUpdated(runnerId);
+    } else this.setStatus(boxId, "online");
+  }
+
+  /** Registration establishes transport; only a fresh discovery inventory establishes readiness.
+   * A failed inventory remains connected for diagnostics and can recover on later rediscovery. */
+  onRunnerAgentsUpdated(runnerId: string): void {
+    const boxId = this.deps.db.boxIdForRunner(runnerId);
+    const rt = boxId ? this.runtimes.get(boxId) : undefined;
+    const pending = rt?.readiness;
+    const runner = this.deps.db.getRunner(runnerId);
+    if (!boxId || !rt || !pending?.registered || !runner?.agentsRefreshed) return;
+    const current = runnerHarnessReadiness(runner);
+    const readyBefore = pending.baseline?.agents.filter(agent => agent.available) ?? [];
+    const authenticatedBefore = pending.baseline?.accounts?.filter(account => account.authStatus === "authenticated") ?? [];
+    const previouslyBlocked = new Set(pending.baseline?.agents.filter(agent => agent.ownershipBlocked).map(agent => agent.id));
+    const problem = current.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))
+      ? "Provider HOME ownership blocks harness discovery. Preserve ownership evidence and inspect recovery details; historical leases may need operator recovery."
+      : readyBefore.some(agent => !current.agents.some(next => next.id === agent.id && next.available))
+        ? "A previously available harness became unavailable after reconnect. Inspect Agent Details before retrying."
+        : authenticatedBefore.some(account => !current.accounts?.some(next => next.id === account.id && next.authStatus === "authenticated"))
+          ? "A previously signed-in provider account became unavailable after reconnect. Inspect account recovery details."
+          : null;
+    clearTimeout(pending.timer);
+    this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId, epoch: rt.epoch, outcome: problem ? "failed" : "ready" }));
+    this.setStatus(boxId, problem ? "failed" : "online", problem);
+    if (!problem) rt.readiness = undefined;
   }
 
   /** Called when a box's runner websocket drops — mark it offline even if the SSH child lingers. */
   onRunnerDisconnected(runnerId: string): void {
     const boxId = this.deps.db.boxIdForRunner(runnerId);
     if (!boxId) return;
+    const pending = this.runtimes.get(boxId)?.readiness;
+    if (pending) { pending.registered = false; clearTimeout(pending.timer); }
     // Only downgrade from online; a bootstrapping/deploying/failed status is already accurate.
     if (this.deps.db.getBox(boxId)?.status === "online") this.setStatus(boxId, "offline");
   }
@@ -1598,6 +1643,19 @@ export class BoxOrchestrator {
     runnerPath: string,
   ): void {
     const controlPlaneUrl = `ws://127.0.0.1:${rt.remotePort}/runner`;
+    const baseline = rt.readiness?.baseline;
+    if (rt.readiness) clearTimeout(rt.readiness.timer);
+    const previous = this.deps.db.getRunner(cfg.runnerId);
+    rt.readiness = {
+      baseline: baseline ?? (previous ? runnerHarnessReadiness(previous) : null),
+      registered: false,
+      timer: setTimeout(() => {
+        if (!this.live(rt, epoch) || !rt.readiness) return;
+        this.log(JSON.stringify({ event: "ssh_runner_readiness", boxId: cfg.boxId, epoch, outcome: "timeout" }));
+        this.setStatus(cfg.boxId, "failed", "The SSH runner did not report fresh harness readiness within 90 seconds. Inspect the connection and runner discovery diagnostics.");
+      }, 90_000),
+    };
+    rt.readiness.timer.unref();
     const remoteCommand = buildRemoteCommand({
       runnerPath,
       runnerId: cfg.runnerId,
@@ -1612,14 +1670,25 @@ export class BoxOrchestrator {
       sshPort: cfg.sshPort,
       remotePort: rt.remotePort,
       cpPort: this.deps.cpPort,
-      remoteCommand,
+      remoteCommand: supervisedSshCommand(remoteCommand, `wollipog-ssh-${randomUUID()}.scope`),
     });
     this.log(`${cfg.boxId} launching ssh ${cfg.sshTarget} (tunnel :${rt.remotePort} → CP :${this.deps.cpPort})`);
     const child = this.spawnTunnel(args);
+    // EPIPE is expected if the remote launch fails before accepting stdin.
+    child.stdin?.on("error", () => {});
     rt.child = child;
     let stderrTail = "";
+    let diagnosticLine = "";
     child.stderr?.on("data", (b: Buffer) => {
       stderrTail = (stderrTail + b.toString()).slice(-2000);
+      const lines = (diagnosticLine + b.toString()).split("\n");
+      diagnosticLine = (lines.pop() ?? "").slice(-2000);
+      for (const line of lines) {
+        const diagnostic = sshLaunchDiagnostic(line.trim());
+        if (diagnostic && this.live(rt, epoch)) {
+          this.log(JSON.stringify({ ...diagnostic, boxId: cfg.boxId, epoch }));
+        }
+      }
     });
     child.stdout?.on("data", () => {
       /* drain the runner's stdout so its pipe never blocks */
@@ -1627,12 +1696,14 @@ export class BoxOrchestrator {
     child.on("error", (err) => {
       if (rt.child === child) rt.child = null;
       if (!this.live(rt, epoch)) return; // superseded attempt — ignore
+      if (rt.readiness) { rt.readiness.registered = false; clearTimeout(rt.readiness.timer); }
       this.setStatus(cfg.boxId, "failed", `ssh spawn error: ${err.message}`);
       this.scheduleReconnect(cfg, rt, epoch);
     });
     child.on("exit", (code, signal) => {
       if (rt.child === child) rt.child = null; // only clear if this child is still the current one
       if (!this.live(rt, epoch)) return; // a newer attempt / removal / shutdown owns the box now
+      if (rt.readiness) { rt.readiness.registered = false; clearTimeout(rt.readiness.timer); }
       this.log(`${cfg.boxId} ssh exited (${signal ? `signal ${signal}` : `code ${code}`})`);
       // Node may report exit before the last stderr chunk arrives, and that chunk is the one that
       // names an occupied port, so classify only once stderr has ended.
@@ -1702,6 +1773,8 @@ export class BoxOrchestrator {
   private stopRuntime(boxId: string): void {
     const rt = this.runtimes.get(boxId);
     if (!rt) return;
+    if (rt.readiness) clearTimeout(rt.readiness.timer);
+    rt.readiness = undefined;
     rt.epoch++; // supersede any in-flight attempt and pending reconnect timers
     rt.activeAdoptionEpoch = null;
     rt.activeCredentialId = null;
@@ -1713,7 +1786,8 @@ export class BoxOrchestrator {
     }
     if (rt.child && !rt.child.killed) {
       try {
-        rt.child.kill();
+        if (rt.child.stdin && !rt.child.stdin.destroyed) rt.child.stdin.end();
+        else rt.child.kill();
       } catch {
         /* already gone */
       }

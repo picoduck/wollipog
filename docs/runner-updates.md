@@ -302,7 +302,12 @@ snapshot-based recovery are acceptable.
 
 If candidate resolution fails, the request returns the exact error and the box keeps its current
 runner — nothing is marked failed. A `started` response means deployment has begun; the card's
-connection status, runner version, and protocol are the completion signal.
+connection status, runner version, protocol, and fresh harness discovery are the completion signal.
+An SSH runner stays deploying until discovery completes. A new ownership block, a previously ready
+harness becoming unavailable, or a previously authenticated account losing readiness marks the
+Machine failed with recovery guidance while leaving the connected runner available for inspection.
+See [Linux Delegation and Update Readiness](./ssh-runner-lifecycle.md#linux-delegation-and-update-readiness)
+for containment, shutdown acknowledgment, unsupported hosts, and historical-lease limitations.
 
 For a private repository, launch the control plane with `GH_TOKEN` or `GITHUB_TOKEN` scoped to
 `Contents: read`. The token is used only against `api.github.com`, is stripped before asset-CDN

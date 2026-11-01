@@ -208,6 +208,7 @@ import {
   waitForPendingKills,
 } from "./spawn.js";
 import { providerContainmentEmpty, providerContainmentIdentity } from "./linux-cgroup.js";
+import { watchSshLifetime } from "./ssh-supervision.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -443,8 +444,12 @@ if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
 config.dataDir = dataDirLease.dataDir;
 // Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
 // runner data directory when the temporary filesystem is noexec. This never moves the runner.
-providerContainmentIdentity(config.dataDir);
 process.once("exit", dataDirLease.release);
+const containment = providerContainmentIdentity(config.dataDir);
+if (process.env.WOLLIPOG_SSH_REQUIRE_CGROUP === "1" && !containment) {
+  console.error("[runner] ssh_launch_failed reason=containment-unavailable; verify delegated cgroup v2 support before reconnecting; preserve existing ownership evidence");
+  process.exit(1);
+}
 if (dataDirLease.migratedLegacyDataDir) {
   log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
 }
@@ -4435,6 +4440,12 @@ function shutdown(exitCode = 0): void {
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 process.on("SIGHUP", () => shutdown());
+if (process.env.WOLLIPOG_SSH_SUPERVISED === "1") {
+  watchSshLifetime(process.stdin, () => {
+    log("ssh_transport_closed; draining runner-owned work");
+    if (!shuttingDown) shutdown();
+  });
+}
 // A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state, so run
 // the graceful shutdown() (waits for pending kills, releases provider-home leases) before exiting —
 // a hard crash would strand the lease and block every future agent. shutdown()'s own `shuttingDown`

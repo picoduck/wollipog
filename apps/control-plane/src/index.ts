@@ -1638,6 +1638,7 @@ app.register(async (instance) => {
       case "agents_updated":
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
+          orchestrator.onRunnerAgentsUpdated(msg.runnerId);
           // The review-session capability follows the agents it was derived from (#3369).
           if (msg.reviewSession !== undefined && runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "reviewSession")) {
             db.updateRunnerReviewSessionCapability(msg.runnerId, msg.reviewSession);

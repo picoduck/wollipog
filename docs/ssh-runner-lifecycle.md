@@ -19,6 +19,36 @@ command. The runner therefore lives exactly as long as that SSH connection:
 This is deliberate ownership, not a service-manager guarantee. The dashboard must not describe an
 SSH box as unattended or laptop-off capable while it uses this mode.
 
+### Linux Delegation and Update Readiness
+
+On Linux with a reachable systemd user manager, SSH launches execute in a fresh transient user
+scope with `Delegate=yes`. The scope inherits the SSH login's environment and working directory;
+it is not an installed service and does not enable unattended operation. The runner verifies
+usable cgroup v2 containment before acquiring any provider HOME. If scope creation or containment
+verification fails, launch fails rather than retrying outside containment.
+
+The control plane holds the SSH command's stdin open. EOF requests the runner's normal bounded
+shutdown and provider cleanup. Reconnect/update closes stdin and waits up to 35 seconds for a
+successful SSH exit before launching a replacement; failure or timeout refuses replacement.
+SSH multiplexing and TTY allocation are disabled on this owned connection so another SSH master
+cannot outlive the owning process or retain the shutdown channel. Use matching current control-plane
+and runner builds: older runners do not implement the stdin shutdown contract.
+
+If a Linux host lacks a usable user manager, the runner retains process-scan containment and emits
+`ssh_launch mode=process-scan reason=user-manager-unavailable`. macOS keeps its existing native
+process boundary and uses the same EOF shutdown request. Neither path claims Linux cgroup proof.
+Remote launch stderr and runner containment diagnostics explain which mode was selected.
+
+Registration alone is not update readiness. The managed Machine stays deploying until a completed
+discovery inventory arrives. Newly ownership-blocked harnesses, previously available harnesses
+that become unavailable, and previously authenticated accounts that lose readiness produce a
+failed Machine status with a recovery explanation. The connected runner is retained for inspection;
+later successful rediscovery clears the failure. Missing readiness times out after 90 seconds.
+
+New delegation cannot add cgroup evidence to old ownership records. Preserve historical journals
+and use the existing account recovery details or local provider-HOME doctor; a refusal may still
+require operator recovery or a host reboot. Never delete ownership records to bypass proof.
+
 Reconnect and update requests fail with HTTP 409 while the box has any non-terminal session,
 including idle or input-required process state. An operator must first let those sessions settle or
 explicitly repeat the request with `{ "force": true }`; forced replacement interrupts the existing
@@ -166,7 +196,14 @@ Repository tests deterministically cover:
 - rejection before authorization when the supervised child cannot be stopped;
 - concurrent refresh sharing and reconnect/update supersession guards;
 - full-digest reuse plus current-and-one-rollback cache retention;
+- SSH shell quoting, delegation selection/failure, EOF shutdown acknowledgment, fresh harness
+  readiness and recovery after a failed inventory;
 - authenticated `gh` fallback and atomic partial-file promotion in all release installers.
 
-No live Linux or macOS SSH host was available for this slice. Those live rows remain unverified; the
-tests exercise their exact command and artifact contracts without claiming live platform coverage.
+The opt-in `ssh-runner-launch.integration.test.ts` uses an isolated Python process on a Linux SSH
+host to verify the exact tunnel/launch argv, delegated scope creation and stdin-EOF exit without
+accessing a runner credential or provider HOME. Select the host with `WOLLIPOG_TEST_SSH_TARGET`
+and optionally a known-hosts file with `WOLLIPOG_TEST_SSH_KNOWN_HOSTS`. Native
+`provider-home-lease-cgroup.test.ts` separately verifies recovery with an unreadable unrelated
+process alive and refusal while a genuine boundary survivor remains. These checks do not establish
+live macOS coverage or reproduce the original pre-reboot incident.
