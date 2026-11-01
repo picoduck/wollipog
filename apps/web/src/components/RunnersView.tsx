@@ -29,7 +29,7 @@ import {
   NetworkIcon,
   ComputerIcon,
 } from "./Icons.js";
-import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
+import { PeopleDevicesTab } from "./PeopleDevicesPanel.js";
 import { addRemoteInstanceAction, InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
 import { MachineCapacitySection } from "./MachineCapacitySection.js";
@@ -495,18 +495,15 @@ export function RunnersView() {
           id="connections-people-panel"
           role="tabpanel"
           aria-labelledby="connections-people-tab"
-          className="connections-panel access-panel"
+          className="connections-panel"
         >
-          {identity ? (
-            <PeopleDevicesPanel identity={identity} onIdentityChange={setIdentity} />
-          ) : identityError ? (
-            <div className="connection-access-error" role="alert">
-              People and device access could not be loaded: {identityError}
-              <button type="button" className="btn ghost sm" onClick={loadMachineAccess}>Retry</button>
-            </div>
-          ) : (
-            <div className="access-loading">Loading organization access…</div>
-          )}
+          <PeopleDevicesTab
+            identity={identity}
+            identityError={identityError}
+            offline={stale}
+            onIdentityChange={setIdentity}
+            onRetry={loadMachineAccess}
+          />
         </div>
       ) : (
       <div

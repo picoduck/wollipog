@@ -1,2 +1,0 @@
-|.access-page-intro|padding|2px
-|.access-page-intro|padding|2px

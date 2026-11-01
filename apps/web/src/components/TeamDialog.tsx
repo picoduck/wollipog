@@ -14,7 +14,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 
 /** The Teams section's own helper: Create Team says once what a team is for; Manage Team does not. */
-export const TEAM_PURPOSE = "Use teams when machines and work need a shared ownership scope.";
+export const TEAM_PURPOSE = "Teams share machines, workspaces and sessions among their members.";
 const NAME_HELPER = "Up to 80 characters.";
 const NAME_REQUIRED = "Enter a team name.";
 const NAME_TAKEN = "Another team already has this name.";

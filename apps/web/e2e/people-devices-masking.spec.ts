@@ -1,4 +1,4 @@
-import { devices, expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Locator, type Page } from "@playwright/test";
 
 const FIXTURE = "/people-devices-e2e.html";
 const OWNER = "owner@example.com";
@@ -154,15 +154,23 @@ async function leaveAndReturn(page: Page, via: "pointer" | "keyboard", whileAway
     await peopleTab.click();
   }
   await expect(peopleTab).toHaveAttribute("aria-selected", "true");
-  await expect(page.getByRole("heading", { name: "People & Devices" })).toBeVisible();
+  await expect(page.locator("#people-heading")).toBeVisible();
   await expect(page.getByRole("region", { name: "Paired Devices" }).getByText("Pat's Phone")).toBeVisible();
+}
+
+/** Your own row: it says "You" (#2997), and its name is masked like everyone else's. */
+const ownRow = (page: Page) => page.getByRole("region", { name: "People" }).locator(".access-row").filter({ hasText: "You" });
+
+/** Open a row through its one open target, which every row that opens something has on desktop and phone. */
+async function openRow(row: Locator): Promise<void> {
+  await row.locator(".access-row-open").click();
 }
 
 test("the identifier observer records transient disclosures that leave no trace in the final markup (#1816)", async ({ page }) => {
   await openPeopleDevices(page);
-  const context = page.locator(".access-context");
-  await context.getByRole("button", { name: "Show Your Name" }).click();
-  await expect(context).toContainText(OWNER);
+  const own = ownRow(page);
+  await own.getByRole("button", { name: "Show Person Name" }).click();
+  await expect(own).toContainText(OWNER);
 
   await watchIdentifierLeaks(page);
   await page.evaluate(([owner, member]) => {
@@ -191,7 +199,8 @@ test("the identifier observer records transient disclosures that leave no trace 
   // The node granted the reveal may drop it once; writing it back and away again is a new disclosure.
   await watchIdentifierLeaks(page);
   await page.evaluate((owner) => {
-    const revealed = document.querySelector(".access-context .pid-value")!.firstChild!;
+    const revealed = [...document.querySelectorAll(".access-row")]
+      .find((row) => row.textContent?.includes("You"))!.querySelector(".pid-value")!.firstChild!;
     revealed.textContent = "Hidden";
     revealed.textContent = owner;
     revealed.textContent = "Hidden";
@@ -220,21 +229,22 @@ for (const formFactor of ["desktop", "phone"] as const) {
       screen: phone.screen,
     } : { viewport: { width: 1280, height: 900 } });
 
-  test(`People & Devices masks names across rendered ${formFactor} surfaces until reveal (#1667)`, async ({ page }) => {
+  test(`People and Devices masks names across rendered ${formFactor} surfaces until reveal (#1667)`, async ({ page }) => {
     await page.goto(FIXTURE);
-    await expect(page.getByRole("heading", { name: "People & Devices" })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Paired Devices" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^People/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: /^Paired Devices/ })).toBeVisible();
     await expectNoEmailLeak(page);
 
-    const context = page.locator(".access-context");
+    const own = ownRow(page);
     const people = page.getByRole("region", { name: "People" });
     const devices = page.getByRole("region", { name: "Paired Devices" });
-    const contextReveal = context.getByRole("button", { name: "Show Your Name" });
-    await expect(contextReveal).toHaveAttribute("title", "Show Your Name");
-    await contextReveal.click();
-    await expect(context).toContainText(OWNER);
-    await expect(people).not.toContainText(OWNER);
-    await context.getByRole("button", { name: "Hide Your Name" }).click();
+    const teams = page.getByRole("region", { name: "Teams" });
+    const ownReveal = own.getByRole("button", { name: "Show Person Name" });
+    await expect(ownReveal).toHaveAttribute("title", "Show Person Name");
+    await ownReveal.click();
+    await expect(own).toContainText(OWNER);
+    await expectOnlyRevealed(page, OWNER);
+    await own.getByRole("button", { name: "Hide Person Name" }).click();
     await expectNoEmailLeak(page);
 
     const memberRow = people.locator(".access-row").last();
@@ -243,6 +253,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await personReveal.click();
     await expect(memberRow).toContainText(MEMBER);
     await expect(devices).not.toContainText(MEMBER);
+    await expect(teams).not.toContainText(MEMBER);
     await memberRow.getByRole("button", { name: "Hide Person Name" }).click();
     await expectNoEmailLeak(page);
 
@@ -253,20 +264,49 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await devices.getByRole("button", { name: "Hide Person Name" }).click();
     await expectNoEmailLeak(page);
 
-    await memberRow.getByRole("button", { name: "Manage", exact: true }).click();
-    let dialog = page.getByRole("dialog", { name: "Manage Person" });
+    // A team row's line 2 masks its members as the People rows do (#2997).
+    const teamRow = teams.locator(".access-row").first();
+    await expect(teamRow).toContainText("1 member: Email Hidden");
+    await teamRow.getByRole("button", { name: "Show Member Name" }).click();
+    await expect(teamRow).toContainText(MEMBER);
+    await expectOnlyRevealed(page, MEMBER);
+    await teamRow.getByRole("button", { name: "Hide Member Name" }).click();
+    await expectNoEmailLeak(page);
+
+    // Device Details and its Revoke Device confirmation keep the person masked until revealed.
+    await openRow(devices.locator(".access-row").first());
+    let dialog = page.getByRole("dialog", { name: "Pat's Phone" });
+    await expect(dialog.getByText("Access Level")).toBeVisible();
+    await expectNoEmailLeak(page);
+    await dialog.getByRole("button", { name: "Show Person Name" }).click();
+    await expect(dialog).toContainText(MEMBER);
+    await dialog.getByRole("button", { name: "Hide Person Name" }).click();
+    await dialog.getByRole("button", { name: "Revoke Device…" }).click();
+    const confirmation = page.getByRole("dialog", { name: "Revoke Device" });
+    await expect(confirmation).toContainText("“Pat's Phone” stops working for");
+    await expectNoEmailLeak(page);
+    await confirmation.getByRole("button", { name: "Show Person Name" }).click();
+    await expect(confirmation).toContainText(MEMBER);
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirmation).toHaveCount(0);
+    await dialog.getByRole("button", { name: "Done" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expectNoEmailLeak(page);
+
+    await openRow(memberRow);
+    dialog = page.getByRole("dialog", { name: "Manage Person" });
     await expect(dialog).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Show Name", exact: true }).click();
     await expect(dialog.getByRole("textbox", { name: "Name" })).toHaveValue(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
-    await memberRow.getByRole("button", { name: "Manage", exact: true }).click();
+    await openRow(memberRow);
     dialog = page.getByRole("dialog", { name: "Manage Person" });
     await expect(dialog.getByRole("button", { name: "Show Name", exact: true })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
-    await page.getByRole("button", { name: "Pair Device" }).click();
+    await page.getByRole("button", { name: "Pair Device…" }).click();
     dialog = page.getByRole("dialog", { name: "Pair Device" });
     await expect(dialog).toContainText("Step 1 of 2: Choose who it's for.");
     await expect(dialog.getByRole("radiogroup", { name: "Person" }).getByRole("radio")).toHaveCount(2);
@@ -293,14 +333,13 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await dialog.getByRole("button", { name: "Show Person Name" }).click();
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Done" }).click();
-    await page.getByRole("button", { name: "Pair Device" }).click();
+    await page.getByRole("button", { name: "Pair Device…" }).click();
     dialog = page.getByRole("dialog", { name: "Pair Device" });
     await expect(dialog.getByRole("button", { name: "Show Names" })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
-    const teamRow = page.getByRole("region", { name: "Teams" }).locator(".access-row").first();
-    await teamRow.getByRole("button", { name: "Manage" }).click();
+    await openRow(teamRow);
     dialog = page.getByRole("dialog", { name: "Manage Team" });
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 1/ })).toBeVisible();
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 2/ })).toBeVisible();
@@ -309,7 +348,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
-    await page.getByRole("button", { name: "Create Team" }).click();
+    await page.getByRole("button", { name: "Create Team…" }).click();
     dialog = page.getByRole("dialog", { name: "Create Team" });
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 1/ })).toBeVisible();
     await expect(dialog.getByRole("checkbox", { name: /Hidden Name 2/ })).toBeVisible();
@@ -318,40 +357,40 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await expect(dialog).toContainText(OWNER);
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
-    await page.getByRole("button", { name: "Create Team" }).click();
+    await page.getByRole("button", { name: "Create Team…" }).click();
     dialog = page.getByRole("dialog", { name: "Create Team" });
     await expect(dialog.getByRole("button", { name: "Show Names" })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();
   });
 
-  test(`returning to People & Devices through the Connections tabs starts masked on ${formFactor} (#1816)`, async ({ page }) => {
+  test(`returning to People and Devices through the Connections tabs starts masked on ${formFactor} (#1816)`, async ({ page }) => {
     await openPeopleDevices(page);
     await expectNoEmailLeak(page);
-    const context = page.locator(".access-context");
+    const own = ownRow(page);
     const memberRow = page.getByRole("region", { name: "People" }).locator(".access-row").last();
     const deviceRow = page.getByRole("region", { name: "Paired Devices" }).locator(".access-row").first();
     const surfaces = [
-      { name: "your name", scope: context, label: "Your Name", value: OWNER },
-      { name: "person row", scope: memberRow, label: "Person Name", value: MEMBER },
-      { name: "device row", scope: deviceRow, label: "Person Name", value: MEMBER },
+      { name: "your own row", scope: own, value: OWNER },
+      { name: "person row", scope: memberRow, value: MEMBER },
+      { name: "device row", scope: deviceRow, value: MEMBER },
     ];
     for (const [index, surface] of surfaces.entries()) {
       await test.step(`${surface.name} is masked again after a tab round trip`, async () => {
-        await surface.scope.getByRole("button", { name: `Show ${surface.label}` }).click();
+        await surface.scope.getByRole("button", { name: "Show Person Name" }).click();
         await expect(surface.scope).toContainText(surface.value);
         await expectOnlyRevealed(page, surface.value);
         await watchIdentifierLeaks(page);
         // Phones switch tabs by tapping; desktop also covers the roving arrow keys of the tablist.
         await leaveAndReturn(page, formFactor === "desktop" && index === 1 ? "keyboard" : "pointer");
-        await expect(surface.scope.getByRole("button", { name: `Show ${surface.label}` })).toBeVisible();
+        await expect(surface.scope.getByRole("button", { name: "Show Person Name" })).toBeVisible();
         await expectNoEmailLeak(page);
         expect(await takeIdentifierLeaks(page)).toEqual([]);
       });
     }
 
     await test.step("an identity renamed while away arrives masked", async () => {
-      await context.getByRole("button", { name: "Show Your Name" }).click();
+      await own.getByRole("button", { name: "Show Person Name" }).click();
       await memberRow.getByRole("button", { name: "Show Person Name" }).click();
       await expectOnlyRevealed(page, OWNER, MEMBER);
       await watchIdentifierLeaks(page);
@@ -360,7 +399,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
       // replaces it: both states must render masked.
       await leaveAndReturn(page, "pointer", () => renameEveryone(page));
       expect(await identityRequests(page)).toBeGreaterThan(requestsBefore);
-      await expect(context.getByRole("button", { name: "Show Your Name" })).toBeVisible();
+      await expect(own.getByRole("button", { name: "Show Person Name" })).toBeVisible();
       await expect(memberRow.getByRole("button", { name: "Show Person Name" })).toBeVisible();
       await expect(deviceRow.getByRole("button", { name: "Show Person Name" })).toBeVisible();
       await expectNoEmailLeak(page);
@@ -368,10 +407,10 @@ for (const formFactor of ["desktop", "phone"] as const) {
     });
 
     await test.step("a deliberate reveal shows only the chosen identifier", async () => {
-      await context.getByRole("button", { name: "Show Your Name" }).click();
-      await expect(context).toContainText(NEXT_OWNER);
+      await own.getByRole("button", { name: "Show Person Name" }).click();
+      await expect(own).toContainText(NEXT_OWNER);
       await expectOnlyRevealed(page, NEXT_OWNER);
-      await context.getByRole("button", { name: "Hide Your Name" }).click();
+      await own.getByRole("button", { name: "Hide Person Name" }).click();
       await deviceRow.getByRole("button", { name: "Show Person Name" }).click();
       await expect(deviceRow).toContainText(RENAMED_MEMBER);
       await expectOnlyRevealed(page, RENAMED_MEMBER);
@@ -380,13 +419,13 @@ for (const formFactor of ["desktop", "phone"] as const) {
 
   test(`an identity change remasks revealed names without transient disclosure on ${formFactor} (#1816)`, async ({ page }) => {
     await openPeopleDevices(page);
-    const context = page.locator(".access-context");
+    const own = ownRow(page);
     const people = page.getByRole("region", { name: "People" });
     const memberRow = people.locator(".access-row").last();
     const deviceRow = page.getByRole("region", { name: "Paired Devices" }).locator(".access-row").first();
-    await context.getByRole("button", { name: "Show Your Name" }).click();
+    await own.getByRole("button", { name: "Show Person Name" }).click();
     await memberRow.getByRole("button", { name: "Show Person Name" }).click();
-    await expect(context).toContainText(OWNER);
+    await expect(own).toContainText(OWNER);
     await expect(memberRow).toContainText(MEMBER);
     await expectOnlyRevealed(page, OWNER, MEMBER);
 
@@ -395,20 +434,20 @@ for (const formFactor of ["desktop", "phone"] as const) {
     // Saving a team refreshes the identity through RunnersView's onIdentityChange while the panel,
     // and the reveal state of each name in it, stays mounted.
     const requestsBefore = await identityRequests(page);
-    await page.getByRole("region", { name: "Teams" }).getByRole("button", { name: "Manage" }).click();
+    await openRow(page.getByRole("region", { name: "Teams" }).locator(".access-row").first());
     const dialog = page.getByRole("dialog", { name: "Manage Team" });
     // Save Changes sends nothing when nothing changed, so the team is renamed to make it save (#3000).
     await dialog.getByRole("textbox", { name: "Team Name" }).fill("Support Desk");
     await dialog.getByRole("button", { name: "Save Changes" }).click();
     await expect(dialog).toHaveCount(0);
     expect(await identityRequests(page)).toBeGreaterThan(requestsBefore);
-    await expect(context.getByRole("button", { name: "Show Your Name" })).toBeVisible();
+    await expect(own.getByRole("button", { name: "Show Person Name" })).toBeVisible();
     await expect(memberRow.getByRole("button", { name: "Show Person Name" })).toBeVisible();
     await expectNoEmailLeak(page);
     expect(await takeIdentifierLeaks(page)).toEqual([]);
 
-    await context.getByRole("button", { name: "Show Your Name" }).click();
-    await expect(context).toContainText(NEXT_OWNER);
+    await own.getByRole("button", { name: "Show Person Name" }).click();
+    await expect(own).toContainText(NEXT_OWNER);
     await expectOnlyRevealed(page, NEXT_OWNER);
     await memberRow.getByRole("button", { name: "Show Person Name" }).click();
     await expect(memberRow).toContainText(RENAMED_MEMBER);
@@ -418,7 +457,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
     // The reveal is bound to the tab visit as well as the value.
     await watchIdentifierLeaks(page);
     await leaveAndReturn(page, "pointer");
-    await expect(context.getByRole("button", { name: "Show Your Name" })).toBeVisible();
+    await expect(own.getByRole("button", { name: "Show Person Name" })).toBeVisible();
     await expect(memberRow.getByRole("button", { name: "Show Person Name" })).toBeVisible();
     await expectNoEmailLeak(page);
     expect(await takeIdentifierLeaks(page)).toEqual([]);

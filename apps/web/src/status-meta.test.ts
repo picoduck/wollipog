@@ -185,7 +185,7 @@ const TABLE: readonly Row[] = [
   ["run", "running", "Running", "info"],
   ["run", "failed", "Failed", "danger"],
   ["member", "active", "Active", "success"],
-  ["member", "suspended", "Suspended", "danger"],
+  ["member", "suspended", "Suspended", "neutral"],
   ["provider_account", "signed_in", "Signed In", "success"],
   ["provider_account", "sign_in_required", "Sign-In Required", "warning"],
   ["provider_account", "signing_in", "Signing In", "info"],

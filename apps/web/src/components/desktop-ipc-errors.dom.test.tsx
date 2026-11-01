@@ -127,8 +127,11 @@ test("People & Devices shows a native IPC string rejection and stops loading org
     navigation={{ current: () => ({ name: "runners", section: "people" }), push() {}, listen: () => () => {} }}
   ><RunnersView /></StoreProvider></FeedbackProvider>);
   try {
-    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /binary request frame/u);
-    assert.doesNotMatch(container.textContent ?? "", /Loading organization access/u);
+    // A titled danger notice, with the native message behind Show Details (#2997).
+    const alert = container.querySelector('[role="alert"]');
+    assert.match(alert?.textContent ?? "", /^Couldn't Load People and Devices/u);
+    assert.match(await noticeDetails(alert), /binary request frame/u);
+    assert.doesNotMatch(container.textContent ?? "", /Loading organization access|Loading people and devices/u);
   } finally {
     await unmount();
   }

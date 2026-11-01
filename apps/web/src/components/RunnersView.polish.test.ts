@@ -28,7 +28,7 @@ test("Connections separates machines from people and exposes durable machine rec
   assert.match(view, /id: "machines", label: <>Machines/);
   assert.match(view, /id: "people", label: <>People and Devices/);
   assert.match(view, /const instancesTab = instances\.desktopMultiInstance && !isMobile/);
-  assert.match(view, /<PeopleDevicesPanel identity=\{identity\}/);
+  assert.match(view, /<PeopleDevicesTab\s+identity=\{identity\}/);
   assert.match(machine, />Repair Connection…<\/button>/);
   assert.match(machine, /actions=\{access\.canManage && \(/);
   assert.match(view, /useMachineActions\(selectedMachine, \{\s*canManage: canManageMachines,/);
@@ -45,14 +45,18 @@ test("Connections separates machines from people and exposes durable machine rec
 
 test("People and device tasks use progressive disclosure and only Agents collapse", () => {
   assert.match(access, /const canPair = admin && identity\.context\.localBootstrap/);
-  assert.match(access, /Pairing and revocation must be started from this instance’s trusted local dashboard\./);
+  // A paired dashboard says where pairing happens, inside Paired Devices (#2997); the old note is gone.
+  assert.match(access, /You're on a paired device\. Pair and revoke devices from the computer running Wollipog\./);
+  assert.doesNotMatch(access, /connection-access-note/);
   assert.match(access, /kind: "add-person"/);
   assert.match(access, /kind: "pair-device"/);
   assert.match(access, /kind: "create-team"/);
-  assert.match(access, /Forms open only when/);
+  assert.doesNotMatch(access, /Forms open only when|access-page-intro|access-context/);
   // The forms are dialogs of their own files; Pair Device is one (#2999).
   assert.match(pairDevice, /<Modal/);
-  assert.match(access, /nextAdmin \? await api\.listDevices\(\) : \{ devices: \[\] \}/);
+  // Nobody else asks for the device list, and theirs stays unloaded rather than empty (#2997).
+  assert.match(access, /if \(canAdminister\(context\)\) \{\s*await loadDevices\(\);\s*\} else \{[\s\S]*?setDevices\(null\);/);
+  assert.doesNotMatch(access, /\{ devices: \[\] \}/);
   assert.match(teamDialog, /api\.createIdentityTeam\(\{ name: trimmed, memberUserIds: memberIds \}\)/);
   assert.match(personAccess, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
   assert.doesNotMatch(access, /device-pair-row/);

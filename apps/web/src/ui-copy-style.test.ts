@@ -1002,7 +1002,7 @@ const MAX_BODY_BRANCHES = 256;
 const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^projectArchiveMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
   /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/,
   /^STOP_JOB_OUTCOME$/, /^projectDeleteMessage\(/, /^projectRemoveLocationMessage\(/, /^queueHoldReleaseOutcome\(/,
-  /^deleteTeamMessage\(/];
+  /^deleteTeamMessage\(/, /^revokeDeviceMessage\(/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
