@@ -2842,6 +2842,14 @@ function interpreterHeredoc(command: string): { body: string; cd: string | undef
   return { body: lines.slice(0, end).join("\n"), cd: header[1] };
 }
 
+/** Absolute and dot-relative cd operands bypass CDPATH; `-` and option-like spellings do not
+ * identify a directory. Resolve before lexical normalization so a symlink followed by .. uses
+ * the kernel's parent, not the spelling's parent. Unresolvable operands receive no exemption. */
+function heredocWorkingDirectory(path: string, cwd: string): string | null {
+  if (!isAbsolute(path) && !/^\.\.?(?:\/|$)/u.test(path)) return null;
+  return physicalSpelling(isAbsolute(path) ? path : `${cwd}${sep}${path}`);
+}
+
 /** Language-neutral, additive path readings of executable heredoc text. This is not an interpreter
  * parser: quoted spans and punctuation-separated words are all judged, including comments. Simple
  * escapes add a decoded reading; encoded/unknown escapes and non-ASCII code fail closed. In
@@ -2864,8 +2872,12 @@ function interpreterBodyRefusal(body: string, cwd: string, root: string): string
   const quotedSlashes = new Set<string>();
   // HOME can be expanded by a shell the interpreter invokes. Add that reading as well; never
   // replace the raw one, since a literal filename may itself contain a dollar sign.
-  const expandBodyHome = (text: string): string => text.replace(/\$(?:HOME\b|\{HOME\})/gu, homedir());
-  for (const text of new Set([body, decoded, expandBodyHome(body), expandBodyHome(decoded)])) {
+  const expandBodyHome = (text: string): string => text.replace(/\$(?:HOME\b|\{HOME[^}]*\})/gu, homedir());
+  const texts = new Set([body, decoded, expandBodyHome(body), expandBodyHome(decoded)]);
+  // Adjacent string literals can concatenate in Python (and shell strings passed by either
+  // interpreter). This only ADDS path readings; raw and decoded text are always retained.
+  for (const text of [...texts]) texts.add(text.replace(/['"]\s*['"]/gu, "").replace(/['"]/gu, ""));
+  for (const text of texts) {
     for (const match of text.matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`|[^\s'"`()\[\]{},;=+*!?&|$<>]+/gu)) {
       readings.add(match[1] ?? match[2] ?? match[3] ?? match[0]);
       // Strings can themselves contain commands/code. Keep the whole span AND every lexical
@@ -2969,7 +2981,9 @@ export function commandTargetsGuardState(
     const inner = command.slice(command.indexOf(" && ") + 4);
     if (matchStrippableHeredoc(inner) !== null) {
       if (guardStateRelation(copyPrefix[1]!, cwd, root) !== null) return GUARD_STATE_REFUSAL;
-      return commandTargetsGuardState(inner, canonicalPath(resolve(cwd, copyPrefix[1]!)), directory);
+      const nextCwd = heredocWorkingDirectory(copyPrefix[1]!, cwd);
+      if (nextCwd === null) return guardStateUninspectableRefusal("the heredoc cd target is not an absolute or resolvable dot-relative path");
+      return commandTargetsGuardState(inner, nextCwd, directory);
     }
   }
   // Two readings (#1734): a whitelisted `cat`/`tee` heredoc has its body removed, and every `#` is
@@ -2987,7 +3001,8 @@ export function commandTargetsGuardState(
   if (interpreter !== null) {
     if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
     if (interpreter.cd !== undefined && guardStateRelation(interpreter.cd, cwd, root) !== null) return GUARD_STATE_REFUSAL;
-    const bodyCwd = interpreter.cd === undefined ? cwd : canonicalPath(resolve(cwd, interpreter.cd));
+    const bodyCwd = interpreter.cd === undefined ? cwd : heredocWorkingDirectory(interpreter.cd, cwd);
+    if (bodyCwd === null) return guardStateUninspectableRefusal("the heredoc cd target is not an absolute or resolvable dot-relative path");
     return interpreterBodyRefusal(interpreter.body, bodyCwd, root);
   }
   let tokens: ShellToken[];
