@@ -280,6 +280,7 @@ import {
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
+import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
@@ -854,6 +855,11 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
 // http-auth.ts so it can be regression-tested with app.inject against real Fastify routing.
 registerAuthGate(app, {
   authenticate: authedApiPrincipal,
+  authenticationRefusal: (req) => {
+    const refusal = sessionCredentialRefusal(req.headers, db);
+    if (refusal) app.log.warn({ reason: refusal.reason }, "session agent credential refused");
+    return refusal?.error;
+  },
   isAllowedOrigin,
   authorize: authorizeApiRequest,
 });

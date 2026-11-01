@@ -1,4 +1,5 @@
 import { RETIRED_REVIEW_TOOL_NAMES, REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Shared session-management tools for the session-scoped CLI and MCP server. */
 
 import { createHash } from "node:crypto";
@@ -257,7 +258,10 @@ async function cpFetch(
     /* non-JSON body (proxy error page etc.) — surface the raw text below */
   }
   if (!res.ok) {
-    const detail = typeof data?.error === "string" ? data.error : truncate(raw, MAX_LINE);
+    let detail = typeof data?.error === "string" ? data.error : truncate(raw, MAX_LINE);
+    if (res.status === 401 && deps.selfSessionId && actorHeader === WOLLIPOG_AGENT_ACTOR_SESSION_HEADER) {
+      detail = sessionCredentialRefusal(detail);
+    }
     return { ok: false, message: `HTTP ${res.status}: ${detail}`, status: res.status };
   }
   return { ok: true, data };
