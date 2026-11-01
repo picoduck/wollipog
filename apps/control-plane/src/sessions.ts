@@ -10611,10 +10611,16 @@ export class SessionsService {
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
     this.hub.sessionChangedById(sessionId);
     let result: GithubIssueClosureResult = { outcome: "uncertain", completedAt: now };
+    // The runner fences the mutation on the scope revision it was just synchronized to. A closure
+    // carried across scope changes that left its issue alone (#3915) is dispatched at that current
+    // revision, which the checks above proved still names its authority; the runner's own scope,
+    // issue, bounded-authority and mutation-fence checks then apply unchanged.
+    const currentScopeRevision = freshSession.orchestratorPolicy?.issueScope?.revision;
+    const dispatched = currentScopeRevision === undefined ? snapshot : { ...snapshot, scopeRevision: currentScopeRevision };
     try {
       const requestId = `issue_closure_execute_${randomUUID()}`;
       const response = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot,
+        type: "github_issue_closure", operation: "execute", requestId, sessionId, occurrenceId, snapshot: dispatched,
       }, 150_000);
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
           response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&

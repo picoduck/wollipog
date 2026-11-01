@@ -2184,9 +2184,27 @@ test("#3915 adding an issue leaves unrelated decisions as they were and revokes 
     assert.equal(h.db.issueScopeUnchangedFor("root", "team/repo", 101, 1, 2), false, "the change added 101");
     assert.equal(h.db.issueScopeUnchangedFor("root", "team/repo", 100, 1, 3), false, "no scope decision wrote revision 3");
     assert.equal(h.db.issueScopeUnchangedFor("root", "other/repo", 100, 1, 2), false, "another repository has separate authority");
+    // Like the runner, refuse a snapshot at any revision but the one just synchronized.
+    let synchronizedRevision = 0;
+    let dispatched: import("@wollipog/protocol").GithubIssueClosureSnapshot | undefined;
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type === "campaign_issue_scope" && message.operation === "synchronize") synchronizedRevision = message.scope.revision;
+      if (message.type === "github_issue_closure" && message.operation === "execute") {
+        dispatched = message.snapshot;
+        if (message.snapshot.scopeRevision !== synchronizedRevision) return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId,
+          ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
+      }
+      return runner(runnerId, requestId, message, timeout);
+    };
     const executed = await h.svc.executeGithubIssueClosure("root", closure.occurrenceId, closure.resourceDigest);
     assert.ok(executed.ok, executed.error ?? "refused");
     assert.equal(h.state.executes, 1);
+    assert.equal(synchronizedRevision, 2);
+    assert.ok(closure.resourceSnapshot.category === "issue_closure");
+    assert.deepEqual(dispatched, { ...closure.resourceSnapshot, scopeRevision: 2 },
+      "the approved closure is dispatched unchanged except for the revision the runner was synchronized to");
+    assert.notEqual(h.db.workflowDecisionByOccurrence(closure.occurrenceId)!.issueClosureResult?.outcome, "refused");
   } finally { h.db.close(); }
 });
 
