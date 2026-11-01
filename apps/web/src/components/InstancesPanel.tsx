@@ -35,7 +35,8 @@ export function addRemoteInstanceAction(
   };
 }
 
-function lastConnection(profile: InstanceProfile): string {
+/** A remote's last connection as a fact (§5.2): "Last connected 5h ago", or "Never connected". */
+export function lastConnection(profile: InstanceProfile): string {
   const parsed = profile.lastConnectedAt ? Date.parse(profile.lastConnectedAt) : Number.NaN;
   return Number.isFinite(parsed) ? `Last connected ${relativeTime(parsed)}` : "Never connected";
 }

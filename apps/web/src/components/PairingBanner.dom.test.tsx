@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -6,12 +7,15 @@ import { Window } from "happy-dom";
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "../device-token.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { StoreProvider, useStoreSelector } from "../store.js";
+import type { UiConnectionRuntime, UiSocket } from "../ui-transport.js";
 import { PairingBanner, type PairingBannerProps } from "./PairingBanner.js";
+import { PAIRING_INPUT_EMPTY, PAIRING_INPUT_INVALID } from "./PairThisDeviceDialog.js";
 
 /**
- * The pairing banner speaks in the person's terms (#2303): no "control plane" in any of its copy,
- * the startup-link command behind Show Details (§12.5, §13.2), and the pairing field, Pair, Retry
- * Pairing and their error lines behave as they did inside App.tsx.
+ * The pairing banner is one sentence and its actions; Pair This Device is the dialog with the field
+ * (#3005). The dialog runs against the real store: a stored link reopens its socket in-process, and
+ * what that socket does (a snapshot, or another 1008) is what the dialog reports.
  */
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -22,184 +26,314 @@ for (const [name, value] of Object.entries({
   navigator: domWindow.navigator,
   localStorage: domWindow.localStorage,
   HTMLElement: domWindow.HTMLElement,
+  HTMLButtonElement: domWindow.HTMLButtonElement,
   HTMLInputElement: domWindow.HTMLInputElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
-  InputEvent: domWindow.InputEvent,
+  PointerEvent: domWindow.PointerEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-const CONTROL_PLANE = /control[\s-]*plane/iu;
+/** Copy no banner or dialog may show (#2303, #3005). */
+const INTERNAL = /control[\s-]*plane|token|still not accepted/iu;
 const TOKEN = "abcdefghijklmnopqrstuvwxyz012345";
+const OTHER_TOKEN = "zyxwvutsrqponmlkjihgfedcba543210";
 
-const setValue = Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!;
+class FakeSocket implements UiSocket {
+  readonly readyState = 0;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  send() {}
+  close() {}
+}
 
-async function mount(props: PairingBannerProps) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  const render = (next: PairingBannerProps) => act(async () => { root.render(<PairingBanner {...next} />); });
-  await render(props);
-  const buttons = () => [...container.querySelectorAll<HTMLButtonElement>("button")];
+const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
+
+/** The shell's pairing slot, as App.tsx draws it: the banner while a 1008 latch holds. */
+function PairingSlot(props: Omit<PairingBannerProps, "conn">) {
+  const conn = useStoreSelector((state) => state.conn);
+  const authRequired = useStoreSelector((state) => state.authRequired);
+  return authRequired && conn !== "online" ? <PairingBanner conn={conn} {...props} /> : null;
+}
+
+async function mount(props: Omit<PairingBannerProps, "conn"> = { nativePairingFailure: null }) {
+  const sockets: FakeSocket[] = [];
+  let credentialChanges = 0;
+  const runtime: UiConnectionRuntime = {
+    instanceId: "pairing-banner",
+    runtimeKey: `pairing-banner:${Math.random()}`,
+    createSocket() {
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    onCredentialChange(listener) {
+      const counted = () => {
+        credentialChanges += 1;
+        listener();
+      };
+      window.addEventListener(DEVICE_TOKEN_CHANGED_EVENT, counted);
+      return () => window.removeEventListener(DEVICE_TOKEN_CHANGED_EVENT, counted);
+    },
+    close() {},
+  };
+  const host = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(host as never);
+  const root = createRoot(host);
+  await act(async () => {
+    root.render(<StoreProvider connection={runtime}><PairingSlot {...props} /></StoreProvider>);
+  });
+  const latest = () => sockets.at(-1)!;
+  // The first socket is refused as an unpaired device's is.
+  await act(async () => { latest().onclose?.({ code: 1008 }); });
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const banner = () => host.querySelector<HTMLElement>(".notice.page-banner");
+  const dialog = () => body.querySelector<HTMLElement>('[role="dialog"]');
+  const buttonIn = (scope: HTMLElement | null, name: string) =>
+    [...(scope?.querySelectorAll<HTMLButtonElement>("button") ?? [])].find((button) => button.textContent?.trim() === name);
+  const field = () => {
+    const label = [...(dialog()?.querySelectorAll<HTMLLabelElement>("label.field-label") ?? [])]
+      .find((candidate) => candidate.textContent === "Pairing Link or Code");
+    return label ? dialog()!.querySelector<HTMLInputElement>(`[id="${label.htmlFor}"]`) : null;
+  };
   const view = {
-    banner: () => container.querySelector<HTMLElement>(".notice.page-banner")!,
-    body: () => container.querySelector<HTMLElement>(".notice-body")!.textContent ?? "",
-    input: () => container.querySelector<HTMLInputElement>('input[aria-label="Pairing Token"]')!,
-    button: (name: string) => buttons().find((button) => button.textContent === name),
-    errors: () => [...container.querySelectorAll(".notice-error")].map((line) => line.textContent),
-    rerender: render,
-    async click(name: string) {
-      const button = view.button(name);
+    banner,
+    dialog,
+    field,
+    latest,
+    get sockets() { return sockets.length; },
+    get credentialChanges() { return credentialChanges; },
+    sentence: () => banner()?.querySelector(".notice-body")?.textContent ?? "",
+    bannerButtons: () => [...(banner()?.querySelectorAll<HTMLButtonElement>("button") ?? [])].map((button) => button.textContent?.trim()),
+    bannerButton: (name: string) => buttonIn(banner(), name),
+    dialogButton: (name: string) => buttonIn(dialog(), name),
+    async click(button: HTMLButtonElement | undefined, name = "button") {
       assert.ok(button, `${name} is rendered`);
-      await act(async () => { button.click(); });
+      await act(async () => {
+        button.click();
+        await tick();
+      });
     },
-    /** React's change plugin watches the focused input through keyup here, so type as a person would. */
     async type(value: string) {
-      const input = view.input();
+      const input = field();
+      assert.ok(input, "the Pairing Link or Code field is rendered");
       await act(async () => {
-        input.focus();
-        setValue.call(input, value);
-        input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true, data: "x" }) as never);
-        input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true, key: "k" }) as never);
+        input.value = value;
+        fireDomEvent.change(input);
       });
     },
-    async press(key: string) {
+    async pressEnter() {
       await act(async () => {
-        view.input().dispatchEvent(new domWindow.KeyboardEvent("keydown", { bubbles: true, key }) as never);
+        field()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { bubbles: true, key: "Enter" }) as never);
+        await tick();
       });
+    },
+    description: (input: Element) => (input.getAttribute("aria-describedby") ?? "").split(" ").filter(Boolean)
+      .map((id) => domWindow.document.getElementById(id)?.textContent ?? "").join(" "),
+    async openDialog(name = "Pair This Device…") {
+      await view.click(view.bannerButton(name), name);
+      assert.ok(dialog(), "the dialog opens");
     },
     async dispose() {
       await act(async () => root.unmount());
-      container.remove();
+      host.remove();
     },
   };
   return view;
 }
 
-function countTokenChanges() {
-  let count = 0;
-  const listener = () => { count += 1; };
-  window.addEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
-  return { get count() { return count; }, stop: () => window.removeEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener) };
-}
-
-test("the browser banner says how to pair in the person's terms and keeps the startup command behind Show Details", async () => {
-  const view = await mount({ connecting: false, nativePairingFailure: null });
+test("an unpaired browser's banner is one sentence and Pair This Device…, with no field in it", async () => {
+  const view = await mount();
   try {
-    const banner = view.banner();
+    const banner = view.banner()!;
     assert.equal(banner.getAttribute("role"), "status");
-    assert.equal(view.body(), "Pair this device to use Wollipog: open a pairing link on it, or paste the link or token here. "
-      + "An owner or admin can create one in Connections › People and Devices.");
-    assert.doesNotMatch(banner.textContent ?? "", CONTROL_PLANE);
-    assert.doesNotMatch(banner.textContent ?? "", /print-pair-url/u, "the operator command is not the main sentence");
-    assert.equal(view.button("Retry Pairing"), undefined, "Retry Pairing is the desktop app's alone");
-
-    await view.click("Show Details");
-    const details = banner.querySelector(".notice-details-body");
-    assert.ok(details, "Show Details opens the details");
-    assert.equal(details.textContent, "The computer running Wollipog prints a pairing link when it starts. "
-      + "To print it again, run wollipog pair url there, or start Wollipog with --print-pair-url.");
-    assert.deepEqual([...details.querySelectorAll("code")].map((code) => code.textContent), ["wollipog pair url", "--print-pair-url"]);
-    assert.doesNotMatch(banner.textContent ?? "", CONTROL_PLANE, "nor with the details open");
-    assert.equal(view.button("Hide Details")?.getAttribute("aria-expanded"), "true");
-
-    await view.click("Hide Details");
-    assertNoDomNode(banner.querySelector(".notice-details-body"));
+    assert.equal(view.sentence(), "This device isn't paired with Wollipog yet.");
+    assert.deepEqual(view.bannerButtons(), ["Pair This Device…"]);
+    const pair = view.bannerButton("Pair This Device…")!;
+    assert.equal(pair.className, "btn sm primary");
+    assert.equal(pair.getAttribute("aria-haspopup"), "dialog");
+    assertNoDomNode(banner.querySelector("input, textarea"), "no field renders inside the banner");
+    assert.doesNotMatch(banner.textContent ?? "", INTERNAL);
+    assert.doesNotMatch(banner.textContent ?? "", /print-pair-url|wollipog pair url/u, "the commands are the dialog's");
   } finally {
     await view.dispose();
   }
 });
 
-test("the desktop app's managed-pairing failure and its Retry Pairing error never name the control plane", async () => {
-  let adopt = async () => false;
+test("Pair This Device names its field and keeps where to find a link behind its disclosure", async () => {
+  const view = await mount();
+  try {
+    await view.openDialog();
+    const dialog = view.dialog()!;
+    assert.equal(dialog.querySelector("h2")?.textContent, "Pair This Device");
+    assert.match(dialog.textContent ?? "", /Paste the pairing link from the computer running Wollipog\./u);
+    const input = view.field()!;
+    assert.equal(input.type, "password");
+    assert.equal(input.maxLength, 2048);
+    assert.equal(view.description(input), "The link opens this page on its own; pasting it here works too.");
+    assert.equal(input.getAttribute("aria-invalid"), null);
+    assert.ok(view.dialogButton("Cancel"));
+    assert.ok(view.dialogButton("Pair This Device"));
+
+    const disclosure = dialog.querySelector<HTMLDetailsElement>("details.disclosure")!;
+    assert.equal(disclosure.querySelector("summary")?.textContent, "Where Do I Find the Link?");
+    assert.equal(disclosure.open, false);
+    const body = disclosure.querySelector(".disclosure-body")!;
+    assert.match(body.textContent ?? "", /On the computer running Wollipog, choose Pair Device… in Connections › People and Devices\. If you can't open Wollipog there, run this in its terminal:/u);
+    assert.equal(body.querySelector(".code-well > code")?.textContent, "wollipog pair url");
+    assert.equal(body.querySelector(".code-well > button")?.getAttribute("aria-label"), "Copy Pairing Command");
+    assert.match(body.textContent ?? "", /or start Wollipog with --print-pair-url\./u);
+    // The commands appear only inside the disclosure.
+    const outside = (dialog.textContent ?? "").replace(disclosure.textContent ?? "", "");
+    assert.doesNotMatch(outside, /print-pair-url|wollipog pair url/u);
+    assert.doesNotMatch(dialog.textContent ?? "", INTERNAL);
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("a malformed paste is the field's error, and nothing is stored or reconnected", async () => {
+  const view = await mount();
+  try {
+    await view.openDialog();
+    const before = deviceToken();
+    await view.click(view.dialogButton("Pair This Device"), "Pair This Device");
+    let input = view.field()!;
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(view.description(input), PAIRING_INPUT_EMPTY);
+
+    await view.type("https://studio.example.com/#pair=");
+    assert.equal(view.field()!.getAttribute("aria-invalid"), null, "typing clears the error");
+    await view.pressEnter();
+    input = view.field()!;
+    assert.equal(input.getAttribute("aria-invalid"), "true", "Enter submits");
+    const error = view.dialog()!.querySelector(".field-error")!;
+    assert.equal(error.textContent, PAIRING_INPUT_INVALID);
+    assert.equal(error.id, input.getAttribute("aria-describedby"));
+    assert.equal(domWindow.document.activeElement, input, "focus moves to the invalid field");
+    assert.equal(deviceToken(), before);
+    assert.equal(view.credentialChanges, 0);
+    assert.doesNotMatch(view.dialog()!.textContent ?? "", INTERNAL);
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("a link the server refuses says so above the footer, and an accepted one pairs in-process and closes", async () => {
+  const view = await mount();
+  try {
+    await view.openDialog();
+    await view.type(`http://127.0.0.1:4317/#pair=${OTHER_TOKEN}`);
+    const sockets = view.sockets;
+    await view.click(view.dialogButton("Pair This Device"), "Pair This Device");
+    assert.equal(deviceToken(), OTHER_TOKEN, "the link's code is stored");
+    assert.equal(view.credentialChanges, 1, "the socket reopens in-process, with no reload");
+    assert.equal(view.sockets, sockets + 1);
+    const submit = view.dialogButton("Pair This Device")!;
+    assert.equal(submit.getAttribute("aria-busy"), "true", "the new connection is opening");
+    assert.equal(view.field()!.value, "", "a stored link is cleared from the field");
+
+    await act(async () => { view.latest().onclose?.({ code: 1008 }); });
+    const dialog = view.dialog()!;
+    const notice = dialog.querySelector<HTMLElement>(".notice.t-danger")!;
+    assert.ok(notice, "a refused link is a danger notice");
+    assert.equal(notice.getAttribute("role"), "alert");
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Wollipog Didn't Accept This Link");
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "It may have been used already or revoked. Create a new one with Pair Device… and paste it here.");
+    const footer = dialog.querySelector(".modal-foot")!;
+    assert.ok(notice.compareDocumentPosition(footer) & domWindow.Node.DOCUMENT_POSITION_FOLLOWING, "the notice sits above the footer");
+    assert.equal(view.dialogButton("Pair This Device")!.getAttribute("aria-busy"), null);
+    assert.doesNotMatch(dialog.textContent ?? "", INTERNAL);
+
+    await view.type(TOKEN);
+    assertNoDomNode(view.dialog()!.querySelector(".notice.t-danger"), "a new paste clears the notice");
+    await view.pressEnter();
+    assert.equal(deviceToken(), TOKEN, "a bare code works too");
+    assert.equal(view.credentialChanges, 2);
+    await act(async () => {
+      view.latest().onmessage?.({ data: JSON.stringify({ type: "snapshot", runners: [], runs: [], pods: [], sessions: [] }) });
+      await tick();
+    });
+    assertNoDomNode(view.dialog(), "the dialog closes");
+    assertNoDomNode(view.banner(), "and the banner goes away");
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("a typed pairing link never reaches the DOM (#3814)", async () => {
+  const view = await mount();
+  try {
+    await view.openDialog();
+    const html = () => view.dialog()!.outerHTML;
+    await view.type("not a pairing-secret link");
+    assert.equal(view.field()!.value, "not a pairing-secret link", "the field still holds what was typed");
+    assert.doesNotMatch(html(), /pairing-secret/u);
+    await view.pressEnter();
+    assert.equal(view.field()!.value, "not a pairing-secret link", "a rejected paste stays in the field to correct");
+    assert.doesNotMatch(html(), /pairing-secret/u);
+    await view.type(`http://127.0.0.1:4317/#pair=${TOKEN}`);
+    assert.doesNotMatch(html(), new RegExp(TOKEN, "u"));
+  } finally {
+    await view.dispose();
+  }
+});
+
+test("the desktop app's managed-pairing failure offers Retry Pairing and Paste a Link…, with its words behind Show Details", async () => {
+  let adopt: () => Promise<boolean> = async () => false;
+  let settle: (adopted: boolean) => void = () => {};
   const view = await mount({
-    connecting: false,
     nativePairingFailure: "could not read the local dashboard credential",
     retryDesktopPairing: () => adopt(),
   });
   try {
-    assert.equal(view.body(), "This app couldn't pair itself with Wollipog. Retry pairing, or paste a pairing link or token here.");
-    assert.doesNotMatch(view.banner().textContent ?? "", CONTROL_PLANE);
+    assert.equal(view.sentence(), "This app couldn't read its saved pairing, so it can't connect.");
+    assert.deepEqual(view.bannerButtons(), ["Retry Pairing", "Paste a Link…", "Show Details"]);
+    assert.doesNotMatch(view.banner()!.textContent ?? "", INTERNAL);
+    await view.click(view.bannerButton("Show Details"), "Show Details");
+    assert.equal(view.banner()!.querySelector(".notice-details-body")?.textContent, "could not read the local dashboard credential");
+    assertNoDomNode(view.banner()!.querySelector(".notice-error"), "no red line in the banner");
 
-    // The native command answers null when another server owns the local port.
-    await view.click("Retry Pairing");
-    assert.deepEqual(view.errors(), [
-      "Another Wollipog is already running on this computer. Paste a pairing link or token from it to pair with it.",
-    ]);
-    assert.doesNotMatch(view.banner().textContent ?? "", CONTROL_PLANE);
-    await view.click("Show Details");
-    assert.doesNotMatch(view.banner().textContent ?? "", CONTROL_PLANE, "nor with the details open");
+    // Busy keeps the label: a spinner, aria-busy and the same name.
+    adopt = () => new Promise<boolean>((resolve) => { settle = resolve; });
+    await view.click(view.bannerButton("Retry Pairing"), "Retry Pairing");
+    const retry = view.bannerButton("Retry Pairing")!;
+    assert.equal(retry.getAttribute("aria-busy"), "true");
+    assert.equal(retry.getAttribute("data-busy-spinner"), "prepended");
+    // The native command answers false when another server owns the local port.
+    await act(async () => {
+      settle(false);
+      await tick();
+    });
+    assert.equal(view.sentence(), "Another Wollipog is already running on this computer. Paste a pairing link from it.");
+    assert.equal(view.bannerButton("Retry Pairing")!.getAttribute("aria-busy"), null);
+    assert.equal(view.bannerButton("Show Details"), undefined, "nothing more to show");
 
-    // A thrown native error is shown as it was; a successful adoption reconnects.
+    // Any other thrown message goes behind Show Details.
     adopt = async () => { throw new Error("the local dashboard credential is invalid"); };
-    await view.click("Retry Pairing");
-    assert.deepEqual(view.errors(), ["the local dashboard credential is invalid"]);
-    const changes = countTokenChanges();
+    await view.click(view.bannerButton("Retry Pairing"), "Retry Pairing");
+    assert.equal(view.sentence(), "This app couldn't read its saved pairing, so it can't connect.");
+    // The details were left open, so they show again opened.
+    assert.equal(view.bannerButton("Hide Details")?.getAttribute("aria-expanded"), "true");
+    assert.equal(view.banner()!.querySelector(".notice-details-body")?.textContent, "the local dashboard credential is invalid");
+    assertNoDomNode(view.banner()!.querySelector(".notice-error"), "nor a red line for a thrown message");
+
+    // An adopted credential reconnects in-process, and stays busy while that connection opens.
     adopt = async () => true;
-    await view.click("Retry Pairing");
-    changes.stop();
-    assert.equal(changes.count, 1, "an adopted credential reconnects in-process");
-    assert.deepEqual(view.errors(), [], "the retry clears the previous error");
+    await view.click(view.bannerButton("Retry Pairing"), "Retry Pairing");
+    assert.equal(view.credentialChanges, 1);
+    assert.equal(view.bannerButton("Retry Pairing")!.getAttribute("aria-busy"), "true");
 
-    await view.rerender({ connecting: true, nativePairingFailure: "x", retryDesktopPairing: () => adopt() });
-    assert.equal(view.button("Retry Pairing")?.disabled, true, "Retry Pairing waits out an open attempt");
-  } finally {
-    await view.dispose();
-  }
-});
-
-test("the pairing field, Pair and the error lines behave as before", async () => {
-  const view = await mount({ connecting: false, nativePairingFailure: null });
-  try {
-    assert.equal(view.input().type, "password");
-    assert.equal(view.input().placeholder, "#pair=… link or token");
-    assert.equal(view.button("Pair")?.disabled, true, "Pair waits for something to pair with");
-
-    await view.type("not a token");
-    assert.equal(view.button("Pair")?.disabled, false);
-    await view.click("Pair");
-    assert.deepEqual(view.errors(), ["that doesn't look like a pairing token or link"]);
-    await view.type("not a token either");
-    assert.deepEqual(view.errors(), [], "typing clears the error");
-
-    const changes = countTokenChanges();
-    await view.type(`http://127.0.0.1:4317/#pair=${TOKEN}`);
-    await view.press("Enter");
-    changes.stop();
-    assert.equal(deviceToken(), TOKEN, "a whole link is accepted and its token stored");
-    assert.equal(changes.count, 1, "the socket reconnects in-process, with no reload");
-    assert.deepEqual(view.errors(), ["Still not accepted. Check the token or pair a fresh one."],
-      "once the attempt settles without being accepted, the banner says so");
-
-    await view.rerender({ connecting: true, nativePairingFailure: null });
-    assert.equal(view.button("Pairing…")?.disabled, true, "the connecting state reads Pairing…");
-    assert.deepEqual(view.errors(), [], "no rejection line while the attempt is open");
-  } finally {
-    await view.dispose();
-  }
-});
-
-test("a typed pairing link never reaches the DOM, and a stored one is cleared from the field (#3814)", async () => {
-  const view = await mount({ connecting: false, nativePairingFailure: null });
-  const html = () => view.banner().outerHTML;
-  try {
-    await view.type("not a pairing-secret token");
-    assert.equal(view.input().value, "not a pairing-secret token", "the field still holds what was typed");
-    assert.doesNotMatch(html(), /pairing-secret/, "a typed token is not mirrored into a value attribute");
-    await view.click("Pair");
-    assert.deepEqual(view.errors(), ["that doesn't look like a pairing token or link"]);
-    assert.equal(view.input().value, "not a pairing-secret token", "a rejected token stays in the field to correct");
-    assert.doesNotMatch(html(), /pairing-secret/, "nor after a rejected Pair");
-
-    await view.type(`http://127.0.0.1:4317/#pair=${TOKEN}`);
-    assert.doesNotMatch(html(), new RegExp(TOKEN));
-    await view.click("Pair");
-    assert.equal(deviceToken(), TOKEN);
-    assert.equal(view.input().value, "", "a stored token is cleared from the field");
-    assert.equal(view.button("Pair")?.disabled, true, "and Pair waits for another");
-    assert.doesNotMatch(html(), new RegExp(TOKEN));
+    // Paste a Link… opens the same dialog.
+    await act(async () => { view.latest().onclose?.({ code: 1008 }); });
+    assert.equal(view.bannerButton("Retry Pairing")!.getAttribute("aria-busy"), null);
+    await view.openDialog("Paste a Link…");
+    assert.equal(view.dialog()!.querySelector("h2")?.textContent, "Pair This Device");
   } finally {
     await view.dispose();
   }

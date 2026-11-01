@@ -2156,8 +2156,10 @@ button.status { cursor: pointer; }
 .notice.compact .notice-details-body { flex-basis: 100%; margin-top: var(--space-2); }
 /* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
    in the tone below it. */
+/* The sentence wraps in its own column and the actions stay at the top right (#2465, #3005), as
+   Retry Now does; opened details take the line under both. */
 .notice.page-banner {
-  align-items: center;
+  align-items: start;
   min-height: 36px;
   padding: var(--space-1) var(--space-6);
   border: 0;
@@ -2165,22 +2167,26 @@ button.status { cursor: pointer; }
   border-radius: initial;
 }
 .notice.page-banner .notice-content {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  column-gap: var(--space-3);
-}
-.notice.page-banner .notice-actions { margin-top: 0; }
-/* The reconnecting message wraps in its own column; Retry Now stays at the top right. */
-.notice.page-banner.offline-banner { align-items: start; }
-.notice.page-banner.offline-banner .notice-content {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
+  column-gap: var(--space-3);
 }
+.notice.page-banner .notice-actions { margin-top: 0; }
+.notice.page-banner .notice-details-body { grid-column: 1 / -1; }
 @media (max-width: 760px) {
   .notice.page-banner {
     padding-inline: max(var(--space-4), env(safe-area-inset-left, 0px)) max(var(--space-4), env(safe-area-inset-right, 0px));
+  }
+  /* Two actions take one row under the sentence, each 44px tall even under a mouse; the tone icon
+     stays on the sentence's first line. One action keeps the top right. */
+  .notice.page-banner:has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-2);
+  }
+  .notice.page-banner:has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content > .notice-actions {
+    --control-h-sm: 44px;
+    padding-bottom: var(--space-2);
   }
   /* At the very top of the main area the banner takes the safe area the page header gives up. Below
      the phone Session bar, which already clears it, it does not. */
@@ -15104,20 +15110,6 @@ button.review-finding-location {
 @media (pointer: coarse) {
   .palette-foot { display: none; }
 }
-
-/* -------- Pairing banner (unauthorized /ui socket — device needs a token) -------- */
-.pairing-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-.pairing-controls input {
-  width: 220px;
-  padding: 6px 9px;
-  font-size: 13px;
-}
-/* A command is copied whole, so it wraps as one chip, never at its spaces or hyphens. */
-.pairing-details code { white-space: nowrap; }
 /* --------------------------- Phone layout (≤760px) --------------------------- */
 /* Keep the breakpoint in sync with MOBILE_BREAKPOINT_PX in components/useIsMobile.ts. */
 @media (max-width: 760px) {
@@ -15435,18 +15427,6 @@ button.review-finding-location {
   }
   .runner-card {
     padding: 14px;
-  }
-  /* The generic 16px rule below is (0,0,1); the desktop .pairing-controls input rule is
-     (0,1,1) and would win — restate it at equal specificity so iOS doesn't focus-zoom. */
-  .pairing-controls input {
-    font-size: 16px;
-    flex: 1;
-    width: auto;
-    min-width: 0;
-  }
-  .pairing-controls {
-    flex: 1;
-    display: flex;
   }
 
 

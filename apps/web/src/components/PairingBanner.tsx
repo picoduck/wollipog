@@ -1,12 +1,14 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { adoptManagedDesktopPairing, desktopLocalPairingFailure } from "../desktop-local-pairing.js";
-import { DEVICE_TOKEN_CHANGED_EVENT, parsePairingInput, storeDeviceToken } from "../device-token.js";
+import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
+import type { ConnState } from "../store.js";
 import { Notice } from "./Notice.js";
-import { useSecretInput } from "./ui/secret-input.js";
+import { PairThisDeviceDialog } from "./PairThisDeviceDialog.js";
+import { BusyButton } from "./ui/BusyButton.js";
 
 export interface PairingBannerProps {
-  /** A connection attempt is open right now. */
-  connecting: boolean;
+  /** The connection's state: whether an attempt is open, and whether a stored link was accepted. */
+  conn: ConnState;
   /** Why the desktop app could not adopt its own managed credential, or null outside that case. */
   nativePairingFailure?: string | null;
   /** Adopts the desktop app's managed credential; false when another server owns the local port. */
@@ -17,103 +19,87 @@ export interface PairingBannerProps {
  * Shown when the /ui socket was policy-closed (1008): this device isn't paired (or was
  * revoked). Matters most for the INSTALLED iOS PWA — its storage is partitioned from Safari,
  * so a token adopted in the browser never carries over, and a standalone app has no address
- * bar to open a fresh `#pair=` link in. Pasting the token (or the whole link) here is the way in.
+ * bar to open a fresh `#pair=` link in. Pair This Device… is the way in.
  *
- * The copy is in the person's terms (#2303), as the "Pair to Load Session" placeholder below it is;
- * the operator's way to reprint the startup link sits behind Show Details (§12.5, §13.2).
+ * The banner is one sentence and its actions (#3005; docs/design-system.md §12.5, §13.3): the field,
+ * its errors and where to find a link are Pair This Device's, a dialog. In the desktop app, when it
+ * could not read its own managed pairing, Retry Pairing tries again and Paste a Link… opens the same
+ * dialog; the desktop's own words for the failure stay behind Show Details.
  */
 export function PairingBanner({
-  connecting,
+  conn,
   nativePairingFailure = desktopLocalPairingFailure(),
   retryDesktopPairing = adoptManagedDesktopPairing,
 }: PairingBannerProps) {
-  // The token stays out of the DOM (#3814): Pair reads it once, and a token it stores is cleared.
-  const token = useSecretInput();
-  const [hasValue, setHasValue] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [submitted, setSubmitted] = useState(false);
+  const connecting = conn === "connecting";
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const closeDialog = useCallback(() => setDialogOpen(false), []);
+  // Another Wollipog owns the local port: its own pairing link is the only way in.
+  const [portTaken, setPortTaken] = useState(false);
+  const [failureDetail, setFailureDetail] = useState(nativePairingFailure);
   const [retrying, setRetrying] = useState(false);
-  const submit = () => {
-    const parsed = parsePairingInput(token.read());
-    if (!parsed) {
-      setError("that doesn't look like a pairing token or link");
-      return;
-    }
-    storeDeviceToken(parsed);
-    token.clear();
-    setHasValue(false);
-    setSubmitted(true);
-    // Reconnect IN-PROCESS (no reload): when localStorage is blocked the token lives only in
-    // this page's memory — a reload would drop it and loop straight back to this card.
-    window.dispatchEvent(new Event(DEVICE_TOKEN_CHANGED_EVENT));
-  };
+  // Busy from the press through the reconnect an adopted credential starts, as Retry Now is.
+  const [reconnecting, setReconnecting] = useState(false);
+  useEffect(() => {
+    if (!connecting) setReconnecting(false);
+  }, [connecting]);
+
   const retry = async () => {
+    if (retrying || reconnecting || connecting) return;
     setRetrying(true);
-    setError(null);
     try {
       const adopted = await retryDesktopPairing();
-      if (!adopted) {
-        throw new Error("Another Wollipog is already running on this computer. Paste a pairing link or token from it to pair with it.");
+      setPortTaken(!adopted);
+      if (adopted) {
+        setFailureDetail(null);
+        setReconnecting(true);
+        window.dispatchEvent(new Event(DEVICE_TOKEN_CHANGED_EVENT));
       }
-      window.dispatchEvent(new Event(DEVICE_TOKEN_CHANGED_EVENT));
     } catch (retryError) {
-      setError(retryError instanceof Error ? retryError.message : "the desktop could not retry local pairing");
+      setPortTaken(false);
+      setFailureDetail(retryError instanceof Error ? retryError.message : null);
     } finally {
       setRetrying(false);
     }
   };
+
+  // A retry that finds the port taken clears the desktop's recorded failure, but this is still the
+  // desktop app's banner: once seen, the failure keeps it.
+  const [desktop, setDesktop] = useState(nativePairingFailure != null);
+  if (nativePairingFailure != null && !desktop) setDesktop(true);
+  const sentence = !desktop
+    ? "This device isn't paired with Wollipog yet."
+    : portTaken
+      ? "Another Wollipog is already running on this computer. Paste a pairing link from it."
+      : "This app couldn't read its saved pairing, so it can't connect.";
+  const openDialog = () => setDialogOpen(true);
   return (
-    <Notice
-      pageBanner
-      tone="warning"
-      role="status"
-      actions={(
-        <span className="pairing-controls">
-          {nativePairingFailure && (
-            <button
-              type="button"
-              className="btn secondary sm"
+    <>
+      <Notice
+        pageBanner
+        tone="warning"
+        role="status"
+        actions={desktop ? (
+          <>
+            <BusyButton
+              className="btn sm"
+              busy={retrying || (reconnecting && connecting)}
+              progress="Retrying pairing…"
+              aria-disabled={connecting || undefined}
               onClick={() => void retry()}
-              disabled={retrying || connecting}
             >
-              {retrying ? "Retrying…" : "Retry Pairing"}
-            </button>
-          )}
-          <input
-            ref={token.ref}
-            type="password"
-            maxLength={2048}
-            placeholder="#pair=… link or token"
-            onChange={(e) => {
-              setHasValue(token.remember(e).trim() !== "");
-              setError(null);
-              setSubmitted(false);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") submit();
-            }}
-            aria-label="Pairing Token"
-          />
-          <button type="button" className="btn primary sm" onClick={submit} disabled={!hasValue || connecting}>
-            {connecting ? "Pairing…" : "Pair"}
-          </button>
-        </span>
-      )}
-      details={(
-        <p className="pairing-details">
-          The computer running Wollipog prints a pairing link when it starts. To print it again, run{" "}
-          <code>wollipog pair url</code> there, or start Wollipog with <code>--print-pair-url</code>.
-        </p>
-      )}
-    >
-      {nativePairingFailure
-        ? "This app couldn't pair itself with Wollipog. Retry pairing, or paste a pairing link or token here."
-        : "Pair this device to use Wollipog: open a pairing link on it, or paste the link or token here. An owner or admin can create one in Connections › People and Devices."}
-      {/* The banner is the live region; a nested alert would announce the error twice. */}
-      {error && <p className="notice-error">{error}</p>}
-      {submitted && !error && !connecting && (
-        <p className="notice-error">Still not accepted. Check the token or pair a fresh one.</p>
-      )}
-    </Notice>
+              Retry Pairing
+            </BusyButton>
+            <button type="button" className="btn sm" aria-haspopup="dialog" onClick={openDialog}>Paste a Link…</button>
+          </>
+        ) : (
+          <button type="button" className="btn sm primary" aria-haspopup="dialog" onClick={openDialog}>Pair This Device…</button>
+        )}
+        details={desktop && !portTaken && failureDetail ? <code>{failureDetail}</code> : undefined}
+      >
+        {sentence}
+      </Notice>
+      {dialogOpen && <PairThisDeviceDialog conn={conn} onClose={closeDialog} />}
+    </>
   );
 }

@@ -41,7 +41,7 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   // testable, the remote instance banner so the instance harness can show it (#1970), and the pairing
   // banner so its browser and desktop copy is DOM tested (#2303). The shell itself draws none.
   assert.doesNotMatch(app, /<Notice\b/, "the shell renders its banners through their components");
-  assert.match(app, /<PairingBanner connecting=\{conn === "connecting"\} \/>/);
+  assert.match(app, /<PairingBanner conn=\{conn\} \/>/);
   assert.equal(remoteInstanceBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
     "the remote instance banner renders the Notice page banner");
   assert.equal(offlineBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
