@@ -3266,6 +3266,18 @@ button.status { cursor: pointer; }
   gap: var(--space-1) var(--space-2);
 }
 .pid-field-head > .pid-toggle { margin-inline-start: auto; }
+/* A field whose stored value is masked (Manage Person's Name): the mask sits inside a box with the
+   input's edge and control height, so a hidden value still reads as the field rather than a missing
+   input. It is not a control; Show in the field head swaps in the real input. */
+.pid-field-box {
+  display: flex;
+  align-items: center;
+  min-height: var(--control-h);
+  padding: 0 var(--space-3);
+  background: var(--field-bg);
+  border: 1px solid var(--control-outline);
+  border-radius: var(--radius-sm);
+}
 
 /* ---------------------------------- Stale ----------------------------------
    StaleContent.tsx: last-known content kept on screen while its source is unreachable (§12.5).
@@ -10289,12 +10301,6 @@ textarea {
 .access-form select {
   width: 100%;
 }
-.access-form label small {
-  color: var(--text-faint);
-  font-size: 11.5px;
-  font-weight: 400;
-  line-height: 1.45;
-}
 .access-success {
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
@@ -12540,17 +12546,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   padding: 0 !important; margin: -1px !important; overflow: hidden !important;
   clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important;
 }
-
-/* People & Devices: a Name field whose stored value is masked until the admin shows it. */
-.access-form-field {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  color: var(--text);
-  font-size: var(--text-sm);
-  font-weight: 600;
-}
-.access-form-field > .pid-mask { min-height: 38px; display: flex; align-items: center; padding: 0 var(--space-3); }
 
 /* Connect via SSH (#2987). What This Needs is a closed disclosure of three requirements. Workspace
    Folder takes the row beside the 96px Port (§8.3), and the row stacks under 480px as a `.field-row`
