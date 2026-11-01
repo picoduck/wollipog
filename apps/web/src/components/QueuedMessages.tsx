@@ -208,8 +208,12 @@ export function QueuedMessages({
   useLayoutEffect(() => {
     if (!focusRemoved()) return;
     // A queue down to one message loses its summary; focus that was there, or on a control the lone
-    // row dropped, stays on the row while it has a control to take it.
-    const next = single ? trayRef.current?.querySelector<HTMLButtonElement>(".queue-row button:not(:disabled)") : null;
+    // row dropped, stays on the row while it has a control to take it. A sheet still open keeps it
+    // first: its Steer item can move onto the row, and focus outside an open sheet escapes its keys.
+    const sheetItem = trayRef.current?.ownerDocument.querySelector<HTMLElement>('[data-queue-sheet] [role="menuitem"]');
+    const next = single
+      ? sheetItem ?? trayRef.current?.querySelector<HTMLButtonElement>(".queue-row button:not(:disabled)")
+      : null;
     if (next) next.focus();
     else onFocusLost?.();
   });

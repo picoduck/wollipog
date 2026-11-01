@@ -642,6 +642,33 @@ test("a second arrival brings the collapsed summary back unless the lone row hol
   }
 });
 
+test("on a phone, a sheet whose focused Steer moves onto the row keeps focus inside the sheet", async () => {
+  phone = true;
+  let lost = 0;
+  const onFocusLost = () => { lost += 1; };
+  const tray = await render({ prompts: [queued("a"), queued("b")], onFocusLost });
+  try {
+    await act(async () => { tray.summary()!.click(); });
+    await act(async () => { tray.button(tray.row("a"), "Queued Message Actions")!.click(); });
+    const steer = domWindow.document.querySelector('[role="menuitem"][data-menu-label="Steer into This Turn"]') as unknown as HTMLButtonElement;
+    await act(async () => { steer.focus(); });
+    // B leaves, so A is the lone row and its Steer moves out of the sheet onto the row.
+    await tray.draw({ prompts: [queued("a")], onFocusLost });
+    const menu = domWindow.document.querySelector('[role="menu"]');
+    assert.ok(menu, "the sheet stays open");
+    const active = domWindow.document.activeElement;
+    assert.ok(active !== null && menu.contains(active as never), "focus stays inside the open sheet");
+    assert.equal(lost, 0);
+    await act(async () => {
+      active!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+    });
+    assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "Escape still closes it");
+  } finally {
+    phone = false;
+    await tray.unmount();
+  }
+});
+
 test("on a phone a lone row's open sheet survives a second arrival", async () => {
   phone = true;
   const tray = await render({ prompts: [queued("a")] });
