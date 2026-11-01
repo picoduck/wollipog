@@ -539,14 +539,21 @@ export function PeopleDevicesPanel({
     }
   };
 
+  // Only the latest refresh answers, as a whole: an earlier one that resolves after a newer one (an
+  // edit's refresh overtaken by the reconnect's) must not put back an older directory or role, nor
+  // ask for devices on that older role's behalf.
+  const refreshLoad = useRef(0);
   const refresh = async () => {
+    const load = ++refreshLoad.current;
     let context = contextRef.current;
     try {
       const nextIdentity = await api.getIdentity();
+      if (load !== refreshLoad.current) return;
       setRefreshError(null);
       onIdentityChange(nextIdentity);
       context = nextIdentity.context;
     } catch (cause) {
+      if (load !== refreshLoad.current) return;
       setRefreshError((cause as Error).message);
     }
     // Only owners and admins may read the device list, so nobody else asks for it. Their devices stay
@@ -563,6 +570,11 @@ export function PeopleDevicesPanel({
   useEffect(() => {
     void refresh();
   }, [api]);
+  // Unmounted, nothing in flight answers any more.
+  useEffect(() => () => {
+    refreshLoad.current += 1;
+    deviceLoad.current += 1;
+  }, []);
   // Back online, the lists are read again: what was on screen may no longer be true (§12.5).
   const wasOffline = useRef(offline);
   useEffect(() => {
