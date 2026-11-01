@@ -2221,7 +2221,7 @@ export const GUARD_STATE_REFUSAL =
 export const GUARD_STATE_UNINSPECTABLE_PREFIX = "Wollipog could not inspect this command for access to its runner-owned state";
 export function guardStateUninspectableRefusal(reason: string): string {
   return `${GUARD_STATE_UNINSPECTABLE_PREFIX} (${reason}), so it was not run. Split it into simpler commands, ` +
-    "write multi-line content with a file tool, or run it from a script file.";
+    "write multi-line content with apply_patch (Codex) or the Edit/Write tools (Claude Code), or run it from a script file.";
 }
 
 /** Values remembered per assigned name, and spellings judged per word, so no command is unbounded. */
@@ -2732,19 +2732,19 @@ function inspectsAncestorOnly(
  *
  *  1. STRIPPABLE HEREDOC (`matchStrippableHeredoc`). The body is dropped only when the command's
  *     first line matches one anchored regex over a tiny charset — `cat`/`tee`/`tee -a`, one `>`/`>>`
- *     redirect (cat) or target (tee) from `[A-Za-z0-9._/@+-]`, one `<<'DELIM'` with a plain
+ *     optional redirect (cat) or target (tee) from `[A-Za-z0-9._/@+-]`, one `<<[-]'DELIM'` with a plain
  *     single-quoted word, single spaces only — AND the body is terminated by a line equal to DELIM
  *     that is the last line (bar one trailing newline). Any `#`, `\`, `$`, backtick, extra quote,
  *     brace, glob, `;&|()<>` beyond the exact operators, or odd whitespace disqualifies it. The
  *     target is classified normally, so a target in the hook dir is refused.
  *  2. NON-REACHING ANCESTOR / AC1 (the gate in `commandTargetsGuardState`). A single simple command
- *     whose command word is the literal, unquoted `echo` — the only builtin that opens no operand and
- *     cannot be coerced into executing one — with no redirect and every character whitelisted
+ *     whose command word is literal `echo`, `true`, `false`, `:`, or fixed-format `printf`,
+ *     with no redirect and every character whitelisted
  *     (`ac1CommandWhitelisted`), is allowed even when it names `/`, `//`, or `~`. Only the ancestor
  *     check is relaxed; the inside check and the raw-text scan still refuse anything resolving into
  *     the state. (grep/sed/awk pattern/script exemptions were dropped as they could not be made both
- *     whitelist-tight and useful; `printf` was dropped because `printf -v 'arr[$(cmd)]'` executes a
- *     substitution, and `true`/`false`/`:` for conservatism — Codex round 4 CR-4.2, user scope.)
+ *     whitelist-tight and useful. Only printf '%s' and printf '%s\n' qualify: unlike `-v`,
+ *     these formats cannot evaluate an argument as an array subscript.)
  *
  * The only text-level correction never touches quoted text, so it can never hide a reach: `shell-quote`
  * treats an unquoted `#` as a comment running to the END of the whole string (past newlines), so
@@ -2755,18 +2755,19 @@ function inspectsAncestorOnly(
  * no `${...}` reduction and no quote-CONTENT modelling (round-2/round-3 bypass sources).
  * ------------------------------------------------------------------------------------------ */
 
-/** The ONLY builtin whose operands are never opened as paths and which cannot be coerced into
- *  executing one, so an ancestor among its operands cannot reach. `printf` is excluded because
- *  `printf -v 'arr[$(cmd)]' …` evaluates the array subscript and executes a command substitution even
- *  from a single-quoted argument the whitelist treats as opaque (Codex round 4 CR-4.2); `true`,
- *  `false`, and `:` are excluded too, so the exemption is `echo` alone (the user's round-4 scope). */
-const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo"]);
+/** Builtins with inert operands under the literal spelling/format gate below. No redirect,
+ * assignment, substitution, or second command qualifies. Inside-state operands still refuse. */
+const GUARD_STATE_NONPATH_COMMANDS = new Set(["echo", "true", "false", ":", "printf"]);
 
-/** The command word must be the literal, unquoted `echo` as the first thing on the line — not a
+/** The command word must be literal and unquoted as the first thing on the line — not a
  *  quoted (`'echo'`), escaped (`ec\ho`), or otherwise spelled word that tokenizes to `echo` but the
  *  whitelist could not reason about. Leading blanks are allowed; a separator before it is not (that
  *  would make it a second command, which the single-segment check already excludes). */
-const GUARD_STATE_LITERAL_ECHO = /^[ \t]*echo[ \t]/u;
+const GUARD_STATE_LITERAL_INERT_BUILTIN = /^[ \t]*(?:echo|true|false|:)[ \t]/u;
+
+// A fixed format excludes printf's -v variable/array evaluation and %b escape interpretation.
+// Arguments still pass the character whitelist and unconditional inside/realpath checks.
+const GUARD_STATE_LITERAL_PRINTF = /^[ \t]*printf '%s(?:\\n)?' /u;
 
 /** Characters allowed OUTSIDE single quotes in an AC1 command; a single-quoted run with no nested
  *  `'` is otherwise opaque-clean. Excludes `$`, `` ` ``, `\`, `"`, `#`, braces, globs (`*?[]`), and
@@ -2796,10 +2797,10 @@ function ac1CommandWhitelisted(command: string): boolean {
  *  single-quoted word; the redirect may precede or follow the `<<`. Single spaces only. */
 const GUARD_STATE_STRIPPABLE_HEREDOC_LINE = new RegExp(
   "^(?:" +
-    "cat >>? ?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // cat > T <<'D'
-    "cat <<'[A-Za-z_][A-Za-z0-9_]*' >>? ?[A-Za-z0-9._/@+-]+" + "|" + // cat <<'D' > T
-    "tee (?:-a )?[A-Za-z0-9._/@+-]+ <<'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // tee [-a] T <<'D'
-    "tee (?:-a )?<<'[A-Za-z_][A-Za-z0-9_]*' [A-Za-z0-9._/@+-]+" + // tee [-a] <<'D' T
+    "cat >>? ?[A-Za-z0-9._/@+-]+ <<-?'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // cat > T <<'D'
+    "cat <<-?'[A-Za-z_][A-Za-z0-9_]*'(?: >>? ?[A-Za-z0-9._/@+-]+)?" + "|" + // cat <<'D' [> T]
+    "tee (?:-a )?[A-Za-z0-9._/@+-]+ <<-?'[A-Za-z_][A-Za-z0-9_]*'" + "|" + // tee [-a] T <<'D'
+    "tee (?:-a )?<<-?'[A-Za-z_][A-Za-z0-9_]*' [A-Za-z0-9._/@+-]+" + // tee [-a] <<'D' T
   ")$",
   "u",
 );
@@ -2816,9 +2817,10 @@ function matchStrippableHeredoc(command: string): string | null {
   if (newline < 0) return null; // a heredoc needs a body on later lines
   const commandLine = command.slice(0, newline);
   if (!GUARD_STATE_STRIPPABLE_HEREDOC_LINE.test(commandLine)) return null;
-  const delimiter = /<<'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(commandLine)?.[1];
+  const delimiter = /<<-?'([A-Za-z_][A-Za-z0-9_]*)'/u.exec(commandLine)?.[1];
   if (delimiter === undefined) return null;
-  const lines = command.slice(newline + 1).split("\n");
+  const lines = command.slice(newline + 1).split("\n").map((line) =>
+    commandLine.includes("<<-") ? line.replace(/^\t+/u, "") : line);
   const terminator = lines.indexOf(delimiter); // bash: the first body line equal to the delimiter
   if (terminator < 0) return null; // unterminated → keep the body
   const last = lines.length - 1;
@@ -2999,21 +3001,21 @@ export function commandTargetsGuardState(
     }
     return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
   }
-  // AC1 (#1734): a SINGLE simple command whose command word is the literal, unquoted `echo` (the only
-  // builtin that opens no operand and cannot be coerced into executing one — printf/true/false/: are
-  // excluded, Codex round 4 CR-4.2), with no redirect and every character whitelisted, is allowed
+  // AC1 (#1734): a SINGLE literal inert builtin (printf only with a fixed %s format),
+  // with no redirect and every character whitelisted, is allowed
   // even when it names `/`, `//`, or `~`. Only the ancestor check is relaxed; the `inside` check below
   // (with symlink resolution) and the raw-text scan still refuse anything resolving into the state.
   // The command word must be the first token (no leading redirect/assignment) AND spelled literally
-  // (GUARD_STATE_LITERAL_ECHO, so a quoted/escaped `echo` the whitelist cannot reason about is out),
+  // (so a quoted/escaped command word the whitelist cannot reason about is out),
   // and the whitelist (no `$`, backtick, `\`, `"`, `#`, braces, globs, or extra operators) keeps out
   // any expansion or substitution that could reach — so this needs no bash modelling (Codex round 3).
   if (segments.length === 1) {
     const { operands, words, redirects } = segments[0]!;
     if (words !== null && words.length > 0 && operands[0] === words[0] &&
-        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) && GUARD_STATE_LITERAL_ECHO.test(command) &&
+        GUARD_STATE_NONPATH_COMMANDS.has(words[0]!) &&
+        (GUARD_STATE_LITERAL_INERT_BUILTIN.test(command) || GUARD_STATE_LITERAL_PRINTF.test(command)) &&
         redirects.length === 0 && ac1CommandWhitelisted(command)) {
-      // `echo` opens none of its operands; still refuse if one resolves inside the state.
+      // These forms open none of their operands; still refuse if one resolves inside the state.
       const reaches = operands.some((value) => value !== null && wordRelation(value) === "inside");
       if (!reaches) return null; // names at most an ancestor it cannot open → allowed
     }
