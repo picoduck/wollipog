@@ -13006,8 +13006,7 @@ export class SessionsService {
       if (decision.authority !== "human" || decision.category !== "review_round_extension") {
         return fail("this category is not designated for Orchestrator withdrawal", 403);
       }
-      if (typeof resolution.reason !== "string" || !resolution.reason.trim() ||
-          resolution.reason.length > WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS) {
+      if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
         return fail("a bounded nonempty withdrawal reason is required", 400);
       }
       if (this.workflowDecisionChildEnded(child) || isTerminal(parent.status) ||

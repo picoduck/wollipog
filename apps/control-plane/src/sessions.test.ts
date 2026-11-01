@@ -2363,6 +2363,8 @@ test("withdraw a pending human review request and deliver steering without stopp
       svc.resolveDescendantRequest(actor, child.id, pending.occurrenceId,
         { action: "withdraw_workflow_decision", reason }, access);
     assert.equal(withdraw(" ").status, 400);
+    assert.equal(withdraw("Continue\u0000now").status, 400);
+    assert.equal(withdraw("Continue\u001bnow").status, 400);
     assert.equal(withdraw("Continue", child.id).ok, false);
     assert.equal(withdraw("Continue", root.id, () => false).status, 404);
     const reason = "The extra round is unnecessary. Restore the reviewed head and continue.";
