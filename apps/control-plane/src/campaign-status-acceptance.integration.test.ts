@@ -799,6 +799,36 @@ test("AC12: a session outside every campaign has no membership or Campaign Statu
   }
 });
 
+test("worktree inspection gates archival, while Retain verification supports legacy and offline runners", async () => {
+  for (const completion of ["retain", "stop_and_archive"] as const) {
+    for (const unavailable of ["legacy", "offline"] as const) {
+      const stack = await acceptanceStack({ completion });
+      const { db, svc, hub, root, child, report, sentToRunner, close } = stack;
+      try {
+        const worker = child(root, "Completed Work");
+        db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?")
+          .run(JSON.stringify([{ id: "wt", path: "/worktrees/finished", branch: "fix/finished", source: "created" }]), worker);
+        svc.onSessionStatus(worker, "completed");
+        const seq = report(worker, "Delivered.");
+        svc.hydrateHistory = async () => {};
+        if (unavailable === "legacy") db.registerRunner(runnerMeta(), Date.now(), 265);
+        else hub.isRunnerOnline = () => false;
+        const sentBefore = sentToRunner.length;
+        const result = await svc.verifyCampaignChildWithHistory(root, {
+          childSessionId: worker, reportEventSeq: seq, followUpsAccounted: true,
+        });
+        assert.equal(result.ok, completion === "retain", `${completion}, ${unavailable}: ${result.error}`);
+        assert.equal(db.getSession(worker)?.archived, false, "no unavailable inspection archives a child");
+        assert.equal(sentToRunner.length, sentBefore, "no worktree action is sent without supported online inspection");
+        if (completion === "stop_and_archive") assert.match(result.error!,
+          unavailable === "legacy" ? /campaignWorktreeRecovery/u : /runner is offline/u);
+      } finally {
+        await close();
+      }
+    }
+  }
+});
+
 test("AC14 (pending cleanup): a verified child's refused worktree retirement is an outstanding cleanup obligation until it is retired", async () => {
   const stack = await acceptanceStack({ completion: "stop_and_archive" });
   const { db, svc, owner, root, child, report, byKey, setRunnerReply, sentToRunner, close } = stack;

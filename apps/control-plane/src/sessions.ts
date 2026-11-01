@@ -8326,8 +8326,13 @@ export class SessionsService {
       if (!child) return fail("campaign child not found", 404);
       const paths = [...new Set([...(child.worktrees ?? []).map((tree) => tree.path),
         ...(child.worktreePath ? [child.worktreePath] : [])])];
-      if (paths.length) {
-        const unsupported = this.capabilityFailure(child.runnerId, "campaignWorktreeRecovery", "campaign worktree inspection");
+      const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
+      const completion = rootId ? this.db.getSession(rootId)?.orchestratorPolicy?.behavior.completion : undefined;
+      // Retain attests delivery without retiring the worktree; preserve offline/legacy verification
+      // in that mode. Only archival needs fresh runner inspection before making the child inaccessible.
+      if (paths.length && completion === "stop_and_archive") {
+        const unsupported = this.capabilityFailure(child.runnerId, "campaignWorktreeRecovery",
+          "campaign worktree inspection (campaignWorktreeRecovery)");
         if (unsupported) return unsupported;
         if (!this.hub.isRunnerOnline(child.runnerId)) return fail("runner is offline; cannot inspect child worktrees before archival", 409);
         for (const worktreePath of paths) {
