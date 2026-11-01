@@ -135,13 +135,18 @@ test("offline and unpaired states name the next step without Wollipog's internal
   await expect(page.getByText("This device needs to be paired before it can open sessions.")).toBeVisible();
   // The pairing banner above is the next step; the page itself never names Wollipog's internals.
   await expect(page.locator("[data-placeholder]")).not.toContainText(/control[ -]plane/iu);
-  // Nor does the banner (#2303): the startup-link command waits behind Show Details.
+  // Nor does the banner (#2303, #3005): one sentence and Pair This Device…; the startup-link
+  // commands are the dialog's, behind Where Do I Find the Link?.
   const banner = page.locator(".notice.page-banner");
-  await expect(banner).toContainText("Pair this device to use Wollipog");
-  await expect(banner).not.toContainText(/control[ -]plane|print-pair-url/iu);
-  await banner.getByRole("button", { name: "Show Details" }).click();
-  await expect(banner.locator(".notice-details-body code")).toHaveText(["wollipog pair url", "--print-pair-url"]);
-  await expect(banner).not.toContainText(/control[ -]plane/iu);
+  await expect(banner).toHaveCount(1);
+  await expect(banner.locator(".notice-body")).toHaveText("This device isn't paired with Wollipog yet.");
+  await expect(banner).not.toContainText(/control[ -]plane|token|print-pair-url|wollipog pair url/iu);
+  await expect(banner.locator("input")).toHaveCount(0);
+  await banner.getByRole("button", { name: "Pair This Device…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Pair This Device" });
+  await dialog.getByText("Where Do I Find the Link?").click();
+  await expect(dialog.locator(".disclosure-body code")).toHaveText(["wollipog pair url", "--print-pair-url"]);
+  await expect(dialog).not.toContainText(/control[ -]plane|token/iu);
 });
 
 async function openArchived(page: Page, width: number, query = "&unarchiveRestart=1") {

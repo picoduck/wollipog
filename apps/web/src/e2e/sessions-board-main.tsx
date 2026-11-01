@@ -543,6 +543,12 @@ const client = {
     return { login };
   },
   listSkills: async () => ({ skills: [] }),
+  setArchived: async (sessionId: string, archived: boolean) => {
+    const value = sessions.find((candidate) => candidate.id === sessionId)!;
+    value.archived = archived;
+    socket?.push({ type: "session_upsert", session: structuredClone(value) });
+    return structuredClone(value);
+  },
   setColumn: async (sessionId: string, column: BoardColumn) => {
     window.__setColumnCalls.push({ sessionId, column });
     const moved = sessions.find((candidate) => candidate.id === sessionId);
@@ -620,6 +626,11 @@ const navigation: ViewNavigation = {
     const url = new URL(window.location.href);
     url.searchParams.set("path", viewPath(view));
     window.history.pushState(null, "", url);
+  },
+  replace: (view) => {
+    const url = new URL(window.location.href);
+    url.searchParams.set("path", viewPath(view));
+    window.history.replaceState(window.history.state, "", url);
   },
   listen: (onView) => {
     const onPop = () => onView(navigation.current());

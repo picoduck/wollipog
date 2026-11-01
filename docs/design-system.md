@@ -3431,7 +3431,20 @@ follows these rules so it never crowds out the conversation it asks about:
 
 A Notice variant spanning the top of the main area (under the rail's top, above the page header):
 36px, no radius, no side borders, bottom hairline in the tone. For offline and pairing states only.
-It pushes content down with a `--dur-base` height transition. A held desktop update is a decision,
+It pushes content down with a `--dur-base` height transition.
+
+- One sentence and its actions; never a field. The sentence wraps in its own column and the actions
+  stay at the top right at every width (#2465). At 760px and below a banner with two actions moves
+  them to one row under the sentence, each 44px tall, with the tone icon on the first line (#3005).
+- Unpaired: "This device isn't paired with Wollipog yet." and **Pair This Device…**, which opens the
+  Pair This Device dialog: Pairing Link or Code (a password field), Where Do I Find the Link? (the
+  `wollipog pair url` code well and `--print-pair-url`), a field error for a paste that isn't a link,
+  and a danger Notice above the footer, "Wollipog Didn't Accept This Link", for one the server
+  refuses. The desktop app that couldn't read its saved pairing offers **Retry Pairing** and
+  **Paste a Link…**, with the desktop's own words behind Show Details.
+- A remote instance: "Can't reach {name}. Last connected 5h ago." with **Retry** and **Open
+  Instances**, or "{name} needs a new pairing before it can reconnect." with **Re-Pair…** (the
+  Re-Pair Instance dialog, in place) and **Open Instances**. The address is the Instances row's. A held desktop update is a decision,
 so it is the Restart to Install Update confirmation (§13.1), never a banner or a notice.
 
 ---

@@ -426,6 +426,19 @@ test("a connection banner takes the top safe area only at the very top of the ma
   assert.deepEqual(bare, [], "a bare page-banner inset would clear the safe area twice under the Session bar");
 });
 
+test("an untitled page banner keeps its actions top right, and a titled one keeps its wrapping row", () => {
+  // The top-right grid is for a sentence and its actions (#2465, #3005). A titled banner (Secure
+  // Dashboard Available) has a head, a body and actions as three siblings, which that grid would
+  // scatter across two columns, so it keeps the wrapping flex row.
+  assert.match(baseRule(".notice.page-banner .notice-content"), /display: flex;/);
+  assert.match(baseRule(".notice.page-banner:not(.with-head) > .notice-content"), /display: grid;/);
+  const phone = mediaBlocks(css).filter((block) => block.maxWidths.includes(760));
+  const rows = phone.flatMap((block) => block.declarationsForSelector(
+    ".notice.page-banner:not(.with-head):has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content",
+  ).get("grid-template-columns") ?? []);
+  assert.deepEqual(rows, ["minmax(0, 1fr)"], "two actions move under the sentence on a phone, for untitled banners only");
+});
+
 test("a crashed route's error notice lines up with its page header", () => {
   // ErrorBoundary puts the notice in `.page` under the route's PageHeader (#1801); the page supplies
   // the gutter, so the notice's own standalone margin would push it right of the header.

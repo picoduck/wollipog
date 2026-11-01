@@ -80,6 +80,8 @@ import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
+import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "../device-token.js";
+import { adoptManagedDesktopPairing } from "../desktop-local-pairing.js";
 import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
@@ -188,8 +190,18 @@ const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
  */
 const SESSION_LOOKUP_MODE = FIXTURE_QUERY.get("lookup");
 let sessionLookupFailed = false;
-/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner. */
+/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner,
+ * until Pair This Device stores `PAIRING_ACCEPTED_CODE`, which the fixture accepts (#3005). */
 const PAIRING_REQUIRED = FIXTURE_QUERY.get("pairingRequired") === "1";
+const PAIRING_ACCEPTED_CODE = "e2eAcceptedPairingCode0123456789";
+/** `?managedPairingFailure=1` is the desktop app that couldn't read its saved pairing: its banner offers
+ * Retry Pairing, which here finds another Wollipog on the port, as a browser build's adoption does. */
+if (FIXTURE_QUERY.get("managedPairingFailure") === "1") {
+  void adoptManagedDesktopPairing({
+    isTauri: () => true,
+    invoke: async () => { throw new Error("The saved pairing file could not be read."); },
+  }).catch(() => {});
+}
 /** `?unarchiveRestart=1` advertises the control plane's one preflighted Unarchive and Restart. */
 const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
 /** `?archiveStop=failed` or `?archiveStop=pending`: every archive reports its sessions' stops as
@@ -1751,7 +1763,7 @@ const connection: UiConnectionRuntime = {
   runtimeKey: "project-inbox-e2e:1",
   createSocket() {
     if (offlineBannerLost) return offlineBannerSocket = new NeverOpenSocket();
-    if (PAIRING_REQUIRED) {
+    if (PAIRING_REQUIRED && deviceToken() !== PAIRING_ACCEPTED_CODE) {
       const unpaired = new NeverOpenSocket();
       window.setTimeout(() => unpaired.onclose?.({ code: 1008 }), 0);
       return unpaired;
@@ -1768,6 +1780,11 @@ const connection: UiConnectionRuntime = {
       }, 50);
     }
     return opened;
+  },
+  // A stored pairing reopens the socket in-process, as the browser runtime's does.
+  onCredentialChange(listener) {
+    window.addEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
+    return () => window.removeEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
   },
   close() {},
 };

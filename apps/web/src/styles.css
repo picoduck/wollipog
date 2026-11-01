@@ -2159,16 +2159,29 @@ button.status { cursor: pointer; }
   column-gap: var(--space-3);
 }
 .notice.page-banner .notice-actions { margin-top: 0; }
-/* The reconnecting message wraps in its own column; Retry Now stays at the top right. */
-.notice.page-banner.offline-banner { align-items: start; }
-.notice.page-banner.offline-banner .notice-content {
+/* An untitled banner's sentence wraps in its own column and its actions stay at the top right
+   (#2465, #3005), as Retry Now does; opened details take the line under both. A titled banner
+   (Secure Dashboard Available) keeps the wrapping row above. */
+.notice.page-banner:not(.with-head) { align-items: start; }
+.notice.page-banner:not(.with-head) > .notice-content {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: start;
 }
+.notice.page-banner:not(.with-head) .notice-details-body { grid-column: 1 / -1; }
 @media (max-width: 760px) {
   .notice.page-banner {
     padding-inline: max(var(--space-4), env(safe-area-inset-left, 0px)) max(var(--space-4), env(safe-area-inset-right, 0px));
+  }
+  /* Two actions take one row under the sentence, each 44px tall even under a mouse; the tone icon
+     stays on the sentence's first line. One action keeps the top right. */
+  .notice.page-banner:not(.with-head):has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content {
+    grid-template-columns: minmax(0, 1fr);
+    row-gap: var(--space-2);
+  }
+  .notice.page-banner:not(.with-head):has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content > .notice-actions {
+    --control-h-sm: 44px;
+    padding-bottom: var(--space-2);
   }
   /* At the very top of the main area the banner takes the safe area the page header gives up. Below
      the phone Session bar, which already clears it, it does not. */
@@ -6166,6 +6179,38 @@ body.shell-dock-dragging * {
   border-radius: var(--radius-xs);
   background: none;
   cursor: zoom-in;
+}
+/* An artifact a reply cites by id (#3970): a chip of its kind and name in the line of text, which
+   opens the viewer. It wraps with the sentence and truncates a long name rather than widening it. */
+.art-ref {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  max-width: 100%;
+  padding: 0 var(--space-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev-2);
+  color: var(--text);
+  font: inherit;
+  line-height: inherit;
+  vertical-align: baseline;
+  cursor: pointer;
+}
+.art-ref:hover { border-color: var(--border-strong); }
+.art-ref > .app-icon { flex: none; }
+.art-ref-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The cited artifacts a reply's turn did not attach, previewed under the reply. */
+.tl-artifact-refs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  margin-top: var(--space-3);
 }
 /* The artifact viewer (#3924): a full dialog, a full-height sheet on phones, its stage taking what the
    header and footer leave. An image's stage takes every touch, so a pinch zooms the image and not the
@@ -15015,20 +15060,6 @@ button.review-finding-location {
 @media (pointer: coarse) {
   .palette-foot { display: none; }
 }
-
-/* -------- Pairing banner (unauthorized /ui socket — device needs a token) -------- */
-.pairing-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-.pairing-controls input {
-  width: 220px;
-  padding: 6px 9px;
-  font-size: 13px;
-}
-/* A command is copied whole, so it wraps as one chip, never at its spaces or hyphens. */
-.pairing-details code { white-space: nowrap; }
 /* --------------------------- Phone layout (≤760px) --------------------------- */
 /* Keep the breakpoint in sync with MOBILE_BREAKPOINT_PX in components/useIsMobile.ts. */
 @media (max-width: 760px) {
@@ -15306,18 +15337,6 @@ button.review-finding-location {
   }
   .runner-card {
     padding: 14px;
-  }
-  /* The generic 16px rule below is (0,0,1); the desktop .pairing-controls input rule is
-     (0,1,1) and would win — restate it at equal specificity so iOS doesn't focus-zoom. */
-  .pairing-controls input {
-    font-size: 16px;
-    flex: 1;
-    width: auto;
-    min-width: 0;
-  }
-  .pairing-controls {
-    flex: 1;
-    display: flex;
   }
 
 

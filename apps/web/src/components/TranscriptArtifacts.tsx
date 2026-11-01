@@ -1,5 +1,9 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from "react";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
+import { useApi } from "../api-context.js";
+import { SessionArtifactDirectory } from "../artifact-directory.js";
+import { referencedArtifactIds } from "../artifact-references.js";
+import { ArtifactReferenceContext } from "./artifact-reference-context.js";
 import { labelFor } from "../artifact-kind.js";
 import { classifyArtifactPreview } from "../artifact-preview.js";
 import { formatBytes } from "../files-panel.js";
@@ -39,6 +43,10 @@ interface TranscriptArtifactActions {
 }
 
 const TranscriptArtifactContext = createContext<TranscriptArtifactActions | null>(null);
+const ArtifactDirectoryContext = createContext<SessionArtifactDirectory | null>(null);
+
+/** The transcript's directory of its session's artifacts; null where references do not resolve. */
+export const useArtifactDirectory = (): SessionArtifactDirectory | null => useContext(ArtifactDirectoryContext);
 
 /**
  * The transcript's one artifact viewer (#3924). It belongs to the transcript, not to a row, so a
@@ -46,10 +54,18 @@ const TranscriptArtifactContext = createContext<TranscriptArtifactActions | null
  * focus to the control that opened it; the transcript's scroll and the composer's draft are never
  * touched.
  */
-export function TranscriptArtifactViewerProvider({ children, onOpenInBrowser }: {
+export function TranscriptArtifactViewerProvider({ children, onOpenInBrowser, sessionId }: {
   children: ReactNode;
   onOpenInBrowser?: (artifact: WorkflowArtifactView) => void;
+  /** The session whose artifact ids a reply's references resolve against (#3970); none resolves
+   * without it, as in a public shared transcript. */
+  sessionId?: string;
 }) {
+  const api = useApi();
+  const directory = useMemo(
+    () => sessionId ? new SessionArtifactDirectory(sessionId, api.sessionWorkflowArtifacts) : null,
+    [api, sessionId],
+  );
   const [viewer, setViewer] = useState<{ group: readonly WorkflowArtifactView[]; artifactId: string } | null>(null);
   const openerRef = useRef<HTMLElement | null>(null);
   const openViewer = useCallback((group: readonly WorkflowArtifactView[], artifactId: string, opener: HTMLElement | null) => {
@@ -62,7 +78,9 @@ export function TranscriptArtifactViewerProvider({ children, onOpenInBrowser }: 
   );
   return (
     <TranscriptArtifactContext.Provider value={actions}>
+    <ArtifactDirectoryContext.Provider value={directory}>
       {children}
+    </ArtifactDirectoryContext.Provider>
       {viewer && (
         <ArtifactGallery
           artifacts={viewer.group}
@@ -185,5 +203,111 @@ function TranscriptArtifactPreview({ artifact, group, actions }: {
       {model && <ArtifactPreviewBody model={model} onOpenImage={actions ? openViewer : undefined} />}
       {!inline && <p className="tl-artifact-note">{TRANSCRIPT_ARTIFACT_COPY.noPreview}</p>}
     </div>
+  );
+}
+
+/** Which of a reply's cited artifacts preview under it (#3970), from `layoutReplyArtifactPreviews`. */
+export interface ReplyArtifactPreviews {
+  /** The ids this reply is the first in its turn to cite, of artifacts its turn did not attach. */
+  ids: readonly string[];
+  /** How many may preview inline: what the turn's attachments and earlier replies left of the limit. */
+  budget: number;
+}
+
+const NO_IDS: readonly string[] = [];
+const noSubscribe = () => () => undefined;
+const noVersion = () => 0;
+
+/**
+ * The ids' artifacts as far as the transcript's directory resolves them, in order. `active` asks
+ * the directory about ids it has not settled; a streaming reply waits, so a half-written id is never
+ * looked up.
+ */
+function useResolvedArtifacts(ids: readonly string[], active: boolean): WorkflowArtifactView[] {
+  const directory = useArtifactDirectory();
+  const version = useSyncExternalStore(directory?.subscribe ?? noSubscribe, directory?.getVersion ?? noVersion, noVersion);
+  useEffect(() => {
+    if (directory && active && ids.length > 0) directory.request(ids);
+  }, [active, directory, ids]);
+  return useMemo(() => directory
+    ? ids.flatMap((id) => {
+      const resolution = directory.resolve(id);
+      return resolution.state === "resolved" ? [resolution.artifact] : [];
+    })
+    : [], [directory, ids, version]);
+}
+
+const ReplyReferenceContext = createContext<{ ids: readonly string[]; settled: boolean } | null>(null);
+
+/**
+ * An artifact id cited in a reply (#3970), once the session's directory names it: a chip of its kind
+ * and name that opens the viewer on it, stepping through every artifact the reply cites. Until then,
+ * and for an id the session has no artifact for, it is the text the agent wrote, and says nothing
+ * more. Copy Link and Open in Browser are the viewer's.
+ */
+function TranscriptArtifactReference({ id, code }: { id: string; code: boolean }) {
+  const reply = useContext(ReplyReferenceContext);
+  const actions = useContext(TranscriptArtifactContext);
+  const group = useResolvedArtifacts(reply?.ids ?? NO_IDS, reply?.settled ?? false);
+  const artifact = group.find((candidate) => candidate.artifactId === id);
+  if (!artifact || !actions) return code ? <code>{id}</code> : <>{id}</>;
+  return (
+    <button
+      type="button"
+      className="art-ref"
+      aria-haspopup="dialog"
+      title={`${labelFor(artifact.kind)} · ${formatBytes(artifact.sizeBytes)} · ${id}`}
+      data-artifact-id={id}
+      onClick={(event) => actions.openViewer(group, id, event.currentTarget)}
+    >
+      <ArtifactKindIcon kind={artifact.kind} size={14} />
+      <span className="art-ref-name">{artifact.name}</span>
+    </button>
+  );
+}
+
+const renderArtifactReference = (id: string, code: boolean) => <TranscriptArtifactReference id={id} code={code} />;
+
+/**
+ * The cited artifacts a reply's turn did not attach, under the reply: bounded previews within what
+ * the turn's limit leaves, then a counted View All for the rest, the way attachments show.
+ */
+function ReplyReferencedArtifacts({ previews, settled }: { previews: ReplyArtifactPreviews; settled: boolean }) {
+  const actions = useContext(TranscriptArtifactContext);
+  const resolved = useResolvedArtifacts(previews.ids, settled);
+  if (resolved.length === 0) return null;
+  const shown = Math.min(previews.budget, resolved.length);
+  return (
+    <div className="tl-artifact-refs">
+      {resolved.slice(0, shown).map((artifact) => (
+        <TranscriptArtifactPreview key={artifact.artifactId} artifact={artifact} group={resolved} actions={actions} />
+      ))}
+      {resolved.length > shown && <TranscriptArtifactsMore group={resolved} index={shown} actions={actions} />}
+    </div>
+  );
+}
+
+/**
+ * An agent reply's artifact references (#3970): the ids it cites become chips, and the artifacts
+ * its turn did not attach preview under it. Without a session directory (a public share, a host
+ * outside a session) or any cited id, the reply renders exactly as it did.
+ */
+export function ReplyArtifactScope({ text, settled, previews, children }: {
+  text: string;
+  settled: boolean;
+  previews?: ReplyArtifactPreviews;
+  children: ReactNode;
+}) {
+  const directory = useArtifactDirectory();
+  const ids = useMemo(() => referencedArtifactIds(text), [text]);
+  const reply = useMemo(() => ({ ids, settled }), [ids, settled]);
+  if (!directory || ids.length === 0) return <>{children}</>;
+  return (
+    <ArtifactReferenceContext.Provider value={renderArtifactReference}>
+      <ReplyReferenceContext.Provider value={reply}>
+        {children}
+        {previews && previews.ids.length > 0 && <ReplyReferencedArtifacts previews={previews} settled={settled} />}
+      </ReplyReferenceContext.Provider>
+    </ArtifactReferenceContext.Provider>
   );
 }

@@ -34,6 +34,13 @@ const session: SessionView = {
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
 };
 
+/** Artifact-shaped ids a reply cites: two the session saved, and one it has no artifact for. */
+const CITED = [
+  ["art_c17ed0000a01", "Review Summary", "#0ea5e9"],
+  ["art_c17ed0000b02", "Checkout Flow", "#84cc16"],
+] as const;
+const FOREIGN_ID = "art_f0e19e000ff0";
+
 const SHOTS = [
   ["sessions-desktop", "Sessions, Desktop", "#3b82f6"],
   ["sessions-phone", "Sessions, Phone", "#10b981"],
@@ -101,7 +108,17 @@ async function describeArtifacts(): Promise<WorkflowArtifactView[]> {
     encoding: "utf8", sizeBytes: logBytes.byteLength, sha256: await sha256(logBytes),
     createdBy: { kind: "agent", id: SESSION_ID }, createdAt: now,
   };
-  return [...shots, log];
+  // Saved by the session but never attached in its transcript: a reply cites them by id (#3970).
+  const cited = await Promise.all(CITED.map(async ([id, label, color], index) => {
+    const bytes = await capture(label, color, index);
+    fixtures.set(id, { bytes, mimeType: "image/png" });
+    return {
+      artifactId: id, sessionId: SESSION_ID, kind: "screenshot", name: `${label.toLowerCase().replace(/\W+/g, "-")}.png`,
+      mimeType: "image/png", encoding: "base64", sizeBytes: bytes.byteLength, sha256: await sha256(bytes),
+      createdBy: { kind: "agent", id: SESSION_ID }, createdAt: now + index + 1,
+    } satisfies WorkflowArtifactView;
+  }));
+  return [...shots, log, ...cited];
 }
 
 let artifacts: WorkflowArtifactView[] = [];
@@ -151,7 +168,7 @@ const connection: UiConnectionRuntime = {
 const navigation: ViewNavigation = { current: () => ({ name: "session", id: SESSION_ID }), push() {}, listen: () => () => {} };
 
 function timelineItems(): TimelineItem[] {
-  const shots = artifacts.filter((artifact) => artifact.kind === "screenshot");
+  const shots = artifacts.filter((artifact) => artifact.kind === "screenshot" && !CITED.some(([cited]) => cited === artifact.artifactId));
   const log = artifacts.find((artifact) => artifact.kind === "test_log")!;
   let id = 0;
   const at = (offset: number) => Date.now() - 600_000 + offset * 1_000;
@@ -166,6 +183,20 @@ function timelineItems(): TimelineItem[] {
   items.push({ kind: "user_message", id: ++id, text: "Attach the test log too.", createdAt: at(id) });
   items.push({ kind: "artifact_attached", id: ++id, artifact: log, createdAt: at(id) });
   items.push({ kind: "agent_message", id: ++id, text: "The log is attached.", createdAt: at(id) });
+  items.push({ kind: "user_message", id: ++id, text: "Which earlier captures matter for this review?", createdAt: at(id) });
+  items.push({
+    kind: "agent_message",
+    id: ++id,
+    text: [
+      `The two that matter are \`${CITED[0][0]}\` and ${CITED[1][0]}.`,
+      `${FOREIGN_ID} belongs to another session, so it is not shown here.`,
+      "",
+      "```json",
+      `{ "artifactId": "${CITED[0][0]}" }`,
+      "```",
+    ].join("\n"),
+    createdAt: at(id),
+  });
   return items;
 }
 
@@ -192,7 +223,8 @@ function Fixture() {
       <section className="detail-chat" style={{ flex: 1, minWidth: 0, display: phone && panelOpen ? "none" : "flex", flexDirection: "column" }}>
         <div ref={scrollRef} className="detail-scroll" role="region" aria-label="Session Activity"
           style={{ flex: 1, overflow: "auto", padding: "16px" }}>
-          <EventTimeline items={items} historyKey={`${SESSION_ID}:0`} scrollRef={scrollRef} onOpenArtifact={onOpenArtifact} />
+          <EventTimeline items={items} historyKey={`${SESSION_ID}:0`} scrollRef={scrollRef} onOpenArtifact={onOpenArtifact}
+            artifactSessionId={SESSION_ID} />
         </div>
         <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)" }}>
           <textarea aria-label="Message" className="input" rows={2} value={draft}

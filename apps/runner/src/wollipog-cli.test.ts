@@ -1396,12 +1396,13 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
 
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
   const rootHelpText = await captureCli(["help"]);
-  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, and reconcile typed workflow decisions/mu);
+  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, reconcile, and withdraw typed workflow decisions/mu);
   const topic = await captureCli(["help", "workflow-decisions"]);
   assert.equal(topic.code, 0);
   for (const text of [
     "decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision",
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
+    "decision withdraw", "withdraw_workflow_decision", "protocol v269",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
@@ -1421,6 +1422,10 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "list", "--limit", "1.5"],
     ["decision", "list", "--cursor"],
     ["decision", "list", "unexpected"],
+    ["decision", "withdraw", "--reason", "Not needed"],
+    ["decision", "withdraw", "workflow_1"],
+    ["decision", "withdraw", "workflow_1", "--reason", " "],
+    ["decision", "withdraw", "workflow_1", "--reason", "Not needed", "--session"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));
@@ -1474,6 +1479,29 @@ test("CLI reconciliation requires protocol v153 before calling the endpoint", as
     `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation}`, "u",
   ));
   assert.deepEqual(calls, ["http://cp/api/compatibility"]);
+});
+
+test("CLI withdrawal forwards the exact reason and target, and refuses a pre-v269 control plane (#3917)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { occurrenceId: "workflow_1", status: "revoked" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "withdraw", ...args, "--json"],
+    env, { stdout: () => {}, stderr: () => {} }, fetch);
+  assert.equal(await invoke(["workflow_1", "--reason", "Superseded by #2."]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/workflow-decisions/workflow_1/withdraw");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { reason: "Superseded by #2." });
+  assert.equal(await invoke(["workflow_1", "--reason", "Not needed.", "--session", "child"]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { reason: "Not needed.", sessionId: "child" },
+    "an Orchestrator names its child in the body; the path stays its own session");
+  calls.length = 0;
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal - 1;
+  assert.equal(await invoke(["workflow_1", "--reason", "Not needed."]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane is never sent the withdrawal");
 });
 
 test("CLI issue closure preserves the exact proposal and refuses other sessions or old control planes", async () => {

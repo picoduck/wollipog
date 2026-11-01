@@ -25,7 +25,7 @@ export function rootHelp(): string {
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  automation          Propose, inspect, and create an automation with human approval",
-    "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
+    "  decision            Request, read, consume, reconcile, and withdraw typed workflow decisions",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  pr                  Wait for a pull request's required checks or merge-queue outcome",
@@ -176,11 +176,13 @@ export function decisionHelp(): string {
     "  decision list [--session <id>] [--limit <1-100>] [--cursor <occurrence-id>] [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
     "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
+    "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "Reads may target an accessible descendant with --session for an Orchestrator; request, consume, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, reconcile_workflow_decision.",
+    "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
     "Descendant reads and lists require control plane v214. Follow nextCursor until absent. Older runners can use an updated CLI or GET /api/sessions/:id/workflow-decisions[/<occurrence-id>] against v214 where a session token is provisioned. Provider-isolated sessions have only a relay key: upgrade the runner/CLI instead of seeking a bearer token. Older control planes expose pending requests only through list_descendant_requests. A 404 or missing list entry never proves consumption.",
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
+    "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }

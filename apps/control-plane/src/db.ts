@@ -21198,6 +21198,42 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
+  /** #3917: retire one pending or approved occurrence that was never consumed and whose action was
+   * never armed. Those conditions are part of the write, so a consume, arm or resolution that got
+   * there first leaves it untouched. `unheard` says the child has not heard the decision's outcome:
+   * it was still pending, or its approval's resume was never sent (and is recalled here). Only then
+   * does `oweResume` hold a resume that announces the withdrawal, so a finished child that already
+   * holds an approval is not woken into a new turn. */
+  withdrawWorkflowDecision(
+    occurrenceId: string,
+    sessionId: string,
+    withdrawal: NonNullable<WorkflowDecisionView["withdrawal"]>,
+    now: number,
+    oweResume: boolean,
+  ): { decision: WorkflowDecisionView; unheard: boolean } | null {
+    return this.atomic(() => {
+      const prior = this.stmt("SELECT status, resume_state FROM workflow_decisions WHERE occurrence_id=? AND session_id=?")
+        .get(occurrenceId, sessionId) as { status: WorkflowDecisionStatus; resume_state: WorkflowDecisionResumeState | null } | undefined;
+      const changed = Number(this.stmt(
+        `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?), withdrawal=?
+         WHERE occurrence_id=? AND session_id=? AND status IN ('pending','approved') AND consumed_at IS NULL
+           AND action_kind IS NULL AND action_command_digest IS NULL AND action_armed_at IS NULL`,
+      ).run(now, JSON.stringify(withdrawal), occurrenceId, sessionId).changes) === 1;
+      if (!changed || !prior) return null;
+      this.retireWorkflowDecisionResume(occurrenceId, now);
+      const after = this.stmt("SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?")
+        .get(occurrenceId) as { resume_state: WorkflowDecisionResumeState | null };
+      const unheard = prior.status === "pending" ||
+        (prior.resume_state === "held" || prior.resume_state === "delivering") && after.resume_state === "abandoned";
+      if (oweResume && unheard) {
+        this.stmt(`UPDATE workflow_decisions SET resume_state='held', resume_command_id=NULL, resume_updated_at=?
+          WHERE occurrence_id=?`).run(now, occurrenceId);
+      }
+      this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
+      return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, unheard };
+    });
+  }
+
   setWorkflowDecisionResume(
     occurrenceId: string,
     state: WorkflowDecisionResumeState,
@@ -22135,6 +22171,30 @@ export class ControlPlaneDb {
           provenance.resourceDigest !== decision.resourceDigest) return false;
     }
     return true;
+  }
+
+  /** The person's campaign scope approval that revoked this decision (#3915), or null. The decision
+   * has exactly one `superseded_by_scope_change` revocation, triggered by a person; exactly one
+   * consumed, human-owned scope decision of its controlling campaign root was consumed at that
+   * instant, under the same policy revision, and its exact snapshot names this occurrence among
+   * the decisions it revokes. Anything else proves nothing. */
+  scopeApprovalRevoking(decision: WorkflowDecisionView): WorkflowDecisionView | null {
+    const revocations = this.stmt(
+      `SELECT created_at, workflow_decision FROM governance_audit
+       WHERE session_id=? AND request_id=? AND approval_kind='workflow_decision' AND stage='resolution'
+         AND outcome='revoked' AND actor_kind='system' AND actor_id='superseded_by_scope_change'`,
+    ).all(decision.sessionId, decision.occurrenceId) as Array<{ created_at: number; workflow_decision: string | null }>;
+    if (revocations.length !== 1) return null;
+    const provenance = parseJson<NonNullable<GovernanceAuditEntry["workflowDecision"]>>(revocations[0]!.workflow_decision ?? "");
+    if (provenance?.revocation?.reason !== "superseded_by_scope_change" || provenance.revocation.triggeredBy?.kind !== "human") return null;
+    const scopes = (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=? AND category='campaign_issue_scope'
+         AND authority='human' AND status='consumed' AND consumed_at=? AND resolved_at=? AND policy_revision=?`,
+    ).all(decision.controllingSessionId, decision.controllingSessionId, revocations[0]!.created_at, revocations[0]!.created_at,
+      decision.policyRevision) as unknown[]).map(workflowDecisionFromRow);
+    const scope = scopes.length === 1 ? scopes[0] : null;
+    return scope?.resourceSnapshot.category === "campaign_issue_scope" && scope.resourceSnapshot.affectedDecisions.includes(decision.occurrenceId)
+      ? scope : null;
   }
 
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly

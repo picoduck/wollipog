@@ -2196,13 +2196,13 @@ test("#3919 a root's own publication leaves child, nested and non-campaign reque
 
 /** Ledger-attributed children for scope-impact tests: each gets an open attempt on a plan item
  * and its launch prompt, so the work ledger can prove what it is unrelated to (#3914). */
-function scopeImpactFixture(h: ReturnType<typeof harness>) {
+function scopeImpactFixture(h: ReturnType<typeof harness>, delegateMerge = true) {
   assert.ok(h.svc.recordCampaignPlan("root", { items: [{ key: "other" }, { key: "issue:101", issue: { repository: "team/repo", number: 101 } }],
     planComplete: true }).ok);
   const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now()); assert.ok(page.ok);
   const itemId = (key: string) => page.data.items.find((item) => item.key === key)!.id;
   const policy = h.db.getSession("root")!.parentControlPolicy!;
-  assert.ok(h.svc.setParentControlPolicy("root", { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
+  if (delegateMerge) assert.ok(h.svc.setParentControlPolicy("root", { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
   const runner = h.hub.requestFromRunner;
   h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => message.type === "github_merge_preflight"
     ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } }
@@ -2223,7 +2223,7 @@ function scopeImpactFixture(h: ReturnType<typeof harness>) {
     return created.data.occurrenceId;
   };
   /** An Orchestrator-approved merge its Claude Code child has armed: the enqueue already ran. */
-  const armedMerge = async (sessionId: string, pullRequest: number) => {
+  const armedMerge = async (sessionId: string, pullRequest: number, arm = true) => {
     const headSha = String(pullRequest).padStart(40, "a");
     const snapshot = { category: "pr_merge" as const, repository: "team/repo", pullRequest, headSha, reviewResult: "merge" as const,
       requiredChecks: { headSha, status: "passed" as const, checkedAt: 10, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
@@ -2234,6 +2234,7 @@ function scopeImpactFixture(h: ReturnType<typeof harness>) {
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
     assert.ok(approved.ok, approved.error ?? "refused");
     const command = canonicalPrMergeEnqueueCommand(snapshot);
+    if (!arm) return { occurrenceId: created.data.occurrenceId, snapshot, command };
     const armed = await h.svc.consumeWorkflowDecision(sessionId, created.data.occurrenceId, { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
     assert.ok(armed.ok, armed.error ?? "refused");
     assert.equal(armed.data?.status, "approved");
@@ -2246,8 +2247,34 @@ function scopeImpactFixture(h: ReturnType<typeof harness>) {
     return requested.data.decision;
   };
   const status = (occurrenceId: string) => h.db.workflowDecisionByOccurrence(occurrenceId)!.status;
-  return { itemId, child, question, armedMerge, closure, status };
+  /** The runner's forge read for a reconciliation: merged at the approved head only when `merged`. */
+  const forge = (merge: { occurrenceId: string; command: string; snapshot: { headSha: string } }, sessionId: string, merged: () => boolean) => {
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+      if (message.type !== "reconcile_workflow_action") return runner(runnerId, requestId, message, timeout);
+      return merged() ? { type: "workflow_action_reconciliation_result", requestId, sessionId, occurrenceId: message.occurrenceId, accepted: true,
+        commandDigest: createHash("sha256").update(merge.command, "utf8").digest("hex"), forgeHeadSha: merge.snapshot.headSha }
+        : { type: "workflow_action_reconciliation_result", requestId, sessionId, occurrenceId: message.occurrenceId, accepted: false,
+          error: "forge did not prove the exact approved head was merged" };
+    };
+  };
+  return { itemId, child, question, armedMerge, closure, status, forge };
 }
+
+/** A Full Control campaign whose boundary gives the Orchestrator merges and scope, so a person's
+ * scope approval re-mints it (#3915). */
+function fullControlMergeHarness() {
+  const h = harness(false);
+  const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+  assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100",
+    operations: ["campaign_issue_scope", "issue_closure", "pr_merge", "implementation_question"], delegatablePolicyIds: [],
+    issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed"] } }, revision, h.principal).ok);
+  return h;
+}
+
+const humanScopeAddition = (h: ReturnType<typeof harness>, requestId: string, number: number, expectedRevision = 1) =>
+  h.svc.proposeCampaignIssueScope("root", { requestId, expectedRevision, additions: [{ repository: "team/repo", number }],
+    removals: [], explanation: "Verified intended member" }, () => true, h.principal);
 
 test("#3915 adding an issue leaves unrelated decisions as they were and revokes only work related to it", async () => {
   const h = harness(false);
@@ -2454,5 +2481,72 @@ test("#3915 a person's scope approval under Full Control re-authorizes the bound
     assert.equal(f.status(question), "revoked");
     assert.deepEqual(revocationAudit(h, unrelated, question).workflowDecision?.revocation,
       { reason: "superseded_by_scope_change", triggeredBy: { kind: "human", id: h.principal.userId } });
+  } finally { h.db.close(); }
+});
+
+test("#3915 an armed merge a person's Full Control scope approval revoked is recorded once from forge proof; an unarmed one stays terminal", async () => {
+  const h = fullControlMergeHarness();
+  try {
+    const f = scopeImpactFixture(h, false);
+    const merger = f.child("merger", "other", "claude-code");
+    const armed = await f.armedMerge(merger, 21);
+    const unarmed = await f.armedMerge(merger, 22, false);
+    assert.equal(f.status(unarmed.occurrenceId), "approved");
+    const before = h.db.getSession("root")!.parentControlPolicy!.revision;
+    const proposed = await humanScopeAddition(h, "human-add", 101); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    assert.equal(proposed.data!.authority, "human");
+    assert.ok(h.approve(proposed.data!).ok);
+    assert.equal(h.db.getSession("root")!.parentControlPolicy!.revision, before + 1, "the approval re-minted the boundary");
+    assert.equal(f.status(armed.occurrenceId), "revoked");
+    assert.equal(f.status(unarmed.occurrenceId), "revoked");
+    assert.equal(h.db.scopeApprovalRevoking(h.db.workflowDecisionByOccurrence(armed.occurrenceId)!)?.occurrenceId, proposed.data!.occurrenceId);
+
+    let merged = false;
+    f.forge(armed, merger, () => merged);
+    const early = await h.svc.reconcileWorkflowDecision(merger, armed.occurrenceId, { resourceSnapshot: armed.snapshot });
+    assert.equal(early.status, 409);
+    assert.equal(f.status(armed.occurrenceId), "revoked", "nothing is recorded before the forge proves the merge");
+    merged = true;
+    const recorded = await h.svc.reconcileWorkflowDecision(merger, armed.occurrenceId, { resourceSnapshot: armed.snapshot });
+    assert.ok(recorded.ok, recorded.error ?? "refused");
+    assert.equal(recorded.data?.status, "consumed");
+    assert.equal(recorded.data?.actionAdmission?.command, armed.command, "the armed command is recorded, not a new one");
+    assert.equal((await h.svc.reconcileWorkflowDecision(merger, armed.occurrenceId, { resourceSnapshot: armed.snapshot })).status, 409,
+      "the merge is recorded once");
+
+    const stillTerminal = await h.svc.reconcileWorkflowDecision(merger, unarmed.occurrenceId, { resourceSnapshot: unarmed.snapshot });
+    assert.equal(stillTerminal.status, 409, "an approval that was never armed cannot be recorded");
+    assert.equal(f.status(unarmed.occurrenceId), "revoked");
+  } finally { h.db.close(); }
+});
+
+test("#3915 a merge revoked by a policy change outside a scope approval, or one followed by another policy change, stays unreconcilable", async () => {
+  const h = fullControlMergeHarness();
+  try {
+    const f = scopeImpactFixture(h, false);
+    const merger = f.child("merger", "other", "claude-code");
+    const control = (revision: number) => h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100",
+      operations: ["campaign_issue_scope", "issue_closure", "pr_merge", "implementation_question"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues: 5, closureReasons: ["completed"] } }, revision, h.principal);
+    f.forge({ command: "", occurrenceId: "", snapshot: { headSha: "" } }, merger, () => true);
+
+    // A re-authorization of Full Control is a policy change, not a scope approval.
+    const reauthorized = await f.armedMerge(merger, 31);
+    assert.ok(control(h.db.getSession("root")!.parentControlPolicy!.revision).ok);
+    assert.equal(f.status(reauthorized.occurrenceId), "revoked");
+    f.forge(reauthorized, merger, () => true);
+    assert.equal((await h.svc.reconcileWorkflowDecision(merger, reauthorized.occurrenceId, { resourceSnapshot: reauthorized.snapshot })).status, 409);
+    assert.equal(f.status(reauthorized.occurrenceId), "revoked");
+
+    // A scope approval's revocation does not survive a later policy change.
+    const scoped = await f.armedMerge(merger, 32);
+    const proposed = await humanScopeAddition(h, "human-add", 101); assert.ok(proposed.ok, proposed.error ?? "proposal");
+    assert.ok(h.approve(proposed.data!).ok);
+    assert.equal(f.status(scoped.occurrenceId), "revoked");
+    assert.ok(control(h.db.getSession("root")!.parentControlPolicy!.revision).ok);
+    f.forge(scoped, merger, () => true);
+    assert.equal((await h.svc.reconcileWorkflowDecision(merger, scoped.occurrenceId, { resourceSnapshot: scoped.snapshot })).status, 409,
+      "only the exact revision bump of the revoking scope approval is accepted");
+    assert.equal(f.status(scoped.occurrenceId), "revoked");
   } finally { h.db.close(); }
 });

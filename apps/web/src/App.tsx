@@ -846,7 +846,7 @@ export function Shell() {
         {authRequired && conn !== "online" ? (
           instances.activeProfile.kind === "remote"
             ? <RemoteInstanceBanner authenticationRequired />
-            : <PairingBanner connecting={conn === "connecting"} />
+            : <PairingBanner conn={conn} />
         ) : (
           offlineHeld && (
             instances.activeProfile.kind === "remote"
