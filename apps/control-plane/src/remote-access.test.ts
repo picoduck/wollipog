@@ -120,6 +120,30 @@ test("occupied or public listeners are preserved and the external alternative po
   assert.equal(f.config.AllowFunnel["fixture.example.ts.net:443"], true);
 });
 
+test("status revokes a ready private origin when Funnel exposes its owned listener without changing Tailscale", async (t) => {
+  const f = fixture(t);
+  const ready = await f.service.setup({ provider: "tailscale" });
+  assert.equal(ready.phase, "ready");
+  assert.equal(f.service.publicOrigin(), "https://fixture.example.ts.net");
+  assert.deepEqual(f.config.Web["fixture.example.ts.net:443"], {
+    Handlers: { "/": { Proxy: "http://127.0.0.1:4317" } },
+  });
+  assert.ok(f.calls.some((args) => args.includes("--bg")), "setup created the owned listener");
+
+  f.config.AllowFunnel["fixture.example.ts.net:443"] = true;
+  const exposed = structuredClone(f.config);
+  const callsBeforeStatus = f.calls.length;
+  f.tick();
+  const result = await f.service.status(true);
+  assert.deepEqual({ phase: result.phase, origin: f.service.publicOrigin() }, {
+    phase: "needs_repair", origin: null,
+  });
+  assert.equal(result.origin, null);
+  assert.equal(result.message, "This listener now allows public access. Review it in Tailscale before retrying private remote access.");
+  assert.deepEqual(f.config, exposed, "status preserves the listener and its Funnel setting");
+  assert.deepEqual(f.calls.slice(callsBeforeStatus), [["serve", "status", "--json"]], "status only reads Tailscale configuration");
+});
+
 test("a reused operator listener is not owned, and externally changed owned services are never removed", async (t) => {
   const f = fixture(t);
   f.config.TCP["443"] = { HTTPS: true };
