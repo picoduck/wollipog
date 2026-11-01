@@ -130,7 +130,7 @@ test("the socket judges a Codex apply_patch exactly as the file transport does",
   );
   const unparseable = await requestManagedWorktreeGuardVerdict(socket, patchPayload(["just write it for me"]));
   assert.equal(unparseable.exitCode, 2);
-  assert.ok(unparseable.stderr.includes(MANAGED_WORKTREE_REFUSAL));
+  assert.ok(unparseable.stderr.includes("Wollipog could not inspect this tool call"));
 });
 
 test("the socket refuses Claude Edit and Write against protected Git state", { skip: !POSIX }, async () => {

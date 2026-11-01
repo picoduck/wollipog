@@ -119,6 +119,9 @@ test("an apply_patch touching only ordinary project files gets no opinion at all
     patch("*** Add File: docs/notes.md", "+hello"),
     patch("*** Delete File: src/old.ts"),
     patch("*** Update File: src/app.ts", "*** Move to: src/renamed.ts", "@@", "-a", "+b"),
+    // Ordinary outside-worktree files also receive no guard opinion: this is a lifecycle guard,
+    // not a sandbox grant. Malformed headers must not falsely claim this is a runner-owned tree.
+    patch("*** Update File: /unmanaged-project/src/app.ts", "@@", "-before", "+after"),
     // Absolute, inside the protected worktree: the session's own workspace, never the guard's.
     patch(`*** Update File: ${WORKTREE}/src/app.ts`, "@@", "-before", "+after"),
     // A content line that looks like a directive IS content: it carries the `+` prefix.
@@ -156,7 +159,7 @@ test("an apply_patch whose headers cannot be parsed is refused while the guard i
     const outcome = runManagedWorktreeGuardDecision(applyPatchInput(document), f.protectionsFile);
     assert.equal(outcome.exitCode, 2, why);
     assert.equal(outcome.stdout, "", why);
-    assert.ok(outcome.stderr.includes(MANAGED_WORKTREE_REFUSAL), why);
+    assert.ok(outcome.stderr.includes("Wollipog could not inspect this tool call"), why);
     assert.match(outcome.stderr, /could not read the file headers/u, why);
   }
 });
