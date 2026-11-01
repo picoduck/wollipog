@@ -9,7 +9,7 @@ candidates and the archived-session filter hover fix merged after rc.2.
 
 Download the desktop installer for your platform from this release's assets. Existing desktop
 installations can discover this stable release through Settings → About and use
-**Install and Restart** where supported. Linux package installations link to the release page.
+**Install and Restart** where supported. `.deb` and `.rpm` installations, and builds without an update key, link to the release page.
 
 Headless installations can select this exact release after publication:
 
@@ -78,6 +78,19 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 - Move a Pod's automatic turns and merge work into dialogs, show recent merges in words, and
   identify the Pod in its close confirmation.
 
+## Accounts and Provider Sessions
+
+- Set up managed provider profiles and recover existing profiles from refused sessions. Busy
+  provider accounts can wait for availability, and recovery is offered from refused agent TUIs.
+  Device-code sign-in cards include **Copy Device Code**.
+- Copy an existing Codex API-key sign-in into a new managed profile. Removing an account explains
+  that the stored sign-in is retained.
+- Restarted Claude sessions resume conversations. Ordinary agent TUIs use the session's provider
+  account, structured sessions lease the provider HOME where the provider writes, and account
+  configuration publications are fenced against competing writers.
+- Codex children can run commands when their sandbox cannot nest inside the runner's sandbox.
+  Provider compatibility includes Pi 1.4.0 RPC handling and updated Codex request handling.
+
 ## Reviews and Campaign Tools
 
 - Review sessions are the default cross-model review route on supported runners. The review
@@ -94,6 +107,29 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
   orchestration handles eligible decisions while credential requests become blocked work.
   These changes do not establish unattended Full Control production readiness: the complete
   execution, evidence review, and managed-usage path still requires verification.
+
+
+- People can change a running Orchestrator's child harness, model, effort, follow-up threshold,
+  and completion settings. Personal reviewer choices and round budgets can be configured.
+- Campaign tools support closing and scoping GitLab issues; review sessions support GitLab merge
+  requests. Legacy review jobs have been retired in favor of review sessions.
+- Full Control handles eligible closure and implementation questions without waiting on its own
+  unanswered questions. Human scope changes and revocations remain enforced. Follow-up publication
+  and closure checks bind prompt identity and content and recheck forge state.
+- Codex review sessions exclude repository skills.
+
+## Session Browsing and Lifecycle
+
+- Archived Sessions uses a search-first toolbar, a filters sheet, and fixed two-line rows.
+  Returning from a session restores the archive browsing context. Filter controls retain their hover edges.
+- Touch screens regain one-tap copying of user messages. Session previews center transcripts like
+  open sessions, and full-area empty states are centered in the space they fill.
+- Worktree switches show their relaunch state and automatically continue the session afterward.
+- Handoff holds show outstanding work, start times, and full counts, exclude ended jobs, and offer
+  **Proceed Now**. Terminated background jobs remain ended after provider relaunch.
+- Side chats stay alive until their first message and stop when their parent is archived.
+- Sessions record who launched them so per-user settings and budgets apply. Artifact upload
+  preferences also apply to personal-organization sessions.
 
 ## Security
 
@@ -117,45 +153,6 @@ may report `The address is not a Wollipog control plane.` and must be upgraded b
 - Operator-scoped shared runtime directories support Linux projects without making one
   session's private runtime directory the shared location.
 
-## Accounts and Provider Sessions
-
-- Set up managed provider profiles and recover existing profiles from refused sessions. Busy
-  provider accounts can wait for availability, and recovery is offered from refused agent TUIs.
-  Device-code sign-in cards include **Copy Device Code**.
-- Copy an existing Codex API-key sign-in into a new managed profile. Removing an account explains
-  that the stored sign-in is retained.
-- Restarted Claude sessions resume conversations. Ordinary agent TUIs use the session's provider
-  account, structured sessions lease the provider HOME where the provider writes, and account
-  configuration publications are fenced against competing writers.
-- Codex children can run commands when their sandbox cannot nest inside the runner's sandbox.
-  Provider compatibility includes Pi 1.4.0 RPC handling and updated Codex request handling.
-
-## Campaigns and Reviews
-
-- People can change a running Orchestrator's child harness, model, effort, follow-up threshold,
-  and completion settings. Personal reviewer choices and round budgets can be configured.
-- Campaign tools support closing and scoping GitLab issues; review sessions support GitLab merge
-  requests. Legacy review jobs have been retired in favor of review sessions.
-- Full Control handles eligible closure and implementation questions without waiting on its own
-  unanswered questions. Human scope changes and revocations remain enforced. Follow-up publication
-  and closure checks bind prompt identity and content and recheck forge state.
-- Codex review sessions exclude repository skills. These changes do not establish unattended
-  Full Control production readiness; complete execution and evidence paths still need verification.
-
-## Session Browsing and Lifecycle
-
-- Archived Sessions uses a search-first toolbar, a filters sheet, and fixed two-line rows.
-  Returning from a session restores the archive browsing context. Filter controls retain their hover edges.
-- Touch screens regain one-tap copying of user messages. Session previews center transcripts like
-  open sessions, and full-area empty states are centered in the space they fill.
-- Worktree switches show their relaunch state and automatically continue the session afterward.
-- Handoff holds show outstanding work, start times, and full counts, exclude ended jobs, and offer
-  **Proceed Now**. Terminated background jobs remain ended after provider relaunch.
-- Side chats stay alive until their first message and stop when their parent is archived.
-- Sessions record who launched them so per-user settings and budgets apply. Artifact upload
-  preferences also apply to personal-organization sessions.
-
-## Reliability and Dependencies
 
 - Runner registration avoids full session scans, batches queued runtime updates, and commits
   heartbeats without a WAL flush, reducing database work on frequent runner activity.
