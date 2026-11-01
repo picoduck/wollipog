@@ -8,6 +8,7 @@ const settings = readFileSync(new URL("./MachineSettingsDialog.tsx", import.meta
 const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", import.meta.url), "utf8");
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
 const teamDialog = readFileSync(new URL("./TeamDialog.tsx", import.meta.url), "utf8");
+const personAccess = readFileSync(new URL("./PersonAccessDialogs.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
 const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.meta.url), "utf8");
 const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
@@ -51,7 +52,7 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(access, /<Modal/);
   assert.match(access, /nextAdmin \? await api\.listDevices\(\) : \{ devices: \[\] \}/);
   assert.match(teamDialog, /api\.createIdentityTeam\(\{ name: trimmed, memberUserIds: memberIds \}\)/);
-  assert.match(access, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
+  assert.match(personAccess, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
   assert.doesNotMatch(access, /device-pair-row/);
   // One detail for every machine (#2988): the spec sheet moved into Connection Details.
   assert.doesNotMatch(view, /runner-meta|runner-system-meta/);
