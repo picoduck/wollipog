@@ -484,6 +484,43 @@ test("the CI permission-block mask covers a workflow's declared permissions, nev
   declined(evaluate({ ...tool, title: "Read-only, secret-free permissions", context: { input: "the campaign cannot supply credentials" } }), "secrets_and_sign_in");
 });
 
+test("a child's provider question asking for plural, widening or lasting grants is declined like a design form (#3968)", () => {
+  for (const text of [
+    // The #3968 table: each was forwarded to the Orchestrator on the child route.
+    "Can you grant my session permanent permissions?", "Grant the agent broader permissions for all future sessions",
+    "Widen the agent's permissions for every future session", "Expand the session scopes for the design",
+    "Should the design grant the workflow job's permissions permanently?",
+    // Plural nouns, widening verbs and lasting qualifiers, alone and together.
+    "Grant me permissions to push", "Grant the agent scopes to push for the design", "Broaden the session's scopes for the design",
+    "Extend the agent's permissions to the other repository", "Expand my access to the provider for the design",
+    "Should the design widen the child's permissions?", "Request additional scopes for the provider",
+    "Keep durable approvals for the design", "Permanently allow the agent to push", "Allow the agent to push for all future sessions",
+    "Should the design approve pushes in every new session?", "Trust this agent across all future campaigns",
+    // Previously declined on the design routes only (#3913).
+    "Should the design give the workflow job's permissions to Alice?", "Should the design widen the job's permissions for Alice?",
+    "Alice would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
+  ]) declinedEverywhere(text);
+  // A real request after a mention-only question is still screened on the child route.
+  for (const mention of mentionOnly) declined(evaluate(question(`${mention} Widen the agent's permissions for every future session.`)), "secrets_and_sign_in", mention);
+  // A lasting qualifier voids the CI mask, so a plural workflow grant with one is declined.
+  declinedEverywhere("Should the design grant its job the actions: read, checks: read permissions permanently so it can poll the GitHub Actions API?");
+});
+
+test("questions that only mention permissions, scopes or access still reach their owner on the child route (#3968)", () => {
+  for (const text of [
+    ...mentionOnly,
+    // A plural CI permission block is masked like a singular one.
+    "Should the design grant its job the actions: read, checks: read permissions so it can poll the GitHub Actions API?",
+    "Should the design widen the workflow's permissions so it can poll the GitHub Actions API?",
+    // No grant is asked for: the permissions, scopes or sessions are the design subject.
+    "Should the design keep the workflow's default permissions?",
+    "Should the settings page list each session's permissions?",
+    "Which scopes does the design document for the GitHub Actions API?",
+    "Should the design hide expired permissions from the overview?",
+    "Should the importer reuse the cache for all future sessions?",
+  ]) reachesOwner(text);
+});
+
 test("a persistent grant is never converted to anything but a one-time Orchestrator allow, and a grant offering none is declined", () => {
   decided(evaluate(tool), undefined);
   assert.ok(tool.options.some((o) => o.kind === "allow_always"), "the fixture offers a persistent option the Orchestrator cannot pick");
