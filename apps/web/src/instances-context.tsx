@@ -15,12 +15,53 @@ export type InstanceAvailability =
   | "incompatible"
   | "missing-credential";
 
-/** An instance's availability in the shared machine vocabulary (§11.2): a missing or rejected
- * credential needs the user to sign in again, and an incompatible instance needs an update. */
-export function instanceAvailabilityMeta(status: InstanceAvailability): StatusMeta {
-  return statusMeta("machine", status === "authentication-required" || status === "missing-credential"
-    ? "sign_in_required"
-    : status === "incompatible" ? "update_required" : status);
+/** Connecting is the one instance word that pulses: the connection is actively opening (§11.1). */
+const CONNECTING: StatusMeta = { ...statusMeta("machine", "connecting"), pulse: true };
+
+/**
+ * The one instance status table (docs/design-system.md §11.2, #3002), for every surface that names
+ * an instance's state: the Instances rows, the rail tile and its tooltip, the instance menu and the
+ * banner. One word per state:
+ *
+ * | Availability                                     | Word              | Tone                  |
+ * | ------------------------------------------------ | ----------------- | --------------------- |
+ * | `online`                                         | Online            | success               |
+ * | `connecting`                                     | Connecting        | info, pulsing         |
+ * | `offline`                                        | Offline           | neutral, hollow       |
+ * | `authentication-required`, `missing-credential`  | Pairing Required  | warning               |
+ * | `incompatible`                                   | Update Required   | warning               |
+ * | `saved` (not tried in this session)              | none: null        |                       |
+ *
+ * A rejected or missing pairing reads Pairing Required, not Sign-In Required: the fix is Re-Pair…,
+ * and Sign-In Required is a provider account's word. Tooltips take the word in sentence case.
+ */
+export function instanceAvailabilityMeta(status: InstanceAvailability): StatusMeta | null {
+  switch (status) {
+    case "saved": return null;
+    case "connecting": return CONNECTING;
+    case "authentication-required":
+    case "missing-credential": return statusMeta("machine", "pairing_required");
+    case "incompatible": return statusMeta("machine", "update_required");
+    default: return statusMeta("machine", status);
+  }
+}
+
+/**
+ * Line 2 of an instance row with a problem (#3002): one sentence about the other computer, so a raw
+ * transport error never shows in a row. Null when nothing is known to be wrong (Online, Connecting,
+ * or not tried yet). The row follows it with the last connection.
+ */
+export function describeInstanceFailure(status: InstanceStatus): string | null {
+  const message = status.message?.toLowerCase() ?? "";
+  switch (status.availability) {
+    case "offline": return message.includes("refused") ? "Refused the connection." : "Didn't answer.";
+    case "authentication-required": return "No longer accepts the saved pairing.";
+    case "missing-credential": return "This app has no saved pairing for it.";
+    case "incompatible": return message.includes("different wollipog instance")
+      ? "Answers as a different Wollipog instance."
+      : "Runs an older Wollipog. Update it on that computer.";
+    default: return null;
+  }
 }
 
 /**
@@ -38,9 +79,10 @@ export function instanceMonogram(label: string): string {
 
 /**
  * What the shell's connection banner says about the active instance, which the rail tile and the
- * Instances card must agree with (#1970, #2102): a lost connection is "reconnecting" from its first offline report until it is back,
- * and a rejected credential needs signing in again. Null while the connection is live or first
- * opening. The banner shows only in these states, so neither is ever Online beside it.
+ * Instances rows must agree with (#1970, #2102): a lost connection is "reconnecting" from its first
+ * offline report until it is back, and a rejected credential needs re-pairing. Null while the
+ * connection is live or first opening. The banner shows only in these states, so neither is ever
+ * Online beside it.
  */
 export type ActiveInstanceConnection = "reconnecting" | "sign-in-required";
 
@@ -55,21 +97,34 @@ export function activeInstanceConnection(input: {
   return input.connectionLost || input.conn === "offline" ? "reconnecting" : null;
 }
 
-/** The active instance while the banner says its connection is lost: hollow and neutral, as Offline is (§11.2). */
-const RECONNECTING: StatusMeta = { label: "Reconnecting…", tone: "neutral", pulse: false, hollow: true };
-
 /**
- * The active instance's status on every surface that shows it: the rail tile, the instance menu and
- * the Instances card (#1970, #2102). What the shell's banner says wins over the status the instance
- * manager last recorded, which is kept only for remote profiles and can still read Online for a
- * moment after the socket drops.
+ * The status every surface shows for one saved profile (#1970, #2102, #3002): the rail tile, the
+ * instance menu and the Instances rows. For the active instance, what the shell's banner says wins
+ * over the status the instance manager last recorded, which is kept only for remote profiles and can
+ * still read Online for a moment after the socket drops: a lost connection is Offline and a rejected
+ * pairing is Pairing Required, so it never reads Online beside the banner. An active instance with
+ * nothing recorded is Connecting while the shell opens it.
  */
+export function instanceStatus(
+  manager: Pick<InstanceManager, "activeProfile" | "phase" | "statusByProfile">,
+  connection: ActiveInstanceConnection | null,
+  profileId: string,
+): InstanceStatus {
+  const active = profileId === manager.activeProfile.id;
+  const recorded = manager.statusByProfile[profileId];
+  if (active && connection === "reconnecting") return { availability: "offline", message: recorded?.message };
+  if (active && connection === "sign-in-required") return { availability: "authentication-required" };
+  if (recorded) return recorded;
+  return { availability: active && (manager.phase === "loading" || manager.phase === "opening") ? "connecting" : "saved" };
+}
+
+/** The active instance's word (§11.2) given the banner's state: `instanceStatus`'s rule for one availability. */
 export function activeInstanceStatusMeta(
   connection: ActiveInstanceConnection | null,
   availability: InstanceAvailability,
-): StatusMeta {
-  return connection === "reconnecting" ? RECONNECTING
-    : instanceAvailabilityMeta(connection === "sign-in-required" ? "authentication-required" : availability);
+): StatusMeta | null {
+  return instanceAvailabilityMeta(connection === "reconnecting" ? "offline"
+    : connection === "sign-in-required" ? "authentication-required" : availability);
 }
 
 /** What the shell's banner says about the active instance. Null outside the shell (the recovery shell). */
@@ -137,6 +192,13 @@ export interface InstanceManager {
    * ignored. Outside the desktop app it does nothing.
    */
   openInstanceDialog(options: OpenInstanceDialogOptions): void;
+  /**
+   * Identifies the connection the provider last started for the active instance: every switch,
+   * retry, edit or re-pair of the active instance, and every removal, starts a new one. Read once a
+   * switch or retry settles, it names that switch's connection, so a later failed phase can be told
+   * apart from it (#3002). Absent outside the desktop app.
+   */
+  currentConnection?(): number;
   goToThisMachine(): Promise<void>;
   reportActiveStatus(status: InstanceStatus): void;
 }

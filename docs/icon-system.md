@@ -105,6 +105,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts: the palette action and Settings › Behavior's Show Shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
+| `KeyIcon` | Lucide | `Key` | Re-Pair… on an instance row and in its More Actions menu: replace this app's saved pairing (#3002). |
+| `ArrowLeftRightIcon` | Lucide | `ArrowLeftRight` | Switch on an instance row: make another saved instance the one this app shows (#3002). |
 | `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email; Private to Me access. |
 | `BuildingIcon` | Lucide | `Building` | Organization-Wide access (#2960). |

@@ -649,11 +649,12 @@ Rules
   item's square, which has no fill or border at rest. Its monogram (12px/600) is the first letter of
   each of the profile label's first two words; there are no per-instance colors, because color
   means state. The corner dot is `instanceAvailabilityMeta`'s tone (§11.2), hollow when offline.
-  While the shell shows the offline or sign-in banner, the tile agrees with it
-  (`activeInstanceConnection`): hollow and neutral, "Reconnecting…", never Online. The active
-  instance's card in Connections › Instances reads the same truth, which the shell provides once
-  (`ActiveInstanceConnectionProvider`), for This Machine as for a remote, and offers Retry while the
-  connection is lost; every card's dot is its badge's tone and hollow state (#2102). Accessible
+  While the shell shows the offline or pairing banner, the tile agrees with it
+  (`activeInstanceConnection`, through `instanceStatus`): hollow and neutral Offline, or Pairing
+  Required, never Online. The active instance's row in Connections › Instances reads the same truth,
+  which the shell provides once (`ActiveInstanceConnectionProvider`), for This Machine as for a
+  remote, and offers Retry while the connection is lost; every row's tile dot is its badge's tone
+  and hollow state (#2102, #3002). Accessible
   name "Switch Instance: <label>"; the tooltip gives the name and the status in sentence case. It
   opens the instance menu as a 300px flyout to the right of the rail, top-aligned with the tile
   (§9.1): `menuitemradio` rows with a 24px monogram, the name, and the origin ("On this machine"
@@ -1326,8 +1327,25 @@ Rules
 ### 5.3 Cards (Grid)
 
 Use cards only when items are browsed visually side by side and each item is one object with a few
-facts (automation templates, instance tiles). Machines, instances, runs and pods are **lists** by
+facts (automation templates). Machines, instances, runs and pods are **lists** by
 default (converge on the People & Devices anatomy).
+
+**Connections › Instances (#3002)** is the instance list: a `.page` under the shared Connections
+header, whose one primary is **Add Remote Instance…**, then one `.surface` of `.row.row-2` rows in
+registry order, This Machine first. A row leads with the instance tile at 32px (§4.1) and its corner
+dot; line 1 is the name (one line, ellipsis, the full name in a tooltip) and the one status badge
+(§11.2, none for an instance not tried yet); line 2 is "On this machine", or a remote's mono address
+(one line, ellipsis, the origin in a tooltip) and "Last connected 40d ago" / "Never connected", or,
+when something is wrong, one `describeInstanceFailure()` sentence ("Didn't answer.", "Refused the
+connection.", "No longer accepts the saved pairing.", "Runs an older Wollipog. Update it on that
+computer.") and the last connection. Raw transport errors never show in a row. The row ends with one
+`.btn.sm` slot chosen by state: a check and "Current" as text for the current, online instance;
+**Retry** while its connection is lost; **Re-Pair…** for Pairing Required; nothing for Update
+Required; otherwise **Switch**, a `BusyButton` that keeps its label and width while the row reads
+Connecting. A remote then has ⋯ "More Actions for {name}": Edit…, Re-Pair…, Copy Address, a
+separator and Remove… (danger, last). This Machine has no menu and keeps its room. A failed switch,
+retry or removal is a compact danger notice under its row, inside the surface, with the raw message
+behind Show Details. The tab is not shown at 760px and below (#2984).
 
 - `display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start`.
 - Card: `.surface` + padding 16, `--radius-md`. Title 1 line, description clamp 2, meta row, actions
@@ -2349,6 +2367,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Machine / instance | Connecting | info |
 | Machine / instance | Offline | neutral (hollow dot) |
 | Machine / instance / device | Update Required, Sign-In Required, Pairing Required | warning |
+| Instance (`instanceAvailabilityMeta`, #3002: the Instances rows, the rail tile and its tooltip, the instance menu and the banner) | Online: success · Connecting: info (pulse) · Offline: neutral (hollow dot) · Pairing Required (a rejected or missing saved pairing; the fix is Re-Pair…): warning · Update Required: warning · none for an instance not tried in this session. Sign-In Required is never an instance's word, and "Saved" is retired. While the banner is shown the active instance reads its word, never Online (`instanceStatus`). |
 | Machine | Approval Required (a Registry agent waits for its exact launch to be approved) | warning |
 | Machine / instance | Unreachable, Error | danger |
 | Person account (`member`, People and Devices, #2997) | Suspended: neutral (hollow dot). Active shows nothing: status appears only as an exception. |
@@ -3809,14 +3828,15 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Seven other label and value lists still carry their own rules and
+**Remaining `<dl>` recipes.** Six other label and value lists still carry their own rules and
 move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
-`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts` and
+`.auth-recovery-identity`, `.shortcut-list`, `.governance-decision-facts` and
 `.approval-selector-context`.
 (`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
 `.campaign-held-child-hold` with Held Children, #2157, `.runner-meta` and
 `.connection-details-list` with the machine detail's Connection Details, #2988, and
-`.automation-facts` with the automation page's Rules and Limits, #2968.)
+`.automation-facts` with the automation page's Rules and Limits, #2968, and `.instance-meta` went
+with the Instances cards, #3002.)
 
 ---
 

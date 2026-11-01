@@ -2907,10 +2907,10 @@ app.post("/api/identity/users", async (req, reply) => {
       role,
       now: Date.now(),
     });
-    // A new member makes the organization's sessions shared: reconnecting clients reload the
-    // directory, so a transcript stops attributing the new member's answers to "you" (#2527).
-    // Nobody's access changed, so this is an ordinary reconnect rather than a 1008.
-    hub.closeOrganizationUiClients(principal.organizationId, 1000, "organization directory changed");
+    // A new member makes the organization's sessions shared: open dashboards reload the directory,
+    // so a transcript stops attributing the new member's answers to "you" (#2527). Nobody's access
+    // changed, so they refresh in place rather than reconnecting (#2606).
+    hub.identityDirectoryChanged(principal.organizationId);
     return reply.code(201).send({ membership });
   } catch {
     return reply.code(409).send({ error: "could not create organization member" });
@@ -2948,7 +2948,14 @@ app.patch("/api/identity/users/:userId", async (req, reply) => {
     });
     if (!membership) return reply.code(404).send({ error: "member not found" });
     for (const deviceId of deviceIds) hub.closeUiClientsForDevice(deviceId);
-    hub.closeOrganizationUiClients(principal.organizationId);
+    // A role or status change alters only this member's own access (#2606): close their sockets so
+    // no cached privilege outlives it. A rename, and everyone else's view of either change, reaches
+    // open dashboards as an in-place refresh.
+    if (role !== existing.role || status !== existing.userStatus ||
+      membership.role !== existing.role || membership.userStatus !== existing.userStatus) {
+      hub.closeUserUiClients(userId);
+    }
+    hub.identityDirectoryChanged(principal.organizationId);
     return { membership };
   } catch (error) {
     return reply.code(409).send({ error: error instanceof Error ? error.message : "member update failed" });

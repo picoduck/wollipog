@@ -8,12 +8,10 @@ import type { InstanceProfile } from "../desktop-instances.js";
 import {
   ActiveInstanceConnectionProvider,
   InstancesContextProvider,
-  type ActiveInstanceConnection,
   type InstanceManager,
 } from "../instances-context.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { InstanceSelector } from "./InstanceSelector.js";
-import { InstancesPanel } from "./InstancesPanel.js";
 import { Rail } from "./Rail.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
@@ -117,10 +115,10 @@ test("the instance menu switches, adds and manages, and keeps focus on the tile"
     assert.ok(!rows[1]!.querySelector(".menu-check"));
     // Status is text, not colour alone: the online local row has none, the remote one says why.
     assertNoDomNode(rows[0]!.querySelector(".status"));
-    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Sign-In Required");
+    assert.equal(rows[1]!.querySelector(".status")?.textContent, "Pairing Required");
     assert.ok(rows[1]!.querySelector(".status")?.classList.contains("t-warning"));
     const describedBy = rows[1]!.getAttribute("aria-describedby")!.split(" ");
-    assert.ok(describedBy.some((id) => domWindow.document.getElementById(id)?.textContent === "Sign-In Required"),
+    assert.ok(describedBy.some((id) => domWindow.document.getElementById(id)?.textContent === "Pairing Required"),
       "a screen reader hears the status the row shows");
     // A "Remote" section label precedes the remote profiles; the local one has none.
     const labels = Array.from(menu.querySelectorAll(".menu-label")).map((label) => label.textContent);
@@ -189,15 +187,30 @@ test("the tile's dot and tooltip say the active instance's status, and agree wit
       detail: "Offline",
     },
     {
-      name: "remote sign-in",
+      name: "remote pairing",
       value: manager({ activeProfile: remote }),
       tone: "t-warning",
       hollow: false,
-      detail: "Sign-in required",
+      detail: "Pairing required",
     },
     // The instance manager still records Online a moment after the socket drops; the banner wins.
-    { name: "banner offline", value: manager(), connection: "reconnecting", tone: "t-neutral", hollow: true, detail: "Reconnecting…" },
-    { name: "banner sign-in", value: manager(), connection: "sign-in-required", tone: "t-warning", hollow: false, detail: "Sign-in required" },
+    { name: "banner offline", value: manager(), connection: "reconnecting", tone: "t-neutral", hollow: true, detail: "Offline" },
+    { name: "banner pairing", value: manager(), connection: "sign-in-required", tone: "t-warning", hollow: false, detail: "Pairing required" },
+    {
+      name: "remote update",
+      value: manager({ activeProfile: remote, statusByProfile: { [remote.id]: { availability: "incompatible" } } }),
+      tone: "t-warning",
+      hollow: false,
+      detail: "Update required",
+    },
+    // Not tried in this session and not opening: never "Saved".
+    {
+      name: "nothing recorded",
+      value: manager({ statusByProfile: {}, phase: "missing" }),
+      tone: "t-neutral",
+      hollow: true,
+      detail: "Offline",
+    },
   ];
   for (const example of cases) {
     const mounted = mount(
@@ -318,214 +331,6 @@ test("the browser build shows no tile, and the rail keeps its decorative brand",
   }
 });
 
-test("an Instances card says what the banner and the rail tile say, in the tile's tone and hollow state", async () => {
-  // The manager records a status only for remote profiles, so This Machine can still read Online
-  // after its socket drops; the banner's connection wins on the active card, as it does on the tile.
-  const cases: Array<{
-    name: string;
-    value: InstanceManager;
-    connection?: ActiveInstanceConnection;
-    card: string;
-    label: string;
-    tone: string;
-    hollow: boolean;
-    retry: boolean;
-  }> = [
-    { name: "local online", value: manager(), card: local.id, label: "Online", tone: "t-success", hollow: false, retry: false },
-    {
-      name: "local offline banner",
-      value: manager(),
-      connection: "reconnecting",
-      card: local.id,
-      label: "Reconnecting…",
-      tone: "t-neutral",
-      hollow: true,
-      retry: true,
-    },
-    {
-      name: "local sign-in banner",
-      value: manager(),
-      connection: "sign-in-required",
-      card: local.id,
-      label: "Sign-In Required",
-      tone: "t-warning",
-      hollow: false,
-      retry: false,
-    },
-    {
-      name: "remote offline banner",
-      value: manager({ activeProfile: remote, statusByProfile: { [remote.id]: { availability: "online" } } }),
-      connection: "reconnecting",
-      card: remote.id,
-      label: "Reconnecting…",
-      tone: "t-neutral",
-      hollow: true,
-      retry: true,
-    },
-    {
-      name: "remote sign-in banner",
-      value: manager({ activeProfile: remote, statusByProfile: { [remote.id]: { availability: "online" } } }),
-      connection: "sign-in-required",
-      card: remote.id,
-      label: "Sign-In Required",
-      tone: "t-warning",
-      hollow: false,
-      retry: false,
-    },
-    {
-      name: "active remote recorded offline",
-      value: manager({ activeProfile: remote, statusByProfile: { [remote.id]: { availability: "offline" } } }),
-      card: remote.id,
-      label: "Offline",
-      tone: "t-neutral",
-      hollow: true,
-      retry: true,
-    },
-    {
-      name: "inactive remote offline",
-      value: manager({ statusByProfile: { local: { availability: "online" }, [remote.id]: { availability: "offline" } } }),
-      card: remote.id,
-      label: "Offline",
-      tone: "t-neutral",
-      hollow: true,
-      retry: false,
-    },
-    { name: "inactive remote sign-in", value: manager(), card: remote.id, label: "Sign-In Required", tone: "t-warning", hollow: false, retry: false },
-    {
-      name: "inactive remote update",
-      value: manager({ statusByProfile: { local: { availability: "online" }, [remote.id]: { availability: "incompatible" } } }),
-      card: remote.id,
-      label: "Update Required",
-      tone: "t-warning",
-      hollow: false,
-      retry: false,
-    },
-    // The banner describes only the active instance; another card keeps its own status.
-    {
-      name: "inactive remote beside a local banner",
-      value: manager({ statusByProfile: { local: { availability: "online" }, [remote.id]: { availability: "online" } } }),
-      connection: "reconnecting",
-      card: remote.id,
-      label: "Online",
-      tone: "t-success",
-      hollow: false,
-      retry: false,
-    },
-  ];
-  for (const example of cases) {
-    let retries = 0;
-    const value = { ...example.value, async retryActive() { retries += 1; } };
-    const mounted = mount(
-      <InstancesContextProvider value={value}>
-        <ActiveInstanceConnectionProvider value={example.connection ?? null}>
-          <FeedbackProvider>
-            <InstanceSelector />
-            <InstancesPanel />
-          </FeedbackProvider>
-        </ActiveInstanceConnectionProvider>
-      </InstancesContextProvider>,
-    );
-    await mounted.render();
-    try {
-      const profile = example.card === local.id ? local : remote;
-      const card = Array.from(mounted.mountPoint.querySelectorAll<HTMLElement>(".instance-card"))
-        .find((candidate) => candidate.querySelector("h2")?.textContent === profile.label)!;
-      assert.ok(card, example.name);
-      const badges = Array.from(card.querySelectorAll(".status:not(.no-dot)"));
-      assert.equal(badges.length, 1, `${example.name}: one status badge`);
-      assert.equal(badges[0]!.textContent, example.label, example.name);
-      assert.ok(badges[0]!.classList.contains(example.tone), `${example.name}: badge ${badges[0]!.className}`);
-      assert.equal(badges[0]!.classList.contains("hollow"), example.hollow, `${example.name}: badge hollow`);
-      // The dot is the badge's tone and hollow state; no status colours of its own (#2102).
-      const dot = card.querySelector(".instance-status-dot")!;
-      assert.ok(dot.classList.contains(example.tone), `${example.name}: dot ${dot.className}`);
-      assert.equal(dot.classList.contains("hollow"), example.hollow, `${example.name}: dot hollow`);
-      assert.ok(!Array.from(dot.classList).some((name) => name.startsWith("status-")), `${example.name}: ${dot.className}`);
-      assert.ok(card.classList.contains(example.tone), `${example.name}: the card's edge follows the tone`);
-      const retry = Array.from(card.querySelectorAll<HTMLButtonElement>("button"))
-        .find((button) => button.textContent?.trim() === "Retry");
-      assert.equal(Boolean(retry), example.retry, `${example.name}: Retry`);
-      if (retry) {
-        await act(async () => { retry.click(); await tick(); });
-        assert.equal(retries, 1, `${example.name}: Retry retries the active instance`);
-      }
-      if (profile.id === value.activeProfile.id) {
-        // The rail tile says the same thing.
-        const tileDot = mounted.mountPoint.querySelector(".instance-tile-dot")!;
-        assert.ok(tileDot.classList.contains(example.tone), `${example.name}: tile ${tileDot.className}`);
-        assert.equal(tileDot.classList.contains("hollow"), example.hollow, `${example.name}: tile hollow`);
-        assert.equal(
-          mounted.mountPoint.querySelector(".instance-tile-trigger")?.getAttribute("data-rail-detail")?.toLowerCase(),
-          example.label.toLowerCase(),
-          example.name,
-        );
-      }
-      if (example.connection && profile.id === value.activeProfile.id) {
-        assert.doesNotMatch(card.textContent ?? "", /Online/, `${example.name}: never Online beside the banner`);
-      }
-    } finally {
-      await act(async () => { mounted.root.unmount(); });
-      mounted.mountPoint.remove();
-    }
-  }
-});
-
-test("an active remote card offers Re-Pair first while the sign-in banner is shown", async () => {
-  const mounted = mount(
-    <InstancesContextProvider value={manager({
-      activeProfile: remote,
-      statusByProfile: { [remote.id]: { availability: "online" } },
-    })}>
-      <ActiveInstanceConnectionProvider value="sign-in-required">
-        <FeedbackProvider><InstancesPanel /></FeedbackProvider>
-      </ActiveInstanceConnectionProvider>
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  try {
-    const card = Array.from(mounted.mountPoint.querySelectorAll<HTMLElement>(".instance-card"))
-      .find((candidate) => candidate.querySelector("h2")?.textContent === remote.label)!;
-    const buttons = Array.from(card.querySelectorAll<HTMLButtonElement>(".instance-card-actions button"));
-    assert.equal(buttons[0]?.textContent?.trim(), "Re-Pair");
-    assert.ok(buttons[0]!.classList.contains("primary"), "recovery is the primary action");
-    assert.equal(buttons.filter((button) => button.textContent?.trim() === "Re-Pair").length, 1);
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
-test("instances panel keeps This Machine immutable and makes credential recovery explicit", async () => {
-  const opened: Parameters<InstanceManager["openInstanceDialog"]>[0][] = [];
-  const mounted = mount(
-    <InstancesContextProvider value={manager({ openInstanceDialog(options) { opened.push(options); } })}>
-      <FeedbackProvider><InstancesPanel /></FeedbackProvider>
-    </InstancesContextProvider>,
-  );
-  await mounted.render();
-  try {
-    assert.match(mounted.container.textContent ?? "", /2 Instances/);
-    // Instances share the machine vocabulary (docs/design-system.md §11.2): a missing credential
-    // needs the user to sign in again.
-    assert.match(mounted.container.textContent ?? "", /Sign-In Required/);
-    assert.equal(
-      Array.from(mounted.container.querySelectorAll("button")).filter((button) => button.textContent === "Remove").length,
-      1,
-      "the immutable local profile has no remove action",
-    );
-    const rePair = Array.from(mounted.container.querySelectorAll<HTMLButtonElement>("button"))
-      .find((button) => button.textContent?.trim() === "Re-Pair")!;
-    await act(async () => { rePair.click(); });
-    assert.equal(opened.length, 1);
-    assert.equal(opened[0]!.mode, "repair");
-    assert.equal((opened[0] as { profileId: string }).profileId, remote.id);
-    assert.ok(opened[0]!.returnFocus === (rePair as never), "focus returns to the button pressed");
-  } finally {
-    await act(async () => { mounted.root.unmount(); });
-    mounted.mountPoint.remove();
-  }
-});
-
 test("a labelled tile shows the name and status beside the monogram and leaves the tooltip to the rail", async () => {
   const mounted = mount(
     <InstancesContextProvider value={manager({ activeProfile: remote })}>
@@ -538,7 +343,7 @@ test("a labelled tile shows the name and status beside the monogram and leaves t
     assert.equal(trigger.getAttribute("aria-label"), "Switch Instance: Home Workstation");
     assert.equal(trigger.querySelector(".instance-tile-name")?.textContent, "Home Workstation");
     const status = trigger.querySelector(".instance-tile-status")!;
-    assert.equal(status.textContent, "Sign-In Required");
+    assert.equal(status.textContent, "Pairing Required");
     assert.equal(trigger.getAttribute("aria-describedby"), status.id, "the visible status is the description");
     assert.equal(trigger.getAttribute("data-rail-tip"), null, "the labelled rail shows no tooltip");
     assert.equal(trigger.getAttribute("data-rail-detail"), null);

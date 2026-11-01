@@ -1,1 +1,0 @@
-|.instance-card|padding|18px

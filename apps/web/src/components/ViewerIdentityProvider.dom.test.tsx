@@ -87,6 +87,10 @@ async function mount(getIdentity: ApiClient["getIdentity"], runtimeKey: string) 
   return {
     text: () => container.textContent,
     online: () => act(async () => { sockets.at(-1)!.onmessage?.({ data: "{}" }); }),
+    directoryChanged: () => act(async () => {
+      sockets.at(-1)!.onmessage?.({ data: JSON.stringify({ type: "identity_directory_changed" }) });
+    }),
+    socketCount: () => sockets.length,
     switchCredentials: () => act(async () => { for (const listener of credentialListeners) listener(); }),
     unmount: () => act(async () => { root.unmount(); }),
   };
@@ -132,6 +136,37 @@ test("a reconnect with other credentials drops the previous viewer before the ne
     assert.equal(view.text(), "unknown", "the reconnecting connection shows no viewer");
     await view.online();
     assert.equal(view.text(), "unknown", "a failed reload keeps the previous viewer dropped");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a directory change reloads the viewer in place, without a reconnect or a neutral gap (#2606)", async () => {
+  // Ada starts alone, so every answer reads as hers. An admin adds Grace, then renames her: the open
+  // transcript must learn both on the same connection.
+  const alone: IdentityAdministrationView = { ...identity, memberships: identity.memberships.slice(0, 1) };
+  const renamed: IdentityAdministrationView = {
+    ...identity,
+    memberships: identity.memberships.map((membership) =>
+      membership.userId === "user-grace" ? { ...membership, userName: "Grace B. Hopper" } : membership),
+  };
+  const responses = [alone, identity, renamed];
+  let release: (() => void) | null = null;
+  const view = await mount(async () => {
+    const next = responses.shift()!;
+    if (next === renamed) await new Promise<void>((resolve) => { release = resolve; });
+    return next;
+  }, "viewer-identity-directory-change");
+  try {
+    await view.online();
+    assert.equal(view.text(), "user-ada shared=false undefined");
+    await view.directoryChanged();
+    assert.equal(view.text(), "user-ada shared=true Grace Hopper", "the new member makes sessions shared");
+    await view.directoryChanged();
+    assert.equal(view.text(), "user-ada shared=true Grace Hopper", "the current viewer stays while the refresh loads");
+    await act(async () => { release!(); });
+    assert.equal(view.text(), "user-ada shared=true Grace B. Hopper", "the rename reaches the open transcript");
+    assert.equal(view.socketCount(), 1, "no refresh reconnected the dashboard");
   } finally {
     await view.unmount();
   }
