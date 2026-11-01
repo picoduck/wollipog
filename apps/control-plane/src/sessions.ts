@@ -9933,8 +9933,10 @@ export class SessionsService {
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
       // preserve the original configured/human request path without a standing issue grant,
       // and record why on the decision so the person is never asked without a reason (#2940).
-      const { recommendationId: _recommendationId, ...snapshot } = normalized.data;
-      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess,
+      // The snapshot keeps the name exactly as requested, so the card shows what the person
+      // approves and the requester consumes what it sent (#3918). Only the server's own
+      // issueAdmission makes a publication bounded; a named recommendation never does.
+      return this.createWorkflowDecision(sessionId, request, canAccess,
         "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
     }
     if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
@@ -10838,11 +10840,16 @@ export class SessionsService {
       this.hub.sessionChangedById(childSessionId);
       return ok(this.withMergeReviewEvidence(resolved));
     }
+    const ownRequester = decision?.sessionId === childSessionId ? this.db.getSession(childSessionId) : null;
+    // A Custom root's own publication, which only the campaign owner decides (#3919).
+    const rootOwnPublication = Boolean(decision && ownRequester && decision.category === "follow_up_issue_publication" &&
+      parentSessionId === childSessionId && decision.authority === "human" && this.customRootOwnPublication(ownRequester));
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope" ||
           decision.category === "campaign_follow_up_admission") && parentSessionId === childSessionId ||
           // A standalone session's own extra review rounds, which only a person decides (#3369).
           decision.category === "review_round_extension" && parentSessionId === childSessionId && decision.authority === "human" ||
+          rootOwnPublication ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
@@ -10889,6 +10896,10 @@ export class SessionsService {
     }
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
+    }
+    if (rootOwnPublication && (authority !== "human" || actor.kind !== "human" || !actor.id ||
+        !this.db.campaignOwnerUser(childSessionId, actor.id))) {
+      return fail("Only the campaign owner can decide a root Orchestrator's own follow-up publication", 403);
     }
     if (decision.category === "campaign_follow_up_admission") {
       // Only the campaign's owner admits a follow-up past its approval limit (#2940), never an agent.
@@ -11118,13 +11129,16 @@ export class SessionsService {
       }
     }
     const policy = parent?.parentControlPolicy;
-    // The same narrow self-control exception as creation/resolution: an ordinary standalone
-    // requester can consume its human-approved review extension, never another self-owned gate.
+    // The same narrow self-control exceptions as creation/resolution: an ordinary standalone
+    // requester can consume its human-approved review extension, and a Custom root its
+    // owner-approved publication (#3919), never another self-owned gate.
     const standaloneReviewExtension = child && parent?.id === child.id && decision.category === "review_round_extension" &&
       decision.authority === "human" && this.decisionControllerRoot(child) === "none";
+    const rootOwnPublication = child && parent?.id === child.id && decision.category === "follow_up_issue_publication" &&
+      decision.authority === "human" && this.customRootOwnPublication(child);
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !(standaloneReviewExtension || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
+        !(standaloneReviewExtension || rootOwnPublication || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
@@ -11675,6 +11689,9 @@ export class SessionsService {
         sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
+    if (category === "follow_up_issue_publication" && this.customRootOwnPublication(child)) {
+      return { session: child, policy: child.parentControlPolicy! };
+    }
     // The outermost Orchestrator above the child owns its gates, found by the same walk the
     // campaign projection uses (#2451). An Orchestrator whose campaign policy is unreadable still
     // owns them, human-only unless its Parent Control policy says otherwise, so no shape moves a
@@ -11694,6 +11711,14 @@ export class SessionsService {
       },
     } : null;
     return controller;
+  }
+
+  /** A Custom campaign root publishing a draft it wrote itself (#3919). It controls that gate, which
+   * stays the campaign owner's: a root's request is never Orchestrator-owned outside Full Control.
+   * Full Control roots and Orchestrators nested under another one resolve exactly as before. */
+  private customRootOwnPublication(session: SessionView): boolean {
+    return sessionRole(session) === "orchestrator" && Boolean(session.parentControlPolicy) &&
+      session.orchestratorPolicy?.control?.mode !== "full_control" && this.decisionControllerRoot(session) === "none";
   }
 
   /** A child's gates resolve from its parent, exactly as its campaign attention does, so a gate

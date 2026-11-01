@@ -128,7 +128,19 @@ an older untagged issue is still found. Every bounded publication is admitted an
 through a runner that reports this subject search and comparison. The server verifies accepted lineage and scope
 capacity. When it cannot admit the request, the decision goes to the person, and its
 `authorityEvaluation.admissionFailure` names the failed condition (for example `title_mismatch`,
-`capacity_exhausted` or `inspection_failed`), which the server also logs. The runner
+`capacity_exhausted` or `inspection_failed`, or `no_issue_boundary` in a Custom campaign), which
+the server also logs. That decision stores the snapshot exactly as requested, including its
+`recommendationId`, so the person's card shows it and the requester consumes the same snapshot it
+sent. A named recommendation never makes a publication bounded: only the server's own
+`issueAdmission` does, and a person-approved publication's name binds scope only to a
+recommendation whose repository and title subject also match the payload.
+
+In a Custom campaign the root may also request publication of a draft it wrote itself, through the
+same request, get and consume workflow. That decision is always the campaign owner's, even when the
+saved Parent Control policy delegates follow-up publication: only the campaign owner can approve or
+deny it, never the root or another member. The root then consumes the unchanged approved snapshot
+immediately before publishing. A Full Control root, an Orchestrator nested under another one, and a
+child's publication resolve exactly as before. The runner
 screens public content against the issue-reporting format and inspects both open and closed search
 results plus the newest issues. Incomplete or duplicate evidence refuses admission. This supplements
 the exact payload review; it never rewrites content or proves arbitrary prose is free of private data.
@@ -146,8 +158,12 @@ payload before settlement leaves its slot reserved, including after a human scop
 restore the exact payload before verification or have the human account for the outstanding slot.
 The system cannot infer a publication receipt from an edited tracker issue or a ledger claim.
 After publication, read back the exact payload, record the resulting issue on its recommendation,
-then propose the scope addition against that publication occurrence. Ledger acceptance alone grants
-neither publication nor scope.
+then propose the scope addition against that publication occurrence. Recording it is one
+`adjudicate_campaign_recommendation` call with `disposition: accepted`, a reason and
+`resultingIssue`; without `resultingWorkItemKey` it links the work item the earlier acceptance
+created rather than creating another, the recommendation then reads `published`, and its
+publication obligation clears. This applies to bounded and person-approved publications alike, in
+Custom and Full Control campaigns. Ledger acceptance alone grants neither publication nor scope.
 
 Completed delegated closure requires a delivered work-item verification with an exact report digest
 and fresh observed PR evidence. The root's verification attests delivery against acceptance criteria;

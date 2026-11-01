@@ -1055,7 +1055,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         category: { const: "follow_up_issue_publication" }, repository: { type: "string" },
         sanitizedTitle: { type: "string" }, sanitizedBody: { type: "string" },
         labels: { type: "array", maxItems: 32, items: { type: "string" } },
-        recommendationId: { type: "string", description: "Root Full Control related recommendation; the server inspects sanitation, duplicates, lineage and capacity." },
+        recommendationId: { type: "string", description: "The accepted campaign recommendation this publishes. Under Full Control the server inspects sanitation, duplicates, lineage and capacity for a bounded grant; otherwise the person decides. It is kept in the stored snapshot either way, so consume with exactly what you requested. After publishing, record the issue with adjudicate_campaign_recommendation (accepted, resultingIssue)." },
         issueAdmission: { type: "object", properties: { boundaryRevision: { type: "integer" }, evidenceDigest: { type: "string" },
           publicationAuthority: { type: "object", properties: { authorizedByUserId: { type: "string" }, objectiveDigest: { type: "string" } }, required: ["authorizedByUserId", "objectiveDigest"], additionalProperties: false } }, required: ["boundaryRevision", "evidenceDigest"], additionalProperties: false, description: "Echo only the server-derived admission from get_workflow_decision when consuming." },
       },
@@ -1661,7 +1661,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "adjudicate_campaign_recommendation",
-    description: "Record a disposition for one recorded follow-up recommendation: accepted (creates or links a follow_up work item by resultingWorkItemKey, optionally with resultingIssue), rejected, deferred, or duplicate (optionally of the existing item resultingWorkItemKey), with a reason. Accepting is not approval: publishing an issue and starting work still need their typed decisions.",
+    description: "Record a disposition for one recorded follow-up recommendation: accepted (creates or links a follow_up work item by resultingWorkItemKey, optionally with resultingIssue; re-accepting with only resultingIssue records the published issue on the work item the first acceptance created), rejected, deferred, or duplicate (optionally of the existing item resultingWorkItemKey), with a reason. Accepting is not approval: publishing an issue and starting work still need their typed decisions.",
     inputSchema: {
       type: "object",
       properties: {
