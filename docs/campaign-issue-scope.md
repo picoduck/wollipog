@@ -18,7 +18,20 @@ expected revision, before list, additions, removals, affected assignments, and d
 Approval, persistence of the approving human/revision, and one-time consumption share one database
 transaction. Pending/denied/stale/replayed requests cannot mutate scope. Changes to scope or affected work
 require a fresh proposal. Removing an issue preserves history and assignments but removes issue authority.
-Outstanding action decisions are revoked conservatively on any approved scope change.
+
+A scope change binds and revokes only what depends on the issues it adds or removes (#3915). Its
+snapshot binds every live child except those the work ledger proves unrelated to all of those issues,
+by the rule issue closures use (#3914), so progress by an unrelated child never makes a pending request
+stale, while a change to a child assigned to an added or removed issue does. Approval revokes exactly
+the decisions the snapshot lists: a closure of an added or removed issue (or of another repository),
+every follow-up publication and follow-up admission (they count against the issue capacity every
+change moves), the root's own decisions, and every decision of a child without that proof. Other
+closures, merges, evidence reviews and questions stay as they were and are still re-evaluated when
+resolved or consumed. A closure bound to an earlier scope revision still executes when every later
+revision was written by a consumed scope decision that left its issue alone. An armed merge survives
+a change that only adds issues; one a removal revokes can still be reconciled, which only records a
+forge-proven merge at the approved head. A person's approval under Full Control re-authorizes the
+boundary every decision was evaluated under, so it still revokes all of them.
 
 Protocol v208 capability-gates the complete operation before any update. Active Orchestrator participants
 must share the campaign runner and repository workspace; finish or move incompatible participants first.
@@ -111,10 +124,10 @@ still in scope, published payload matching exactly, and scope plus reservations 
 The admission evidence names which kind it was. Each Orchestrator refusal returns a fixed sentence
 and a bounded `code`, such as `publication_approver_not_owner`, `origin_outside_scope` or
 `lineage_missing`. A campaign owner can still propose any change from Campaign Status.
-The server binds lineage evidence, rationale, expected revision, affected assignments, active
-children and outstanding grants into the snapshot. Root standing authorization resolves and
-consumes that exact occurrence atomically; all incompatible grants and evidence receipts are revoked
-in the same transaction. Agent disposition records name the acting session, occurrence and boundary
+The server binds lineage evidence, rationale, expected revision, affected assignments, related
+active children and affected grants into the snapshot. Root standing authorization resolves and
+consumes that exact occurrence atomically; the grants it lists and their evidence receipts are
+revoked in the same transaction. Agent disposition records name the acting session, occurrence and boundary
 revision separately from the original authorizing human and timestamp. Scope revisions advance the
 bounded contract without altering its objective, permitted effects or limits. Custom approval still
 establishes new human provenance and invalidates an older Full Control boundary.

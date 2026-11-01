@@ -73,9 +73,13 @@ function issueClosurePrompts(child: Pick<SessionView, "queued" | "pendingPrompts
  * included: a task can move between issues in steering history, and a later "continue" prompt is
  * not proof it is unrelated. Exclusion is decided from append-only history, so a child once
  * connected to the issue is never excluded again, and bringing one into the set changes the
- * digest. Without an issue, as for a campaign scope change, every live child is included. */
-export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string, issue?: { repository: string; number: number }) {
-  const excludable = issue ? db.campaignWorkLedger.issueClosureExcludableSessions(sessionId, issue.repository, issue.number) : null;
+ * digest. A campaign scope change passes every issue it adds or removes, and a child is left out
+ * only when it is proven unrelated to all of them (#3915). Without an issue every live child is
+ * included. */
+export function issueClosureActiveChildren(db: ControlPlaneDb, sessionId: string,
+  issue?: { repository: string; number: number } | { repository: string; numbers: readonly number[] }) {
+  const numbers = !issue ? [] : "numbers" in issue ? issue.numbers : [issue.number];
+  const excludable = issue && numbers.length ? db.campaignWorkLedger.sessionsUnrelatedToIssues(sessionId, issue.repository, numbers) : null;
   return db.campaignDescendantIds(sessionId).flatMap((id) => {
     const child = db.getSession(id);
     if (!child || isTerminal(child.status) || child.archived) return [];

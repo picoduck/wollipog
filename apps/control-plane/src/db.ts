@@ -369,10 +369,13 @@ function followUpApprovalDetails(subject: CampaignFollowUpSubject, content: Camp
 
 export const GOVERNANCE_AUDIT_RETENTION_MS = 90 * 24 * 60 * 60_000;
 export const MAX_PROJECTED_STEERING_ATTEMPTS = 50;
-/** Lifecycle revocations an exact provider proof may recover from. */
+/** Lifecycle revocations an exact provider proof may recover from. A campaign scope change that
+ * revokes an armed merge (#3915) is one too: its enqueue already ran, so recovery can only record
+ * the merge the proof shows, and the approving authority and policy revision must still stand. */
 export const RECOVERABLE_ACTION_REVOCATION_ACTORS: readonly string[] = [
   "session-restarted",
   "provider-session-ended",
+  "superseded_by_scope_change",
 ];
 /** A forge-proven Claude Code merge recovers from every lifecycle revocation (#1351). */
 export const FORGE_RECOVERABLE_ACTION_REVOCATION_ACTORS: readonly string[] = [
@@ -16455,8 +16458,12 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
-  /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope. */
-  approveCampaignIssueScope(occurrenceId: string, userId: string, now: number, agentSessionId?: string): WorkflowDecisionView | null {
+  /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope.
+   * It revokes the outstanding decisions the exact approved snapshot names as affected (#3915). A
+   * Human's approval under Full Control re-authorizes the boundary every decision was evaluated
+   * under (re-minting it bumps the policy revision they are bound to), so it still revokes them all. */
+  approveCampaignIssueScope(occurrenceId: string, userId: string, now: number, agentSessionId?: string):
+    { decision: WorkflowDecisionView; revoked: WorkflowDecisionView[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
@@ -16515,14 +16522,35 @@ export class ControlPlaneDb {
       if (!this.resolveWorkflowDecision(occurrenceId, decision.authority, "approved", now) || !this.consumeWorkflowDecision(occurrenceId, now)) {
         throw new Error("Scope approval was resolved concurrently");
       }
-      for (const stale of this.unconsumedWorkflowDecisionsForController(root.id)) {
+      const affected = new Set(snapshot.affectedDecisions);
+      const revoked = this.unconsumedWorkflowDecisionsForController(root.id)
+        .filter((stale) => (!agentSessionId && boundary !== null) || affected.has(stale.occurrenceId));
+      for (const stale of revoked) {
         this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
         this.retireWorkflowDecisionResume(stale.occurrenceId, now);
         this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
       }
       this.db.exec("COMMIT");
-      return this.workflowDecisionByOccurrence(occurrenceId);
+      return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** Whether every campaign issue-scope revision from `fromRevision` up to `toRevision` was written
+   * by exactly one consumed scope decision of this campaign, in this repository, that neither added
+   * nor removed `issue` (#3915). An approved issue closure bound to `fromRevision` then still names
+   * the same authority over its issue. A revision written any other way (a launch, a first message,
+   * a Full Control authorization) has no such record, and the answer is no. */
+  issueScopeUnchangedFor(rootId: string, repository: string, issue: number, fromRevision: number, toRevision: number): boolean {
+    if (!Number.isSafeInteger(fromRevision) || !Number.isSafeInteger(toRevision) || fromRevision < 1 || toRevision < fromRevision) return false;
+    for (let revision = fromRevision; revision < toRevision; revision++) {
+      const rows = (this.stmt(`SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND session_id=?
+          AND category='campaign_issue_scope' AND status='consumed' AND json_extract(resource_snapshot, '$.expectedRevision')=?`)
+        .all(rootId, rootId, revision) as unknown[]).map(workflowDecisionFromRow);
+      const snapshot = rows.length === 1 ? rows[0]?.resourceSnapshot : undefined;
+      if (snapshot?.category !== "campaign_issue_scope" || snapshot.repository.toLowerCase() !== repository.toLowerCase() ||
+          snapshot.additions.includes(issue) || snapshot.removals.includes(issue)) return false;
+    }
+    return true;
   }
 
   /** Whether a Full Control campaign's boundary names its issue scope, or trails it only by scope
