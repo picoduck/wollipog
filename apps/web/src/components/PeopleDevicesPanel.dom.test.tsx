@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { IdentityAdministrationView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { textBefore } from "../dom-test-assertions.js";
+import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { PairDeviceDialog, PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 
@@ -199,16 +199,17 @@ test("every masked name on People & Devices says what it hides after a visible l
       assert.equal(mask.textContent, "Email Hidden");
       return textBefore(scope, mask);
     };
-    assert.equal(labelled(container.querySelector(".access-context")!), "Signed in as");
-    const rows = [...container.querySelectorAll(".access-row-main")];
+    // The identity chip is gone (#2997); your own row says "You" instead.
+    assertNoDomNode(container.querySelector(".access-context"));
+    const rows = [...container.querySelectorAll(".access-row")];
     const [owner, member, device] = rows;
     assert.equal(rows.length, 3, "two people and one device");
     // The value is an email, not a name, so the row says whose it is (#1954 review).
-    assert.equal(labelled(owner!), "Person");
-    assert.equal(labelled(member!), "Person");
-    // A device row names the device first; the person it belongs to is labelled on its own line.
-    assert.equal(device!.querySelector("strong")?.textContent, "Pat's Phone");
-    assert.equal(labelled(device!.children[1]!), "Person");
+    assert.equal(labelled(owner!.querySelector(".row-title")!), "Person");
+    assert.equal(labelled(member!.querySelector(".row-title")!), "Person");
+    // A device row names the device first; the person it belongs to is labelled on line 2.
+    assert.equal(device!.querySelector(".row-title")?.textContent, "Pat's Phone");
+    assert.equal(labelled(device!.querySelector(".access-row-meta")!), "Person");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

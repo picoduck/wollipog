@@ -362,9 +362,9 @@ describe("Add Person and Manage Person (#2998)", () => {
     try {
       await act(async () => { await tick(); });
       const row = () => [...view.mountPoint.querySelectorAll(".access-row")]
-        .find((candidate) => candidate.textContent?.includes("Pat Jones") && candidate.textContent?.includes("Manage"))!;
-      assert.match(row().textContent ?? "", /Active/);
-      await press(buttonIn(row(), "Manage"));
+        .find((candidate) => candidate.textContent?.includes("Pat Jones") && candidate.textContent?.includes("Manage…"))!;
+      assert.doesNotMatch(row().textContent ?? "", /Active|Suspended/, "an active person shows no status (#2997)");
+      await press(buttonIn(row(), "Manage…"));
       const manage = dialog("Manage Pat Jones");
       assert.equal(manage.querySelector("dl.facts dd")?.textContent, "2 devices. They use this access level.");
       // A pointer press focuses the button; happy-dom's click() does not.

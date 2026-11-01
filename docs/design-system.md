@@ -826,7 +826,7 @@ everywhere also ends the 54 / 57 / 50 / 40px jumps between routes. The session's
 - Sections within a page: `--type-section` title row (title left, one action right), 12px to content,
   32px between sections. Sections are not boxed (§5.1).
 - Why 960 for list pages: a row's trailing status and actions should stay within one eye movement
-  of its title. The People and Devices tab, the calmest list page, runs at about 880px; at 1200px a machine row's Manage button sits 1,100px from the name.
+  of its title. The People and Devices tab, the calmest list page, runs at this 960px measure (#2997); at 1200px a machine row's Manage button sits 1,100px from the name.
   Wide content (tables with 5+ columns, the usage chart, card grids) opts into `.page.wide`.
 - A component never uses negative margins to escape its parent's padding (`.subagents-panel {
   margin: -12px -14px }`). Hosts offer a flush modifier instead. Optical bleed inside one component
@@ -2351,6 +2351,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Machine / instance / device | Update Required, Sign-In Required, Pairing Required | warning |
 | Machine | Approval Required (a Registry agent waits for its exact launch to be approved) | warning |
 | Machine / instance | Unreachable, Error | danger |
+| Person account (`member`, People and Devices, #2997) | Suspended: neutral (hollow dot). Active shows nothing: status appears only as an exception. |
 | Skill deployment | Linked | success |
 | Skill deployment | Pending | neutral |
 | Skill deployment | Edited (a machine copy differs from the library) | warning |

@@ -176,7 +176,7 @@ test.describe("phone", () => {
 
   test("Delete Team takes over the Manage Team sheet and Back returns with its values", async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
-    await page.getByRole("region", { name: "Teams" }).locator(".access-row").first().getByRole("button", { name: "Manage" }).click();
+    await page.getByRole("region", { name: "Teams" }).locator(".access-row-open").first().click();
     const manage = page.getByRole("dialog", { name: "Manage Team" });
     await expect(manage).toBeVisible();
     const member = manage.getByRole("checkbox").first();
@@ -280,7 +280,7 @@ test.describe("desktop stacking", () => {
 
   test("Delete Team stacks over Manage Team under one dim", async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
-    await page.getByRole("region", { name: "Teams" }).locator(".access-row").first().getByRole("button", { name: "Manage" }).click();
+    await page.getByRole("region", { name: "Teams" }).locator(".access-row-open").first().click();
     const manage = page.getByRole("dialog", { name: "Manage Team" });
     await manage.locator(".modal-foot .modal-tertiary").getByRole("button", { name: "Delete Team" }).click();
     const confirmation = page.getByRole("dialog", { name: "Delete Team" });

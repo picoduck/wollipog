@@ -410,7 +410,8 @@ const VOCABULARY = {
   /** An organization member's account (People & Devices). */
   member: {
     active: success("Active"),
-    suspended: danger("Suspended"),
+    // An exception, not an alarm: a suspended person is listed neutral with a hollow dot (#2997).
+    suspended: neutral("Suspended", { hollow: true }),
   },
   provider_account: {
     signed_in: success("Signed In"),

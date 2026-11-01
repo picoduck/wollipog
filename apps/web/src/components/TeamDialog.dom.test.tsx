@@ -308,7 +308,7 @@ describe("Team dialog (#3000)", () => {
     const view = await mount({ manage: null });
     const dialog = view.dialog("Create Team");
     assert.ok(dialog);
-    assert.equal(dialog.querySelector(".modal-desc")?.textContent, "Use teams when machines and work need a shared ownership scope.");
+    assert.equal(dialog.querySelector(".modal-desc")?.textContent, "Teams share machines, workspaces and sessions among their members.");
     const panel = dialog.closest(".modal-panel")!;
     const create = buttonNamed(panel, "Create Team")!;
     assert.equal(create.disabled, false);
