@@ -218,13 +218,17 @@ test(
       contender.once("error", reject);
     });
     lock.exec("BEGIN IMMEDIATE");
+    // The database commit and child stdout are separate transports. Hold log delivery until
+    // registration persists to exercise the ordering hosted CI can observe.
+    child.stdout?.pause();
     contender.send(JSON.stringify({ ...JSON.parse(registerFrame("runner-frame-isolation", runnerToken)),
       sessionSnapshots: [snapshot] }));
     await delay(550);
     lock.exec("COMMIT");
     await waitUntil(() => lock.prepare("SELECT title FROM sessions WHERE id=?").get(snapshot.id)?.title === "After lock");
     assert.equal(contender.readyState, 1, "registration survives a real lock longer than the busy timeout");
-    assert.match(output, /runner_persistence_contention/);
+    child.stdout?.resume();
+    await waitUntil(() => output.includes("runner_persistence_contention"));
     await waitUntil(() => output.includes("runner online: runner-frame-isolation"));
 
     lock.exec("BEGIN IMMEDIATE");
