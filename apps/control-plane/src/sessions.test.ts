@@ -27030,10 +27030,13 @@ test("issue closure requires an exact human decision and executes one durable ac
 
 test("issue closure binds only children whose work bears on the issue (#3084)", async () => {
   // Each mode changes one child after the human approved closing issue 1440, then executes.
-  const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child"]);
+  const executable = new Set(["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "linked_unrelated_prompt",
+    "other_issue_follow_up_decision"]);
   for (const mode of ["unrelated_prompt", "unrelated_decision", "new_unrelated_child", "related_prompt",
     "related_decision", "unattributed_prompt", "unechoed_launch", "earlier_attempt_prompt", "issue_cleared",
-    "follow_up_prompt", "linked_unrelated_prompt", "reassigned_into_lineage", "issue_toggled", "readjudicated"]) {
+    "follow_up_prompt", "follow_up_decision", "transitive_follow_up_prompt", "upstream_follow_up_prompt",
+    "sibling_follow_up_prompt", "linked_unrelated_prompt", "other_issue_follow_up_decision", "reassigned_into_lineage",
+    "issue_toggled", "readjudicated"]) {
     const { db, svc, hub, parent, spawn } = stopAndArchiveCampaignFixture("retain");
     try {
       const plan = svc.recordCampaignPlan(parent.id, { items: [
@@ -27078,11 +27081,35 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
         track(unrelatedItem!, null);
       } else assign(otherItem!, unrelated);
       const unattributed = mode === "unattributed_prompt" ? launch("Help with something") : null;
-      // A follow-up of the issue's item, and of an unrelated item: any follow-up link keeps a child bound.
-      const lineageChild = mode === "follow_up_prompt" ? launch("Deliver the follow-up") : null;
-      if (lineageChild) assign(followUpOf(issueItem!, related, "followup:lineage"), lineageChild);
-      const linkedChild = mode === "linked_unrelated_prompt" ? launch("Deliver the plain follow-up") : null;
-      if (linkedChild) assign(followUpOf(unrelatedItem!, unrelated, "followup:plain"), linkedChild);
+      // Follow-up lineage binds a child only when, followed transitively in both directions, it
+      // reaches an item that tracked the issue (#3914).
+      const issue = (number: number) => ({ repository: "picoduck/wollipog", number });
+      const trackedFollowUpOf = (originItem: string, originSessionId: string, key: string, number: number) => {
+        const result = followUpOf(originItem, originSessionId, key);
+        track(result, issue(number));
+        return result;
+      };
+      const lineageItem = (() => {
+        switch (mode) {
+          case "follow_up_prompt": case "follow_up_decision": return followUpOf(issueItem!, related, "followup:lineage");
+          case "transitive_follow_up_prompt":
+            return followUpOf(followUpOf(issueItem!, related, "followup:first"), related, "followup:second");
+          // The child's own item is the origin of the issue's item.
+          case "upstream_follow_up_prompt":
+            trackedFollowUpOf(unrelatedItem!, unrelated, "followup:issue", 1440);
+            return unrelatedItem!;
+          // The issue's item and the child's item share an origin: up one link, then down another.
+          case "sibling_follow_up_prompt":
+            trackedFollowUpOf(unrelatedItem!, unrelated, "followup:issue", 1440);
+            return followUpOf(unrelatedItem!, unrelated, "followup:sibling");
+          case "linked_unrelated_prompt": return followUpOf(unrelatedItem!, unrelated, "followup:plain");
+          // A follow-up result for another issue, whose origin is another issue's item.
+          case "other_issue_follow_up_decision": return trackedFollowUpOf(otherItem!, unrelated, "followup:other", 1442);
+          default: return null;
+        }
+      })();
+      const lineageChild = lineageItem ? launch("Deliver the follow-up") : null;
+      if (lineageChild) assign(lineageItem!, lineageChild);
 
       let executions = 0;
       hub.requestHandler = (message) => {
@@ -27105,8 +27132,17 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       assert.equal(bound.has(unrelated), ["unechoed_launch", "earlier_attempt_prompt", "issue_cleared"].includes(mode),
         `${mode}: a child attributed elsewhere is bound only when its launch is unknown or it was ever connected to the issue`);
       if (unattributed) assert.ok(bound.has(unattributed), "a child without an open attempt stays bound");
-      if (lineageChild) assert.ok(bound.has(lineageChild), "a child on a follow-up of the issue is bound");
-      if (linkedChild) assert.ok(bound.has(linkedChild), "a child on any follow-up-linked item stays bound");
+      if (lineageChild) {
+        assert.equal(bound.has(lineageChild), !executable.has(mode),
+          `${mode}: a follow-up-linked child is bound exactly when its lineage reaches the issue's item`);
+      }
+      if (mode === "unrelated_prompt") {
+        // The same rule over a set of issues, as a scope change compares them; the repository is case-insensitive.
+        const unrelatedTo = (numbers: number[]) =>
+          db.campaignWorkLedger.sessionsUnrelatedToIssues(parent.id, "PicoDuck/Wollipog", numbers).has(unrelated);
+        assert.deepEqual([unrelatedTo([1440]), unrelatedTo([1441]), unrelatedTo([1440, 1441]), unrelatedTo([])],
+          [true, false, false, true]);
+      }
       assert.ok(svc.approve(parent.id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
 
       const prompt = (sessionId: string) => db.stageSessionPromptCommand({ commandId: `prompt-${sessionId}`, sessionId,
@@ -27122,8 +27158,10 @@ test("issue closure binds only children whose work bears on the issue (#3084)", 
       if (mode === "related_prompt") prompt(related);
       if (mode === "related_decision") raiseDecision(related);
       if (unattributed) prompt(unattributed);
-      if (lineageChild) prompt(lineageChild);
-      if (linkedChild) prompt(linkedChild);
+      if (lineageChild) {
+        if (mode.endsWith("_decision")) raiseDecision(lineageChild);
+        else prompt(lineageChild);
+      }
       if (mode === "reassigned_into_lineage") assign(issueItem!, unrelated);
       // Connecting a child after approval and disconnecting it again still revokes: history only grows.
       if (mode === "issue_toggled") {
@@ -27366,6 +27404,18 @@ test("issue-closure attribution treats work recorded before its history as relat
       assert.ok(accepted.ok, accepted.error);
     }
     assert.equal(rows("SELECT * FROM campaign_work_lineage_edges").length, 1);
+    assert.deepEqual(excludable(), [unrelated], "lineage that never reaches the issue or a legacy item does not bind");
+
+    // Lineage reaching a legacy item binds too: what that item tracked or linked before history began is unknown (#3914).
+    const fromLegacy = svc.recordCampaignFollowUp(parent.id, { originSessionId: unrelated, repository: "picoduck/wollipog",
+      title: "Legacy Follow-Up", originWorkItemIds: [otherItem!] });
+    assert.ok(fromLegacy.ok && fromLegacy.data, fromLegacy.error);
+    const legacyResult = svc.adjudicateCampaignRecommendation(parent.id, { recommendationId: fromLegacy.data.id,
+      disposition: "accepted", reason: "Needed", resultingWorkItemKey: "followup:legacy" });
+    assert.ok(legacyResult.ok && legacyResult.data?.workItem, legacyResult.error);
+    const lineageChild = spawn(parent.id, "Deliver the legacy follow-up");
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: legacyResult.data.workItem.id, childSessionId: lineageChild }).ok);
+    assert.deepEqual(excludable(), [unrelated]);
   } finally { db.close(); }
 });
 
