@@ -10256,13 +10256,6 @@ textarea {
 .danger-text {
   color: var(--danger-text);
 }
-/* Pair Device's sentence when nobody can be chosen (#2999 rebuilds that dialog). */
-.access-empty-copy {
-  padding: var(--space-4);
-  border-top: 1px solid var(--border);
-  color: var(--text-faint);
-  font: var(--type-small);
-}
 /* Device Details (#2997): its facts, then one sentence on a paired dashboard. */
 .device-details-note {
   margin: 0;
@@ -15310,10 +15303,6 @@ button.review-finding-location {
   }
   .main-body {
     padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
-  }
-  .connections-panel > .toolbar {
-    align-items: stretch;
-    flex-direction: column;
   }
   .runner-card {
     padding: 14px;
