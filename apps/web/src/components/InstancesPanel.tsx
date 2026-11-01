@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import React, { useEffect, useRef, useState, useSyncExternalStore, type ReactNode, type RefObject } from "react";
 import { writeClipboardText } from "../clipboard.js";
 import type { InstanceProfile } from "../desktop-instances.js";
 import { relativeTime } from "../format.js";
@@ -46,6 +46,45 @@ type RowAction = "switch" | "retry" | "remove";
 interface RowFailure {
   message: string;
   detail: string;
+}
+
+/**
+ * What each row is doing, and how its last action ended (#3002). A Switch or Retry makes the shell
+ * give way to the recovery screen while the instance opens (`DesktopInstanceBoundary`), which
+ * unmounts this list and mounts the recovery screen's own, and the shell's list again once it is
+ * open. So the state lives beside the component, keyed by profile, and the list on screen shows the
+ * busy button and then the notice under the row that was pressed. `attempts` remembers a finished
+ * Switch or Retry: the provider reports a failed connection as its `failed` phase, not by throwing.
+ */
+interface RowFeedback {
+  pending: Readonly<Record<string, RowAction>>;
+  attempts: Readonly<Record<string, Exclude<RowAction, "remove">>>;
+  failures: Readonly<Record<string, RowFailure>>;
+}
+
+const EMPTY_FEEDBACK: RowFeedback = { pending: {}, attempts: {}, failures: {} };
+let rowFeedback = EMPTY_FEEDBACK;
+const rowFeedbackListeners = new Set<() => void>();
+
+function updateRowFeedback(change: (current: RowFeedback) => RowFeedback) {
+  rowFeedback = change(rowFeedback);
+  for (const listener of rowFeedbackListeners) listener();
+}
+function subscribeRowFeedback(listener: () => void) {
+  rowFeedbackListeners.add(listener);
+  return () => { rowFeedbackListeners.delete(listener); };
+}
+const readRowFeedback = () => rowFeedback;
+
+/** Forgets every row's progress and failures. For tests, which mount the list many times. */
+export function resetInstanceRowFeedback() {
+  updateRowFeedback(() => EMPTY_FEEDBACK);
+}
+
+function without<T>(record: Readonly<Record<string, T>>, key: string): Readonly<Record<string, T>> {
+  if (!(key in record)) return record;
+  const { [key]: _drop, ...rest } = record;
+  return rest;
 }
 
 const FAILURE_SENTENCES: Record<RowAction, (label: string) => string> = {
@@ -154,27 +193,33 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
   const instances = useInstances();
   const connection = useActiveInstanceConnection();
   const { confirm } = useFeedback();
-  const [busy, setBusy] = useState<Record<string, RowAction>>({});
-  const [failures, setFailures] = useState<Record<string, RowFailure>>({});
+  const { pending: busy, attempts, failures } = useSyncExternalStore(subscribeRowFeedback, readRowFeedback);
 
   const run = async (profile: InstanceProfile, action: RowAction, operation: () => Promise<void>) => {
-    setBusy((current) => ({ ...current, [profile.id]: action }));
-    setFailures((current) => {
-      const { [profile.id]: _drop, ...rest } = current;
-      return rest;
-    });
+    updateRowFeedback((current) => ({
+      pending: { ...current.pending, [profile.id]: action },
+      attempts: without(current.attempts, profile.id),
+      failures: without(current.failures, profile.id),
+    }));
     try {
       await operation();
+      // A switch or retry reports a failed connection through the provider's phase, not by throwing.
+      if (action !== "remove") updateRowFeedback((current) => ({ ...current, attempts: { ...current.attempts, [profile.id]: action } }));
     } catch (cause) {
       const detail = cause instanceof Error ? cause.message : String(cause);
-      setFailures((current) => ({ ...current, [profile.id]: { message: FAILURE_SENTENCES[action](profile.label), detail } }));
+      updateRowFeedback((current) => ({
+        ...current,
+        failures: { ...current.failures, [profile.id]: { message: FAILURE_SENTENCES[action](profile.label), detail } },
+      }));
     } finally {
-      setBusy((current) => {
-        const { [profile.id]: _done, ...rest } = current;
-        return rest;
-      });
+      updateRowFeedback((current) => ({ ...current, pending: without(current.pending, profile.id) }));
     }
   };
+  const dismiss = (profileId: string) => updateRowFeedback((current) => ({
+    ...current,
+    attempts: without(current.attempts, profileId),
+    failures: without(current.failures, profileId),
+  }));
 
   const remove = async (profile: InstanceProfile) => {
     const active = profile.id === instances.activeProfile.id;
@@ -200,15 +245,21 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
         const pending = busy[profile.id];
         const problem = profile.kind === "remote" ? describeInstanceFailure(status) : null;
         const pairing = status.availability === "authentication-required" || status.availability === "missing-credential";
-        const failure = failures[profile.id];
+        // A thrown failure (a removal), else a Switch or Retry from a list whose connection then failed.
+        const attempt = attempts[profile.id];
+        const opened = active && instances.phase === "failed" && attempt !== undefined;
+        const failure: RowFailure | undefined = failures[profile.id] ?? (opened ? {
+          message: FAILURE_SENTENCES[attempt](profile.label),
+          detail: instances.error ?? status.message ?? "",
+        } : undefined);
 
         // One slot, chosen by state (§5.2): a switch keeps its Switch through Connecting.
         let slot: ReactNode = null;
         if (pending === "retry") {
-          slot = <BusyButton className="btn sm" busy progress={`Reconnecting to ${profile.label}…`} icon={<RefreshIcon />}>Retry</BusyButton>;
+          slot = <BusyButton className="btn sm" busy progress={`Reconnecting to ${profile.label}…`} icon={<RefreshIcon size={14} />}>Retry</BusyButton>;
         } else if (pending === "switch" || (active && status.availability === "connecting")) {
           slot = (
-            <BusyButton className="btn sm" busy progress={`Switching to ${profile.label}…`} icon={<ArrowLeftRightIcon />}>
+            <BusyButton className="btn sm" busy progress={`Switching to ${profile.label}…`} icon={<ArrowLeftRightIcon size={14} />}>
               Switch
             </BusyButton>
           );
@@ -217,7 +268,7 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
             slot = (
               <button type="button" className="btn sm" aria-haspopup="dialog" disabled={pending !== undefined}
                 onClick={(event) => instances.openInstanceDialog({ mode: "repair", profileId: profile.id, returnFocus: event.currentTarget })}>
-                <KeyIcon />
+                <KeyIcon size={14} />
                 <span>Re-Pair…</span>
               </button>
             );
@@ -226,7 +277,7 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
           // Nothing here fixes it: the other computer needs an update.
         } else if (active && status.availability === "offline") {
           slot = (
-            <BusyButton className="btn sm" busy={false} progress={`Reconnecting to ${profile.label}…`} icon={<RefreshIcon />}
+            <BusyButton className="btn sm" busy={false} progress={`Reconnecting to ${profile.label}…`} icon={<RefreshIcon size={14} />}
               disabled={pending !== undefined} onClick={() => void run(profile, "retry", () => instances.retryActive())}>
               Retry
             </BusyButton>
@@ -235,7 +286,7 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
           slot = <span className="instance-row-current"><CheckIcon size={14} />Current</span>;
         } else {
           slot = (
-            <BusyButton className="btn sm" busy={false} progress={`Switching to ${profile.label}…`} icon={<ArrowLeftRightIcon />}
+            <BusyButton className="btn sm" busy={false} progress={`Switching to ${profile.label}…`} icon={<ArrowLeftRightIcon size={14} />}
               disabled={pending !== undefined} onClick={() => void run(profile, "switch", () => instances.switchInstance(profile.id))}>
               Switch
             </BusyButton>
@@ -286,11 +337,8 @@ export function InstancesPanel({ addButtonRef }: { addButtonRef?: RefObject<HTML
               </span>
             </div>
             {failure && (
-              <Notice compact tone="danger" role="alert" details={failure.detail}
-                onDismiss={() => setFailures((current) => {
-                  const { [profile.id]: _drop, ...rest } = current;
-                  return rest;
-                })}>
+              <Notice compact tone="danger" role="alert" details={failure.detail || undefined}
+                onDismiss={() => dismiss(profile.id)}>
                 {failure.message}
               </Notice>
             )}

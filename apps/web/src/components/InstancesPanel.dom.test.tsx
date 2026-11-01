@@ -13,7 +13,7 @@ import {
 } from "../instances-context.js";
 import { FeedbackContext, type ConfirmationOptions } from "./FeedbackProvider.js";
 import { InstanceSelector } from "./InstanceSelector.js";
-import { InstancesPanel } from "./InstancesPanel.js";
+import { InstancesPanel, resetInstanceRowFeedback } from "./InstancesPanel.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/connections/instances" });
@@ -79,7 +79,8 @@ interface Feedback {
   accept: boolean;
 }
 
-function mount(value: InstanceManager, options: { connection?: ActiveInstanceConnection | null; selector?: boolean } = {}) {
+function mount(value: InstanceManager, options: { connection?: ActiveInstanceConnection | null; selector?: boolean; reset?: boolean } = {}) {
+  if (options.reset !== false) resetInstanceRowFeedback();
   const feedback: Feedback = { confirmations: [], toasts: [], accept: true };
   const host = domWindow.document.createElement("div");
   domWindow.document.body.append(host);
@@ -327,15 +328,45 @@ test("Switch keeps its label and width with a spinner while the row reads Connec
   }
 });
 
-test("a failed switch shows a danger notice under its row with the raw message behind Show Details", async () => {
+test("a failed switch shows a danger notice under its row in the list that replaces the one pressed", async () => {
+  // As InstanceProvider does: the switch makes the profile active and opening, the boundary
+  // unmounts the shell's list, and a failed connection resolves the switch with the failed phase.
+  let finish: () => void = () => undefined;
   const value = manager({
-    async switchInstance() { throw new Error("tcp connect error: Connection refused (os error 111)"); },
+    statusByProfile: { local: { availability: "online" } },
+    switchInstance: () => new Promise<void>((resolve) => { finish = resolve; }),
   });
-  const view = mount(value);
+  const shell = mount(value);
+  await shell.render();
+  await act(async () => { buttons(rowOf(shell.mountPoint, remote))[0]!.click(); await tick(); });
+  await shell.unmount();
+
+  const switched = { registry: { profiles: [local, remote], activeInstanceId: remote.id }, activeProfile: remote };
+  const view = mount(manager({
+    ...value,
+    ...switched,
+    phase: "opening",
+    statusByProfile: { local: { availability: "online" }, [remote.id]: { availability: "connecting" } },
+  }), { reset: false });
   await view.render();
   try {
-    const row = rowOf(view.mountPoint, remote);
-    await act(async () => { buttons(row)[0]!.click(); await tick(); });
+    let row = rowOf(view.mountPoint, remote);
+    assert.equal(buttons(row)[0]!.textContent?.trim(), "Switch", "the recovery screen's list shows the switch running");
+    assert.equal(buttons(row)[0]!.getAttribute("aria-busy"), "true");
+    await act(async () => { finish(); await tick(); });
+    await view.render(manager({
+      ...value,
+      ...switched,
+      phase: "failed",
+      error: "tcp connect error: Connection refused (os error 111)",
+      statusByProfile: {
+        local: { availability: "online" },
+        [remote.id]: { availability: "offline", message: "tcp connect error: Connection refused (os error 111)" },
+      },
+    }));
+    row = rowOf(view.mountPoint, remote);
+    assert.equal(row.querySelector(".row-sub")?.textContent, "Refused the connection.Last connected 40d ago");
+    assert.deepEqual(slotLabels(row), ["Retry"]);
     const notice = row.nextElementSibling as HTMLElement;
     assert.ok(notice?.classList.contains("notice"), "directly below the row");
     assert.ok(notice.classList.contains("t-danger") && notice.classList.contains("compact"));

@@ -72,9 +72,11 @@ export function InstanceRecoveryShell() {
                   </button>
                 </div>
               </div>
-              <InstancesPanel addButtonRef={addButtonRef} />
             </>
           )}
+          {/* The list stays while an instance opens, so a row's Switch or Retry shows its progress and
+              then its outcome where it was pressed (#3002). */}
+          {instances.phase !== "loading" && <InstancesPanel addButtonRef={addButtonRef} />}
         </div>
       </main>
     </div>

@@ -11,6 +11,7 @@ import {
   type ActiveInstanceConnection,
 } from "../instances-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { InstanceRecoveryShell } from "../components/InstanceRecoveryShell.js";
 import { InstanceSelector } from "../components/InstanceSelector.js";
 import { addRemoteInstanceAction, InstancesPanel } from "../components/InstancesPanel.js";
 import { OfflineBanner } from "../components/OfflineBanner.js";
@@ -152,11 +153,22 @@ window.__WOLLIPOG_INSTANCE_E2E__ = {
 
 let setHarnessConnection: (connection: ActiveInstanceConnection | null) => void = () => undefined;
 
-/** The shell's part: the rail with the tile, and the banner the tile must agree with (#1970). */
-function Shell() {
+/**
+ * App.tsx's `DesktopInstanceBoundary`: the shell while the active instance is open, and the recovery
+ * screen while it is opening, failed or missing, so a switch unmounts the shell's list as the app's
+ * does (#3002). The banner's state lives here, above the swap.
+ */
+function Boundary() {
   const instances = useInstances();
   const [connection, setConnection] = useState<ActiveInstanceConnection | null>(null);
   setHarnessConnection = setConnection;
+  if (instances.phase !== "ready" || !instances.runtime) return <InstanceRecoveryShell />;
+  return <Shell connection={connection} />;
+}
+
+/** The shell's part: the rail with the tile, and the banner the tile must agree with (#1970). */
+function Shell({ connection }: { connection: ActiveInstanceConnection | null }) {
+  const instances = useInstances();
   const { labels } = useRailPreferences();
   const addButtonRef = useRef<HTMLButtonElement>(null);
   return (
@@ -213,7 +225,7 @@ createRoot(root).render(
           return runtime(profileId, profile.origin);
         }}
       >
-        <Shell />
+        <Boundary />
       </InstanceProvider>
     </FeedbackProvider>
   </React.StrictMode>,
