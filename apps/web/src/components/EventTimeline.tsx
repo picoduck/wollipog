@@ -2918,17 +2918,19 @@ export function messageActions(item: UserMessageItem, input: MessageActionInput)
 }
 
 /** Fine pointers keep the hover cluster beside the bubble. Touch screens always get direct Copy
- * below the bubble, plus More Message Actions when no settled turn menu lists this message. The
- * touch row takes its own space so full-size targets cannot overlap the bubble or one another. */
+ * below the bubble, plus More Message Actions when no settled turn menu lists this message; that
+ * menu leaves out the Copy beside it (#3961). The touch row takes its own space so full-size
+ * targets cannot overlap the bubble or one another. */
 function UserMessageActions({ item, inTurnMenu, ...input }: MessageActionInput & { item: UserMessageItem; inTurnMenu: boolean }) {
   const coarsePointer = useIsCoarsePointer();
   if (coarsePointer && inTurnMenu && !item.text) return null;
   const actions = messageActions(item, input);
   if (coarsePointer) {
+    const menuActions = item.text ? actions.filter((action) => action.key !== "copy-message") : actions;
     return (
       <div className="tl-message-actions tl-user-menu" role="group" aria-label="Message Actions">
         {item.text && <CopyButton text={item.text} iconOnly ariaLabel="Copy Message" className="icon-btn sm" />}
-        {!inTurnMenu && <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions }]} />}
+        {!inTurnMenu && <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions: menuActions }]} />}
       </div>
     );
   }
