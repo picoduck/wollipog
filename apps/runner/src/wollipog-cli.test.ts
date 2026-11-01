@@ -755,6 +755,23 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   assert.match(JSON.parse(incompatible).error, /incompatible/);
 });
 
+test("CLI explains a refused session credential without device pairing instructions", async () => {
+  for (const detail of ["unauthorized — open the startup pairing URL or pair this device", "session agent credential refused: runner reconnecting; retry after the runner reconnects"]) {
+    let output = "";
+    const code = await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "session", "list", "--json"],
+      { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "session-token", WOLLIPOG_SESSION_ID: "s_self" },
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ error: detail }) }),
+    );
+    assert.equal(code, 1);
+    assert.match(JSON.parse(output).error, /session agent credential refused:/);
+    assert.match(JSON.parse(output).error, /Orchestrator|retry/);
+    assert.doesNotMatch(JSON.parse(output).error, /pair/i);
+    if (detail.startsWith("session agent")) assert.ok(JSON.parse(output).error.includes(detail));
+  }
+});
+
 test("CLI rejects explicit effort against pre-v138 control planes without creating a session", async () => {
   const requests: string[] = [];
   const fetch: McpFetch = async (url) => {

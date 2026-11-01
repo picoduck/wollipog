@@ -2618,6 +2618,20 @@ test("REST errors map to isError results carrying the status + CP error text ver
   }
 });
 
+test("MCP session 401s name recovery and preserve credential-bound causes", async () => {
+  for (const error of ["unauthorized — pair this device", "session agent credential refused: session stopped; ask the Orchestrator to restart the session"]) {
+    const { deps } = makeDeps(() => ({ status: 401, body: { error } }));
+    const result = await callTool(deps, "get_session", { sessionId: SELF_ID });
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /HTTP 401: session agent credential refused:/);
+    assert.match(resultText(result), /Orchestrator/);
+    assert.doesNotMatch(resultText(result), /pair/i);
+    if (error.startsWith("session agent")) assert.ok(resultText(result).includes(error));
+    const deviceResult = await callTool({ ...deps, selfSessionId: "" }, "get_session", { sessionId: SELF_ID });
+    assert.ok(resultText(deviceResult).includes(error), "device callers retain the server diagnostic");
+  }
+});
+
 test("a network-level fetch rejection maps to an isError result", async () => {
   const failingFetch: McpFetch = async () => {
     throw new Error("ECONNREFUSED 127.0.0.1:4317");
