@@ -5,6 +5,8 @@ import { test } from "node:test";
 import fc from "fast-check";
 import type {
   ControlPlaneToRunner,
+  DelegatableWorkflowDecisionCategory,
+  WorkflowDecisionAuthority,
   CreateSessionRequest,
   DurableSessionCommand,
   GitSummaryInfo,
@@ -2394,6 +2396,257 @@ test("withdraw a pending human review request and deliver steering without stopp
     const undesignated = makeDecision("undesignated");
     assert.equal(svc.resolveDescendantRequest(root.id, child.id, undesignated.occurrenceId,
       { action: "withdraw_workflow_decision", reason }, () => true).status, 403);
+  } finally { db.close(); }
+});
+
+/** A campaign whose Orchestrator owns every delegatable category, with an exact pr_merge request helper. */
+function withdrawalCampaign(owners: Partial<Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>> = {}) {
+  const fixture = continuationCampaign("off");
+  const { svc, root, child } = fixture;
+  assert.ok(svc.setParentControlPolicy(root.id, {
+    implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
+    ...owners,
+  }, 0).ok);
+  const mergeSnapshot = (pullRequest: number) => ({
+    category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest, headSha: "a".repeat(40),
+    reviewResult: "merge" as const, requiredChecks: { headSha: "a".repeat(40), status: "passed" as const, checkedAt: 10,
+      checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+  });
+  const requestMerge = (pullRequest: number) => {
+    const created = svc.createWorkflowDecision(child.id, { requestId: `merge-${pullRequest}`,
+      resourceKey: `picoduck/wollipog#${pullRequest}`, resourceSnapshot: mergeSnapshot(pullRequest) });
+    assert.ok(created.ok && created.data, created.error);
+    return created.data;
+  };
+  const approve = (occurrenceId: string) => assert.ok(svc.resolveDescendantRequest(root.id, child.id, occurrenceId,
+    { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+  return { ...fixture, mergeSnapshot, requestMerge, approve };
+}
+
+test("the controlling Orchestrator withdraws an approved, unconsumed grant so its finished child can be verified (#3917)", async () => {
+  const { db, svc, root, child, hub, mergeSnapshot, requestMerge, approve } = withdrawalCampaign();
+  try {
+    const stale = requestMerge(125);
+    approve(stale.occurrenceId);
+    svc.onSessionStatus(child.id, "idle");
+    const report = db.appendEvent(child.id, { kind: "agent_message", text: "Done", final: true }, Date.now());
+    const verify = () => svc.verifyCampaignChild(root.id, {
+      childSessionId: child.id, reportEventSeq: report.seq, followUpsAccounted: true,
+    });
+    const blocked = verify();
+    assert.equal(blocked.status, 409);
+    assert.ok(blocked.error?.includes(`${stale.occurrenceId} (pr_merge, approved)`), blocked.error);
+
+    const unrelated = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+    const reason = "Superseded: the fix landed in another pull request.";
+    const withdraw = (caller: string, text = reason, sessionId: string | undefined = child.id) =>
+      svc.withdrawWorkflowDecision(caller, stale.occurrenceId, { reason: text, ...(sessionId ? { sessionId } : {}) }, () => true);
+    assert.equal(withdraw(unrelated.id).status, 404, "an unrelated session cannot retire another session's grant");
+    assert.equal(withdraw(root.id, reason, root.id).status, 404, "the occurrence must belong to the named requester");
+    assert.equal(svc.withdrawWorkflowDecision(root.id, stale.occurrenceId, { reason, sessionId: child.id }, () => false).status, 404);
+    assert.equal(withdraw(root.id, " ").status, 400);
+    assert.equal(withdraw(root.id, "No\u0000longer").status, 400);
+    assert.equal(withdraw(root.id, "x".repeat(WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS + 1)).status, 400);
+    assert.equal(db.workflowDecisionByOccurrence(stale.occurrenceId)?.status, "approved", "no refusal changed it");
+
+    const promptsBefore = hub.sentOfType("durable_session_command").length;
+    const withdrawn = withdraw(root.id);
+    assert.ok(withdrawn.ok && withdrawn.data, withdrawn.error);
+    assert.equal(withdrawn.data.status, "revoked");
+    assert.deepEqual(withdrawn.data.withdrawal, { bySessionId: root.id, reason });
+    assert.deepEqual(svc.workflowDecision(child.id, stale.occurrenceId).data?.withdrawal, { bySessionId: root.id, reason },
+      "get_workflow_decision reports the actor and the reason");
+    assert.equal(db.getSession(child.id)?.status, "idle", "a child that already held the approval is not woken");
+    assert.equal(hub.sentOfType("durable_session_command").length, promptsBefore);
+
+    const audit = svc.governanceAudit(child.id).filter((entry) => entry.requestId === stale.occurrenceId);
+    const withdrawal = audit.find((entry) => entry.outcome === "revoked")!;
+    assert.deepEqual(withdrawal.actor, { kind: "agent", id: root.id }, "the withdrawing session is the resolver");
+    assert.equal(withdrawal.workflowDecision?.withdrawal?.reasonDigest, createHash("sha256").update(JSON.stringify(reason)).digest("hex"));
+    assert.equal(withdrawal.workflowDecision?.revocation, undefined, "a withdrawal is not a server revocation");
+    assert.ok(!JSON.stringify(audit).includes(reason), "audit records only the reason's digest");
+    assert.equal(db.campaignContinuationEvents(root.id).some((event) => event.kind === "request_resolved"), false,
+      "the Orchestrator's own withdrawal wakes nobody");
+
+    const snapshot = mergeSnapshot(125);
+    const action = { kind: "pr_merge_enqueue" as const, command: canonicalPrMergeEnqueueCommand(snapshot) };
+    for (let replay = 0; replay < 2; replay++) {
+      const consumed = await svc.consumeWorkflowDecision(child.id, stale.occurrenceId, { resourceSnapshot: snapshot, action });
+      assert.equal(consumed.status, 409, "a replayed consume never reaches the withdrawn grant");
+    }
+    assert.equal((await svc.reconcileWorkflowDecision(child.id, stale.occurrenceId, { resourceSnapshot: snapshot })).ok, false);
+    assert.equal(svc.resolveDescendantRequest(root.id, child.id, stale.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 409, "nothing re-approves it");
+    assert.equal(withdraw(root.id).status, 409, "a withdrawal cannot be replayed");
+    assert.equal(withdraw(child.id, reason, undefined).status, 409);
+    const after = db.workflowDecisionByOccurrence(stale.occurrenceId)!;
+    assert.equal(after.status, "revoked");
+    assert.equal(after.consumedAt, undefined);
+    assert.equal(after.actionAdmission, undefined);
+    assert.equal(svc.governanceAudit(child.id).some((entry) =>
+      entry.requestId === stale.occurrenceId && entry.outcome === "consumed"), false);
+
+    const verified = verify();
+    assert.ok(verified.ok, verified.error);
+  } finally { db.close(); }
+});
+
+test("a child's own withdrawal reaches its Orchestrator with the actor and reason, not as a stale consumption (#3917)", () => {
+  const { db, svc, root, child, deliver, requestMerge, approve } = withdrawalCampaign();
+  try {
+    const pending = requestMerge(126);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    assert.ok(deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000), "the request reached the Orchestrator");
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const reason = "The change moved to a later pull request.";
+    const withdrawn = svc.withdrawWorkflowDecision(child.id, pending.occurrenceId, { reason });
+    assert.ok(withdrawn.ok, withdrawn.error);
+    assert.deepEqual(withdrawn.data?.withdrawal, { bySessionId: child.id, reason });
+    assert.equal(pendingRequests(db.getSession(child.id)?.pendingApproval)
+      .some((request) => request.occurrenceId === pending.occurrenceId), false, "its card is gone");
+    assert.equal(svc.resolveDescendantRequest(root.id, child.id, pending.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 409,
+    "the Orchestrator can no longer approve what was withdrawn");
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text, "the withdrawal is reported, so the Orchestrator does not wait on it");
+    assert.match(text, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${pending.occurrenceId}","owner":"orchestrator","category":"pr_merge",` +
+      `"title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#126","outcome":"withdrawn","resolvedBy":"agent",` +
+      `"withdrawal":\\{"bySessionId":"${child.id}","reason":"${reason}"\\}`, "u"));
+    assert.doesNotMatch(text, /consume_refused_stale|revocationReason/u);
+
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const granted = requestMerge(127);
+    approve(granted.occurrenceId);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const grantReason = "No longer needed after rebasing onto main.";
+    assert.ok(svc.withdrawWorkflowDecision(child.id, granted.occurrenceId, { reason: grantReason }).ok);
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const grantText = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(grantText, "an approved grant the child withdrew is reported too, though it was no longer pending");
+    assert.match(grantText, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${granted.occurrenceId}","owner":"orchestrator",` +
+      `.*"outcome":"withdrawn","resolvedBy":"agent","withdrawal":\\{"bySessionId":"${child.id}","reason":"${grantReason}"\\}`, "u"));
+  } finally { db.close(); }
+});
+
+test("an Orchestrator's withdrawal of a pending request resumes the waiting child with its reason (#3917)", () => {
+  const { db, svc, root, child, hub, requestMerge } = withdrawalCampaign();
+  try {
+    const pending = requestMerge(128);
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    const reason = "Hold this merge; the release branch is frozen. Report and stop.";
+    const withdrawn = svc.withdrawWorkflowDecision(root.id, pending.occurrenceId, { reason, sessionId: child.id });
+    assert.ok(withdrawn.ok, withdrawn.error);
+    assert.equal(db.getSession(child.id)?.status, "queued", "the held input_required state is released into the resume");
+    assert.equal(pendingRequests(db.getSession(child.id)?.pendingApproval).length, 0);
+    const prompts = hub.sentOfType("durable_session_command").filter((message) =>
+      message.command.type === "prompt_session" && message.command.text.includes(pending.occurrenceId));
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]!.command.type === "prompt_session");
+    assert.match(prompts[0]!.command.text, /Your Orchestrator withdrew your pr_merge decision/u);
+    assert.ok(prompts[0]!.command.text.includes(reason));
+  } finally { db.close(); }
+});
+
+test("a consume in flight when its grant is withdrawn neither arms it nor relabels the withdrawal (#3917)", async () => {
+  const { db, svc, root, child, hub, deliver, mergeSnapshot, requestMerge, approve } = withdrawalCampaign();
+  try {
+    for (const [pullRequest, answer] of [
+      [130, { ok: false, refusal: "stale_head", reason: "The head moved." }],
+      [131, { ok: true, check: { checkedAt: 7, closures: [] } }],
+    ] as const) {
+      const granted = requestMerge(pullRequest);
+      approve(granted.occurrenceId);
+      let release: ((result: RunnerRequestResult) => void) | undefined;
+      let asked: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }> | undefined;
+      hub.githubMergePreflight = (msg) => {
+        asked = msg;
+        return new Promise<RunnerRequestResult>((resolve) => { release = resolve; });
+      };
+      const snapshot = mergeSnapshot(pullRequest);
+      const consuming = svc.consumeWorkflowDecision(child.id, granted.occurrenceId, { resourceSnapshot: snapshot,
+        action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(snapshot) } });
+      for (let tick = 0; tick < 50 && !release; tick++) await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.ok(release && asked, "the consume is waiting on GitHub");
+      const reason = `Superseded while GitHub was read for #${pullRequest}.`;
+      assert.ok(svc.withdrawWorkflowDecision(child.id, granted.occurrenceId, { reason }).ok);
+      const audited = () => svc.governanceAudit(child.id).filter((entry) => entry.requestId === granted.occurrenceId);
+      const auditsBefore = audited().length;
+      release({ type: "github_merge_preflight_result", requestId: asked.requestId, sessionId: asked.sessionId,
+        ...answer } as RunnerRequestResult);
+      assert.equal((await consuming).status, 409, "the withdrawn grant is never armed");
+      const after = db.workflowDecisionByOccurrence(granted.occurrenceId)!;
+      assert.equal(after.status, "revoked");
+      assert.deepEqual(after.withdrawal, { bySessionId: child.id, reason });
+      assert.equal(after.actionAdmission, undefined);
+      assert.equal(audited().length, auditsBefore, "the late refusal adds no server revocation");
+      assert.equal(audited().some((entry) => entry.workflowDecision?.revocation), false);
+      assert.equal(db.campaignRequestResolution(root.id, campaignRequestToken("typed", child.id, granted.occurrenceId))?.outcome,
+        "withdrawn");
+      db.updateSessionStatus(root.id, "idle", Date.now());
+      const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+      assert.ok(text);
+      assert.match(text, new RegExp(`"occurrenceId":"${granted.occurrenceId}",.*"outcome":"withdrawn","resolvedBy":"agent",` +
+        `"withdrawal":\\{"bySessionId":"${child.id}","reason":"Superseded while GitHub was read for #${pullRequest}\\."\\}`, "u"));
+      db.updateSessionStatus(root.id, "running", Date.now());
+      hub.githubMergePreflight = undefined;
+    }
+  } finally { db.close(); }
+});
+
+test("withdrawal refuses consumed, armed, person-settled and other owners' decisions (#3917)", async () => {
+  const { db, svc, root, child, requestMerge, approve } = withdrawalCampaign({ implementation_question: "human" });
+  try {
+    const reason = "No longer needed.";
+    const question = (requestId: string) => {
+      const created = svc.createWorkflowDecision(child.id, { requestId, resourceKey: requestId, resourceSnapshot: {
+        category: "implementation_question", question: "Which next step?",
+        options: [{ optionId: "safe", label: "Continue" }, { optionId: "wait", label: "Wait" }],
+      } });
+      assert.ok(created.ok && created.data, created.error);
+      assert.equal(created.data.authority, "human");
+      return created.data;
+    };
+    const asked = question("human-question");
+    assert.equal(svc.withdrawWorkflowDecision(root.id, asked.occurrenceId, { reason, sessionId: child.id }).status, 403,
+      "an Orchestrator cannot retire a request a person owns");
+    assert.ok(svc.withdrawWorkflowDecision(child.id, asked.occurrenceId, { reason }).ok,
+      "its requester can retract its own request to a person");
+
+    const answered = question("answered-question");
+    assert.ok(svc.resolveWorkflowDecision(root.id, child.id, answered.occurrenceId,
+      { outcome: "approve", selectedOptionId: "safe" }, "human", { kind: "human", id: "owner" }, () => true).ok);
+    assert.ok((await svc.consumeWorkflowDecision(child.id, answered.occurrenceId, { resourceSnapshot: answered.resourceSnapshot })).ok);
+    const consumed = svc.withdrawWorkflowDecision(child.id, answered.occurrenceId, { reason });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /consumed/u);
+
+    const armed = requestMerge(129);
+    approve(armed.occurrenceId);
+    db.raw().prepare(`UPDATE workflow_decisions SET action_kind='pr_merge_enqueue', action_command='gh pr merge',
+      action_command_digest=?, action_armed_at=? WHERE occurrence_id=?`).run("c".repeat(64), Date.now(), armed.occurrenceId);
+    for (const [caller, sessionId] of [[child.id, undefined], [root.id, child.id]] as const) {
+      const refused = svc.withdrawWorkflowDecision(caller, armed.occurrenceId, { reason, ...(sessionId ? { sessionId } : {}) });
+      assert.equal(refused.status, 409);
+      assert.match(refused.error!, /reconcile_workflow_decision/u);
+    }
+    assert.equal(db.withdrawWorkflowDecision(armed.occurrenceId, child.id, { bySessionId: child.id, reason }, Date.now(), false), null,
+      "the write itself refuses an armed action");
+    assert.equal(db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, "approved");
+
+    for (const category of ["issue_closure", "campaign_issue_scope", "campaign_follow_up_admission", "automation_creation"]) {
+      const settled = question(`person-${category}`);
+      db.raw().prepare("UPDATE workflow_decisions SET category=? WHERE occurrence_id=?").run(category, settled.occurrenceId);
+      for (const [caller, sessionId] of [[child.id, undefined], [root.id, child.id]] as const) {
+        assert.equal(svc.withdrawWorkflowDecision(caller, settled.occurrenceId,
+          { reason, ...(sessionId ? { sessionId } : {}) }).status, 403, `${category} stays a person's to settle`);
+      }
+      assert.equal(db.workflowDecisionByOccurrence(settled.occurrenceId)?.status, "pending");
+    }
   } finally { db.close(); }
 });
 

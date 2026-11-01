@@ -1970,6 +1970,24 @@ restarts, or its provider session ends with an armed merge still approved, the o
 at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
 and moves it to consumed if the approved head merged.
 
+An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
+`decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol
+v269, #3917) and a required reason, rather than by consuming it with a stale snapshot. `:id` is
+always the caller's own credential session. The requester withdraws its own pending or approved
+occurrence; its controlling Orchestrator names the child in `sessionId` and may withdraw only one it
+owns, under the same ancestry and current-authority checks as resolution. The write is conditional
+on the occurrence still being pending or approved, unconsumed and unarmed, so it never approves,
+consumes or re-arms anything. The occurrence ends `revoked` with `withdrawal` provenance naming the
+withdrawing session and its reason; the governance audit records that session as the resolver and
+only the reason's digest, without the `revocation` cause a server revocation carries. It no longer
+blocks `verify_campaign_child`, archival or role changes. A child still waiting on a pending
+occurrence is resumed with the reason; one already holding an approval is not woken. A withdrawal
+the campaign's own Orchestrator did not make reaches it as `request_resolved` with outcome
+`withdrawn`, the withdrawing session and the reason. Consumed occurrences, an armed `pr_merge`
+(reconcile it instead), another session's occurrences, a person-owned occurrence the caller did not
+request, and person-owned issue closure, scope, follow-up admission and automation requests are
+refused.
+
 Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
 and `agentId`. The matching CLI command is:
 
