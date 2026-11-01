@@ -129,6 +129,9 @@ export function buildSshArgs(o: {
     "-p", String(o.sshPort),
     ...SSH_BASE_OPTS,
     "-T",
+    // IgnoreUnknown predates our existing accept-new requirement. StdinNull arrived in 8.7;
+    // older clients already keep stdin open by default and must not reject this override.
+    "-o", "IgnoreUnknown=StdinNull",
     "-o", "StdinNull=no",
     "-o", "ControlMaster=no",
     "-o", "ControlPath=none",
@@ -1145,7 +1148,12 @@ export function stopAndWaitForManagedChild(child: ChildProcess, timeoutMs = 35_0
     const onError = (error: Error) => finish(error);
     child.once("exit", onExit);
     child.once("error", onError);
-    timer = setTimeout(() => finish(new Error("managed runner did not acknowledge shutdown before the timeout")), timeoutMs);
+    timer = setTimeout(() => {
+      // Terminate only our local transport. This cannot prove remote provider cleanup, so a
+      // replacement is still refused; any later attempt must pass the normal ownership proof.
+      try { child.kill("SIGKILL"); } catch { /* retain the unacknowledged outcome */ }
+      finish(new Error("managed runner did not acknowledge shutdown before the timeout; the local SSH transport was terminated"));
+    }, timeoutMs);
     try {
       if (child.stdin && !child.stdin.destroyed) child.stdin.end();
       else if (!child.killed && !child.kill()) finish(new Error("managed runner refused the stop signal"));
@@ -1200,6 +1208,8 @@ export class BoxOrchestrator {
   private readonly pendingStops = new Map<string, Promise<void>>();
   private readonly legacyAccountOperations = new Map<string, Promise<unknown>>();
   private stopping = false;
+  private shutdownOperation: Promise<void> | null = null;
+  private readonly teardownStops = new Set<Promise<void>>();
   private readonly stopManagedChild: (child: ChildProcess) => Promise<void>;
   private readonly spawnTunnel: (args: string[]) => ChildProcess;
   private readonly randomIndex: (span: number) => number;
@@ -1465,9 +1475,13 @@ export class BoxOrchestrator {
   }
 
   /** Graceful shutdown: stop reconnecting, kill all SSH children. Wired to signals + Fastify close. */
-  shutdown(): void {
+  shutdown(): Promise<void> {
+    if (this.shutdownOperation) return this.shutdownOperation;
     this.stopping = true;
-    for (const id of [...this.runtimes.keys()]) this.stopRuntime(id);
+    const stops = [...this.runtimes.keys()].map(id => this.stopRuntime(id));
+    // Remove can already have retired a runtime while its transport is still draining.
+    this.shutdownOperation = Promise.all([...stops, ...this.teardownStops]).then(() => {});
+    return this.shutdownOperation;
   }
 
   private runtimeFor(boxId: string): BoxRuntime {
@@ -1770,9 +1784,9 @@ export class BoxOrchestrator {
     this.deps.hub.boxChanged(boxId);
   }
 
-  private stopRuntime(boxId: string): void {
+  private stopRuntime(boxId: string): Promise<void> {
     const rt = this.runtimes.get(boxId);
-    if (!rt) return;
+    if (!rt) return Promise.resolve();
     if (rt.readiness) clearTimeout(rt.readiness.timer);
     rt.readiness = undefined;
     rt.epoch++; // supersede any in-flight attempt and pending reconnect timers
@@ -1784,15 +1798,23 @@ export class BoxOrchestrator {
       clearTimeout(rt.reconnectTimer);
       rt.reconnectTimer = null;
     }
+    let stopped = Promise.resolve();
     if (rt.child && !rt.child.killed) {
       try {
-        if (rt.child.stdin && !rt.child.stdin.destroyed) rt.child.stdin.end();
-        else rt.child.kill();
+        if (rt.child.stdin) {
+          // Keep the child and drain timer owned even when Remove drops its Machine runtime.
+          stopped = stopAndWaitForManagedChild(rt.child).catch(() => {
+            this.log(JSON.stringify({ event: "ssh_runner_stop", boxId, outcome: "unacknowledged" }));
+          });
+        } else rt.child.kill();
       } catch {
         /* already gone */
       }
     }
     if (!this.pendingStops.has(boxId)) rt.child = null;
+    this.teardownStops.add(stopped);
+    void stopped.finally(() => this.teardownStops.delete(stopped));
+    return stopped;
   }
 
   /** ssh argv for a one-shot remote command (no tunnel). `--` keeps the target out of options. */

@@ -839,6 +839,8 @@ test("buildSshArgs opens the reverse tunnel and runs the remote command last", (
   });
   assert.deepEqual(args.slice(0, 2), ["-p", "2222"]);
   assert.ok(args.includes("ExitOnForwardFailure=yes"));
+  assert.ok(args.indexOf("IgnoreUnknown=StdinNull") < args.indexOf("StdinNull=no"),
+    "OpenSSH before 8.7 must ignore the newer stdin override");
   const ri = args.indexOf("-R");
   assert.equal(args[ri + 1], "47100:127.0.0.1:4317");
   // `--` then target then the remote command are the final positional args (option terminator

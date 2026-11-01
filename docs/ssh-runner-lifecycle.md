@@ -30,6 +30,11 @@ verification fails, launch fails rather than retrying outside containment.
 The control plane holds the SSH command's stdin open. EOF requests the runner's normal bounded
 shutdown and provider cleanup. Reconnect/update closes stdin and waits up to 35 seconds for a
 successful SSH exit before launching a replacement; failure or timeout refuses replacement.
+On timeout the owned local SSH process is killed, including for older fallback runners that
+ignore EOF. This is transport cleanup, not acknowledgment of remote provider cleanup. Remove
+also bounds transport cleanup, and control-plane shutdown awaits these drains before exiting.
+EOF cancellation is armed before control-plane attestation so an unavailable control plane cannot
+strand a starting runner in its attestation retry loop.
 SSH multiplexing and TTY allocation are disabled on this owned connection so another SSH master
 cannot outlive the owning process or retain the shutdown channel. Use matching current control-plane
 and runner builds: older runners do not implement the stdin shutdown contract.

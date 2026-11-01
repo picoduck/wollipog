@@ -386,6 +386,16 @@ try {
 
 async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
+// Before attestation succeeds no provider HOME or mutable store is owned. Arm transport
+// cancellation now, so an unavailable control plane cannot strand a supervised SSH launch.
+// Startup after attestation is synchronous through the assignment to graceful shutdown below.
+let onSshTransportClosed: () => void = () => process.exit(0);
+if (process.env.WOLLIPOG_SSH_SUPERVISED === "1") {
+  watchSshLifetime(process.stdin, () => {
+    log("ssh_transport_closed; draining runner-owned work");
+    onSshTransportClosed();
+  });
+}
 validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
@@ -4440,12 +4450,7 @@ function shutdown(exitCode = 0): void {
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 process.on("SIGHUP", () => shutdown());
-if (process.env.WOLLIPOG_SSH_SUPERVISED === "1") {
-  watchSshLifetime(process.stdin, () => {
-    log("ssh_transport_closed; draining runner-owned work");
-    if (!shuttingDown) shutdown();
-  });
-}
+onSshTransportClosed = () => { if (!shuttingDown) shutdown(); };
 // A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state, so run
 // the graceful shutdown() (waits for pending kills, releases provider-home leases) before exiting —
 // a hard crash would strand the lease and block every future agent. shutdown()'s own `shuttingDown`

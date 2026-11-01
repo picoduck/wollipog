@@ -7126,7 +7126,7 @@ app.addHook("onClose", async () => {
   try {
     await outboundEvents.close();
   } finally {
-    orchestrator.shutdown();
+    await orchestrator.shutdown();
     // One last checkpoint pass, which flushes the log whenever it has frames to copy.
     db.stopWalCheckpoints();
   }
@@ -7145,8 +7145,11 @@ function gracefulShutdown(exitCode: number, reason: string): void {
   // app.close() fires the onClose hook, which runs orchestrator.shutdown() to kill the box SSH
   // children — the same path SIGINT/SIGTERM use. Force-exit on a bounded failsafe so a hung close
   // (possible after an uncaughtException left state corrupt) can never wedge the process forever.
-  const failsafe = setTimeout(() => process.exit(exitCode), 5_000);
-  void app.close().finally(() => {
+  // Start the owned tunnel drains before app.close(), whose other hooks may themselves hang.
+  // Allow the 35s drain/forced-local-transport deadline to run before the overall failsafe.
+  const runnersStopped = orchestrator.shutdown();
+  const failsafe = setTimeout(() => process.exit(exitCode), 40_000);
+  void Promise.allSettled([app.close(), runnersStopped]).finally(() => {
     clearTimeout(failsafe);
     process.exit(exitCode);
   });

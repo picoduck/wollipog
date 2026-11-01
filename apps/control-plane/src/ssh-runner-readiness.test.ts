@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { PROTOCOL_VERSION, type AgentDefinition } from "@wollipog/protocol";
 import { BoxOrchestrator, stopAndWaitForManagedChild } from "./box-orchestrator.js";
@@ -92,5 +93,34 @@ test("SSH stop refuses failed or missing remote drain acknowledgement", async t 
     `], { stdio: ["pipe", "ignore", "pipe"] });
     t.after(() => { if (child.exitCode === null) child.kill(); });
     await assert.rejects(stopAndWaitForManagedChild(child, code === null ? 50 : 5_000), /acknowledged|acknowledge/);
+    if (code === null) assert.equal(child.killed, true, "timeout must terminate the owned transport, without claiming remote cleanup");
   }
 });
+
+for (const action of ["remove", "shutdown"] as const) {
+  test(`SSH ${action} bounds legacy runners that ignore EOF`, async t => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const db = ControlPlaneDb.open(":memory:");
+    t.after(() => db.close());
+    const orchestrator = new BoxOrchestrator({ db, hub: { boxChanged() {} } as unknown as Hub, cpPort: 4317,
+      issueCredential: () => { throw new Error("unexpected bootstrap"); },
+      resolveBinary: async () => { throw new Error("unexpected bootstrap"); },
+    });
+    const child = Object.assign(new EventEmitter(), { stdin: new PassThrough(), exitCode: null, signalCode: null, killed: false,
+      kill() { this.killed = true; return true; } }) as unknown as ChildProcess;
+    const internal = orchestrator as unknown as { runtimeFor(id: string): { child: ChildProcess } };
+    internal.runtimeFor("box-0123abcd").child = child;
+    const stopped = action === "remove" ? orchestrator.remove("box-0123abcd") : orchestrator.shutdown();
+    const closing = orchestrator.shutdown();
+    let closed = false;
+    void closing.then(() => { closed = true; });
+    await Promise.resolve();
+    assert.equal(closed, false, "control-plane shutdown must await transports whose Machine was already removed");
+    assert.equal(child.stdin?.writableEnded, true, "request graceful shutdown first");
+    assert.equal(child.killed, false);
+    t.mock.timers.tick(35_000);
+    await stopped;
+    await closing;
+    assert.equal(child.killed, true, "never leave a legacy tunnel running after the drain deadline");
+  });
+}
