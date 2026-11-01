@@ -247,7 +247,23 @@ test("on a coarse pointer, a message no turn menu lists keeps More Message Actio
   for (const index of [0, 1]) {
     const edit = await readTranscriptAction(container, "More Message Actions", "Edit as a New Turn", index);
     assert.equal(edit?.disabled, false);
+    // The direct Copy beside the menu is the message's one Copy (#3961).
+    const copy = await readTranscriptAction(container, "More Message Actions", "Copy Message", index);
+    assert.ok(copy === null, `More Message Actions #${index} does not repeat Copy Message`);
   }
+  coarsePointer = false;
+});
+
+test("on a coarse pointer, a message with no text keeps Copy Message in its menu, with the reason", async () => {
+  coarsePointer = true;
+  const { container } = await mount({
+    onEditAndResend: () => {},
+    items: [{ kind: "user_message", id: 1, text: "" }],
+  });
+  assertNoDomNode(container.querySelector('button[aria-label="Copy Message"]'), "no direct Copy without text");
+  const copy = await readTranscriptAction(container, "More Message Actions", "Copy Message");
+  assert.equal(copy?.disabled, true);
+  assert.equal(copy?.reason, "This message has no text to copy.");
   coarsePointer = false;
 });
 
