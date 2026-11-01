@@ -581,6 +581,15 @@ export function PeopleDevicesPanel({
     if (wasOffline.current && !offline) void refresh();
     wasOffline.current = offline;
   }, [offline]);
+  // Another dashboard changed the member directory (#2606): the control plane says so in place of a
+  // reconnect, and the lists are read again without leaving the tab.
+  const directoryRevision = useOptionalStoreSelector((state) => state.identityDirectoryRevision);
+  const shownRevision = useRef(directoryRevision);
+  useEffect(() => {
+    if (shownRevision.current === directoryRevision) return;
+    shownRevision.current = directoryRevision;
+    void refresh();
+  }, [directoryRevision]);
 
   const revokeDevice = useRevokeDevice(refresh);
 

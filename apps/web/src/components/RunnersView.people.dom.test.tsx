@@ -525,3 +525,30 @@ test("on a phone each row ends in a chevron, an owner row in a labelled lock, an
     await act(async () => domWindow.happyDOM.setWindowSize({ width: 1440, height: 900 }));
   }
 });
+
+test("a directory change another dashboard made reloads the lists in place (#2606)", async () => {
+  let renamed = false;
+  const view = await mount({
+    getIdentity: async () => {
+      const current = directory("owner");
+      return renamed
+        ? { ...current, memberships: current.memberships.map((one) => one.userId === "sam" ? { ...one, userName: "Sam Rivera" } : one) }
+        : current;
+    },
+  });
+  try {
+    const people = () => section(view.body, "people");
+    assert.ok(rowNamed(people(), "person", "Sam Lee"));
+    const panelRoot = view.panel().querySelector(".access-sections");
+    const devicesBefore = view.calls.devices;
+    renamed = true;
+    await act(async () => view.sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "identity_directory_changed" }) }));
+    await settle();
+    assert.ok(rowNamed(people(), "person", "Sam Rivera"), "the renamed member shows without a reconnect");
+    assert.equal(rowNamed(people(), "person", "Sam Lee"), undefined);
+    assert.ok(view.calls.devices > devicesBefore, "and the device list is read again with it");
+    assert.ok(view.panel().querySelector(".access-sections") === panelRoot, "the panel stayed mounted");
+  } finally {
+    await view.unmount();
+  }
+});
