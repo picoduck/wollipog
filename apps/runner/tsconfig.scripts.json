@@ -1,0 +1,21 @@
+// Typecheck for this package's TypeScript scripts (see #3912): the harness probe suites, their
+// shared support modules, and the benchmarks. They run through `node --import tsx`, which strips
+// types without checking them, so without this program a type error in one reaches `main` unseen.
+//
+// `rootDir` is widened to the repo root because scripts import across packages, as in
+// `tsconfig.test.json`. `lib` is ES2023 because these scripts only ever run on the Node versions
+// in the root `engines` field, which all provide ES2023; the production program keeps ES2022.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "../..",
+    "lib": [
+      "ES2023"
+    ]
+  },
+  "include": [
+    "scripts/*.ts"
+  ],
+  "exclude": []
+}
