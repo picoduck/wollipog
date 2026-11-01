@@ -219,6 +219,18 @@ const designCredentialSink = new RegExp([
   String.raw`\b(?:third[ -]?part(?:y|ies)|external(?:ly)?|remote(?:ly)?|servers?|endpoints?|webhooks?|collectors?|logs?|logging|prs?|pull[ -]?requests?|issues?|comments?|chats?|transcripts?|public(?:ly)?|uploads?|gists?|paste(?:bin|s)?|slack|discord|e-?mails?|vendors?|partners?|customers?|someone|anyone|everyone|others?|buckets?|cloud|internet|online|web|channels?|clipboard|screen|output|stdout|console|tickets?|wiki|docs?|readme|commits?|reports?|bugs?|screenshots?|recordings?|repositor(?:y|ies)|repos?|git|github|gitlab|version[ -]control|visible|readable|plain[ -]?text|unmasked|unredacted|curl|wget|http|ssh|scp|rsync|devices?|machines?|hosts?|across|sync(?:ed|ing)?)\b`,
 ].join("|"), "iu");
 const disclosureVerb = String.raw`(?:tell|give|reveal|show|print|display|disclose|dictate|recite|expose|output|echo|say|read\s+(?:out|back|aloud)|spell\s+out|send|sent|upload|post|publish|forward|share|export|leak|dump|hand\s+(?:over|out)|write\s+(?:down|out)|e-?mail|mail|message|text|transmit|broadcast|paste|provide|supply|enter|submit|disclos(?:e|ing)|collect|ask|request|prompt|obtain|solicit|capture|harvest|type\s+in|sync|replicate|mirror|transfer|distribute|propagate|commit|push|include|attach|embed)`;
+/** Asking for access, wider provider access or a lasting permission, plural nouns, widening verbs
+ * and lasting qualifiers included. Decline-only on every question route (#3968): a child's
+ * provider question meets the same clauses as a design form, read through the same masks. */
+const grantRequestPatterns = [
+  String.raw`\b(?:grant|give|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox(?:es)?|polic(?:y|ies)|limits?|protections?)\b`,
+  String.raw`\b(?:wider|broader|more|additional|extra|elevated|admin)\s+(?:provider\s+)?(?:access|permissions?|scopes?)\b`,
+  String.raw`\b(?:always|permanently|persistently|indefinitely)\s+(?:allow|approve|trust|grant|permit)\b`, String.raw`\ballow\s+(?:always|permanently)\b`,
+  String.raw`\b(?:lasting|persistent|permanent|standing|durable)\s+(?:permissions?|access|grants?|approvals?)\b`,
+  // A grant carried into later sessions: "allow the agent to push for all future sessions".
+  String.raw`\b(?:grant|give|allow|approve|trust|permit|authorize)\b.{0,60}\b(?:for|in|across)\s+(?:all|every|each|any)\s+(?:future|later|subsequent|new|other)\s+(?:sessions?|campaigns?|children|agents?)\b`,
+];
+const grantRequest = new RegExp(grantRequestPatterns.join("|"), "iu");
 /** Decline-only additions for design forms: none of these admits anything main declined. */
 const designOnlyProtected = new RegExp([
   // An email value, or performing a sign-in at all.
@@ -234,10 +246,7 @@ const designOnlyProtected = new RegExp([
   // "work" qualifies a credential only when adjacent, so "…work? Copy the API key" is not one.
   String.raw`\bwork\s+(?:oauth\s+|api[ _-]?|access[ _-]?)?(?:tokens?|keys?|passwords?|secrets?|credentials?|accounts?)\b`,
   // An option granting access, wider provider access or a lasting permission, plural nouns included.
-  String.raw`\b(?:grant|give|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax)\b.{0,60}\b(?:access|permissions?|scopes?|guardrails?|sandbox(?:es)?|polic(?:y|ies)|limits?|protections?)\b`,
-  String.raw`\b(?:wider|broader|more|additional|extra|elevated|admin)\s+(?:provider\s+)?(?:access|permissions?|scopes?)\b`,
-  String.raw`\b(?:always|permanently|persistently|indefinitely)\s+(?:allow|approve|trust|grant|permit)\b`, String.raw`\ballow\s+(?:always|permanently)\b`,
-  String.raw`\b(?:lasting|persistent|permanent|standing|durable)\s+(?:permissions?|access|grants?|approvals?)\b`,
+  ...grantRequestPatterns,
 ].join("|"), "iu");
 /** Handling any credential, bare "token" or "key" included, near a sink is disclosure too. */
 const handlingVerb = String.raw`(?:cop(?:y|ies|ied|ying)|us(?:e|es|ed|ing)|mov(?:e|es|ed|ing)|send(?:s|ing)?|sent|upload(?:s|ed|ing)?|post(?:s|ed|ing)?|publish(?:es|ed|ing)?|export(?:s|ed|ing)?|forward(?:s|ed|ing)?|shar(?:e|es|ed|ing)|past(?:e|es|ed|ing)|put(?:s|ting)?|writ(?:e|es|ing|ten)|wrote|stor(?:e|es|ed|ing)|sav(?:e|es|ed|ing)|print(?:s|ed|ing)?|log(?:s|ged|ging)?|includ(?:e|es|ed|ing)|attach(?:es|ed|ing)?|embed(?:s|ded|ding)?|leak(?:s|ed|ing)?|transmit(?:s|ted|ting)?)`;
@@ -450,7 +459,7 @@ function providerQuestionProtected(raw: string, verifiedPlanning: boolean, parts
   const forms = mentionOnlyForms(raw, parts);
   const any = (pattern: RegExp) => forms.some((text) => pattern.test(text));
   return protectedValue.test(raw) || protectedValue.test(withoutQuoting(raw)) || any(protectedAction) || any(credentialIdentity) ||
-    any(credentialValueChoice) || (any(sensitiveSubject) && (!verifiedPlanning || !planningIntent.test(forms[0])));
+    any(credentialValueChoice) || (any(sensitiveSubject) && (!verifiedPlanning || !planningIntent.test(forms[0]))) || any(grantRequest);
 }
 function designQuestionProtected(raw: string, verifiedPlanning: boolean, parts: QuestionPart[]): boolean {
   const unmasked = [raw, withoutQuoting(raw)];
