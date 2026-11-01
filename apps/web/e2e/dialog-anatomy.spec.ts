@@ -177,14 +177,35 @@ test.describe("phone", () => {
   test("Delete Team takes over the Manage Team sheet and Back returns with its values", async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
     await page.getByRole("region", { name: "Teams" }).locator(".access-row").first().getByRole("button", { name: "Manage" }).click();
-    const manage = page.getByRole("dialog", { name: "Manage Support" });
+    const manage = page.getByRole("dialog", { name: "Manage Team" });
     await expect(manage).toBeVisible();
     const member = manage.getByRole("checkbox").first();
     const checked = await member.isChecked();
     await member.setChecked(!checked);
 
-    // On a phone the destructive tertiary is a full-width row at the end of the body.
-    const deleteTeam = manage.locator(".modal-body > .modal-tertiary").getByRole("button", { name: "Delete Team" });
+    // On a phone the destructive tertiary is a full-width row at the end of the body, and the
+    // footer holds two equal 48px buttons (#3000).
+    const deleteTeam = manage.locator(".modal-body > .modal-tertiary").getByRole("button", { name: "Delete Team…" });
+    await dialogMotionSettled(page);
+    const layout = await manage.evaluate((panel) => {
+      const body = panel.querySelector(".modal-body")!;
+      const tertiary = body.querySelector(".modal-tertiary button")!;
+      const bodyStyle = getComputedStyle(body);
+      const inner = body.getBoundingClientRect().width - parseFloat(bodyStyle.paddingLeft) - parseFloat(bodyStyle.paddingRight);
+      return {
+        tertiaryLast: body.lastElementChild?.classList.contains("modal-tertiary") ?? false,
+        tertiaryFullWidth: Math.abs(tertiary.getBoundingClientRect().width - inner) < 1,
+        footer: [...panel.querySelectorAll(".modal-foot .btn")].map((button) => {
+          const box = button.getBoundingClientRect();
+          return [Math.round(box.width), Math.round(box.height)];
+        }),
+      };
+    });
+    expect(layout.tertiaryLast).toBe(true);
+    expect(layout.tertiaryFullWidth).toBe(true);
+    expect(layout.footer).toHaveLength(2);
+    expect(layout.footer[0]).toEqual(layout.footer[1]);
+    expect(layout.footer[0]![1]).toBe(48);
     await deleteTeam.click();
 
     const confirmation = page.getByRole("dialog", { name: "Delete Team" });
@@ -192,7 +213,7 @@ test.describe("phone", () => {
     await expect(page.locator(".modal")).toHaveCount(1);
     await expect(page.locator(".modal-backdrop")).toHaveCount(1);
     await expect(manage).toBeHidden();
-    const back = confirmation.getByRole("button", { name: "Back to Manage Support" });
+    const back = confirmation.getByRole("button", { name: "Back to Manage Team" });
     await expect(back).toBeVisible();
     await expect(confirmation.locator(".modal-foot .btn.danger")).toHaveText("Delete Team");
 
@@ -260,7 +281,7 @@ test.describe("desktop stacking", () => {
   test("Delete Team stacks over Manage Team under one dim", async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
     await page.getByRole("region", { name: "Teams" }).locator(".access-row").first().getByRole("button", { name: "Manage" }).click();
-    const manage = page.getByRole("dialog", { name: "Manage Support" });
+    const manage = page.getByRole("dialog", { name: "Manage Team" });
     await manage.locator(".modal-foot .modal-tertiary").getByRole("button", { name: "Delete Team" }).click();
     const confirmation = page.getByRole("dialog", { name: "Delete Team" });
     await expect(confirmation).toBeVisible();

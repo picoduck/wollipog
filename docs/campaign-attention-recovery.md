@@ -52,13 +52,22 @@ has something to learn or do (#3083):
   the same hashed identity the projection publishes, in
   `orchestrator_campaign_request_resolutions`. When the campaign Orchestrator settled a request
   itself, through `resolve_descendant_workflow_decision` or another descendant resolution, its
-  removal records no `request_resolved` event. Any other removal of an Orchestrator-owned request
-  still does. A human settling a human-owned gate records one too, besides `human_blockers_cleared`,
-  which fires only once the last human gate goes.
+  removal records no `request_resolved` event, and neither does a server revocation its own action
+  led to. Any other removal of an Orchestrator-owned request still does. A human settling a
+  human-owned gate records one too, besides `human_blockers_cleared`, which fires only once the last
+  human gate goes, and so does a server revocation of a human-owned request.
+- **Server revocations are the system's (#3916).** A typed decision the server revokes (a stale
+  snapshot, a side effect of another approval, a policy change, the requester ending) records
+  `resolvedBy: "system"` and a `revocationReason` from `WORKFLOW_DECISION_REVOCATION_REASONS` in
+  `@wollipog/protocol`, which documents each value. When an actor's request led to it, such as a
+  person's approval refused as stale, `triggeredBy` names that actor's kind; it is never the
+  resolver. The governance audit records the same revocation with a `system` actor and
+  `workflowDecision.revocation: { reason, triggeredBy }`, where `triggeredBy` keeps the actor's id.
+  A person's own denial still reads `resolvedBy: "human"`.
 - **Bursts share one turn.** These events are delivered after a one-second fan-in:
   - `child_ready`, `child_blocked` and `human_blockers_cleared`;
-  - a `request_resolved` whose removal was caused by a human, or by no recorded resolver at all
-    (an unknown resolver may have been a human).
+  - a `request_resolved` whose removal was caused by a human, by a server revocation a human's
+    action led to, or by no recorded resolver at all (an unknown resolver may have been a human).
 
   Any other event waits 30 seconds from the oldest undelivered event. Urgency is judged across
   the whole pending queue, not just one 64-event delivery slice. A prompt event carries everything
@@ -67,7 +76,8 @@ has something to learn or do (#3083):
 - **The payload says whether to act.** Each event names:
   - its request's category and title;
   - the child's current status;
-  - for a settled request, its outcome and the resolver that caused the removal.
+  - for a settled request, its outcome and the resolver that caused the removal, and for a server
+    revocation its `revocationReason` and any `triggeredBy`.
 
   The prompt also carries compact campaign counts and an `Action needed` line.
   - **Titles** add nothing the Orchestrator cannot already read: it may read every descendant's

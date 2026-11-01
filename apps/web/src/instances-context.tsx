@@ -96,6 +96,21 @@ export interface InstanceStatus {
   message?: string;
 }
 
+/** Which form of the one instance dialog to open (#3003): Add Remote Instance, or Edit Instance or
+ * Re-Pair Instance for a saved remote profile. */
+export type InstanceDialogRequest =
+  | { mode: "add" }
+  | { mode: "edit" | "repair"; profileId: string };
+
+export type OpenInstanceDialogOptions = InstanceDialogRequest & {
+  /**
+   * Where focus returns when the dialog closes. Defaults to the element that has focus when
+   * `openInstanceDialog` is called, which is the button that opened it. A menu item unmounts as its
+   * menu closes, so a menu passes its trigger instead.
+   */
+  returnFocus?: HTMLElement | null;
+};
+
 export interface InstanceManager {
   readonly desktopMultiInstance: boolean;
   readonly registry: InstanceRegistrySnapshot;
@@ -107,11 +122,21 @@ export interface InstanceManager {
   readonly statusByProfile: Readonly<Record<string, InstanceStatus>>;
   switchInstance(profileId: string): Promise<void>;
   retryActive(): Promise<void>;
-  addAndSwitch(input: { label: string; origin: string; token: string }): Promise<void>;
+  /** Saves a remote profile. With `switchTo`, the switch to it has started when this resolves; its
+   * connection then opens as any switch does. */
+  addInstance(input: { label: string; origin: string; token: string; switchTo: boolean }): Promise<void>;
   editInstance(input: { profileId: string; label: string; origin: string; token?: string }): Promise<void>;
   repairInstance(profileId: string, token: string): Promise<void>;
   removeInstance(profileId: string): Promise<void>;
   manageInstances(): void;
+  /**
+   * Opens the instance dialog (#3003). The provider mounts the one `RemoteInstanceDialog`, so the
+   * Instances tab, the rail's instance menu, the recovery screen and the remote banner all open the
+   * same dialog and it survives the page under it changing (a switch, or a re-pair that reconnects
+   * the shell). Opening it again replaces the open one; a profile that is not a saved remote is
+   * ignored. Outside the desktop app it does nothing.
+   */
+  openInstanceDialog(options: OpenInstanceDialogOptions): void;
   goToThisMachine(): Promise<void>;
   reportActiveStatus(status: InstanceStatus): void;
 }
@@ -136,7 +161,7 @@ export const browserInstanceManager: InstanceManager = {
   statusByProfile: { local: { availability: "online" } },
   async switchInstance() {},
   async retryActive() {},
-  async addAndSwitch() {
+  async addInstance() {
     throw new Error("Remote instances are available only in the Wollipog desktop app.");
   },
   async editInstance() {
@@ -149,6 +174,7 @@ export const browserInstanceManager: InstanceManager = {
     throw new Error("Remote instances are available only in the Wollipog desktop app.");
   },
   manageInstances() {},
+  openInstanceDialog() {},
   async goToThisMachine() {},
   reportActiveStatus() {},
 };

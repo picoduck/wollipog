@@ -39,6 +39,8 @@ function loadRegistry(): InstanceRegistrySnapshot {
 let registry = loadRegistry();
 const openFailures = new Map<string, { code: string; message: string }>();
 const closedRuntimes: string[] = [];
+const MUTATIONS = new Set(["add_remote_instance", "edit_remote_instance", "repair_remote_instance"]);
+let nextMutationFailure: string | null = null;
 
 function saveRegistry(next: InstanceRegistrySnapshot): InstanceRegistrySnapshot {
   registry = next;
@@ -72,6 +74,12 @@ const desktop = {
   async invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
     const input = (args ?? {}) as Record<string, string>;
     if (command === "instance_registry") return structuredClone(registry) as T;
+    if (nextMutationFailure && MUTATIONS.has(command)) {
+      const message = nextMutationFailure;
+      nextMutationFailure = null;
+      // The desktop commands reject with a plain string, as instances.rs does.
+      throw message;
+    }
     if (command === "set_active_instance") {
       if (!registry.profiles.some((profile) => profile.id === input.profileId)) {
         throw { code: "missing-profile", message: "The selected Wollipog instance no longer exists." };
@@ -114,6 +122,8 @@ declare global {
   interface Window {
     __WOLLIPOG_INSTANCE_E2E__: {
       failNextOpen(profileId: string, code: string, message: string): void;
+      /** The next add, edit or re-pair rejects with this desktop message. */
+      failNextMutation(message: string): void;
       /** What the shell's banner says about the active instance's connection. */
       setConnection(connection: ActiveInstanceConnection | null): void;
       registry(): InstanceRegistrySnapshot;
@@ -124,6 +134,7 @@ declare global {
 
 window.__WOLLIPOG_INSTANCE_E2E__ = {
   failNextOpen(profileId, code, message) { openFailures.set(profileId, { code, message }); },
+  failNextMutation(message) { nextMutationFailure = message; },
   setConnection(connection) { setHarnessConnection(connection); },
   registry: () => structuredClone(registry),
   closedRuntimes: () => [...closedRuntimes],

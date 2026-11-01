@@ -304,7 +304,7 @@ function blocks(outcome: { stdout: string; stderr: string; exitCode: number }, l
   // Claude blocks the tool call on exit code 2 and shows stderr to the model (measured on 2.1.270).
   assert.equal(outcome.exitCode, 2, `${label} blocks the call`);
   assert.equal(outcome.stdout, "", `${label} prints no permission decision`);
-  assert.ok(outcome.stderr.includes(MANAGED_WORKTREE_REFUSAL), `${label} explains itself`);
+  assert.ok(outcome.stderr.includes("Wollipog could not inspect this tool call"), `${label} explains itself`);
 }
 
 test("malformed hook input fails closed", (t) => {
@@ -394,7 +394,7 @@ test("the CLI reads stdin, writes the decision, and fails closed when stdin expl
     ["node", "cli.js", "--managed-worktree-guard", "--protections", f.protectionsFile],
   );
   assert.equal(failed.code, 2, "an unreadable stdin blocks the tool call");
-  assert.ok(failed.err.includes(MANAGED_WORKTREE_REFUSAL));
+  assert.ok(failed.err.includes("Wollipog could not inspect this tool call"));
 
   const noArgument = await run(Readable.from([hookInput()]), ["node", "cli.js", "--managed-worktree-guard"]);
   assert.equal(noArgument.code, 2, "a guard launched without a protections file blocks");
@@ -1323,7 +1323,6 @@ test("a ${...} the tokenizer cannot parse is refused as a documented residual, n
   for (const command of [
     "echo ${r%% *}", "echo ${scrollHeight - 500}", "echo ${x", "echo \"${y",
     "echo ${X:-$(cat ../.wollipog-data/hooks/s1.protections.json)}",
-    "node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF",
   ]) {
     assert.ok(commandTargetsGuardState(command, project, directory) !== null, command);
   }
@@ -1489,10 +1488,7 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `cat > payload.sh <<'EOF'\n${into}\nEOF\nbash payload.sh`,
     `grep / -R ${home}`,
     `unset X; : \${X:-$(cat ${into})}`,
-    // Narrow-shape residuals (conservative, acceptable): a heredoc with no redirect or `<<-`, and a
-    // pure builtin with a redirect, are not the exact strippable shape, so a reach is still refused.
-    `cat <<'EOF'\n${into}\nEOF`,
-    `cat <<-'EOF'\n${into}\nEOF`,
+    // A builtin with a redirect into state still refuses.
     `echo / > ${join(directory, "x")}`,
     // Codex round-3 class: a `#` comment or an escaped `<` before the `<<`, an ANSI-C quote that
     // desyncs a modeller, and brace expansion before the ancestor exemption — all closed by the
@@ -1502,13 +1498,10 @@ test("ordinary commands reaching nothing are allowed, and every real access stay
     `echo $'\\'\${X'; cat ${into}; echo '}'`,
     `grep / {-R,${into}}`,
     // Documented residuals now refused: a `${...}` the tokenizer rejects outside a heredoc, a
-    // grep/sed/awk pattern naming a standalone ancestor, and — the round-4 user scope — every builtin
-    // but the literal, unquoted `echo` (printf/true/false/: dropped from AC1).
+    // grep/sed/awk pattern naming a standalone ancestor. The #1734 continuation now admits
+    // true/false/: and fixed-format printf separately, with inside-state checks preserved.
     "echo ${r%% *}",
     "grep '//' file.ts",
-    "printf '%s\\n' //",
-    "true /",
-    ": /",
     // A command word that only TOKENIZES to `echo` (quoted, escaped) is not the literal spelling the
     // whitelist can reason about, so it does not get the exemption (CR-4.2 hardening).
     "'echo' /",

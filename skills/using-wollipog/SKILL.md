@@ -140,7 +140,18 @@ session credential where a token is provisioned. Provider-isolated sessions hold
 relay key, which cannot authenticate direct HTTP calls; upgrade the runner/CLI for the tools rather
 than seeking a bearer token. Older control planes expose only pending requests through
 `list_descendant_requests`; update them for authoritative descendant state inspection.
-Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
+Only the current owner may resolve the exact pending occurrence.
+
+For an unnecessary pending human-owned `review_round_extension`, the controlling Orchestrator
+may instead call `withdraw_descendant_workflow_decision` with the child's `sessionId`, the exact
+`occurrenceId`, and a nonempty `reason` explaining the withdrawal and giving the child's next
+instructions (control plane v265+). It removes only that request, audits the Orchestrator's
+withdrawal, and delivers the reason through the durable resume path without stopping or restarting
+the child. The decision reads `revoked` with `withdrawal` provenance; it grants no approval and
+cannot be consumed. Approved decisions and categories not designated for withdrawal are refused.
+Use `get_workflow_decision` for the exact outcome; a request that still needs a person stays theirs.
+
+Authentication, secrets,
 persistent grants, governance changes, budget increases, and tool guardrails remain human-only.
 Separate human-established budget authority may permit bounded managed-worker reservations and
 allocations; never infer it from a campaign name or use an unmetered worker to evade accounting.

@@ -356,7 +356,7 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 263", () => {
+test("PROTOCOL_VERSION is 266", () => {
   assert.equal(PROTOCOL_VERSION, 266);
   assert.equal(runnerSupportsProtocol(260, "sessionRestartResume"), false);
   assert.equal(runnerSupportsProtocol(262, "sessionRestartResume"), false);

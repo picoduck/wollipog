@@ -1292,7 +1292,14 @@ export class CampaignWorkLedgerStore {
         workItemId = existing.id;
       }
       if (request.disposition === "accepted") {
-        const key = request.resultingWorkItemKey ??
+        // Recording a published issue on an already accepted recommendation links the work item that
+        // acceptance created, never a second one (#3918). An explicit key still chooses another.
+        const linked = request.resultingWorkItemKey === undefined ? this.stmt(
+          `SELECT item.item_key FROM campaign_recommendation_dispositions disposition
+           JOIN campaign_work_items item ON item.id=disposition.resulting_work_item_id
+           WHERE disposition.recommendation_id=? AND disposition.disposition='accepted'`,
+        ).get(recommendation.id) as { item_key: string } | undefined : undefined;
+        const key = request.resultingWorkItemKey ?? linked?.item_key ??
           (request.resultingIssue ? `${request.resultingIssue.repository}#${request.resultingIssue.number}` : `followup:${recommendation.id}`);
         const existing = this.itemByKey(campaignId, key);
         if (existing) {

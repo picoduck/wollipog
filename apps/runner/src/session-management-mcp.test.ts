@@ -220,6 +220,25 @@ test("Parent Control tools are orchestrator-only and bind resolutions to exact o
   }
 });
 
+test("withdrawal binds the pending occurrence and refuses an older peer (#3941)", async () => {
+  const { deps, calls } = makeDeps();
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = 265;
+  const args = { sessionId: "child", occurrenceId: "workflow_1", reason: "Continue from the reviewed head." };
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "workflow_1",
+    resolution: { action: "withdraw_workflow_decision", reason: args.reason } });
+  const count = calls.length;
+  deps.controlPlaneProtocolVersion = 264;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.length, count);
+  deps.controlPlaneProtocolVersion = 265;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", { ...args, reason: " " })).isError, true);
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "withdraw_descendant_workflow_decision", args)).isError, true);
+  assert.equal(calls.length, count);
+});
+
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
@@ -2631,6 +2650,20 @@ test("REST errors map to isError results carrying the status + CP error text ver
     const text = resultText(result);
     assert.ok(text.includes(`HTTP ${status}`), text);
     assert.ok(text.includes(error), "the CP's own error text is preserved verbatim");
+  }
+});
+
+test("MCP session 401s name recovery and preserve credential-bound causes", async () => {
+  for (const error of ["unauthorized — pair this device", "session agent credential refused: session stopped; ask the Orchestrator to restart the session"]) {
+    const { deps } = makeDeps(() => ({ status: 401, body: { error } }));
+    const result = await callTool(deps, "get_session", { sessionId: SELF_ID });
+    assert.equal(result.isError, true);
+    assert.match(resultText(result), /HTTP 401: session agent credential refused:/);
+    assert.match(resultText(result), /Orchestrator/);
+    assert.doesNotMatch(resultText(result), /pair/i);
+    if (error.startsWith("session agent")) assert.ok(resultText(result).includes(error));
+    const deviceResult = await callTool({ ...deps, selfSessionId: "" }, "get_session", { sessionId: SELF_ID });
+    assert.ok(resultText(deviceResult).includes(error), "device callers retain the server diagnostic");
   }
 });
 

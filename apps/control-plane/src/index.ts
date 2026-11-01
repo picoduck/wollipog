@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
+import { isSqliteBusy, withRunnerPersistenceRetry } from "./runner-persistence.js";
 import cors from "@fastify/cors";
 import { canMutateQuestionPolicy } from "./question-policy.js";
 import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
@@ -204,7 +205,8 @@ import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
-import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
+import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, TeamMemberContainmentError } from "./db.js";
+import { registerIdentityTeamRoutes, TEAM_NAME_TAKEN } from "./identity-team-route.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import { registerSideChatRoutes } from "./side-chat-routes.js";
@@ -280,6 +282,7 @@ import {
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
+import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
@@ -854,6 +857,11 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
 // http-auth.ts so it can be regression-tested with app.inject against real Fastify routing.
 registerAuthGate(app, {
   authenticate: authedApiPrincipal,
+  authenticationRefusal: (req) => {
+    const refusal = sessionCredentialRefusal(req.headers, db);
+    if (refusal) app.log.warn({ reason: refusal.reason }, "session agent credential refused");
+    return refusal?.error;
+  },
   isAllowedOrigin,
   authorize: authorizeApiRequest,
 });
@@ -1281,12 +1289,17 @@ app.register(async (instance) => {
     await svc.flushRunnerAttention(runnerId, currentSocket);
     runtimeAttentionBatch = undefined;
   };
-  const handleRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
+  const handleRunnerFrame = (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) =>
+    withRunnerPersistenceRetry(() => applyRunnerFrame(msg, prepared), (retries, exhausted) => {
+      app.log.warn({ event: "runner_persistence_contention", entryPoint: "runner_socket", runnerId,
+        messageType: msg.type, retries, exhausted }, "runner frame encountered database lock contention");
+    });
+  const applyRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
     // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
-    // failure to the offending socket — log it, then close only this runner (the `register` case
-    // already handles its own rejections and returns, so it never reaches this catch).
+    // failure to the offending socket. Registration handles credential rejections locally, but
+    // snapshot hydration and later registration work also reach this catch.
     try {
     // Nothing but `register` is accepted until this socket has authenticated — an
     // unregistered client must not be able to inject events, queue overlays, or
@@ -1333,6 +1346,7 @@ app.register(async (instance) => {
             msg.protocolVersion ?? null,
           );
         } catch (error) {
+          if (isSqliteBusy(error)) throw error;
           app.log.warn({ err: error, runnerId: msg.runner.runnerId }, "runner registration persistence failed");
           send(socket, { type: "register_rejected", reason: "registration failed" });
           socket.close(1008, "registration failed");
@@ -1935,6 +1949,12 @@ app.register(async (instance) => {
       }
     }
     } catch (error) {
+      if (isSqliteBusy(error)) {
+        app.log.error({ event: "runner_persistence_exhausted", entryPoint: "runner_socket", runnerId,
+          messageType: msg.type }, "runner persistence retries exhausted");
+        try { socket.close(1011, "runner persistence unavailable"); } catch { /* tearing down */ }
+        return;
+      }
       app.log.error(
         { err: error, runnerId, messageType: msg.type },
         "runner frame handler threw — closing offending runner socket",
@@ -1951,7 +1971,12 @@ app.register(async (instance) => {
 
   // A run of consecutive queued runtime updates shares one durable commit (#2601). Each frame gets
   // the same authority checks, activity refresh and attention batching as in handleRunnerFrame.
-  const handleRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
+  const handleRuntimeUpdateRun = (messages: RunnerToControlPlane[]) =>
+    withRunnerPersistenceRetry(() => applyRuntimeUpdateRun(messages), (retries, exhausted) => {
+      app.log.warn({ event: "runner_persistence_contention", entryPoint: "runner_socket", runnerId,
+        messageType: "session_runtime_updated", retries, exhausted }, "runner frame encountered database lock contention");
+    });
+  const applyRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
     const updates = messages as Array<Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>>;
     try {
       if (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient)) return;
@@ -1986,6 +2011,12 @@ app.register(async (instance) => {
         }, "session runtime update blocked the control plane");
       }
     } catch (error) {
+      if (isSqliteBusy(error)) {
+        app.log.error({ event: "runner_persistence_exhausted", entryPoint: "runner_socket", runnerId,
+          messageType: "session_runtime_updated" }, "runner persistence retries exhausted");
+        try { socket.close(1011, "runner persistence unavailable"); } catch { /* tearing down */ }
+        return;
+      }
       app.log.error(
         { err: error, runnerId, messageType: "session_runtime_updated", frameCount: updates.length },
         "runner frame handler threw — closing offending runner socket",
@@ -2932,6 +2963,9 @@ app.post("/api/identity/teams", async (req, reply) => {
     ? [...new Set(body.memberUserIds as string[])] : null;
   if (!name || name.length > 80) return reply.code(400).send({ error: "team name must be 1-80 characters" });
   if (!memberUserIds || memberUserIds.length > 100) return reply.code(400).send({ error: "memberUserIds must contain at most 100 unique user ids" });
+  if (db.identityTeamNameTaken(principal.organizationId, name)) {
+    return reply.code(409).send({ error: "another team in this organization already has this name", code: TEAM_NAME_TAKEN });
+  }
   try {
     const team = db.createIdentityTeam({
       teamId: `team_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
@@ -2965,9 +2999,14 @@ app.put("/api/identity/teams/:teamId/members", async (req, reply) => {
     hub.closeScopedUiClients();
     return { team };
   } catch (error) {
-    return reply.code(409).send({ error: error instanceof Error ? error.message : "team update failed" });
+    return reply.code(409).send({
+      error: error instanceof Error ? error.message : "team update failed",
+      ...(error instanceof TeamMemberContainmentError ? { code: "team_member_containment" } : {}),
+    });
   }
 });
+
+registerIdentityTeamRoutes(app, { db, requestHuman });
 
 app.delete("/api/identity/teams/:teamId", async (req, reply) => {
   const principal = requestHuman(req)!;
@@ -4671,6 +4710,8 @@ app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => 
   }
   const resolution = body.resolution;
   const valid = resolution.action === "dismiss" ||
+    (resolution.action === "withdraw_workflow_decision" && typeof resolution.reason === "string" &&
+      Boolean(resolution.reason.trim())) ||
     (resolution.action === "answer" && resolution.answers && typeof resolution.answers === "object" && !Array.isArray(resolution.answers)) ||
     ((resolution.action === "approve" || resolution.action === "deny") && typeof resolution.optionId === "string" && resolution.optionId) ||
     (resolution.action === "resolve_workflow_decision" &&

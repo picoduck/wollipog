@@ -18,6 +18,7 @@ import { CopyButton, Modal } from "./common.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { ChevronRightIcon, DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { TeamDialog } from "./TeamDialog.js";
 import {
   PersonalIdentifier,
   PersonalIdentifierMask,
@@ -415,124 +416,6 @@ export function PairDeviceDialog({
           <DialogError error={error} />
         </div>
       )}
-    </Modal>
-  );
-}
-
-function TeamDialog({
-  identity,
-  team,
-  onClose,
-  onSaved,
-}: {
-  identity: IdentityAdministrationView;
-  team?: TeamView;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const api = useApi();
-  const { confirm } = useFeedback();
-  const activeMembers = identity.memberships.filter((member) => member.userStatus === "active");
-  const [name, setName] = useState(team?.name ?? "");
-  const [memberIds, setMemberIds] = useState<string[]>(team?.memberUserIds ?? []);
-  const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
-  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
-    activeMembers.map((member) => member.userName).join("\n"),
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const toggle = (userId: string) => {
-    setMemberIds((current) =>
-      current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId],
-    );
-  };
-  const save = async () => {
-    if (busy || (!team && !name.trim())) return;
-    setBusy(true);
-    setError(null);
-    try {
-      if (team) await api.updateIdentityTeamMembers(team.teamId, memberIds);
-      else await api.createIdentityTeam({ name: name.trim(), memberUserIds: memberIds });
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const remove = async () => {
-    if (!team || busy || !await confirm({
-      title: "Delete Team",
-      message: `“${team.name}” is removed permanently. People and paired devices are unchanged.`,
-      confirmLabel: "Delete Team",
-      tone: "danger",
-    })) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteIdentityTeam(team.teamId);
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-      setBusy(false);
-    }
-  };
-  return (
-    <Modal
-      title={team ? `Manage ${team.name}` : "Create a Team"}
-      onClose={onClose}
-      describedBy="team-dialog-description"
-      tertiary={team && (
-        <button type="button" className="btn ghost danger" onClick={() => void remove()} disabled={busy}>
-          Delete Team
-        </button>
-      )}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || (!team && !name.trim())}>
-            {busy ? "Saving…" : team ? "Save Members" : "Create Team"}
-          </button>
-        </>
-      }
-    >
-      <p className="access-dialog-intro" id="team-dialog-description">
-        Teams provide a shared ownership scope for machines, workspaces, and sessions.
-      </p>
-      <div className="access-form">
-        {!team && (
-          <label>
-            <span>Team Name</span>
-            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Team name" />
-          </label>
-        )}
-        <fieldset className="access-member-picker">
-          <legend>Members</legend>
-          {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
-            <PersonalIdentifierRevealButton
-              label="Person Names"
-              revealed={namesRevealed}
-              onToggle={toggleNames}
-              withText
-            />
-          )}
-          <ChoiceRows<string>
-            multiple
-            label="Members"
-            value={memberIds}
-            onChange={toggle}
-            options={activeMembers.map((member, index) => ({
-              value: member.userId,
-              title: namesRevealed ? member.userName : memberTitles[index]!,
-              description: titleCaseLabel(member.role),
-            }))}
-          />
-          {activeMembers.length === 0 && <div className="access-empty-copy">No active people are available.</div>}
-        </fieldset>
-        <DialogError error={error} />
-      </div>
     </Modal>
   );
 }

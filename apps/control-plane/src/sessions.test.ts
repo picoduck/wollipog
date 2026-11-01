@@ -2333,6 +2333,70 @@ test("a child-written request title cannot imitate the continuation's own marker
   }
 });
 
+test("withdraw a pending human review request and deliver steering without stopping the child (#3941)", async () => {
+  const { db, svc, root, child, hub } = continuationCampaign("questions_and_approvals");
+  try {
+    const makeDecision = (id: string) => {
+      const result = svc.createWorkflowDecision(child.id, { requestId: id, resourceKey: id, resourceSnapshot: {
+        category: "implementation_question", question: "Which next step?",
+        options: [{ optionId: "safe", label: "Continue" }, { optionId: "wait", label: "Wait" }],
+      } });
+      assert.ok(result.ok && result.data, result.error);
+      return result.data;
+    };
+    const other = makeDecision("other");
+    assert.ok(svc.resolveWorkflowDecision(root.id, child.id, other.occurrenceId,
+      { outcome: "approve", selectedOptionId: "safe" }, "human", { kind: "human", id: "owner" }, () => true).ok);
+    const pending = makeDecision("review-request");
+    // Seed an already-admitted review request; review-history admission is covered by review-session tests.
+    const snapshot = { category: "review_round_extension" as const, repository: "picoduck/wollipog", pullRequest: 1,
+      headSha: "a".repeat(40), epoch: 1, roundsUsed: 4, blockingFindings: 1, extraRounds: 1, reason: "Review the changed head" };
+    db.raw().prepare("UPDATE workflow_decisions SET category='review_round_extension', resource_snapshot=? WHERE occurrence_id=?")
+      .run(JSON.stringify(snapshot), pending.occurrenceId);
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    for (const outcome of ["approve", "deny"] as const) {
+      assert.equal(svc.resolveDescendantRequest(root.id, child.id, pending.occurrenceId,
+        { action: "resolve_workflow_decision", outcome }, () => true).status, 403);
+    }
+    const withdraw = (reason: string, actor = root.id, access = () => true) =>
+      svc.resolveDescendantRequest(actor, child.id, pending.occurrenceId,
+        { action: "withdraw_workflow_decision", reason }, access);
+    assert.equal(withdraw(" ").status, 400);
+    assert.equal(withdraw("Continue\u0000now").status, 400);
+    assert.equal(withdraw("Continue\u001bnow").status, 400);
+    assert.equal(withdraw("Continue", child.id).ok, false);
+    assert.equal(withdraw("Continue", root.id, () => false).status, 404);
+    const reason = "The extra round is unnecessary. Restore the reviewed head and continue.";
+    const result = withdraw(reason);
+    assert.ok(result.ok, result.error);
+    assert.equal(db.getSession(child.id)?.status, "queued");
+    assert.equal(pendingRequests(db.getSession(child.id)?.pendingApproval).length, 0);
+    const withdrawn = db.workflowDecisionByOccurrence(pending.occurrenceId)!;
+    assert.equal(withdrawn.status, "revoked");
+    assert.deepEqual(withdrawn.withdrawal, { bySessionId: root.id, reason });
+    assert.equal(db.workflowDecisionByOccurrence(other.occurrenceId)?.status, "approved");
+    const prompts = hub.sentOfType("durable_session_command").filter((message) =>
+      message.command.type === "prompt_session" && message.command.text.includes(pending.occurrenceId));
+    assert.equal(prompts.length, 1);
+    assert.ok(prompts[0]!.command.type === "prompt_session");
+    assert.match(prompts[0]!.command.text, /Your Orchestrator withdrew your review_round_extension/u);
+    assert.ok(prompts[0]!.command.text.includes(reason));
+    const audit = svc.governanceAudit(child.id).find((entry) =>
+      entry.requestId === pending.occurrenceId && entry.outcome === "revoked")!;
+    assert.deepEqual(audit.actor, { kind: "agent", id: root.id });
+    assert.ok(audit.workflowDecision?.withdrawal?.reasonDigest);
+    assert.equal(withdraw(reason).status, 409, "terminal withdrawal cannot be replayed");
+    assert.equal((await svc.consumeWorkflowDecision(child.id, pending.occurrenceId,
+      { resourceSnapshot: snapshot })).status, 409);
+    assert.equal(svc.resolveDescendantRequest(root.id, child.id, other.occurrenceId,
+      { action: "withdraw_workflow_decision", reason }, () => true).status, 409, "approved decisions belong to #3917");
+    const undesignated = makeDecision("undesignated");
+    assert.equal(svc.resolveDescendantRequest(root.id, child.id, undesignated.occurrenceId,
+      { action: "withdraw_workflow_decision", reason }, () => true).status, 403);
+  } finally { db.close(); }
+});
+
 test("resolving a child's typed decision with resolve_descendant_workflow_decision does not wake its Orchestrator (#3083)", () => {
   const { db, svc, root, child, deliver } = continuationCampaign("off");
   try {
@@ -2370,7 +2434,7 @@ test("resolving a child's typed decision with resolve_descendant_workflow_decisi
     svc.onSessionStatus(child.id, "stopped");
     const ended = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000);
     assert.ok(ended, "the stopped child's report wakes the Orchestrator promptly");
-    assert.match(ended, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${replacement.data.occurrenceId}","owner":"orchestrator","category":"pr_merge","title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#124","outcome":"revoked","resolvedBy":"system"`, "u"),
+    assert.match(ended, new RegExp(`"kind":"request_resolved",.*"occurrenceId":"${replacement.data.occurrenceId}","owner":"orchestrator","category":"pr_merge","title":"PR Merge Approval Required","resourceKey":"picoduck/wollipog#124","outcome":"revoked","resolvedBy":"system","revocationReason":"session_ended"\\}`, "u"),
       "a request that left without the Orchestrator's answer still reaches it, with how it ended");
     assert.match(ended, /"kind":"child_ready",.*"childStatus":"stopped","status":"stopped"/u);
   } finally {
@@ -5717,8 +5781,11 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       entry.actor.kind === "agent"));
     assert.ok(audits.some((entry) => entry.outcome === "consumed"));
     assert.ok(audits.some((entry) => entry.requestId === pending.data!.occurrenceId &&
-      entry.outcome === "revoked" && entry.actor.kind === "human" && entry.actor.id === "policy-owner"),
-    "policy-change revocation audits name the authenticated human actor");
+      entry.outcome === "revoked" && entry.actor.kind === "system" && entry.actor.id === "parent_control_policy_changed" &&
+      entry.workflowDecision?.revocation?.reason === "parent_control_policy_changed" &&
+      entry.workflowDecision.revocation.triggeredBy?.kind === "human" &&
+      entry.workflowDecision.revocation.triggeredBy.id === "policy-owner"),
+    "a policy-change revocation is the system's, and its audit names the authenticated human who changed the policy (#3916)");
     assert.ok(audits.every((entry) => !JSON.stringify(entry).includes("Reviewed exact head and checks.")),
       "audit stores a rationale digest rather than raw rationale");
     assert.equal(hub.sentOfType("resolve_permission").some((message) =>

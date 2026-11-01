@@ -237,6 +237,8 @@ test("wrong runner ids and expired pending credentials fail without revoking the
     db.registerRunnerWithCredential(runner(), hashToken(replacement.token), 300 + RUNNER_CREDENTIAL_PENDING_MS, 53),
     null,
   );
+  assert.equal(db.raw().prepare("SELECT status FROM runner_credentials WHERE credential_id=?")
+    .get(replacement.credential.credentialId)?.status, "revoked");
   assert.equal(db.verifyActiveRunnerCredential("runner-1", hashToken(initial.token)), true);
   assert.equal(db.verifyActiveRunnerCredential("runner-1", hashToken(replacement.token)), false);
   db.close();

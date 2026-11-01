@@ -237,6 +237,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type WorkflowDecisionCategory,
   type WorkflowDecisionResourceSnapshot,
   type WorkflowDecisionView,
+  type WorkflowDecisionRevocation,
+  type WorkflowDecisionRevocationReason,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
   type ResolveWorkflowDecisionRequest,
@@ -260,6 +262,7 @@ import {
   type CampaignContinuationEventRecord,
   type CampaignContinuationRecord,
   type CampaignRequestResolutionRecord,
+  type CampaignRequestResolver,
   type ControlPlaneDb,
   type RestartNoticeEntry,
   type RunnerHistoryReconciliation,
@@ -426,6 +429,48 @@ interface CampaignContinuationEventDetail {
   actionable: boolean;
   /** What the prompt shows for this event. */
   summary: Record<string, unknown>;
+}
+
+/** Why the server revokes one typed decision, and whose action led to it (#3916). The resolver it
+ * records is always the system: `systemId` keeps a lifecycle path's established actor id, which
+ * armed-merge recovery matches exactly; any other revocation's actor id is its reason. */
+interface WorkflowDecisionRevocationCause {
+  reason: WorkflowDecisionRevocationReason;
+  triggeredBy?: GovernanceActor;
+  systemId?: string;
+}
+
+function workflowDecisionRevocationActor(cause: WorkflowDecisionRevocationCause): GovernanceActor {
+  return { kind: "system", id: cause.systemId ?? cause.reason };
+}
+
+function workflowDecisionRevocation(cause: WorkflowDecisionRevocationCause): WorkflowDecisionRevocation {
+  return { reason: cause.reason, ...(cause.triggeredBy ? { triggeredBy: cause.triggeredBy } : {}) };
+}
+
+/** Who a campaign request resolution names: the campaign's own Orchestrator, or the actor's kind. */
+function campaignRequestResolver(actor: GovernanceActor, campaignSessionId: string): CampaignRequestResolver {
+  return actor.kind === "agent" && actor.id === campaignSessionId ? "orchestrator" : actor.kind;
+}
+
+/** Whether removing a settled campaign request reaches the Orchestrator as `request_resolved`
+ * (#3083, #3916). Its own resolution, or a revocation its own action led to, wakes nobody: it
+ * already has the result. Any other removal of an Orchestrator-owned request is reported. A
+ * human-owned one is reported when a person resolved it or the server revoked it, so no server
+ * revocation is dropped; one that ended any other way still waits for human_blockers_cleared. */
+function campaignRequestRemovalReported(
+  owner: "orchestrator" | "human",
+  resolution: CampaignRequestResolutionRecord | null,
+): boolean {
+  if (resolution?.resolvedBy === "orchestrator" || resolution?.triggeredBy === "orchestrator") return false;
+  if (owner === "orchestrator") return true;
+  return resolution?.resolvedBy === "human" || resolution?.revocationReason !== undefined;
+}
+
+/** A request resolution a person made, or a server revocation a person's action led to, asks the
+ * Orchestrator to look again, as the person's own resolution always has. */
+function campaignRequestResolutionInvolvesHuman(resolution: CampaignRequestResolutionRecord): boolean {
+  return resolution.resolvedBy === "human" || resolution.triggeredBy === "human";
 }
 
 /** The continuation prompt (#3083). It carries enough to decide whether the turn has anything to
@@ -708,13 +753,13 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
-  const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
   const option = decision.selectedOptionId === undefined
     ? ""
     : ` with option ${decisionLiteral(decision.selectedOptionId)}`;
   return [
     `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
-    `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
+    `${resolver} ${decision.withdrawal ? "withdrew" : decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
       `(resource ${decisionLiteral(decision.resourceKey)})${option}` +
       (decision.childMessage ? " and left this message for you:" : "."),
     ...(decision.childMessage ? [decision.childMessage] : []),
@@ -3466,7 +3511,7 @@ export class SessionsService {
     session: Pick<SessionView, "id" | "parentSessionId" | "role" | "permissionMode">,
     type: "typed" | "generic",
     requestKey: string,
-    request: { category: string; title?: string; resourceKey?: string },
+    request: { category: string; title?: string; resourceKey?: string; revocation?: WorkflowDecisionRevocation },
     outcome: GovernanceAuditOutcome,
     actor: GovernanceActor,
     now: number,
@@ -3496,8 +3541,11 @@ export class SessionsService {
         ...(request.title ? { title: boundedCampaignEventText(request.title) } : {}),
         ...(request.resourceKey ? { resourceKey: boundedCampaignEventText(request.resourceKey) } : {}),
         outcome,
-        resolvedBy: actor.kind === "agent" && actor.id === campaign.id ? "orchestrator" : actor.kind,
+        resolvedBy: campaignRequestResolver(actor, campaign.id),
         resolvedAt: now,
+        ...(request.revocation ? { revocationReason: request.revocation.reason } : {}),
+        ...(request.revocation?.triggeredBy
+          ? { triggeredBy: campaignRequestResolver(request.revocation.triggeredBy, campaign.id) } : {}),
       });
     } catch (error) {
       this.log.warn(`campaign request resolution for ${session.id} was not recorded: ${(error as Error).message}`);
@@ -5414,14 +5462,16 @@ export class SessionsService {
       if (revoked) {
         for (const decision of revoked) {
           this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-          this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+          this.recordWorkflowDecisionRevocation(decision,
+            { reason: "campaign_boundary_restored", triggeredBy: { kind: "human", id: principal.userId } }, now);
         }
         const repaired = this.db.getSession(root.id)!;
         const boundary = (repaired.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
         this.log.info(JSON.stringify({ event: "campaign_boundary_restored_from_scope_approval", sessionId: root.id,
           boundaryRevision: boundary.revision, issueScopeRevision: boundary.issueScopeRevision, revokedDecisions: revoked.length }));
         for (const member of scopeParticipants(this.db, repaired)) this.hub.sessionChangedById(member.id);
-        this.publishCampaignAttentionTransition(repaired);
+        // From the campaign as it read before the repair, so the decisions it revoked are seen leaving.
+        this.publishCampaignAttentionTransition(root);
         return null;
       }
     }
@@ -6213,7 +6263,9 @@ export class SessionsService {
       ...(visible && request.resourceKey ? { resourceKey: request.resourceKey } : {}),
     });
     const settled = (resolution: CampaignRequestResolutionRecord | null) => resolution
-      ? { outcome: resolution.outcome, resolvedBy: resolution.resolvedBy }
+      ? { outcome: resolution.outcome, resolvedBy: resolution.resolvedBy,
+        ...(resolution.revocationReason ? { revocationReason: resolution.revocationReason } : {}),
+        ...(resolution.triggeredBy ? { triggeredBy: resolution.triggeredBy } : {}) }
       : { resolvedBy: "unknown" as const };
     switch (event.kind) {
       case "request_actionable": {
@@ -6259,11 +6311,12 @@ export class SessionsService {
         // Only a resolution recorded no later than this removal describes it. A removal with no
         // such record, for instance a change of owner or a record that could not be written, may
         // still have been a human's, so it asks for the full sweep (and woke the Orchestrator
-        // promptly: campaignContinuationPromptEventAt applies the same rule).
+        // promptly: campaignContinuationPromptEventAt applies the same rule). So does a server
+        // revocation a person's action led to, such as an approval refused as stale (#3916).
         const recorded = this.db.campaignRequestResolution(campaignSessionId, event.occurrenceId ?? "");
         const resolution = recorded && recorded.resolvedAt <= event.createdAt ? recorded : null;
         const owner = event.subjectStatus === "human" ? "human" : "orchestrator";
-        return { actionable: !resolution || resolution.resolvedBy === "human", summary: {
+        return { actionable: !resolution || campaignRequestResolutionInvolvesHuman(resolution), summary: {
           ...base, ...subject(resolution?.subjectSessionId),
           ...(resolution ? { occurrenceId: resolution.occurrenceId } : {}), owner,
           ...(resolution
@@ -8145,7 +8198,7 @@ export class SessionsService {
       const child = this.db.getSession(decision.sessionId);
       if (child) {
         this.settleWorkflowDecisionPause(child.id, decision.occurrenceId, now);
-        this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
+        this.recordWorkflowDecisionRevocation(decision, { reason: "parent_control_policy_changed", triggeredBy: actor }, now);
         this.hub.sessionChangedById(child.id);
       }
     }
@@ -8909,10 +8962,12 @@ export class SessionsService {
       after?.pendingRequests?.orchestratorRequestTokens ?? [],
     );
     const currentTokens = new Set([...currentOrchestratorTokens, ...after?.pendingRequests?.humanRequestTokens ?? []]);
-    // A request the Orchestrator settled itself wakes nobody: it already knows (#3083). Any other
-    // Orchestrator-owned removal still wakes it, and so does a human settling a human-owned gate,
-    // which human_blockers_cleared alone reports only once the last one goes. A human-owned request
-    // that ended without a human answer, such as a stopped child's, still waits for that event.
+    // A request the Orchestrator settled itself, or a revocation its own action led to, wakes
+    // nobody: it already knows (#3083). Any other Orchestrator-owned removal still wakes it, and so
+    // does a human settling a human-owned gate, which human_blockers_cleared alone reports only once
+    // the last one goes. A server revocation of a human-owned request is reported too, as the
+    // system's, with its reason (#3916); one that ended any other way, such as a stopped child's
+    // question, still waits for that event.
     const removals = [
       ["orchestrator", before.orchestratorCampaign?.pendingRequests?.orchestratorRequestTokens ?? [], currentOrchestratorTokens],
       ["human", before.orchestratorCampaign?.pendingRequests?.humanRequestTokens ?? [], currentTokens],
@@ -8920,8 +8975,7 @@ export class SessionsService {
     for (const [owner, previous, current] of removals) {
       for (const token of new Set(previous)) {
         if (current.has(token)) continue;
-        const resolvedBy = this.db.campaignRequestResolution(before.id, token)?.resolvedBy;
-        if (resolvedBy === "orchestrator" || (owner === "human" && resolvedBy !== "human")) continue;
+        if (!campaignRequestRemovalReported(owner, this.db.campaignRequestResolution(before.id, token))) continue;
         continuationEvents.push({
           eventId: `request-resolved:${before.id}:${token}`,
           campaignSessionId: before.id,
@@ -9230,7 +9284,8 @@ export class SessionsService {
     if (this.db.campaignBudgets.view(sessionId)?.state !== "active") this.enforceCampaignBudget(sessionId, now);
     for (const decision of outstanding) {
       this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-      this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+      this.recordWorkflowDecisionRevocation(decision,
+        { reason: "campaign_control_changed", triggeredBy: { kind: "human", id: principal.userId } }, now);
     }
     if (control.mode === "full_control") {
       // Requests parked before enablement are settled now: the root's standing decisions, and
@@ -9270,13 +9325,14 @@ export class SessionsService {
     if (!result.ok) return fail(result.error, result.status);
     for (const decision of result.revoked) {
       this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-      this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "human", id: principal.userId }, now);
+      this.recordWorkflowDecisionRevocation(decision,
+        { reason: "campaign_follow_up_limit_changed", triggeredBy: { kind: "human", id: principal.userId } }, now);
     }
-    const updated = this.db.getSession(sessionId)!;
     this.log.info(JSON.stringify({ event: "campaign_follow_up_limit_changed", sessionId, acceptedFollowUps: limit,
       policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
     for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
-    this.publishCampaignAttentionTransition(updated);
+    // From the campaign as it read before the change, so the decisions it revoked are seen leaving.
+    this.publishCampaignAttentionTransition(session);
     return ok(this.db.getSession(sessionId)!);
   }
 
@@ -9971,8 +10027,10 @@ export class SessionsService {
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
       // preserve the original configured/human request path without a standing issue grant,
       // and record why on the decision so the person is never asked without a reason (#2940).
-      const { recommendationId: _recommendationId, ...snapshot } = normalized.data;
-      return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: snapshot }, canAccess,
+      // The snapshot keeps the name exactly as requested, so the card shows what the person
+      // approves and the requester consumes what it sent (#3918). Only the server's own
+      // issueAdmission makes a publication bounded; a named recommendation never does.
+      return this.createWorkflowDecision(sessionId, request, canAccess,
         "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
     }
     if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
@@ -10535,7 +10593,7 @@ export class SessionsService {
         decision.resourceDigest !== resourceDigest || !decision.resolvedAt || now - decision.resolvedAt > 30 * 60_000 ||
         auditDigest(issueClosureActiveChildren(this.db, sessionId, { repository: snapshot.repository, number: snapshot.issue })) !==
           auditDigest(snapshot.activeChildren)) {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("issue-closure approval expired or its scope, payload, policy, or active child work changed; request renewed human review", 409);
     }
     const unsupported = this.capabilityFailure(session.runnerId, "orchestratorIssueClosure", "human-approved issue closure");
@@ -10876,11 +10934,16 @@ export class SessionsService {
       this.hub.sessionChangedById(childSessionId);
       return ok(this.withMergeReviewEvidence(resolved));
     }
+    const ownRequester = decision?.sessionId === childSessionId ? this.db.getSession(childSessionId) : null;
+    // A Custom root's own publication, which only the campaign owner decides (#3919).
+    const rootOwnPublication = Boolean(decision && ownRequester && decision.category === "follow_up_issue_publication" &&
+      parentSessionId === childSessionId && decision.authority === "human" && this.customRootOwnPublication(ownRequester));
     if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
         !((decision.category === "issue_closure" || decision.category === "campaign_issue_scope" ||
           decision.category === "campaign_follow_up_admission") && parentSessionId === childSessionId ||
           // A standalone session's own extra review rounds, which only a person decides (#3369).
           decision.category === "review_round_extension" && parentSessionId === childSessionId && decision.authority === "human" ||
+          rootOwnPublication ||
           this.workflowDecisionRelationship(parentSessionId, childSessionId)) ||
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
@@ -10890,7 +10953,7 @@ export class SessionsService {
       const requester = this.db.getSession(childSessionId);
       const refused = requester && this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot);
       if (refused) {
-        this.revokeWorkflowDecision(decision, actor);
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
         return fail(refused, 409);
       }
     }
@@ -10902,7 +10965,7 @@ export class SessionsService {
         "typed workflow decisions",
       );
       if (unsupported) {
-        this.revokeWorkflowDecision(decision, actor);
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
         return unsupported;
       }
     }
@@ -10913,7 +10976,7 @@ export class SessionsService {
         isTerminal(currentParent.status) ||
         !currentPolicy || currentPolicy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision)) {
-      this.revokeWorkflowDecision(decision, actor);
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: actor });
       return fail("workflow decision authority was revoked or superseded", 409);
     }
     if (decision.authority !== authority) {
@@ -10927,6 +10990,10 @@ export class SessionsService {
     }
     if ((decision.category === "issue_closure" || decision.category === "campaign_issue_scope") && authority === "human" && actor.kind !== "human") {
       return fail("issue closure always requires an authenticated human response", 403);
+    }
+    if (rootOwnPublication && (authority !== "human" || actor.kind !== "human" || !actor.id ||
+        !this.db.campaignOwnerUser(childSessionId, actor.id))) {
+      return fail("Only the campaign owner can decide a root Orchestrator's own follow-up publication", 403);
     }
     if (decision.category === "campaign_follow_up_admission") {
       // Only the campaign's owner admits a follow-up past its approval limit (#2940), never an agent.
@@ -10942,7 +11009,7 @@ export class SessionsService {
     if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
       const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
       if (refused) {
-        this.revokeWorkflowDecision(decision, actor);
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_precondition", triggeredBy: actor });
         return fail(refused, 409);
       }
     }
@@ -10977,7 +11044,7 @@ export class SessionsService {
         let sourceBytes: Buffer | null;
         try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
         if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
-          this.revokeWorkflowDecision(decision, actor);
+          this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
           return fail("the source video no longer matches the digest bound to this decision", 409);
         }
         let previousOrder = 0;
@@ -11036,7 +11103,7 @@ export class SessionsService {
       }
       if (!latest || auditDigest(latest) !== decision.resourceDigest ||
           (currentChild.orchestratorPolicy?.issueScope?.revision ?? 0) !== snapshot.expectedRevision) {
-        this.revokeWorkflowDecision(decision, actor);
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
         return fail("Campaign scope or affected work changed. Refresh Campaign Status and request approval of a new exact proposal.", 409);
       }
       if (!actor.id) return fail("An authenticated human identity is required for scope authorization", 403);
@@ -11046,7 +11113,7 @@ export class SessionsService {
       if (!resolvedScope) return fail("Campaign scope changed concurrently. Refresh and propose again.", 409);
       for (const stale of staleDecisions) {
         this.settleWorkflowDecisionPause(stale.sessionId, stale.occurrenceId, now);
-        this.recordWorkflowDecisionAudit(stale, "revoked", actor, now);
+        this.recordWorkflowDecisionRevocation(stale, { reason: "superseded_by_scope_change", triggeredBy: actor }, now);
       }
       this.settleResolvedWorkflowDecision(resolvedScope, now, null);
       this.recordWorkflowDecisionAudit(resolvedScope, "allowed", actor, now, normalizedResolution.rationale);
@@ -11056,6 +11123,9 @@ export class SessionsService {
         revision: snapshot.expectedRevision + 1, additions: snapshot.additions.length, removals: snapshot.removals.length }));
       void this.synchronizeCampaignIssueScope(childSessionId);
       for (const member of scopeParticipants(this.db, this.db.getSession(childSessionId)!)) this.hub.sessionChangedById(member.id);
+      // From the campaign as it read before this approval, so the decisions it revoked are seen
+      // leaving and reach the Orchestrator with their reason (#3916).
+      this.publishCampaignAttentionTransition(currentParent);
       return ok(resolvedScope);
     }
     const oweResume = this.workflowDecisionResumeOwed(currentChild);
@@ -11121,7 +11191,7 @@ export class SessionsService {
       return failAs(supplied);
     }
     if (!matchesStored && !matchesOriginal) {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("workflow decision resource snapshot is stale", 409);
     }
     // A child can echo the original video request or the exact server-derived snapshot from get;
@@ -11131,7 +11201,7 @@ export class SessionsService {
       let sourceBytes: Buffer | null;
       try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
       if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("the source video no longer matches the digest bound to this decision", 409);
       }
     }
@@ -11140,7 +11210,7 @@ export class SessionsService {
     if (child && decision.resourceSnapshot.category === "pr_merge") {
       const refused = this.mergeReviewEvidenceRefusal(child, decision.resourceSnapshot);
       if (refused) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(refused, 409);
       }
     }
@@ -11151,33 +11221,36 @@ export class SessionsService {
         "typed workflow decisions",
       );
       if (unsupported) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return unsupported;
       }
     }
     const policy = parent?.parentControlPolicy;
-    // The same narrow self-control exception as creation/resolution: an ordinary standalone
-    // requester can consume its human-approved review extension, never another self-owned gate.
+    // The same narrow self-control exceptions as creation/resolution: an ordinary standalone
+    // requester can consume its human-approved review extension, and a Custom root its
+    // owner-approved publication (#3919), never another self-owned gate.
     const standaloneReviewExtension = child && parent?.id === child.id && decision.category === "review_round_extension" &&
       decision.authority === "human" && this.decisionControllerRoot(child) === "none";
+    const rootOwnPublication = child && parent?.id === child.id && decision.category === "follow_up_issue_publication" &&
+      decision.authority === "human" && this.customRootOwnPublication(child);
     if (!child || !parent || isTerminal(child.status) || isTerminal(parent.status) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
-        !(standaloneReviewExtension || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
+        !(standaloneReviewExtension || rootOwnPublication || this.workflowDecisionRelationship(parent.id, child.id)) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("workflow decision authority was revoked or ancestry changed before action start", 409);
     }
     if (normalized.data.category === "pr_merge") {
       const snapshot = normalized.data;
       const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
       if (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("the current pull request head needs a valid review before merge", 409);
       }
     }
     if (!this.reviewExtensionCurrent(child, decision)) {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("the review extension no longer matches the current run", 409);
     }
     const action = normalizeWorkflowDecisionAction(normalized.data, request?.action);
@@ -11199,7 +11272,7 @@ export class SessionsService {
     }
     if (action.data) {
       if (child.driver !== "claude-code" && child.driver !== "codex-app-server") {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(`${child.driver} does not expose trusted correlated command-decision evidence`, 409);
       }
       for (const owner of [child, parent]) {
@@ -11209,7 +11282,7 @@ export class SessionsService {
           "workflow decision action admission",
         );
         if (unsupported) {
-          this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+          this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
           return unsupported;
         }
       }
@@ -11222,7 +11295,7 @@ export class SessionsService {
       const snapshot = normalized.data;
       const unsupported = this.capabilityFailure(child.runnerId, "gitlabMergeDecisions", "GitLab merge decisions");
       if (unsupported) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return unsupported;
       }
       const requestId = `gitlab_merge_preflight_${randomUUID()}`;
@@ -11239,7 +11312,7 @@ export class SessionsService {
       const result = checked as Partial<GitLabMergePreflightResultMessage> | null;
       if (result?.type !== "gitlab_merge_preflight_result" || result.sessionId !== child.id || result.ok !== true) {
         if (result?.refusal === "stale_head" || result?.refusal === "mismatch") {
-          this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+          this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         }
         const reason = typeof result?.reason === "string" ? result.reason : "GitLab could not be checked.";
         return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
@@ -11251,7 +11324,7 @@ export class SessionsService {
       // nothing either way, so nothing is armed and the child may try again.
       const checked = await this.githubMergeClosures(child, normalized.data);
       if (!checked.ok) {
-        if (checked.revoke) this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        if (checked.revoke) this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(checked.revoke
           ? `${checked.message} This approval was revoked, so nothing was armed; request a new merge decision.`
           : checked.message, 409);
@@ -11263,7 +11336,7 @@ export class SessionsService {
         ? this.hub.activeTurnIdForSession(child.id)
         : undefined;
       if (child.driver === "codex-app-server" && !sessionTurnId) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("App Server action admission requires an active runner turn", 409);
       }
       let providerFence: Pick<NonNullable<WorkflowDecisionView["actionAdmission"]>,
@@ -11329,11 +11402,11 @@ export class SessionsService {
       }
       const evidenceRefusal = normalized.data.category === "pr_merge" ? this.mergeReviewEvidenceRefusal(child, normalized.data) : null;
       if (evidenceRefusal) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(evidenceRefusal, 409);
       }
       if (!this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
       }
       const armed = this.db.armWorkflowDecisionAction(occurrenceId, {
@@ -11359,7 +11432,7 @@ export class SessionsService {
         ? this.workflowVideoApprovals!.consume(decision, () => this.db.consumeWorkflowDecision(occurrenceId, now))
         : this.db.consumeWorkflowDecision(occurrenceId, now);
     } catch {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+      this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
       return fail("Original video provenance expired, changed or was revoked before consumption", 409);
     }
     if (!consumed) return fail("workflow decision was already consumed", 409);
@@ -11646,7 +11719,7 @@ export class SessionsService {
         canonicalPrMergeEnqueueCommand(decision.resourceSnapshot as Extract<
           WorkflowDecisionResourceSnapshot, { category: "pr_merge" }
         >) !== command) {
-      this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-decision-action-admission" });
+      this.revokeWorkflowDecision(decision, { reason: "action_admission_refused", systemId: "workflow-decision-action-admission" });
       return null;
     }
     return { decision, commandDigest };
@@ -11713,6 +11786,9 @@ export class SessionsService {
         sessionRole(child) === "orchestrator" && child.parentControlPolicy) {
       return { session: child, policy: child.parentControlPolicy };
     }
+    if (category === "follow_up_issue_publication" && this.customRootOwnPublication(child)) {
+      return { session: child, policy: child.parentControlPolicy! };
+    }
     // The outermost Orchestrator above the child owns its gates, found by the same walk the
     // campaign projection uses (#2451). An Orchestrator whose campaign policy is unreadable still
     // owns them, human-only unless its Parent Control policy says otherwise, so no shape moves a
@@ -11732,6 +11808,14 @@ export class SessionsService {
       },
     } : null;
     return controller;
+  }
+
+  /** A Custom campaign root publishing a draft it wrote itself (#3919). It controls that gate, which
+   * stays the campaign owner's: a root's request is never Orchestrator-owned outside Full Control.
+   * Full Control roots and Orchestrators nested under another one resolve exactly as before. */
+  private customRootOwnPublication(session: SessionView): boolean {
+    return sessionRole(session) === "orchestrator" && Boolean(session.parentControlPolicy) &&
+      session.orchestratorPolicy?.control?.mode !== "full_control" && this.decisionControllerRoot(session) === "none";
   }
 
   /** A child's gates resolve from its parent, exactly as its campaign attention does, so a gate
@@ -12008,7 +12092,7 @@ export class SessionsService {
     if (!child || isTerminal(child.status) || isTerminal(parent.status) || !policy ||
         policy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: parentSessionId });
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: parentSessionId } });
       return fail("workflow decision authority was revoked or superseded", 409);
     }
     if (decision.authority !== "orchestrator") {
@@ -12045,7 +12129,7 @@ export class SessionsService {
       let original: Buffer | null;
       try { original = this.db.readWorkflowArtifactBytes(video!.sourceArtifactId); } catch { original = null; }
       if (!original || createHash("sha256").update(original).digest("hex") !== video!.sourceSha256) {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: parentSessionId });
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: { kind: "agent", id: parentSessionId } });
         return fail("the source video no longer matches the digest bound to this decision", 409);
       }
     }
@@ -12059,7 +12143,7 @@ export class SessionsService {
     }
     if (!bytes || bytes.byteLength > MAX_UI_EVIDENCE_REVIEW_BYTES ||
         createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
-      this.revokeWorkflowDecision(decision, { kind: "agent", id: parentSessionId });
+      this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: { kind: "agent", id: parentSessionId } });
       return fail("evidence content no longer matches the digest bound to this workflow decision", 409);
     }
     const now = Date.now();
@@ -12201,15 +12285,24 @@ export class SessionsService {
   }
 
   private revokeWorkflowDecision(
-    decision: WorkflowDecisionView, actor: GovernanceActor, oweRestartNotice = false, rationale?: string,
+    decision: WorkflowDecisionView, cause: WorkflowDecisionRevocationCause, oweRestartNotice = false, rationale?: string,
   ): void {
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
     this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
-    this.recordWorkflowDecisionAudit(decision, "revoked", actor, now, rationale);
+    this.recordWorkflowDecisionRevocation(decision, cause, now, rationale);
     this.hub.sessionChangedById(decision.sessionId);
     this.publishCampaignAttentionTransition(controllerBefore);
+  }
+
+  /** The governance audit of one server revocation (#3916): a `system` resolver with its reason,
+   * and the actor whose action led to it recorded as its trigger, never as its resolver. */
+  private recordWorkflowDecisionRevocation(
+    decision: WorkflowDecisionView, cause: WorkflowDecisionRevocationCause, now: number, rationale?: string,
+  ): void {
+    this.recordWorkflowDecisionAudit(decision, "revoked", workflowDecisionRevocationActor(cause), now, rationale,
+      undefined, undefined, workflowDecisionRevocation(cause));
   }
 
   private expiringAutomationDecisions = false;
@@ -12228,7 +12321,8 @@ export class SessionsService {
           const changed = this.db.expireAutomationCreationDecision(decision.occurrenceId, now, () => {
             this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now, undefined,
               (kind, previous) => this.db.queueAutomationExpirationEffect(decision.occurrenceId, previous, kind, now));
-            this.recordWorkflowDecisionAudit(decision, "revoked", { kind: "system", id: "automation-approval-expiration" },
+            this.recordWorkflowDecisionRevocation(decision,
+              { reason: "automation_approval_expired", systemId: "automation-approval-expiration" },
               now, "automation proposal or approval execution deadline elapsed");
           });
           if (!changed) continue;
@@ -12591,8 +12685,10 @@ export class SessionsService {
       const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
       // Each delivery can move the child, so the next resume reads it again.
       const child = this.db.getSession(sessionId);
-      // A decision revoked or superseded meanwhile has nothing to announce.
-      if (!child || !decision || !["approved", "denied", "consumed"].includes(decision.status)) {
+      // Ordinary revocations have nothing to announce. Explicit withdrawal owes the steering
+      // resume atomically recorded with it, even though its terminal status is also revoked.
+      if (!child || !decision || !(["approved", "denied", "consumed"].includes(decision.status) ||
+          decision.status === "revoked" && decision.withdrawal)) {
         this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
         continue;
       }
@@ -12628,7 +12724,7 @@ export class SessionsService {
         // A refused ancestry leaves no controller to restore the card to. Say why in the audit and
         // in the child's transcript, so the card does not just vanish (#2451).
         const malformed = !controller && this.decisionControllerRoot(child) === "refused";
-        this.revokeWorkflowDecision(decision, { kind: "system", id: "workflow-recovery" }, false,
+        this.revokeWorkflowDecision(decision, { reason: "authority_superseded", systemId: "workflow-recovery" }, false,
           malformed ? MALFORMED_ANCESTRY_DECISION_REFUSAL : undefined);
         if (malformed) {
           this.hub.sessionEvent(this.db.appendEvent(sessionId, {
@@ -12656,7 +12752,9 @@ export class SessionsService {
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
       const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
-      this.revokeWorkflowDecision(decision, { kind: "system", id: actorId }, actorId === "session-restarted");
+      this.revokeWorkflowDecision(decision, {
+        reason: actorId === "session-restarted" ? "session_restarted" : "session_ended", systemId: actorId,
+      }, actorId === "session-restarted");
       if (settle) void this.settleArmedMergeFromForge(child!, decision);
     }
     // A child that already reads terminal was stopped provisionally, which kept any in-flight
@@ -12828,6 +12926,7 @@ export class SessionsService {
     rationale?: string,
     reviewReceiptIds?: string[],
     stage: GovernanceAuditStage = outcome === "pending" ? "request" : "resolution",
+    revocation?: WorkflowDecisionRevocation,
   ): void {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return;
@@ -12839,6 +12938,7 @@ export class SessionsService {
         category: decision.category,
         title: this.workflowDecisionApproval(decision).title,
         resourceKey: decision.resourceKey,
+        ...(revocation ? { revocation } : {}),
       }, outcome, actor, now);
     }
     // Only the resolving record carries the message digest; later consume/revoke records do not.
@@ -12865,6 +12965,7 @@ export class SessionsService {
       contentDigest: decision.resourceDigest,
       optionId: decision.selectedOptionId,
       workflowDecision: {
+        ...(decision.withdrawal ? { withdrawal: { reasonDigest: auditDigest(decision.withdrawal.reason)! } } : {}),
         occurrenceId: decision.occurrenceId,
         parentSessionId: decision.controllingSessionId,
         childSessionId: decision.sessionId,
@@ -12887,6 +12988,7 @@ export class SessionsService {
           ? { childMessageDigest: auditDigest(decision.childMessage)! }
           : {}),
         ...(publicationAuthority ? { publicationAuthority } : {}),
+        ...(revocation ? { revocation } : {}),
       },
       timestamp: now,
     });
@@ -13031,6 +13133,36 @@ export class SessionsService {
     }
     const child = this.db.getSession(childSessionId);
     if (!child) return fail("session not found", 404);
+    if (resolution.action === "withdraw_workflow_decision") {
+      // This explicit product allowlist does not delegate approval, governance, or access grants.
+      const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId) {
+        return fail("workflow decision not found", 404);
+      }
+      if (decision.status !== "pending") return fail("only pending workflow requests can be withdrawn", 409);
+      if (decision.authority !== "human" || decision.category !== "review_round_extension") {
+        return fail("this category is not designated for Orchestrator withdrawal", 403);
+      }
+      if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+        return fail("a bounded nonempty withdrawal reason is required", 400);
+      }
+      if (this.workflowDecisionChildEnded(child) || isTerminal(parent.status) ||
+          typedPolicy.revision !== decision.policyRevision ||
+          !this.workflowDecisionAuthorityCurrent(parent, typedPolicy, decision)) {
+        return fail("workflow decision authority was superseded", 409);
+      }
+      const now = Date.now();
+      const oweResume = this.workflowDecisionResumeOwed(child);
+      const withdrawn = this.db.withdrawPendingWorkflowDecision(occurrenceId, parentSessionId,
+        resolution.reason.trim(), now, oweResume);
+      if (!withdrawn) return fail("workflow decision changed concurrently", 409);
+      this.recordWorkflowDecisionAudit(withdrawn, "revoked", { kind: "agent", id: parentSessionId }, now,
+        resolution.reason.trim());
+      this.settleResolvedWorkflowDecision(withdrawn, now, oweResume ? "held" : null);
+      this.hub.sessionChangedById(childSessionId);
+      this.publishCampaignAttentionTransition(parent);
+      return ok(this.db.getSession(childSessionId)!);
+    }
     if (resolution.action === "resolve_workflow_decision") {
       const resolved = this.resolveWorkflowDecision(
         parentSessionId,

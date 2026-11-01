@@ -1,7 +1,7 @@
 /** Shared socket framing and judge, used only by the fixed verdict worker. */
 import type { Socket } from "node:net";
 import { managedWorktreeGuardDecision, managedWorktreeGuardOutcome, parseManagedWorktreeGuardVerdictRequest, type ManagedWorktreeGuardOutcome } from "./managed-worktree-guard.js";
-import { MANAGED_WORKTREE_REFUSAL, type ManagedWorktreeProtection } from "./managed-worktree-protection.js";
+import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 import { parsePolicyHookRelayRequest, policyHookRelayAnswer, type PolicyHookRelayRequest } from "./policy-hook-relay.js";
 type GuardProtectionsLoader = () => ManagedWorktreeProtection[];
 // The hook payload (at most 1 MB, up to six bytes per byte once JSON-escaped) plus the sidecar's
@@ -16,7 +16,7 @@ function judge(request: string, loadProtections: GuardProtectionsLoader, guardSt
   } catch (error) {
     return {
       stdout: "",
-      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard received an unreadable verdict request: ${(error as Error).message})\n`,
+      stderr: `Wollipog could not inspect this tool call (managed worktree guard received an unreadable verdict request: ${(error as Error).message}), so it was not run.\n`,
       exitCode: 2,
     };
   }
