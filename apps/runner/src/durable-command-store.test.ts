@@ -385,6 +385,24 @@ test("malformed durable envelopes fail closed without throwing", () => {
   }
 });
 
+test("review continuation marker is validated and included in the durable identity (#3938)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-review-continuation-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const command: DurableSessionCommand = {
+      type: "prompt_session", sessionId: "s1", text: "Review completed", reviewContinuation: true,
+    };
+    assert.equal(store.claim(message(command, { commandId: "review_valid" })).kind, "new");
+    for (const value of [false, "true", {}, 1]) {
+      const invalid = { ...command, reviewContinuation: value } as DurableSessionCommand;
+      const result = store.claim(message(invalid, { commandId: `review_invalid_${typeof value}` }));
+      assert.notEqual(result.kind, "busy");
+      if (result.kind !== "busy") assert.equal(result.receipt.code, "INVALID_COMMAND");
+    }
+    assert.notEqual(durableCommandPayloadDigest(command), durableCommandPayloadDigest({ ...command, reviewContinuation: undefined }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("campaign continuation metadata is bounded and bound to its exact session and event range", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-command-campaign-continuation-"));
   try {

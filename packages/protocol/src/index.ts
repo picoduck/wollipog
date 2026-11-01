@@ -6254,7 +6254,8 @@ export type SessionEventPayload =
       kind: "user_message";
       text: string;
       images?: PromptImageInput[];
-      /** Runner-authenticated automatic campaign turn; preserves earlier async questions. */
+      /** Runner-authenticated automatic campaign or review turn; preserves earlier async questions.
+       * The historical field name is retained for persisted event compatibility. */
       campaignContinuation?: true;
       final?: boolean;
       commandId?: string;
@@ -10323,6 +10324,9 @@ export interface PromptSessionMessage {
   config?: SessionConfig;
   /** Slash command name (without leading "/") if this turn invokes one. */
   slashCommand?: string;
+  /** Trusted automatic review notification; never supplied by the person-authored prompt API.
+   * Requires the runner's explicit reviewSession.questionPreservation advertisement. */
+  reviewContinuation?: true;
   /** Control-plane-authenticated synthetic campaign turn. Event bounds contain identities and
    * metadata only; the provider must query scoped management tools for authorized details. */
   campaignContinuation?: {

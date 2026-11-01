@@ -1,3 +1,5 @@
+import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
+import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
@@ -290,7 +292,7 @@ import {
   claudeStableAliasFamily,
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
-import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { SessionPromptOutbox, REVIEW_CONTINUATION_UNSUPPORTED_REASON } from "./session-prompt-outbox.js";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
 import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
@@ -5769,6 +5771,8 @@ export class SessionsService {
       admitAs?: "queued";
       /** Always admit through the durable queue when the runner supports its identity. */
       durable?: boolean;
+      /** Only server-created review notifications may preserve pending async questions. */
+      reviewContinuation?: true;
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
@@ -5972,6 +5976,7 @@ export class SessionsService {
       type: "prompt_session",
       sessionId,
       text: effectiveText,
+      ...(binding?.reviewContinuation ? { reviewContinuation: true as const } : {}),
       images: nonEmpty(commandImages),
       slashCommand: effectiveSlashCommand,
       config: {
@@ -9825,11 +9830,19 @@ export class SessionsService {
     if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
     const daily = this.dailyBudgetFor(requesterSessionId);
     if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    const supportsQuestionRetention = runnerSupportsReviewQuestionPreservation(this.db.getRunner(session.runnerId));
+    // Older runners mistake this automatic prompt for human input and dismiss the async card.
+    // Keep the review owed until the person answers or the runner upgrades.
+    if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async)) {
+      return "runner upgrade is required to preserve a pending async question";
+    }
     const ids = held.map((review) => review.reviewSessionId);
     let claimed = false;
     const sent = this.prompt(
       requesterSessionId, reviewContinuationPrompt(held), [], undefined, undefined, undefined, "session", true, {
         admitAs: "queued" as const,
+        // The durable lane is where the runner validates this trusted continuation marker.
+        ...(supportsQuestionRetention ? { durable: true, reviewContinuation: true as const } : {}),
         stage: (runnerId, command, at) => this.promptOutbox.stageReviewContinuation(ids, requesterSessionId, runnerId, command, at),
         // Without a durable command there is no receipt to follow: recorded delivered before the
         // send, so a crash between the two can lose it but never send it twice.
@@ -9851,9 +9864,22 @@ export class SessionsService {
     if (!requesterSessionId) return;
     const command = this.db.getSessionPromptCommand(commandId);
     if (!command) return;
-    if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
-        command.userEventSeq === undefined) {
+    const requester = this.db.getSession(requesterSessionId);
+    let automaticReview = false;
+    try {
+      const payload = JSON.parse(command.payloadJson) as DurableSessionCommand;
+      automaticReview = payload.type === "prompt_session" && payload.reviewContinuation === true;
+    } catch { /* Malformed stored payloads are final failures, never retried. */ }
+    const retryUnsentReview = automaticReview && requester && !isTerminal(requester.status) && !requester.archived &&
+      ((command.errorCode === "COMMAND_CANCELLED" && command.error === AUTOMATIC_TURN_RESTART_CANCELLED_REASON) ||
+        (command.attemptCount === 0 && command.error === REVIEW_CONTINUATION_UNSUPPORTED_REASON));
+    // Restart cancels rejection-held automatic turns before submission; a transport downgrade
+    // can also reject a never-sent command. Keep the result owed, without replaying any user event
+    // or uncertain delivery. Older runners then use the same pending-question hold as admission.
+    if (command.state === "failed" && command.userEventSeq === undefined &&
+        (command.errorCode === "WORKTREE_RECOVERY_REQUIRED" || retryUnsentReview)) {
       if (!this.db.holdReviewContinuationCommand(requesterSessionId, commandId, now)) return;
+      this.settleQueuedAdmission(command, now);
       this.hub.sessionChangedById(requesterSessionId);
       this.deliverHeldReviewContinuations(requesterSessionId, now);
       return;

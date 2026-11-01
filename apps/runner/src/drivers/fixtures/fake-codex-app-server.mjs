@@ -175,6 +175,10 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         send({ method: "item/completed", params: { threadId, turnId, item: {
           type: "agentMessage", id: "async-answer", text: "Async answer received by Codex.",
         } } });
+      } else if (typeof text === "string" && text.includes("[Wollipog Cross-Model Review")) {
+        send({ method: "item/completed", params: { threadId, turnId, item: {
+          type: "agentMessage", id: "review-notice", text: "Review received. The original question is still pending.",
+        } } });
       } else {
         send({ method: "item/completed", params: { threadId, turnId, item: {
           type: "agentMessage", id: "async-ask", text: "I will keep investigating.",

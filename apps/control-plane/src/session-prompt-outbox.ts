@@ -1,3 +1,4 @@
+import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { randomUUID } from "node:crypto";
 import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
@@ -21,6 +22,9 @@ export type RetryablePendingPrompt = {
   runnerId: string;
   errorCode: "PROVIDER_AUTHENTICATION_REQUIRED" | "WORKTREE_RECOVERY_REQUIRED";
 };
+
+export const REVIEW_CONTINUATION_UNSUPPORTED_REASON =
+  "runner no longer supports question-preserving review continuations";
 
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
@@ -246,7 +250,10 @@ export class SessionPromptOutbox {
         : command.type === "prompt_session" && command.campaignContinuation
           ? "campaignContinuations"
           : "durablePromptQueueIdentity";
-      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
+      const runner = this.db.getRunner(row.runnerId);
+      if (!runnerSupportsProtocol(runner?.protocolVersion, capability) ||
+          (command.type === "prompt_session" && command.reviewContinuation &&
+            !runnerSupportsReviewQuestionPreservation(runner))) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
           runnerId: row.runnerId,
@@ -257,7 +264,9 @@ export class SessionPromptOutbox {
             ? "runner no longer supports resumable structured-question answers"
             : command.type === "prompt_session" && command.campaignContinuation
               ? "runner no longer supports durable campaign continuations"
-              : "runner no longer supports durable queued prompt identity",
+              : command.type === "prompt_session" && command.reviewContinuation
+                ? REVIEW_CONTINUATION_UNSUPPORTED_REASON
+                : "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

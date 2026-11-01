@@ -21570,8 +21570,8 @@ export class ControlPlaneDb {
     ).run(state, now, commandId).changes);
   }
 
-  /** The runner reported the command not sent because the requester's worktree needs recovery:
-   * owe the continuation again and retire the not-sent row in one transaction. */
+  /** A proven-unsent command needs a fresh delivery after worktree recovery, Restart, or a
+   * transport downgrade: owe the continuation again and retire its terminal row atomically. */
   holdReviewContinuationCommand(requesterSessionId: string, commandId: string, now: number): boolean {
     this.db.exec("BEGIN");
     try {
