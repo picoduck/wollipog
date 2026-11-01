@@ -256,26 +256,36 @@ const namesCredentialPath = (text: string) => text.replace(/[^\p{L}\p{N}._~\/\\-
 // only names a protected subject was declined: a compound adjective, a quoted decline notice, a
 // design choosing a CI workflow's permissions. Before those screens run, a question loses exactly
 // the spans below, each blanked to the same length so no window between other words changes:
-//   1. a compound adjective ("read-only", "secret-free", "tokenless"), which asks for nothing;
-//   2. the server's own decline wording, and a declarative negation of a request verb by a
-//      non-reader subject ("the campaign cannot supply"), only when no other request verb or
-//      reader-directed ask is left anywhere in the form and the sentence is not a question;
-//   3. a widening phrase about a repository CI workflow or job's declared permission block, a code
-//      artifact, only when the form names no reader, session, agent, provider, account or lasting
-//      grant and the span itself names no credential and no other request verb;
+//   1. "read-only" and "write-only", and a credential noun's "-free"/"-less" compound when the form
+//      neither handles nor discloses a credential;
+//   2. the server's own decline wording, and a declarative negation of a request verb (with its
+//      credential object) by a non-reader subject ("the campaign cannot supply credentials"), only
+//      when the sentence is not a question and nothing left in the form could still ask: no request
+//      verb or reader-directed ask, and no protected noun, reader pronoun or back-reference
+//      ("yours", "it", "one", "the value") that could request what the mask removed;
+//   3. a widening phrase whose grantee is a repository CI workflow or job and whose sentence names
+//      its declared permission block, a code artifact, only when the form names no reader, session,
+//      agent, provider, account, other grantee or lasting grant and the sentence names no credential
+//      and no other request verb;
 //   4. the "CI" qualifier of a credential noun, only when the form has no handling or disclosure verb.
 // Every other word still meets every pattern. Value literals, store paths, email values, sinks, the
 // secret and email fields and the tool screen never see masked text, so no mask can admit one.
 const blank = (span: string) => " ".repeat(span.length);
-const compoundAdjective = /\b(?:read|write|secrets?|tokens?|credentials?|passwords?|passphrases?|(?:api[ _-]?)?keys?|cookies?|sign-?in|log-?in|auth)-(?:only|free|less)\b|\b(?:secret|token|credential|password|passphrase|key|cookie)less\b/giu;
+const handlingOrDisclosure = new RegExp(String.raw`\b${handlingVerb}\b|\b${disclosureVerb}\b`, "iu");
+const readWriteCompound = /\b(?:read|write)-only\b/giu;
+const credentialCompound = /\b(?:secrets?|tokens?|credentials?|passwords?|passphrases?|(?:api[ _-]?)?keys?|cookies?|sign-?in|log-?in|auth)-(?:free|less)\b/giu;
 const requestVerb = String.raw`(?:paste|enter|provide|supply|reveal|show|print|display|read|retrieve|extract|send|sent|upload|copy|use|share|give|tell|fetch|load|export|disclose|dictate|recite|expose|output|echo|say|spell|post|publish|forward|leak|dump|hand|write|e-?mail|mail|message|text|transmit|broadcast|submit|collect|ask|request|prompt|obtain|solicit|capture|harvest|type|sync|replicate|mirror|transfer|distribute|propagate|commit|push|include|attach|embed|get|acquire|borrow|lend|grant|enlarge|increase|broaden|widen|expand|extend|elevate|escalate|disable|bypass|remove|lift|relax|allow|approve|trust|permit|authorize|authenticate|sign|log|login)`;
 const modal = String.raw`(?:can|could|would|will|may|might|shall|should|must|do|does|did)`;
 const negatedModal = String.raw`(?:cannot|can[’'\s]*t|couldn[’'\s]*t|wouldn[’'\s]*t|won[’'\s]*t|shouldn[’'\s]*t|mustn[’'\s]*t|don[’'\s]*t|doesn[’'\s]*t|didn[’'\s]*t)`;
-/** Anything left that could still ask the reader for something voids the decline-wording mask. */
+const protectedNoun = String.raw`(?:${anyCredential}|${designCredentialNoun}|auth(?:entication)?|oauth|identity|logins?|log-?ins?|sign-?ins?|accounts?|permissions?|access|scopes?)`;
+/** Anything left that could still ask the reader for something voids the decline-wording mask: a
+ * request verb, a reader-directed ask, a protected noun, or a word that could refer back to the
+ * removed credential ("What are yours?", "Which one?", "What is it?"). */
 const remainingRequest = new RegExp([
   String.raw`\b${requestVerb}\w*`, String.raw`\b${handlingVerb}\b`, String.raw`\bplease\b`, String.raw`\bwhy\s+not\b`,
   String.raw`\b(?:${modal}(?:\s+not)?|${negatedModal})\s+(?:you|u)\b`, String.raw`\byou\s+(?:${modal}|need|have)\b`,
-  String.raw`\b(?:can|could|may|might|would|${negatedModal})\s+(?:I|we)\b`,
+  String.raw`\b(?:can|could|may|might|would|${negatedModal})\s+(?:I|we)\b`, String.raw`\b${protectedNoun}\b`,
+  String.raw`\b(?:you|your|yours|yourself|u|mine|ours|theirs|it|its|one|ones|them|they|those|these|value|values|string|literal|here)\b`,
 ].join("|"), "iu");
 const words = (phrase: string) => phrase.split(/\s+/u).map((word) => word.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join(String.raw`\s+`);
 /** The server's own Full Control decline wording, verbatim, longest first. */
@@ -290,8 +300,9 @@ const declineNotice = new RegExp([
   "cannot supply credentials", "cannot supply these", "Continue without them; the request is recorded as blocked work.",
 ].map(words).join("|"), "giu");
 const nonReaderSubject = String.raw`(?:(?:the|this)\s+(?:campaign|server|orchestrator|control\s+plane|system)|full\s+control|it|we|they)`;
+const negatedObject = String.raw`(?:\s+(?:the\s+|any\s+|its\s+|their\s+)?${protectedNoun}(?:\s*(?:,|or|and)\s*${protectedNoun})*)?`;
 const declarativeNegation = new RegExp(String.raw`(^\s*|[.;:!,"'\x60‘’“”(\[]\s*|\b(?:because|since|as|so|and|but|that|which|while|although|though|if)\s+)` +
-  String.raw`(${nonReaderSubject}\s+(?:cannot|can\s+not|can[’'\s]*t|could\s+not|couldn[’'\s]*t|will\s+not|won[’'\s]*t|does\s+not|doesn[’'\s]*t|did\s+not|didn[’'\s]*t|is\s+not\s+able\s+to|never)\s+${requestVerb})\b`, "giu");
+  String.raw`(${nonReaderSubject}\s+(?:cannot|can\s+not|can[’'\s]*t|could\s+not|couldn[’'\s]*t|will\s+not|won[’'\s]*t|does\s+not|doesn[’'\s]*t|did\s+not|didn[’'\s]*t|is\s+not\s+able\s+to|never)\s+${requestVerb}\b${negatedObject})\b`, "giu");
 const interrogative = /^\s*(?:why|how|what|who|whom|whose|where|when|which|whether|is|are|was|were|do|does|did|can|could|would|will|should|shall|may|might|must|isn|aren|wasn|weren|don|doesn|didn|won|wouldn|shouldn|couldn|can)\b|\b(?:why|how|whether)\b/iu;
 /** Interrogative or tag negation ("can't we…?", "…, can it?", "why can't…") stays screened. */
 function asked(text: string, start: number, end: number): boolean {
@@ -306,35 +317,42 @@ function maskDeclineWording(text: string): string {
     asked(notices, offset + lead.length, offset + match.length) ? match : lead + blank(clause));
 }
 /** A repository CI workflow or job's declared permission block: the design subject, not a grant. */
+const permissionKey = String.raw`\b(?:actions|attestations|checks|contents|deployments|discussions|id-token|issues|models|packages|pages|pull-requests|repository-projects|security-events|statuses)\s*:\s*(?:read|write|none)\b`;
+const permissionKeys = new RegExp(permissionKey, "giu");
 const permissionBlock = new RegExp([
-  String.raw`\bpermissions\s*:`,
-  String.raw`\b(?:actions|attestations|checks|contents|deployments|discussions|id-token|issues|models|packages|pages|pull-requests|repository-projects|security-events|statuses)\s*:\s*(?:read|write|none)\b`,
+  String.raw`\bpermissions\s*:`, permissionKey,
   String.raw`\b(?:workflow|job)(?:s|[’'\s]?s)?\s+(?:(?:default|declared|token)\s+)?permissions?\b`,
   String.raw`\b(?:the|its)\s+(?:workflow|job)\b[^.?!;\n]{0,40}\bpermissions?\b`,
 ].join("|"), "iu");
 const ciScopeChange = /\b(?:grant|give|broaden|widen|expand|extend|increase|elevate)\b[^.?!;\n]{0,60}?\b(?:permissions?|scopes?|access)\b|\b(?:wider|broader|more|additional|extra)\s+(?:access|permissions?|scopes?)\b/giu;
+/** The change's grantee is the workflow or job itself: its direct object, or the comparison. */
+const ciGrantee = /^\S+\s+(?:the|its|this|that|each|every)\s+(?:ci\s+|github\s+actions\s+)?(?:workflow|job)(?:s|[’'\s]?s)?\b/iu;
+const ciComparison = /\bthan\s+(?:the\s+|its\s+)?(?:default\s+)?(?:workflow|job)(?:s|[’'\s]?s)?\s+(?:token\s+)?permissions?\b/iu;
 /** Anyone or anything but the workflow being given scope, or a lasting grant, voids the CI mask. */
-const ciScopeVeto = /\b(?:i|me|my|mine|myself|you|your|yours|yourself|u|us|our|ours|ourselves|sessions?|agents?|child|children|orchestrators?|runners?|campaigns?|wollipog|providers?|accounts?|users?|humans?|persons?|people|operators?|owners?|admins?|administrators?|root|sudo|sandbox(?:es)?|guardrails?|polic(?:y|ies)|limits?|protections?|bypass|disable|always|forever|permanent(?:ly)?|persistent(?:ly)?|lasting|standing|durable|indefinitely|organi[sz]ations?|org|enterprise|claude|codex|reader|answerer|whoever|anyone|everyone|someone|production|prod)\b/iu;
-const ciSpanForbidden = new RegExp(String.raw`\b(?:${anyCredential}|${designCredentialNoun}|sign-?ins?|log-?ins?|logins?|sessions?)\b|\b(?:${disclosureVerb}|paste|enter|provide|supply|share|tell|send)\b`, "iu");
+const ciScopeVeto = /\b(?:i|me|my|mine|myself|you|your|yours|yourself|u|us|our|ours|ourselves|sessions?|agents?|child|children|orchestrators?|runners?|campaigns?|wollipog|providers?|accounts?|users?|humans?|persons?|people|operators?|owners?|admins?|administrators?|root|sudo|sandbox(?:es)?|guardrails?|polic(?:y|ies)|limits?|protections?|bypass|disable|always|forever|permanent(?:ly)?|persistent(?:ly)?|lasting|standing|durable|indefinitely|organi[sz]ations?|org|enterprise|claude|codex|reader|answerer|whoever|anyone|everyone|everybody|someone|production|prod|bots?|apps?|applications?|teams?|services?|deploy(?:ments?)?|integrations?|installations?|repositor(?:y|ies)|repos?|browsers?|devices?|machines?|hosts?|computers?|clients?|servers?|members?|contributors?|maintainers?|collaborators?|forks?)\b/iu;
+const ciSentenceForbidden = new RegExp(String.raw`\bwe\b|\b(?:${anyCredential}|${designCredentialNoun}|sign-?ins?|log-?ins?|logins?|sessions?)\b|\b(?:${disclosureVerb}|paste|enter|provide|supply|share|tell|send)\b`, "iu");
 function maskCiScope(text: string): string {
   return text.replace(ciScopeChange, (match: string, offset: number) => {
     const before = text.slice(0, offset), after = text.slice(offset + match.length);
     const sentence = before.slice(Math.max(...[".", "?", "!", ";", "\n"].map((mark) => before.lastIndexOf(mark))) + 1) + match +
       after.slice(0, (after.search(/[.?!;\n]/u) + 1 || after.length + 1) - 1);
-    // The leading verb is the masked change itself; any other request verb or credential is not.
-    const inner = match.replace(/^\S+/u, "");
-    return permissionBlock.test(sentence) && !ciSpanForbidden.test(inner) ? blank(match) : match;
+    const grantee = /^(?:wider|broader|more|additional|extra)\b/iu.test(match) ? ciComparison.test(sentence) : ciGrantee.test(match);
+    return grantee && permissionBlock.test(sentence) && !ciSentenceForbidden.test(sentence.replace(permissionKeys, blank)) ? blank(match) : match;
   });
 }
 const ciQualifier = new RegExp(String.raw`\bci\b(?=.{0,50}\b(?:tokens?|(?:api[ _-]?)?keys?|access[ _-]?tokens?|private[ _-]?keys?|passwords?|passphrases?|secrets?|credentials?|cookies?)\b)`, "giu");
-const handlingOrDisclosure = new RegExp(String.raw`\b${handlingVerb}\b|\b${disclosureVerb}\b`, "iu");
 /** The raw and quote-stripped forms with the mention-only masks applied. Each mask's guard reads
  * both forms, so quoting can neither hide a request from a guard nor create a mask. */
 function mentionOnlyForms(raw: string): [string, string] {
-  const compounds = [raw, withoutQuoting(raw)].map((text) => text.replace(compoundAdjective, blank)) as [string, string];
+  const unmasked = [raw, withoutQuoting(raw)] as const;
+  const handles = unmasked.some((text) => handlingOrDisclosure.test(text));
+  const compounds = unmasked.map((text) => {
+    const rw = text.replace(readWriteCompound, blank);
+    return handles ? rw : rw.replace(credentialCompound, blank);
+  }) as [string, string];
   const declines = compounds.map(maskDeclineWording) as [string, string];
   const worded = declines.some((text) => remainingRequest.test(text)) ? compounds : declines;
-  const scoped = worded.some((text) => ciScopeVeto.test(text)) ? worded : worded.map(maskCiScope) as [string, string];
+  const scoped = worded.some((text) => ciScopeVeto.test(text.replace(permissionKeys, blank))) ? worded : worded.map(maskCiScope) as [string, string];
   return scoped.some((text) => handlingOrDisclosure.test(text)) ? scoped : scoped.map((text) => text.replace(ciQualifier, blank)) as [string, string];
 }
 /** Values a form carries itself, screened on the unmasked text of every question route. */

@@ -362,7 +362,7 @@ const mentionOnly = [
   "The child's question was refused because the campaign cannot supply credentials. Should I continue without that design input?",
   "The child's design question was declined with \"cannot supply credentials\". Should I continue without that design input?",
   "The child's design question was declined with `the campaign cannot supply credentials`. Should I continue without that design input?",
-  "The child reported \"Full Control declined this question: the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.\" Which design should it take next?",
+  "The child reported \"Full Control declined this question: the campaign cannot supply credentials or sign-in. Continue without them; the request is recorded as blocked work.\" Which design should the child take next?",
   "We cannot supply credentials for this design. Which fallback should the importer implement?",
   "Should the workflow design stay token-free and read-only?",
 ];
@@ -399,6 +399,12 @@ test("only declarative negation by a non-reader is masked; interrogative, tag an
     "We cannot supply credentials for the design. Can you?",
     "The campaign cannot supply credentials for the design; please share yours.",
     "\"The campaign cannot supply credentials\" for the design, so share one with me.",
+    // Review round 1: a back-reference asks for what the mask removed.
+    "The campaign cannot supply credentials. What are yours for the design?",
+    "The campaign cannot supply credentials. Which one does the design need from the reader?",
+    "We cannot supply credentials for the design. What is it?",
+    "The campaign cannot supply credentials for the design. What is the value?",
+    "The campaign cannot supply credentials for the design. Which token does the importer need?",
   ]) declinedEverywhere(text);
 });
 
@@ -416,7 +422,15 @@ test("the CI permission-block mask covers a workflow's declared permissions, nev
     "Should the design grant the workflow job the token and the actions: read permission?",
     // No permission block in the sentence: plain access stays declined.
     "Should the design grant access to the GitHub API?", "Grant access to implement the workflow design",
+    // Review round 1: the grantee must be the workflow or job itself.
+    "Grant this browser access to GitHub with contents: write for the design.",
+    "Should the design grant the deploy bot access with contents: write?",
+    "Should the design grant the workflow job and this device access with contents: write?",
+    "Should the design grant its job the actions: read permission? Do the same for the browser.",
+    "Should we grant the workflow job access with contents: write for the design?",
   ]) declinedEverywhere(text);
+  // A credential noun's "-only" compound is a credential, and a "-free" one beside a request is screened.
+  for (const text of ["Enter the secret-only value here for the design.", "Paste the token-free value here for the design."]) declinedEverywhere(text);
   // Values, store paths and secret fields are screened on the unmasked text.
   for (const text of ["Should the design grant the workflow job sk-abcdefghijklmnop with contents: write permissions?",
     "Should the design grant the workflow job ~/.ssh/id_rsa with contents: write permissions?"]) declinedEverywhere(text);
