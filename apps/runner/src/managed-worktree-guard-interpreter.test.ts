@@ -52,13 +52,29 @@ test("quoted interpreter heredocs have script-file parity while literal state an
   assert.notEqual(judge("node - <<'PY'\nread('alias#/secret')\nPY"), null);
   assert.notEqual(judge("python3 - <<'PY'\nos.system('$(cat alias/secret)')\nPY"), null);
   assert.notEqual(judge("python3 - <<'PY'\nopen('ali''as/secret')\nPY"), null);
+  if (process.platform !== "win32") { // double quotes are not valid Windows filename characters
+    symlinkSync(directory, join(project, 'special"quote'), "dir");
+    const quotedPath = JSON.stringify('special"quote/secret');
+    assert.notEqual(judge(`python3 - <<'PY'\nopen(${quotedPath})\nPY`), null,
+      "an escaped quote in a literal symlink name must retain the whole path reading");
+    const shellString = JSON.stringify("cat 'special\"quote/secret'");
+    assert.notEqual(judge(`python3 - <<'PY'\nos.system(${shellString})\nPY`), null,
+      "nested quoted command text must retain the escaped filename too");
+  }
   assert.notEqual(judge("cd alias && node - <<'PY'\nconsole.log('safe');\nPY"), null);
   for (const cd of ["-", "--", "nested"]) {
-    assert.notEqual(judge(`cd ${cd} && node - <<'PY'\nconsole.log('safe');\nPY`), null, cd);
+    assert.notEqual(judge(`cd ${cd} && node - <<'PY'\nconsole.log(\`\${spec.sessionId}\`); // /\nPY`), null, cd);
   }
-  symlinkSync(nested, join(root, "cwd-alias"), process.platform === "win32" ? "junction" : "dir");
+  assert.equal(judge("cd nested && node - <<'PY'\nconsole.log('safe');\nPY"), null,
+    "a disqualified exemption must preserve previously allowed simple commands");
+  const physicalParent = join(root, "other");
+  mkdirSync(join(physicalParent, "nested"), { recursive: true });
+  symlinkSync(join(physicalParent, "nested"), join(project, "cwd-link"), process.platform === "win32" ? "junction" : "dir");
+  symlinkSync(directory, join(physicalParent, "physical-only"), process.platform === "win32" ? "junction" : "dir");
+  assert.notEqual(commandTargetsGuardState("cd .. && node - <<'PY'\nread('physical-only/secret')\nPY",
+    join(project, "cwd-link"), directory), null, "cd .. follows the physical parent of a symlink cwd");
   assert.notEqual(commandTargetsGuardState("cd .. && node - <<'PY'\nread('alias/secret')\nPY",
-    join(root, "cwd-alias"), directory), null, "cd .. follows the physical parent of a symlink cwd");
+    join(project, "cwd-link"), directory), null, "the shell's logical parent must also be checked");
   assert.notEqual(commandTargetsGuardState("python3 - <<'PY'\nos.system('cat $HOME/.wollipog/hooks/secret')\nPY", project,
     join(homedir(), ".wollipog", "hooks")), null);
   assert.notEqual(commandTargetsGuardState("python3 - <<'PY'\nos.system('cat ${HOME:-unused}/.wollipog/hooks/secret')\nPY", project,
@@ -105,6 +121,17 @@ test("cd-prefixed copy heredocs classify targets at the new cwd (Refs #1734)", (
   symlinkSync(directory, join(nested, "alias"), process.platform === "win32" ? "junction" : "dir");
   const judge = (command: string) => commandTargetsGuardState(command, project, directory);
   assert.equal(judge("cd ./nested && cat > notes.txt <<'EOF'\n/ // ${example}\nEOF"), null);
+  assert.equal(judge(`cd ./nested && cat > notes.txt <<'EOF'\n${directory}\nEOF`), null,
+    "literal state text is still inert in the copy-only body, unlike in its cd prefix");
   assert.notEqual(judge("cd ./nested && cat > alias/secret <<'EOF'\nsafe\nEOF"), null);
   assert.notEqual(judge("cd ./nested && cat > notes.txt <<'EOF'\nsafe\nEOF\ncat nested/alias/secret"), null);
+  assert.equal(judge("cd nested && cat > notes.txt <<'EOF'\nsafe\nEOF"), null);
+  assert.notEqual(judge(`cd ${directory.replaceAll("\\", "/")}/../../project && cat > notes.txt <<'EOF'\nsafe\nEOF`), null,
+    "the cd prefix itself retains the unconditional literal-path scan");
+  const other = join(root, "other", "dir");
+  mkdirSync(other, { recursive: true });
+  symlinkSync(other, join(project, "link"), process.platform === "win32" ? "junction" : "dir");
+  symlinkSync(directory, join(project, "alias"), process.platform === "win32" ? "junction" : "dir");
+  assert.notEqual(judge("cd ./link/.. && cat > alias/secret <<'EOF'\nsafe\nEOF"), null,
+    "copy redirects must be checked at the logical cd target as well as the physical one");
 });

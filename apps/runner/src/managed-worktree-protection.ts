@@ -2843,11 +2843,15 @@ function interpreterHeredoc(command: string): { body: string; cd: string | undef
 }
 
 /** Absolute and dot-relative cd operands bypass CDPATH; `-` and option-like spellings do not
- * identify a directory. Resolve before lexical normalization so a symlink followed by .. uses
- * the kernel's parent, not the spelling's parent. Unresolvable operands receive no exemption. */
-function heredocWorkingDirectory(path: string, cwd: string): string | null {
+ * identify a directory. Keep both logical and physical parents when a symlink precedes ..;
+ * shell settings can select either. Unresolvable operands receive no exemption. */
+function heredocWorkingDirectories(path: string, cwd: string): string[] | null {
   if (!isAbsolute(path) && !/^\.\.?(?:\/|$)/u.test(path)) return null;
-  return physicalSpelling(isAbsolute(path) ? path : `${cwd}${sep}${path}`);
+  const physical = physicalSpelling(isAbsolute(path) ? path : `${cwd}${sep}${path}`);
+  const logical = canonicalPathOrNull(resolve(cwd, path));
+  if (physical === null || logical === null) return null;
+  // Bash may use logical cd or physical cd (-P / shell options). Neither reading may hide a path.
+  return [...new Set([physical, logical])];
 }
 
 /** Language-neutral, additive path readings of executable heredoc text. This is not an interpreter
@@ -2866,8 +2870,9 @@ function interpreterBodyRefusal(body: string, cwd: string, root: string): string
   if (!whitelisted) {
     return guardStateUninspectableRefusal("the interpreter body is outside the literal-path inspection whitelist");
   }
-  const decoded = body.replace(/\\([\\/'"nrt])/gu, (_, c: string) =>
+  const decodeSimple = (text: string): string => text.replace(/\\([\\/'"nrt])/gu, (_, c: string) =>
     ({ n: "\n", r: "\r", t: "\t" }[c] ?? c));
+  const decoded = decodeSimple(body);
   const readings = new Set<string>();
   const quotedSlashes = new Set<string>();
   // HOME can be expanded by a shell the interpreter invokes. Add that reading as well; never
@@ -2878,11 +2883,18 @@ function interpreterBodyRefusal(body: string, cwd: string, root: string): string
   // interpreter). This only ADDS path readings; raw and decoded text are always retained.
   for (const text of [...texts]) texts.add(text.replace(/['"]\s*['"]/gu, "").replace(/['"]/gu, ""));
   for (const text of texts) {
-    for (const match of text.matchAll(/'([^']*)'|"([^"]*)"|`([^`]*)`|[^\s'"`()\[\]{},;=+*!?&|$<>]+/gu)) {
-      readings.add(match[1] ?? match[2] ?? match[3] ?? match[0]);
+    for (const match of text.matchAll(/'((?:\\.|[^'\\])*)'|"((?:\\.|[^"\\])*)"|`((?:\\.|[^`\\])*)`|[^\s'"`()\[\]{},;=+*!?&|$<>]+/gu)) {
+      const whole = match[1] ?? match[2] ?? match[3] ?? match[0];
+      readings.add(whole);
+      // Preserve a literal escaped quote as part of the filename instead of splitting the span:
+      // open("special\"quote/secret") must resolve special"quote, not special and quote/secret.
+      readings.add(decodeSimple(whole));
       // Strings can themselves contain commands/code. Keep the whole span AND every lexical
       // piece inside it, so os.system("cat alias/secret") cannot hide an alias in an opaque string.
       const quoted = match[1] !== undefined || match[2] !== undefined || match[3] !== undefined;
+      // A string may itself be executable command text. Inspect its decoded quoted spans too;
+      // Set iteration visits these additive readings, bounded by the same unique-reading cap.
+      if (quoted) texts.add(decodeSimple(whole));
       for (const piece of match[0].matchAll(/[^\s'"`()\[\]{},;=+*!?&|$<>]+/gu)) {
         readings.add(piece[0]);
         if (quoted && /^\/+$/u.test(piece[0])) quotedSlashes.add(piece[0]);
@@ -2973,6 +2985,7 @@ export function commandTargetsGuardState(
 ): string | null {
   if (!directory || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
   const root = resolve(directory);
+  const foldCase = process.platform === "win32" || process.platform === "darwin";
   // A cd-prefixed COPY-ONLY heredoc can use the existing inert-body whitelist. Inspect its cd
   // separately and judge the untouched inner command at the directory where its relative target
   // actually resolves. No generic command-text normalization or cd emulation is involved.
@@ -2980,17 +2993,26 @@ export function commandTargetsGuardState(
   if (copyPrefix) {
     const inner = command.slice(command.indexOf(" && ") + 4);
     if (matchStrippableHeredoc(inner) !== null) {
-      if (guardStateRelation(copyPrefix[1]!, cwd, root) !== null) return GUARD_STATE_REFUSAL;
-      const nextCwd = heredocWorkingDirectory(copyPrefix[1]!, cwd);
-      if (nextCwd === null) return guardStateUninspectableRefusal("the heredoc cd target is not an absolute or resolvable dot-relative path");
-      return commandTargetsGuardState(inner, nextCwd, directory);
+      const nextCwds = heredocWorkingDirectories(copyPrefix[1]!, cwd);
+      if (nextCwds !== null) {
+        // Only the proven inert BODY may be omitted. A cd spelling that contains the literal
+        // hook path stays refused even if normalization climbs back out of it.
+        const prefixText = foldCase ? copyPrefix[0].toLowerCase() : copyPrefix[0];
+        if ([root, root.split(sep).join("/")].some((path) => prefixText.includes(foldCase ? path.toLowerCase() : path))) return GUARD_STATE_REFUSAL;
+        if (guardStateRelation(copyPrefix[1]!, cwd, root) !== null) return GUARD_STATE_REFUSAL;
+        for (const nextCwd of nextCwds) {
+          const refusal = commandTargetsGuardState(inner, nextCwd, directory);
+          if (refusal !== null) return refusal;
+        }
+        return null;
+      }
+      // CDPATH/OLDPWD or an unresolved target disqualifies the exemption: read as before.
     }
   }
   // Two readings (#1734): a whitelisted `cat`/`tee` heredoc has its body removed, and every `#` is
   // escaped so the tokenizer cannot run a comment to the end of the command. The text scan reads
   // `scan` (literal paths kept everywhere bash could reach); the tokenizer reads `parse`.
   const { scan: scanText, parse: parseText } = prepareGuardStateCommand(command);
-  const foldCase = process.platform === "win32" || process.platform === "darwin";
   const haystack = foldCase ? scanText.toLowerCase() : scanText;
   // Raw text first: concatenations, inline `--settings=<path>`, and quoting styles that tokenize
   // in ways a path comparison would miss still name the directory verbatim.
@@ -2999,11 +3021,16 @@ export function commandTargetsGuardState(
   }
   const interpreter = interpreterHeredoc(command);
   if (interpreter !== null) {
-    if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
-    if (interpreter.cd !== undefined && guardStateRelation(interpreter.cd, cwd, root) !== null) return GUARD_STATE_REFUSAL;
-    const bodyCwd = interpreter.cd === undefined ? cwd : heredocWorkingDirectory(interpreter.cd, cwd);
-    if (bodyCwd === null) return guardStateUninspectableRefusal("the heredoc cd target is not an absolute or resolvable dot-relative path");
-    return interpreterBodyRefusal(interpreter.body, bodyCwd, root);
+    const bodyCwds = interpreter.cd === undefined ? [cwd] : heredocWorkingDirectories(interpreter.cd, cwd);
+    if (bodyCwds !== null) {
+      if (guardStateRelation(cwd, cwd, root)?.kind === "inside") return GUARD_STATE_REFUSAL;
+      if (interpreter.cd !== undefined && guardStateRelation(interpreter.cd, cwd, root) !== null) return GUARD_STATE_REFUSAL;
+      for (const bodyCwd of bodyCwds) {
+        const refusal = interpreterBodyRefusal(interpreter.body, bodyCwd, root);
+        if (refusal !== null) return refusal;
+      }
+      return null;
+    }
   }
   let tokens: ShellToken[];
   try {
