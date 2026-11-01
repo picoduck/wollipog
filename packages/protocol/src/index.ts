@@ -2,6 +2,7 @@ import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type P
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
+export * from "./worktree-dirty-paths.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
@@ -798,8 +799,10 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      for older control planes, whose enum validation would otherwise discard the whole hold.
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
+// 264: reserved by the async-review question continuation change (#3938, PR #3939).
 // v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
-export const PROTOCOL_VERSION = 265;
+// 266: campaign dirty-worktree diagnostics and controlling-Orchestrator recovery (#3942).
+export const PROTOCOL_VERSION = 266;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1262,6 +1265,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionWorktreeDiscard: 102,
   /** v159 reports durable deferred retirement instead of silently treating it as removal. */
   sessionWorktreeRetirement: 159,
+  campaignWorktreeRecovery: 266,
   /** v193 enforces delivery proof on archive-triggered managed retirement and replay. */
   archiveWorktreeRetirement: 193,
   progressAwareSessionWorktrees: 113,
@@ -11858,6 +11862,8 @@ export interface GitRepositoryFacts {
 }
 
 export interface GitStatusInfo extends GitRepositoryFacts {
+  /** Total changed paths before transport truncation (v266). */
+  changedPathCount?: number;
   branch: string;
   files: GitFileChange[];
   /** True when files is capped for transport; aggregate counts and hasChanges still cover all paths. */

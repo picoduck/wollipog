@@ -1,4 +1,5 @@
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
 import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
@@ -8374,6 +8375,41 @@ export class SessionsService {
       if (!this.db.hasCompletedAgentReportAt(request.childSessionId, request.reportEventSeq)) {
         await this.hydrateHistory(request.childSessionId, { force: true });
       }
+      const child = this.db.getSession(request.childSessionId);
+      if (!child) return fail("campaign child not found", 404);
+      const preflight = this.verifyCampaignChild(campaignSessionId, request, canAccess, true);
+      if (!preflight.ok) return preflight;
+      const paths = [...new Set([...(child.worktrees ?? []).filter((tree) => tree.source !== "attached").map((tree) => tree.path),
+        ...(child.worktreePath && !child.worktrees?.some((tree) => tree.path === child.worktreePath)
+          ? [child.worktreePath] : [])])];
+      const rootId = this.db.resolvedCampaignSessionId(campaignSessionId);
+      const completion = rootId ? this.db.getSession(rootId)?.orchestratorPolicy?.behavior.completion : undefined;
+      // Retain attests delivery without retiring the worktree; preserve offline/legacy verification
+      // in that mode. Only archival needs fresh runner inspection before making the child inaccessible.
+      if (paths.length && completion === "stop_and_archive") {
+        const unsupported = this.capabilityFailure(child.runnerId, "campaignWorktreeRecovery",
+          "campaign worktree inspection");
+        if (unsupported) return unsupported;
+        if (!this.hub.isRunnerOnline(child.runnerId)) return fail("runner is offline; cannot inspect child worktrees before archival", 409);
+        for (const worktreePath of paths) {
+          const requestId = randomUUID();
+          try {
+            const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
+              type: "git_action", requestId, sessionId: child.id, worktreePath, action: { kind: "status" },
+            }, 30_000);
+            const status = result.type === "git_result" && result.ok ? result.data?.status : undefined;
+            if (!status || !Number.isSafeInteger(status.changedPathCount) || status.changedPathCount! < 0 ||
+                status.hasChanges !== (status.changedPathCount! > 0) || !Array.isArray(status.files)) {
+              return fail("runner did not provide child worktree inspection; update Wollipog and retry", 409);
+            }
+            if (status.hasChanges) return fail(`Child worktree ${JSON.stringify(worktreePath)}: ` +
+              worktreeDirtyPaths(status.changedPathCount!, status.files.map((file) => file.path)) +
+              "; ask the child to preserve and clean its work before verification", 409);
+          } catch {
+            return fail("child worktree inspection failed; retry before archival", 409);
+          }
+        }
+      }
     }
     return this.verifyCampaignChild(campaignSessionId, request, canAccess);
   }
@@ -8382,6 +8418,7 @@ export class SessionsService {
     campaignSessionId: string,
     request: VerifyOrchestratorChildRequest,
     canAccess: (sessionId: string) => boolean = () => true,
+    checkOnly = false,
   ): ServiceResult<{ campaign: OrchestratorCampaignProjection; child: SessionView }> {
     const campaign = this.db.getSession(campaignSessionId);
     if (!campaign?.orchestratorPolicy) return fail("Orchestrator campaign not found", 404);
@@ -8475,6 +8512,7 @@ export class SessionsService {
         workItem.outcome, this.db.campaignReportIdentity(child.id, request.reportEventSeq));
       if (!target.ok) return fail(target.error, target.status);
     }
+    if (checkOnly) return ok({ campaign: this.db.campaignProjection(campaignSessionId)!, child });
     // Settle the spent approvals now, so a later stop or archive does not audit them as revoked.
     const now = Date.now();
     for (const decision of spentApprovals) {

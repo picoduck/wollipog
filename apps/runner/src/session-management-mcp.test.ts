@@ -643,6 +643,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "release_queue_hold",
       "restart_session",
       "archive_session",
+      "unarchive_session",
       "set_guardrails",
       "create_run",
     ],
@@ -2286,6 +2287,21 @@ test("archive_session sends only archived true, preserves scoped errors, and ref
   assert.equal(calls.length, 1);
   const denied = makeDeps(() => ({ status: 404, body: { error: "session not found" } }));
   assert.equal((await callTool(denied.deps, "archive_session", { sessionId: "s_sibling" })).isError, true);
+});
+
+test("unarchive_session is explicit, Orchestrator-only, and refuses unsupported control planes", async () => {
+  const { deps, calls } = makeDeps((call) => ({ status: 200,
+    body: call.url.endsWith("/api/compatibility") ? { protocolVersion: PROTOCOL_VERSION } : { id: "s_child", archived: false } }));
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: "s_child" })).isError, true);
+  deps.orchestrator = true;
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: SELF_ID })).isError, true);
+  assert.equal((await callTool(deps, "unarchive_session", { sessionId: "s_child" })).isError, undefined);
+  assert.deepEqual(calls.at(-1)?.body, { archived: false });
+  assert.ok(calls.at(-1)?.url.endsWith("/api/sessions/s_child/archive"));
+  const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 263 } }));
+  old.deps.orchestrator = true;
+  assert.equal((await callTool(old.deps, "unarchive_session", { sessionId: "s_child" })).isError, true);
+  assert.equal(old.calls.length, 1, "never sends an unsupported mutation");
 });
 
 test("compact archive and inspection responses retain lifecycle progress without inventing legacy state", async () => {
