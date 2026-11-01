@@ -54,6 +54,24 @@ test("a negated occurrence withholds scope even where another clause asks for it
   assert.deepEqual(intent("Fix #1 and #2. Don't close #2 yet."), { scope: [1], context: [2] });
   assert.deepEqual(intent("Fix #1. See #1 for the logs."), { scope: [1], context: [] });
   assert.deepEqual(intent("Fix #1 and #2 is handled elsewhere."), { scope: [], context: [1, 2] });
+  // A negation reaches every later clause of its sentence, however the actions are coordinated.
+  assert.deepEqual(intent("Do not fix #1 or close #2."), { scope: [], context: [1, 2] });
+  assert.deepEqual(intent("Don't fix #1, and then close #2 or claim #3."), { scope: [], context: [1, 2, 3] });
+  assert.deepEqual(intent("Never close #1 - fix #2 instead."), { scope: [], context: [1, 2] });
+  assert.deepEqual(intent("Don't touch #1. Fix #2."), { scope: [2], context: [1] }, "it ends with its sentence");
+  // A rejected alternative, or work to stop or put off, is withheld.
+  assert.deepEqual(intent("Fix #1 instead of fixing #2."), { scope: [1], context: [2] });
+  assert.deepEqual(intent("Fix #1 rather than fixing #2."), { scope: [1], context: [2] });
+  assert.deepEqual(intent("Fix #2. Fix #1 instead of #2."), { scope: [1], context: [2] });
+  assert.deepEqual(intent("Fix everything other than #2, apart from #3."), { scope: [], context: [2, 3] });
+  assert.deepEqual(intent("Stop working on #4. Postpone fixing #5; hold off on closing #6."), { scope: [], context: [4, 5, 6] });
+  // A question asks nothing unless it is phrased as a request.
+  assert.deepEqual(intent("Should we fix #1? Is #2 worth fixing?"), { scope: [], context: [1, 2] });
+  assert.deepEqual(intent("Can you fix #1? Please close #2? Could you work on #3?"), { scope: [1, 2, 3], context: [] });
+  // Quoted words, blockquotes and work assigned to someone else grant nothing.
+  assert.deepEqual(intent('The issue says "fix #1", and the log says “never close #2”. Fix #3.'), { scope: [3], context: [1, 2] });
+  assert.deepEqual(intent("> Fix #1 and close #2\nFix #3."), { scope: [3], context: [1, 2] });
+  assert.deepEqual(intent("Someone else will fix #1; another campaign is closing #2. Fix #3."), { scope: [3], context: [1, 2] });
   // A negation inside a parenthetical or inline code still withholds, even one left unclosed.
   assert.deepEqual(intent("Fix #1 and #2 (don't touch #2 yet)."), { scope: [1], context: [2] });
   assert.deepEqual(intent("Fix #1 and #2. `never close #2`"), { scope: [1], context: [2] });
@@ -64,6 +82,11 @@ test("a list introduced by a request inherits it item by item; items with their 
   assert.deepEqual(intent("Please deliver:\n- #1\n- #2 (login crash)\n\n- #3 is related\n\nBackground:\n- #4\n- #5"),
     { scope: [1, 2], context: [3, 4, 5] });
   assert.deepEqual(intent("Work through these:\n1. #7\n2) #8\nThanks.\n- #9"), { scope: [7, 8], context: [9] });
+  // A withholding lead governs every item, whatever verb the item uses, and plain lines up to a blank line.
+  assert.deepEqual(intent("Do not:\n- fix #1\n- close #2\n\n- claim #3"), { scope: [], context: [1, 2, 3] });
+  assert.deepEqual(intent("Background:\n- We are fixing #3\n- Deliver #4"), { scope: [], context: [3, 4] });
+  assert.deepEqual(intent("Don't touch these:\nfix #5\nclose #6\n\nFix #7."), { scope: [7], context: [5, 6] });
+  assert.deepEqual(intent("Deliver:\n- #1\n- don't close #2"), { scope: [1], context: [2] });
 });
 
 test("an epic named as the target is scope, and so its verified members can be added by lineage (#3920)", () => {
@@ -91,7 +114,7 @@ test("classification is bounded: a message too long or too dense scopes nothing,
   // Inputs that are quadratic for unanchored path, file-name or punctuation patterns, or for a
   // clause-by-reference scan, each stay well inside the bound.
   const near = MAX_CLASSIFIED_MESSAGE_LENGTH - 64;
-  for (const filler of ["a".repeat(near), ")".repeat(near), "a.".repeat(near / 2), "(".repeat(near), "and x ".repeat(near / 6),
+  for (const filler of ["a".repeat(near), ")".repeat(near), "a.".repeat(near / 2), "(".repeat(near), "and x ".repeat(near / 6), "\"a".repeat(near / 2), "? ".repeat(near / 2),
     "#1, ".repeat(MAX_CLASSIFIED_REFERENCES) + "but ".repeat((near - 4 * MAX_CLASSIFIED_REFERENCES) / 4)]) {
     const started = performance.now();
     intent(`Fix #1 ${filler}`.slice(0, MAX_CLASSIFIED_MESSAGE_LENGTH));
@@ -110,5 +133,11 @@ test("the split covers every reference exactly once; citing or negating a refere
     // Appending a negated mention of any issue withdraws it; a parenthetical alone grants nothing.
     assert.equal(intent(`${text}\nDon't touch #${n}.`).scope.includes(n), false);
     assert.deepEqual(intent(`(Fix #${n}.)`).scope, []);
+    // A withholding lead or a negation earlier in the sentence withholds whatever the request says.
+    const request = words.filter((w) => !w.includes("\n") && w !== ":").join(" ");
+    assert.equal(intent(`Do not:\n- ${request} fix #${n}`).scope.includes(n), false);
+    assert.equal(intent(`Background:\n- ${request} close #${n}`).scope.includes(n), false);
+    // Within one sentence: a full stop legitimately ends the negation's reach.
+    assert.equal(intent(`Do not fix #9 or ${request.replaceAll(".", "")} close #${n}.`).scope.includes(n), false);
   }), { numRuns: 500 });
 });

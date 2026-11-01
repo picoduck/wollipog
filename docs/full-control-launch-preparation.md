@@ -62,9 +62,17 @@ only) establishes the boundary before the Orchestrator's first turn:
   for", "handled elsewhere", "duplicate of", past tense such as "fixed" or "closed"), one in a
   negated clause ("not", "don't touch", "never", "without", "leave"), including a negation inside
   parentheses, and one whose intent is unclear (no request at all, or a clause mixing a request
-  with a background or negation cue). A list introduced by a line ending in a colon passes that
-  line's intent to each list item that has no cue of its own. One negated occurrence keeps an
-  issue out of scope even where another clause asks for it; a background occurrence does not. An
+  with a background or negation cue). Negation also covers rejected alternatives ("instead of",
+  "rather than", "other than", "apart from") and stopping or putting off work ("stop", "pause",
+  "defer", "postpone", "hold off"), and it reaches every later clause of its sentence, so "Do not
+  fix #1 or close #2" withholds both. Quoted words (`"…"`, `“…”`, a `>` blockquote line) and work
+  assigned to someone else ("someone else", "another campaign", "other teams") are background. A
+  question asks nothing unless it is phrased as a request ("Can you fix #5?", "Please …?"), so
+  "Should we fix #5?" leaves #5 as context. A line ending in a colon leads what follows: a requesting
+  lead passes its request only to list items with no cue of their own, while a negated or
+  background lead governs every following list item, whatever verb the item uses, and plain lines
+  up to the next blank line. One negated occurrence keeps an issue out of scope even where another
+  clause asks for it; a background occurrence does not. An
   epic named as the target is scope like any other issue, so it is an authorized epic and its
   verified members can be added through epic lineage. When in doubt a reference is context, never
   scope. Classification runs in linear time and is bounded: a message longer than 64 KiB, or with

@@ -39,9 +39,10 @@ export interface FirstMessageIssueIntent { scope: number[]; context: number[] }
 // Present-tense requests to act on an issue. Past tense ("fixed", "closed") is history, not a request.
 const DIRECTIVE = /\b(?:deliver(?:s|ing)?|implement(?:s|ing)?|fix(?:es|ing)?|close[s]?|closing|claim(?:s|ing)?|resolve[s]?|resolving|address(?:es|ing)?|finish(?:es|ing)?|ship(?:s|ping)?|land(?:s|ing)?|tackle[s]?|tackling|solve[s]?|solving|handle[s]?|handling|orchestrate[s]?|orchestrating|work(?:s|ing)?\s+(?:on|through)|take\s+on|taking\s+on|pick(?:s|ing)?\s+up)\b/iu;
 // Words that turn a clause into background: citing, relating, explaining or recording history.
-const BACKGROUND = /\b(?:see|cf|related|relates|relating|relation|known|caused?|acceptance\s+tests?|elsewhere|being\s+handled|handled\s+by|tracked|tracking|tracks|background|context|for\s+reference|reference[sd]?|refs?|e\.g|i\.e|example|similar|same\s+as|such\s+as|duplicates?|duplicated|dupes?|block(?:s|ed|ing|ers?)?|depend(?:s|ed|ing|ency|encies)?|follow[- ]?ups?|builds?\s+on|based\s+on|fixed|closed|resolved|delivered|implemented|merged|landed|shipped|addressed|completed|finished|already|previously|earlier|prior|mentioned|discussed|described|reported|explain(?:s|ed|ing)?|per|according|introduced|supersede[sd]?|inspired|cit(?:e|es|ed|ing)|citation|history|historical|another\s+campaign|other\s+campaign)\b/iu;
-// Words that withhold authority. Bare "no" is left out: it is common in requests ("no regressions").
-const NEGATION = /\b(?:not|never|without|except|excluding|exclude[sd]?|avoid(?:s|ing)?|skip(?:s|ping)?|ignor(?:e|es|ing)|leave|leaving|nor|cannot|out\s+of\s+scope|hands\s+off)\b|n['’]t\b/iu;
+const BACKGROUND = /\b(?:see|cf|related|relates|relating|relation|known|caused?|acceptance\s+tests?|elsewhere|being\s+handled|handled\s+by|tracked|tracking|tracks|background|context|for\s+reference|reference[sd]?|refs?|e\.g|i\.e|example|similar|same\s+as|such\s+as|duplicates?|duplicated|dupes?|block(?:s|ed|ing|ers?)?|depend(?:s|ed|ing|ency|encies)?|follow[- ]?ups?|builds?\s+on|based\s+on|fixed|closed|resolved|delivered|implemented|merged|landed|shipped|addressed|completed|finished|already|previously|earlier|prior|mentioned|discussed|described|reported|explain(?:s|ed|ing)?|per|according|introduced|supersede[sd]?|inspired|cit(?:e|es|ed|ing)|citation|history|historical|(?:some|any)(?:one|body)\s+else|another\s+(?:campaign|team|session|person|agent|orchestrator|child)|other\s+(?:campaigns?|teams?|sessions?|people|agents?|orchestrators?|children))\b/iu;
+// Words that withhold authority: refusals, rejected alternatives ("instead of", "rather than") and
+// requests to stop or put off work. Bare "no" is left out: it is common in requests ("no regressions").
+const NEGATION = /\b(?:not|never|without|except|excluding|exclude[sd]?|avoid(?:s|ing)?|skip(?:s|ping)?|ignor(?:e|es|ing)|leave|leaving|nor|cannot|out\s+of\s+scope|hands\s+off|instead\s+of|rather\s+than|other\s+than|apart\s+from|stop(?:s|ped|ping)?|halt(?:s|ed|ing)?|paus(?:e|es|ed|ing)|abandon(?:s|ed|ing)?|defer(?:s|red|ring)?|postpon(?:e|es|ed|ing)|hold(?:ing)?\s+off|deprioriti[sz](?:e|es|ed|ing))\b|n['’]t\b/iu;
 // Words that start a new clause wherever they appear: subordinate, contrasting or sequencing.
 const CLAUSE_START = /\b(?:but|except|excluding|without|unless|although|though|while|whereas|because|since|which|whose|rather\s+than|instead\s+of|other\s+than|however|once|after|before|until|when|whenever|if|so)\b/giu;
 // Coordinators start a new clause only when a word follows them, so "#1, #2 and #3" stays one list.
@@ -54,6 +55,14 @@ function clauseCue(clause: string): Cue {
   if (NEGATION.test(clause)) return "negated";
   if (BACKGROUND.test(clause)) return "background";
   return DIRECTIVE.test(clause) ? "directive" : null;
+}
+
+/** A clause's own cue under the lead governing it: a negation on either side wins, then a
+ * background lead, and only then the clause's own request or the lead's. */
+function withholding(own: Cue, lead: Cue): Cue {
+  if (own === "negated" || lead === "negated") return "negated";
+  if (lead === "background") return "background";
+  return own ?? lead;
 }
 
 /** Positions that split `text` into pieces at each match's start, as [start, end) ranges. */
@@ -94,9 +103,10 @@ function sentences(line: string, offset: number): Array<[number, number]> {
  * like) and that clause carries no background or negation cue; any negated occurrence withholds it.
  * Everything else is context: references in parentheses, brackets or inline code (citations),
  * background ("see", "related to", "known cause", "acceptance test for", "handled elsewhere"),
- * negated ones ("not", "don't touch", "never") and any whose intent is unclear. A list introduced by
- * a clause ending in a colon inherits that clause's intent, item by item, unless an item has its
- * own cue. When in doubt a reference is context, never scope: the owner can promote it through the
+ * negated ones ("not", "don't touch", "never", "instead of", "postpone") and any whose intent is
+ * unclear. A negation reaches every later clause of its sentence. A line ending in a colon leads
+ * what follows it: a request passes only to list items without a cue of their own, while a negated
+ * or background lead withholds every following item and plain line up to a blank line. When in doubt a reference is context, never scope: the owner can promote it through the
  * existing scope review. The same 100-issue bound as before applies to the union. */
 export function firstMessageIssueIntent(text: string, repository: string): FirstMessageIssueIntent {
   const references = issueReferenceSpans(text, repository);
@@ -144,6 +154,19 @@ export function firstMessageIssueIntent(text: string, repository: string): First
       blankKeepingReferences(token.index + from, token.index + length);
     }
   }
+  // Quoted text is someone else's words: its references are background, or negated when it says so.
+  let quotedNext = 0;
+  for (const match of text.matchAll(/"[^"\n]*"|“[^”\n]*”/gu)) {
+    const end = match.index + match[0].length;
+    while (quotedNext < references.length && references[quotedNext]!.start <= match.index) quotedNext++;
+    for (; quotedNext < references.length && references[quotedNext]!.start < end; quotedNext++) {
+      const r = references[quotedNext]!;
+      if (cited.has(r) || r.end >= end) continue;
+      record(r.number, NEGATION.test(match[0]) ? "negated" : "background");
+      cited.add(r);
+    }
+    blankKeepingReferences(match.index, end);
+  }
   // Parenthetical and bracketed text is a citation: its references are background, or negated when
   // it says so, and its words never govern the clause around it. An unclosed one runs to the end.
   const unparenthesized = masked.join("");
@@ -169,23 +192,41 @@ export function firstMessageIssueIntent(text: string, repository: string): First
   // References and clauses are both in text order, so one pointer walks them together.
   const open = references.filter((r) => !cited.has(r));
   let next = 0;
+  // A line ending in a colon leads what follows it. A requesting lead passes its request only to
+  // list items without a cue of their own. A withholding lead (negated or background) governs every
+  // following list item, whatever verb it uses, and plain lines up to the next blank line.
   let lead: Cue = null;
+  let blank = false;
   let offset = 0;
   for (const line of plain.split("\n")) {
     const item = /^\s*(?:[-*+•]|\d{1,3}[.)])\s+/u.test(line);
-    if (!item && line.trim()) lead = null;
+    // A blockquote line is quoted material, whatever it asks.
+    const quoted = /^\s*>/u.test(line);
+    if (!line.trim()) blank = true;
+    else if (!item && (lead === "directive" || lead === null || blank)) lead = null;
+    const governed = item || lead === "negated" || lead === "background" ? lead : null;
     let last: Cue = null;
     for (const [sentenceStart, sentenceEnd] of sentences(line, offset)) {
+      // A question asks nothing unless it is phrased as a request ("Can you fix #5?").
+      const sentence = plain.slice(sentenceStart, sentenceEnd).trim();
+      const question = sentence.endsWith("?") &&
+        !/^(?:[-*+•>]\s*|\d{1,3}[.)]\s+)?(?:please\b|(?:can|could|would|will)\s+you\b)/iu.test(sentence);
+      // A negation reaches every later clause of its sentence: "Do not fix #1 or close #2".
+      let negated = false;
       for (const [start, end] of splitAt(sentenceStart, sentenceEnd, plain, [CLAUSE_START, COORDINATOR, /,\s*(?=(?:not|never)\b)/giu, /\s[-–—]\s/gu])) {
-        const cue = clauseCue(plain.slice(start, end));
+        const own = clauseCue(plain.slice(start, end));
+        negated ||= own === "negated";
+        let cue = withholding(negated ? "negated" : own, quoted && governed !== "negated" ? "background" : governed);
+        if (question && cue === "directive") cue = null;
         last = cue;
-        const inherited = cue ?? (item ? lead : null);
         while (next < open.length && open[next]!.start < start) record(open[next++]!.number, "unclear");
-        while (next < open.length && open[next]!.start < end) record(open[next++]!.number, inherited ?? "unclear");
+        while (next < open.length && open[next]!.start < end) record(open[next++]!.number, cue ?? "unclear");
       }
     }
-    // A line ending in a colon introduces the list items that follow it.
-    if (line.trimEnd().endsWith(":")) lead = last;
+    if (line.trim()) {
+      if (line.trimEnd().endsWith(":")) lead = last;
+      blank = false;
+    }
     offset += line.length + 1;
   }
   while (next < open.length) record(open[next++]!.number, "unclear");
