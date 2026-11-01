@@ -1091,7 +1091,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "get_campaign_issue_scope", "request_campaign_issue_scope_change",
   "request_github_issue_closure", "close_github_issue",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
-  "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
+  "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
   "reconcile_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
@@ -1102,7 +1102,7 @@ const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campa
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
-  "resolve_descendant_approval", "resolve_descendant_workflow_decision", "review_descendant_ui_evidence",
+  "resolve_descendant_approval", "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
 ]);
 
@@ -1804,6 +1804,39 @@ export const TOOLS: McpTool[] = [
       const decision = args?.decision;
       if (decision !== "approve" && decision !== "deny") return errorResult("decision must be approve or deny");
       return resolveDescendantRequestTool(args, deps, decision);
+    },
+  },
+  {
+    name: "withdraw_descendant_workflow_decision",
+    description: "Withdraw an unnecessary pending human-owned review_round_extension from your controlled child, with a reason and steering. This removes the human request and resumes the child without approving it or touching other decisions. Approved decisions and other categories are refused.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, occurrenceId: { type: "string" },
+        reason: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS } },
+      required: ["sessionId", "occurrenceId", "reason"], additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.sessionId !== "string" || !args.sessionId ||
+          typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
+          typeof args?.reason !== "string" || !args.reason.trim() ||
+          args.reason.length > WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS) {
+        return errorResult("sessionId, occurrenceId, and a bounded nonempty reason are required");
+      }
+      let peer = deps.controlPlaneProtocolVersion;
+      if (peer === undefined) {
+        const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+        peer = compatibility.ok ? compatibility.data?.protocolVersion : undefined;
+      }
+      if (!Number.isSafeInteger(peer) || peer === undefined || peer < 265) {
+        return errorResult("Workflow request withdrawal requires control plane protocol v265; no withdrawal was sent");
+      }
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/resolve`, {
+          sessionId: args.sessionId, occurrenceId: args.occurrenceId,
+          resolution: { action: "withdraw_workflow_decision", reason: args.reason },
+        });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
     },
   },
   {

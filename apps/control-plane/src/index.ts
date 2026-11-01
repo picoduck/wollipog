@@ -4671,6 +4671,8 @@ app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => 
   }
   const resolution = body.resolution;
   const valid = resolution.action === "dismiss" ||
+    (resolution.action === "withdraw_workflow_decision" && typeof resolution.reason === "string" &&
+      Boolean(resolution.reason.trim())) ||
     (resolution.action === "answer" && resolution.answers && typeof resolution.answers === "object" && !Array.isArray(resolution.answers)) ||
     ((resolution.action === "approve" || resolution.action === "deny") && typeof resolution.optionId === "string" && resolution.optionId) ||
     (resolution.action === "resolve_workflow_decision" &&

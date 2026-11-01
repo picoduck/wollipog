@@ -7044,6 +7044,7 @@ export class ControlPlaneDb {
       "action_provider_thread_id TEXT",
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
+      "withdrawal TEXT",
       "delegated_video_evidence TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
@@ -21072,6 +21073,17 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
+  /** Conditional terminal write and owed resume are atomic; approved grants are never touched. */
+  withdrawPendingWorkflowDecision(occurrenceId: string, bySessionId: string, reason: string, now: number,
+    oweResume: boolean): WorkflowDecisionView | null {
+    const result = this.stmt(`UPDATE workflow_decisions SET status='revoked', resolved_at=?,
+      withdrawal=?, child_message=?, resume_state=?, resume_command_id=NULL, resume_updated_at=?
+      WHERE occurrence_id=? AND status='pending' AND authority='human'
+        AND category='review_round_extension' AND controlling_session_id=?`)
+      .run(now, JSON.stringify({ bySessionId, reason }), reason, oweResume ? "held" : null, now, occurrenceId, bySessionId);
+    return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
   setWorkflowDecisionResume(
     occurrenceId: string,
     state: WorkflowDecisionResumeState,
@@ -32080,6 +32092,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_provider_thread_id?: string | null;
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
+    withdrawal?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     closing_reference_check?: string | null;
@@ -32136,6 +32149,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
         } }
       : {}),
     ...(row.child_message ? { childMessage: row.child_message } : {}),
+    ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
   };
 }
 

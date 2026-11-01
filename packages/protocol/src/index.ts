@@ -798,7 +798,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      for older control planes, whose enum validation would otherwise discard the whole hold.
 // 263: session-scoped restartResumesConversation capability (#2515). Retry Turn reads the
 //      runner's actual retained conversation state; older peers omit it and clients fail closed.
-export const PROTOCOL_VERSION = 263;
+// v265: Orchestrators can withdraw pending human-owned review-round requests (#3941).
+export const PROTOCOL_VERSION = 265;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -5317,6 +5318,8 @@ export interface WorkflowDecisionView {
   closingReferenceCheck?: PullRequestClosingReferenceCheck;
   /** v166: the resolver's message to the child, present only when one was attached. */
   childMessage?: string;
+  /** Explicit Orchestrator withdrawal; revoked is terminal and never grants authority. */
+  withdrawal?: { bySessionId: string; reason: string };
 }
 
 export interface CreateWorkflowDecisionRequest {
@@ -5608,6 +5611,8 @@ export interface GovernanceAuditEntry {
   optionId?: string;
   /** Typed workflow provenance. Resource content and rationale are represented only by digests. */
   workflowDecision?: {
+    /** Explicit withdrawal, distinct from a server revocation; raw reason stays on the decision. */
+    withdrawal?: { reasonDigest: string };
     /** Additive in v142 so a matching action audit identifies the exact authorizing occurrence. */
     occurrenceId?: string;
     parentSessionId: string;
@@ -5717,6 +5722,7 @@ export interface DescendantRequestsView {
 }
 
 export type DescendantRequestResolution =
+  | { action: "withdraw_workflow_decision"; reason: string }
   | { action: "answer"; answers: Record<string, string | string[]> }
   | { action: "dismiss" }
   | { action: "approve" | "deny"; optionId: string }
