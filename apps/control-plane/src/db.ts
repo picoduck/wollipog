@@ -19508,7 +19508,8 @@ export class ControlPlaneDb {
     return estimate > 0 ? { dailyBudgetUsd: budget, todayEstimateUsd: estimate } : { dailyBudgetUsd: budget };
   }
 
-  /** Every user with usage in the last 30 days, most spend today first. One aggregate pass with
+  /** Every user with usage in the last 30 days, and while a budget is set anyone a running turn is
+   * spending for today, most spend today first. One aggregate pass with
    * the windows as CASE sums; the bound applies AFTER ordering, so the biggest spenders and anyone
    * paused today are never the rows a cap drops. */
   listUserCostWindows(organizationId: string, now = Date.now()): UserCostWindows[] {
@@ -19540,7 +19541,7 @@ export class ControlPlaneDb {
       owner_id: string; today: number; week: number; month: number;
     }>;
     const nameOf = this.stmt("SELECT display_name FROM identity_users WHERE user_id=?");
-    return rows.map((row) => ({
+    const windows: UserCostWindows[] = rows.map((row) => ({
       userId: row.owner_id,
       userName: (nameOf.get(row.owner_id) as { display_name: string } | undefined)?.display_name ?? row.owner_id,
       todayUsd: Number(row.today) / 1_000_000,
@@ -19548,6 +19549,37 @@ export class ControlPlaneDb {
       last30DaysUsd: Number(row.month) / 1_000_000,
       ...this.dailyBudgetWindow(organizationId, row.owner_id, budget, now),
     }));
+    if (budget == null) return windows;
+    // A person whose only spend today is a running turn has no settled bucket yet, yet the gate
+    // already counts its estimate (#3196): they are listed too, so whoever it pauses is on the table.
+    const listed = new Set(windows.map((row) => row.userId));
+    const live = this.liveBudgetUserIds(organizationId, now).filter((userId) => !listed.has(userId));
+    if (live.length === 0) return windows;
+    const micros = (row: UserCostWindows) => Math.round((row.todayUsd + (row.todayEstimateUsd ?? 0)) * 1_000_000);
+    return [...windows, ...live.map((userId) => this.userCostWindows(organizationId, userId, now))]
+      .sort((a, b) => micros(b) - micros(a) || b.last30DaysUsd - a.last30DaysUsd || (a.userId < b.userId ? -1 : a.userId > b.userId ? 1 : 0));
+  }
+
+  /** The users whose daily budget an open live estimate counts toward today, on the terms of
+   * `ownerLiveCostUsd`: a user-owned session's owner, or an organization- or team-owned session's
+   * launcher who is still a member (#3840). */
+  private liveBudgetUserIds(organizationId: string, now: number): string[] {
+    const live = `s.live_settling=0 AND s.live_cost_usd>0 AND s.live_observed_at>=?
+      AND s.status NOT IN ('completed','failed','stopped')`;
+    const dayStart = Math.floor(now / 86_400_000) * 86_400_000;
+    const rows = this.stmt(
+      `SELECT ownership.owner_id AS user_id FROM sessions s
+         JOIN session_ownership ownership ON ownership.session_id=s.id
+        WHERE ownership.organization_id=? AND ownership.owner_kind='user' AND ${live}
+       UNION
+       SELECT launcher.user_id FROM sessions s
+         JOIN session_launchers launcher ON launcher.session_id=s.id
+         JOIN session_ownership ownership ON ownership.session_id=s.id
+         JOIN identity_memberships membership
+           ON membership.organization_id=ownership.organization_id AND membership.user_id=launcher.user_id
+        WHERE ownership.organization_id=? AND ownership.owner_kind<>'user' AND ${live}`,
+    ).all(organizationId, dayStart, organizationId, dayStart) as Array<{ user_id: string }>;
+    return rows.map((row) => row.user_id);
   }
 
   updateSessionCostBudget(id: string, budgetUsd: number | null, now: number, stepUsd = budgetUsd): void {
