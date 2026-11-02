@@ -94,11 +94,20 @@ const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
   stopped: "was stopped",
 };
 
+/** The same, before anything was said: "This side chat was stopped before any reply." */
+const ENDED_EMPTY_PHRASE: Partial<Record<SessionStatus, string>> = {
+  completed: "finished",
+  failed: "failed",
+  stopped: "was stopped",
+};
+
 /**
  * The ended state's one sentence (#1206, #2863): what happened and where the transcript is. Its
- * remedy is the one button beside it, so the sentence does not repeat it.
+ * remedy is the one button beside it, so the sentence does not repeat it. A side chat that ended
+ * with no messages has no transcript to point to, so it says only what happened (#3037).
  */
-export function sideChatEndedSentence(status: SessionStatus): string {
+export function sideChatEndedSentence(status: SessionStatus, hasMessages = true): string {
+  if (!hasMessages) return `This side chat ${ENDED_EMPTY_PHRASE[status] ?? "ended"} before any reply.`;
   return `This side chat ${ENDED_PHRASE[status] ?? "ended"}. Its transcript stays here and in Sessions.`;
 }
 
@@ -217,6 +226,10 @@ export function SideChatPanel({
   /** The child and history generation whose first page has arrived; until then the transcript is
    * loading, never empty. */
   const [loadedTranscript, setLoadedTranscript] = useState<string | null>(null);
+  /** The same key once the control plane has said the whole history is read: its cache is complete
+   * and nothing more is cached past the last page. Only then can an empty transcript mean that no
+   * message was sent, rather than one still hydrating (#3037). */
+  const [completeTranscript, setCompleteTranscript] = useState<string | null>(null);
   // The unsent message belongs to the person typing it, not to the child: it survives the panel
   // being switched away and closed (#1202), the transcript resets around it, and no tour of other
   // sessions can evict the scope while it still holds one (#1283).
@@ -346,6 +359,7 @@ export function SideChatPanel({
     epochRef.current = next?.session.eventEpoch ?? 0;
     setEvents([]);
     setLoadedTranscript(null);
+    setCompleteTranscript(null);
   };
 
   // Backstop for any path that changes the child without going through `resetTranscript`. It runs
@@ -356,6 +370,7 @@ export function SideChatPanel({
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
     setEvents([]);
     setLoadedTranscript(null);
+    setCompleteTranscript(null);
     // A start that "failed" while the replacement it asked for exists after all (the response was
     // lost) is over once polling adopts that child: its Retry would be refused as replacing a live
     // chat, and the failure would keep Send closed over a ready side chat.
@@ -393,6 +408,7 @@ export function SideChatPanel({
           cursorRef.current = 0;
           setEvents([]);
           setLoadedTranscript(null);
+          setCompleteTranscript(null);
         }
         readingEvents = true;
         const page = await api.getSessionEventPage(childId, cursorRef.current, epoch, PAGE_SIZE);
@@ -406,6 +422,7 @@ export function SideChatPanel({
         }
         cursorRef.current = page.nextAfter ?? page.events.at(-1)?.seq ?? cursorRef.current;
         setLoadedTranscript(`${childId}:${epoch}`);
+        setCompleteTranscript(page.cacheComplete === true && page.hasMoreCached !== true ? `${childId}:${epoch}` : null);
         setPollError(null);
       } catch (cause) {
         if (!current || transcriptChildRef.current !== childId) return;
@@ -416,6 +433,7 @@ export function SideChatPanel({
           cursorRef.current = 0;
           setEvents([]);
           setLoadedTranscript(null);
+          setCompleteTranscript(null);
         } else {
           setPollError((cause as Error).message);
         }
@@ -694,6 +712,9 @@ export function SideChatPanel({
   }
 
   const transcriptLoaded = child !== undefined && loadedTranscript === `${child.id}:${child.eventEpoch ?? 0}`;
+  // Until its whole history has been read, an ended side chat is taken to have a transcript.
+  const endedEmpty = childEnded && transcriptLoaded && items.length === 0 &&
+    completeTranscript === loadedTranscript;
   const transcript = creating || !child ? null
     : !transcriptLoaded ? <TranscriptSkeleton label="Loading Side Chat Transcript" />
       : items.length ? (
@@ -705,7 +726,8 @@ export function SideChatPanel({
           historyKey={`${child.id}:${child.eventEpoch ?? 0}`}
           onInsertReply={insertReply}
         />
-      ) : childEnded || childStarting ? null : <p className="sc-empty">No messages yet.</p>;
+      ) : endedEmpty ? <p className="sc-empty">No messages were sent in this side chat.</p>
+        : childEnded || childStarting ? null : <p className="sc-empty">No messages yet.</p>;
 
   return (
     <div className="sc-panel" onKeyDown={onPanelKeyDown}>
@@ -722,7 +744,7 @@ export function SideChatPanel({
       <div className="sc-foot">
         {showEnded ? (
           <div className="sc-ended">
-            <p className="sc-ended-text">{sideChatEndedSentence(child!.status)}</p>
+            <p className="sc-ended-text">{sideChatEndedSentence(child!.status, !endedEmpty)}</p>
             <div className="sc-ended-action">
               <button type="button" className="btn primary" ref={restartRef} disabled={!runnerOnline}
                 aria-describedby={!runnerOnline ? reasonId : undefined} onClick={() => start(true)}>

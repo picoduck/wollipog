@@ -14128,6 +14128,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   white-space: normal;
 }
 .dedit textarea { width: 100%; }
+/* The line the finding is written against, above its textarea and its accessible name (#2851). */
+.dedit-caption {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.dedit-caption > svg { flex: none; }
 /* Severity and Required share a row; the helper sits 4px under it (§8.1). */
 .dedit-options {
   display: flex;

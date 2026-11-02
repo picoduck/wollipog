@@ -530,9 +530,10 @@ test("managed background indicators open a responsive inspectable inventory and 
   await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Background Work" }).click();
   const panel = page.locator("#right-panel");
   await expect(panel.locator(".rpanel-switcher")).toHaveText("Background Work");
-  // #2858: a turn group with its status and View Turn, and a two-line row named by its kind and id.
+  // #2858: a turn group with its status and View Turn, and a two-line row named by its kind and id;
+  // the readable id is hashed rather than cut ("ask-id").
   const jobRow = panel.locator("button.background-job-row");
-  await expect(jobRow.locator(".row-title")).toHaveText("Shell Job ask-id");
+  await expect(jobRow.locator(".row-title")).toHaveText("Shell Job eba0f8");
   await expect(jobRow.locator(".status")).toHaveText("Running");
   await expect(jobRow.locator(".row-sub")).toHaveText(/^Started \d+[sm] ago$/u);
   await expect(panel.locator(".background-work-turn-head .status")).toHaveText("Waiting for 1 Job");

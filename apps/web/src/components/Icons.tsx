@@ -104,6 +104,7 @@ import {
   MessageCircleQuestion as LucideMessageCircleQuestion,
   MessageSquare as LucideMessageSquare,
   MessageSquareCheck as LucideMessageSquareCheck,
+  MessageSquareCode as LucideMessageSquareCode,
   MessageSquareDot as LucideMessageSquareDot,
   Mic as LucideMic,
   Monitor as LucideMonitor,
@@ -1014,6 +1015,11 @@ export function HistoryIcon(props: IconProps) {
 /** Side Chat: a question asked beside the session without interrupting its agent (#2844). */
 export function MessageSquareIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMessageSquare} {...props} />;
+}
+
+/** A review finding: a note written against a line of the diff (#2851). */
+export function FindingIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMessageSquareCode} {...props} />;
 }
 
 export function FilesIcon(props: IconProps) {

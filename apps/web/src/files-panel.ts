@@ -1,7 +1,7 @@
 /** Pure logic for the session Files panel (kept out of the component for unit tests —
  * @wollipog/web has no component-render harness, pure-logic tests only). */
 
-import type { EditorInfo, EditorLocationPrecision, EditorSourceLocation, SourceLocation } from "@wollipog/protocol";
+import type { EditorInfo, EditorLocationPrecision, EditorSourceLocation, SessionView, SourceLocation } from "@wollipog/protocol";
 
 /** Extensions the viewer renders through the Markdown component (everything else is <pre> text). */
 export function isMarkdownPath(path: string): boolean {
@@ -36,6 +36,31 @@ export interface Crumb {
 export function workspaceFolderName(folderPath: string | null | undefined, workspaceName?: string | null): string {
   const last = (folderPath ?? "").split(/[\\/]+/).filter(Boolean).pop();
   return last || workspaceName?.trim() || "Workspace";
+}
+
+/**
+ * Whether the session works in a worktree Wollipog made for it, whose folder is named after the
+ * session rather than the project (#2852). The selected worktree's own record says so where the
+ * session lists it; a worktree attached from elsewhere keeps the name its owner gave it. Without the
+ * record, a session launched in a worktree is in Wollipog's.
+ */
+export function inManagedWorktree(session: Pick<SessionView, "useWorktree" | "worktreePath" | "worktrees">): boolean {
+  if (!session.worktreePath) return false;
+  const selected = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  return selected ? selected.source !== "attached" : session.useWorktree;
+}
+
+/**
+ * The name Files and Session Tools call the session's root by (#2852): the workspace's name for a
+ * session in a managed worktree, whose folder name is only its session id, otherwise the folder's
+ * own name (`workspaceFolderName`). The worktree's full path stays in the first crumb's tooltip.
+ */
+export function sessionRootName(
+  session: Pick<SessionView, "useWorktree" | "worktreePath" | "worktrees" | "workspaceName">,
+): string {
+  const workspace = session.workspaceName?.trim();
+  if (workspace && inManagedWorktree(session)) return workspace;
+  return workspaceFolderName(session.worktreePath, session.workspaceName);
 }
 
 /** The parent of a root-relative path ("" for a top-level entry and for the root itself). */
@@ -171,7 +196,7 @@ export function rankGoToFileResults(
 }
 
 /** Breadcrumb segments for a root-relative dir path; always starts with the root crumb, named by
- * `rootName` (the workspace folder's name, `workspaceFolderName`). */
+ * `rootName` (the session's root, `sessionRootName`). */
 export function crumbsFor(path: string, rootName: string): Crumb[] {
   const crumbs: Crumb[] = [{ name: rootName, path: "" }];
   if (!path) return crumbs;
