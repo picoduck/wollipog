@@ -21831,6 +21831,35 @@ export class ControlPlaneDb {
     ).run(now, occurrenceId);
   }
 
+  /**
+   * The requester's own action consumed this decision (#3982), so its resume has nothing left to
+   * announce: an owed one is abandoned and one still in the outbox is withdrawn, as for a
+   * revocation. A command the runner holds unstarted, queued behind the turn that consumed the
+   * decision, is returned so the caller can recall it from the runner's queue; the runner's receipt
+   * then settles the resume, and a resume that already started is left alone.
+   */
+  retireConsumedWorkflowDecisionResume(occurrenceId: string, now: number): { sessionId: string; commandId: string } | null {
+    return this.atomic(() => {
+      const row = this.stmt(
+        "SELECT status, session_id, resume_state, resume_command_id FROM workflow_decisions WHERE occurrence_id=?",
+      ).get(occurrenceId) as {
+        status: WorkflowDecisionStatus; session_id: string; resume_state: WorkflowDecisionResumeState | null;
+        resume_command_id: string | null;
+      } | undefined;
+      if (!row || row.status !== "consumed") return null;
+      if (row.resume_state === "delivering" && row.resume_command_id !== null) {
+        const command = this.stmt(
+          "SELECT state FROM session_prompt_commands WHERE session_id=? AND command_id=? AND dismissed_at IS NULL",
+        ).get(row.session_id, row.resume_command_id) as { state: SessionPromptCommandState } | undefined;
+        if (command && (command.state === "sent" || command.state === "accepted" || command.state === "queued")) {
+          return { sessionId: row.session_id, commandId: row.resume_command_id };
+        }
+      }
+      this.retireWorkflowDecisionResume(occurrenceId, now);
+      return null;
+    });
+  }
+
   /** `oweRestartNotice` records, in the revocation's own transaction, the notice a restart owes
    * the child for this occurrence (#1861): no crash can leave the revocation without it, and it
    * stays owed whatever the decision's status becomes later (a forge-settled merge, say). */

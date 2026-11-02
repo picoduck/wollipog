@@ -9730,8 +9730,10 @@ export class SessionsService {
       // revokes unconsumed decisions, cannot take back rounds the run has been granted.
       const now = Date.now();
       for (const occurrenceId of this.db.reviewSessions.extensions(session.id, policy.pullRequest, policy.history.epoch, request.headSha).approved) {
-        if (this.db.consumeWorkflowDecision(occurrenceId, now)) {
+        const consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+        if (consumed) {
           this.log.info(JSON.stringify({ event: "review_round_extension_consumed", sessionId: session.id, occurrenceId }));
+          this.retireResumeConsumedByRequester(consumed, now);
         }
       }
     }
@@ -10722,6 +10724,7 @@ export class SessionsService {
     const consumed = this.db.consumeGithubIssueClosure(occurrenceId, now);
     if (!consumed) return fail("issue-closure approval was consumed concurrently", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
+    this.retireResumeConsumedByRequester(consumed, now);
     this.hub.sessionChangedById(sessionId);
     let result: GithubIssueClosureResult = { outcome: "uncertain", completedAt: now };
     // The runner fences the mutation on the scope revision it was just synchronized to. A closure
@@ -11158,12 +11161,16 @@ export class SessionsService {
         }
       }
     }
-    // Every resolution resumes the child: prompt delivery wakes an idle child and queues behind a
-    // turn still in progress. On a runner that reports exact not-sent receipts the resume is owed
-    // from this write onward (#1759): the resolving statement records it as held, so a stop before
-    // it is staged cannot lose it, and a child whose worktree needs recovery (#1650) or whose
-    // runner is offline keeps it until the first boundary that can deliver it. A guardrail card
-    // still refuses it, leaving the outcome, and any message, on the decision record.
+    // A root that resolves its own decision is inside the turn that will act on it, so it only loses
+    // the card (#3982), exactly as a requester withdrawing its own request does.
+    const resolvedBySelf = authority === "orchestrator" && actor.kind === "agent" &&
+      actor.id === childSessionId && parentSessionId === childSessionId;
+    // Every other resolution resumes the child: prompt delivery wakes an idle child and queues
+    // behind a turn still in progress. On a runner that reports exact not-sent receipts the resume
+    // is owed from this write onward (#1759): the resolving statement records it as held, so a
+    // stop before it is staged cannot lose it, and a child whose worktree needs recovery (#1650) or
+    // whose runner is offline keeps it until the first boundary that can deliver it. A guardrail
+    // card still refuses it, leaving the outcome, and any message, on the decision record.
     if (decision.resourceSnapshot.category === "campaign_issue_scope" && normalizedResolution.outcome === "approve") {
       const snapshot = decision.resourceSnapshot;
       const audience = this.db.sessionScope(childSessionId);
@@ -11214,7 +11221,8 @@ export class SessionsService {
         this.settleWorkflowDecisionPause(stale.sessionId, stale.occurrenceId, now);
         this.recordWorkflowDecisionRevocation(stale, { reason: "superseded_by_scope_change", triggeredBy: actor }, now);
       }
-      this.settleResolvedWorkflowDecision(resolvedScope, now, null);
+      if (resolvedBySelf) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
+      else this.settleResolvedWorkflowDecision(resolvedScope, now, null);
       this.recordWorkflowDecisionAudit(resolvedScope, "allowed", actor, now, normalizedResolution.rationale);
       this.recordWorkflowDecisionAudit(resolvedScope, "consumed", actor, now);
       this.log.info(JSON.stringify({ event: "campaign_issue_scope_approved", sessionId: childSessionId, occurrenceId,
@@ -11227,7 +11235,7 @@ export class SessionsService {
       this.publishCampaignAttentionTransition(currentParent);
       return ok(resolvedScope);
     }
-    const oweResume = this.workflowDecisionResumeOwed(currentChild);
+    const oweResume = !resolvedBySelf && this.workflowDecisionResumeOwed(currentChild);
     const commitResolution = () => this.db.resolveWorkflowDecision(
       occurrenceId,
       authority,
@@ -11247,7 +11255,8 @@ export class SessionsService {
     } catch { return fail("Original video approval lacks current complete worker and image provenance", 409); }
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
-    this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
+    if (resolvedBySelf) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
+    else this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(
       resolved,
       normalizedResolution.outcome === "approve" ? "allowed" : "denied",
@@ -11536,6 +11545,7 @@ export class SessionsService {
     }
     if (!consumed) return fail("workflow decision was already consumed", 409);
     this.recordWorkflowDecisionAudit(consumed, "consumed", { kind: "agent", id: sessionId }, now);
+    this.retireResumeConsumedByRequester(consumed, now);
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
     return ok(this.withMergeReviewEvidence(consumed));
@@ -11692,6 +11702,7 @@ export class SessionsService {
       if (!current) return fail("workflow decision authority or ancestry changed during reconciliation", 409);
       const consumed = this.consumeForgeAttestedMerge(decision, normalized.data, proven.data!);
       if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+      this.retireResumeConsumedByRequester(consumed, Date.now());
       return ok(this.withMergeReviewEvidence(consumed));
     }
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
@@ -11782,6 +11793,7 @@ export class SessionsService {
     if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
     const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-reconciliation" };
     this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+    this.retireResumeConsumedByRequester(consumed, now);
     this.recordGovernanceAudit(
       child,
       {
@@ -12752,6 +12764,22 @@ export class SessionsService {
     return delivered.ok;
   }
 
+  /**
+   * The requester itself consumed or reconciled this decision, inside the turn that read its
+   * outcome (#3982). The resume its resolution owes would only queue a turn that finds the work
+   * already done, so it is retired: an owed or unsent resume is dropped here, and one the runner
+   * holds behind that turn is recalled from its queue. A resume that already started, a runner that
+   * cannot recall it, or a recall that arrives too late still delivers it, which the prompt's own
+   * text allows for. Only the requester's own action reaches this, never a resolution or a sweep.
+   */
+  private retireResumeConsumedByRequester(decision: WorkflowDecisionView, now: number): void {
+    const queued = this.db.retireConsumedWorkflowDecisionResume(decision.occurrenceId, now);
+    if (!queued) return;
+    const session = this.db.getSession(queued.sessionId);
+    if (!session || !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "queuedPromptCancellation")) return;
+    this.hub.sendToRunner(session.runnerId, { type: "cancel_queued_prompt", sessionId: queued.sessionId, promptId: queued.commandId });
+  }
+
   /** Follow the durable command that carries a decision's resume. Known non-delivery for worktree
    * recovery holds the resume, and retires the failed row so no one can also Retry it by hand. */
   private reconcileWorkflowDecisionResumeCommand(commandId: string, now: number): void {
@@ -12765,6 +12793,16 @@ export class SessionsService {
       this.hub.sessionChangedById(command.sessionId);
       // The recovery may already be over by the time this receipt arrives.
       this.deliverHeldWorkflowDecisionResumes(command.sessionId, now);
+      return;
+    }
+    if (command.state === "failed" && command.errorCode === "COMMAND_CANCELLED" &&
+        this.db.workflowDecisionByOccurrence(resume.occurrenceId)?.status === "consumed") {
+      // Recalled from the runner's queue once its requester consumed the decision (#3982): nothing
+      // is owed any more, so the resume did not fail and the row has nothing left to retry.
+      this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
+      this.db.dismissTerminalSessionPromptCommand(command.sessionId, commandId, now);
+      this.hub.sessionChangedById(command.sessionId);
+      this.settleQueuedAdmission(command, now);
       return;
     }
     const state = command.state === "started" || command.state === "completed" ? "delivered" as const
@@ -17180,6 +17218,7 @@ export class SessionsService {
           this.db.setPendingApproval(sessionId, remaining);
           this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+          this.retireResumeConsumedByRequester(consumed, now);
           this.recordGovernanceAudit(session(), approval, "resolution", "allowed", actor, now, {
             optionId: actionAdmission.optionId,
             ...(policyDecision.policy ? { governancePolicyId: policyDecision.policy.policyId } : {}),
@@ -17316,6 +17355,7 @@ export class SessionsService {
           );
           if (consumed) {
             this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+            this.retireResumeConsumedByRequester(consumed, now);
             this.recordGovernanceAudit(
               session(),
               {
