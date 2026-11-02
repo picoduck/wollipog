@@ -1432,6 +1432,25 @@ Known limits of the `provider`-mode form:
   command-text veto remains the only control over READING the directory; what the directory no
   longer does, on native Linux, is decide the guard's verdict.
 
+### Parameter Operators in the Hook-State Veto
+
+The hook-state command-text veto refuses shell parameter operators it cannot inspect (#4031),
+including pattern removal/substitution, substring/length, default/alternate/assignment/error,
+case conversion, indirection/name enumeration and `@` transformations (including prompt expansion).
+Only plain identifiers, positional digits and single special parameters retain the existing
+variable treatment. Operator expressions refuse even in non-path positions such as `echo ${#x}`;
+this conservative restriction avoids emulating Bash and covers partial operands and nested forms.
+Single-quoted or escaped literal text and already admitted inert copy-only heredoc bodies retain
+their existing treatment. No new command allowance is introduced.
+
+Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
+includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as
+described above; native Windows and WSL launches must likewise not assume a filesystem deny unless
+their selected isolation boundary enforces one. OS-isolated launches retain the veto as defense in
+depth. It is not a sandbox: plain unknown variables remain opaque, quoted command substitution
+(#3322) and script-file indirection remain limitations; #1336 tracks the OS boundary. The separate
+misleading managed-worktree refusal wording tracked under #1734 is unchanged here.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking

@@ -3039,7 +3039,18 @@ export function commandTargetsGuardState(
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
     // stays opaque, which is the documented limit of a command-text matcher. It is kept in place as
     // a reference so the word around it stays whole (see `guardStateReadings`).
-    tokens = parse(parseText, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
+    tokens = parse(parseText, (name) => {
+      // shell-quote passes the WHOLE braced expression as the name. Do not treat operators as
+      // opaque variables: that would lose both HOME handling and tracked assignments (#4031).
+      // Refuse the entire reading, including non-path uses, rather than emulate Bash expansion.
+      // This also covers partial operands, assignment values and nested operator expressions.
+      // An empty name is shell-quote's sentinel for a bare `$` or `$(`, not an operator
+      // expression. Keep its original unresolved reading; command substitution is out of scope.
+      if (name !== "" && !/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!_-])$/u.test(name)) {
+        throw new UnclassifiableCommandError("shell parameter operators cannot be inspected");
+      }
+      return name === "HOME" ? homedir() : reference(name);
+    }) as ShellToken[];
   } catch (error) {
     // Still refused: this is the state the veto itself depends on. The raw-text scan above has
     // already refused any command that names the hook directory outright.
