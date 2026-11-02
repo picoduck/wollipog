@@ -1502,6 +1502,15 @@ export function changeRequestProvider(url: string): ForgeProvider {
   return linkedChangeRequest(url)?.provider ?? "github";
 }
 
+/** Whether two change-request URLs name the same forge project, so a pull request found by head
+ * search can be tied to the repository an earlier recorded link already proved (#3981). */
+export function sameChangeRequestProject(left: string, right: string): boolean {
+  const a = linkedChangeRequest(left);
+  const b = linkedChangeRequest(right);
+  return !!a && !!b && a.provider === b.provider && a.host === b.host &&
+    a.project.toLowerCase() === b.project.toLowerCase();
+}
+
 function linkedChangeRequest(value: string): LinkedChangeRequest | null {
   try {
     const url = new URL(value);
