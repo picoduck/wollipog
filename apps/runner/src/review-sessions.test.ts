@@ -602,6 +602,88 @@ test("a later round reviews only the changes since the last valid head, with its
   f.launcher.release("s_review");
 });
 
+/** Move the base branch with files the pull request never touches, plus `extra`, and make it the
+ * pull request's base. */
+function moveBase(f: Fixture, extra: Record<string, string> = {}): string {
+  const files: Record<string, string> = { ...extra };
+  for (let index = 0; index < 30; index++) files[`lib/module-${index}.ts`] = `export const value${index} = ${index};\n`;
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(f.repo, path, ".."), { recursive: true });
+    writeFileSync(join(f.repo, path), content);
+  }
+  git(f.repo, "add", "--all");
+  git(f.repo, "commit", "--quiet", "-m", "base moves");
+  f.facts.baseSha = git(f.repo, "rev-parse", "HEAD");
+  return f.facts.baseSha;
+}
+
+test("a follow-up round over a merge of a moved base scopes only the pull request's own changes", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "notes.md"), "Uses no fences.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "notes");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["notes.md"], since: f.head,
+  });
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), head);
+  assert.match(prepared.prompt, new RegExp(`- Mode: follow-up round: the files whose pull request changes moved since ${f.head}, which merged the base branch`, "u"));
+  assert.match(prepared.prompt, /Changed files to classify \(each exactly once\):\n- `notes.md`\n\n/u);
+  assert.match(prepared.prompt, /context only; do not classify\):\n- `app.ts`\n- `outside`\n\n/u);
+  assert.match(prepared.prompt, /## Pinned Patch\n\n```diff\n[^]*\+Uses no fences\./u);
+  assert.doesNotMatch(prepared.prompt, /lib\/module-|value\d+/u, "nothing the base branch alone changed");
+  assert.doesNotMatch(prepared.prompt, /answer = 42/u, "only the scoped files' diff");
+  f.launcher.release("s_review");
+});
+
+test("a follow-up round over a pure merge of the base is refused as unchanged", async (t) => {
+  const f = fixture(t);
+  moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  assert.notEqual(f.facts.headSha, f.head);
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.unchanged);
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+  // Merging the base again on top still has nothing of the pull request's own to review.
+  moveBase(f, { "lib/later.ts": "export const later = true;\n" });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.unchanged);
+});
+
+test("a follow-up round over a merge keeps a conflict resolution in a file both sides changed", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 42; // was 40 on main\n");
+  git(f.worktree, "add", "app.ts");
+  const head = push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual([prepared.round.mode, prepared.round.baseSha, prepared.round.scopeFiles], ["delta", base, ["app.ts"]]);
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), head);
+  // The patch is the pull request's diff of app.ts against the moved base, resolution included.
+  assert.match(prepared.prompt, /-export const answer = 40;\n\+export const answer = 42; \/\/ was 40 on main/u);
+  assert.doesNotMatch(prepared.prompt, /lib\/module-/u);
+  f.launcher.release("s_review");
+
+  // Resolving by keeping the reviewed content unchanged still reverts the base's change: in scope.
+  const g = fixture(t);
+  moveBase(g, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(g.worktree, "merge", "--quiet", "--no-edit", "main"));
+  git(g.worktree, "checkout", "--ours", "app.ts");
+  git(g.worktree, "add", "app.ts");
+  push(g, "--no-edit");
+  assert.equal(git(g.worktree, "diff", g.head, "HEAD", "--", "app.ts"), "");
+  const kept = await g.launcher.prepare("s_review", g.policy({ history: reviewed(g, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(kept.round.scopeFiles, ["app.ts"]);
+  assert.match(kept.prompt, /-export const answer = 40;\n\+export const answer = 42;/u);
+  g.launcher.release("s_review");
+});
+
 test("a head that no longer descends from the reviewed one starts an epoch that reviews the range-diff", async (t) => {
   const f = fixture(t);
   // The first round fetched the head that is about to be rewritten.
