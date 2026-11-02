@@ -1,6 +1,6 @@
 import React, { Component, type ErrorInfo, type ReactNode } from "react";
 import { CopyButton } from "./common.js";
-import { ErrorIcon } from "./Icons.js";
+import { ErrorIcon, RefreshIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { PageHeader } from "./PageHeader.js";
 import { State } from "./State.js";
@@ -39,6 +39,8 @@ type ErrorBoundaryProps = {
     body?: string;
     /** The route's page header, redrawn above the notice because the crashed route drew its own. */
     pageTitle?: string;
+    /** The route's container width (`viewPageWidth`), so the redrawn header keeps the route's edge. */
+    pageWidth?: "wide" | "full" | null;
     /** Keep a failed dialog in its dismissible surface while retaining the standard notice. */
     wrapError?: (notice: ReactNode) => ReactNode;
   }
@@ -119,6 +121,7 @@ export class ErrorBoundary extends Component<
         actions={
           <>
             <button type="button" className="btn sm primary" onClick={() => window.location.reload()}>
+              <RefreshIcon size={14} />
               Reload Page
             </button>
             {copy("btn sm")}
@@ -132,7 +135,7 @@ export class ErrorBoundary extends Component<
     if (this.props.wrapError) return this.props.wrapError(notice);
     if (this.props.pageTitle === undefined) return notice;
     return (
-      <div className="page">
+      <div className={this.props.pageWidth ? `page ${this.props.pageWidth}` : "page"}>
         <PageHeader title={this.props.pageTitle} />
         {notice}
       </div>

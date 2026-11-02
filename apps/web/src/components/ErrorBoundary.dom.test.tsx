@@ -6,7 +6,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { ErrorBoundary, errorDetailsText } from "./ErrorBoundary.js";
-import { viewSubjectName } from "../navigation.js";
+import { viewPageWidth, viewSubjectName } from "../navigation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
@@ -105,6 +105,10 @@ test("a crashed view names the destination in user words and keeps the exception
       ["Reload Page", "Copy Error Details", "Show Details"]);
     assert.equal(buttonNamed(notice, "Try Again"), undefined, "re-rendering the same data crashes the same way");
     assert.ok(buttonNamed(notice, "Reload Page")!.classList.contains("primary"), "Reload Page is the next step");
+    const reloadIcon = buttonNamed(notice, "Reload Page")!.querySelector("svg");
+    assert.ok(reloadIcon?.classList.contains("lucide-refresh-cw"), "Reload Page carries the refresh icon (§3.1)");
+    assert.equal(reloadIcon?.getAttribute("width"), "14");
+    assert.equal(view.container.querySelector(".page")?.className, "page", "a list page keeps the default container");
 
     await click(buttonNamed(notice, "Show Details")!);
     const well = notice.querySelector(".notice-details-body .code-well pre");
@@ -211,9 +215,32 @@ test("a route's error title reads as its destination, and a detail route as This
   assert.equal(viewSubjectName({ name: "pod", id: "p1" }), "This Pod");
 });
 
+test("a crashed route keeps its own container width, so the header's hairline does not move", async () => {
+  for (const width of ["wide", "full"] as const) {
+    const view = await mount(
+      <ErrorBoundary name="Usage and Cost" pageTitle="Usage and Cost" pageWidth={width}><TimelineRow /></ErrorBoundary>,
+    );
+    try {
+      assert.equal(view.container.querySelector(".page")?.className, `page ${width}`);
+    } finally {
+      await view.unmount();
+    }
+  }
+  assert.equal(viewPageWidth({ name: "usage" }), "wide");
+  for (const name of ["inbox", "board", "projects", "skills", "settings"] as const) {
+    assert.equal(viewPageWidth({ name }), "full", `${name} is a full-width page`);
+  }
+  assert.equal(viewPageWidth({ name: "runners" }), "full", "Connections opens on Machines, a master-detail");
+  assert.equal(viewPageWidth({ name: "runners", section: "people" }), null);
+  for (const name of ["archived", "automations", "runs", "pods"] as const) {
+    assert.equal(viewPageWidth({ name }), null, `${name} is a list page`);
+  }
+});
+
 test("the shell passes the destination's name, and both app boundaries take the window", () => {
   const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
   assert.equal(app.match(/<ErrorBoundary scope="app">/g)?.length, 2, "the browser and the desktop roots");
   assert.match(app, /<ErrorBoundary\s+name=\{viewSubjectName\(view\)\}\s+resetKey=\{viewPath\(view\)\}/);
+  assert.match(app, /pageWidth=\{viewPageWidth\(view\)\}/, "with the route's container width");
   assert.doesNotMatch(app, /<ErrorBoundary[^>]*\blabel=/, "a developer label never reaches the page");
 });
