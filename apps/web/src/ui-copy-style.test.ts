@@ -313,16 +313,6 @@ const LABEL_FRAGMENTS: readonly LabelFragment[] = [
     fragment: "s",
     reason: 'the plural suffix of "{hiddenCount} More Hunk{…}", which reads "3 More Hunks"',
   },
-  {
-    file: "components/UsageView.tsx",
-    fragment: "· unpriced",
-    reason: "a status note after the model name in its row header, not part of the name",
-  },
-  {
-    file: "components/UsageView.tsx",
-    fragment: "· paused by daily budget",
-    reason: "a status note after the user's name in its row header, not part of the name",
-  },
 ];
 
 /**

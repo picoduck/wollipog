@@ -17395,28 +17395,15 @@ button.review-finding-location {
 .subscription-bucket.unmeasured dd strong { font-size: var(--text-xs); font-weight: 650; color: var(--text-dim); }
 .subscription-bucket.warning dd strong { color: var(--yellow); }
 .subscription-bucket.exhausted dd strong { color: var(--red); }
-.usage-table-wrap:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
+/* The Breakdown's tables grow with the page: a long one ends in Show All rather than scrolling
+   inside it (#3013). Hairlines and hover come from the table recipe; no zebra (§14). */
 .usage-table-wrap {
-  overflow: auto;
-  max-height: min(70vh, 640px);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-elev);
 }
-/* The period or model column takes what is left; the figures share the rest (§14). */
+/* The period or name column takes what is left; the figures share the rest (§14). */
 .usage-table .col-name { width: 34%; }
-/* Hairlines and hover come from the table recipe; no zebra (§14). The header stays in view: this
-   is the one table a reader tracks a value across while it scrolls. Sticky, and opaque. A translucent header over scrolling rows is unreadable in exactly the moment
-   it exists for, so it takes the wrapper's own surface rather than a tint. */
-.usage-table thead th {
-  position: sticky;
-  top: 0;
-  /* The layer scale, not a bare 1. It only has to beat the rows in its own stacking context, but a
-     literal here is a number nobody can compare to the others — which is the whole reason #210
-     introduced the scale. */
-  z-index: var(--z-sticky);
-  background: var(--bg-elev);
-}
 .table .usage-empty {
   height: auto;
   padding: var(--space-6);
@@ -17424,10 +17411,55 @@ button.review-finding-location {
   text-align: center;
   white-space: normal;
 }
-.usage-breakdowns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 18px; }
-.usage-breakdown { padding: 14px; min-width: 0; }
-.usage-breakdown h3 { margin: 0 0 10px; }
-.usage-breakdown ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+/* The tab row sits under the section title, and its table under the row's hairline (§10.1). */
+.usage-tables-section > .tabs { margin-bottom: var(--space-3); border-bottom: 1px solid var(--border); }
+.usage-tables-note { margin: var(--space-2) 0 0; }
+/* A figure's unit, said only where its column header is not on screen: line 2 of a phone row. */
+.usage-cell-unit { display: none; }
+/* The trailing figure folded under a period's date in the compact tier. */
+.usage-period-meta { display: none; }
+.usage-period { overflow: hidden; text-overflow: ellipsis; }
+/* By Person's name keeps its badge in view: the name truncates, the badge never does (§11.1). */
+.usage-person {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  max-width: 100%;
+  vertical-align: middle;
+}
+.usage-person > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.usage-person > .status { flex: none; }
+.usage-person-today > .meter { margin-top: var(--space-1); }
+.usage-person-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+}
+.usage-person-head > p { margin: 0; }
+/* A main column of 1099px or less (and a phone wider than a row's 560px): the time table's trailing
+   column moves under the date as a second line, so the per-agent headers keep their names. */
+@container app (max-width: 1099px) {
+  .usage-period-table .usage-period-trailing { display: none; }
+  .usage-period-table .usage-period-meta { display: block; color: var(--text-dim); font: var(--type-small); }
+  .usage-period-table .usage-period { display: block; }
+}
+@media (max-width: 760px) {
+  .usage-period-table .usage-period-trailing { display: none; }
+  .usage-period-table .usage-period-meta { display: block; color: var(--text-dim); font: var(--type-small); }
+  .usage-period-table .usage-period { display: block; }
+}
+/* Phone rows (§14): the name and the total on line 1, the next figure with its unit on line 2.
+   Declared after the fold so a phone row shows the trailing figure as its own line-2 item. */
+@container (max-width: 560px) {
+  .usage-cell-unit { display: inline; }
+  .usage-period-table .usage-period-trailing { display: block; }
+  .usage-period-table .usage-period-meta { display: none; }
+  .usage-table .usage-share { order: 5; }
+  .usage-person-today > .meter { display: none; }
+}
 
 /* ---- Usage & Cost: chart, series slots, tiles, breakdown ----
    Series colours are the validated categorical slots (dataviz palette, adjacent pairs pass CVD
@@ -17474,7 +17506,7 @@ button.review-finding-location {
 .usage-driver-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .usage-driver-share { margin-left: var(--space-3); color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .usage-driver-row strong { margin-left: var(--space-3); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
-.usage-breakdown-section h3 { margin: 0 0 10px; font-size: var(--text-md); }
+.usage-tables-section h3 { margin: 0 0 10px; font-size: var(--text-md); }
 .usage-facts { margin-bottom: var(--space-5); }
 /* In a compact column the strip never leaves an empty cell: five facts keep one row, and six
    wrap to three by two rather than squeezing their labels, each row's first fact flush and the
@@ -17526,10 +17558,6 @@ button.review-finding-location {
 .usage-chart-readout-hint, .usage-chart-readout-total dt { color: var(--text-dim); }
 
 
-.usage-breakdown-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
-.usage-breakdown-heading h3 { margin: 0; }
-.usage-users-section { margin-top: 20px; }
-.usage-users-section .usage-breakdown-heading { align-items: flex-start; }
 .usage-daily-budget { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
 .usage-daily-budget label { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--text-dim); }
 .usage-daily-budget input { width: 120px; }
@@ -17537,9 +17565,6 @@ button.review-finding-location {
 @media (max-width: 860px) {
   .usage-chart-svg { height: 260px; }
 }
-.usage-breakdown li { display: flex; justify-content: space-between; gap: 10px; min-width: 0; font-size: 12px; }
-.usage-breakdown li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.usage-breakdown li strong { color: var(--text-dim); flex: none; }
 .usage-retention { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(130px, 180px)) auto; align-items: end; gap: 14px; margin-top: 18px; padding: 16px; }
 .usage-retention h3 { margin: 0; }
 .usage-retention p { margin: 5px 0 0; font-size: 12px; }
@@ -17548,7 +17573,6 @@ button.review-finding-location {
 .usage-save-status { grid-column: 1 / -1; color: var(--text-dim); font-size: 12px; }
 
 @media (max-width: 700px) {
-  .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
   /* A narrow card stacks each window's label over its figures, as it always has. */
@@ -17557,10 +17581,6 @@ button.review-finding-location {
     row-gap: var(--space-1);
   }
   .subscription-source > .facts > div + div > dt { margin-top: var(--space-2); }
-}
-
-@media (max-width: 340px) {
-  .usage-breakdown-heading { align-items: flex-start; flex-direction: column; }
 }
 
 /* ====================== Setting rows (docs/design-system.md §8.2) ======================

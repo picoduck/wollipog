@@ -447,6 +447,11 @@ const VOCABULARY = {
     sign_in_required: warning("Sign-In Required"),
     not_applicable: neutral("Not Applicable"),
   },
+  /** A person's spend today against the organization's daily budget (Usage and Cost's By Person).
+   * Only a reached budget carries a badge; below it the meter says how much is left. */
+  usageBudget: {
+    reached: warning("Budget Reached"),
+  },
   /** One coding agent on a machine, by `agentStatus()` (#2990): the machine's agent rows, Agent
    * Details and Set Up This Machine. Ready renders as the inline badge. */
   agent: {

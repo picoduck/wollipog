@@ -2,7 +2,9 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import type {
   AgentDriverKind,
+  RunnerView,
   SubscriptionUsageResponse,
+  UiSnapshotMessage,
   UsageAggregationGranularity,
   UsageAggregationResponse,
   UsageAmount,
@@ -10,8 +12,11 @@ import type {
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { UsageView } from "../components/UsageView.js";
-import type { UsageTab } from "../navigation.js";
+import type { UsageTab, ViewNavigation } from "../navigation.js";
+import { StoreProvider } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
 
 /**
@@ -56,10 +61,13 @@ const recentCoverage = params.get("coverage") === "recent";
 const COVERAGE_STARTED_AT = recentCoverage ? END - DAY + 15 * 3_600_000 + 20 * 60_000 : Date.UTC(2026, 6, 1);
 // The plane clamps the window to the day recording started, as `usage-aggregation.ts` does.
 const SINCE = recentCoverage ? END - DAY : END - 29 * DAY;
-const drivers: Array<{ driver: AgentDriverKind; model: string; weight: number }> = [
-  { driver: "claude-code", model: "claude-fable-5-1", weight: 1 },
-  { driver: "codex-app-server", model: "gpt-5.5-codex", weight: 0.55 },
-  { driver: "acp", model: "gemini-3-pro", weight: 0.18 },
+// Each driver's agent, the model it ran and the machine it ran on, as the store names them.
+const drivers: Array<{
+  driver: AgentDriverKind; agentId: string; agentName: string; model: string; modelName: string; runnerId: string; weight: number;
+}> = [
+  { driver: "claude-code", agentId: "claude", agentName: "Claude Code", model: "claude-fable-5-1", modelName: "Fable 5.1", runnerId: "r-build-box", weight: 1 },
+  { driver: "codex-app-server", agentId: "codex", agentName: "Codex App Server", model: "gpt-5.5-codex", modelName: "GPT-5.5-Codex", runnerId: "r-studio", weight: 0.55 },
+  { driver: "acp", agentId: "gemini", agentName: "Gemini CLI", model: "gemini-3-pro", modelName: "Gemini 3 Pro", runnerId: "r-studio", weight: 0.18 },
 ];
 
 // A deterministic 30-day shape: weekday activity with a mid-month push, weekends quiet.
@@ -113,8 +121,15 @@ const response: UsageAggregationResponse = {
   series,
   seriesByDriver: [...seriesByDriver].sort((a, b) => b.bucketTs - a.bucketTs || a.driver.localeCompare(b.driver)),
   byDriver,
-  byAgent: byDriver.map((row) => ({ ...row, key: `${row.key === "acp" ? "gemini" : row.key} / ${row.key}` })),
-  byRunner: [{ key: "build-box", ...totals }],
+  byAgent: byModel.map((row) => {
+    const entry = drivers.find((candidate) => candidate.model === row.key)!;
+    return { ...row, key: `${entry.agentId} / ${row.key}` };
+  }),
+  byRunner: [...new Set(drivers.map((entry) => entry.runnerId))].map((runnerId) => ({
+    key: runnerId,
+    ...byModel.filter((row) => drivers.find((entry) => entry.model === row.key)!.runnerId === runnerId)
+      .reduce((sum, row) => add(sum, row), amount(0, 0, 0, 0)),
+  })),
   byModel,
   pricing: {
     status: unpriced ? "cached" : "fresh",
@@ -243,7 +258,8 @@ if (params.get("selectedUnavailable") === "1" && subscription.sources[0]) {
 let dailyBudget: { perUserUsd: number | null; updatedAt: number | null } = { perUserUsd: 25, updatedAt: END };
 const users = [
   { userId: "u-ada", userName: "Ada", todayUsd: 26.4, last7DaysUsd: 112.2, last30DaysUsd: 401.7 },
-  { userId: "u-grace", userName: "Grace", todayUsd: 9.8, last7DaysUsd: 61.3, last30DaysUsd: 240.1 },
+  // Grace has a turn running: the plane sends its open estimate beside her settled spend.
+  { userId: "u-grace", userName: "Grace", todayUsd: 9.8, todayEstimateUsd: 1.25, last7DaysUsd: 61.3, last30DaysUsd: 240.1 },
   { userId: "u-linus", userName: "Linus", todayUsd: 0, last7DaysUsd: 4.5, last30DaysUsd: 38.9 },
 ];
 const client = {
@@ -253,7 +269,13 @@ const client = {
     dailyBudget = { perUserUsd, updatedAt: END };
     return { dailyBudget };
   },
-  usageUsers: async () => ({ users: users.map((user) => ({ ...user, dailyBudgetUsd: dailyBudget.perUserUsd })) }),
+  usageUsers: async () => ({
+    users: users.map(({ todayEstimateUsd, ...user }) => ({
+      ...user,
+      dailyBudgetUsd: dailyBudget.perUserUsd,
+      ...(dailyBudget.perUserUsd != null && todayEstimateUsd ? { todayEstimateUsd } : {}),
+    })),
+  }),
   usage: async (input: { granularity?: UsageAggregationGranularity }) => aggregateResponse(input.granularity ?? "day"),
   subscriptionUsage: async () => subscription,
   refreshSubscriptionUsage: async () => subscription,
@@ -285,11 +307,51 @@ function UsageRoute() {
   );
 }
 
+/** The fleet the store knows, so By Agent, By Machine and By Model show the names people gave them.
+ * `?anonymous=1` leaves the store empty, as a plane whose machines are not visible would. */
+const runners: RunnerView[] = params.get("anonymous") === "1" ? [] : [
+  { runnerId: "r-build-box", displayName: "Build Box" },
+  { runnerId: "r-studio", displayName: "Studio Mac" },
+].map(({ runnerId, displayName }) => ({
+  runnerId, displayName, hostname: runnerId.slice(2), os: "linux", version: "1", status: "online",
+  workspaces: [], connectedAt: END, lastSeen: END,
+  agents: drivers.filter((entry) => entry.runnerId === runnerId).map((entry) => ({
+    id: entry.agentId, name: entry.agentName, command: entry.agentId, args: [], env: {}, driver: entry.driver, available: true,
+    capabilities: { models: [{ id: entry.model, displayName: entry.modelName }], effortLevels: [] },
+  })),
+} as unknown as RunnerView));
+
+class FixtureSocket implements UiSocket {
+  readonly readyState = UI_SOCKET_OPEN;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  constructor() {
+    window.setTimeout(() => {
+      this.onopen?.();
+      const snapshot = { type: "snapshot", runners, boxes: [], sessions: [], runs: [], pods: [] } as unknown as UiSnapshotMessage;
+      this.onmessage?.({ data: JSON.stringify(snapshot) });
+    }, 0);
+  }
+  send() {}
+  close() {}
+}
+const connection: UiConnectionRuntime = {
+  instanceId: "usage-view-e2e", runtimeKey: "usage-view-e2e", createSocket: () => new FixtureSocket(), close() {},
+};
+// The harness owns its URL (`?tab=`); the store reads a fixed view and never navigates.
+const navigation: ViewNavigation = { current: () => ({ name: "usage" }), push() {}, listen: () => () => {} };
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ApiProvider client={client}>
-      {/* `.main` is the app container, so the column-width rules answer here as in the shell. */}
-      <main className="main"><UsageRoute /></main>
+      <FeedbackProvider>
+        <StoreProvider connection={connection} navigation={navigation}>
+          {/* The shell's main column, which is the `app` size container the compact tier answers to. */}
+          <main className="main"><UsageRoute /></main>
+        </StoreProvider>
+      </FeedbackProvider>
     </ApiProvider>
   </React.StrictMode>,
 );

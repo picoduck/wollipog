@@ -159,42 +159,37 @@ test.describe("at 390px", () => {
     await expect(page.getByRole("menuitem", { name: "Unarchive", exact: true })).toBeVisible();
   });
 
-  test("the Usage breakdown keeps every driver's value on a phone, each named", async ({ page }) => {
-    // No detail view holds the per-driver split, so the two-line row shows it on line 2 rather
-    // than hiding it with the other extra columns.
+  test("the Usage breakdown hides the per-agent columns on a phone and names every figure it shows", async ({ page }) => {
+    // A phone row is the period and its total, then the next figure (#3013): the per-agent split
+    // is the chart's to show, so its columns are hidden here like any other extra column.
     await page.goto("/usage-view-e2e.html");
-    const table = page.locator(".usage-breakdown-section table").first();
+    const table = page.locator(".usage-tables-section table").first();
     await expect(table).toBeVisible();
     const drivers = await table.evaluate((element) => {
-      const headers = [...element.querySelectorAll("thead th")].map((th) => th.textContent?.trim() ?? "");
       const cells = [...element.querySelectorAll<HTMLElement>("tbody tr:first-child td[data-driver]")];
-      return {
-        count: cells.length,
-        visible: cells.every((cell) => cell.getBoundingClientRect().height > 0 && getComputedStyle(cell).display !== "none"),
-        named: cells.every((cell) => {
-          const label = cell.querySelector(".cell-label");
-          return !!label && getComputedStyle(label).display !== "none"
-            && headers.some((header) => header && label.textContent?.startsWith(header));
-        }),
-      };
+      return { count: cells.length, hidden: cells.every((cell) => getComputedStyle(cell).display === "none") };
     });
     expect(drivers.count, "the fixture has a per-driver split").toBeGreaterThan(0);
-    expect(drivers).toMatchObject({ visible: true, named: true });
+    expect(drivers.hidden, "the per-agent columns are hidden on a phone").toBe(true);
 
-    // The headers are off screen here, so every figure on a meta line carries its own name: the
-    // period breakdown and Cost by User as the view opens, then the Model breakdown.
+    // The headers are off screen here, so every figure on a meta line names itself, by a label
+    // before it or a unit after it ("3.25M tokens"), on every Breakdown tab.
     const unnamed = () => page.locator(".usage-table tbody td.cell-meta").evaluateAll((cells) => cells
       .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
       .filter((cell) => {
+        const shown = (node: Element | null) => !!node && getComputedStyle(node).display !== "none";
         const label = cell.querySelector(".cell-label");
-        // A word or a 14px icon (§5.2) names it.
-          return !label || getComputedStyle(label).display === "none" || !(label.textContent?.trim() || label.querySelector("svg"));
+        const unit = cell.querySelector(".usage-cell-unit");
+        // A word or a 14px icon (§5.2) names it, or the unit that follows the figure.
+        return !((shown(label) && (label!.textContent?.trim() || label!.querySelector("svg"))) || (shown(unit) && unit!.textContent?.trim()));
       })
-      .map((cell) => `${cell.closest("table")?.querySelector("caption")?.textContent}: ${cell.textContent}`));
-    expect(await unnamed(), "no unlabelled figure on a phone").toEqual([]);
-    await page.getByRole("radiogroup", { name: "Usage Breakdown" }).getByRole("radio", { name: "Model" }).click();
-    await expect(page.locator(".usage-breakdown-section caption")).toHaveText("Usage by Model");
-    expect(await unnamed(), "nor in the Model breakdown").toEqual([]);
+      .map((cell) => `${cell.closest("table")?.getAttribute("aria-labelledby")}: ${cell.textContent}`));
+    const tabs = page.getByRole("tablist", { name: "Breakdown" });
+    for (const tab of ["By Day", "By Model", "By Agent", "By Machine", "By Person"]) {
+      await tabs.getByRole("tab", { name: tab }).click();
+      await expect(page.locator(".usage-table tbody tr").first()).toBeVisible();
+      expect(await unnamed(), `no unlabelled figure on a phone in ${tab}`).toEqual([]);
+    }
   });
 
   test("a long trailing value gives way to the row's title", async ({ page }) => {
@@ -273,9 +268,11 @@ test.describe("at 390px", () => {
       const unnamed = await page.locator(".table tbody td.cell-meta").evaluateAll((cells) => cells
         .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
         .filter((cell) => {
+          const shown = (node: Element | null) => !!node && getComputedStyle(node).display !== "none";
           const label = cell.querySelector(".cell-label");
-          // A word or a 14px icon (§5.2) names it.
-          return !label || getComputedStyle(label).display === "none" || !(label.textContent?.trim() || label.querySelector("svg"));
+          const unit = cell.querySelector(".usage-cell-unit");
+          // A word or a 14px icon (§5.2) names it, or the unit that follows the figure.
+          return !((shown(label) && (label!.textContent?.trim() || label!.querySelector("svg"))) || (shown(unit) && unit!.textContent?.trim()));
         })
         .map((cell) => cell.textContent));
       expect(unnamed, "no unlabelled figure on a phone").toEqual([]);

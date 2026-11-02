@@ -6580,6 +6580,9 @@ export interface UserCostWindows {
   last30DaysUsd: number;
   /** The organization's per-user daily budget, repeated for convenience; null ⇒ none. */
   dailyBudgetUsd: number | null;
+  /** While a daily budget is set, the open live estimate of the user's running turns, which the
+   * daily-budget gate adds to `todayUsd` (#3196). Absent when there is none, or from older planes. */
+  todayEstimateUsd?: number;
 }
 
 /** Provenance for the rate table so the UI can be honest about how good the estimates are. */
