@@ -132,6 +132,44 @@ test("GitLab merged head discovery requires a merged merge request on the remote
   assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), "c".repeat(39), host), null);
 });
 
+test("branch-aware merged head discovery requires a same-repository change request from the branch (#3981)", () => {
+  const head = "a".repeat(40);
+  const branches = ["agent/s_reused", "feat/3981-reused"];
+  const github = { url: "https://github.com/picoduck/wollipog/pull/3974", state: "MERGED", headRefOid: head,
+    headRefName: "agent/s_reused", isCrossRepository: false };
+  const githubProof = { url: github.url, state: "merged", headOid: head, provider: "github", kind: "pull_request" };
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(JSON.stringify([github]), head, branches), githubProof);
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(
+    JSON.stringify([{ ...github, headRefName: "feat/3981-reused" }]), head, branches),
+  { ...githubProof }, "the configured upstream branch name also counts");
+  for (const rejected of [
+    { ...github, headRefName: "fix/other" },
+    { ...github, headRefName: undefined },
+    { ...github, isCrossRepository: true },
+    { ...github, isCrossRepository: undefined },
+  ]) {
+    assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([rejected]), head, branches), null,
+      JSON.stringify(rejected));
+  }
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(
+    JSON.stringify([{ ...github, url: "https://github.com/picoduck/wollipog/pull/1", headRefName: "fix/other" }, github]),
+    head, branches), githubProof, "a non-matching entry is skipped, not fatal");
+
+  const host = "gitlab.example.test";
+  const gitlab = { iid: 19, state: "merged", sha: head, web_url: `https://${host}/team/repo/-/merge_requests/19`,
+    source_branch: "agent/s_reused", source_project_id: 7, target_project_id: 7 };
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([gitlab]), head, host, branches),
+    { url: gitlab.web_url, state: "merged", headOid: head, provider: "gitlab", kind: "merge_request" });
+  for (const rejected of [
+    { ...gitlab, source_branch: "fix/other" },
+    { ...gitlab, source_project_id: 8 },
+    { ...gitlab, source_project_id: undefined, target_project_id: undefined },
+  ]) {
+    assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([rejected]), head, host, branches), null,
+      JSON.stringify(rejected));
+  }
+});
+
 test("the production forge choice keeps every GitHub remote the original check admitted (#3601)", async () => {
   const calls: string[][] = [];
   const run: typeof runContextCommand = async (_context, _command, args) => {
@@ -1124,6 +1162,179 @@ test("archive retirement proves delivery of a -u pushed squash-merged worktree w
     assert.equal((await manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }))
       .retirement.status, "removed", "the exact merged head proves delivery for archive retirement");
     assert.equal(existsSync(created.worktree.path), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a branch reused for a second squash-merged PR retires by that PR's exact head (#3981)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-reused-branch-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_reused_branch", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "reused branch",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const url = (number: number) => `https://github.com/picoduck/wollipog/pull/${number}`;
+    const rev = (path: string) => execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    // Commit, push the agent branch with tracking, squash-merge it into main, delete the remote
+    // branch: the configured upstream's tracking ref is gone after every pull request.
+    const deliverOnce = (path: string, branch: string, name: string, number: number) => {
+      writeFileSync(join(path, `${name}.txt`), `${name}\n`);
+      execFileSync("git", ["-C", path, "add", `${name}.txt`]);
+      execFileSync("git", ["-C", path, "commit", "-m", name]);
+      execFileSync("git", ["-C", path, "push", "-u", "origin", branch]);
+      execFileSync("git", ["-C", repo, "merge", "--squash", branch]);
+      execFileSync("git", ["-C", repo, "commit", "-m", `${name} (#${number})`]);
+      execFileSync("git", ["-C", repo, "push", "origin", "main"]);
+      execFileSync("git", ["-C", path, "push", "origin", "--delete", branch]);
+      return rev(path);
+    };
+    type ForgePullRequest = {
+      url: string; state: string; headRefOid: string; headRefName: string; isCrossRepository: boolean;
+    };
+    const pullRequests: ForgePullRequest[] = [];
+    const merged = (prUrl: string, head: string, headRefName: string): ForgePullRequest =>
+      ({ url: prUrl, state: "MERGED", headRefOid: head, headRefName, isCrossRepository: false });
+    const deliver = async (name: string, number: number) => {
+      const created = await manager!.requestWorktree("s_reused_branch",
+        { baseRef: "HEAD", branch: `agent/s_reused_${name}` });
+      const { path, branch } = created.worktree;
+      const first = deliverOnce(path, branch, `${name}-1`, number);
+      pullRequests.push(merged(url(number), first, branch));
+      // The session's record links the first pull request with its forge-verified merged head.
+      const meta = store.readMeta("s_reused_branch")!;
+      store.patchMeta("s_reused_branch", {
+        worktrees: meta.worktrees!.map((item) => item.path === path
+          ? { ...item, pullRequest: { url: url(number), state: "merged" as const, headOid: first,
+            provider: "github" as const, kind: "pull_request" as const } }
+          : item),
+      });
+      // The same session resets onto the new main and delivers a follow-on change from the same
+      // branch name; its second pull request is squash-merged and the remote branch deleted again.
+      execFileSync("git", ["-C", path, "fetch", "origin", "main"]);
+      execFileSync("git", ["-C", path, "reset", "--hard", "origin/main"]);
+      const second = deliverOnce(path, branch, `${name}-2`, number + 1);
+      assert.notEqual(second, first);
+      assert.equal(execFileSync("git", ["-C", path, "config", "--get", `branch.${branch}.remote`], { encoding: "utf8" }).trim(),
+        "origin", "the upstream stays configured while its tracking ref is gone");
+      return { path, branch, first, second, secondUrl: url(number + 1) };
+    };
+    const explicit = await deliver("explicit", 3960);
+    const archive = await deliver("archive", 3970);
+    const deferred = await deliver("deferred", 3980);
+    const returned = await deliver("returned", 3985);
+    const kept = await deliver("kept", 3990);
+
+    let forgeUnavailable = false;
+    const searched: string[] = [];
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = (path, branch, options) =>
+      mergedWorktreePullRequestForBranch(path, branch, {
+        ...options,
+        runForgeCommand: async (_context, _command, args) => {
+          searched.push(args[args.indexOf("--search") + 1]!);
+          if (forgeUnavailable) throw Object.assign(new Error("forge unavailable"), { code: "EFORGE" });
+          return { stdout: JSON.stringify(pullRequests), stderr: "" };
+        },
+      });
+    const linked = (path: string) => store.readMeta("s_reused_branch")?.worktrees
+      ?.find((item) => item.path === path)?.pullRequest;
+
+    // Only the first pull request is known as merged: the second head is unproven and kept.
+    await assert.rejects(manager.discardWorktree("s_reused_branch", explicit.path),
+      /the branch has unpushed commits/, "the earlier linked head cannot prove its successor");
+    assert.equal(existsSync(explicit.path), true);
+    assert.ok(searched.includes(explicit.second), "the forge was searched by the exact current tip");
+    // Merged pull requests with this exact head that did not come from this branch in this
+    // repository prove nothing here: another repository, a fork, or another source branch.
+    for (const unrelated of [
+      merged("https://github.com/someone/fork/pull/9", explicit.second, explicit.branch),
+      { ...merged(url(3961), explicit.second, explicit.branch), isCrossRepository: true },
+      merged(url(3962), explicit.second, "fix/someone-else"),
+    ]) {
+      pullRequests.push(unrelated);
+      await assert.rejects(manager.discardWorktree("s_reused_branch", explicit.path),
+        /the branch has unpushed commits/, `explicit discard must keep the tree for ${JSON.stringify(unrelated)}`);
+      await assert.rejects(manager.discardWorktree("s_reused_branch", explicit.path, { requireDelivered: true }),
+        /the branch has unpushed commits/, `archive retirement must keep the tree for ${JSON.stringify(unrelated)}`);
+      assert.equal(existsSync(explicit.path), true);
+      pullRequests.pop();
+    }
+
+    pullRequests.push(merged(explicit.secondUrl, explicit.second, explicit.branch));
+    assert.equal((await manager.discardWorktree("s_reused_branch", explicit.path)).retirement.status, "removed",
+      "explicit discard retires the tip the second merged pull request delivered");
+    assert.equal(existsSync(explicit.path), false);
+
+    // Archive retirement keeps the tree pending through a forge outage, then retires it.
+    forgeUnavailable = true;
+    pullRequests.push(merged(archive.secondUrl, archive.second, archive.branch));
+    await assert.rejects(manager.discardWorktree("s_reused_branch", archive.path, { requireDelivered: true }),
+      /forge state is temporarily unavailable/);
+    assert.equal(existsSync(archive.path), true);
+    forgeUnavailable = false;
+    assert.equal((await manager.discardWorktree("s_reused_branch", archive.path, { requireDelivered: true }))
+      .retirement.status, "removed", "archive retirement accepts the second merged pull request's head");
+    assert.equal(existsSync(archive.path), false);
+
+    // A retirement deferred by an active provider journals the stale linked head; replay re-derives
+    // the proof for the current tip once the provider exits.
+    const internals = manager as unknown as {
+      active: Map<string, unknown>;
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+      cleanupJournal: { list: () => WorktreeCleanupRecord[]; add: (record: WorktreeCleanupRecord) => void };
+    };
+    const deferWhileActive = async (target: typeof deferred, owner: string) => {
+      // An earlier replay releases the session lease only after its directory is already gone.
+      await waitForCondition(() => store.readWorktreeLease("s_reused_branch") === null,
+        "an earlier cleanup still holds the session's worktree lease");
+      assert.equal(store.acquireWorktreeLease("s_reused_branch", owner), true);
+      const view = store.readMeta("s_reused_branch")!.worktrees!.find((item) => item.path === target.path)!;
+      const entry = { sessionId: "s_reused_branch", context: { kind: "native" },
+        cwd: target.path, worktree: view, worktreeLeaseOwner: owner,
+        queue: [], client: { dispose: () => {} } };
+      internals.active.set("s_reused_branch", entry);
+      assert.deepEqual((await manager!.discardWorktree("s_reused_branch", target.path)).retirement,
+        { status: "deferred", reason: "provider_active" });
+      const record = internals.cleanupJournal.list().find((item) => item.worktreePath === target.path);
+      assert.equal(record?.verifiedMergedHead, target.first, "the deferral journals the linked pull request's head");
+      return { entry, record: record! };
+    };
+    const deferral = await deferWhileActive(deferred, "runner:provider:reused-deferred");
+    pullRequests.push(merged(deferred.secondUrl, deferred.second, deferred.branch));
+    assert.equal(internals.deleteActiveSession("s_reused_branch", deferral.entry), true);
+    await waitForCondition(() => !existsSync(deferred.path),
+      "deferred replay did not retire the tip the second merged pull request delivered");
+
+    // A replay that already proved the later head can be fenced while the provider moves the tip
+    // back to the linked pull request's head. The linked proof must replace the stale later one.
+    pullRequests.push(merged(returned.secondUrl, returned.second, returned.branch));
+    const returning = await deferWhileActive(returned, "runner:provider:reused-returned");
+    returning.record.verifiedMergedHead = returned.second;
+    internals.cleanupJournal.add(returning.record);
+    execFileSync("git", ["-C", returned.path, "reset", "--hard", returned.first]);
+    assert.equal(internals.deleteActiveSession("s_reused_branch", returning.entry), true);
+    await waitForCondition(() => !existsSync(returned.path),
+      "deferred replay did not restore the linked head's proof after the tip returned to it");
+
+    // No merged pull request delivered this tip: every path keeps it.
+    await assert.rejects(manager.discardWorktree("s_reused_branch", kept.path), /the branch has unpushed commits/);
+    await assert.rejects(manager.discardWorktree("s_reused_branch", kept.path, { requireDelivered: true }),
+      /the branch has unpushed commits/);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(kept.path), true, "a tip no merged pull request delivered is kept");
+    assert.equal(linked(kept.path)?.headOid, kept.first, "a successor proof is never persisted as the link");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

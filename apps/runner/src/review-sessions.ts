@@ -433,6 +433,7 @@ interface EvaluationContext {
   headSha: string;
   scopeFiles: string[];
   tracked: Set<string>;
+  contextFiles: string[];
   checkout: string;
   git: string;
   env: NodeJS.ProcessEnv;
@@ -633,6 +634,7 @@ export class ReviewSessionLauncher {
         ...(mode === "rebase" ? { rebasedFrom: planned.rebasedFrom! } : {}),
       };
       const inScope = new Set(scopeFiles);
+      const contextFiles = mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path));
       const prompt = reviewPrompt({
         ...(driver === "codex-app-server" ? { checkout } : {}),
         brief, repository: policy.pullRequest.repository, number: policy.pullRequest.number,
@@ -641,10 +643,10 @@ export class ReviewSessionLauncher {
         ...(mergedBase ? { mergedBase } : {}),
         ...(round.rebasedFrom ? { rebasedFrom: round.rebasedFrom } : {}),
         ...(mode === "full" && policy.fullReason ? { fullReason: policy.fullReason } : {}),
-        contextFiles: mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path)),
+        contextFiles,
         openFindings: planned.openFindings,
       });
-      this.contexts.set(sessionId, { headSha: policy.headSha, scopeFiles, tracked, checkout, git: verified.git, env });
+      this.contexts.set(sessionId, { headSha: policy.headSha, scopeFiles, contextFiles, tracked, checkout, git: verified.git, env });
       return { checkout, prompt, baseSha, round };
     } catch (error) {
       // The intent stays until the caller has recorded this refusal's outcome.
@@ -753,6 +755,7 @@ export class ReviewSessionLauncher {
     }
     const verdict = evaluateReviewAttempt({ ...observation, snapshotChanged }, {
       headSha: context?.headSha ?? "", scopeFiles: context?.scopeFiles ?? [],
+      contextFiles: context?.contextFiles ?? [],
       ...(context ? { isTracked: (path: string) => context.tracked.has(path) } : {}),
     });
     return {

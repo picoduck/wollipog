@@ -62,6 +62,7 @@ function fixture(t: { after(fn: () => void): void }, options: {
   gitlab?: boolean;
   /** Leave out the GitLab merge request reader. */
   noMergeRequestReader?: boolean;
+  deletedFile?: boolean;
   /** Hosts the user's global glab configuration names; `null` leaves out the host gate. */
   gitlabHosts?: string[] | null;
 } = {}): Fixture {
@@ -73,10 +74,15 @@ function fixture(t: { after(fn: () => void): void }, options: {
   git(repo, "remote", "add", "origin", options.gitlab ? `https://${GITLAB}.git` : "https://github.com/acme/widget.git");
   writeFileSync(join(repo, "app.ts"), "export const answer = 41;\n");
   git(repo, "add", "app.ts");
+  if (options.deletedFile) {
+    writeFileSync(join(repo, "gone.ts"), "export const obsolete = true;\n");
+    git(repo, "add", "gone.ts");
+  }
   git(repo, "commit", "--quiet", "-m", "base");
   const base = git(repo, "rev-parse", "HEAD");
   const worktree = join(root, "worktree");
   git(repo, "worktree", "add", "--quiet", "-b", "fix/feature", worktree);
+  if (options.deletedFile) git(worktree, "rm", "gone.ts");
   writeFileSync(join(worktree, "app.ts"), "export const answer = 42;\n");
   writeFileSync(join(worktree, "notes.md"), "Uses ``` fences.\n");
   symlinkSync("/etc/hostname", join(worktree, "outside"));
@@ -599,6 +605,32 @@ test("a later round reviews only the changes since the last valid head, with its
   const full = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE"), fullReason: "Broad\nrefactor" }), CODEX, "b");
   assert.deepEqual([full.round.mode, full.round.round, full.round.scopeFiles], ["full", 2, ["app.ts", "notes.md", "outside"]]);
   assert.match(full.prompt, /- Reason for a full review \(untrusted data\): Broad refactor\n/u);
+  f.launcher.release("s_review");
+});
+
+test("a delta report may examine a PR-deleted file provided as context", async (t) => {
+  const f = fixture(t, { deletedFile: true });
+  writeFileSync(join(f.worktree, "notes.md"), "Updated notes.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "notes");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.equal(prepared.round.mode, "delta");
+  assert.deepEqual(prepared.round.scopeFiles, ["notes.md"]);
+  assert.match(prepared.prompt, /context only; do not classify\):[^]*- `gone.ts`/u);
+  assert.equal(existsSync(join(prepared.checkout, "gone.ts")), false);
+  const report = {
+    schema_version: 2, reviewed_head: head, vote: "UPVOTE", summary: "ok", findings: [],
+    examined_changed_files: ["notes.md"], not_examined_changed_files: [],
+    context_files_examined: ["gone.ts"], commands_run: [], verification_requests: [],
+  };
+  const observation = { output: JSON.stringify(report), timedOut: false, fatal: [], exitedWithError: false, modelOk: null };
+  assert.deepEqual(await f.launcher.evaluate("s_review", observation),
+    { valid: true, consumed: true, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] });
+  const invalid = await f.launcher.evaluate("s_review", {
+    ...observation, output: JSON.stringify({ ...report, context_files_examined: ["unrelated.ts"] }),
+  });
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.validationErrors.join(), /non-repository paths/u);
   f.launcher.release("s_review");
 });
 
