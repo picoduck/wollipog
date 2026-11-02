@@ -5,8 +5,8 @@ import React, { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../experiments.js";
-import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
-import { ExperimentalPanel, SETTINGS_DESCRIPTION, SettingsView, settingsIndexGroups } from "./SettingsView.js";
+import { EXPERIMENT_OFF_EFFECT, SETTINGS_DESCRIPTION, SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
+import { ExperimentalPanel, SettingsView, settingsIndexGroups } from "./SettingsView.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 /**

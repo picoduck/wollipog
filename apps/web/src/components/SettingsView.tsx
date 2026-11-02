@@ -51,7 +51,7 @@ import { useSessionsPreviewLayout } from "../use-sessions-preview-layout.js";
 import { setTerminalPlacement, useTerminalPlacement, type TerminalPlacement } from "../terminal-placement.js";
 import { setEnterKeyBehavior, useEnterKeyBehavior, type EnterKeyBehavior } from "../enter-key.js";
 import { setShowAgentLogs, useShowAgentLogs } from "../agent-logs.js";
-import { EXPERIMENT_OFF_EFFECT, SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
+import { EXPERIMENT_OFF_EFFECT, SETTINGS_DESCRIPTION, SETTINGS_SECTIONS, viewPath, type SettingsFocus, type SettingsSection, type SettingsSectionEntry, type View } from "../navigation.js";
 import { SHOW_SHORTCUTS_ID, shortcutDisplay } from "../shortcuts.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 
@@ -103,9 +103,6 @@ export function useSettingsPanelHead({ description, meta, action }: SettingsPane
   }, [setHead, description, meta, action]);
   return setHead !== ignoreSettingsPanelHead;
 }
-
-/** The page header's one line (§4.2), hidden on phones as every page description is. */
-export const SETTINGS_DESCRIPTION = "Preferences for this device and your account.";
 
 /** Each section's 16px glyph, one per meaning (§18, docs/icon-system.md). */
 const SECTION_ICONS: Record<SettingsSection, (props: { size?: number }) => ReactNode> = {

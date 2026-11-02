@@ -2069,6 +2069,13 @@ button.status { cursor: pointer; }
 .notice.view-error { max-width: 560px; margin: var(--space-6); }
 /* Under a crashed route's page header, the page already supplies the gutter and the header's gap. */
 .page > .notice.view-error { margin: 0; }
+/* A filled page (Sessions, Machines) leaves the gutter and that gap to its content, and stretches
+   its content to the column's height, so the notice takes both back and keeps its own height. */
+.page.fill > .notice.view-error { flex: none; margin: var(--space-6) var(--page-gutter) 0; }
+/* The phone app bar's own gap (§15.1). */
+@media (max-width: 760px) {
+  .page.fill > .notice.view-error { margin-top: var(--space-4); }
+}
 /* An operation inside the notice failed; it reads as the notice's own error line. */
 .notice-error { color: var(--danger-text); }
 /* A setting row's reason or failure sits under its description, clear of the words above it. */
