@@ -17,12 +17,13 @@ import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 
 import { setTimeout as delay } from "node:timers/promises";
 import { homedir, hostname } from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CampaignLaunchInspections } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
+import { ProcessingWindow } from "./processing-window.js";
 import {
   parseMessage,
   agentContextKey,
@@ -830,6 +831,7 @@ let ws: WebSocket | null = null;
 let controlPlanePeerRefused = false;
 let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
+let republishWindow: ProcessingWindow | null = null;
 let policyHookRegistrationGeneration = 0;
 const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
@@ -2427,7 +2429,24 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
-      publishNegotiatedSessionSnapshots(sessions, sendUp);
+      republishWindow?.close();
+      republishWindow = null;
+      if (ws && runnerSupportsProtocol(controlPlaneProtocolVersion, "runnerProcessingBarriers")) {
+        const socket = ws;
+        const republishId = randomUUID();
+        republishWindow = new ProcessingWindow(sessions.republishSessionIds(), (id) => {
+          const snapshot = sessions.republishSessionSnapshot(id);
+          if (!snapshot) return null;
+          const message = projectMessageForCurrentProtocol({ type: "session_runtime_updated", snapshot });
+          return message ? JSON.stringify(message) : null;
+        }, (wire) => {
+          if (ws !== socket || socket.readyState !== WebSocket.OPEN || !registered) throw new Error("republish socket replaced");
+          socket.send(wire);
+        }, () => socket.terminate(), (details) => log(JSON.stringify({ ...details,
+          entryPoint: "runner_republish", republishId })));
+      } else {
+        publishNegotiatedSessionSnapshots(sessions, sendUp);
+      }
       // The CP may have restarted or missed live frames. Reconcile retained terminal processes
       // from bounded, sequence-addressed snapshots, then close the inventory with a fence.
       const shellSnapshots = shells.snapshots();
@@ -2471,6 +2490,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void subscriptionUsage.refreshAll()
         .then(() => subscriptionUsage.refreshAll())
         .catch((error) => log(`subscription usage refresh after harness installation selection failed: ${errText(error)}`));
+      break;
+    case "runner_processing_ack":
+      if (Number.isSafeInteger(msg.barrierId)) republishWindow?.acknowledge(msg.barrierId);
       break;
     case "policy_hook_credential_registered":
       try {
@@ -4281,6 +4303,8 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
 
 function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
+  republishWindow?.close();
+  republishWindow = null;
   registered = false;
   controlPlanePeerRefused = false;
   controlPlaneProtocolVersion = null;
@@ -4333,6 +4357,8 @@ function connect(): void {
 
   socket.on("close", () => {
     if (ws !== socket) return;
+    republishWindow?.close();
+    republishWindow = null;
     stopHeartbeat();
     registered = false;
     forgetAgentControlRegistrationAnswers();

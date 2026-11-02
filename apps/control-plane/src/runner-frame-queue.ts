@@ -80,6 +80,10 @@ interface QueuedFrame<T, P> {
 }
 
 export class RunnerFrameQueue<T, P = never> {
+  get pressureStats(): { frames: number; bytes: number } {
+    return { frames: this.pending.length, bytes: this.bytes };
+  }
+
   private pending: Array<QueuedFrame<T, P>> = [];
   private bytes = 0;
   private draining = false;
