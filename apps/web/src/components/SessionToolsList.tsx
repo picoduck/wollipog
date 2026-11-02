@@ -54,6 +54,7 @@ import {
   MessageSquareIcon,
 } from "./Icons.js";
 import { Notice } from "./Notice.js";
+import { commitsAheadFact } from "./ReviewSummary.js";
 import { StatusBadge } from "./StatusBadge.js";
 import type { DescendantRequestStatus } from "./SessionRequestPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
@@ -280,8 +281,13 @@ function SessionToolsListView({
 
   const waitingForYou = descendantRequests.filter((request) => request.responseOwner === "human").length;
 
+  // Review opens on Branch when a worktree session has nothing uncommitted and its branch is ahead
+  // (ReviewPanel's opening scope, #2846), so the row then names the branch's commits (#3035).
   const changes = git.status
-    ? { files: git.status.files.length, truncated: git.status.filesTruncated === true, staged: git.status.stagedCount ?? 0 }
+    ? {
+        files: git.status.files.length, truncated: git.status.filesTruncated === true, staged: git.status.stagedCount ?? 0,
+        branch: session.useWorktree === true ? commitsAheadFact(git.status) : null,
+      }
     : git.busy ? "checking" as const : "unknown" as const;
   const fact = (id: SessionToolId): RowFact => {
     switch (id) {

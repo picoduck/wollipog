@@ -1031,8 +1031,9 @@ Requests, Decision History, and Terminal in Right Panel placement, #2868) opens 
   `SESSION_TOOLS`, top-aligned under the header and scrolling on its own: the Code, Work and
   Decisions groups under `.group-label` headers (§5.2), each tool a `.row.row-2` with a 32px icon
   tile (`--bg-elev-2`, `--radius-sm`), its name, and a live sentence-case fact on line two (Review's
-  uncommitted changes and required findings, Agents' one status badge, Requests' count badge of what
-  waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
+  uncommitted changes and required findings, or, with nothing uncommitted in a worktree whose branch
+  is ahead, the "3 commits ahead of main" Review opens on Branch to show, in its summary's words;
+  Agents' one status badge, Requests' count badge of what waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
   stays focusable (`aria-disabled`), its reason the second line in `--text-faint` and its
   description, its tile hollow (an inset 1px `--border`), never an opacity. On an older runner one
   neutral compact Notice above the list names the machine to update, and Files and Terminal say
