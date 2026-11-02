@@ -5041,7 +5041,7 @@ export class SessionManager {
 
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
-  async reconcileWorktreePullRequests(): Promise<void> {
+  async reconcileWorktreePullRequests(options: { replayDeferredRetirements?: boolean } = {}): Promise<void> {
     if (this.worktreePullRequestReconciling || this.shuttingDown) return;
     this.worktreePullRequestReconciling = true;
     try {
@@ -5125,7 +5125,7 @@ export class SessionManager {
           this.log(`pull request worktree reconciliation failed for ${boundedSessionIdForLog(candidate.sessionId)}: ${errText(error)}`);
         }
       }
-      await this.replayDeferredWorktreeRetirements();
+      if (options.replayDeferredRetirements !== false) await this.replayDeferredWorktreeRetirements();
     } catch (error) {
       this.log(`pull request worktree reconciliation could not enumerate sessions: ${errText(error)}`);
     } finally {
@@ -6362,7 +6362,10 @@ export class SessionManager {
     }
     this.reconcileReviewSessions();
     this.store.reapDeletedMarkers();
-    void this.reconcileWorktreePullRequests();
+    // Startup already scheduled every pending record above, including records without a session
+    // row and force cleanups. Only later periodic passes should sweep them again. Keep this at
+    // the scheduling boundary: awaiting rollback/deletion callers must run their own reaper.
+    void this.reconcileWorktreePullRequests({ replayDeferredRetirements: false });
     this.resumeProviderAuthDismissals();
     // Keep archive/index work out of synchronous startup and provider command paths. One bounded
     // pass shortly after startup plus the periodic timer gradually drains legacy oversized logs.
