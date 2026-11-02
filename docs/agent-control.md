@@ -642,6 +642,35 @@ at 300 seconds. The setting sits inside the `wollipog` entry alone: no other MCP
 configuration changes, and other Wollipog tools keep their own shorter bounds (control-plane
 requests 30 seconds, `wait_session` one hour).
 
+**Code mode (#4023).** Some models put Codex in code mode: every GPT-6 model in codex-cli 0.164.0
+and 0.165.0 sets `tool_mode = "code_mode_only"` in its catalog entry. Those models reach MCP tools
+only from an `exec` script cell. `exec` hands a still-running cell back to the model. To get the
+result, the model then has to call `wait` on the cell, which blocks for the `yield_time_ms` it
+asks for. Real models asked for about a minute at a time, often with sleeps in between. One long
+`wait_pull_request` call therefore cost one full-context model request a minute. In one campaign
+child, 531 of 616 requests were spent this way. The runner adds
+`-c features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]` directly after its own entry.
+Codex then offers the `wollipog` tools as ordinary direct tools again, outside `exec`, so a wait
+blocks in one tool call with no model request. This holds for sessions and native-host
+Orchestrators alike. Measured on codex-cli 0.165.0, the setting has no effect without code mode,
+with the hybrid `code_mode` mode, or with a user's own `features.code_mode = true` (which stays
+enabled). Codex refuses its whole configuration when `features.code_mode` contains a field it does
+not know. So the runner adds the setting only when a `codex mcp list --json` read with it still
+loads the `wollipog` entry. On a Codex without the field, the launch is exactly what it was before,
+and the runner log says so. Resume removes the setting only when it directly follows the runner's
+own entry; a user's identical setting anywhere else is kept.
+
+A `-c` array replaces the configured value rather than merging into it, so the setting would drop
+namespaces a user already keeps out of code mode. The runner therefore adds nothing if the launch
+arguments or a Codex configuration file it can read already name `direct_only_tool_namespaces`.
+Those files are the Codex home's `config.toml`, each `.codex/config.toml` from the launch
+directory up, and `/etc/codex/config.toml` and `managed_config.toml`. A mention in a profile or a
+comment counts too. The log then says to add `"mcp__wollipog"` to that list. A target-local WSL
+Orchestrator is launched inside its distribution, where the runner reads no Codex configuration.
+It gets no setting and keeps today's behavior. A session or Orchestrator whose tools stay inside
+`exec` should follow the shipped skill's code-mode guidance: one call, then one long `wait`, never
+short polls.
+
 **What a session without the Orchestrator role gains.** The entry starts the same
 `--agent-control-mcp` re-entry Claude sessions already run, with the same session-scoped transport
 the injected CLI already uses: a token-file path, or in `provider` mode the relay coordinates
@@ -677,7 +706,10 @@ and disables the rest.
 `pnpm probe:codex-mcp-wait` re-measures this against a real `codex app-server`, a scripted local
 model, and a stub `wait_pull_request` behind the exact entry the runner builds. It counts every
 model request while the call blocks and can show the default cutoff (`--default-limit`) and the
-reviewer request (`--without-approval`).
+reviewer request (`--without-approval`). `--code-mode` runs the same wait for a code-mode-only
+model, with the direct-tools setting and without it. On codex-cli 0.165.0, a 150-second wait made
+no model request with the setting. Without it, the call ran from an `exec` cell that two model
+requests polled.
 
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
