@@ -226,6 +226,10 @@ export function SideChatPanel({
   /** The child and history generation whose first page has arrived; until then the transcript is
    * loading, never empty. */
   const [loadedTranscript, setLoadedTranscript] = useState<string | null>(null);
+  /** The same key once the control plane has said the whole history is read: its cache is complete
+   * and nothing more is cached past the last page. Only then can an empty transcript mean that no
+   * message was sent, rather than one still hydrating (#3037). */
+  const [completeTranscript, setCompleteTranscript] = useState<string | null>(null);
   // The unsent message belongs to the person typing it, not to the child: it survives the panel
   // being switched away and closed (#1202), the transcript resets around it, and no tour of other
   // sessions can evict the scope while it still holds one (#1283).
@@ -355,6 +359,7 @@ export function SideChatPanel({
     epochRef.current = next?.session.eventEpoch ?? 0;
     setEvents([]);
     setLoadedTranscript(null);
+    setCompleteTranscript(null);
   };
 
   // Backstop for any path that changes the child without going through `resetTranscript`. It runs
@@ -365,6 +370,7 @@ export function SideChatPanel({
     epochRef.current = sideChat?.session.eventEpoch ?? 0;
     setEvents([]);
     setLoadedTranscript(null);
+    setCompleteTranscript(null);
     // A start that "failed" while the replacement it asked for exists after all (the response was
     // lost) is over once polling adopts that child: its Retry would be refused as replacing a live
     // chat, and the failure would keep Send closed over a ready side chat.
@@ -402,6 +408,7 @@ export function SideChatPanel({
           cursorRef.current = 0;
           setEvents([]);
           setLoadedTranscript(null);
+          setCompleteTranscript(null);
         }
         readingEvents = true;
         const page = await api.getSessionEventPage(childId, cursorRef.current, epoch, PAGE_SIZE);
@@ -415,6 +422,7 @@ export function SideChatPanel({
         }
         cursorRef.current = page.nextAfter ?? page.events.at(-1)?.seq ?? cursorRef.current;
         setLoadedTranscript(`${childId}:${epoch}`);
+        setCompleteTranscript(page.cacheComplete === true && page.hasMoreCached !== true ? `${childId}:${epoch}` : null);
         setPollError(null);
       } catch (cause) {
         if (!current || transcriptChildRef.current !== childId) return;
@@ -425,6 +433,7 @@ export function SideChatPanel({
           cursorRef.current = 0;
           setEvents([]);
           setLoadedTranscript(null);
+          setCompleteTranscript(null);
         } else {
           setPollError((cause as Error).message);
         }
@@ -703,8 +712,9 @@ export function SideChatPanel({
   }
 
   const transcriptLoaded = child !== undefined && loadedTranscript === `${child.id}:${child.eventEpoch ?? 0}`;
-  // Until its transcript has loaded, an ended side chat is taken to have one.
-  const endedEmpty = childEnded && transcriptLoaded && items.length === 0;
+  // Until its whole history has been read, an ended side chat is taken to have a transcript.
+  const endedEmpty = childEnded && transcriptLoaded && items.length === 0 &&
+    completeTranscript === loadedTranscript;
   const transcript = creating || !child ? null
     : !transcriptLoaded ? <TranscriptSkeleton label="Loading Side Chat Transcript" />
       : items.length ? (
