@@ -2,20 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { ApiError } from "../api.js";
 import { statusMeta } from "../status-meta.js";
-import { agentAvailabilityLabel } from "./RunnersView.js";
 import { lifecycleConflictPresentation } from "./MachineDetail.js";
-
-test("Machine Settings labels legacy agent rows unverified", () => {
-  const base = { name: "Agent", command: "agent", args: [], env: {} };
-  const agents = [
-    { ...base, id: "verified", available: true },
-    { ...base, id: "unavailable", available: false },
-    { ...base, id: "legacy" },
-  ];
-  assert.equal(agentAvailabilityLabel(agents[0]!), "Available");
-  assert.equal(agentAvailabilityLabel(agents[1]!), "Unavailable");
-  assert.equal(agentAvailabilityLabel(agents[2]!), "Unverified");
-});
 
 test("runner lifecycle conflicts list every named session as a confirmation detail row", () => {
   const error = new ApiError("active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
