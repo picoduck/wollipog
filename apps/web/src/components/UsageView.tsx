@@ -464,14 +464,14 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   }, [loadSubscriptions]);
 
   const loadUsers = useCallback(async () => {
-    try {
-      const [budget, list] = await Promise.all([api.usageDailyBudget(), api.usageUsers()]);
-      setDailyBudget(budget.dailyBudget);
-      setUsers(list.users);
-      setUsersError(null);
-    } catch (cause) {
-      setUsersError(cause instanceof Error ? cause.message : "Unable to load per-user usage");
-    }
+    // Settled apart, so a people list that fails never withholds the budget Budget and History needs.
+    const [budget, list] = await Promise.allSettled([api.usageDailyBudget(), api.usageUsers()]);
+    if (budget.status === "fulfilled") setDailyBudget(budget.value.dailyBudget);
+    if (list.status === "fulfilled") setUsers(list.value.users);
+    const failure = budget.status === "rejected" ? budget : list.status === "rejected" ? list : null;
+    setUsersError(failure
+      ? failure.reason instanceof Error ? failure.reason.message : "Unable to load per-user usage"
+      : null);
   }, [api]);
 
   useEffect(() => {

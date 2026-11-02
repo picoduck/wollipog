@@ -654,11 +654,13 @@ test("an unavailable Hour response cannot replace a newer Week selection during 
 /** A Usage page over `usage`, with the budget and retention writes the dialog makes recorded. */
 const renderBudgetHistory = async ({
   canManage = true,
+  usersFail = false,
   perUserUsd = 25 as number | null,
   updateUsageDailyBudget = async (value: number | null) => ({ dailyBudget: { perUserUsd: value, updatedAt: 1 } }),
   updateUsageRetention = async (input: { hourlyDays: number; dailyDays: number }) => ({ retention: { ...input, coverageStartedAt: 0 } }),
 }: {
   canManage?: boolean;
+  usersFail?: boolean;
   perUserUsd?: number | null;
   updateUsageDailyBudget?: (value: number | null) => Promise<{ dailyBudget: { perUserUsd: number | null; updatedAt: number } }>;
   updateUsageRetention?: (input: { hourlyDays: number; dailyDays: number }) => Promise<{ retention: { hourlyDays: number; dailyDays: number; coverageStartedAt: number } }>;
@@ -672,7 +674,10 @@ const renderBudgetHistory = async ({
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: budget, updatedAt: null } }),
-    usageUsers: async () => ({ users: [] }),
+    usageUsers: async () => {
+      if (usersFail) throw new Error("Unable to list people");
+      return { users: [] };
+    },
     usage: async (query: { days?: number; granularity?: UsageAggregationGranularity }) => {
       usageQueries.push(`${query.days}:${query.granularity}`);
       return { ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"), canManageRetention: canManage };
@@ -930,6 +935,23 @@ test("a budget failure saves nothing else and says the budget wasn't saved (#301
     await page.save();
     assert.equal(page.dialog("Budget and History")!.querySelector(".notice-body")?.textContent, "Nothing was changed.");
     assert.deepEqual(page.writes.map(([kind]) => kind), ["budget", "budget"], "history is never sent after the budget failed");
+  } finally {
+    await page.unmount();
+  }
+});
+
+test("a people list that fails to load still leaves Budget and History open to change history (#3015)", async () => {
+  const page = await renderBudgetHistory({ usersFail: true });
+  try {
+    await chooseBreakdown(page.container, "By Person");
+    assert.equal(page.container.querySelector('.usage-state.error[role="alert"]')?.textContent, "Unable to list people");
+    assert.match(page.container.querySelector(".usage-person-head")?.textContent ?? "", /\$25\.00 per UTC day/);
+    assert.ok(page.button(page.container, "Change Budget…"));
+    await page.open();
+    await page.type("Daily Totals", "400");
+    await page.save();
+    assert.deepEqual(page.writes, [["retention", { hourlyDays: 30, dailyDays: 400 }]]);
+    assertNoDomNode(page.dialog("Budget and History"));
   } finally {
     await page.unmount();
   }
