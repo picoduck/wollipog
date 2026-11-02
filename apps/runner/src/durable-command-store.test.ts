@@ -193,7 +193,7 @@ test("same-owner handle loss makes a started command uncertain instead of replay
     assert.equal(first.kind, "new");
     if (first.kind !== "new") return;
     assert.equal(first.handle.started(7).state, "started");
-    store.releaseHandle("cmd_test");
+    store.releaseHandle("cmd_test", first.handle);
 
     const retried = store.claim(message());
     assert.equal(retried.kind, "duplicate");
@@ -630,6 +630,42 @@ for (const published of [false, true]) {
       replay.handle.started(7);
       replay.handle.completed();
       assert.equal(restarted.claim(message(command)).kind, "duplicate");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const staleCallback of ["completed", "failed", "uncertain", "queued", "started"] as const) {
+  test(`stale ${staleCallback} cleanup preserves a reclaimed handle`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-stale-command-handle-"));
+    try {
+      const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+      const envelope = message();
+      const first = store.claim(envelope);
+      if (first.kind !== "new") return assert.fail("command was not claimed");
+      first.handle.queued();
+      const callback = () => {
+        if (staleCallback === "failed") return first.handle.failed("stale failure");
+        if (staleCallback === "uncertain") return first.handle.uncertain("stale uncertainty");
+        return first.handle[staleCallback]();
+      };
+      // A real transition failure must relinquish its own marker for a safe sender retry.
+      const fault = t.mock.method(store as any, "writeAtomic", () => { throw new Error("synthetic write failure"); });
+      assert.throws(callback, /synthetic write failure/u);
+      fault.mock.restore();
+      const retry = store.claim(envelope);
+      if (retry.kind !== "reclaimed") return assert.fail("failed persistence did not release ownership");
+      retry.handle.queued();
+      const before = store.read(envelope.commandId);
+      assert.throws(callback, /changed concurrently/u);
+      assert.deepEqual(store.read(envelope.commandId), before, "stale callbacks must not change the receipt");
+      assert.equal(store.claim(envelope).kind, "duplicate", "the newer handle must retain its marker");
+      retry.handle.started(7);
+      retry.handle.completed();
+      const duplicate = store.claim(envelope);
+      assert.equal(duplicate.kind, "duplicate");
+      if (duplicate.kind === "duplicate") assert.equal(duplicate.receipt.state, "completed");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
