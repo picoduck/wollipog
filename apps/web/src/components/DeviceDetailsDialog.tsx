@@ -103,7 +103,7 @@ export function DeviceDetailsDialog({
           <dd>{device.lastSeenAt == null ? "Never" : relativeTime(device.lastSeenAt)}</dd>
         </div>
       </dl>
-      {!canRevoke && <p className="device-details-note">Revoke devices from the computer running Wollipog.</p>}
+      {!canRevoke && <p className="facts-note">Revoke devices from the computer running Wollipog.</p>}
     </Modal>
   );
 }

@@ -322,6 +322,8 @@ const OUTBOUND_EVENT_KINDS = new Set<OutboundEventKind>([
 import { DEFAULT_POD_ORCHESTRATION_POLICY, type PodContextSelectionWindow } from "./pod-orchestration.js";
 import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient, type UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
 import {
+  BOOTSTRAP_OWNER_NAME,
+  LEGACY_BOOTSTRAP_OWNER_NAME,
   LOCAL_OWNER_USER_ID,
   PERSONAL_ORGANIZATION_ID,
   type AuthPrincipal,
@@ -2301,7 +2303,9 @@ CREATE TABLE IF NOT EXISTS identity_users (
   display_name TEXT NOT NULL,
   status       TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active','suspended')),
   created_at   INTEGER NOT NULL,
-  updated_at   INTEGER NOT NULL
+  updated_at   INTEGER NOT NULL,
+  -- 1 while the bootstrap owner still has the default name the server gave it (#3001).
+  default_name INTEGER NOT NULL DEFAULT 0 CHECK (default_name IN (0,1))
 );
 
 CREATE TABLE IF NOT EXISTS identity_organizations (
@@ -6720,10 +6724,27 @@ export class ControlPlaneDb {
       const now = Date.now();
       db.exec("BEGIN");
       try {
+        // The default-name marker (#3001). Adding the column is what makes the "Local owner" rename
+        // below run exactly once: a database that already has it was created with "Owner" or already
+        // renamed. Both happen in this transaction, so an interrupted startup retries them together.
+        const addDefaultName = !(db.prepare("PRAGMA table_info(identity_users)").all() as unknown as Array<{ name: string }>)
+          .some((column) => column.name === "default_name");
+        if (addDefaultName) {
+          db.exec("ALTER TABLE identity_users ADD COLUMN default_name INTEGER NOT NULL DEFAULT 0 CHECK (default_name IN (0,1))");
+        }
+        // A fixed word, never the computer's account or host name: every member sees the owner's name.
         db.prepare(
           `INSERT OR IGNORE INTO identity_users
-           (user_id, display_name, status, created_at, updated_at) VALUES (?, 'Local owner', 'active', ?, ?)`,
-        ).run(LOCAL_OWNER_USER_ID, now, now);
+           (user_id, display_name, status, created_at, updated_at, default_name)
+           VALUES (?, ?, 'active', ?, ?, 1)`,
+        ).run(LOCAL_OWNER_USER_ID, BOOTSTRAP_OWNER_NAME, now, now);
+        // An existing install still showing the old placeholder gets the neutral default once; a name
+        // anyone chose is left alone.
+        if (addDefaultName) {
+          db.prepare(
+            "UPDATE identity_users SET display_name=?, default_name=1, updated_at=? WHERE user_id=? AND display_name=?",
+          ).run(BOOTSTRAP_OWNER_NAME, now, LOCAL_OWNER_USER_ID, LEGACY_BOOTSTRAP_OWNER_NAME);
+        }
         db.prepare(
           `INSERT OR IGNORE INTO identity_organizations
            (organization_id, name, created_at, updated_at) VALUES (?, 'Personal organization', ?, ?)`,
@@ -11004,8 +11025,14 @@ export class ControlPlaneDb {
     ).all(context.organizationId) as unknown as Array<{
       team_id: string; organization_id: string; name: string; created_at: number; members: string;
     }>;
+    // Only the signed-in member learns whether their own name is still the default (#3001).
+    const defaultName = (this.stmt("SELECT default_name FROM identity_users WHERE user_id=?")
+      .get(context.userId) as { default_name: number } | undefined)?.default_name === 1;
+    const contextView: IdentityContextView = { ...context };
+    if (defaultName) contextView.defaultName = true;
+    else delete contextView.defaultName;
     return {
-      context,
+      context: contextView,
       organizations: organizations.map((row): OrganizationView => ({
         organizationId: row.organization_id, name: row.name, createdAt: row.created_at,
       })),
@@ -11060,6 +11087,8 @@ export class ControlPlaneDb {
     displayName: string;
     role: OrganizationRole;
     status: UserStatus;
+    /** The member's name was saved (#3001): it is no longer the server's default, even if unchanged. */
+    nameSaved?: boolean;
     now: number;
   }): OrganizationMembershipView | null {
     const current = this.stmt(
@@ -11076,8 +11105,11 @@ export class ControlPlaneDb {
     }
     this.db.exec("BEGIN");
     try {
-      this.stmt("UPDATE identity_users SET display_name=?, status=?, updated_at=? WHERE user_id=?")
-        .run(input.displayName, input.status, input.now, input.userId);
+      this.stmt(
+        `UPDATE identity_users SET display_name=?, status=?, updated_at=?,
+           default_name=CASE WHEN ? THEN 0 ELSE default_name END
+         WHERE user_id=?`,
+      ).run(input.displayName, input.status, input.now, input.nameSaved ? 1 : 0, input.userId);
       this.stmt("UPDATE identity_memberships SET role=?, updated_at=? WHERE organization_id=? AND user_id=?")
         .run(input.role, input.now, input.organizationId, input.userId);
       if (input.status === "suspended") {

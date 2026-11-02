@@ -117,12 +117,14 @@ function renderManage({
   person = member(),
   actorRole = "owner" as OrganizationRole,
   pairedDevices,
+  self,
   updateIdentityMember = async () => ({}) as never,
   onClose = () => {},
 }: {
   person?: OrganizationMembershipView;
   actorRole?: OrganizationRole;
   pairedDevices?: number | null;
+  self?: { defaultName: boolean };
   updateIdentityMember?: ApiClient["updateIdentityMember"];
   onClose?: () => void;
 } = {}) {
@@ -133,6 +135,7 @@ function renderManage({
           actorRole={actorRole}
           member={person}
           pairedDevices={pairedDevices}
+          self={self}
           onClose={onClose}
           onSaved={async () => {}}
         />
@@ -578,6 +581,84 @@ describe("Add Person and Manage Person (#2998)", () => {
       assert.equal(add.querySelector(".field-error")?.textContent, "Use 80 characters or fewer.");
     } finally {
       await length.unmount();
+    }
+  });
+});
+
+describe("Your Name (#3001)", () => {
+  test("holds only the Name field and a read-only access level, and saves the name alone", async () => {
+    const updates: Array<{ userId: string; body: UpdateBody }> = [];
+    let closes = 0;
+    const view = await renderManage({
+      person: member({ userId: "me", userName: "Owner", role: "owner" }),
+      pairedDevices: 2,
+      self: { defaultName: true },
+      updateIdentityMember: async (userId, body) => { updates.push({ userId, body }); return {} as never; },
+      onClose: () => { closes += 1; },
+    });
+    try {
+      const yours = dialog("Your Name");
+      assert.equal(nameField(yours).value, "Owner");
+      assert.equal(yours.querySelector(".field-helper")?.textContent, "Enter your name.");
+      assertNoDomNode(yours.querySelector('[role="radiogroup"]'), "no Access Level choice");
+      assert.equal(buttonIn(yours, "Suspend Access…"), undefined, "and no Suspend Access…");
+      assert.deepEqual([...yours.querySelectorAll("dl.facts dt, dl.facts dd")].map((node) => node.textContent),
+        ["Access Level", "Owner"], "only the access level, not the paired devices line");
+      assert.equal(yours.querySelector(".facts-note")?.textContent, "You can't change your own access level.");
+      assert.equal(yours.querySelectorAll("input").length, 1, "the Name field is the only input");
+
+      // Saving the default name unchanged still sends it: that is what ends the default.
+      await press(buttonIn(yours, "Save Changes"));
+      assert.deepEqual(updates, [{ userId: "me", body: { displayName: "Owner" } }]);
+      assert.equal(closes, 1);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("sends a new name without role or status, and closes without a request once the name is chosen", async () => {
+    const updates: UpdateBody[] = [];
+    let closes = 0;
+    const view = await renderManage({
+      person: member({ userId: "me", userName: "Misko", role: "admin" }),
+      actorRole: "admin",
+      self: { defaultName: false },
+      updateIdentityMember: async (_userId, body) => { updates.push(body); return {} as never; },
+      onClose: () => { closes += 1; },
+    });
+    try {
+      const yours = dialog("Your Name");
+      assert.equal(yours.querySelector("dl.facts dd")?.textContent, "Admin");
+      await press(buttonIn(yours, "Save Changes"));
+      assert.deepEqual(updates, [], "an unchanged chosen name sends nothing");
+      assert.equal(closes, 1);
+      await type(nameField(yours), "  Misko M.  ");
+      await press(buttonIn(yours, "Save Changes"));
+      assert.deepEqual(updates, [{ displayName: "Misko M." }], "the name alone, with no role or status");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("an empty name is refused in your own words, with focus on the field", async () => {
+    const updates: UpdateBody[] = [];
+    const view = await renderManage({
+      person: member({ userId: "me", userName: "Owner", role: "owner" }),
+      self: { defaultName: true },
+      updateIdentityMember: async (_userId, body) => { updates.push(body); return {} as never; },
+    });
+    try {
+      const yours = dialog("Your Name");
+      const name = nameField(yours);
+      await type(name, "   ");
+      await press(buttonIn(yours, "Save Changes"));
+      assert.equal(yours.querySelector(".field-error")?.textContent, "Enter your name.");
+      assert.equal(name.getAttribute("aria-invalid"), "true");
+      assert.ok(domWindow.document.activeElement === (name as unknown as typeof domWindow.document.activeElement),
+        "focus moves to the Name field");
+      assert.deepEqual(updates, []);
+    } finally {
+      await view.unmount();
     }
   });
 });

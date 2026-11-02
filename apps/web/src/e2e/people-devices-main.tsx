@@ -46,6 +46,9 @@ const onlyYou = params.has("onlyYou");
 let failDevices = params.has("deviceError");
 const pairedDashboard = params.has("paired");
 const pairingRequired = params.has("pairing");
+// - `defaultName` signs in as a new install's owner, still called "Owner" (#3001): People asks for a
+//   name, and saving one renames the owner on the server, which reports the change in place (#2606).
+let ownDefaultName = params.has("defaultName");
 // Pair Device's result (#2999): by default the common local setup, bound to this computer only;
 // `?reach=lan` offers two addresses with a QR, and the other values each reason no link is offered.
 const REACH: Record<string, { hosts: string[]; webServed: boolean; boundBeyondLoopback: boolean }> = {
@@ -69,6 +72,7 @@ function identity(ownerName: string, memberName: string): IdentityAdministration
       role,
       deviceId: null,
       localBootstrap: !pairedDashboard,
+      ...(ownDefaultName ? { defaultName: true as const } : {}),
     },
     organizations: [{ organizationId, name: organizationName, createdAt: 1 }],
     memberships: onlyYou ? [membership("owner-1", ownerName, role, 1)] : [
@@ -86,7 +90,7 @@ function identity(ownerName: string, memberName: string): IdentityAdministration
   };
 }
 
-let currentIdentity = identity(owner, member);
+let currentIdentity = identity(ownDefaultName ? "Owner" : owner, member);
 let devices: DeviceView[] = onlyYou ? [] : [{
   deviceId: "device-1",
   name: "Pat's Phone",
@@ -111,6 +115,7 @@ let devices: DeviceView[] = onlyYou ? [] : [{
 let identityRequests = 0;
 let deviceRequests = 0;
 let online = true;
+let socketsOpened = 0;
 const sockets: FixtureSocket[] = [];
 
 function snapshot(): UiSnapshotMessage {
@@ -140,6 +145,7 @@ class FixtureSocket implements UiSocket {
   onerror: (() => void) | null = null;
   constructor() {
     sockets.push(this);
+    socketsOpened += 1;
     window.setTimeout(() => {
       // The control plane opens, then policy-closes an unpaired device's socket (1008).
       if (pairingRequired) {
@@ -199,6 +205,17 @@ const client: ApiClient = {
     token: "fixture_pairing_token_not_a_real_credential",
     pairing: { ...reach, port: 4317 },
   }),
+  // As the control plane does (#2606, #3001): a rename ends the default name and reaches every open
+  // dashboard as `identity_directory_changed`, never as a reconnect.
+  updateIdentityMember: async (userId, body) => {
+    if (userId !== "owner-1" || body.displayName === undefined) return api.updateIdentityMember(userId, body);
+    ownDefaultName = false;
+    currentIdentity = { ...identity(body.displayName, member), teams: currentIdentity.teams };
+    window.setTimeout(() => {
+      for (const socket of sockets) socket.push({ type: "identity_directory_changed" });
+    }, 0);
+    return { membership: currentIdentity.memberships.find((item) => item.userId === userId)! };
+  },
   renameIdentityTeam: async (teamId, name) => {
     if (currentIdentity.teams.some((team) => team.teamId !== teamId && team.name === name)) {
       throw new ApiError("another team in this organization already has this name", 409, "team_name_taken");
@@ -232,6 +249,8 @@ declare global {
       renameEveryone(): void;
       identityRequests(): number;
       deviceRequests(): number;
+      /** How many UI sockets the dashboard has opened: a reconnect opens another. */
+      socketsOpened(): number;
       /** Let the device list load after a `deviceError` start. */
       fixDevices(): void;
       /** Drop the connection, as a control plane that went away would: reconnects never open. */
@@ -247,6 +266,7 @@ window.__WOLLIPOG_PEOPLE_DEVICES_E2E__ = {
   },
   identityRequests: () => identityRequests,
   deviceRequests: () => deviceRequests,
+  socketsOpened: () => socketsOpened,
   fixDevices: () => {
     failDevices = false;
   },

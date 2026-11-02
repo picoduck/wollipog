@@ -4221,6 +4221,10 @@ export interface IdentityContextView {
   role: OrganizationRole;
   deviceId: string | null;
   localBootstrap: boolean;
+  /** True only in `GET /api/identity`, for the signed-in member whose name is still the default the
+   * server gave the bootstrap owner, until their name is first saved (#3001). Absent otherwise and
+   * from older control planes, which a client treats as a chosen name. */
+  defaultName?: true;
 }
 
 export interface IdentityAdministrationView {

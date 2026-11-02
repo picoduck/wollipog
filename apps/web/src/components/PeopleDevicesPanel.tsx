@@ -30,13 +30,17 @@ import {
   canAdminister,
   deviceCountLabel,
   devicesByPerson,
+  isOwnRow,
   OWNER_LOCKED_REASON,
   personRowAction,
 } from "./people-device-rows.js";
+import { useInstanceScope } from "../instance-scope.js";
+import { dismissSetYourName, setYourNameDismissed } from "../set-your-name.js";
 
 type AccessDialog =
   | { kind: "add-person" }
   | { kind: "manage-person"; member: OrganizationMembershipView }
+  | { kind: "your-name"; member: OrganizationMembershipView }
   | { kind: "pair-device" }
   | { kind: "device"; device: DeviceView }
   | { kind: "create-team" }
@@ -162,9 +166,13 @@ function PersonRow({
 }) {
   const { title, reveal } = usePersonTitle(member.userName);
   const action = personRowAction(member, context);
-  const trailing = action === "manage"
+  const own = action === "you" || action === "edit-own-name";
+  const opens = action === "manage" || action === "edit-own-name";
+  const trailing = opens
     ? phone ? <RowChevron /> : (
-      <button type="button" className="btn sm ghost" aria-haspopup="dialog" onClick={onManage}>Manage…</button>
+      <button type="button" className="btn sm ghost" aria-haspopup="dialog" onClick={onManage}>
+        {action === "manage" ? "Manage…" : "Edit Name…"}
+      </button>
     )
     : action === "owner-locked"
       ? phone
@@ -178,7 +186,7 @@ function PersonRow({
       titleAfter={(
         <>
           {reveal}
-          {action === "you" && <StatusBadge tone="neutral" noDot label="You" />}
+          {own && <StatusBadge tone="neutral" noDot label="You" />}
           {/* Status shows only when it is an exception: Active shows nothing (§11.1). */}
           {member.userStatus === "suspended" && <StatusBadge meta={statusMeta("member", "suspended")} />}
         </>
@@ -186,11 +194,13 @@ function PersonRow({
       meta={(
         <>
           <MetaItem icon={<ShieldIcon size={14} />}>{titleCaseLabel(member.role)}</MetaItem>
+          {/* Your name is still the one the server gave you, until you save one (#3001). */}
+          {own && context.defaultName && <MetaItem>Default name</MetaItem>}
           {deviceCount !== null && <MetaItem icon={<DeviceIcon size={14} />}>{deviceCountLabel(deviceCount)}</MetaItem>}
           {teamNames.length > 0 && <MetaItem icon={<TeamIcon size={14} />}>{teamNames.join(", ")}</MetaItem>}
         </>
       )}
-      onOpen={action === "manage" ? onManage : undefined}
+      onOpen={opens ? onManage : undefined}
       trailing={trailing}
     />
   );
@@ -309,6 +319,17 @@ export function PeopleDevicesPanel({
   const admin = canAdminister(identity.context);
   // Pairing and revoking are trusted-local operations; a paired dashboard only lists.
   const canPair = admin && identity.context.localBootstrap;
+  // Set Your Name (#3001): only the person whose name is still the server's default is asked, and only
+  // when they can rename themselves. Not Now hides it on this device; saving a name ends it everywhere.
+  const instanceScope = useInstanceScope();
+  const ownUserId = identity.context.userId;
+  const [notNow, setNotNow] = useState(() => setYourNameDismissed(ownUserId, instanceScope));
+  const ownMember = identity.memberships.find((member) => isOwnRow(member, identity.context));
+  const askForName = admin && identity.context.defaultName === true && !notNow;
+  const dismissNotice = () => {
+    dismissSetYourName(ownUserId, instanceScope);
+    setNotNow(true);
+  };
   const contextRef = useRef(identity.context);
   contextRef.current = identity.context;
 
@@ -423,6 +444,23 @@ export function PeopleDevicesPanel({
         count={people.length}
         action={admin && <SectionAction label="Add Person…" onClick={() => setDialog({ kind: "add-person" })} />}
       >
+        {ownMember && askForName && (
+          <Notice
+            tone="neutral"
+            title="Set Your Name"
+            actions={(
+              <>
+                <button type="button" className="btn sm" aria-haspopup="dialog"
+                  onClick={() => setDialog({ kind: "your-name", member: ownMember })}>
+                  Set Your Name…
+                </button>
+                <button type="button" className="btn sm" onClick={dismissNotice}>Not Now</button>
+              </>
+            )}
+          >
+            People in your organization see you as “{ownMember.userName}”. Add your name so they know who you are.
+          </Notice>
+        )}
         <div className="surface">
           {people.map((member) => (
             <PersonRow
@@ -432,7 +470,7 @@ export function PeopleDevicesPanel({
               deviceCount={deviceCounts ? deviceCounts.get(member.userId) ?? 0 : null}
               teamNames={teamNamesByPerson.get(member.userId) ?? []}
               phone={phone}
-              onManage={() => setDialog({ kind: "manage-person", member })}
+              onManage={() => setDialog({ kind: isOwnRow(member, identity.context) ? "your-name" : "manage-person", member })}
             />
           ))}
         </div>
@@ -530,6 +568,15 @@ export function PeopleDevicesPanel({
           pairedDevices={canPair && devices
             ? devices.filter((device) => device.userId === dialog.member.userId).length
             : null}
+          onClose={() => setDialog(null)}
+          onSaved={refresh}
+        />
+      )}
+      {dialog?.kind === "your-name" && (
+        <ManagePersonDialog
+          actorRole={identity.context.role}
+          member={dialog.member}
+          self={{ defaultName: identity.context.defaultName === true }}
           onClose={() => setDialog(null)}
           onSaved={refresh}
         />

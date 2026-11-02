@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import React, { act } from "react";
@@ -245,7 +246,8 @@ test("person rows mark your own row You, show status only as an exception, and n
     const me = rowNamed(list, "person", "Misko")!;
     assert.match(me.textContent ?? "", /You/);
     assert.equal(buttonNamed(me, "Manage…"), undefined, "your own row has no Manage…");
-    assertNoDomNode(me.querySelector(".access-row-open"), "and opens nothing");
+    assert.ok(buttonNamed(me, "Edit Name…"), "but an owner edits their own name from it (#3001)");
+    assert.doesNotMatch(me.textContent ?? "", /Default name/, "a chosen name is not called the default");
     // No person shows Active; the suspended one shows one neutral hollow-dot badge.
     assert.doesNotMatch(list.textContent ?? "", /Active/);
     const sam = rowNamed(list, "person", "Sam Lee")!;
@@ -550,5 +552,144 @@ test("a directory change another dashboard made reloads the lists in place (#260
     assert.ok(view.panel().querySelector(".access-sections") === panelRoot, "the panel stayed mounted");
   } finally {
     await view.unmount();
+  }
+});
+
+/** The directory while your name is still the default "Owner" (#3001), until a save names you. */
+function defaultNameServer(role: OrganizationRole = "owner") {
+  const server = { name: "Owner", defaultName: true, updates: [] as Array<{ userId: string; body: object }> };
+  const getIdentity = async (): Promise<IdentityAdministrationView> => {
+    const current = directory(role, {
+      memberships: people.map((one) => one.userId === "me" ? { ...one, userName: server.name, role } : one),
+    });
+    return {
+      ...current,
+      context: { ...current.context, userName: server.name, ...(server.defaultName ? { defaultName: true as const } : {}) },
+    };
+  };
+  const updateIdentityMember = async (userId: string, body: { displayName?: string }) => {
+    server.updates.push({ userId, body });
+    if (userId === "me" && body.displayName !== undefined) {
+      server.name = body.displayName;
+      server.defaultName = false;
+    }
+    return { membership: member(userId, server.name, role) };
+  };
+  return { server, getIdentity, updateIdentityMember };
+}
+
+const setYourName = (body: HTMLElement) => section(body, "people").querySelector(".notice");
+
+test("while your name is the default, People asks you to set it, and saving any name ends it (#3001)", async () => {
+  localStorage.clear();
+  const { server, getIdentity, updateIdentityMember } = defaultNameServer();
+  const view = await mount({ getIdentity, updateIdentityMember });
+  try {
+    const notice = setYourName(view.body)!;
+    assert.ok(notice.classList.contains("t-neutral"), "one neutral notice");
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Set Your Name");
+    assert.match(notice.textContent ?? "",
+      /People in your organization see you as “Owner”\. Add your name so they know who you are\./);
+    assert.deepEqual(buttons(notice).map((button) => button.textContent), ["Set Your Name…", "Not Now"]);
+    assert.ok(notice.nextElementSibling?.classList.contains("surface"), "at the top of the People section, above its rows");
+    const me = () => rowNamed(section(view.body, "people"), "person", "Owner")!;
+    assert.match(me().querySelector(".access-row-meta")?.textContent ?? "", /^OwnerDefault name/);
+
+    await click(buttonNamed(notice, "Set Your Name…"));
+    assert.equal(dialog().querySelector(".modal-title, h2")?.textContent, "Your Name");
+    // Saving the default unchanged is still saving a name.
+    await click(buttonNamed(dialog(), "Save Changes"));
+    assert.deepEqual(server.updates, [{ userId: "me", body: { displayName: "Owner" } }]);
+    assert.equal(document.body.querySelectorAll('[role="dialog"]').length, 0);
+    assertNoDomNode(setYourName(view.body), "the notice is gone once a name is saved");
+    assert.doesNotMatch(me().textContent ?? "", /Default name/);
+    assert.match(me().textContent ?? "", /You/, "and the row still says You");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("your own row and its Edit Name… open Your Name, which sends only the new name (#3001)", async () => {
+  localStorage.clear();
+  const { server, getIdentity, updateIdentityMember } = defaultNameServer();
+  const view = await mount({ getIdentity, updateIdentityMember });
+  try {
+    const me = rowNamed(section(view.body, "people"), "person", "Owner")!;
+    await click(me.querySelector(".access-row-open")!);
+    assert.equal(dialog().querySelector(".modal-title, h2")?.textContent, "Your Name");
+    await click(buttonNamed(dialog(), "Cancel"));
+    await click(buttonNamed(me, "Edit Name…"));
+    const yours = dialog();
+    assert.equal(yours.querySelector(".modal-title, h2")?.textContent, "Your Name");
+    assertNoDomNode(yours.querySelector('[role="radiogroup"]'), "no Access Level choice");
+    assert.equal(buttonNamed(yours, "Suspend Access…"), undefined);
+    assert.match(yours.textContent ?? "", /Access LevelOwner/);
+    assert.match(yours.textContent ?? "", /You can't change your own access level\./);
+    const input = yours.querySelector("input")!;
+    await act(async () => {
+      input.value = "Misko";
+      fireDomEvent.change(input);
+    });
+    await click(buttonNamed(yours, "Save Changes"));
+    assert.deepEqual(server.updates, [{ userId: "me", body: { displayName: "Misko" } }]);
+    const renamed = rowNamed(section(view.body, "people"), "person", "Misko")!;
+    assert.match(renamed.textContent ?? "", /You/);
+    assertNoDomNode(setYourName(view.body));
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Not Now hides Set Your Name on this device only; the Default name line stays (#3001)", async () => {
+  localStorage.clear();
+  const first = defaultNameServer();
+  let view = await mount({ getIdentity: first.getIdentity, updateIdentityMember: first.updateIdentityMember });
+  try {
+    await click(buttonNamed(setYourName(view.body)!, "Not Now"));
+    assertNoDomNode(setYourName(view.body));
+    assert.deepEqual(first.server.updates, [], "Not Now saves nothing");
+    assert.match(rowNamed(section(view.body, "people"), "person", "Owner")!.textContent ?? "", /Default name/);
+  } finally {
+    await view.unmount();
+  }
+  // A reload on this device keeps it hidden.
+  view = await mount({ getIdentity: first.getIdentity, updateIdentityMember: first.updateIdentityMember });
+  try {
+    assertNoDomNode(setYourName(view.body), "still hidden after a reload");
+  } finally {
+    await view.unmount();
+  }
+  // Another device, with its own storage, still asks.
+  localStorage.clear();
+  view = await mount({ getIdentity: first.getIdentity, updateIdentityMember: first.updateIdentityMember });
+  try {
+    assert.ok(setYourName(view.body), "another device still shows the notice");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("Set Your Name shows only to the person whose name is the default, and a viewer's own row opens nothing (#3001)", async () => {
+  localStorage.clear();
+  // Everyone else's context carries no marker, even when the default person is in their list.
+  const other = await mount();
+  try {
+    assertNoDomNode(setYourName(other.body));
+    assert.doesNotMatch(section(other.body, "people").textContent ?? "", /Default name/);
+  } finally {
+    await other.unmount();
+  }
+  // A viewer can't call the identity routes, so they are not asked, and their row stays plain.
+  const { getIdentity } = defaultNameServer("viewer");
+  const viewer = await mount({ role: "viewer", getIdentity });
+  try {
+    assertNoDomNode(setYourName(viewer.body));
+    const me = rowNamed(section(viewer.body, "people"), "person", "Owner")!;
+    assert.match(me.textContent ?? "", /You/);
+    assertNoDomNode(me.querySelector(".access-row-open"), "the row opens nothing");
+    assert.equal(buttons(me).length, 0, "and has no action");
+    assert.equal(document.body.querySelectorAll('[role="dialog"]').length, 0);
+  } finally {
+    await viewer.unmount();
   }
 });

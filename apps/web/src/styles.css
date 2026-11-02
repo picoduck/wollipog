@@ -10301,8 +10301,9 @@ textarea {
 .danger-text {
   color: var(--danger-text);
 }
-/* Device Details (#2997): its facts, then one sentence on a paired dashboard. */
-.device-details-note {
+/* One sentence under a dialog's facts: Device Details on a paired dashboard (#2997), and Your Name's
+   read-only access level (#3001). */
+.facts-note {
   margin: 0;
   color: var(--text-dim);
   font: var(--type-body);
