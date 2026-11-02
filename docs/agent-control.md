@@ -524,6 +524,18 @@ successful replies, and ambiguous steering errors identify the exact submission 
 and Dismiss path. Agent reads and resolution have the same descendant scope and visibility checks
 as `prompt_session`; an agent cannot use them on itself, ancestors, siblings, or unrelated sessions.
 
+A turn started by a durable command refuses ordinary steering. One exception (#4022): a child's
+controlling Orchestrator can steer `prompt_session` text into a running turn that the control plane
+started from its own prompt outbox (an assignment, an Orchestrator prompt, a decision resume, or a
+continuation). The sender must be the child's immediate parent and also its outermost
+policy-bearing Orchestrator. The control plane passes the exact started command to the runner, and
+the runner admits the steer only when that command started the active turn. Turns started by an
+automation, recovered answers, recovery continuations, nested Orchestrators, grandparents and
+people keep the existing refusal, and every other steering guard still applies. The steering
+attempt gets its own receipt, and the outbox command still settles at its own turn boundary. A
+refused steer still falls back to the queue, and so does every steer on a runner that predates this
+exception.
+
 Queue Again explicitly admits one ordinary queued message; it cannot prove that an uncertain
 provider write was never delivered. Inspect the attempt and session events before choosing an
 action. A `resolution.state` of `pending` means recovery is staged, including while the runner is

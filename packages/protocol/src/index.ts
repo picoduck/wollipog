@@ -10415,6 +10415,11 @@ export interface SteerSessionMessage {
   images?: PromptImageInput[];
   /** Stable queue identity only. Every promotion action still receives a fresh submissionId. */
   promotePromptId?: string;
+  /** #4022: the control plane's own prompt-outbox command whose running turn the child's
+   * controlling Orchestrator may steer with direct text. Server-derived, never taken from an API
+   * body; the runner admits it only when it names the exact durable command that started the active
+   * turn. A runner that predates this field ignores it and keeps refusing durable turns. */
+  controllingOrchestratorCommandId?: string;
 }
 
 /** Explicit user resolution for an uncertain delivery, or durable acknowledgement of rejection. */

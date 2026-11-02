@@ -5274,7 +5274,8 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
   const target = db.getSession(id);
   const holdReader = target ? sessionHoldReaderFor(db, principal, target) : undefined;
-  const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader);
+  const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader,
+    principal?.kind === "agent" ? principal : undefined);
   return respond(reply, result.ok && result.data
     ? { ...result, data: withSessionHoldAdviceFor(db, principal, result.data, holdReader) }
     : result);

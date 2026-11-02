@@ -24855,6 +24855,15 @@ export class ControlPlaneDb {
     return row ? this.sessionPromptCommand(row) : null;
   }
 
+  /** The one prompt-outbox command this runner reports as having started the session's current turn
+   * (#4022). Null when there is none or more than one, so an ambiguous record names no turn. */
+  startedSessionPromptCommand(sessionId: string, runnerId: string): SessionPromptCommandRecord | null {
+    const rows = this.stmt(`SELECT * FROM session_prompt_commands
+      WHERE session_id=? AND runner_id=? AND state='started' AND dismissed_at IS NULL LIMIT 2`)
+      .all(sessionId, runnerId) as unknown as SessionPromptCommandRow[];
+    return rows.length === 1 ? this.sessionPromptCommand(rows[0]!) : null;
+  }
+
   dueSessionPromptCommands(now: number, runnerId?: string, limit = 100): SessionPromptCommandRecord[] {
     const runner = runnerId ? "AND command.runner_id=?" : "";
     const approvalNow = Math.min(now, Date.now());
