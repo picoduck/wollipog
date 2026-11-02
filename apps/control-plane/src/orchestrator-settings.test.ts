@@ -105,7 +105,7 @@ test("Orchestrator defaults persist per authenticated user and preserve capabili
       "the same signed-in user sees persisted defaults on another device");
 
     const local = db.localIdentityContext();
-    db.raw().prepare("INSERT INTO identity_users VALUES (?, ?, 'active', ?, ?)")
+    db.raw().prepare("INSERT INTO identity_users (user_id, display_name, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)")
       .run("other-user", "Other User", 3, 3);
     db.raw().prepare("INSERT INTO identity_memberships VALUES (?, ?, 'viewer', ?, ?)")
       .run(local.organizationId, "other-user", 3, 3);
