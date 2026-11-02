@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionUsageResponse, SessionView, UsageAmount, UsageCostSource } from "@wollipog/protocol";
+import type { AgentModel, SessionUsageResponse, SessionView, UsageAmount, UsageCostSource } from "@wollipog/protocol";
 import type { ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { SessionUsageControl } from "./SessionUsageControl.js";
@@ -50,31 +50,40 @@ function session(overrides: Partial<SessionView> = {}): SessionView {
   } as SessionView;
 }
 
-async function mount(view: SessionView, usage: SessionUsageResponse | Error | null) {
+/** `usage` answers every fetch, or a list answers them in turn (the last one repeating). */
+async function mount(
+  view: SessionView,
+  usage: SessionUsageResponse | Error | null | ReadonlyArray<SessionUsageResponse | Error>,
+  models?: AgentModel[],
+) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  let fetches = 0;
   const client = {
     sessionUsage: async () => {
-      if (usage instanceof Error) throw usage;
-      if (!usage) return new Promise<never>(() => {});
-      return usage;
+      const answers = Array.isArray(usage) ? usage : [usage];
+      const answer = answers[Math.min(fetches, answers.length - 1)] as SessionUsageResponse | Error | null;
+      fetches += 1;
+      if (answer instanceof Error) throw answer;
+      if (!answer) return new Promise<never>(() => {});
+      return answer;
     },
   } as unknown as ApiClient;
-  await act(async () => {
-    root.render(<ApiProvider client={client}><SessionUsageControl session={view} /></ApiProvider>);
-  });
+  const node = (next: SessionView) => (
+    <ApiProvider client={client}><SessionUsageControl session={next} models={models} /></ApiProvider>
+  );
+  await act(async () => { root.render(node(view)); });
   return {
     container,
-    button: () => container.querySelector<HTMLButtonElement>(".session-cost-button"),
+    fetches: () => fetches,
+    button: () => container.querySelector<HTMLButtonElement>(".cbar-usage"),
     popover: () => container.querySelector<HTMLElement>(".session-usage-popover"),
     async open() {
-      await act(async () => { container.querySelector<HTMLButtonElement>(".session-cost-button")!.click(); });
+      await act(async () => { container.querySelector<HTMLButtonElement>(".cbar-usage")!.click(); });
     },
     async rerender(next: SessionView) {
-      await act(async () => {
-        root.render(<ApiProvider client={client}><SessionUsageControl session={next} /></ApiProvider>);
-      });
+      await act(async () => { root.render(node(next)); });
     },
     async cleanup() {
       await act(async () => { root.unmount(); });
@@ -92,7 +101,18 @@ function facts(list: Element | null): Record<string, string> {
   return out;
 }
 
-test("a priced session shows only the cost, and opens Session Usage with cumulative tokens", async () => {
+/** The Token Breakdown disclosure's facts. */
+const breakdown = (popover: Element) => facts(popover.querySelector(".usage-disclosure dl"));
+
+/** The table by model as rows of cell text, the Total row last. */
+function table(popover: Element): string[][] {
+  return [...popover.querySelectorAll(".usage-table tr")]
+    .map((row) => [...row.children].map((cell) => cell.textContent ?? ""));
+}
+
+const notes = (popover: Element) => [...popover.querySelectorAll(".usage-popover-note")].map((note) => note.textContent);
+
+test("a priced session shows only the cost, and opens Session Cost with the token breakdown closed", async () => {
   const view = await mount(session(), {
     sessionId: "s1",
     totals: amount({
@@ -120,18 +140,20 @@ test("a priced session shows only the cost, and opens Session Usage with cumulat
   await view.open();
   const popover = view.popover()!;
   assert.equal(button.getAttribute("aria-expanded"), "true");
-  assert.equal(popover.getAttribute("aria-label"), "Session Usage");
+  assert.equal(popover.getAttribute("aria-label"), "Session Cost");
   assert.equal(button.getAttribute("aria-controls"), popover.getAttribute("id"));
-  const rows = facts(popover.querySelector(".session-usage-facts"));
-  assert.equal(rows["Input"], "2.0k");
-  assert.equal(rows["Output"], "900");
-  assert.equal(rows["Cache Read"], "36k");
-  assert.equal(rows["Cache Write"], "2.0k");
-  assert.equal(rows["Reasoning"], "300");
-  assert.equal(rows["Total Processed"], "41k");
-  assert.match(popover.textContent ?? "", /Cost as reported by the provider\./);
+  assert.equal(popover.querySelector(".usage-popover-title")!.textContent, "Session Cost");
+  assert.equal(popover.querySelector(".usage-popover-figure")!.textContent, "$0.59");
+  // No ledger rows yet: the processed total stays in view in place of the table.
+  assertNoDomNode(popover.querySelector(".usage-table"));
+  assert.deepEqual(facts(popover.querySelector(".session-usage-popover > dl.facts")), { Tokens: "41K" });
+  const disclosure = popover.querySelector<HTMLDetailsElement>("details.disclosure")!;
+  assert.equal(disclosure.open, false, "Token Breakdown is closed by default");
+  assert.match(disclosure.querySelector("summary")!.textContent ?? "", /^Token Breakdown$/);
+  assert.deepEqual(breakdown(popover), { Input: "2K", Output: "900", "Cache Read": "36K", "Cache Write": "2K", Reasoning: "300" });
+  assert.ok(notes(popover).includes("Cost as reported by the provider."));
   // Occupancy and capacity stay with the context meter; the usage panel never repeats them.
-  assert.doesNotMatch(popover.textContent ?? "", /Capacity|Remaining|258k/);
+  assert.doesNotMatch(popover.textContent ?? "", /Capacity|Remaining|258K/);
 
   await view.cleanup();
 });
@@ -259,9 +281,14 @@ test("Escape passes through once the open control has stopped rendering", async 
 });
 
 test("Escape from inside the popover returns focus to the cost chip", async () => {
-  const view = await mount(session({ driver: "codex-app-server" }), { sessionId: "s1", totals: amount(), byModel: [] });
+  const view = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
+    byModel: [],
+    pricing: { status: "fresh", source: "https://example.com/rates.json", fetchedAt: 1, knownModels: 1200 },
+  });
   await view.open();
-  const info = view.popover()!.querySelector<HTMLButtonElement>('[aria-label="About Codex App Server Usage"]')!;
+  const info = view.popover()!.querySelector<HTMLAnchorElement>("a.link")!;
   info.focus();
   assert.equal(domWindow.document.activeElement, info as never);
   await act(async () => {
@@ -272,87 +299,160 @@ test("Escape from inside the popover returns focus to the cost chip", async () =
   await view.cleanup();
 });
 
-test("an unpriced session refuses to show $0.00 and says so in the panel", async () => {
-  const view = await mount(session({ costUsd: 0 }), {
+test("an unpriced session shows its token count, the Unpriced badge and Unpriced cells, never $0.00", async () => {
+  const view = await mount(session({ costUsd: 0, tokensIn: 184_000, tokensOut: 21_000 }), {
     sessionId: "s1",
-    totals: amount({
-      inputTokens: 25_000,
-      outputTokens: 900,
-      processedTokens: 25_900,
-      costSource: "unpriced",
-      unpricedRecords: 4,
-    }),
-    byModel: [],
+    totals: amount({ inputTokens: 184_000, outputTokens: 21_000, processedTokens: 205_000, costSource: "unpriced", unpricedRecords: 4 }),
+    byModel: [
+      { model: "local-large", ...amount({ inputTokens: 160_000, outputTokens: 18_000, processedTokens: 178_000, costSource: "unpriced", unpricedRecords: 3 }) },
+      { model: "local-small", ...amount({ inputTokens: 24_000, outputTokens: 3_000, processedTokens: 27_000, costSource: "unpriced", unpricedRecords: 1 }) },
+    ],
   });
 
   const button = view.button()!;
-  assert.equal(button.textContent, "$—");
-  assert.equal(button.getAttribute("aria-label"), "Session Usage: Cost Unavailable");
-  assert.equal(button.classList.contains("is-unpriced"), true);
+  assert.equal(button.textContent, "205K Tokens");
+  assert.equal(button.getAttribute("aria-label"), "Session Usage: 205K Tokens, Unpriced");
+  assert.doesNotMatch(button.textContent ?? "", /\$/);
 
   await view.open();
   const popover = view.popover()!;
-  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /Not Priced/);
-  assert.doesNotMatch(popover.textContent ?? "", /\$0\.00/);
-  assert.match(popover.textContent ?? "", /4 records could not be priced, so this cost is a lower bound\./);
-  const rows = facts(popover.querySelector(".session-usage-facts"));
-  assert.equal(rows["Input"], "25k");
-  assert.equal(rows["Output"], "900");
+  const badge = popover.querySelector(".usage-popover-head .status")!;
+  assert.equal(badge.textContent, "Unpriced");
+  assert.ok(badge.classList.contains("t-neutral"));
+  assertNoDomNode(popover.querySelector(".usage-popover-figure"));
+  assert.ok(notes(popover).includes("No rate is known for these models, so the cost isn't estimated. Token counts are exact."));
+  assert.deepEqual(table(popover), [
+    ["Model", "Tokens", "Cost"],
+    ["local-large", "178K", "Unpriced"],
+    ["local-small", "27K", "Unpriced"],
+    ["Total", "205K", "Unpriced"],
+  ]);
+  assert.doesNotMatch(popover.textContent ?? "", /\$0\.00|lower bound/);
+  await view.cleanup();
+});
+
+test("two models are one table of two rows plus Total, by display name, with nothing uppercased or monospace", async () => {
+  const models: AgentModel[] = [{ id: "opus", displayName: "Opus 5" }];
+  const view = await mount(session({ costUsd: 1.37, tokensIn: 184_000, tokensOut: 21_000 }), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 184_000, uncachedInputTokens: 24_000, cachedInputTokens: 160_000, outputTokens: 21_000,
+      processedTokens: 205_000, costUsd: 1.37, costSource: "modelPriced" }),
+    byModel: [
+      { model: "opus", ...amount({ processedTokens: 178_000, costUsd: 1.21, costSource: "modelPriced" }) },
+      { model: "claude-haiku-4-5-20251001", ...amount({ processedTokens: 27_000, costUsd: 0.16, costSource: "modelPriced" }) },
+    ],
+    pricing: { status: "fresh", source: "https://example.com/rates.json", fetchedAt: 1, knownModels: 1200 },
+  }, models);
+
+  await view.open();
+  const popover = view.popover()!;
+  assert.equal(popover.querySelectorAll("table").length, 1);
+  assert.equal(popover.querySelector("table")!.className, "table compact usage-table");
+  assert.deepEqual(table(popover), [
+    ["Model", "Tokens", "Cost"],
+    ["Opus 5", "178K", "$1.21"],
+    ["Haiku 4.5", "27K", "$0.16"],
+    ["Total", "205K", "$1.37"],
+  ]);
+  // The catalog's display name, else `resolvedModelLabel`; the exact id is the tooltip.
+  const names = [...popover.querySelectorAll("tbody th")];
+  assert.deepEqual(names.map((name) => name.getAttribute("title")), ["opus", "claude-haiku-4-5-20251001"]);
+  assert.deepEqual([...popover.querySelectorAll("thead th")].map((header) => header.getAttribute("scope")), ["col", "col", "col"]);
+  assert.equal(popover.querySelector<HTMLDetailsElement>("details.disclosure")!.open, false);
+  // §17.1: no text is set in capitals or a monospace face by a class that could carry it.
+  for (const element of popover.querySelectorAll("*")) {
+    assert.doesNotMatch(element.className.toString(), /mono|uppercase|session-usage-label|session-usage-model/, element.outerHTML);
+  }
+  assert.doesNotMatch(popover.textContent ?? "", /By Model|BY MODEL/);
+  // The footer names the rates; the link carries the source rather than printing it.
+  const foot = popover.querySelector(".usage-popover-foot")!;
+  assert.equal(foot.querySelector(".usage-popover-note")!.textContent, "Estimated API cost at published rates.");
+  const link = foot.querySelector("a")!;
+  assert.equal(link.textContent, "published rates");
+  assert.equal(link.getAttribute("href"), "https://example.com/rates.json");
+  assert.equal(link.getAttribute("target"), "_blank");
+  assert.equal(link.getAttribute("rel"), "noreferrer");
   await view.cleanup();
 });
 
 test("a free session reports $0.00 once the ledger proves the provider priced it", async () => {
   const view = await mount(session({ costUsd: 0 }), {
     sessionId: "s1",
-    totals: amount({
-      inputTokens: 25_000,
-      outputTokens: 900,
-      processedTokens: 25_900,
-      costUsd: 0,
-      costSource: "providerReported",
-    }),
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0, costSource: "providerReported" }),
     byModel: [
       { model: "local-llama", ...amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costSource: "providerReported" }) },
     ],
   });
 
-  // Before the ledger loads, the strip cannot tell "free" from "nobody priced it", so it says so.
-  assert.equal(view.button()!.textContent, "$—");
+  // Before the ledger loads, the strip cannot tell "free" from "nobody priced it", so it shows tokens.
+  assert.equal(view.button()!.textContent, "26K Tokens");
   await view.open();
   const popover = view.popover()!;
   // Once provenance is known, zero is stated as the amount it is rather than as a missing price.
   assert.equal(view.button()!.textContent, "$0.00");
   assert.equal(view.button()!.getAttribute("aria-label"), "Session Usage: $0.00");
-  assert.equal(view.button()!.classList.contains("is-unpriced"), false);
-  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /\$0\.00/);
-  assert.doesNotMatch(popover.textContent ?? "", /Not Priced/);
-  assert.equal(facts(popover.querySelector(".session-usage-model dl"))["Cost"], "$0.00");
+  assert.equal(popover.querySelector(".usage-popover-figure")!.textContent, "$0.00");
+  assert.doesNotMatch(popover.textContent ?? "", /Unpriced/);
+  assert.deepEqual(table(popover).slice(1), [["local-llama", "26K", "$0.00"], ["Total", "26K", "$0.00"]]);
   await view.cleanup();
 });
 
-test("a provider-reported free snapshot keeps a $0.00 heading while detail is pending", async () => {
+test("a provider-reported free snapshot keeps a $0.00 figure while detail is pending", async () => {
   const view = await mount(session({ costUsd: 0, costSource: "providerReported" }), null);
 
   assert.equal(view.button()!.textContent, "$0.00");
   await view.open();
-  const heading = view.popover()!.querySelector(".session-usage-head")!.textContent ?? "";
-  assert.match(heading, /\$0\.00/);
-  assert.doesNotMatch(heading, /Not Priced/);
+  assert.equal(view.popover()!.querySelector(".usage-popover-figure")!.textContent, "$0.00");
+  assertNoDomNode(view.popover()!.querySelector(".usage-popover-head .status"));
   await view.cleanup();
 });
 
-test("a provider-reported free snapshot keeps a $0.00 heading when detail fails", async () => {
-  const view = await mount(
-    session({ costUsd: 0, costSource: "providerReported" }),
-    new Error("usage endpoint unavailable"),
-  );
-
+test("a cost without token counts says so, with no table, no breakdown and no unknown model", async () => {
+  const view = await mount(session({ tokensIn: 0, tokensOut: 0, costUsd: 0.42 }), {
+    sessionId: "s1",
+    totals: amount({ costUsd: 0.42, costSource: "providerReported" }),
+    byModel: [{ model: "unknown", ...amount({ costUsd: 0.42, costSource: "providerReported" }) }],
+  });
+  assert.equal(view.button()!.textContent, "$0.42");
   await view.open();
   const popover = view.popover()!;
-  const heading = popover.querySelector(".session-usage-head")!.textContent ?? "";
-  assert.match(heading, /\$0\.00/);
-  assert.doesNotMatch(heading, /Not Priced/);
-  assert.match(popover.querySelector("[role=alert]")!.textContent ?? "", /usage endpoint unavailable/);
+  assert.equal(popover.querySelector(".usage-popover-figure")!.textContent, "$0.42");
+  assert.ok(notes(popover).includes("The provider reported this cost but no token counts, so there is no breakdown by model."));
+  assertNoDomNode(popover.querySelector("table"));
+  assertNoDomNode(popover.querySelector("details"));
+  assertNoDomNode(popover.querySelector("dl"));
+  assert.doesNotMatch(popover.textContent ?? "", /unknown/);
+  await view.cleanup();
+});
+
+test("a failed breakdown is a compact danger notice whose Retry refetches once", async () => {
+  const ledger: SessionUsageResponse = {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "providerReported" }),
+    byModel: [{ model: "gpt-5.5-codex", ...amount({ processedTokens: 25_900, costUsd: 0.59, costSource: "providerReported" }) }],
+  };
+  const view = await mount(session(), [new Error("usage endpoint unavailable"), ledger]);
+  await view.open();
+  assert.equal(view.fetches(), 1);
+  const popover = view.popover()!;
+  const notice = popover.querySelector<HTMLElement>(".notice")!;
+  assert.ok(notice.classList.contains("compact"));
+  assert.ok(notice.classList.contains("t-danger"));
+  assert.equal(notice.getAttribute("role"), "alert");
+  assert.equal(notice.querySelector(".notice-body")!.textContent, "Couldn't load the breakdown by model.");
+  // The raw message stays behind Show Details.
+  assert.doesNotMatch(notice.textContent ?? "", /usage endpoint unavailable/);
+  const toggle = [...notice.querySelectorAll("button")].find((button) => button.textContent === "Show Details")!;
+  await act(async () => { toggle.click(); });
+  assert.match(notice.textContent ?? "", /usage endpoint unavailable/);
+  // The processed total stays visible beside the failure.
+  assert.deepEqual(facts(popover.querySelector(".session-usage-popover > dl.facts")), { Tokens: "26K" });
+
+  const retry = [...notice.querySelectorAll("button")].find((button) => button.textContent === "Retry")!;
+  await act(async () => { retry.click(); });
+  assert.equal(view.fetches(), 2, "Retry refetches once");
+  assertNoDomNode(view.popover()!.querySelector(".notice"));
+  assert.deepEqual(table(view.popover()!).slice(1), [["gpt-5.5-codex", "26K", "$0.59"], ["Total", "26K", "$0.59"]]);
   await view.cleanup();
 });
 
@@ -368,17 +468,15 @@ test("a lagging ledger drives nothing in the panel, not just the token rows", as
     pricing: { status: "fresh", source: "litellm", fetchedAt: 1, knownModels: 1200 },
   });
 
-  assert.equal(view.button()!.textContent, "$—", "a stale priced zero must not be shown as $0.00");
+  assert.equal(view.button()!.textContent, "10K Tokens", "a stale priced zero must not be shown as $0.00");
   await view.open();
   const popover = view.popover()!;
-  const rows = facts(popover.querySelector(".session-usage-facts"));
-  assert.equal(rows["Input"], "9.0k");
-  assert.equal(rows["Output"], "1.0k");
-  assert.equal(rows["Total Processed"], "10k");
-  assert.equal(view.button()!.textContent, "$—");
+  assert.deepEqual(breakdown(popover), { Input: "9K", Output: "1K" });
+  assert.deepEqual(facts(popover.querySelector(".session-usage-popover > dl.facts")), { Tokens: "10K" });
+  assert.equal(view.button()!.textContent, "10K Tokens");
   // The rest of the rejected response is rejected too, so nothing on screen disagrees.
-  assert.match(popover.querySelector(".session-usage-head")!.textContent ?? "", /Not Priced/);
-  assertNoDomNode(popover.querySelector(".session-usage-models"));
+  assert.equal(popover.querySelector(".usage-popover-head .status")!.textContent, "Unpriced");
+  assertNoDomNode(popover.querySelector("table"));
   assert.doesNotMatch(popover.textContent ?? "", /stale-model|rate table|reported by the provider/);
   await view.cleanup();
 });
@@ -389,14 +487,14 @@ test("running counters say whether their input includes cached tokens until the 
     totals: amount({ inputTokens: 100, outputTokens: 10, processedTokens: 110, costUsd: 0.01, costSource: "modelPriced" as const }),
     byModel: [],
   };
-  const notes = (popover: Element) => [...popover.querySelectorAll(".session-usage-note")].map((note) => note.textContent);
   for (const [driver, note] of [
     ["claude-code", "Until the breakdown loads, these totals leave out cached input."],
     ["codex-app-server", "Until the breakdown loads, Input includes cached tokens."],
   ] as const) {
     const view = await mount(session({ driver, tokensIn: 9_000, tokensOut: 1_000 }), lagging);
     await view.open();
-    assert.ok(notes(view.popover()!).includes(note), `${driver}: ${notes(view.popover()!).join(" | ")}`);
+    const disclosure = view.popover()!.querySelector(".usage-disclosure")!;
+    assert.ok(notes(disclosure).includes(note), `${driver}: ${notes(disclosure).join(" | ")}`);
     await view.cleanup();
   }
   // A caught-up breakdown reports uncached Input for every driver, so it needs no note.
@@ -410,56 +508,20 @@ test("running counters say whether their input includes cached tokens until the 
   await current.cleanup();
 });
 
-test("a session with an unknown context window still shows its cost", async () => {
-  const view = await mount(
-    session({ contextWindow: undefined, contextTokensUsed: undefined }),
-    { sessionId: "s1", totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59 }), byModel: [] },
-  );
-  assert.equal(view.button()!.textContent, "$0.59");
-  await view.open();
-  const rows = facts(view.popover()!.querySelector(".session-usage-facts"));
-  assert.equal(rows["Input"], "25k");
-  assert.equal(rows["Total Processed"], "26k");
-  await view.cleanup();
-});
-
-test("Codex App Server protocol details stay behind a compact info disclosure", async () => {
+test("the Codex App Server note is one plain sentence inside Token Breakdown, not an overlay", async () => {
   const view = await mount(session({ driver: "codex-app-server" }), {
     sessionId: "s1",
     totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59 }),
     byModel: [],
   });
   await view.open();
-  const disclosure = view.popover()!.querySelector(".session-usage-info")!;
-  const button = disclosure.querySelector("button")!;
-  const detail = disclosure.querySelector(".session-usage-info-detail")!;
-  assert.equal(button.getAttribute("aria-label"), "About Codex App Server Usage");
-  assert.equal(button.getAttribute("aria-expanded"), "false");
-  assert.equal(button.getAttribute("aria-controls"), detail.id);
-  assert.equal(
-    detail.textContent,
-    "Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.",
-  );
-  assert.doesNotMatch(view.popover()!.textContent ?? "", /protocol|v\d/i);
-  await view.cleanup();
-});
-
-test("an estimated-cost URL is a compact link instead of visible source text", async () => {
-  const source = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-  const view = await mount(session(), {
-    sessionId: "s1",
-    totals: amount({ inputTokens: 25_000, outputTokens: 900, processedTokens: 25_900, costUsd: 0.59, costSource: "modelPriced" }),
-    byModel: [],
-    pricing: { status: "fresh", source, fetchedAt: 1, knownModels: 1200 },
-  });
-  await view.open();
-  const note = view.popover()!.querySelector(".session-usage-note")!;
-  const link = note.querySelector("a")!;
-  assert.equal(link.textContent, "Estimated API Costs");
-  assert.equal(link.getAttribute("href"), source);
-  assert.equal(link.getAttribute("target"), "_blank");
-  assert.equal(link.getAttribute("rel"), "noreferrer");
-  assert.doesNotMatch(note.textContent ?? "", /raw\.githubusercontent\.com/);
+  const popover = view.popover()!;
+  assertNoDomNode(popover.querySelector('[aria-label="About Codex App Server Usage"]'));
+  assertNoDomNode(popover.querySelector('[role="note"]'));
+  assert.deepEqual(notes(popover.querySelector(".usage-disclosure")!), [
+    "Codex App Server usage recorded before the machine's Wollipog update counts only the final response of each turn, so older figures are incomplete.",
+  ]);
+  assert.doesNotMatch(popover.textContent ?? "", /protocol|v\d/i);
   await view.cleanup();
 });
 
@@ -472,8 +534,9 @@ test("cached and unavailable URL sources keep their provenance state", async () 
     pricing: { status: "cached", source, fetchedAt: 1, knownModels: 1200 },
   });
   await cached.open();
-  assert.equal(cached.popover()!.querySelector(".session-usage-note")!.textContent, "Estimated API Costs (Cached Rates)");
-  assert.equal(cached.popover()!.querySelector(".session-usage-note a")!.getAttribute("href"), source);
+  const note = cached.popover()!.querySelector(".usage-popover-foot .usage-popover-note")!;
+  assert.equal(note.textContent, "Estimated API cost at published rates. Cached rates.");
+  assert.equal(note.querySelector("a")!.getAttribute("href"), source);
   await cached.cleanup();
 
   const unavailable = await mount(session(), {
@@ -483,12 +546,13 @@ test("cached and unavailable URL sources keep their provenance state", async () 
     pricing: { status: "unavailable", source, fetchedAt: null, knownModels: 0 },
   });
   await unavailable.open();
-  assert.equal(unavailable.popover()!.querySelector(".session-usage-note")!.textContent, "No rate table is loaded, so cost is not estimated.");
-  assertNoDomNode(unavailable.popover()!.querySelector(".session-usage-note a"));
+  const plain = unavailable.popover()!.querySelector(".usage-popover-foot .usage-popover-note")!;
+  assert.equal(plain.textContent, "No rate table is loaded, so cost is not estimated.");
+  assertNoDomNode(plain.querySelector("a"));
   await unavailable.cleanup();
 });
 
-test("a mixed-model session splits by model and names the unpriced one", async () => {
+test("a mixed-model session names the unpriced model and states its cost as a lower bound", async () => {
   const view = await mount(session({ costUsd: 1.21 }), {
     sessionId: "s1",
     totals: amount({
@@ -502,41 +566,81 @@ test("a mixed-model session splits by model and names the unpriced one", async (
       unpricedRecords: 3,
     }),
     byModel: [
-      {
-        model: "gpt-5.5-codex",
-        ...amount({
-          inputTokens: 160_000,
-          uncachedInputTokens: 20_000,
-          cachedInputTokens: 140_000,
-          outputTokens: 18_000,
-          processedTokens: 178_000,
-          costUsd: 1.21,
-          costSource: "providerReported",
-        }),
-      },
-      {
-        model: "gpt-5.5-codex-mini",
-        ...amount({
-          inputTokens: 24_000,
-          outputTokens: 3_000,
-          processedTokens: 27_000,
-          costSource: "unpriced",
-          unpricedRecords: 3,
-        }),
-      },
+      { model: "gpt-5.5-codex", ...amount({ processedTokens: 178_000, costUsd: 1.21, costSource: "providerReported" }) },
+      { model: "gpt-5.5-codex-mini", ...amount({ processedTokens: 27_000, costSource: "unpriced", unpricedRecords: 3 }) },
     ],
     pricing: { status: "fresh", source: "litellm", fetchedAt: 1, knownModels: 1200 },
   });
 
   await view.open();
   const popover = view.popover()!;
-  const models = [...popover.querySelectorAll(".session-usage-model")];
-  assert.equal(models.length, 2);
-  assert.equal(models[0]!.querySelector(".session-usage-model-name")!.textContent, "gpt-5.5-codex");
-  assert.equal(facts(models[0]!.querySelector("dl"))["Cost"], "$1.21");
-  assert.equal(models[1]!.querySelector(".session-usage-model-name")!.textContent, "gpt-5.5-codex-mini");
-  assert.equal(facts(models[1]!.querySelector("dl"))["Cost"], "Not Priced");
+  assert.deepEqual(table(popover).slice(1), [
+    ["gpt-5.5-codex", "178K", "$1.21"],
+    ["gpt-5.5-codex-mini", "27K", "Unpriced"],
+    ["Total", "205K", "$1.21"],
+  ]);
+  // One sentence names the gap; neither the lower-bound note nor the fully unpriced sentence repeats it.
+  assert.deepEqual(notes(popover).filter((note) => /rate|priced|lower bound/.test(note ?? "")),
+    ["Some models have no known rate, so this cost is incomplete. Token counts are exact."]);
   await view.cleanup();
+});
+
+test("an unpriced session keeps the known amount of a model that was priced", async () => {
+  const view = await mount(session({ costUsd: 0, tokensIn: 184_000, tokensOut: 21_000 }), {
+    sessionId: "s1",
+    totals: amount({ processedTokens: 205_000, costSource: "unpriced", unpricedRecords: 3 }),
+    byModel: [
+      { model: "claude-fable-5-1", ...amount({ processedTokens: 178_000, costUsd: 1.21, costSource: "modelPriced" }) },
+      { model: "claude-haiku-4-5", ...amount({ processedTokens: 27_000, costSource: "unpriced", unpricedRecords: 3 }) },
+    ],
+  });
+  assert.equal(view.button()!.textContent, "205K Tokens");
+  await view.open();
+  const popover = view.popover()!;
+  assert.equal(popover.querySelector(".usage-popover-head .status")!.textContent, "Unpriced");
+  assert.deepEqual(table(popover).slice(1), [
+    ["Fable 5.1", "178K", "$1.21"],
+    ["Haiku 4.5", "27K", "Unpriced"],
+    ["Total", "205K", "Unpriced"],
+  ]);
+  assert.ok(notes(popover).includes("Some models have no known rate, so this cost is incomplete. Token counts are exact."));
+  assert.doesNotMatch(popover.textContent ?? "", /No rate is known for these models/);
+  await view.cleanup();
+});
+
+test("a running Claude turn's live usage is its own row, so the rows add up to the Total", async () => {
+  const liveUsage = { tokensIn: 10, tokensOut: 5, costUsd: 0.02 };
+  const ledger: SessionUsageResponse = {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 10, uncachedInputTokens: 10, outputTokens: 5, cachedInputTokens: 1000,
+      processedTokens: 1015, costUsd: 0.01, costSource: "modelPriced" }),
+    byModel: [{ model: "claude-fable-5-1", ...amount({ processedTokens: 1015, costUsd: 0.01, costSource: "modelPriced" }) }],
+  };
+  const view = await mount(session({ driver: "claude-code", tokensIn: 10, tokensOut: 5, costUsd: 0.01, liveUsage }), ledger);
+  await view.open();
+  assert.deepEqual(table(view.popover()!).slice(1), [
+    ["Fable 5.1", "1K", "$0.01"],
+    ["Running Turn", "15", "$0.02"],
+    ["Total", "1K", "$0.03"],
+  ]);
+  await view.cleanup();
+
+  // A running turn whose model has no rate yet is not free.
+  const unrated = await mount(session({ driver: "claude-code", tokensIn: 10, tokensOut: 5, costUsd: 0.01, liveUsage: { ...liveUsage, costUsd: 0 } }), ledger);
+  await unrated.open();
+  assert.deepEqual(table(unrated.popover()!)[2], ["Running Turn", "15", "Unpriced"]);
+  await unrated.cleanup();
+
+  // A provisional request priced from its cache buckets alone has a cost but no counted tokens.
+  const cacheOnly = await mount(session({ driver: "claude-code", tokensIn: 10, tokensOut: 5, costUsd: 0.01,
+    liveUsage: { tokensIn: 0, tokensOut: 0, costUsd: 0.02 } }), ledger);
+  await cacheOnly.open();
+  assert.deepEqual(table(cacheOnly.popover()!).slice(1), [
+    ["Fable 5.1", "1K", "$0.01"],
+    ["Running Turn", "0", "$0.02"],
+    ["Total", "1K", "$0.03"],
+  ]);
+  await cacheOnly.cleanup();
 });
 
 test("a session that has processed nothing renders no control", async () => {
@@ -545,13 +649,12 @@ test("a session that has processed nothing renders no control", async () => {
   await view.cleanup();
 });
 
-test("a failed usage fetch reports the error and still shows the runner's own totals", async () => {
-  const view = await mount(session(), new Error("usage endpoint unavailable"));
-  await view.open();
-  const popover = view.popover()!;
-  assert.match(popover.querySelector("[role=alert]")!.textContent ?? "", /usage endpoint unavailable/);
-  const rows = facts(popover.querySelector(".session-usage-facts"));
-  assert.equal(rows["Input"], "25k");
-  assert.equal(rows["Output"], "900");
-  await view.cleanup();
+test("no production component renders the retired non-bar triggers or the old panel classes", async () => {
+  const { readFileSync, readdirSync } = await import("node:fs");
+  const dir = new URL("./", import.meta.url);
+  for (const file of readdirSync(dir).filter((name) => name.endsWith(".tsx") && !name.includes(".test."))) {
+    const source = readFileSync(new URL(file, dir), "utf8");
+    assert.doesNotMatch(source, /session-cost-button|context-ring-button|session-usage-(?:label|model|info|facts|head|title|note)\b|context-popover-(?:facts|discrepancy|head|note)\b|ProtocolUsageInfo/,
+      `${file} renders a retired usage class`);
+  }
 });

@@ -1,1 +1,0 @@
-|.session-usage-popover|padding|12px

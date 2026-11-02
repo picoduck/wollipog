@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { compactionNote, computeContextFill } from "./context-meter.js";
+import { compactionNote, compactionNotice, computeContextFill } from "./context-meter.js";
 
 test("computeContextFill: small fill keeps one decimal", () => {
   const r = computeContextFill({ tokensIn: 1000, tokensOut: 500, contextWindow: 200_000 });
@@ -66,4 +66,13 @@ test("compactionNote names automatic compaction for native harnesses and defers 
   assert.match(compactionNote("codex-app-server"), /compacts automatically/);
   assert.match(compactionNote("acp"), /up to the agent/);
   assert.match(compactionNote(undefined), /up to the agent/);
+});
+
+test("compactionNotice names the agent from 75%, the next reply from 90%, and nothing for ACP", () => {
+  assert.equal(compactionNotice("claude-code", "neutral", "Claude Code"), null);
+  assert.deepEqual(compactionNotice("codex", "warning", "Codex"),
+    { tone: "warning", text: "Over three quarters full. Codex will compact the conversation soon." });
+  assert.deepEqual(compactionNotice("pi", "danger", "Pi"),
+    { tone: "danger", text: "Almost full. The next long reply will trigger compaction." });
+  assert.equal(compactionNotice("acp", "danger", "Gemini"), null);
 });

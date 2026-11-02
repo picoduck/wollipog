@@ -33,8 +33,9 @@ test("desktop: one Opus entry, a Context Window group, and catalog-sourced capac
   await expect(ring).toHaveAttribute("aria-label", /Context Window 15% Used/);
   await ring.click();
   const popover = page.locator(".context-popover").first();
-  await expect(popover).toContainText("1M · Model Catalog");
-  await expect(popover.locator(".context-popover-discrepancy")).toHaveCount(0);
+  await expect(popover.locator("dl.facts")).toContainText("Window1M");
+  await expect(popover).toContainText("Window size from the model catalog.");
+  await expect(popover.locator(".notice")).toHaveCount(0);
   await page.screenshot({ path: `${SHOT}/desktop-popover-catalog.png` });
 });
 
@@ -88,8 +89,9 @@ test("desktop: a served 200K window against an advertised 1M is named in the pop
   await expect(ring).toHaveAttribute("aria-label", /Context Window 75% Used/);
   await ring.click();
   const popover = page.locator(".context-popover").first();
-  await expect(popover).toContainText("200K · Provider Reported");
-  await expect(popover.locator(".context-popover-discrepancy")).toContainText(
+  await expect(popover.locator("dl.facts")).toContainText("Window200K");
+  await expect(popover).toContainText("Window size reported by the provider.");
+  await expect(popover.locator(".notice.compact.t-warning").first()).toContainText(
     "The provider is serving a 200K context window, not the 1M the selected model advertises.",
   );
   await page.screenshot({ path: `${SHOT}/desktop-popover-downgrade.png` });

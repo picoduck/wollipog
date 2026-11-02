@@ -1,1 +1,0 @@
-|.context-ring-button|padding|4px

@@ -1,8 +1,8 @@
 import { useEffect, useId, type ReactNode } from "react";
-import type { SessionView } from "@wollipog/protocol";
+import type { AgentModel, SessionView } from "@wollipog/protocol";
 import { computeContextFill } from "../context-meter.js";
 import type { ContextWindowCapacity } from "../context-window-capacity.js";
-import { formatContextWindow } from "../context-window-options.js";
+import { formatTokens } from "../format.js";
 import { sessionCostLabel } from "../session-cost.js";
 import { useLiveSession } from "../store.js";
 import { ContextRing, ContextWindowBreakdown, contextToneClass } from "./ContextWindowMeter.js";
@@ -12,12 +12,11 @@ import { useModelSettingsDetail, type ModelSettingsDetail } from "./model-settin
 import { SessionUsageBreakdown } from "./SessionUsageControl.js";
 
 /** One figure's row: named by its label, described by its value, and opening its breakdown. */
-function SessionUsageRow({ detail, label, ringTone, unpriced = false, children }: {
+function SessionUsageRow({ detail, label, ringTone, children }: {
   detail: ModelSettingsDetail;
   label: string;
   /** For the ring's row, its tone class (`contextToneClass`), which the ring's fill reads. */
   ringTone?: string;
-  unpriced?: boolean;
   children: ReactNode;
 }) {
   const controller = useModelSettingsDetail();
@@ -35,7 +34,7 @@ function SessionUsageRow({ detail, label, ringTone, unpriced = false, children }
         <span className="menu-text" id={`${id}-label`}>{label}</span>
       </span>
       <span
-        className={`session-usage-group-value${ringTone === undefined ? "" : ` context-control${ringTone}`}${unpriced ? " is-unpriced" : ""}`}
+        className={`session-usage-group-value${ringTone === undefined ? "" : ` context-control${ringTone}`}`}
         id={`${id}-value`}
       >
         {children}
@@ -53,9 +52,11 @@ function SessionUsageRow({ detail, label, ringTone, unpriced = false, children }
  * component then renders. Renders nothing for a session without usage yet, so Model Settings
  * opens on its model choices as before.
  */
-export function SessionUsageMenuGroup({ session: rendered, resolution }: {
+export function SessionUsageMenuGroup({ session: rendered, resolution, models }: {
   session: SessionView;
   resolution: ContextWindowCapacity;
+  /** The agent's model catalog, which names the cost breakdown's models. */
+  models?: readonly AgentModel[];
 }) {
   // Usage and cost move with every streamed event; the session view does not render for that (#2872).
   const session = useLiveSession(rendered);
@@ -77,7 +78,7 @@ export function SessionUsageMenuGroup({ session: rendered, resolution }: {
     if (stale) controller?.back();
   }, [stale, controller]);
   if (detail === "context-window" && context) return <ContextWindowBreakdown session={session} resolution={resolution} />;
-  if (detail === "session-cost" && cost) return <SessionUsageBreakdown session={session} />;
+  if (detail === "session-cost" && cost) return <SessionUsageBreakdown session={session} models={models} />;
   if (!context && !cost) return null;
   return (
     <>
@@ -88,19 +89,15 @@ export function SessionUsageMenuGroup({ session: rendered, resolution }: {
             <ContextRing fillPct={fill.fillPct} size={14} />
             <span>{fill.formatPct}</span>
             <span className="session-usage-group-capacity">
-              {formatContextWindow(used)} of {formatContextWindow(resolution.capacity!)}
+              {formatTokens(used)} of {formatTokens(resolution.capacity!)}
             </span>
           </SessionUsageRow>
         )}
         {cost && (
-          <SessionUsageRow detail="session-cost" label="Session Cost" unpriced={!cost.priced}>
-            {cost.priced ? cost.text : (
-              // The placeholder glyph must not read as an amount, to the eye or to a screen reader.
-              <>
-                <span aria-hidden="true">{cost.text}</span>
-                <span className="sr-only">Cost Unavailable</span>
-              </>
-            )}
+          <SessionUsageRow detail="session-cost" label="Session Cost">
+            {cost.text}
+            {/* Usage nobody priced reads as its token count; the name says it is not an amount. */}
+            {!cost.priced && <span className="sr-only">, Unpriced</span>}
           </SessionUsageRow>
         )}
       </div>

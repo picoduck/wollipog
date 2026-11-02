@@ -56,7 +56,7 @@ test("the ring is neutral below 75%, warning from 75% and danger from 90%, and i
     [179_999, "t-warning"],
     [180_000, "t-danger"],
   ] as const) {
-    const view = await render(<ContextWindowMeter session={session({ contextTokensUsed: used })} resolution={CAPACITY} placement="bar" />);
+    const view = await render(<ContextWindowMeter session={session({ contextTokensUsed: used })} resolution={CAPACITY} />);
     try {
       const control = view.container.querySelector<HTMLElement>(".context-control")!;
       for (const candidate of ["t-warning", "t-danger"]) {
@@ -71,8 +71,8 @@ test("the ring is neutral below 75%, warning from 75% and danger from 90%, and i
   }
 });
 
-test("in the composer bar the ring is a ghost ComposerButton with a 14px ring and the percentage", async () => {
-  const view = await render(<ContextWindowMeter session={session()} resolution={CAPACITY} placement="bar" />);
+test("the ring is a ghost ComposerButton with a 14px ring and the percentage", async () => {
+  const view = await render(<ContextWindowMeter session={session()} resolution={CAPACITY} />);
   try {
     const button = view.container.querySelector<HTMLButtonElement>("button")!;
     assert.equal(button.className, "btn ghost composer-btn cbar-usage");
@@ -85,18 +85,92 @@ test("in the composer bar the ring is a ghost ComposerButton with a 14px ring an
   }
 });
 
-test("before any usage the bar shows no ring, while the preview header keeps its 0% ring", async () => {
+test("before any usage the bar shows no ring", async () => {
   const empty = session({ tokensIn: 0, tokensOut: 0, costUsd: 0, contextTokensUsed: undefined });
-  const bar = await render(<ContextWindowMeter session={empty} resolution={CAPACITY} placement="bar" />);
+  const bar = await render(<ContextWindowMeter session={empty} resolution={CAPACITY} />);
   try {
     assert.equal(bar.container.innerHTML, "");
   } finally {
     await bar.cleanup();
   }
-  const header = await render(<ContextWindowMeter session={empty} resolution={CAPACITY} />);
+});
+
+/** Opens the meter's popover and returns it. */
+async function openPopover(view: Awaited<ReturnType<typeof render>>) {
+  await act(async () => { view.container.querySelector<HTMLButtonElement>("button")!.click(); });
+  return view.container.querySelector<HTMLElement>(".context-popover")!;
+}
+
+function facts(list: Element | null): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const term of list?.querySelectorAll("dt") ?? []) out[term.textContent ?? ""] = term.nextElementSibling?.textContent ?? "";
+  return out;
+}
+
+test("the popover states Used, Remaining and Window in one unit style, with the source as a sentence", async () => {
+  const view = await render(<ContextWindowMeter session={session()} resolution={CAPACITY} />);
   try {
-    assert.equal(header.container.querySelector("button")!.getAttribute("aria-label"), "Context Window 0.0% Used");
+    const popover = await openPopover(view);
+    assert.equal(popover.querySelector(".usage-popover-title")!.textContent, "Context Window");
+    assert.equal(popover.querySelector(".usage-popover-figure")!.textContent, "36%");
+    const list = popover.querySelector("dl.facts");
+    assert.deepEqual([...list!.querySelectorAll("dt")].map((term) => term.textContent), ["Used", "Remaining", "Window"]);
+    assert.deepEqual(facts(list), { Used: "72K", Remaining: "128K", Window: "200K" });
+    assert.match(popover.textContent ?? "", /Window size reported by the provider\./);
+    assert.doesNotMatch(popover.textContent ?? "", /Provider Reported|Capacity/);
+    assert.match(popover.textContent ?? "", /Context compacts automatically when the window fills\./);
+    assert.equal(popover.querySelectorAll(".notice").length, 0, "no notice below 75%");
   } finally {
-    await header.cleanup();
+    await view.cleanup();
+  }
+  const catalog = await render(<ContextWindowMeter session={session()} resolution={{ ...CAPACITY, source: "catalog", served: null }} />);
+  try {
+    assert.match((await openPopover(catalog)).textContent ?? "", /Window size from the model catalog\./);
+  } finally {
+    await catalog.cleanup();
+  }
+});
+
+test("from 75% a warning notice and from 90% a danger notice, in the ring's tone", async () => {
+  for (const [used, tone, text] of [
+    [156_000, "t-warning", "Over three quarters full. Claude Code will compact the conversation soon."],
+    [184_000, "t-danger", "Almost full. The next long reply will trigger compaction."],
+  ] as const) {
+    const view = await render(<ContextWindowMeter session={session({ contextTokensUsed: used })} resolution={CAPACITY} />);
+    try {
+      const popover = await openPopover(view);
+      assert.ok(view.container.querySelector(".context-control")!.classList.contains(tone));
+      const notices = [...popover.querySelectorAll<HTMLElement>(".notice")];
+      assert.equal(notices.length, 1, `${used} tokens: one notice`);
+      assert.ok(notices[0]!.classList.contains("compact"));
+      assert.ok(notices[0]!.classList.contains(tone), `${used} tokens: the notice takes the ring's tone`);
+      assert.equal(notices[0]!.querySelector(".notice-body")!.textContent, text);
+      assert.doesNotMatch(popover.textContent ?? "", /compacts automatically/, "the notice replaces the quiet sentence");
+    } finally {
+      await view.cleanup();
+    }
+  }
+  // An agent that does not compact on its own gets no compaction claim, at any level.
+  const acp = await render(<ContextWindowMeter session={session({ driver: "acp", contextTokensUsed: 184_000 })} resolution={CAPACITY} />);
+  try {
+    const popover = await openPopover(acp);
+    assert.equal(popover.querySelectorAll(".notice").length, 0);
+    assert.match(popover.textContent ?? "", /Compaction is up to the agent\./);
+  } finally {
+    await acp.cleanup();
+  }
+});
+
+test("a served window that differs from the advertised one is a compact warning notice", async () => {
+  const resolution: ContextWindowCapacity = { known: true, capacity: 128_000, source: "served", served: 128_000, advertised: 200_000 };
+  const view = await render(<ContextWindowMeter session={session({ contextTokensUsed: 46_000 })} resolution={resolution} />);
+  try {
+    const popover = await openPopover(view);
+    const notice = popover.querySelector<HTMLElement>(".notice.compact.t-warning")!;
+    assert.equal(notice.getAttribute("role"), "status");
+    assert.equal(notice.querySelector(".notice-body")!.textContent,
+      "The provider is serving a 128K context window, not the 200K the selected model advertises. The meter uses the served size.");
+  } finally {
+    await view.cleanup();
   }
 });

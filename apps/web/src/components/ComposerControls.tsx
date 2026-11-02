@@ -251,11 +251,13 @@ const MODEL_SETTINGS_TWO_COLUMN_WIDTH = 536;
 /** Tab and Shift+Tab move between the popover's stops and wrap at either end: it is portalled to
  * the end of <body>, so the browser would otherwise carry focus out of it with nowhere to go but
  * the address bar. A row the arrow keys moved to is not its group's Tab stop (arrows do not
- * choose), so it stands in for that stop. A breakdown's links are stops too (#2447). */
+ * choose), so it stands in for that stop. A breakdown's links and its disclosure are stops too (#2447). */
 function keepTabInside(event: ReactKeyboardEvent<HTMLDivElement>): void {
   if (event.key !== "Tab") return;
-  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, a[href], [tabindex]")]
-    .filter((element) => element.tabIndex >= 0 && !(element instanceof HTMLButtonElement && element.disabled));
+  // A disclosure's <summary> is focusable without a tabindex, though not every DOM reports it so.
+  const stops = [...event.currentTarget.querySelectorAll<HTMLElement>("button, summary, a[href], [tabindex]")]
+    .filter((element) => (element.tabIndex >= 0 || (element.localName === "summary" && !element.hasAttribute("tabindex")))
+      && !(element instanceof HTMLButtonElement && element.disabled));
   if (stops.length === 0) return;
   const active = event.currentTarget.ownerDocument.activeElement as HTMLElement | null;
   // Each group's container: its radio rows, or the segmented Context Window.

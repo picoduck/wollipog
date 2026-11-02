@@ -182,21 +182,21 @@ test("the transcript's lower edge has one floating tail control, and context and
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
   // The trailing cluster holds context, then cost, then the mic: only while the bar has room.
-  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
+  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
     "context and cost sit just before the mic in the composer bar's trailing cluster");
-  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} \/>\s*: null\}/,
+  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} models=\{agentCaps\?\.models\} \/>\s*: null\}/,
     "otherwise Model Settings opens with the Session Usage group, and only then");
   assert.match(detail, /const composerUsageNarrow = isMobile \|\| composerColumnNarrow;/);
   assert.match(detail, /const usagePlacement = composerUsagePlacement\(\{\s*narrow: composerUsageNarrow,\s*modelSettingsOpenable: modelSettingsAvailable && composerControlsDisabledReason === null,\s*\}\);/);
   // A narrow column whose Model Settings cannot open gives the figures a row above the bar.
-  assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
+  assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
   assert.match(detail, /<div\s+ref=\{composerBoxRef\}\s+className=\{`composer-box/, "the column measured is the composer card's own");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);/,
     "every meter placement consumes the shared capacity result");
   assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\}/g)?.length, 3,
     "the composer bar, its own row and Answer Mode each place the meter once; the preview has none (#2210)");
   // Answer Mode replaces the bar, Model Settings included, so it carries the two triggers itself.
-  assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
+  assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
   // The Reply shortcut's hint is a keycap in the idle, unfocused composer's placeholder row.
   assert.match(detail, /const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && !composerHasText &&\s*!composerIdleCollapsed && !composerAnswerActive;/);
   assert.match(detail, /\{composerReplyKeycap && \([\s\S]*<div className="composer-reply-hint" aria-hidden="true">\s*<kbd>\{shortcutDisplay\("session-reading-reply"\)\}<\/kbd>\s*<\/div>\s*\)\}\s*<ComposerTextarea/,
