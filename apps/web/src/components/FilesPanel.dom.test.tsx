@@ -74,19 +74,22 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+/** A session working directly in its folder, which Files names by the folder (#2852). */
 const session = {
   id: "files-session",
   runnerId: "runner-1",
   title: "Files Fixture",
   status: "idle",
   driver: "claude-code",
-  useWorktree: true,
+  useWorktree: false,
   worktreePath: "/home/me/.agent-worktrees/wollipog-fix",
   workspaceName: "Wollipog",
   eventEpoch: 0,
   adopted: false,
 } as SessionView;
 
+/** The session the harness shows; a test may swap in another before mounting. */
+let shownSession: SessionView;
 let tree: Record<string, SessionFileEntry[]>;
 let searchResults: WorkspaceReferenceCandidate[];
 let searchTruncated: boolean;
@@ -103,6 +106,7 @@ let searchAnswer: ((query: string) => Promise<{ results: WorkspaceReferenceCandi
 beforeEach(() => {
   domWindow.localStorage.clear();
   clearPanelScratch();
+  shownSession = session;
   tree = {
     "": [
       { name: "src", path: "src", isDir: true },
@@ -201,7 +205,7 @@ function Harness({ onControls }: { onControls: (controls: Controls) => void }) {
   return (
     <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
       state={state}
-      session={session}
+      session={shownSession}
       runnerOnline={online}
       runnerProtocolVersion={protocol}
       git={gitStatus()}
@@ -458,11 +462,40 @@ test("no matching files is a no-results state whose Clear Filter returns to the 
   }
 });
 
+test("a managed worktree is named by its workspace in Session Tools, the crumbs and Go to File (#2852)", async () => {
+  const worktreePath = "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_files";
+  shownSession = { ...session, useWorktree: true, worktreePath, workspaceName: "acme-storefront" };
+  const mounted = await mount();
+  try {
+    await act(async () => mounted.controls.state.show("launcher"));
+    await settle();
+    const filesRow = mounted.container.querySelector('.session-tools [data-tool="files"]');
+    assert.equal(filesRow?.querySelector(".row-sub")?.textContent, "Browse acme-storefront");
+    assert.ok(!text(mounted).includes("s_files"), "the session-id folder name is never shown");
+
+    await showFiles(mounted);
+    assert.deepEqual(crumbTexts(mounted), ["acme-storefront"]);
+    assert.equal(mounted.container.querySelector(".crumbs .crumb")?.getAttribute("title"), worktreePath,
+      "the worktree's full path is the first crumb's tooltip");
+
+    await pressGoToFile();
+    await typeQuery(mounted, "check");
+    assert.equal(mounted.container.querySelector(".files-goto-count")?.textContent, "4 matches in acme-storefront");
+    searchResults = [{ path: "checks", isDirectory: true }];
+    await typeQuery(mounted, "checks");
+    assert.equal(mounted.container.querySelector(".state.no-results .state-body")?.textContent,
+      "Nothing in acme-storefront matches that name.");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
 test("the folder: crumbs start at the folder's name, icons not emoji, changed files marked, Refresh in the header", async () => {
   const mounted = await mount();
   try {
     await showFiles(mounted);
     assert.deepEqual(crumbTexts(mounted), ["wollipog-fix"], "the first crumb is the workspace folder's name");
+    assert.equal(mounted.container.querySelector(".crumbs .crumb")?.getAttribute("title"), session.worktreePath);
     const rows = [...mounted.container.querySelectorAll<HTMLButtonElement>(".files-list .row.dense")];
     assert.deepEqual(rows.map((row) => row.querySelector(".row-title")?.textContent),
       ["src", "empty", "README.md", "logo.png", "notes.txt"]);

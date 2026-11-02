@@ -1463,7 +1463,7 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
     resumed, fileCheckpoint, finished, continuationUsage, completed,
   ]);
-  assert.deepEqual(footerUsage(items), ["1.2k tok · $0.01", "4.8k tok · $0.05"]);
+  assert.deepEqual(footerUsage(items), ["1.2K tok · $0.01", "4.8K tok · $0.05"]);
   assert.deepEqual(usageOf(items), [[1, 1_000, 200, 0.01], [2, 4_000, 800, 0.05]],
     "the footers together hold every parentless report exactly once");
 
@@ -1496,7 +1496,7 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     event(9.5, 14_000, { kind: "token_usage", inputTokens: 3_000, outputTokens: 500, costUsd: 0.03 }),
     completed,
   ].sort((a, b) => a.seq - b.seq));
-  assert.deepEqual(footerUsage(split), ["1.2k tok · $0.01", "4.8k tok · $0.05"], "several reports per turn");
+  assert.deepEqual(footerUsage(split), ["1.2K tok · $0.01", "4.8K tok · $0.05"], "several reports per turn");
 
   // A cancelled turn records no conversation checkpoint: a stopped continuation without a file
   // checkpoint keeps its counters on its stop, whether they land before or after it.
@@ -1511,7 +1511,7 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     const segments = summarizeTimelineTurns(stopped, new Map()).segments.slice(1);
     assert.deepEqual(segments.map((segment) => [segment.stopped !== undefined, segment.usage?.inputTokens, segment.finishedAt]),
       [[false, 1_000, 3_000], [true, 4_000, order === "before" ? 13_000 : 13_500]], `stopped continuation, report ${order}`);
-    assert.deepEqual(footerUsage(stopped), ["1.2k tok · $0.01", "4.8k tok · $0.05"], `stopped continuation footer, report ${order}`);
+    assert.deepEqual(footerUsage(stopped), ["1.2K tok · $0.01", "4.8K tok · $0.05"], `stopped continuation footer, report ${order}`);
   }
 
   // A refusal or provider error records neither a conversation checkpoint nor a stop, so such a
@@ -1527,9 +1527,9 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     event(22, 23_000, { kind: "token_usage", inputTokens: 500, outputTokens: 100, costUsd: 0.02 }),
     event(23, 23_001, { kind: "conversation_checkpoint", turn: 2 }),
   ];
-  assert.deepEqual(footerUsage(deriveTimeline(refused)), ["6.0k tok · $0.06"], "an unanchored continuation's counters are held");
+  assert.deepEqual(footerUsage(deriveTimeline(refused)), ["6K tok · $0.06"], "an unanchored continuation's counters are held");
   const afterRefusal = deriveTimeline([...refused, ...next]);
-  assert.deepEqual(footerUsage(afterRefusal), ["6.0k tok · $0.06", "600 tok · $0.02"], "the next prompt does not drop them");
+  assert.deepEqual(footerUsage(afterRefusal), ["6K tok · $0.06", "600 tok · $0.02"], "the next prompt does not drop them");
   const totals = summarizeTimelineTurns(afterRefusal, new Map()).segments.reduce(
     (sum, segment) => [sum[0]! + (segment.usage?.inputTokens ?? 0) + (segment.usage?.outputTokens ?? 0), sum[1]! + (segment.usage?.costUsd ?? 0)],
     [0, 0],

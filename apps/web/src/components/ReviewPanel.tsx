@@ -184,6 +184,14 @@ function DiffSkeleton() {
  * the summary, the diff and the findings, and the commit bar fixed in the foot (#2847), whose Open
  * Pull Request… opens a dialog. Its one Refresh is in the panel header.
  */
+/**
+ * Why Side by Side can't be chosen in a panel too narrow for its two columns (#2848): Expand Panel
+ * where the panel offers it, otherwise (a phone, or a panel already expanded) a wider screen.
+ */
+export function splitUnavailableReason(canExpandPanel: boolean): string {
+  return canExpandPanel ? "Expand the panel to compare side by side." : "Side by Side needs a wider screen.";
+}
+
 export function ReviewPanel({
   session,
   runnerOnline,
@@ -196,6 +204,7 @@ export function ReviewPanel({
   focus,
   onFocusHandled,
   onOpenSession,
+  canExpandPanel = true,
 }: {
   session: SessionView;
   runnerOnline: boolean;
@@ -211,6 +220,9 @@ export function ReviewPanel({
   onFocusHandled?: () => void;
   /** Opens another session, for a cross-model review's Open Transcript. */
   onOpenSession?: (sessionId: string) => void;
+  /** Whether the panel offers Expand Panel and it is not yet applied: not on a phone (§4.9), and not
+   * while expanded. It decides which reason an unavailable Side by Side gives (#2848). */
+  canExpandPanel?: boolean;
 }) {
   const api = useApi();
   const { confirm } = useFeedback();
@@ -1234,7 +1246,7 @@ export function ReviewPanel({
             onPaneChange={setPane}
             layout={layout}
             onLayoutChange={setLayout}
-            splitUnavailableReason={splitFits ? null : "Expand the panel to compare side by side."}
+            splitUnavailableReason={splitFits ? null : splitUnavailableReason(canExpandPanel)}
             wrap={wrapChoice === "wrap"}
             onWrapChange={(wrap) => setWrapChoice(wrap ? "wrap" : "scroll")}
             selectLines={shownDiff && shownDiff.files.length > 0 ? {

@@ -2530,16 +2530,42 @@ button.status { cursor: pointer; }
   margin: 0;
   white-space: normal;
 }
+/* The Totals row (§14): the strong body type under a strong hairline. */
+.table tfoot :is(th, td) {
+  height: var(--row-h);
+  padding: 0 var(--space-3);
+  border-top: 1px solid var(--border-strong);
+  border-bottom: 0;
+  color: var(--text);
+  font: var(--type-body-strong);
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A compact table (§14) sits inside a popover: 32px rows, 8px between cells and none at its
+   edges, no hover since its rows open nothing, and its few short columns at every width, so it
+   never folds into the two-line rows below. The Session Cost popover's table by model is the
+   first (#3017). */
+.table.compact :is(thead th, td, tbody th, tfoot th) {
+  height: var(--space-8);
+  padding: 0 var(--space-2);
+}
+.table.compact :is(th, td):first-child { padding-left: 0; }
+.table.compact :is(th, td):last-child { padding-right: 0; }
+@media (hover: hover) {
+  .table.compact tbody tr:hover { background: none; }
+}
 /* Phones and containers under 560px (§14): each row becomes two lines instead of scrolling
    sideways. Line 1 is the name and the status (or the row's key figure); line 2 is the two most
    important other columns as meta, then the row's actions; the rest stays in the detail. The
-   header row stays in the accessibility tree, off screen. */
+   header row stays in the accessibility tree, off screen. A compact table is exempt (above). */
 @container (max-width: 560px) {
   /* The caption too: left as a table caption inside a block table, it shrinks to its longest word. */
-  .table,
-  .table caption,
-  .table tbody { display: block; }
-  .table thead {
+  .table:not(:where(.compact)),
+  .table:not(:where(.compact)) caption,
+  .table:not(:where(.compact)) tbody { display: block; }
+  .table:not(:where(.compact)) thead {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -2547,7 +2573,7 @@ button.status { cursor: pointer; }
     clip-path: inset(50%);
     white-space: nowrap;
   }
-  .table tr {
+  .table:not(:where(.compact)) tr {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -2556,29 +2582,29 @@ button.status { cursor: pointer; }
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
   }
-  .table tbody tr:last-child { border-bottom: 0; }
-  .table tr::after {
+  .table:not(:where(.compact)) tbody tr:last-child { border-bottom: 0; }
+  .table:not(:where(.compact)) tr::after {
     content: "";
     order: 3;
     flex-basis: 100%;
   }
-  .table :is(td, tbody th) {
+  .table:not(:where(.compact)) :is(td, tbody th) {
     display: block;
     height: auto;
     padding: 0;
     border: 0;
   }
-  .table tr > :first-child {
+  .table:not(:where(.compact)) tr > :first-child {
     order: 1;
     flex: 1 1 0;
     min-width: 0;
     font: var(--type-body-strong);
   }
-  .table .cell-status {
+  .table:not(:where(.compact)) .cell-status {
     order: 2;
     flex: none;
   }
-  .table .cell-meta {
+  .table:not(:where(.compact)) .cell-meta {
     order: 4;
     max-width: 100%;
     color: var(--text-dim);
@@ -2586,20 +2612,20 @@ button.status { cursor: pointer; }
   }
   /* A meta value that can be long (a project, an agent selector) takes whatever line 2 has left
      and truncates, so the line never wraps and the figures beside it stay whole (§14). */
-  .table .cell-meta.cell-fill {
+  .table:not(:where(.compact)) .cell-meta.cell-fill {
     flex: 1 1 0;
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
   }
-  .table .actions-cell {
+  .table:not(:where(.compact)) .actions-cell {
     order: 5;
     margin-left: auto;
   }
-  .table .cell-extra { display: none; }
-  .table .cell-label { display: inline; }
+  .table:not(:where(.compact)) .cell-extra { display: none; }
+  .table:not(:where(.compact)) .cell-label { display: inline; }
   /* A meta item can be named by its 14px icon instead of a word (§5.2), set on the text line. */
-  .table .cell-label > .app-icon {
+  .table:not(:where(.compact)) .cell-label > .app-icon {
     display: inline-block;
     vertical-align: -2px;
   }
@@ -8124,28 +8150,14 @@ textarea {
   border-radius: 6px;
 }
 /* Phase 5: plan-mode checkbox — a first-class toggle inside the session controls row */
-/* Context-window meter: the composer bar's trigger (#2166) and the Sessions preview header's
-   compact ring. The bar in its popover is the shared `.meter`. */
+/* Context-window meter: the composer bar's trigger (#2166). The bar in its popover is the shared
+   `.meter`. */
 .context-control {
   position: relative;
   display: inline-flex;
   align-items: center;
   vertical-align: middle;
 }
-.context-ring-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--text-faint);
-  cursor: pointer;
-  font: inherit;
-}
-.context-ring-button:hover, .context-ring-button:focus-visible, .context-control.is-open .context-ring-button { color: var(--text-dim); }
-.context-ring-button:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
 .context-ring { display: block; flex: none; }
 /* A level, not progress (§11.6): the meter's track and neutral fill, and its tone from 75% and 90%. */
 .context-ring-track { fill: none; stroke: var(--bg-elev-3); stroke-width: 2.5; }
@@ -8161,19 +8173,20 @@ textarea {
   font-size: var(--text-xs);
   font-variant-numeric: tabular-nums;
 }
-.context-popover {
+/* The Context Window and Session Cost popovers (§9.2, #3017): the popover's container with 16px
+   padding, a title row with the figure trailing, then sections 12px apart. Their contents fill
+   Model Settings' place unchanged on a phone (`.usage-figures`). */
+.usage-popover {
   position: absolute;
   top: calc(100% + 6px);
   left: 0;
   z-index: var(--z-popover);
-  width: 280px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
+  padding: var(--space-4);
+  border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
   background: var(--bg-elev);
-  box-shadow: var(--shadow);
+  box-shadow: var(--elev-2);
   color: var(--text);
-  font-size: var(--text-sm);
   text-align: left;
   white-space: normal;
   /* Positioned against the viewport, so it must also be bounded by it: a session with many
@@ -8181,43 +8194,74 @@ textarea {
   max-height: calc(100vh - 16px);
   overflow: auto;
 }
-.context-popover-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
-.context-popover-head span { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-:is(.context-popover, .context-window-breakdown) > .meter { margin: var(--space-2) 0; }
-.context-popover-facts { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; }
-.context-popover-facts div { display: contents; }
-.context-popover-facts dt { color: var(--text-dim); }
-.context-popover-facts dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-.context-popover-note { margin: 8px 0 0; color: var(--text-dim); }
-/* The provider served a different window than the selected model advertises. */
-.context-popover-discrepancy { color: var(--warning-on-tint, var(--warning)); }
+.usage-popover,
+.usage-figures {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  font: var(--type-body);
+}
+.context-popover { width: 280px; }
+/* Wide enough for a model's display name beside the Tokens and Cost columns (§9.2's 360px cap). */
+.session-usage-popover {
+  right: 0;
+  left: auto;
+  width: min(340px, calc(100vw - var(--space-4)));
+}
+.usage-popover-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  min-height: var(--space-6);
+}
+.usage-popover-title { font: var(--type-section); }
+.usage-popover-figure {
+  font: var(--type-section);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.usage-popover-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+.usage-popover-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.usage-facts dd { font-variant-numeric: tabular-nums; }
+.usage-table .usage-table-tokens { width: 64px; }
+.usage-table .usage-table-cost { width: 96px; }
+/* The trigger's chevron lines up with the figures' left edge. */
+.usage-disclosure > summary { margin-left: calc(var(--space-1) * -1); }
+.usage-popover-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2) var(--space-3);
+  padding-top: var(--space-3);
+  border-top: 1px solid var(--border);
+}
+.usage-popover-foot:empty { display: none; }
+/* The sentence keeps one line where it can; Usage and Cost moves under it rather than squeezing it. */
+.usage-popover-foot > .usage-popover-note { flex: 1 1 14rem; }
+.usage-popover-foot .link { white-space: nowrap; }
+.usage-popover-foot > .btn {
+  margin-left: auto;
+  margin-right: calc(var(--space-2) * -1);
+}
 
-/* Session cost (#781): the composer bar's trigger after the ring (#2166), and the Sessions preview
-   header's figure. Visually distinct from the context ring — no ring, tabular figures — because it
-   answers a different question: what the session has spent, not how full the model's window is. */
+/* Session cost (#781): the composer bar's trigger after the ring (#2166). Visually distinct from the
+   context ring — no ring, tabular figures — because it answers a different question: what the
+   session has spent, not how full the model's window is. */
 .session-usage {
   position: relative;
   display: inline-flex;
   align-items: center;
   vertical-align: middle;
 }
-.session-cost-button {
-  padding: 2px 4px;
-  border: 0;
-  border-radius: var(--radius-pill);
-  background: transparent;
-  color: var(--teal);
-  cursor: pointer;
-  font: inherit;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-/* An unknown cost must not read as an amount, so it drops to the faint text colour. */
-.session-cost-button.is-unpriced { color: var(--text-faint); }
-.session-cost-button:hover, .session-cost-button:focus-visible, .session-usage.is-open .session-cost-button {
-  background: var(--bg-elev-2);
-}
-.session-cost-button:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
 /* In the composer bar both are borderless ghost `ComposerButton`s (#2174), `--composer-ctl` tall, in
    the small type; an open popover keeps its trigger in the hover state. */
 .cbar-right > :is(.context-control, .session-usage) { flex: none; }
@@ -8237,7 +8281,6 @@ textarea {
   font-variant-numeric: tabular-nums;
 }
 .btn.cbar-usage > .context-ring-label { font-size: inherit; }
-.btn.cbar-usage.is-unpriced { color: var(--text-faint); }
 :is(.context-control, .session-usage).is-open > .btn.cbar-usage {
   background: var(--bg-elev-2);
   color: var(--text);
@@ -8253,7 +8296,6 @@ textarea {
   font: var(--type-small);
   font-variant-numeric: tabular-nums;
 }
-.session-usage-group-value.is-unpriced { color: var(--text-faint); }
 .session-usage-group-capacity { color: var(--text-dim); }
 /* A breakdown in Model Settings' place keeps its popover's type and spacing; on a phone it slides in
    from the right, as a dialog pushed onto a sheet does (§7.5). */
@@ -8262,66 +8304,6 @@ textarea {
   font-size: var(--text-sm);
 }
 .menu-head.persistent.has-back { padding-left: var(--space-1); }
-.session-usage-popover {
-  position: absolute;
-  top: calc(100% + 6px);
-  right: 0;
-  z-index: var(--z-popover);
-  width: 280px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
-  box-shadow: var(--shadow);
-  color: var(--text);
-  font-size: var(--text-sm);
-  text-align: left;
-  white-space: normal;
-  /* Positioned against the viewport, so it must also be bounded by it: a session with many
-     model rows scrolls inside the panel instead of running off a short screen. */
-  max-height: calc(100vh - 16px);
-  overflow: auto;
-}
-.session-usage-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; margin-bottom: 8px; }
-.session-usage-head > span { color: var(--text-dim); font-variant-numeric: tabular-nums; }
-.session-usage-title { position: relative; display: flex; gap: 4px; align-items: center; }
-.session-usage-info { display: inline-flex; color: var(--text-dim); }
-.session-usage-info > button {
-  display: inline-flex;
-  padding: 1px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: inherit;
-  cursor: help;
-}
-.session-usage-info > button:hover, .session-usage-info > button:focus-visible { color: var(--text); }
-.session-usage-info > button:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
-.session-usage-info-detail {
-  position: absolute;
-  top: calc(100% + 6px);
-  left: 0;
-  display: none;
-  width: min(240px, calc(100vw - 64px));
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--bg-elev-2);
-  box-shadow: var(--shadow);
-  color: var(--text-dim);
-  font-weight: 400;
-  line-height: 1.35;
-}
-.session-usage-info:hover .session-usage-info-detail,
-.session-usage-info.is-open .session-usage-info-detail { display: block; }
-.session-usage-facts, .session-usage-model dl { display: grid; grid-template-columns: 1fr auto; gap: 2px 12px; margin: 0; }
-.session-usage-facts div, .session-usage-model dl div { display: contents; }
-.session-usage-facts dt, .session-usage-model dt { color: var(--text-dim); }
-.session-usage-facts dd, .session-usage-model dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
-.session-usage-note { margin: 8px 0 0; color: var(--text-dim); }
-.session-usage-models { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); display: grid; gap: 8px; }
-.session-usage-label { color: var(--text-dim); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
-.session-usage-model-name { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: var(--text-xs); }
 
 /* --------------------------- Image attachments -------------------------- */
 /* The composer's one attachment tray (#2177): 56px thumbnails and control-height reference chips,
@@ -14146,6 +14128,17 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   white-space: normal;
 }
 .dedit textarea { width: 100%; }
+/* The line the finding is written against, above its textarea and its accessible name (#2851). */
+.dedit-caption {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.dedit-caption > svg { flex: none; }
 /* Severity and Required share a row; the helper sits 4px under it (§8.1). */
 .dedit-options {
   display: flex;

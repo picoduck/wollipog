@@ -216,12 +216,19 @@ export function osLabel(os: OS): string {
   return os === "macos" ? "macOS" : os.charAt(0).toUpperCase() + os.slice(1);
 }
 
-/** Compact token count: 1234 -> "1.2k", 1_200_000 -> "1.2M". */
+/**
+ * The one unit style for a token count (#3017), shared by usage figures and context-window sizes:
+ * 1234 -> "1.2K", 72_000 -> "72K", 200_000 -> "200K", 1_000_000 -> "1M", 1_500_000 -> "1.5M".
+ */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  // Cross to "M" once the rounded "k" value would reach 1000k (e.g. 999_999 -> "1.0M").
-  if (n < 999_500) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  // Cross to "M" once the rounded "K" value would reach 1000K (e.g. 999_999 -> "1M").
+  if (n < 999_500) return `${withoutZeroTenth((n / 1000).toFixed(n < 10_000 ? 1 : 0))}K`;
+  return `${withoutZeroTenth((n / 1_000_000).toFixed(1))}M`;
+}
+
+function withoutZeroTenth(figure: string): string {
+  return figure.endsWith(".0") ? figure.slice(0, -2) : figure;
 }
 
 /** Convert a provider-resolved Claude id into compact visible model copy. Unknown ids stay exact. */

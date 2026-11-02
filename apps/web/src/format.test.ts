@@ -51,16 +51,19 @@ test("formatTokens: small counts are exact", () => {
   assert.equal(formatTokens(999), "999");
 });
 
-test("formatTokens: thousands use 'k' (one decimal below 10k)", () => {
-  assert.equal(formatTokens(1234), "1.2k");
-  assert.equal(formatTokens(9999), "10.0k");
-  assert.equal(formatTokens(12_500), "13k");
-  assert.equal(formatTokens(250_000), "250k");
+test("formatTokens: thousands use 'K' (one decimal below 10K, none when it is zero)", () => {
+  assert.equal(formatTokens(1234), "1.2K");
+  assert.equal(formatTokens(2000), "2K");
+  assert.equal(formatTokens(9999), "10K");
+  assert.equal(formatTokens(12_500), "13K");
+  assert.equal(formatTokens(72_000), "72K");
+  assert.equal(formatTokens(250_000), "250K");
 });
 
-test("formatTokens: crosses cleanly to 'M' at the 1000k boundary", () => {
-  assert.equal(formatTokens(999_499), "999k");
-  assert.equal(formatTokens(999_999), "1.0M"); // was "1000k" before the fix
+test("formatTokens: crosses cleanly to 'M' at the 1000K boundary", () => {
+  assert.equal(formatTokens(999_499), "999K");
+  assert.equal(formatTokens(999_999), "1M"); // was "1000k" before the fix
+  assert.equal(formatTokens(1_000_000), "1M");
   assert.equal(formatTokens(1_200_000), "1.2M");
 });
 

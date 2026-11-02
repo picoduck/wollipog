@@ -8,6 +8,7 @@
  */
 
 import type { AgentModel } from "@wollipog/protocol";
+import { formatTokens } from "./format.js";
 
 export interface ContextWindowOption {
   /** The launchable model id that selects this window (`opus[1m]`). */
@@ -28,14 +29,10 @@ export interface ContextWindowChoice {
   selectedId: string | null;
 }
 
-/** 200000 → "200K", 1000000 → "1M", 272000 → "272K", 1500000 → "1.5M". */
+/** 200000 → "200K", 1000000 → "1M", 272000 → "272K", 1500000 → "1.5M": the shared token unit
+ * style, so a window reads like the usage measured against it (#3017). */
 export function formatContextWindow(tokens: number): string {
-  if (tokens >= 1_000_000) {
-    const millions = tokens / 1_000_000;
-    return `${Number.isInteger(millions) ? millions : millions.toFixed(1).replace(/\.0$/, "")}M`;
-  }
-  if (tokens >= 1_000) return `${Math.round(tokens / 1_000)}K`;
-  return String(tokens);
+  return formatTokens(tokens);
 }
 
 export function modelBaseId(model: Pick<AgentModel, "id" | "baseModelId">): string {

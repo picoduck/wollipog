@@ -7809,8 +7809,8 @@ function SessionDetailLoaded({
                   // Answer Mode replaces the composer bar, Model Settings included, so the figures
                   // come along to stay in reach while the person answers (#2166).
                   usage={composerAnswerActive ? <>
-                    <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
-                    <SessionUsageControl session={session} placement="bar" />
+                    <ContextWindowMeter session={session} resolution={contextWindow} />
+                    <SessionUsageControl session={session} models={agentCaps?.models} />
                   </> : null}
                   usageOwnRow={composerUsageNarrow}
                 />
@@ -7945,8 +7945,8 @@ function SessionDetailLoaded({
                 /* A narrow column whose Model Settings cannot open: the figures keep a row of their
                    own rather than crowding the bar or becoming unreachable. */
                 <div className="composer-usage-row">
-                  <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
-                  <SessionUsageControl session={session} placement="bar" />
+                  <ContextWindowMeter session={session} resolution={contextWindow} />
+                  <SessionUsageControl session={session} models={agentCaps?.models} />
                 </div>
               )}
               <div className="composer-bar">
@@ -7999,7 +7999,7 @@ function SessionDetailLoaded({
                     pendingServiceTier={() => pendingConfig.current.serviceTier}
                     disabledReason={composerControlsDisabledReason}
                     sessionUsage={usagePlacement === "model-settings"
-                      ? <SessionUsageMenuGroup session={session} resolution={contextWindow} />
+                      ? <SessionUsageMenuGroup session={session} resolution={contextWindow} models={agentCaps?.models} />
                       : null}
                   />
                   {/* After the model chip, so turning Plan on or off never moves the chip (#2174). */}
@@ -8036,8 +8036,8 @@ function SessionDetailLoaded({
                   )}
                   {usagePlacement === "bar" && <>
                     {/* Context, then cost (#781): occupancy and spend, each opening its own popover. */}
-                    <ContextWindowMeter session={session} resolution={contextWindow} placement="bar" />
-                    <SessionUsageControl session={session} placement="bar" />
+                    <ContextWindowMeter session={session} resolution={contextWindow} />
+                    <SessionUsageControl session={session} models={agentCaps?.models} />
                   </>}
                   {dictation.supported && (
                     <ComposerButton

@@ -237,7 +237,7 @@ const CODEX_USAGE_NOTES: ReadonlyArray<[string, string]> = [
   ["./components/UsageView.tsx",
     "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
   ["./components/SessionUsageControl.tsx",
-    "Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
+    "Codex App Server usage recorded before the machine's Wollipog update counts only the final response of each turn, so older figures are incomplete."],
 ];
 
 test("Codex App Server usage notes name the Wollipog update, not a runner protocol number", () => {

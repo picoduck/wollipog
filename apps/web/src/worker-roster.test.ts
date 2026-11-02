@@ -10,6 +10,7 @@ import {
   memberWorkerStatus,
   stepActivity,
   subagentWorkerStatus,
+  workerElapsed,
   workerRequestSentence,
   workerRoster,
   workerStatusMeta,
@@ -111,6 +112,10 @@ test("roster rows carry a group, an activity sentence and a parent, and keep the
   assert.equal(lead.activity, "Starting its first step");
   assert.equal(monitor.state, "running");
   assert.equal(monitor.activity, "A monitor the agent started in the background");
+  // The row sets the job's id apart; the whole name stays for titles and sentences (§4.10).
+  assert.equal(monitor.name, "Monitor Job 3e0219");
+  assert.deepEqual(monitor.nameParts, { kind: "Monitor Job", id: "3e0219" });
+  assert.equal(review.nameParts, undefined);
   assert.equal(review.activity, "Reading the diff.");
   assert.equal(inspect.tokens, 5);
   assert.equal(inspect.inclusiveTokens, 12);
@@ -153,6 +158,18 @@ test("a worker's tokens say whether its provider counts cached input (#3086)", (
     "session:codex": "includesCached",
     "session:pi": undefined,
   });
+});
+
+test("a roster row's elapsed time reads in days and hours past a day, unchanged under it (#2857)", () => {
+  const minute = 60_000;
+  const hour = 60 * minute;
+  assert.equal(workerElapsed(3 * hour + 20 * minute), "3h 20m");
+  assert.equal(workerElapsed(23 * hour + 59 * minute), "23h 59m");
+  assert.equal(workerElapsed(5 * minute + 12_000), "5m 12s");
+  assert.equal(workerElapsed(24 * hour), "1d");
+  assert.equal(workerElapsed(2 * 24 * hour + 3 * hour + 40 * minute), "2d 3h");
+  assert.equal(workerElapsed(16 * 24 * hour), "16d");
+  assert.equal(workerElapsed(384 * hour + 14 * minute), "16d");
 });
 
 test("a step reads as what the worker is doing, did, or waits to do", () => {

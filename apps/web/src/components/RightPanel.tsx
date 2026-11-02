@@ -827,6 +827,7 @@ export function RightPanel({
             focus={reviewFocus}
             onFocusHandled={onReviewFocusHandled}
             onOpenSession={onOpenSession}
+            canExpandPanel={!phone && !expanded}
           />
         );
       case "decisions":
