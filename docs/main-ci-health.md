@@ -337,7 +337,8 @@ public before it lands, which in practice means a security fix prepared in a tem
    run (`.github/workflows/ci.yml` is the authority):
    `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm test`,
    `pnpm --filter @wollipog/web build`,
-   `pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only`,
+   `TARGET_TRIPLE=x86_64-unknown-linux-gnu pnpm --filter @wollipog/runner build:binary`,
+   `node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-unknown-linux-gnu`,
    `pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only`
    and `pnpm test:e2e`. The required check also covers the Node engine boundary and WebKit, which a
    local run rarely reproduces. A local run narrows the risk; it does not replace CI.

@@ -602,7 +602,7 @@ test("CI validates production builds and caches the pinned Playwright browser", 
   );
   assert.match(
     ci,
-    /^      - name: Validate Packaged Runner Guard\r?\n        timeout-minutes: 5\r?\n        env:\r?\n          TARGET_TRIPLE: x86_64-unknown-linux-gnu\r?\n        run: \|\r?\n          pnpm --filter @wollipog\/runner build:binary\r?\n          node --import tsx apps\/runner\/scripts\/verify-managed-worktree-guard-binary\.mjs apps\/runner\/dist-bin\/wollipog-runner-x86_64-unknown-linux-gnu$/m,
+    /^      - name: Validate Runner Bundle\r?\n        timeout-minutes: 5\r?\n        env:\r?\n          TARGET_TRIPLE: x86_64-unknown-linux-gnu\r?\n        run: \|\r?\n          pnpm --filter @wollipog\/runner build:binary\r?\n          node --import tsx apps\/runner\/scripts\/verify-managed-worktree-guard-binary\.mjs apps\/runner\/dist-bin\/wollipog-runner-x86_64-unknown-linux-gnu$/m,
     "required CI must build the real runner SEA and exercise its guard without ignoring failures",
   );
   assert.match(

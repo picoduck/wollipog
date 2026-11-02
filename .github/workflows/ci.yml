@@ -275,7 +275,9 @@ jobs:
         timeout-minutes: 4
         run: pnpm --filter @wollipog/web build
 
-      - name: Validate Packaged Runner Guard
+      # Keep this evidence-contract name: health and release certification look it up exactly.
+      # Exercise complete SEA packaging and guard re-entry, beyond the bundle-only local gate.
+      - name: Validate Runner Bundle
         timeout-minutes: 5
         env:
           TARGET_TRIPLE: x86_64-unknown-linux-gnu
