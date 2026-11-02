@@ -150,6 +150,51 @@ test.describe("at 1440×900", () => {
     }
   });
 
+  test("a crashed tabbed destination keeps its working header, so nothing below it moves", async ({ page }) => {
+    for (const [path, title, module, width] of [
+      ["/automations", "Automations", "AutomationsView", 1440],
+      ["/usage", "Usage and Cost", "UsageView", 1440],
+      ["/connections", "Connections", "RunnersView", 1440],
+      // Settings shows its section tabs only in the compact tier.
+      ["/settings", "Settings", "SettingsView", 1024],
+      // A phone's app bar keeps the tab row under it too.
+      ["/automations", "Automations", "AutomationsView", 390],
+      ["/usage", "Usage and Cost", "UsageView", 390],
+      ["/connections", "Connections", "RunnersView", 390],
+      // Sessions is in the shell's own bundle, so its view throws while rendering instead.
+      ["/inbox", "Sessions", "InboxView", 1440],
+    ] as const) {
+      await page.setViewportSize({ width, height: 900 });
+      await openDestination(page, path, title);
+      const header = page.locator(".page-header");
+      await expect(header.locator(".page-tabs [role=tab], .page-tabs a.tab").first()).toBeVisible();
+      const working = await header.boundingBox();
+      const description = await header.locator(".page-desc").count();
+      // A view module that fails to load is caught by the route's boundary, as a render error is.
+      const url = `**/src/components/${module}.tsx*`;
+      await page.route(url, (route) => module === "InboxView"
+        ? route.fulfill({
+          contentType: "text/javascript",
+          body: `export function InboxView() { throw new Error("${title} failed to render"); }`,
+        })
+        : route.abort());
+      await page.goto(shell(path));
+      const notice = page.getByRole("alert").filter({ hasText: `${title} Couldn't Be Shown` });
+      await expect(notice).toBeVisible();
+      await expect(page.locator("#page-title")).toHaveText(title);
+      expect(await header.locator(".page-desc").count(), `${title} keeps its working description`).toBe(description);
+      expect(await header.boundingBox(), `${title}'s crashed header is its working header`).toEqual(working);
+      const noticeBox = (await notice.boundingBox())!;
+      expect(noticeBox.x, "the notice starts at the title's edge").toBe((await page.locator("#page-title").boundingBox())!.x);
+      expect(noticeBox.y - working!.y - working!.height, "and the header's usual gap below it").toBe(width <= 760 ? 16 : 24);
+      // The reserved row holds nothing to read, reach or announce.
+      await expect(header.locator(".page-tabs")).toHaveText("");
+      await expect(header.locator(".page-tabs").getByRole("tab")).toHaveCount(0);
+      await expect(header.locator(".page-tabs").getByRole("link")).toHaveCount(0);
+      await page.unroute(url);
+    }
+  });
+
   test("Settings content is a form-width column that scrolls with the page, once", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 420 });
     await openDestination(page, "/settings", "Settings");

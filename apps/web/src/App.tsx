@@ -22,7 +22,7 @@ import { InstanceProvider, desktopMultiInstanceAvailable } from "./InstanceProvi
 import { ActiveInstanceConnectionProvider, activeInstanceConnection, useInstances } from "./instances-context.js";
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
-import { useIsMobile } from "./components/useIsMobile.js";
+import { useIsCompact, useIsMobile } from "./components/useIsMobile.js";
 import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
 import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "./entity-title.js";
 import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
@@ -80,7 +80,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { backLabel, viewDescription, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";
 import { useRoutedSessionLookup } from "./routed-session-lookup.js";
@@ -466,6 +466,7 @@ export function Shell() {
   // props — so a session upsert anywhere re-renders every visible row despite the memo. Making the
   // callbacks stable in InboxList and InboxView was necessary and not sufficient.
   const isMobile = useIsMobile();
+  const isCompact = useIsCompact();
   const rightPanelOpen = rightPanel.open;
   const setRightPanelExpanded = rightPanel.setExpanded;
   const expandSession = useCallback((sessionId: string, focusComposer = false) => {
@@ -873,6 +874,7 @@ export function Shell() {
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
             pageDescription={viewDescription(view)}
+            pageTabs={viewHasHeaderTabs(view, { phone: isMobile, compact: isCompact })}
             pageWidth={viewPageWidth(view)}
           >
           <Suspense fallback={<LazyRouteLoading title={viewTitle(view, entityTitle)} pending={pendingRouteTitleFocus} />}>

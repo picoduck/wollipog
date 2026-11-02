@@ -41,8 +41,11 @@ type ErrorBoundaryProps = {
     pageTitle?: string;
     /** The route's description under that title (`viewDescription`), so the header keeps its height. */
     pageDescription?: string;
+    /** Whether the route's header ends in a tab row (`viewHasHeaderTabs`), which the redrawn header
+     * reserves for the same reason. */
+    pageTabs?: boolean;
     /** The route's container width (`viewPageWidth`), so the redrawn header keeps the route's edge. */
-    pageWidth?: "wide" | "full" | null;
+    pageWidth?: "wide" | "full" | "fill" | null;
     /** Keep a failed dialog in its dismissible surface while retaining the standard notice. */
     wrapError?: (notice: ReactNode) => ReactNode;
   }
@@ -55,7 +58,9 @@ type ErrorBoundaryProps = {
  *
  * Routes draw their own page header (#1801), so a crashed route loses its title with it. With
  * `pageTitle` the notice sits under that title again, with the route's `pageDescription` when it has
- * one, and `#page-title` still exists for the shell's focus rescue.
+ * one, and `#page-title` still exists for the shell's focus rescue. With `pageTabs` the header keeps
+ * an empty tab row: the route's tabs are its own state (live counts, session groups, which tabs it
+ * offers), so the boundary reserves their height rather than guessing at them.
  *
  * The recovery is Reload, not a retry: re-rendering the same data crashes the same way, while a
  * reload fetches everything again (docs/design-system.md §12.4).
@@ -137,8 +142,13 @@ export class ErrorBoundary extends Component<
     if (this.props.wrapError) return this.props.wrapError(notice);
     if (this.props.pageTitle === undefined) return notice;
     return (
-      <div className={this.props.pageWidth ? `page ${this.props.pageWidth}` : "page"}>
-        <PageHeader title={this.props.pageTitle} description={this.props.pageDescription} />
+      <div className={this.props.pageWidth === "fill" ? "page full fill" : this.props.pageWidth ? `page ${this.props.pageWidth}` : "page"}>
+        <PageHeader
+          title={this.props.pageTitle}
+          description={this.props.pageDescription}
+          // Nothing to read or reach: the row only holds the tabs' height.
+          tabs={this.props.pageTabs ? <span aria-hidden="true" /> : undefined}
+        />
         {notice}
       </div>
     );

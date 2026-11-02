@@ -17,8 +17,7 @@ import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/MachineDetail.js";
 import { deleteTeamMessage } from "./components/TeamDialog.js";
-import { backLabel, SETTINGS_SECTIONS } from "./navigation.js";
-import { SETTINGS_DESCRIPTION } from "./components/SettingsView.js";
+import { backLabel, SETTINGS_DESCRIPTION, SETTINGS_SECTIONS } from "./navigation.js";
 import { reminderMenuActionLabel } from "./session-reminders.js";
 import {
   DEPLOY_TO_TRACKING_MACHINES_CONSENT,
