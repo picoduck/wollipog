@@ -6720,19 +6720,18 @@ export class ControlPlaneDb {
         /* column already present */
       }
     }
-    // The default-name marker (#3001). Adding the column is what makes the "Local owner" rename below
-    // run exactly once: a database that already has it was created with "Owner" or already renamed.
-    let addedDefaultName = false;
-    try {
-      db.exec("ALTER TABLE identity_users ADD COLUMN default_name INTEGER NOT NULL DEFAULT 0 CHECK (default_name IN (0,1))");
-      addedDefaultName = true;
-    } catch {
-      /* column already present */
-    }
     {
       const now = Date.now();
       db.exec("BEGIN");
       try {
+        // The default-name marker (#3001). Adding the column is what makes the "Local owner" rename
+        // below run exactly once: a database that already has it was created with "Owner" or already
+        // renamed. Both happen in this transaction, so an interrupted startup retries them together.
+        const addDefaultName = !(db.prepare("PRAGMA table_info(identity_users)").all() as unknown as Array<{ name: string }>)
+          .some((column) => column.name === "default_name");
+        if (addDefaultName) {
+          db.exec("ALTER TABLE identity_users ADD COLUMN default_name INTEGER NOT NULL DEFAULT 0 CHECK (default_name IN (0,1))");
+        }
         // A fixed word, never the computer's account or host name: every member sees the owner's name.
         db.prepare(
           `INSERT OR IGNORE INTO identity_users
@@ -6741,7 +6740,7 @@ export class ControlPlaneDb {
         ).run(LOCAL_OWNER_USER_ID, BOOTSTRAP_OWNER_NAME, now, now);
         // An existing install still showing the old placeholder gets the neutral default once; a name
         // anyone chose is left alone.
-        if (addedDefaultName) {
+        if (addDefaultName) {
           db.prepare(
             "UPDATE identity_users SET display_name=?, default_name=1, updated_at=? WHERE user_id=? AND display_name=?",
           ).run(BOOTSTRAP_OWNER_NAME, now, LOCAL_OWNER_USER_ID, LEGACY_BOOTSTRAP_OWNER_NAME);

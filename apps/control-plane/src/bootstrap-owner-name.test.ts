@@ -147,6 +147,39 @@ test("an install whose owner is still Local owner is renamed Owner once, at star
   }
 });
 
+test("a startup interrupted after adding the marker column retries the whole rename next time", () => {
+  const { path, cleanup } = legacyDatabase("Local owner");
+  const prepare = DatabaseSync.prototype.prepare;
+  let interrupted = false;
+  // Fail the bootstrap transaction after the column was added and the owner renamed, before it commits.
+  DatabaseSync.prototype.prepare = function (this: DatabaseSync, sql: string) {
+    if (!interrupted && sql.includes("INSERT OR IGNORE INTO identity_organizations")) {
+      interrupted = true;
+      throw new Error("simulated startup interruption");
+    }
+    return prepare.call(this, sql);
+  } as typeof prepare;
+  try {
+    assert.throws(() => ControlPlaneDb.open(path), /simulated startup interruption/);
+  } finally {
+    DatabaseSync.prototype.prepare = prepare;
+  }
+  try {
+    assert.ok(interrupted, "the interruption happened inside the bootstrap transaction");
+    const raw = new DatabaseSync(path);
+    const columns = (raw.prepare("PRAGMA table_info(identity_users)").all() as Array<{ name: string }>).map((column) => column.name);
+    raw.close();
+    assert.ok(!columns.includes("default_name"), "the rolled-back transaction took the column with it");
+    const db = ControlPlaneDb.open(path);
+    const retried = db.identityAdministration(db.localIdentityContext());
+    db.close();
+    assert.equal(retried.context.userName, "Owner");
+    assert.equal(retried.context.defaultName, true);
+  } finally {
+    cleanup();
+  }
+});
+
 test("an install whose owner has any other name keeps it and is not marked", () => {
   for (const name of ["Misko", "Owner", "local owner", "Local owner "]) {
     const { path, cleanup } = legacyDatabase(name);
