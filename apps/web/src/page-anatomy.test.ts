@@ -103,9 +103,16 @@ test("secondaries overflow into ⋯ by tier and header width, and phones show a 
   assert.equal(phone(".page-header-row")["height"], "var(--bar-h)");
   assert.equal(phone(".page-title")["font"], "var(--type-title)");
   assert.equal(phone(".page-desc")["display"], "none");
-  assert.equal(phone(".page-actions > .page-primary")["width"], "var(--control-h)");
   assert.equal(phone(".page-primary-label")["clip-path"], "inset(50%)",
     "the label is clipped, not removed, so it stays the accessible name");
+  // The phone primary is an `.icon-btn` like Search (PageHeader), so nothing restyles the filled
+  // `.btn.primary` into a square any more.
+  assert.doesNotMatch(css, /\.page-primary \{/, "no rule squares or fills the phone primary");
+  const iconButton = declarations(topLevelRule(css, ".icon-btn"));
+  assert.equal(iconButton["background"], "transparent");
+  assert.equal(iconButton["border"], "none");
+  assert.equal(iconButton["color"], "var(--text-dim)");
+  assert.equal(iconButton["width"], "var(--control-h)");
   // Neither phone bar carries an instance switcher: it is the desktop rail's tile (#1970).
   assert.doesNotMatch(css, /:is\(\.page-actions, \.detail-bar-actions\) \.instance-/);
 });

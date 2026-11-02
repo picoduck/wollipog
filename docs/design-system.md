@@ -583,7 +583,8 @@ Rules
 
 - Order in any horizontal action group: **[destructive tertiary] … spacer … [ghost] [secondary] [⋯]
   [primary]**. Primary is last (rightmost on desktop). The overflow ⋯ sits immediately before the
-  primary because it holds more secondaries.
+  primary because it holds more secondaries. The phone app bar is the exception: its trailing icons
+  are Search, the primary `+`, then ⋯ (§15.1).
 - Gap 8px between buttons. Groups never mix heights: every control in one row uses the same
   control-height token.
 - Segmented and split buttons count as one control.
@@ -601,7 +602,7 @@ Rules
 
 | Region | Holds | Visible limit before ⋯ |
 | --- | --- | --- |
-| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a 44px `+` icon button (label in `aria-label`), everything else in ⋯. |
+| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a quiet `+` icon button before ⋯ (`.icon-btn`; the label is its accessible name and tooltip), everything else in ⋯. |
 | Detail bar (§4.3) | Actions on the open entity. | Desktop: 1 primary + 1 secondary + ⋯. Destructive actions live **only** in ⋯, last, after a separator, in `--danger-text`. |
 | List row | Open (row click) plus one inline action and ⋯. | Inline actions show on hover or focus on fine pointers, always on coarse. |
 | Dialog footer (§7.3) | Cancel and the dialog's one primary, optional destructive tertiary on the left. | 3 on desktop; 2 on phone. |
@@ -744,7 +745,10 @@ Replaces both the 54px `.topbar` and every in-page `h2` (`.view-heading`, `.skil
 | Height | 64px title only, 88px with the description, 124px with description and tabs (20 + 28 + 4 + 20 + 12 + 40). This replaces a 54px bar plus 130–180px of in-page heading. |
 
 Phones: the page header becomes the **app bar** (§15.1): 48px, title `--type-title` (16/600), a
-search icon, the primary as a 44px `+` icon button, and ⋯.
+search icon, the primary as a quiet `+` icon button, and ⋯, in that order to the eye and to Tab.
+The `+` is the `.icon-btn` recipe Search uses (§3.1): transparent at rest, its icon `--text-dim`,
+a 44px target on touch, named and titled by the primary's label (#2229). From 761px up the
+labelled primary stays last, after ⋯.
 
 A secondary may be a **menu button** (`PageHeader`'s `items`): its label and a 14px caret open the
 shared menu, one item per choice with a one-line description (Agent Skills' Import). A secondary
@@ -754,7 +758,7 @@ appear there individually and in order, never as a nested menu (#1947).
 
 The primary may be a menu button too, when the one thing a destination creates has several ways in
 (Connections' **Add Machine**, #2984): its `+`, its label and a 14px caret open the same two-line
-menu. It never folds, so on phones the app bar's 44px `+`, still named by the label, opens the items
+menu. It never folds, so on phones the app bar's quiet `+`, still named by the label, opens the items
 as a menu sheet with the grabber (§9.2). A destination with tabs supplies its header actions per
 tab (`PageHeaderActions`), so each tab brings its own primary to the one header.
 
@@ -3529,7 +3533,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | --- | --- |
 | Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
 | More | A real bottom sheet with a scrim and a 48px "More" title row over a 1px `--border` hairline; rows 48px with icons; the title and the rows' content start at the 16px gutter, as in every menu sheet; Settings last after a full-width separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
-| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
+| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯), in that order to the eye and to Tab. The `+` is an `.icon-btn` like Search, never a filled primary: transparent at rest, `--text-dim`, named and titled by the primary's label. Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
 | Master-detail | Two routes (§6.2). |
 | Dialogs, menus, popovers | Bottom sheets (§7.5, §9.2), each with the 36px grabber. |
@@ -3537,7 +3541,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Tables | Rows (§14). |
 | Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
 | Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
-| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. In Board mode, Filters follows Search (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then the quiet `+` New Session, the app bar's `.icon-btn` named and titled "New Session"; and ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name. In Board mode, Filters follows Search, before the `+` (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
 | Board | One column at a time (#2216). Under the app bar, the column tabs (§10.1) in the order Needs Input, Running, Review, Done, Queued, each with its plain count, Needs Input's a warning count badge while above zero; each tab is named "Running, 13" and is at least 44px wide. The row scrolls with the edge fade when the tabs do not fit. Below it, the chosen column's cards run the width inside the gutter and scroll on their own; an empty column says "No sessions are in Done." The Board opens on the first column with a card in that order and keeps its column, the opening one or the one chosen, while it stays open: a live update never moves it. Each tab is also a drop target for a card dragged with a mouse. The app bar's **Filters** (`FilterIcon`, `.icon-btn`) follows Search: named "Filters" or "Filters, 1 Active", `aria-pressed` and showing the plain number applied while any filter is set. It opens the Filters sheet: the result count ("Showing 10 of 29", which also describes the sheet), the Machine group and the Agent group of §10.1's rows (44px on touch), then Clear Filters after a separator while any is set. A choice applies at once and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes it. While a filter is set, a strip under the Snoozed strip says what is filtered and how many remain ("Machine: Studio Mac. Agent: Codex. Showing 3 of 29.", a long name ending in an ellipsis, the count never) with **Clear Filters**, which hands focus to Filters. |
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
 | Request dock | Mobile session questions start as a 44px strip. Expand Request opens full reading mode directly; Collapse Question returns to the strip (#3308). Other compact cards cap at 50% of the chat column (60% in a landscape column under 480px, #2828), 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). An explicitly expanded question or workflow decision takes the whole column instead, keyboard or not, with Collapse Question or Collapse Decision in its head line (#2786, #2874). A press on a docked card's button, row or label while a text field has focus (the card's own, or the composer) keeps that field focused until the click lands (`holdFieldFocus`, #2205, #2675), so the cap never changes between press and click and the tap lands where it was aimed. |

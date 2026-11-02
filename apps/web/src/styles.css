@@ -1472,9 +1472,10 @@ kbd {
 }
 
 /* Phones (§15.1): the page header is the 48px app bar. Title at --type-title, truncating; no
-   description; the primary is a `+` icon button whose accessible name stays its label (a menu
-   primary drops its caret and opens a sheet); every secondary is in ⋯. The bar sits below the top
-   safe area, as the phone top bar did. */
+   description; every secondary is in ⋯. The primary is the quiet `+`: PageHeader draws it as an
+   `.icon-btn` just before ⋯, like Search, and the label clipped here stays its accessible name (a
+   menu primary drops its caret and opens a sheet). The bar sits below the top safe area, as the
+   phone top bar did. */
 @media (max-width: 760px) {
   :root { --page-gutter: 16px; --tl-gutter: 16px; }
   .page-header {
@@ -1493,15 +1494,8 @@ kbd {
   .page-actions { margin-top: 0; margin-bottom: 0; }
   .page-actions > .page-action { display: none; }
   .page-more[data-overflow] { display: block; }
-  .page-actions > .page-primary {
-    /* Square: `.btn` caps itself at max-content, which the clipped label no longer widens. */
-    width: var(--control-h);
-    max-width: none;
-    padding: 0;
-    justify-content: center;
-  }
-  .page-primary-key,
-  .page-primary-caret { display: none; }
+  /* The `+` alone: no keycap and no caret. */
+  .page-primary > :is(.page-primary-key, .page-primary-caret) { display: none; }
   .page-primary-label {
     position: absolute;
     width: 1px;
