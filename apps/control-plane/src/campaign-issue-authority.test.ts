@@ -1254,6 +1254,53 @@ test("#2940 a Full Control root's pending own closure names the self-approval st
   } finally { h.db.close(); }
 });
 
+test("#3982 a root is not resumed by a closure it resolved itself, but is by one a person resolved", async () => {
+  /** Every prompt the root was sent, ordinary or durable. */
+  const recordPrompts = (hub: Hub) => {
+    const prompts: string[] = [];
+    hub.sendToRunner = (_runnerId, message) => {
+      if (message.type === "prompt_session" && message.sessionId === "root") prompts.push(message.text);
+      if (message.type === "durable_session_command" && message.command.type === "prompt_session" &&
+          message.command.sessionId === "root") prompts.push(message.command.text);
+      return true;
+    };
+    return prompts;
+  };
+  const resumeState = (h: ReturnType<typeof harness>, occurrenceId: string) => (h.db.raw().prepare(
+    "SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?").get(occurrenceId) as { resume_state: string | null }).resume_state;
+  const { h, observe, close } = delivery({ gate: "consumed" });
+  try {
+    observe(10, "merged");
+    const prompts = recordPrompts(h.hub);
+    const c = await close("self-resume");
+    assert.ok(c.ok, c.error ?? "closure");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "orchestrator", JSON.stringify(d.authorityEvaluation));
+    assert.ok(h.svc.resolveDescendantRequest("root", "root", d.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(d.occurrenceId)!.status, "approved");
+    assert.equal(resumeState(h, d.occurrenceId), null, "no resume is owed to the root that resolved it");
+    assert.equal(h.db.getSession("root")!.pendingApproval ?? null, null, "the root still loses the card");
+    const executed = await h.svc.executeGithubIssueClosure("root", d.occurrenceId, d.resourceDigest);
+    assert.ok(executed.ok, executed.error ?? "execute");
+    assert.deepEqual(prompts, [], "the root acted inside its own turn, so nothing resumes it afterwards");
+  } finally { h.db.close(); }
+
+  // A person's resolution of a root's own closure still resumes it: the root did not decide it.
+  const custom = harness(false);
+  try {
+    const prompts = recordPrompts(custom.hub);
+    const c = await custom.svc.requestGithubIssueClosure("root", { requestId: "human-resume", issue: 100, reason: "completed",
+      explanation: "Claimed delivery", evidence: ["Claim"] });
+    assert.ok(c.ok, c.error ?? "closure");
+    const d = c.data!.decision!;
+    assert.equal(d.authority, "human");
+    assert.ok(custom.approve(d).ok);
+    assert.equal(prompts.length, 1, "the person's approval resumes the root once");
+    assert.match(prompts[0]!, new RegExp(`A human reviewer approved your issue_closure decision ${d.occurrenceId}`, "u"));
+  } finally { custom.db.close(); }
+});
+
 test("#2940 a pending human-owned closure tells an agent a person must approve it, and the agent cannot", async () => {
   for (const full of [false, true]) {
     const h = harness(full);

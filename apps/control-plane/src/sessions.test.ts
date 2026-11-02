@@ -25352,6 +25352,98 @@ function worktreeRecoveryCampaign(protocolVersion = PROTOCOL_VERSION) {
     receipt, resumeState, parentOnOtherRunner };
 }
 
+test("a child that consumes its decision inside the resolving turn is not resumed by it afterwards (#3982)", async () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, hub, child } = f;
+  try {
+    const deletionSnapshot = {
+      category: "merged_branch_deletion" as const, repository: "picoduck/wollipog", branch: "fix/3982",
+      merged: true, mergeCommitSha: "d".repeat(40), dependentPullRequests: { checkedAt: 20, open: [] },
+    };
+    const requestDeletion = (requestId: string) => {
+      const decision = svc.createWorkflowDecision(child.id, {
+        requestId, resourceKey: `picoduck/wollipog:${requestId}`, resourceSnapshot: deletionSnapshot,
+      });
+      assert.ok(decision.ok && decision.data, decision.error);
+      return decision.data;
+    };
+    const recalls = () => hub.sentOfType("cancel_queued_prompt").filter((message) => message.sessionId === child.id);
+    const receipt = (commandId: string, state: "queued" | "started" | "failed", revision: number) =>
+      svc.onDurablePromptReceipt(RUNNER_ID, {
+        type: "durable_session_command_update", commandId, sessionId: child.id, state, revision,
+        ...(state === "failed" ? { code: "COMMAND_CANCELLED" as const, error: "queued command was canceled" } : {}),
+      });
+
+    // The child polls inside its turn, so the resolution's resume queues behind that turn.
+    const polled = requestDeletion("polled");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    f.approve(polled.occurrenceId);
+    assert.equal(db.getSession(child.id)?.status, "running", "the child is still inside its turn");
+    const [resume] = f.resolutionPrompts(polled.occurrenceId);
+    assert.ok(resume, "the resume is still sent, because nothing yet proves the child read the outcome");
+    assert.equal(receipt(resume.commandId, "queued", 1), true);
+    assert.equal(f.resumeState(polled.occurrenceId), "delivering");
+
+    // It reads approved and consumes the decision in that same turn: the queued resume is recalled.
+    const consumed = await svc.consumeWorkflowDecision(child.id, polled.occurrenceId, { resourceSnapshot: deletionSnapshot });
+    assert.ok(consumed.ok, consumed.error);
+    assert.deepEqual(recalls().map((message) => message.promptId), [resume.commandId],
+      "the runner is asked to drop exactly the queued resume, not the running turn");
+    assert.equal(f.resumeState(polled.occurrenceId), "delivering", "the runner's receipt, not the request, settles it");
+    assert.equal(receipt(resume.commandId, "failed", 2), true);
+    assert.equal(f.resumeState(polled.occurrenceId), "abandoned", "nothing was owed any more, so nothing failed");
+    assert.equal(db.getSession(child.id)?.pendingPrompts?.some((prompt) => prompt.commandId === resume.commandId) ?? false,
+      false, "the recalled row is retired, so no one can Retry it by hand");
+    assert.equal(db.getSession(child.id)?.status, "running");
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(polled.occurrenceId).length, 1, "no sweep sends it again");
+
+    // A child idle behind its card is still resumed (#1405); consuming the decision inside that
+    // resumed turn recalls nothing, because the resume has already started.
+    const idle = requestDeletion("idle");
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    f.approve(idle.occurrenceId);
+    const [wake] = f.resolutionPrompts(idle.occurrenceId);
+    assert.ok(wake, "the idle child is resumed by the resolution");
+    assert.match(wake.command.type === "prompt_session" ? wake.command.text : "", /Your Orchestrator approved your merged_branch_deletion decision/u);
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
+    assert.equal(receipt(wake.commandId, "started", 1), true);
+    assert.equal(f.resumeState(idle.occurrenceId), "delivered");
+    assert.ok((await svc.consumeWorkflowDecision(child.id, idle.occurrenceId, { resourceSnapshot: deletionSnapshot })).ok);
+    assert.equal(recalls().length, 1, "a resume that already started is never recalled");
+    assert.equal(f.resumeState(idle.occurrenceId), "delivered");
+
+    // A resolution the child has not consumed keeps its queued resume: only the requester's own
+    // consumption retires it, and a runner cancellation of an unconsumed resume still reads failed.
+    const unread = requestDeletion("unread");
+    f.approve(unread.occurrenceId);
+    const [owed] = f.resolutionPrompts(unread.occurrenceId);
+    assert.ok(owed);
+    assert.equal(receipt(owed.commandId, "queued", 1), true);
+    assert.equal(recalls().length, 1, "an approval the child has not acted on is never recalled");
+    assert.equal(receipt(owed.commandId, "failed", 2), true);
+    assert.equal(f.resumeState(unread.occurrenceId), "failed");
+    assert.equal(svc.workflowDecision(child.id, unread.occurrenceId).data?.status, "approved");
+
+    // Consumption that is not the requester's own, as when an approved scope change or a parent's
+    // verification settles the decision, recalls nothing: a runner cancellation of that resume
+    // for its own reasons stays failed, and its row stays available to retry.
+    const settledElsewhere = requestDeletion("settled-elsewhere");
+    f.approve(settledElsewhere.occurrenceId);
+    const [unrecalled] = f.resolutionPrompts(settledElsewhere.occurrenceId);
+    assert.ok(unrecalled);
+    assert.equal(receipt(unrecalled.commandId, "queued", 1), true);
+    assert.ok(db.consumeWorkflowDecision(settledElsewhere.occurrenceId, Date.now()));
+    assert.equal(receipt(unrecalled.commandId, "failed", 2), true);
+    assert.equal(recalls().length, 1);
+    assert.equal(f.resumeState(settledElsewhere.occurrenceId), "failed",
+      "a consumed decision alone does not prove the requester read the outcome");
+    assert.equal(db.getSession(child.id)?.pendingPrompts?.some((prompt) => prompt.commandId === unrecalled.commandId), true,
+      "the failed row stays available to retry");
+  } finally { db.close(); }
+});
+
 test("an approved decision for a child whose worktree branch was switched is delivered exactly once after recovery (#1650)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, svc, root, child, recovery } = f;

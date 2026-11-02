@@ -894,6 +894,9 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   resume_state          TEXT,
   resume_command_id     TEXT,
   resume_updated_at     INTEGER,
+  -- When the requester's own consumption asked the runner to drop resume_command_id from its queue
+  -- (#3982). Only that recall lets a cancellation receipt settle the resume as abandoned.
+  resume_recalled_at    INTEGER,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -7093,6 +7096,8 @@ export class ControlPlaneDb {
       "resume_state TEXT",
       "resume_command_id TEXT",
       "resume_updated_at INTEGER",
+      // #3982: the requester's consumption recalled the queued resume.
+      "resume_recalled_at INTEGER",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -21829,6 +21834,46 @@ export class ControlPlaneDb {
       `UPDATE workflow_decisions SET resume_state='abandoned', resume_command_id=NULL, resume_updated_at=?
        WHERE occurrence_id=?`,
     ).run(now, occurrenceId);
+  }
+
+  /**
+   * The requester's own action consumed this decision (#3982), so its resume has nothing left to
+   * announce: an owed one is abandoned and one still in the outbox is withdrawn, as for a
+   * revocation. A command the runner holds unstarted, queued behind the turn that consumed the
+   * decision, is returned so the caller can recall it from the runner's queue, and the recall is
+   * recorded with it: only that record lets the runner's cancellation receipt settle the resume as
+   * abandoned (workflowDecisionResumeRecalled). A resume that already started is left alone.
+   */
+  retireConsumedWorkflowDecisionResume(occurrenceId: string, now: number): { sessionId: string; commandId: string } | null {
+    return this.atomic(() => {
+      const row = this.stmt(
+        "SELECT status, session_id, resume_state, resume_command_id FROM workflow_decisions WHERE occurrence_id=?",
+      ).get(occurrenceId) as {
+        status: WorkflowDecisionStatus; session_id: string; resume_state: WorkflowDecisionResumeState | null;
+        resume_command_id: string | null;
+      } | undefined;
+      if (!row || row.status !== "consumed") return null;
+      if (row.resume_state === "delivering" && row.resume_command_id !== null) {
+        const command = this.stmt(
+          "SELECT state FROM session_prompt_commands WHERE session_id=? AND command_id=? AND dismissed_at IS NULL",
+        ).get(row.session_id, row.resume_command_id) as { state: SessionPromptCommandState } | undefined;
+        if (command && (command.state === "sent" || command.state === "accepted" || command.state === "queued")) {
+          this.stmt("UPDATE workflow_decisions SET resume_recalled_at=? WHERE occurrence_id=?").run(now, occurrenceId);
+          return { sessionId: row.session_id, commandId: row.resume_command_id };
+        }
+      }
+      this.retireWorkflowDecisionResume(occurrenceId, now);
+      return null;
+    });
+  }
+
+  /** Whether this exact resume command was recalled because its requester consumed the decision
+   * (#3982). A cancellation the runner reports for any other reason leaves the resume failed. */
+  workflowDecisionResumeRecalled(occurrenceId: string, commandId: string): boolean {
+    return this.stmt(
+      `SELECT 1 FROM workflow_decisions WHERE occurrence_id=? AND status='consumed'
+       AND resume_command_id=? AND resume_recalled_at IS NOT NULL`,
+    ).get(occurrenceId, commandId) !== undefined;
   }
 
   /** `oweRestartNotice` records, in the revocation's own transaction, the notice a restart owes
