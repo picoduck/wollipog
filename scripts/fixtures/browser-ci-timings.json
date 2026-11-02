@@ -78,6 +78,13 @@
       "createdAt": "2026-10-18T14:19:28Z",
       "workflowConclusion": "success",
       "workloadTreeSha256": "640d4c39af109bff97abad9bc1f2cadc8a4066d1fe5a8a3c58290d07e8c7f3c8"
+    },
+    {
+      "runId": 40018244256,
+      "attempt": 1,
+      "event": "merge_group",
+      "headSha": "98accc6be15171f931a90a2f9de602b0048cf330",
+      "workflowConclusion": "success"
     }
   ],
   "historicalBaselineHead": "97dd322c312ff315a651cfa6af5e5229fdcc181d",
@@ -206,6 +213,11 @@
     {"runId": 39135469681, "attempt": 1, "event": "merge_group", "headSha": "06af3ae5887d9e3f42f5de2d3b5a77ecd7cf8977", "jobId": 117698982336, "shard": 2, "conclusion": "success", "queueSeconds": 2178, "activeSeconds": 1741, "installPath": "system-dependencies", "firstInstallSeconds": 11, "retryInstallSeconds": 0, "otherSetupSeconds": 21, "suiteSeconds": 1707, "productionSeconds": 0, "cleanupSeconds": 2, "nonInstallSeconds": 1730},
     {"runId": 39135469681, "attempt": 1, "event": "merge_group", "headSha": "06af3ae5887d9e3f42f5de2d3b5a77ecd7cf8977", "jobId": 117698982286, "shard": 3, "conclusion": "success", "queueSeconds": 1799, "activeSeconds": 1595, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 19, "suiteSeconds": 1562, "productionSeconds": 0, "cleanupSeconds": 2, "nonInstallSeconds": 1583},
     {"runId": 39135469681, "attempt": 1, "event": "merge_group", "headSha": "06af3ae5887d9e3f42f5de2d3b5a77ecd7cf8977", "jobId": 117698982325, "shard": 4, "conclusion": "success", "queueSeconds": 2670, "activeSeconds": 1792, "installPath": "system-dependencies", "firstInstallSeconds": 13, "retryInstallSeconds": 0, "otherSetupSeconds": 22, "suiteSeconds": 1755, "productionSeconds": 0, "cleanupSeconds": 2, "nonInstallSeconds": 1779},
-    {"runId": 39135469681, "attempt": 1, "event": "merge_group", "headSha": "06af3ae5887d9e3f42f5de2d3b5a77ecd7cf8977", "jobId": 117698982331, "shard": 5, "conclusion": "success", "queueSeconds": 1857, "activeSeconds": 1433, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 20, "suiteSeconds": 1398, "productionSeconds": 0, "cleanupSeconds": 3, "nonInstallSeconds": 1421}
+    {"runId": 39135469681, "attempt": 1, "event": "merge_group", "headSha": "06af3ae5887d9e3f42f5de2d3b5a77ecd7cf8977", "jobId": 117698982331, "shard": 5, "conclusion": "success", "queueSeconds": 1857, "activeSeconds": 1433, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 20, "suiteSeconds": 1398, "productionSeconds": 0, "cleanupSeconds": 3, "nonInstallSeconds": 1421},
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790178, "shard": 1, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 2091, "installPath": "system-dependencies", "firstInstallSeconds": 13, "retryInstallSeconds": 0, "otherSetupSeconds": 24, "suiteSeconds": 1944, "productionSeconds": 107, "cleanupSeconds": 3, "nonInstallSeconds": 2078},
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790191, "shard": 5, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1993, "installPath": "system-dependencies", "firstInstallSeconds": 18, "retryInstallSeconds": 0, "otherSetupSeconds": 25, "suiteSeconds": 1947, "productionSeconds": 0, "cleanupSeconds": 3, "nonInstallSeconds": 1975},
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790194, "shard": 4, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 2608, "installPath": "system-dependencies", "firstInstallSeconds": 372, "retryInstallSeconds": 256, "otherSetupSeconds": 26, "suiteSeconds": 1950, "productionSeconds": 0, "cleanupSeconds": 4, "nonInstallSeconds": 1980},
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790224, "shard": 3, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1933, "installPath": "system-dependencies", "firstInstallSeconds": 17, "retryInstallSeconds": 0, "otherSetupSeconds": 27, "suiteSeconds": 1888, "productionSeconds": 0, "cleanupSeconds": 1, "nonInstallSeconds": 1916},
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790263, "shard": 2, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1907, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 21, "suiteSeconds": 1872, "productionSeconds": 0, "cleanupSeconds": 2, "nonInstallSeconds": 1895}
   ]
 }

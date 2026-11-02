@@ -532,16 +532,14 @@ jobs:
     # Maximum non-install remainder: 2016s (previous envelope: 1448s),
     # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
     # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
-    # #3628 projects 1710s; retain the measured 2020s floor pending redistributed natural runs.
-    # 720s attempts + max(2020s, 1710s) remainder + 105s enforcement + 480s failure diagnostics
-    # + 180s reserve = 3505s before the system-package cache. Its five bounded phases add
-    # 480s + 75s enforcement (#3649): 4060s fits a finite 68m (4080s), with 200s residual.
-    # Same five concurrent browser jobs. Hung jobs can hold runners 9m longer than the
-    # prior 59m limit in the shared 20-job pool; cache hits should shorten normal setup.
+    # #3628 natural merge group 40018244256 measured 2078s non-install including production.
+    # Keep the 1710s forecast historical; round the measured floor to 2080s.
+    # 720s attempts + 2080s remainder + 480s cache/verify + 180s enforcement
+    # + 480s failure diagnostics + 180s reserve = 4120s, rounded up to 69m (4140s).
+    # Residual reserve is 200s. Same five jobs; only the finite worst-case cap grows 1m.
     # scripts/workflow-browser-budget.test.mjs derives this from actual step deadlines and
-    # identified phases. Remeasure after workload/setup changes; do not grow blindly.
-    # docs/ci-browser-budget.md records warm/cold-cache uncertainty and natural-run delivery.
-    timeout-minutes: 68
+    # identified phases. docs/ci-browser-shards-2026-11-02.md records natural-run comparison.
+    timeout-minutes: 69
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
