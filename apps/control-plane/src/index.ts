@@ -2045,6 +2045,8 @@ app.register(async (instance) => {
 
   type Staging = Promise<StagedSessionEventPayload | null>;
   let receivePressureStarted: number | undefined;
+  let receivePressureWarningAt = -Infinity;
+  let receivePressureWarned = false;
   const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
     try {
       // Frames stay in arrival order: a large event waits here for its durable payload, and the
@@ -2066,7 +2068,14 @@ app.register(async (instance) => {
     const now = performance.now();
     const durationMs = paused || receivePressureStarted === undefined ? 0 : Math.round(now - receivePressureStarted);
     receivePressureStarted = paused ? now : undefined;
-    app.log.warn({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused,
+    // Warn for at most one pause/resume pair per 30 seconds per connection. Keep every transition
+    // available at debug level for detailed flow-control diagnosis without flooding normal logs.
+    const warn = paused ? now - receivePressureWarningAt >= 30_000 : receivePressureWarned;
+    if (paused) {
+      receivePressureWarned = warn;
+      if (warn) receivePressureWarningAt = now;
+    }
+    app.log[warn ? "warn" : "debug"]({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused,
       durationMs, queuedBytes: frameQueue.pressureStats.bytes, queuedFrames: frameQueue.pressureStats.frames },
       "runner receive flow control changed");
   }, {

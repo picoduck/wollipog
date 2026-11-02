@@ -471,7 +471,8 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     maxHandshakeMs: Math.round(maxHandshakeMs), maxHealthMs: Math.round(maxHealthMs), maxPongMs: Math.round(maxPongMs),
     clientLoopDelayMs: Math.round(clientLoopDelay.max / 1_000_000), progress: JSON.parse(trace.summary()),
   });
-  for (let pass = 1; pass < 2; pass++) {
+  {
+    const pass = 1;
     clientLoopDelay.reset();
     const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
     sockets.push(socket);
@@ -495,28 +496,8 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
       if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
     }));
-    socket.send(JSON.stringify({ ...frame, sessionSnapshots: pass === 2
-      ? [...snapshots, { ...snapshots[0]!, id: "new-credential-session" }] : snapshots }));
+    socket.send(JSON.stringify({ ...frame, sessionSnapshots: snapshots }));
     await registered;
-    let newBindings: Promise<boolean[]> | undefined;
-    if (pass === 2) {
-      newBindings = new Promise<boolean[]>((resolvePromise) => {
-        const answers: boolean[] = [];
-        const timer = setTimeout(() => resolvePromise([false]), 60_000);
-        socket.on("message", (raw) => {
-          const message = JSON.parse(raw.toString());
-          if (message.sessionId !== "new-credential-session" || ![
-            "agent_control_credential_registered", "policy_hook_credential_registered",
-          ].includes(message.type)) return;
-          answers.push(message.accepted);
-          if (answers.length === 2) { clearTimeout(timer); resolvePromise(answers); }
-        });
-      });
-      // Unlike existing-session handshakes, these bindings must wait for their first inventory
-      // row instead of rejecting a valid runner-held session that has not been materialized yet.
-      socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "new-credential-session", tokenHash: "b".repeat(64) }));
-      socket.send(JSON.stringify({ type: "policy_hook_credential", sessionId: "new-credential-session", tokenHash: "c".repeat(64) }));
-    }
     const handshakeStarted = performance.now();
     const credentialHandshake = new Promise<void>((resolvePromise, reject) => {
       const timer = setTimeout(() => reject(new Error(`Agent Control handshake stalled during inventory\n${failureContext(pass, handshakeStarted)}\n${output}`)), 2000);
@@ -583,7 +564,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
       maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
     };
     await delay(1000);
-    for (let sample = 0; sample < (pass === 0 ? 1 : 10); sample++) await probe();
+    for (let sample = 0; sample < 10; sample++) await probe();
 
 
     // Pin application of the exact newer snapshot, not title projection: a CP-owned rename is
@@ -600,7 +581,6 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
       fingerprint, `newer snapshot did not converge\n${failureContext(pass, convergenceStarted)}\n${output}`);
     maxConvergenceMs = Math.max(maxConvergenceMs, performance.now() - convergenceStarted);
-    if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
     assert.equal(window?.complete, true, "all windows must be processed before checking newer live state");
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-0'").get()?.runner_snapshot_fingerprint,
       earlyFingerprint, "the live update following an in-flight republish must win");

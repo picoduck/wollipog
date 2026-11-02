@@ -9,6 +9,7 @@ export class ProcessingWindow {
   private waiting: { id: number; since: number; bytes: number; frames: number } | undefined;
   private nextId = 1;
   private closed = false;
+  private readFailureReported = false;
   private watchdog: ReturnType<typeof setInterval>;
 
   constructor(
@@ -16,7 +17,7 @@ export class ProcessingWindow {
     private readonly read: (id: string) => string | null,
     private readonly write: (wire: string) => void,
     private readonly fail: () => void,
-    private readonly diagnostic: (details: { event: string; barrierId: number; durationMs: number; bytes: number; frames: number }) => void,
+    private readonly diagnostic: (details: { event: string; barrierId?: number; durationMs?: number; bytes?: number; frames?: number }) => void,
   ) {
     let reported = false;
     this.watchdog = setInterval(() => {
@@ -55,7 +56,19 @@ export class ProcessingWindow {
         while (this.index < this.ids.length && visited++ < RUNNER_WINDOW_FRAMES) {
           // No snapshot survives a yield. A frame that did not fit is read again after the ACK,
           // so a newer live update cannot be followed by cached older state.
-          const wire = this.read(this.ids[this.index]!);
+          let wire: string | null;
+          try {
+            wire = this.read(this.ids[this.index]!);
+          } catch {
+            // Like sendUp's projection containment, one bad snapshot must not cause an endless
+            // reconnect loop. Do not log the exception: it can contain private snapshot data.
+            if (!this.readFailureReported) {
+              this.readFailureReported = true;
+              this.diagnostic({ event: "runner_republish_snapshot_failed" });
+            }
+            this.index++;
+            continue;
+          }
           if (wire === null) { this.index++; continue; }
           const size = Buffer.byteLength(wire);
           // A single legal oversized snapshot still uses the existing receive-pressure backstop.
@@ -72,6 +85,7 @@ export class ProcessingWindow {
         } else if (this.index === this.ids.length) this.close();
         else this.schedule();
       } catch {
+        this.diagnostic({ event: "runner_republish_write_failed", bytes, frames });
         this.close();
         this.fail();
       }

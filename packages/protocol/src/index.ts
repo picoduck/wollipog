@@ -1059,9 +1059,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   pacedVideoReview: PACED_VIDEO_REVIEW_MIN_PROTOCOL,
   /** v225 provider profile adoption and per-control-plane grants (#3239). */
   providerProfiles: 225,
+  /** v270 runner paces regenerable reconnect snapshots with FIFO processing acknowledgements. */
+  runnerProcessingBarriers: 270,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
-  runnerProcessingBarriers: 270,
   reviewSession: 226,
   /** v227 runner deletes an isolated session's own sequencer leftovers and recorded branches
    * (#3316); the session tools check the same floor against the connected control plane. */

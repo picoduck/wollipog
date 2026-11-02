@@ -77,3 +77,19 @@ test("failed writes abandon this inventory without producing a retry suffix", as
   assert.equal(writes, 1);
   window.close();
 });
+
+test("bad snapshots are skipped with bounded sanitized diagnostics rather than reconnecting", async (t) => {
+  const sent: string[] = [];
+  const diagnostics: unknown[] = [];
+  const window = new ProcessingWindow(['bad-a', 'good', 'bad-b'], (id) => {
+    if (id.startsWith('bad')) throw new Error('private snapshot content must never enter diagnostics');
+    return id;
+  }, (wire) => sent.push(wire), () => assert.fail("snapshot failure must not disconnect"),
+    (details) => diagnostics.push(details));
+  t.after(() => window.close());
+  await turn();
+  assert.equal(sent[0], 'good');
+  assert.deepEqual(diagnostics, [{ event: 'runner_republish_snapshot_failed' }]);
+  window.acknowledge(1);
+  assert.equal(window.complete, true);
+});
