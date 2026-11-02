@@ -99,7 +99,7 @@ Counts below are first-attempt workflow states, not test failure counts.
 | B / Group | 1 | 1 | 0 | 0 | 0 | 0 | 0 |
 | B / Historical Main Push | 2 | 2 | 0 | 0 | 0 | 0 | 0 |
 
-A PR failure fraction is 2/6 over all first attempts, or 2/3 terminal admitted
+A PR failure fraction is 2/6 over all first attempts, or 2/2 terminal admitted
 non-cancelled attempts; B is 0/4 or 0/2 respectively. Group failure fractions
 are 2/4 in A and 0/1 in B. Reruns 40029165955/2 and 40024026119/2 both recover
 failing PR first attempts at unchanged heads: retry-only run fraction 2/10 PR
