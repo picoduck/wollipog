@@ -321,6 +321,40 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
 }
 
 /**
+ * The one-line description under a route's page title (§4.2), or undefined for a route that draws
+ * none. A destination's list page reads it from the registry; an entity page, the Automations editor
+ * and Settings draw their own bar or panel description instead. The turned-off and crashed states
+ * redraw the header with it, so the header keeps its height and nothing moves when the route
+ * recovers (docs/design-system.md §12.4).
+ */
+export function viewDescription(view: View): string | undefined {
+  switch (view.name) {
+    case "automations":
+      return view.editor ? undefined : destination(view.name).description;
+    case "board":
+      return destination("inbox").description;
+    case "inbox":
+    case "projects":
+    case "runs":
+    case "pods":
+    case "usage":
+    case "runners":
+    case "archived":
+    case "skills":
+      return destination(view.name).description;
+    case "session":
+    case "run":
+    case "pod":
+    case "automation":
+    case "settings":
+      return undefined;
+  }
+  // No default branch: this line stops compiling when a view is added without a decision here.
+  const unhandled: never = view;
+  return unhandled;
+}
+
+/**
  * The width of the page container a route draws (§4.5): `.page.wide`, `.page.full`, or null for the
  * default `.page`. A crashed route's notice is drawn in the same container, so the header's hairline
  * does not jump when the route fails.

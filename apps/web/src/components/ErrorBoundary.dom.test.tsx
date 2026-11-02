@@ -6,7 +6,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { ErrorBoundary, errorDetailsText } from "./ErrorBoundary.js";
-import { viewPageWidth, viewSubjectName } from "../navigation.js";
+import { destination, GLOBAL_VIEW_ITEMS, viewDescription, viewPageWidth, viewSubjectName } from "../navigation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
@@ -88,10 +88,18 @@ const click = async (target: HTMLElement) => {
 
 test("a crashed view names the destination in user words and keeps the exception behind Show Details", async () => {
   const view = await mount(
-    <ErrorBoundary name="Automations" pageTitle="Automations"><TimelineRow /></ErrorBoundary>,
+    <ErrorBoundary name="Automations" pageTitle="Automations" pageDescription={viewDescription({ name: "automations" })}>
+      <TimelineRow />
+    </ErrorBoundary>,
   );
   try {
     const notice = view.container.querySelector('[role="alert"]')!;
+    const header = view.container.querySelector(".page > header.page-header")!;
+    assert.equal(header.querySelector("h1#page-title")?.textContent, "Automations");
+    assert.equal(header.querySelector(".page-heading > p.page-desc")?.textContent,
+      "Run a prompt on a schedule, from a webhook, or from a chat message.",
+      "the destination's description stays under the title, so the header keeps its height");
+    assert.ok(header.compareDocumentPosition(notice as never) & 4, "the notice sits below the header");
     assert.ok(notice.classList.contains("t-danger"), "a render failure is a danger notice");
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Automations Couldn't Be Shown");
     assert.equal(notice.querySelector(".notice-body")?.textContent, "Part of this page failed to display. Nothing was changed.");
@@ -237,10 +245,31 @@ test("a crashed route keeps its own container width, so the header's hairline do
   }
 });
 
+test("a destination's list page keeps its registry description; entity pages, editors and Settings keep theirs", () => {
+  for (const item of GLOBAL_VIEW_ITEMS) {
+    assert.equal(viewDescription({ name: item.id }), item.description, `${item.name} reads the registry`);
+  }
+  assert.equal(viewDescription({ name: "runs" }), "Give one task to several agents and compare what each one does.");
+  assert.equal(viewDescription({ name: "board" }), destination("inbox").description, "board mode is Sessions");
+  assert.equal(viewDescription({ name: "automations", tab: "outbound" }), destination("automations").description);
+  assert.equal(viewDescription({ name: "automations", editor: { kind: "new" } }), undefined, "the editor draws a detail bar");
+  for (const view of [
+    { name: "session", id: "s1" },
+    { name: "run", id: "r1" },
+    { name: "pod", id: "p1" },
+    { name: "automation", id: "a1" },
+    { name: "settings" },
+  ] as const) {
+    assert.equal(viewDescription(view), undefined, `${view.name} keeps its own header`);
+  }
+});
+
 test("the shell passes the destination's name, and both app boundaries take the window", () => {
   const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
   assert.equal(app.match(/<ErrorBoundary scope="app">/g)?.length, 2, "the browser and the desktop roots");
   assert.match(app, /<ErrorBoundary\s+name=\{viewSubjectName\(view\)\}\s+resetKey=\{viewPath\(view\)\}/);
   assert.match(app, /pageWidth=\{viewPageWidth\(view\)\}/, "with the route's container width");
+  assert.match(app, /<ErrorBoundary\s+name=\{viewSubjectName\(view\)\}[^>]*\bpageDescription=\{viewDescription\(view\)\}/,
+    "and the route's description");
   assert.doesNotMatch(app, /<ErrorBoundary[^>]*\blabel=/, "a developer label never reaches the page");
 });

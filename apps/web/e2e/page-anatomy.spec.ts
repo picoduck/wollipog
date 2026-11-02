@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { EXPERIMENTS_STORAGE_KEY } from "../src/experiments.js";
+import { instanceStorageKey } from "../src/instance-storage.js";
 
 /**
  * Page anatomy (#1801; docs/design-system.md §4.2 page header, §4.3 detail bar, §4.5 page
@@ -23,6 +25,17 @@ const DESTINATIONS = [
   { path: "/usage", title: "Usage and Cost", description: true, tabs: true, max: 1200 },
   { path: "/settings", title: "Settings", description: true },
 ] as const;
+
+/** Both experiments off on this device, as Settings › Experimental would store them in the shell
+ * harness's instance scope. */
+async function turnExperimentsOff(page: Page) {
+  await page.addInitScript((key) => {
+    // Once per tab, so Turn On is not undone by the next navigation.
+    if (sessionStorage.getItem("e2e-experiments-off")) return;
+    sessionStorage.setItem("e2e-experiments-off", "1");
+    localStorage.setItem(key, JSON.stringify({ multiAgent: false, pods: false }));
+  }, instanceStorageKey(EXPERIMENTS_STORAGE_KEY, "project-inbox-e2e"));
+}
 
 async function openDestination(page: Page, path: string, title: string) {
   await page.goto(shell(path));
@@ -116,6 +129,24 @@ test.describe("at 1440×900", () => {
         await expect(page.locator(".page-header .page-desc"), `${title} at ${width}px`).toHaveText(description);
         await expect(page.locator(".page-header .page-desc")).toBeVisible();
       }
+    }
+  });
+
+  test("a turned-off experiment keeps the working page's header, and Turn On does not move it", async ({ page }) => {
+    await turnExperimentsOff(page);
+    for (const [path, title, description] of [
+      ["/runs", "Multi-Agent Runs", "Give one task to several agents and compare what each one does."],
+      ["/pods", "Pods", "Agents that share notes and a worktree while they work toward one objective."],
+    ] as const) {
+      await openDestination(page, path, title);
+      const header = page.locator(".page-header");
+      await expect(header.locator(".page-desc"), title).toHaveText(description);
+      const off = await header.boundingBox();
+      expect(off!.height, `${title} turned off is as tall as its working header`).toBe(88);
+      await page.getByRole("button", { name: `Turn On ${title}`, exact: true }).click();
+      await expect(page.locator(".experiment-off")).toHaveCount(0);
+      await expect(header.locator(".page-desc")).toHaveText(description);
+      expect(await header.boundingBox(), `${title}'s header stays put when it is turned on`).toEqual(off);
     }
   });
 
@@ -296,6 +327,15 @@ test.describe("page header actions follow the width tiers", () => {
         ["/automations", "Automations"], ["/runs", "Multi-Agent Runs"], ["/pods", "Pods"], ["/usage", "Usage and Cost"],
       ] as const) {
         await openDestination(page, path, title);
+        await expect(page.locator(".page-header .page-desc"), title).toBeHidden();
+      }
+    });
+
+    test("a turned-off experiment shows no description either", async ({ page }) => {
+      await turnExperimentsOff(page);
+      for (const [path, title] of [["/runs", "Multi-Agent Runs"], ["/pods", "Pods"]] as const) {
+        await openDestination(page, path, title);
+        await expect(page.getByRole("button", { name: `Turn On ${title}`, exact: true })).toBeVisible();
         await expect(page.locator(".page-header .page-desc"), title).toBeHidden();
       }
     });

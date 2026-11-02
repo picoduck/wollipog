@@ -2892,12 +2892,18 @@ the same notice with Reload and Copy Error Details; a page-level error is center
   (`viewPageWidth`), so the header's hairline does not move: `.page.wide` for Usage and Cost,
   `.page.full` for Sessions, Projects, Agent Skills, Connections › Machines and Settings, and `.page`
   elsewhere. Archived Sessions keeps its `.page` list container, matching its normal 960px rows.
+  On a destination route the redrawn header keeps the destination's one-line description from the
+  registry (`viewDescription`), so it is as tall as the working page's and nothing moves on reload;
+  like every description it is hidden on phones (§4.2). Entity pages, the Automations editor,
+  Settings and the Session keep their own headers.
 - **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
   Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
-- **A turned-off experiment's route** is not an error: it keeps its page header, and below it an
-  empty-style `State` with a flask icon, "{Name} Are Turned Off", a sentence on why it is hidden and
-  what turning it on adds, **Turn On** (primary, the same switch as Settings › Experimental; the
-  feature mounts in place) and Open Experimental Settings.
+- **A turned-off experiment's route** is not an error: it keeps its page header, with the
+  destination's description on a destination route as for a crashed view, so the feature mounts
+  without the header moving. Below it is an empty-style `State` with a flask icon, "{Name} Are Turned
+  Off", a sentence on why it is hidden and what turning it on adds, **Turn On {Name}** ("Turn On
+  Multi-Agent Runs", "Turn On Pods"; primary, the same switch as Settings › Experimental; the feature
+  mounts in place) and Open Experimental Settings.
 - Below 760px the actions of all three stack at full width and are 44px tall.
 
 ### 12.5 Offline

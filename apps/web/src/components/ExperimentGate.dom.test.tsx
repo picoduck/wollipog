@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { after, before, beforeEach, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -13,7 +15,7 @@ import {
   type ExperimentId,
 } from "../experiments.js";
 import { resetRailPreferencesForTest } from "../rail-preferences.js";
-import type { View } from "../navigation.js";
+import { destination, viewDescription, type View } from "../navigation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
@@ -82,7 +84,7 @@ for (const { experiment, view, path, content } of cases) {
           settingsControl={<button type="button">Settings</button>}
         />
         <main>
-          <ExperimentGate experiment={experiment} pageTitle={name} onOpenSettings={() => { openedSettings += 1; }}>
+          <ExperimentGate experiment={experiment} pageTitle={name} pageDescription={viewDescription(view)} onOpenSettings={() => { openedSettings += 1; }}>
             <h1 id="page-title" tabIndex={-1}>{name}</h1>
             <p className="gated-content">{content}</p>
           </ExperimentGate>
@@ -100,6 +102,10 @@ for (const { experiment, view, path, content } of cases) {
       const header = page().querySelector(".page > header.page-header");
       assert.ok(header, "the page keeps its header");
       assert.equal(page().querySelector("h1#page-title")?.textContent, name);
+      const description = destination(view.name as "runs" | "pods").description;
+      assert.ok(description, "the destination has a description to keep");
+      assert.equal(header!.querySelector(".page-heading > p.page-desc")?.textContent, description,
+        "the header keeps the working page's description, so it is the same height");
       const state = page().querySelector(".state.experiment-off")!;
       assert.ok(state, "the turned-off state");
       assert.ok(header!.compareDocumentPosition(state as never) & 4, "the state sits below the header");
@@ -109,7 +115,7 @@ for (const { experiment, view, path, content } of cases) {
       assert.equal(state.querySelector(".state-body")?.textContent,
         `This experiment is off on this device. Turning it on adds ${name} to the navigation.`);
       const buttons = [...state.querySelectorAll<HTMLButtonElement>(".actions button")];
-      assert.deepEqual(buttons.map((button) => button.textContent), ["Turn On", "Open Experimental Settings"]);
+      assert.deepEqual(buttons.map((button) => button.textContent), [`Turn On ${name}`, "Open Experimental Settings"]);
       assert.ok(buttons[0]!.classList.contains("primary"));
       assert.ok(!buttons[1]!.classList.contains("primary"));
 
@@ -131,3 +137,32 @@ for (const { experiment, view, path, content } of cases) {
     }
   });
 }
+
+test("a turned-off entity route keeps its bare header: only destinations carry a description", async () => {
+  setExperimentFlag("multiAgent", false);
+  const view: View = { name: "run", id: "r1" };
+  assert.equal(viewDescription(view), undefined);
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(
+    <ExperimentGate experiment="multiAgent" pageTitle="Multi-Agent Run" pageDescription={viewDescription(view)} onOpenSettings={() => {}}>
+      <p className="gated-content">Run Detail</p>
+    </ExperimentGate>,
+  ));
+  try {
+    assert.equal(container.querySelector("h1#page-title")?.textContent, "Multi-Agent Run");
+    assertNoDomNode(container.querySelector(".page-desc"), "an entity page has no destination description");
+    assert.equal(container.querySelector(".state .actions .primary")?.textContent, "Turn On Multi-Agent Runs");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("the shell hands both gates the route's description", () => {
+  const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
+  for (const experiment of ["multiAgent", "pods"]) {
+    assert.match(app, new RegExp(`<ExperimentGate experiment="${experiment}" pageTitle=\\{viewTitle\\(view, entityTitle\\)\\} pageDescription=\\{viewDescription\\(view\\)\\}`));
+  }
+});
