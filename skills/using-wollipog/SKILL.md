@@ -222,6 +222,12 @@ typed decisions plus sanitization, dependency checks, cross-model review, and ex
 enqueued pull request remains unfinished until merge-group CI passes and the forge reports actual
 `MERGED` state; continue supervising unrelated children while any one child waits for a human gate.
 
+Tell supervised children to end their turn after successful enqueueing and a confirmed queue entry.
+Watch every queued child pull request yourself with model-free waits (`wait_pull_request`,
+`wollipog pr wait`, or a background watcher that exits on a state change), then prompt its owning
+child on `merged`, `queue_ejected`, or `queue_failed`. A prompt queued to a running child waits for
+its turn to end; do not rely on mid-turn steering to stop a child already polling.
+
 Once a child is Idle or Completed, use its exact completed report event sequence with
 `verify_campaign_child` and attest that follow-ups were recorded. Pass `workItem` (`delivered` or
 `incomplete`) to record delivery of the child's assigned work item; idleness, a closed issue, or an
@@ -290,6 +296,12 @@ position and state, failed jobs with run links, and whether it merged.
   enqueueing, wait again: only `merged` means landed; `queue_failed` means GitHub marked the entry
   unmergeable and `queue_ejected` that it left the queue without merging. A failed merge-group
   check alone keeps the wait going, because GitHub may rebuild the group and still merge it.
+- A campaign child supervised by a parent Orchestrator ends its turn after successful enqueueing
+  and a confirmed queue entry instead of waiting on the merge queue. Queues can take hours, and
+  each repeated wait in a turn re-reads the conversation. The parent watches the queue and prompts
+  the child when the pull request merges or leaves it. In that new turn, reconcile the armed
+  `pr_merge` if its occurrence is still unconsumed, and finish cleanup after merge. Without a
+  supervising Orchestrator, keep waiting until `merged`.
 - `queue_ejected` also covers an entry GitHub removed before the call started, for example on a
   merge-group check timeout between two waits: when the latest merge-queue event removed the current
   head and the pull request is still open, `mergeQueueRemoval` gives GitHub's `reason` (such as
