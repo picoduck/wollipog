@@ -1020,8 +1020,9 @@ test("every workflow job bounds its own runtime", () => {
 
       assert.ok(timeout, `${path}: job "${heading[1]}" must set timeout-minutes`);
       // #3649 adds 8m of bounded cache/verification phases plus 75s enforcement to
-      // the measured Chromium model. Only this job may exceed the general ceiling.
-      const maximum = path === WORKFLOWS[0] && heading[1] === "browser" ? 68 : MAX_TIMEOUT_MINUTES;
+      // the measured Chromium model; #3628's 2078s remainder derives one more minute.
+      // Only this job may exceed the general ceiling (see workflow-browser-budget.test.mjs).
+      const maximum = path === WORKFLOWS[0] && heading[1] === "browser" ? 69 : MAX_TIMEOUT_MINUTES;
       assert.ok(
         Number(timeout[1]) <= maximum,
         `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${maximum}`,
