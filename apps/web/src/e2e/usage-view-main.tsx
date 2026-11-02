@@ -19,7 +19,8 @@ import "../styles.css";
  * flags: `?theme=light|dark`, `?empty=1` for a window with no usage, `?unpriced=1` for a partially
  * unpriced window with a cached rate table, `?subscriptions=1` for the Claude subscription cards,
  * `?tab=subscriptions` to open the Subscriptions tab, `?hourlyDays=14` for shorter hourly
- * retention, and `?noWeek=1` for a plane without weekly aggregation.
+ * retention, `?noWeek=1` for a plane without weekly aggregation, and `?coverage=recent` for recording
+ * that started yesterday, so the 30-day window is clamped to its first day.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -51,6 +52,10 @@ function add(a: UsageAmount, b: UsageAmount): UsageAmount {
 
 const unpriced = params.get("unpriced") === "1";
 const empty = params.get("empty") === "1";
+const recentCoverage = params.get("coverage") === "recent";
+const COVERAGE_STARTED_AT = recentCoverage ? END - DAY + 15 * 3_600_000 + 20 * 60_000 : Date.UTC(2026, 6, 1);
+// The plane clamps the window to the day recording started, as `usage-aggregation.ts` does.
+const SINCE = recentCoverage ? END - DAY : END - 29 * DAY;
 const drivers: Array<{ driver: AgentDriverKind; model: string; weight: number }> = [
   { driver: "claude-code", model: "claude-fable-5-1", weight: 1 },
   { driver: "codex-app-server", model: "gpt-5.5-codex", weight: 0.55 },
@@ -61,6 +66,7 @@ const drivers: Array<{ driver: AgentDriverKind; model: string; weight: number }>
 const seriesByDriver: UsageDriverTimeBucket[] = [];
 for (let dayIndex = 0; dayIndex < 30 && !empty; dayIndex += 1) {
   const bucketTs = END - (29 - dayIndex) * DAY;
+  if (bucketTs < SINCE) continue;
   const weekday = new Date(bucketTs).getUTCDay();
   const quiet = weekday === 0 || weekday === 6;
   const push = dayIndex >= 12 && dayIndex <= 17 ? 1.9 : 1;
@@ -98,9 +104,9 @@ const response: UsageAggregationResponse = {
   granularity: "day",
   supportedGranularities: params.get("noWeek") === "1" ? ["hour", "day"] : ["hour", "day", "week"],
   hourlyDataAvailable: true,
-  since: END - 29 * DAY,
+  since: SINCE,
   through: END + DAY,
-  retention: { hourlyDays: Number(params.get("hourlyDays") ?? 30), dailyDays: 365, coverageStartedAt: Date.UTC(2026, 6, 1) },
+  retention: { hourlyDays: Number(params.get("hourlyDays") ?? 30), dailyDays: 365, coverageStartedAt: COVERAGE_STARTED_AT },
   canManageRetention: true,
   privacy: "content-free aggregates only; no session ids, prompts, paths, tool inputs, event bodies, environment values, or auth data",
   totals,
@@ -282,7 +288,8 @@ function UsageRoute() {
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ApiProvider client={client}>
-      <main className="main-pane"><UsageRoute /></main>
+      {/* `.main` is the app container, so the column-width rules answer here as in the shell. */}
+      <main className="main"><UsageRoute /></main>
     </ApiProvider>
   </React.StrictMode>,
 );

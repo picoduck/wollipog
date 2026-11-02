@@ -197,12 +197,6 @@ export function niceScale(peak: number, tickCount = 4): { max: number; ticks: nu
   return { max, ticks };
 }
 
-/** Whole days a window spans, from the response itself rather than the range the user last
- * clicked, so a headline never labels one window's totals with another's length. */
-export function windowDays(data: Pick<UsageAggregationResponse, "since" | "through">): number {
-  return Math.max(1, Math.round((data.through - data.since) / 86_400_000));
-}
-
 const shortUtcDate = (timestamp: number) => new Date(timestamp).toLocaleDateString("en-US", {
   timeZone: "UTC", month: "short", day: "numeric",
 });
@@ -210,6 +204,25 @@ const shortUtcDate = (timestamp: number) => new Date(timestamp).toLocaleDateStri
 const fullUtcDate = (timestamp: number) => new Date(timestamp).toLocaleDateString("en-US", {
   timeZone: "UTC", year: "numeric", month: "short", day: "numeric",
 });
+
+/** The headline's caption: what the figure is and the dates it covers, read from the response's
+ * clamped window rather than the range the user last chose, so a headline never labels one
+ * window's totals with another's length. A window that starts where recording started says so
+ * instead of naming a length it does not have. `through` is exclusive, so the last day shown is
+ * the one holding its final instant. A window that crosses a year names the year on both dates. */
+export function usageWindowCaption(
+  metric: UsageMetric,
+  data: Pick<UsageAggregationResponse, "since" | "through" | "retention">,
+): string {
+  const subject = metric === "cost" ? "Estimated API cost" : "Processed tokens";
+  const last = Math.max(data.since, data.through - 1);
+  const date = new Date(data.since).getUTCFullYear() === new Date(last).getUTCFullYear() ? shortUtcDate : fullUtcDate;
+  if (data.retention.coverageStartedAt >= data.since) {
+    return `${subject} since ${date(data.since)}, when recording started`;
+  }
+  const [first, final] = [date(data.since), date(last)];
+  return first === final ? `${subject}, ${first}` : `${subject}, ${first} – ${final}`;
+}
 
 const utcHour = (timestamp: number) => String(new Date(timestamp).getUTCHours()).padStart(2, "0");
 

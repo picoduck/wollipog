@@ -17444,24 +17444,70 @@ button.review-finding-location {
 .usage-series-3 { --usage-series: var(--usage-series-3); }
 .usage-series-4 { --usage-series: var(--usage-series-4); }
 .usage-series-5 { --usage-series: var(--usage-series-5); }
-.usage-series-swatch, .usage-series-key { display: inline-block; vertical-align: middle; margin-right: 7px; background: var(--usage-series); }
-.usage-series-swatch { width: 10px; height: 10px; }
-.usage-series-key { width: 12px; height: 2px; }
+/* One swatch for the driver list (the chart's only legend) and the chart readout: an 8px square,
+   sharp like the columns' feet. --radius-xs would round an 8px box into a dot. */
+.usage-series-swatch { display: inline-block; flex: none; width: 8px; height: 8px; margin-right: var(--space-2); vertical-align: middle; background: var(--usage-series); }
 
 .usage-notice { display: grid; gap: 4px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-dim); font-size: var(--text-sm); }
 .usage-notice p { margin: 0; }
 
-.usage-overview { display: grid; grid-template-columns: minmax(0, 18rem) minmax(0, 1fr); gap: 20px; margin: 0 0 20px; }
-.usage-headline { display: grid; gap: 4px; align-content: start; }
-.usage-headline-value { font-size: var(--text-2xl); font-weight: 650; line-height: 1.1; }
-.usage-headline-note { color: var(--text-dim); font-size: var(--text-sm); }
-.usage-driver-list { list-style: none; margin: 14px 0 0; padding: 0; display: grid; gap: 12px; }
-.usage-driver-row { display: grid; gap: 2px; }
-.usage-driver-row > div { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.usage-driver-row strong { font-variant-numeric: tabular-nums; white-space: nowrap; }
-.usage-driver-row small { color: var(--text-dim); font-size: var(--text-xs); }
-.usage-chart-section h3, .usage-breakdown-section h3, .usage-totals-section h3 { margin: 0 0 10px; font-size: var(--text-md); }
-.usage-totals-section > .facts { margin-bottom: var(--space-5); }
+/* The overview (§2.3): the headline column beside the chart, stacked when the main column is
+   under 900px. Stacked, the column keeps its width so a driver's value stays near its name; a
+   phone gives it the whole width. Local to this page (§19.4). */
+.usage-overview {
+  display: grid;
+  grid-template-columns: minmax(240px, 280px) minmax(0, 1fr);
+  gap: var(--space-6);
+  margin: 0 0 var(--space-5);
+}
+@container app (max-width: 899px) {
+  .usage-overview { grid-template-columns: minmax(0, 1fr); }
+  .usage-headline { max-width: 280px; }
+}
+@media (max-width: 760px) {
+  .usage-overview { grid-template-columns: minmax(0, 1fr); }
+}
+.usage-headline, .usage-chart-section { min-width: 0; }
+.usage-headline { display: grid; gap: var(--space-1); align-content: start; }
+.usage-headline-value {
+  font: var(--type-figure);
+  font-variant-numeric: tabular-nums;
+}
+.usage-headline-note { color: var(--text-dim); font: var(--type-small); }
+.usage-driver-list { list-style: none; margin: var(--space-3) 0 0; padding: 0; display: grid; gap: var(--space-2); }
+.usage-driver-row { display: flex; align-items: center; min-width: 0; }
+.usage-driver-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.usage-driver-share { margin-left: var(--space-3); color: var(--text-faint); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-driver-row strong { margin-left: var(--space-3); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.usage-breakdown-section h3 { margin: 0 0 10px; font-size: var(--text-md); }
+.usage-facts { margin-bottom: var(--space-5); }
+/* In a compact column the strip never leaves an empty cell: five facts keep one row, and six
+   wrap to three by two rather than squeezing their labels, each row's first fact flush and the
+   second row under its own hairline. Phones turn the strip into rows (§5.4) and have no app
+   container. */
+@container app (max-width: 1099px) {
+  .usage-facts.strip { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .usage-facts-six.strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .usage-facts-six.strip > div:nth-child(3n + 1) { padding-left: 0; border-left: 0; }
+  .usage-facts-six.strip > div:nth-child(n + 4) { border-top: 1px solid var(--border); }
+}
+/* A column too narrow for five labels side by side (a docked panel beside it) gets the phone's
+   rows, label left and value right; a label that still cannot fit breaks rather than spill. */
+.usage-facts dt { overflow-wrap: anywhere; }
+@container app (max-width: 639px) {
+  .usage-facts.strip { grid-template-columns: minmax(0, 1fr); }
+  .usage-facts.strip > div {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) 0;
+  }
+  .usage-facts.strip > div + div {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+  .usage-facts.strip dd { font: var(--type-body-strong); }
+}
 
 .usage-chart { position: relative; display: grid; gap: 8px; min-width: 0; }
 .usage-chart-empty { padding: 40px 0; color: var(--text-dim); text-align: center; }
@@ -17483,7 +17529,6 @@ button.review-finding-location {
 .usage-chart-readout dd { margin: 0; font-weight: 650; font-variant-numeric: tabular-nums; }
 .usage-chart-readout-period { font-weight: 650; }
 .usage-chart-readout-hint, .usage-chart-readout-total dt { color: var(--text-dim); }
-.usage-legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--text-dim); font-size: var(--text-sm); }
 
 
 .usage-breakdown-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 10px; }
@@ -17495,7 +17540,6 @@ button.review-finding-location {
 .usage-daily-budget input { width: 120px; }
 
 @media (max-width: 860px) {
-  .usage-overview { grid-template-columns: minmax(0, 1fr); }
   .usage-chart-svg { height: 260px; }
 }
 .usage-breakdown li { display: flex; justify-content: space-between; gap: 10px; min-width: 0; font-size: 12px; }

@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type RefObject } from "react";
-import type { AgentDriverKind, UsageAggregationGranularity } from "@wollipog/protocol";
+import type { UsageAggregationGranularity } from "@wollipog/protocol";
 import {
   DRIVER_PRESENTATION,
   seriesClass,
@@ -52,14 +52,12 @@ function segmentPath(x: number, width: number, top: number, bottom: number, roun
  */
 export function UsageChart({
   columns,
-  drivers,
   metric,
   granularity,
   bounds,
   tableHint,
 }: {
   columns: readonly UsageColumn[];
-  drivers: readonly AgentDriverKind[];
   metric: UsageMetric;
   granularity: UsageAggregationGranularity;
   bounds: { since: number; through: number };
@@ -168,7 +166,7 @@ export function UsageChart({
               {readout.bands.map((band) => (
                 <div key={band.driver}>
                   <dt>
-                    <span className={`usage-series-key ${seriesClass(band.driver)}`} aria-hidden="true" />
+                    <span className={`usage-series-swatch ${seriesClass(band.driver)}`} aria-hidden="true" />
                     {DRIVER_PRESENTATION[band.driver].label}
                   </dt>
                   <dd>{formatMetric(band.value, metric)}</dd>
@@ -181,16 +179,6 @@ export function UsageChart({
           <span className="usage-chart-readout-hint">Hover or focus a column for its breakdown.</span>
         )}
       </div>
-      {split && drivers.length >= 2 && (
-        <ul className="usage-legend" aria-label="Drivers">
-          {drivers.map((driver) => (
-            <li key={driver}>
-              <span className={`usage-series-swatch ${seriesClass(driver)}`} aria-hidden="true" />
-              {DRIVER_PRESENTATION[driver].label}
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
