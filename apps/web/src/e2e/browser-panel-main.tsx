@@ -1,11 +1,11 @@
-import React from "react";
+import React, { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { ControlPlaneToUi, SessionView, WorkflowArtifactKind, WorkflowArtifactPage, WorkflowArtifactView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { BrowserPanel } from "../components/BrowserPanel.js";
-import { SESSION_TOOL_ICONS } from "../components/RightPanel.js";
+import { PanelActionSlotContext, SESSION_TOOL_ICONS } from "../components/RightPanel.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -13,7 +13,8 @@ import "../styles.css";
 
 /**
  * The Browser tool (#2854) in a side panel column: 400px on a desktop and the whole width on a
- * phone, under a stand-in for the panel's 48px header. `?theme=light` switches the theme;
+ * phone, under a stand-in for the panel's 48px header with the real action slot, where the tool puts
+ * About Browser (#3039). `?theme=light` switches the theme;
  * `?artifacts=list|loading|empty|error` chooses what the artifact list answers (a list by default).
  * An opened artifact's bytes are real and match their checksum (#2855); `?preview=loading` never
  * answers and `?preview=mismatch` answers with bytes that fail it.
@@ -208,6 +209,7 @@ const BrowserIcon = SESSION_TOOL_ICONS.browser;
 
 function Fixture() {
   const phone = window.innerWidth <= 760;
+  const [actionSlot, setActionSlot] = useState<HTMLElement | null>(null);
   return (
     <ApiProvider client={client}>
       <FeedbackProvider>
@@ -215,14 +217,19 @@ function Fixture() {
           <main className="app" style={{ height: "100vh", display: "flex", justifyContent: "flex-end", background: "var(--bg)" }}>
             <aside id="right-panel" className="rpanel" aria-label="Side Panel" style={{ width: phone ? "100%" : 400, height: "100vh" }}>
               <div className="rpanel-head">
-                <span className="rpanel-switcher">
-                  <span className="rpanel-switcher-icon" aria-hidden="true"><BrowserIcon /></span>
-                  <span className="rpanel-switcher-name">Browser</span>
+                <span className="rpanel-title">
+                  <span className="rpanel-switcher">
+                    <span className="rpanel-switcher-icon" aria-hidden="true"><BrowserIcon /></span>
+                    <span className="rpanel-switcher-name">Browser</span>
+                  </span>
                 </span>
+                <div className="rpanel-actions" ref={setActionSlot} />
               </div>
-              <div className="rpanel-body">
-                <BrowserPanel session={session} />
-              </div>
+              <PanelActionSlotContext.Provider value={actionSlot}>
+                <div className="rpanel-body">
+                  <BrowserPanel session={session} />
+                </div>
+              </PanelActionSlotContext.Provider>
             </aside>
           </main>
         </StoreProvider>

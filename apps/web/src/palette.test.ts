@@ -4,10 +4,12 @@ import type { SessionView } from "@wollipog/protocol";
 import {
   matchSessions,
   paletteSections,
+  paletteSessionStatus,
   snippetFromWordBoundary,
   transcriptQueryTooShort,
   type PaletteEntry,
 } from "./palette.js";
+import { sessionRowStatus } from "./session-row-status.js";
 
 function s(over: Partial<SessionView>): SessionView {
   return {
@@ -157,6 +159,55 @@ test("paletteSections: a session row's dot says what the session needs before it
     pendingApproval: { requestId: "r", kind: "permission", toolName: "Bash", input: {}, createdAt: 1 } as never });
   const approval = paletteSections({ query: "w", sessions: byId(waiting), recent: [], hits: [], destinations: [], actions: [] })[0]!.entries[0]!;
   assert.equal(approval.kind === "session" && approval.status.tone, "warning");
+});
+
+test("paletteSections: a pending approval reads Approval Required on every row naming the session, as its dot does", () => {
+  const waiting = s({ id: "w", title: "Deploy the fix", status: "input_required",
+    pendingApproval: { requestId: "r", kind: "permission", toolName: "Bash", input: {}, createdAt: 1 } as never });
+  const sessions = byId(waiting);
+  const recent = paletteSections({ query: "", sessions, recent: ["w"], hits: [], destinations: [], actions: [] })[0]!.entries[0]!;
+  const matched = paletteSections({ query: "deploy", sessions, recent: [], hits: [], destinations: [], actions: [] })[0]!.entries[0]!;
+  const hit = paletteSections({
+    query: "rollout",
+    sessions,
+    recent: [],
+    hits: [{ sessionId: "w", title: "Deploy the fix", snippet: "the ⟪rollout⟫ step" }],
+    destinations: [],
+    actions: [],
+  })[0]!.entries[0]!;
+  for (const entry of [recent, matched, hit]) {
+    assert.equal(entry.detail, "Approval Required · repo · Claude Code", `${entry.key} names the attention, not the lifecycle`);
+  }
+  assert.equal(recent.kind === "session" && recent.status.label, "Approval Required", "the dot names the same status");
+  const answered = paletteSections({ query: "deploy", sessions: byId({ ...waiting, pendingApproval: null }), recent: [], hits: [],
+    destinations: [], actions: [] })[0]!.entries[0]!;
+  assert.equal(answered.detail, "Awaiting Input · repo · Claude Code", "with nothing pending the lifecycle is the status");
+});
+
+test("paletteSessionStatus: several pending approvals read as the Sessions list's badge does, not Needs Your Input", () => {
+  const approval = (requestId: string) => ({ requestId, kind: "permission", toolName: "Bash", input: {}, createdAt: 1 });
+  const waiting = s({ id: "w", title: "Migrate billing", status: "input_required",
+    pendingApproval: { ...approval("r1"), additionalRequests: [approval("r2"), approval("r3")] } as never });
+  const status = paletteSessionStatus(waiting);
+  assert.equal(status.label, "Approval Required");
+  assert.equal(status.label, sessionRowStatus(waiting).badge?.meta.label, "the same words as the Sessions list's row");
+  assert.equal(status.tone, "warning");
+  const entry = paletteSections({ query: "", sessions: byId(waiting), recent: ["w"], hits: [], destinations: [], actions: [] })[0]!.entries[0]!;
+  assert.equal(entry.detail, "Approval Required · repo · Claude Code");
+});
+
+test("paletteSections: Recent rows carry the session's last-activity time; other rows do not", () => {
+  const sessions = byId(
+    s({ id: "a", title: "Alpha", updatedAt: 5, lastEventAt: 40 }),
+    s({ id: "b", title: "Beta", updatedAt: 7, lastEventAt: null }),
+    s({ id: "c", title: "Gamma", updatedAt: 5, lastEventAt: 40, attention: { meaningfulAt: 30 } as never }),
+  );
+  const recent = paletteSections({ query: "", sessions, recent: ["a", "b", "c"], hits: [], destinations, actions });
+  assert.deepEqual(recent[0]!.entries.map((entry) => entry.at), [40, 7, 30],
+    "the latest event, else the last update, and the attention's meaningful time first, as the Sessions list reads it");
+  assert.ok(recent.slice(1).every((section) => section.entries.every((entry) => entry.at === undefined)));
+  const matched = paletteSections({ query: "alpha", sessions, recent: ["a"], hits: [], destinations, actions });
+  assert.equal(matched[0]!.entries[0]!.at, undefined, "a title match has no time");
 });
 
 test("transcriptQueryTooShort: one or two characters get the hint; none and three do not", () => {
