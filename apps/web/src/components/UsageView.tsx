@@ -21,16 +21,13 @@ import { StatusBadge } from "./StatusBadge.js";
 import { redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { useHasStore, useOptionalStoreSelector, useStoreSelector } from "../store.js";
 import {
-  DRIVER_PRESENTATION,
   PERIOD_ROWS_SHOWN,
-  seriesClass,
   activeDrivers,
   agentBreakdown,
   breakdownRows,
   buildColumns,
   coverageMessages,
   dailyBudgetReached,
-  driverLabel,
   driverRows,
   formatCompactTokens,
   formatMetric,
@@ -41,8 +38,10 @@ import {
   processedTokens,
   subscriptionPlanLabel,
   todaySpendUsd,
+  usageDriverLabels,
   usageWindowCaption,
   type BreakdownRow,
+  type UsageAgentCandidate,
   type UsageBreakdownTab,
   type UsageMetric,
 } from "../usage-view-model.js";
@@ -50,7 +49,7 @@ import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { SegmentedControl, type SegmentedOption } from "./ui/ChoiceControls.js";
-import { UsageChart } from "./UsageChart.js";
+import { SeriesSwatch, UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PageHeader } from "./PageHeader.js";
 import { destination, type UsageTab } from "../navigation.js";
@@ -218,6 +217,17 @@ function useUsageNames(): UsageNames {
   const runners = useOptionalStoreSelector((state) => state.runners);
   const boxes = useOptionalStoreSelector((state) => state.boxes);
   return useMemo(() => usageNames(runners, boxes), [runners, boxes]);
+}
+
+/** The agents the viewer's Machines advertise, so ACP usage can be named by its agent. None
+ * without a store (a harness page). */
+function useUsageAgents(): UsageAgentCandidate[] {
+  const runners = useOptionalStoreSelector((state) => state.runners);
+  return useMemo(() => [...(runners?.values() ?? [])].flatMap((runner) => runner.agents.map((agent): UsageAgentCandidate => ({
+    id: agent.id,
+    ...(agent.driver ? { driver: agent.driver } : {}),
+    name: agentDisplayName(agent, undefined, { identifiers: false }),
+  }))), [runners]);
 }
 
 /** Tokens or cost in a breakdown row. The active metric's figure is the row's total, beside the name
@@ -392,6 +402,9 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     available: boolean;
   } | undefined>(undefined);
   const [offlineMachines, setOfflineMachines] = useState<string[]>([]);
+  // The range the shown response answers, which can trail `days` while the next one loads: the
+  // chart spans this range, and the buckets of it before recording started are its Not Recorded band.
+  const [dataRange, setDataRange] = useState<number | null>(null);
   const [users, setUsers] = useState<UserCostWindows[] | null>(null);
   const [dailyBudget, setDailyBudget] = useState<UsageDailyBudgetPolicy | null>(null);
   const [dailyBudgetDraft, setDailyBudgetDraft] = useState("");
@@ -427,6 +440,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       if (next.granularity !== requestedGranularity && !legacyHourlyFallback) {
         throw new Error(`The control plane returned ${next.granularity} usage instead of the requested ${requestedGranularity} aggregation.`);
       }
+      setDataRange(range);
       setData(next);
       setKnownRetention(next.retention);
       setSupportedGranularities(next.supportedGranularities ?? LEGACY_USAGE_GRANULARITIES);
@@ -590,10 +604,21 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   const drivers = useMemo(() => (data ? activeDrivers(data.byDriver) : []), [data]);
   const rows = useMemo(() => (data ? driverRows(data, metric) : []), [data, metric]);
   const columns = useMemo(
-    () => (data ? buildColumns(data.series, data.seriesByDriver ?? [], drivers, metric) : []),
-    [data, drivers, metric],
+    () => (data ? buildColumns(data.series, data.seriesByDriver ?? [], drivers, metric, {
+      granularity: data.granularity,
+      since: data.since,
+      through: data.through,
+      coverageStartedAt: data.retention.coverageStartedAt,
+      ...(dataRange === null ? {} : { rangeDays: dataRange }),
+    }) : []),
+    [data, dataRange, drivers, metric],
   );
   const names = useUsageNames();
+  const usageAgents = useUsageAgents();
+  const driverLabels = useMemo(
+    () => usageDriverLabels(data ?? { byDriver: [], byAgent: [] }, usageAgents),
+    [data, usageAgents],
+  );
   const dimensionRows = useMemo(() => data ? {
     model: breakdownRows(data.byModel ?? [], names.model, metric, data.totals),
     agent: breakdownRows(agentBreakdown(data.byAgent), names.agent, metric, data.totals),
@@ -969,8 +994,8 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                     {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
                     {rows.map((row) => (
                       <li className="usage-driver-row" key={row.driver}>
-                        <span className={`usage-series-swatch ${seriesClass(row.driver)}`} aria-hidden="true" />
-                        <span className="usage-driver-name">{DRIVER_PRESENTATION[row.driver].label}</span>
+                        <SeriesSwatch driver={row.driver} />
+                        <span className="usage-driver-name">{driverLabels[row.driver]}</span>
                         <span className="usage-driver-share">{formatShare(row.share)}</span>
                         <strong>{formatMetric(metricValue(row.amount, metric), metric)}</strong>
                       </li>
@@ -983,6 +1008,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                     metric={metric}
                     granularity={data.granularity}
                     bounds={{ since: data.since, through: data.through }}
+                    driverLabels={driverLabels}
                     tableHint={breakdownTab === "time"
                       ? `the By ${periodNoun} table below lists every value.`
                       : `choose By ${periodNoun} under Breakdown for a table of every value.`}
@@ -1030,7 +1056,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                           <thead>
                             <tr>
                               <th scope="col" className="col-name">{periodNoun} (UTC)</th>
-                              {drivers.map((driver) => <th scope="col" className="num cell-extra" key={driver}>{driverLabel(driver)}</th>)}
+                              {drivers.map((driver) => <th scope="col" className="num cell-extra" key={driver}>{driverLabels[driver]}</th>)}
                               <th scope="col" className="num">Total</th>
                               <th scope="col" className="num usage-period-trailing">{metric === "cost" ? "Tokens" : "Cost"}</th>
                             </tr>

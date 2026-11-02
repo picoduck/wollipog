@@ -9,6 +9,7 @@ import {
   declaredTokens as declared, SCHEMES, THEMES, type Theme, tokensFor as resolveTokens,
 } from "./palettes.js";
 import { SCHEME_SWATCHES, SWATCH_TOKENS, type ColorScheme } from "./theme.js";
+import { DRIVER_ORDER, DRIVER_PRESENTATION } from "./usage-view-model.js";
 
 /**
  * Four alternative palettes, and the properties every one of them has to hold.
@@ -304,6 +305,12 @@ test("usage chart series and hover fills stay distinct and visible in every pale
   assert.ok(hoverSeriesFraction > 0 && hoverSeriesFraction <= 1,
     "the usage hover's series percentage must be a fraction in (0, 1]");
 
+  // The slots measured against the grounds, and every slot in the chart's stacking order from the
+  // baseline up. Pi's slot 5 is not held to the 3:1 ground floor here: it measures 2.98:1 on
+  // Dracula's dark --bg-elev, and its token is shared by every scheme.
+  const slots = [1, 2, 3, 4] as const;
+  const stacked = DRIVER_ORDER.map((driver) => DRIVER_PRESENTATION[driver].slot);
+  assert.deepEqual([...stacked].sort(), [1, 2, 3, 4, 5], "every slot stacks exactly once");
   const failures: string[] = [];
   let contrastChecks = 0;
   let separationChecks = 0;
@@ -315,8 +322,8 @@ test("usage chart series and hover fills stay distinct and visible in every pale
         assert.ok(value, `${scheme}/${theme}: ${name} must be a literal colour for measurement`);
         return value;
       };
-      const series = [1, 2, 3, 4].map((slot) => requireLiteral(`--usage-series-${slot}`));
-      const sharedSeries = [1, 2, 3, 4].map((slot) => {
+      const series = slots.map((slot) => requireLiteral(`--usage-series-${slot}`));
+      const sharedSeries = slots.map((slot) => {
         const value = literal(tokensFor("wollipog", theme), `--usage-series-${slot}`);
         assert.ok(value, `wollipog/${theme}: --usage-series-${slot} must be a literal colour`);
         return value;
@@ -330,20 +337,22 @@ test("usage chart series and hover fills stay distinct and visible in every pale
           const normal = contrast(colour, ground);
           const hovered = contrast(mixHex(text, colour, hoverSeriesFraction), ground);
           if (normal < 3) {
-            failures.push(`${scheme}/${theme}: series ${index + 1} on ${groundName} is ${normal.toFixed(2)}:1`);
+            failures.push(`${scheme}/${theme}: series ${slots[index]} on ${groundName} is ${normal.toFixed(2)}:1`);
           }
           if (hovered < 3) {
-            failures.push(`${scheme}/${theme}: hovered series ${index + 1} on ${groundName} is ${hovered.toFixed(2)}:1`);
+            failures.push(`${scheme}/${theme}: hovered series ${slots[index]} on ${groundName} is ${hovered.toFixed(2)}:1`);
           }
           contrastChecks += 2;
         }
       }
-      for (let index = 0; index < series.length - 1; index++) {
+      // The pairs that touch in a column: each driver and the one stacked directly on it.
+      for (let index = 0; index < stacked.length - 1; index++) {
+        const [below, above] = [stacked[index]!, stacked[index + 1]!];
         for (const vision of Object.keys(VISION_MATRICES) as Vision[]) {
-          const measured = deltaE(series[index]!, series[index + 1]!, vision);
+          const measured = deltaE(requireLiteral(`--usage-series-${below}`), requireLiteral(`--usage-series-${above}`), vision);
           const floor = vision === "normal" ? 15 : 8;
           if (measured < floor) {
-            failures.push(`${scheme}/${theme}: series ${index + 1}/${index + 2} under ${vision} is ΔE ${measured.toFixed(2)}`);
+            failures.push(`${scheme}/${theme}: stacked series ${below}/${above} under ${vision} is ΔE ${measured.toFixed(2)}`);
           }
           separationChecks += 1;
         }
@@ -352,9 +361,9 @@ test("usage chart series and hover fills stay distinct and visible in every pale
   }
   // Literals, because deriving these from the enumerators lets a removed scheme, slot, surface, or
   // vision model shorten both the work and its supposed guard. Five schemes x two themes x four
-  // slots x two grounds x two states; then three adjacent pairs x four vision models.
+  // slots x two grounds x two states; then four stacked pairs x four vision models.
   assert.equal(contrastChecks, 160, "usage contrast coverage must span the complete palette matrix");
-  assert.equal(separationChecks, 120, "usage separation coverage must span every adjacent pair and vision model");
+  assert.equal(separationChecks, 160, "usage separation coverage must span every stacked pair and vision model");
   assert.deepEqual(failures, [], "usage chart colours must preserve their contrast and categorical separation");
 });
 

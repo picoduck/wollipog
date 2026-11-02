@@ -1564,14 +1564,14 @@ test("the driver list is the chart's only legend, and the chart has no heading o
   assert.ok(list, "the driver list is in the overview");
   assert.deepEqual(
     [...list.querySelectorAll(".usage-driver-row")].map((row) => [
-      row.querySelector(".usage-series-swatch")?.className,
+      row.querySelector(".usage-series-swatch")?.getAttribute("class"),
       row.querySelector(".usage-driver-name")?.textContent,
       row.querySelector(".usage-driver-share")?.textContent,
       row.querySelector("strong")?.textContent,
     ]),
     [
-      ["usage-series-swatch usage-series-1", "Claude Code", "80%", "$4.00"],
-      ["usage-series-swatch usage-series-2", "Codex", "20%", "$1.00"],
+      ["usage-series-swatch usage-series-2", "Claude Code", "80%", "$4.00"],
+      ["usage-series-swatch usage-series-1", "Codex", "20%", "$1.00"],
     ],
   );
   assert.equal(container.querySelectorAll("ul").length, 1, "the page lists the driver series once");
