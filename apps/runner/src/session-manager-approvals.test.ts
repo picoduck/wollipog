@@ -7,7 +7,7 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync, symlinkSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pendingRequests, type RunnerToControlPlane } from "@wollipog/protocol";
@@ -2248,8 +2248,8 @@ test("logoutAgent fences prompts and duplicate logout until the provider settles
   }
 });
 
-for (const published of [false, true]) {
-  test(`an async answer survives a journal failure ${published ? "after" : "before"} fence publication`, async (t) => {
+for (const published of [false, true]) for (const resetFlushFails of [false, true]) {
+  test(`an async answer survives a journal failure ${published ? "after" : "before"} fence publication${resetFlushFails ? " and a recovery reset flush failure" : ""}`, async (t) => {
     const { sm, sent, store, cleanup } = makeHarness(true);
     const journalRoot = mkdtempSync(join(tmpdir(), "wollipog-answer-journal-fault-"));
     try {
@@ -2260,7 +2260,11 @@ for (const published of [false, true]) {
       entry.client.activeSteeringTurnId = () => "provider-turn";
       let providerCalls = 0;
       let promptCalls = 0;
-      entry.client.prompt = async () => { promptCalls += 1; return "end_turn"; };
+      entry.client.prompt = async (text: string) => {
+        assert.match(text, /Question: Which path\?\nAnswer: Patch/u);
+        promptCalls += 1;
+        return "end_turn";
+      };
       entry.client.steer = async () => {
         providerCalls += 1;
         return { outcome: "accepted", providerTurnId: "provider-turn" };
@@ -2275,18 +2279,40 @@ for (const published of [false, true]) {
       const command = { type: "answer_recovered_question" as const, sessionId: "s_perm",
         requestId: "codex-async:journal", recoveryId, answers: { "0": "Patch" } };
       const journal = new DurableCommandStore(journalRoot, { ownerId: "owner-a", now: () => 1 });
-      const claim = journal.claim({ type: "durable_session_command", requestId: "receipt-request",
+      const message = { type: "durable_session_command" as const, requestId: "receipt-request",
         commandId: "journal_answer", executionId: "execution", expiresAt: 10_000,
-        payloadDigest: durableCommandPayloadDigest(command), command });
+        payloadDigest: durableCommandPayloadDigest(command), command };
+      const claim = journal.claim(message);
       if (claim.kind !== "new") return assert.fail("answer was not claimed");
       const handle = claim.handle;
       const originalWrite = (journal as any).writeAtomic.bind(journal);
       let injected = false;
+      let writingReset = false;
+      let resetFile = "";
+      let resetBytes = "";
+      let flushFailed = false;
+      const originalFlush = (journal as any).fsyncDirectory.bind(journal);
+      t.mock.method(journal as any, "fsyncDirectory", (directory: string) => {
+        if (writingReset && !flushFailed) {
+          resetBytes = readFileSync(resetFile, "utf8");
+          const reset = JSON.parse(resetBytes);
+          assert.equal(reset.state, "queued", "reset must be published before its directory flush fails");
+          assert.equal(reset.steeringPending, false);
+          flushFailed = true;
+          throw new Error("synthetic reset directory flush failure");
+        }
+        return originalFlush(directory);
+      });
       t.mock.method(journal as any, "writeAtomic", (file: string, record: any) => {
         if (!injected && record.state === "started" && record.steeringPending) {
           injected = true;
           if (published) originalWrite(file, record);
           throw new Error("synthetic journal write failure");
+        }
+        if (resetFlushFails && injected && record.state === "queued" && record.steeringPending === false && !flushFailed) {
+          resetFile = file;
+          writingReset = true;
+          try { return originalWrite(file, record); } finally { writingReset = false; }
         }
         return originalWrite(file, record);
       });
@@ -2298,7 +2324,12 @@ for (const published of [false, true]) {
         started: (seq) => { handle.started(seq); },
         completed: () => { handle.completed(); },
         failed: (error, code) => { handle.failed(error, code); },
-        uncertain: (error) => { handle.uncertain(error); },
+        uncertain: (error) => {
+          // Match index.ts's best-effort terminal persistence, while proving its stale write
+          // cannot terminalize the newer queued reset.
+          assert.equal(resetFlushFails, true);
+          assert.throws(() => handle.uncertain(error), /changed concurrently/u);
+        },
       });
       for (let attempt = 0; attempt < 40 && (sm as any).steeringLaneRunning.has("s_perm"); attempt += 1) {
         await new Promise<void>((resolve) => setImmediate(resolve));
@@ -2306,6 +2337,55 @@ for (const published of [false, true]) {
       assert.equal(injected, true);
       assert.equal(providerCalls, 0);
       assert.equal(journal.read("journal_answer")?.state, "queued");
+      if (resetFlushFails) {
+        assert.equal(flushFailed, true, "the real reset reached its final directory flush");
+        assert.equal(readFileSync(resetFile, "utf8"), resetBytes, "stale uncertain callback cannot overwrite the reset");
+        assert.equal(handle.current.revision < JSON.parse(resetBytes).revision, true);
+        assert.equal(entry.queue.length, 0, "an unflushed reset must not restore the answer to the FIFO");
+        assert.equal(entry.reservedPromotions.size, 0);
+        assert.equal((sm as any).steerFences(entry).size, 0);
+        assert.equal(eventsOf(sent, "user_message").length, 0);
+        sm.reconcileStore();
+        assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+
+        const newerBytes = readFileSync(resetFile, "utf8");
+        assert.throws(() => handle.failed("stale failure"), /changed concurrently/u);
+        assert.throws(() => handle.completed(), /changed concurrently/u);
+        assert.equal(readFileSync(resetFile, "utf8"), newerBytes, "stale terminal calls cannot overwrite the newer reset receipt");
+        const retry = journal.claim(message);
+        assert.equal(retry.kind, "reclaimed", "failed persistence must release the old local handle");
+        if (retry.kind !== "reclaimed") return assert.fail("answer was not reclaimable");
+        assert.equal(journal.claim(message).kind, "duplicate", "only the retry owns the answer");
+        sm.answerRecoveredQuestion("s_perm", command.requestId, recoveryId, command.answers, {
+          commandId: retry.handle.commandId,
+          queued: () => { retry.handle.queued(); },
+          beginSteering: () => retry.handle.beginSteering(),
+          steeringRejected: () => { retry.handle.steeringRejected(); },
+          started: (seq) => { retry.handle.started(seq); },
+          completed: () => { retry.handle.completed(); },
+          failed: (error, code) => { retry.handle.failed(error, code); },
+          uncertain: (error) => { retry.handle.uncertain(error); },
+        });
+        assert.equal(entry.queue.length, 1);
+        assert.match(entry.queue[0].text, /Question: Which path\?\nAnswer: Patch/u);
+        entry.running = false;
+        (sm as any).emitStatus("s_perm", "idle");
+        (sm as any).scheduleDrain("s_perm");
+        for (let attempt = 0; attempt < 40 && retry.handle.state !== "completed"; attempt += 1) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+        assert.equal(retry.handle.state, "completed");
+        assert.equal(providerCalls, 0);
+        assert.equal(promptCalls, 1, "the identical answer is delivered exactly once");
+        const duplicate = journal.claim(message);
+        assert.equal(duplicate.kind, "duplicate");
+        if (duplicate.kind !== "duplicate") return assert.fail("completed answer was not deduplicated");
+        assert.equal(duplicate.receipt.state, "completed");
+        sm.reconcileStore();
+        assert.equal(store.readMeta("s_perm")?.pendingApproval, null, "retry must not resurrect the question");
+        assert.equal(entry.queue.length, 0);
+        return;
+      }
       assert.equal(entry.queue.length, 1, "the submitted answer must remain recoverable");
       assert.match(entry.queue[0].text, /Question: Which path\?\nAnswer: Patch/u);
       assert.equal(entry.reservedPromotions.size, 0);

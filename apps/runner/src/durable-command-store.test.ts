@@ -546,8 +546,8 @@ test("a truncated final receipt is never overwritten or retried as new", () => {
   }
 });
 
-for (const changed of ["owner", "revision", "delivery", "identity", "payload", "rollback"] as const) {
-  test(`a failed answer fence does not recover with ${changed} uncertainty`, (t) => {
+for (const published of [false, true]) for (const changed of ["owner", "revision", "delivery", "identity", "payload", "rollback"] as const) {
+  test(`a failed ${published ? "published" : "unpublished"} answer fence does not recover with ${changed} uncertainty`, (t) => {
     const root = mkdtempSync(join(tmpdir(), "wollipog-answer-fence-guard-"));
     let now = 1;
     try {
@@ -564,7 +564,7 @@ for (const changed of ["owner", "revision", "delivery", "identity", "payload", "
       let recordFile = "";
       t.mock.method(store as any, "writeAtomic", (file: string, record: any) => {
         if (record.state === "started" && record.steeringPending) {
-          const adjusted = { ...record };
+          const adjusted = { ...(published ? record : store.read("cmd_test")) };
           if (changed === "owner") adjusted.ownerId = "owner-b";
           if (changed === "revision") adjusted.revision += 1;
           if (changed === "delivery") adjusted.userEventSeq = 7;
@@ -581,7 +581,7 @@ for (const changed of ["owner", "revision", "delivery", "identity", "payload", "
       assert.throws(() => claim.handle.beginSteering(), /synthetic fence publication failure/u);
       assert.equal(readFileSync(recordFile, "utf8"), diskBeforeRecovery,
         "recovery must not overwrite uncertain state or another command/owner");
-      if (changed === "rollback") {
+      if (changed === "rollback" && published) {
         now = 20;
         const restarted = new DurableCommandStore(root, { ownerId: "owner-c", now: () => now, ownerStaleMs: 10 });
         const replay = restarted.claim(message(command));
