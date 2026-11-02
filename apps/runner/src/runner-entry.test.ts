@@ -3,6 +3,9 @@ import { test } from "node:test";
 import { resolveRunnerEntry } from "./runner-entry.js";
 
 test("runner entry resolves only the first SEA or Node application argument", () => {
+  assert.deepEqual(resolveRunnerEntry(["C:\\bin\\runner.exe", "C:\\bin\\runner.exe", "--managed-worktree-guard", "--protections", "C:\\state\\protections.json"]), {
+    mode: "--managed-worktree-guard", modeIndex: 2,
+  });
   assert.deepEqual(resolveRunnerEntry(["runner.exe", "runner.exe", "--state-doctor"]), {
     mode: "--state-doctor", modeIndex: 2,
   });

@@ -278,6 +278,15 @@ jobs:
           node apps/runner/scripts/verify-cli-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-pc-windows-msvc.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      # Reuse the exact Windows x64 SEA built by the CLI dispatch smoke above.
+      - name: Verify Windows Packaged Guard
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 1
+        shell: pwsh
+        run: |
+          node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-pc-windows-msvc.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify Native Windows Skill Filesystem Adapters
         if: matrix.os == 'windows-latest'
         run: node --import tsx --test apps/runner/src/windows-skill-junction.test.ts apps/runner/src/windows-skill-snapshots.test.ts apps/runner/src/wsl-skill-snapshots.test.ts apps/runner/src/wsl-skills.test.ts apps/runner/src/skill-snapshots.test.ts

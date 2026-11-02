@@ -602,9 +602,13 @@ test("CI validates production builds and caches the pinned Playwright browser", 
   );
   assert.match(
     ci,
-    /^      - name: Validate Runner Bundle\r?\n(?:        timeout-minutes: \d+\r?\n)?        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
-    "CI must exercise the runner esbuild bundle",
+    /^      - name: Validate Runner Bundle\r?\n        timeout-minutes: 5\r?\n        env:\r?\n          TARGET_TRIPLE: x86_64-unknown-linux-gnu\r?\n        run: \|\r?\n          pnpm --filter @wollipog\/runner build:binary\r?\n          node --import tsx apps\/runner\/scripts\/verify-managed-worktree-guard-binary\.mjs apps\/runner\/dist-bin\/wollipog-runner-x86_64-unknown-linux-gnu$/m,
+    "required CI must build the real runner SEA and exercise its guard without ignoring failures",
   );
+  const platform = readFileSync(resolve(process.cwd(), ".github/workflows/platform-isolation.yml"), "utf8");
+  assert.match(platform,
+    /- name: Verify Windows Release CLI Dispatch[\s\S]*?pnpm --filter @wollipog\/runner build:binary[\s\S]*?- name: Verify Windows Packaged Guard\r?\n        if: matrix\.os == 'windows-latest'\r?\n        timeout-minutes: 1\r?\n        shell: pwsh\r?\n        run: \|\r?\n          node --import tsx apps\/runner\/scripts\/verify-managed-worktree-guard-binary\.mjs apps\/runner\/dist-bin\/wollipog-runner-x86_64-pc-windows-msvc\.exe\r?\n          if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+    "Windows CI must exercise the built SEA and propagate native verifier failure");
   assert.match(
     ci,
     /^      - name: Resolve Playwright Version\r?\n        id: playwright-version\r?\n        run: \|\r?\n          playwright_version="\$\(pnpm exec playwright --version\)"\r?\n          echo "version=\$\{playwright_version#Version \}" >> "\$GITHUB_OUTPUT"$/m,
