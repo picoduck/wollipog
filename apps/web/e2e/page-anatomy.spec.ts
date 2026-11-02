@@ -316,6 +316,69 @@ test.describe("page header actions follow the width tiers", () => {
       expect(await menuItems(page)).toEqual(["Manage Groups…", "Import from Git…", "Import from Machine…"]);
     });
 
+    // §15.1: the trailing controls read Search, `+`, ⋯, to the eye and to Tab, and the `+` is drawn
+    // like Search: no accent fill or border, the dimmed icon colour, the same box (#2229).
+    for (const { path, title, search: searchName = "Search", primary, more } of [
+      // Sessions draws its own app bar (SessionsAppBar, #2211) with the same quiet +.
+      { path: "/inbox", title: "Sessions", search: "Search Sessions", primary: "New Session", more: true },
+      { path: "/automations", title: "Automations", primary: "New Automation", more: false },
+      { path: "/skills", title: "Agent Skills", primary: "New Skill", more: true },
+      { path: "/pods", title: "Pods", primary: "New Pod", more: false },
+      { path: "/connections", title: "Connections", primary: "Add Machine", more: false },
+    ] as const) {
+      test(`${title}'s quiet + sits between Search and ⋯`, async ({ page }) => {
+        await openDestination(page, path, title);
+        const actions = page.locator(".page-header .page-actions");
+        const names = await actions.locator(":scope > :visible").evaluateAll((elements) => elements.map((element) => {
+          const button = element.matches("button") ? element : element.querySelector("button")!;
+          return button.getAttribute("aria-label") ?? button.textContent;
+        }));
+        const expected = [searchName, primary, ...(more ? ["More Actions"] : [])];
+        expect(names).toEqual(expected);
+        const left = await actions.locator(":scope > :visible").evaluateAll((elements) =>
+          elements.map((element) => element.getBoundingClientRect().left));
+        expect(left).toEqual([...left].sort((a, b) => a - b));
+
+        const search = actions.getByRole("button", { name: searchName, exact: true });
+        const plus = actions.getByRole("button", { name: primary, exact: true });
+        await expect(plus).toHaveAttribute("title", primary);
+        await search.focus();
+        for (const name of expected.slice(1)) {
+          await page.keyboard.press("Tab");
+          await expect(actions.getByRole("button", { name, exact: true })).toBeFocused();
+        }
+        // At rest: neither button holds focus or the pointer.
+        await page.locator("#page-title").focus();
+
+        const look = (element: Element) => {
+          const style = getComputedStyle(element);
+          const box = element.getBoundingClientRect();
+          return {
+            background: style.backgroundColor,
+            border: style.borderTopWidth,
+            shadow: style.boxShadow,
+            color: style.color,
+            width: Math.round(box.width),
+            height: Math.round(box.height),
+          };
+        };
+        const plusLook = await plus.evaluate(look);
+        expect(plusLook).toEqual(await search.evaluate(look));
+        expect(plusLook.background).toBe("rgba(0, 0, 0, 0)");
+        expect(plusLook.border).toBe("0px");
+        expect(plusLook.color).toBe(await page.evaluate(() => {
+          const probe = document.createElement("span");
+          probe.style.color = "var(--text-dim)";
+          document.body.append(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color;
+        }));
+        // A 44px target on touch.
+        expect([plusLook.width, plusLook.height]).toEqual([44, 44]);
+      });
+    }
+
     test("Pods is a 44px plus named New Pod, and no destination shows its description", async ({ page }) => {
       await openDestination(page, "/pods", "Pods");
       const primary = page.locator(".page-header").getByRole("button", { name: "New Pod", exact: true });
