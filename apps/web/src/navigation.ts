@@ -315,6 +315,29 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
 }
 
 /**
+ * The width of the page container a route draws (§4.5): `.page.wide`, `.page.full`, or null for the
+ * default `.page`. A crashed route's notice is drawn in the same container, so the header's hairline
+ * does not jump when the route fails.
+ */
+export function viewPageWidth(view: View): "wide" | "full" | null {
+  switch (view.name) {
+    case "usage":
+      return "wide";
+    case "inbox":
+    case "board":
+    case "projects":
+    case "skills":
+    case "settings":
+      return "full";
+    // Machines is a master-detail; the other Connections tabs are list pages.
+    case "runners":
+      return (view.section ?? "machines") === "machines" ? "full" : null;
+    default:
+      return null;
+  }
+}
+
+/**
  * The view as the subject of a sentence ("Automations Couldn't Be Shown"). A destination reads as
  * its page title; one item of a kind reads as "This Session", since "Session Couldn't Be Shown"
  * names a type rather than the thing on screen.

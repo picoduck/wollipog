@@ -65,6 +65,31 @@ test.describe("at 1440×900 with a fine pointer", () => {
     await expect(list(page)).not.toContainText("All Skills");
   });
 
+  test("row text and group labels start at the filter's edge, counts trail, and groups have no gap", async ({ page }) => {
+    await open(page);
+    const geometry = await list(page).evaluate((pane) => {
+      const textLeft = (element: Node) => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return range.getBoundingClientRect().left;
+      };
+      const groups = [...pane.querySelectorAll(".skill-list-group")];
+      return {
+        filter: pane.querySelector(".skill-list-filter")!.getBoundingClientRect().left,
+        titles: [...pane.querySelectorAll(".skill-row .row-title")].map(textLeft),
+        labels: groups.map((group) => textLeft(group.querySelector(".skill-list-group-title")!.childNodes[0]!)),
+        counts: groups.map((group) => group.querySelector(".skill-list-group-count")!.getBoundingClientRect().right),
+        badges: [...pane.querySelectorAll(".skill-row-status")].map((badge) => badge.getBoundingClientRect().right),
+        gaps: groups.slice(1).map((group, index) =>
+          group.getBoundingClientRect().top - groups[index]!.getBoundingClientRect().bottom),
+      };
+    });
+    for (const left of [...geometry.titles, ...geometry.labels]) expect(left).toBeCloseTo(geometry.filter, 0);
+    expect(geometry.badges.length).toBeGreaterThan(0);
+    for (const right of geometry.counts) expect(right, "a count in line with the rows' badges").toBeCloseTo(geometry.badges[0]!, 0);
+    expect(geometry.gaps).toEqual(geometry.gaps.map(() => 0));
+  });
+
   test("a row's one badge is its status, only when the skill needs the user", async ({ page }) => {
     await open(page);
     const badges = (name: string) => row(page, name).locator(".status").allTextContents();
