@@ -808,7 +808,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      unarmed workflow decision with a reason (#3917), through
 //      POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw. Older control planes have
 //      no route, so current clients refuse by name rather than sending it.
-export const PROTOCOL_VERSION = 269;
+// 270: FIFO processing barriers pace runner replay independently of WebSocket liveness.
+export const PROTOCOL_VERSION = 270;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1060,6 +1061,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerProfiles: 225,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
+  runnerProcessingBarriers: 270,
   reviewSession: 226,
   /** v227 runner deletes an isolated session's own sequencer leftovers and recorded branches
    * (#3316); the session tools check the same floor against the connected control plane. */
@@ -10146,7 +10148,17 @@ export interface SessionNamingCustomModelResultMessage {
   code?: SessionNamingCustomModelErrorCode;
 }
 
+export interface RunnerProcessingBarrierMessage {
+  type: "runner_processing_barrier";
+  barrierId: number;
+}
+export interface RunnerProcessingAckMessage {
+  type: "runner_processing_ack";
+  barrierId: number;
+}
+
 export type RunnerToControlPlane =
+  | RunnerProcessingBarrierMessage
   | { type: "media_review_stop_acknowledged"; receipt: import("./media-active-stop.js").MediaActiveStopAcknowledgement }
   | { type: "media_review_never_dispatched"; receipt: import("./media-dispatch-fence.js").MediaNeverDispatchedFence;
       /** Outside the fence digest. `host_busy` alone lets the owner requeue a fresh identity. */
@@ -12199,6 +12211,7 @@ export interface GitActionResultMessage {
 }
 
 export type ControlPlaneToRunner =
+  | RunnerProcessingAckMessage
   | { type: "media_review_stop"; request: import("./media-active-stop.js").MediaActiveStopRequest }
   | { type: "media_review_dispatch"; dispatch: import("./paced-video-review-windows.js").MediaReviewDispatch }
   | { type: "media_review_readback"; identity: import("./media-active-stop.js").MediaActiveStopIdentity }

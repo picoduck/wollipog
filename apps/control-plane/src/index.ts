@@ -1333,6 +1333,17 @@ app.register(async (instance) => {
     }
 
     switch (msg.type) {
+      case "runner_processing_barrier": {
+        if (!runnerId || !runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "runnerProcessingBarriers") ||
+            !Number.isSafeInteger(msg.barrierId) || msg.barrierId < 1) {
+          socket.close(1008, "invalid runner processing barrier");
+          return;
+        }
+        // This handler is reached through the state FIFO, after preceding frame application and
+        // attention publication. Reading the barrier, or answering a ping, cannot acknowledge it.
+        send(socket, { type: "runner_processing_ack", barrierId: msg.barrierId });
+        break;
+      }
       case "register": {
         if (runnerId) {
           send(socket, { type: "register_rejected", reason: "socket is already registered" });
@@ -2033,6 +2044,7 @@ app.register(async (instance) => {
   };
 
   type Staging = Promise<StagedSessionEventPayload | null>;
+  let receivePressureStarted: number | undefined;
   const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
     try {
       // Frames stay in arrival order: a large event waits here for its durable payload, and the
@@ -2051,7 +2063,11 @@ app.register(async (instance) => {
     socket.terminate();
   }, undefined, flushRuntimeAttention, (paused) => {
     if (!setRunnerReceivePressure(socket, paused)) return;
-    app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
+    const now = performance.now();
+    const durationMs = paused || receivePressureStarted === undefined ? 0 : Math.round(now - receivePressureStarted);
+    receivePressureStarted = paused ? now : undefined;
+    app.log.warn({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused,
+      durationMs, queuedBytes: frameQueue.pressureStats.bytes, queuedFrames: frameQueue.pressureStats.frames },
       "runner receive flow control changed");
   }, {
     // A large event payload starts becoming durable off the event loop as soon as it is queued,

@@ -17,6 +17,7 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { MAX_RUNNER_CLIENT_MESSAGE_BYTES, MAX_RUNNER_CONNECTIONS_PER_IP } from "./runner-channel.js";
+import { ProcessingWindow } from "../../runner/src/processing-window.js";
 import { RunnerFrameQueue, setRunnerReceivePressure } from "./runner-frame-queue.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -355,6 +356,262 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   assert.equal(reconciliationCompleted, true);
   t.diagnostic(`Reconciliation cancellation observed: ${/runner_reconciliation_cancelled/.test(output)}`);
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
+});
+
+test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
+  const databasePath = join(temp, "control-plane.db");
+  const seed = ControlPlaneDb.open(databasePath);
+  // Only fixture construction skips fsync; the real server opens its own normally durable
+  // connection. Thousands of setup commits should not dominate concurrent suite I/O.
+  seed.raw().exec("PRAGMA synchronous=OFF");
+  const identity = seed.localIdentityContext();
+  const frame = JSON.parse(registerFrame(555));
+  const runnerId = frame.runner.runnerId as string;
+  seed.issueRunnerCredential({ credentialId: "rcred_reconcile_responsiveness_test", runnerId,
+    organizationId: identity.organizationId, ownerKind: "organization", ownerId: identity.organizationId,
+    label: "Synthetic", tokenHash: hashToken(runnerToken(555)), createdByUserId: identity.userId,
+    now: Date.now(), expiresAt: Date.now() + 120_000 });
+  seed.registerRunner(frame.runner, 1, PROTOCOL_VERSION);
+  const base = { runnerId, workspaceId: "ws", agentId: "claude", title: "Synthetic",
+    driver: "claude-code" as const, useWorktree: false, config: {}, now: 1 };
+  for (let i = 0; i < 10; i++) seed.createSession({ ...base, id: `campaign-${i}`,
+    orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
+  const snapshots: SessionSnapshot[] = [];
+  for (let i = 0; i < 2100; i++) {
+    const id = `child-${i}`;
+    seed.createSession({ ...base, id, parentSessionId: `campaign-${i % 10}` });
+    seed.updateSessionStatus(id, "completed", 2);
+    snapshots.push({ id, workspaceId: "ws", agentId: "claude", title: "Synthetic", status: "completed",
+      driver: "claude-code", useWorktree: false, worktreePath: null, config: {}, preview: null,
+      pendingApproval: null, tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1, updatedAt: 2 });
+  }
+  seed.createShell({ shellId: "burst-shell", sessionId: "child-1499", runnerId, name: "Synthetic Burst", createdAt: 1 });
+  seed.raw().exec("PRAGMA synchronous=FULL");
+  seed.close();
+  const preloadPath = join(temp, "bulk-probe.mjs");
+  writeFileSync(preloadPath, `
+import { createRequire } from 'node:module';
+import { skillVersionDigest } from ${JSON.stringify(new URL("../../../packages/protocol/src/skills-digest.ts", import.meta.url).href)};
+import { setTimeout as delay } from 'node:timers/promises';
+import { RunnerFrameQueue } from ${JSON.stringify(new URL("./runner-frame-queue.ts", import.meta.url).href)};
+const req = createRequire(${JSON.stringify(import.meta.url)});
+const ws = createRequire(req.resolve('@fastify/websocket'))('ws').WebSocket;
+const send = ws.prototype.send;
+ws.prototype.send = function(data, ...args) {
+  const result = Reflect.apply(send, this, [data, ...args]);
+  if (typeof data === 'string' && JSON.parse(data).type === 'registered') {
+    const files = [{path:'SKILL.md',content:['---','name: synthetic','description: Test','---','x'.repeat(65536)].join(String.fromCharCode(10)),encoding:'utf8'}];
+    Reflect.apply(send,this,[JSON.stringify({type:'skills_sync_manifest',runnerId:'runner-limits-555',syncId:'synthetic',skills:[{name:'synthetic',versionDigest:skillVersionDigest(files),targets:[]}]})]);
+    setTimeout(() => {
+      Reflect.apply(send,this,[JSON.stringify({type:'skills_sync_content',runnerId:'runner-limits-555',syncId:'synthetic',name:'synthetic',versionDigest:skillVersionDigest(files),files})]);
+      Reflect.apply(send,this,[JSON.stringify({type:'skills_sync_complete',runnerId:'runner-limits-555',syncId:'synthetic'})]);
+    }, 1000);
+    let i = 0;
+    const scopeTimer = setInterval(() => {
+      Reflect.apply(send,this,[JSON.stringify({type:'campaign_issue_scope',requestId:'synthetic-'+i,sessionId:'campaign-'+(i%10),operation:'synchronize',scope:{repository:'example/synthetic',issueNumbers:Array.from({length:100},(_,n)=>n+1),revision:1,authorizedByUserId:'synthetic',authorizedAt:1}})]);
+      if (++i === 60) clearInterval(scopeTimer);
+    }, 100);
+    this.once('close', () => clearInterval(scopeTimer));
+    console.error('BULK_SENT=' + this.bufferedAmount);
+  }
+  return result;
+};
+const enqueue = RunnerFrameQueue.prototype.enqueue;
+const wrapped = new WeakSet();
+RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
+  if (!wrapped.has(this)) {
+    const runs = Reflect.get(this,'runs');
+    const handle = runs.handle;
+    runs.handle = async function(messages) { if(messages[0]?.type==='session_runtime_updated') await delay(350); return Reflect.apply(handle,this,[messages]); };
+    const pressure = Reflect.get(this,'onPressure');
+    Reflect.set(this,'onPressure',(paused)=>{ console.error('BULK_PRESSURE='+JSON.stringify({paused,at:Date.now(),bytes:Reflect.get(this,'bytes')})); return pressure(paused); });
+    wrapped.add(this);
+  }
+  return Reflect.apply(enqueue,this,[message,bytes]);
+};
+`);
+  let output = "";
+  let reconciliationCompleted = false;
+  const trace = new ReconciliationDiagnostics();
+  const captureStdout = trace.capture();
+  const captureStderr = trace.capture();
+  const clientLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+  clientLoopDelay.enable();
+  t.after(() => clientLoopDelay.disable());
+  const child = spawn(process.execPath, ["--import", "tsx", "--import", preloadPath, "apps/control-plane/src/index.ts"], {
+    cwd: REPO_ROOT, env: { ...process.env, CONTROL_PLANE_HOST: "127.0.0.1",
+      CONTROL_PLANE_PORT: String(port), CONTROL_PLANE_DB: databasePath },
+    stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  child.stdout?.on("data", (chunk) => {
+    captureStdout(chunk);
+    output = (output + String(chunk)).slice(-128_000);
+    reconciliationCompleted ||= output.includes("runner_reconciliation_completed");
+  });
+  child.stderr?.on("data", (chunk) => { captureStderr(chunk); output = (output + String(chunk)).slice(-128_000); });
+  const sockets: StrictSocket[] = [];
+  let read: DatabaseSync | undefined;
+  t.after(async () => {
+    for (const socket of sockets) if (socket.readyState < 2) socket.close();
+    await stopChild(child);
+    read?.close();
+    rmSync(temp, { recursive: true, force: true });
+  });
+  const url = `http://127.0.0.1:${port}`;
+  await waitForHealth(url, child, () => output);
+  read = new DatabaseSync(databasePath, { readOnly: true });
+  let maxHealthMs = 0;
+  let maxPongMs = 0;
+  let maxHandshakeMs = 0;
+  let maxConvergenceMs = 0;
+  const failureContext = (pass: number, started: number) => JSON.stringify({
+    pass, elapsedMs: Math.round(performance.now() - started),
+    maxHandshakeMs: Math.round(maxHandshakeMs), maxHealthMs: Math.round(maxHealthMs), maxPongMs: Math.round(maxPongMs),
+    clientLoopDelayMs: Math.round(clientLoopDelay.max / 1_000_000), progress: JSON.parse(trace.summary()),
+  });
+  for (let pass = 1; pass < 2; pass++) {
+    clientLoopDelay.reset();
+    const socket = await openSocket(`ws://127.0.0.1:${port}/runner`);
+    sockets.push(socket);
+    let window: ProcessingWindow | undefined;
+    t.after(() => window?.close());
+    let downstreamScopeCount = 0;
+    let downstreamSkillBytes = 0;
+    let barrierSupported = false;
+    socket.on("message", (raw) => {
+      const message = JSON.parse(raw.toString());
+      if (message.type === "registered") barrierSupported = message.protocolVersion >= 270;
+      if (message.type === "runner_processing_ack") window?.acknowledge(message.barrierId);
+      if (message.type === "campaign_issue_scope") downstreamScopeCount++;
+      if (message.type === "skills_sync_content") downstreamSkillBytes += message.files[0].content.length;
+    });
+    // Behave like a real runner throughout the convergence wait, not just during probe samples.
+    const heartbeat = setInterval(() => {
+      if (socket.readyState === 1) socket.send(JSON.stringify({ type: "heartbeat" }));
+    }, 500);
+    t.after(() => clearInterval(heartbeat));
+    const registered = new Promise<void>((resolvePromise) => socket.on("message", (raw) => {
+      if (JSON.parse(raw.toString()).type === "registered") resolvePromise();
+    }));
+    socket.send(JSON.stringify({ ...frame, sessionSnapshots: pass === 2
+      ? [...snapshots, { ...snapshots[0]!, id: "new-credential-session" }] : snapshots }));
+    await registered;
+    let newBindings: Promise<boolean[]> | undefined;
+    if (pass === 2) {
+      newBindings = new Promise<boolean[]>((resolvePromise) => {
+        const answers: boolean[] = [];
+        const timer = setTimeout(() => resolvePromise([false]), 60_000);
+        socket.on("message", (raw) => {
+          const message = JSON.parse(raw.toString());
+          if (message.sessionId !== "new-credential-session" || ![
+            "agent_control_credential_registered", "policy_hook_credential_registered",
+          ].includes(message.type)) return;
+          answers.push(message.accepted);
+          if (answers.length === 2) { clearTimeout(timer); resolvePromise(answers); }
+        });
+      });
+      // Unlike existing-session handshakes, these bindings must wait for their first inventory
+      // row instead of rejecting a valid runner-held session that has not been materialized yet.
+      socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "new-credential-session", tokenHash: "b".repeat(64) }));
+      socket.send(JSON.stringify({ type: "policy_hook_credential", sessionId: "new-credential-session", tokenHash: "c".repeat(64) }));
+    }
+    const handshakeStarted = performance.now();
+    const credentialHandshake = new Promise<void>((resolvePromise, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Agent Control handshake stalled during inventory\n${failureContext(pass, handshakeStarted)}\n${output}`)), 2000);
+      socket.on("message", (raw) => {
+        const message = JSON.parse(raw.toString());
+        if (message.type !== "agent_control_credential_registered" || message.sessionId !== "child-1499") return;
+        clearTimeout(timer);
+        assert.equal(message.accepted, true);
+        resolvePromise();
+      });
+    });
+    socket.send(JSON.stringify({ type: "agent_control_credential", sessionId: "child-1499", tokenHash: "a".repeat(64) }));
+    await credentialHandshake;
+    maxHandshakeMs = Math.max(maxHandshakeMs, performance.now() - handshakeStarted);
+    assert.ok(maxHandshakeMs < 2000, `Agent Control handshake latency exceeded 2s\n${failureContext(pass, handshakeStarted)}`);
+    // The real runner republishes negotiated metadata for every retained session immediately
+    // after registration. Exercise that burst, not just one isolated live update.
+    const current = new Map<string, SessionSnapshot>(snapshots.map((snapshot) => [snapshot.id, { ...snapshot, preview: "x".repeat(15000) }]));
+    if (barrierSupported) {
+      window = new ProcessingWindow(snapshots.map((snapshot) => snapshot.id), (id) => {
+        const snapshot = current.get(id);
+        return snapshot ? JSON.stringify({ type: "session_runtime_updated", snapshot }) : null;
+      }, (wire) => socket.send(wire), () => socket.terminate(), (details) => t.diagnostic(JSON.stringify(details)));
+    } else {
+      for (const snapshot of current.values()) socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot }));
+    }
+    // Let the first window reach the wire. Child 0 is now in flight; child 1499 is still pending.
+    await delay(20);
+    const liveSnapshot = { ...snapshots[1499]!, title: `Live ${pass}`, updatedAt: 3 + pass };
+    const earlyLive = { ...snapshots[0]!, preview: "Live In Flight", updatedAt: 3 + pass };
+    current.set(liveSnapshot.id, liveSnapshot);
+    current.set(earlyLive.id, earlyLive);
+    const fingerprint = createHash("sha256").update(JSON.stringify(liveSnapshot)).digest("hex");
+    const earlyFingerprint = createHash("sha256").update(JSON.stringify(earlyLive)).digest("hex");
+    // Live traffic keeps the production immediate path; it never joins the republish producer.
+    socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: liveSnapshot }));
+    socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot: earlyLive }));
+    const probe = async () => {
+      const start = performance.now();
+      const answered: { HTTP?: number; pong?: number } = {};
+      const pong = new Promise<void>((resolvePromise, reject) => {
+        const timer = setTimeout(() => reject(new Error("pong exceeded 2s")), 2000);
+        socket.once("pong", () => {
+          clearTimeout(timer);
+          answered.pong = performance.now() - start;
+          maxPongMs = Math.max(maxPongMs, answered.pong);
+          resolvePromise();
+        });
+      });
+      socket.ping();
+      socket.send(JSON.stringify({ type: "heartbeat" }));
+      const http = fetch(`${url}/healthz`, { signal: AbortSignal.timeout(2000) })
+        .then((response) => { answered.HTTP = performance.now() - start; return response; });
+      // Name each starved path with its own latency; a shared failure hides which one stalled.
+      const [response] = await Promise.all([http, pong]).catch((error: unknown) => {
+        const elapsed = Math.round(performance.now() - start);
+        const paths = (["HTTP", "pong"] as const).map((path) => answered[path] === undefined
+          ? `${path} unanswered after ${elapsed}ms` : `${path} answered in ${Math.round(answered[path])}ms`);
+        const starved = (["HTTP", "pong"] as const).filter((path) => answered[path] === undefined).join(" and ");
+        throw new Error(`${starved} probe starved during inventory (${paths.join(", ")})\n${failureContext(pass, start)}\n${output}`,
+          { cause: error });
+      });
+      assert.equal(response.status, 200);
+      maxHealthMs = Math.max(maxHealthMs, performance.now() - start);
+    };
+    await delay(1000);
+    for (let sample = 0; sample < (pass === 0 ? 1 : 10); sample++) await probe();
+
+
+    // Pin application of the exact newer snapshot, not title projection: a CP-owned rename is
+    // intentionally preserved even when newer runner state is successfully applied. Allow slow
+    // file-backed test hosts to converge under full-suite fsync contention. Probe throughout the
+    // entire replay, not just its first few steps; HTTP/pong deadlines remain two seconds.
+    const convergenceStarted = performance.now();
+    const deadline = Date.now() + 60_000;
+    while (Date.now() < deadline) {
+      if ((!window || window.complete) && read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint === fingerprint) break;
+      await probe();
+      await delay(50);
+    }
+    assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
+      fingerprint, `newer snapshot did not converge\n${failureContext(pass, convergenceStarted)}\n${output}`);
+    maxConvergenceMs = Math.max(maxConvergenceMs, performance.now() - convergenceStarted);
+    if (newBindings) assert.deepEqual(await newBindings, [true, true], "new session bindings wait for materialization rather than being rejected");
+    assert.equal(window?.complete, true, "all windows must be processed before checking newer live state");
+    assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-0'").get()?.runner_snapshot_fingerprint,
+      earlyFingerprint, "the live update following an in-flight republish must win");
+    assert.equal(downstreamScopeCount, 60);
+    assert.ok(downstreamSkillBytes >= 65536);
+    assert.doesNotMatch(output, /BULK_PRESSURE=.*"paused":true/, "compatible replay must not pause receive");
+    assert.ok(maxHealthMs < 2000);
+    assert.ok(maxPongMs < 2000);
+    assert.equal(reconciliationCompleted, true);
+    t.diagnostic(`2100 children: HTTP ${Math.round(maxHealthMs)}ms, pong ${Math.round(maxPongMs)}ms, convergence ${Math.round(maxConvergenceMs)}ms, receive pause 0ms`);
+  }
 });
 
 test("a receive-paused runner stays online while authenticated replay advances, then expires when idle", { timeout: 60_000 }, async (t) => {

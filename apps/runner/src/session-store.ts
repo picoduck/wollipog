@@ -3747,37 +3747,44 @@ export class SessionStore {
   ): SessionSnapshot[] {
     const snapshots: SessionSnapshot[] = [];
     for (const listed of this.listSessions()) {
-      if (this.isDeleted(listed.sessionId)) continue;
-      // A reset intent may be published after listSessions read this metadata. Recovery is the
-      // commit point, so run it again and re-read the bumped epoch/cleared seq before registering.
-      this.recoverHistoryReset(listed.sessionId);
-      const meta = this.readMeta(listed.sessionId);
-      if (!meta) continue;
-      // A crash may lose the debounced metadata flush after events.ndjson was already appended.
-      // Registration must advertise the authoritative durable tail or the CP can incorrectly mark
-      // a stale cache complete and never open a page chain for those recovered events.
-      let durableSeq = meta.seq;
-      try {
-        durableSeq = this.historyTail(meta.sessionId).seq;
-        if (!exactEventSeq) {
-          durableSeq = this.projectedEventSeq(meta.sessionId, durableSeq, controlPlaneProtocolVersion);
-        }
-      } catch {
-        // An exact peer can safely retain the metadata high-water. A projected peer cannot: that
-        // number belongs to the local sequence space and may exceed every dense cursor it can page.
-        // Zero is a conservative same-generation tail; a later page attempt still fails closed.
-        if (!exactEventSeq && this.eventProjectionRequired(controlPlaneProtocolVersion)) durableSeq = 0;
-      }
-      const snapshot = metaToSnapshot(meta, controlPlaneProtocolVersion);
-      snapshots.push({
-        ...snapshot,
-        seq: durableSeq,
-        ...(!exactEventSeq && snapshot.historyEpoch !== undefined
-          ? { historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }
-          : {}),
-      });
+      const snapshot = this.sessionSnapshot(listed.sessionId, controlPlaneProtocolVersion, exactEventSeq);
+      if (snapshot) snapshots.push(snapshot);
     }
     return snapshots;
+  }
+
+  /** Read one current negotiated snapshot when a reconnect window is ready to write it. */
+  sessionSnapshot(id: string, controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
+    exactEventSeq = false): SessionSnapshot | null {
+    if (this.isDeleted(id)) return null;
+    // A reset intent may be published after listSessions read this metadata. Recovery is the
+    // commit point, so run it again and re-read the bumped epoch/cleared seq before registering.
+    this.recoverHistoryReset(id);
+    const meta = this.readMeta(id);
+    if (!meta) return null;
+    // A crash may lose the debounced metadata flush after events.ndjson was already appended.
+    // Registration must advertise the authoritative durable tail or the CP can incorrectly mark
+    // a stale cache complete and never open a page chain for those recovered events.
+    let durableSeq = meta.seq;
+    try {
+      durableSeq = this.historyTail(meta.sessionId).seq;
+      if (!exactEventSeq) {
+        durableSeq = this.projectedEventSeq(meta.sessionId, durableSeq, controlPlaneProtocolVersion);
+      }
+    } catch {
+      // An exact peer can safely retain the metadata high-water. A projected peer cannot: that
+      // number belongs to the local sequence space and may exceed every dense cursor it can page.
+      // Zero is a conservative same-generation tail; a later page attempt still fails closed.
+      if (!exactEventSeq && this.eventProjectionRequired(controlPlaneProtocolVersion)) durableSeq = 0;
+    }
+    const snapshot = metaToSnapshot(meta, controlPlaneProtocolVersion);
+    return {
+      ...snapshot,
+      seq: durableSeq,
+      ...(!exactEventSeq && snapshot.historyEpoch !== undefined
+        ? { historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }
+        : {}),
+    };
   }
 
   remove(id: string): void {

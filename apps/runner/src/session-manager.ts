@@ -5695,6 +5695,20 @@ export class SessionManager {
     }
   }
 
+  republishSessionIds(): string[] {
+    return this.store.listSessions().map((meta) => meta.sessionId);
+  }
+
+  republishSessionSnapshot(id: string) {
+    const protocolVersion = this.controlPlaneProtocolVersion();
+    const snapshot = this.store.sessionSnapshot(id, protocolVersion, true);
+    if (!snapshot) return null;
+    const projected = this.overlayQueueHold(this.overlayRuntimeSteering(
+      this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion), protocolVersion), protocolVersion);
+    const meta = runnerSupportsProtocol(protocolVersion, "backgroundFollowUp") ? this.store.readMeta(id) : null;
+    return meta ? { ...projected, backgroundFollowUp: this.backgroundFollowUp(meta) } : projected;
+  }
+
   /** Pre-negotiation register metadata. History is published only after the peer version is known. */
   registrationSessionSnapshots() {
     return this.store.registrationSnapshots().map((snapshot) =>
