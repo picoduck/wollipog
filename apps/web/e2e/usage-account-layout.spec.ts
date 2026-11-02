@@ -11,9 +11,23 @@ const codexAccount = (page: Page) =>
 test("account labels and controls stay inside their surface at every width (#3014)", async ({ page }) => {
   const longLabel = "a-very-long-account-label-without-natural-breaks@example.com";
 
-  for (const width of [320, 390, 600, 701, 875, 1280]) {
+  for (const width of [320, 390, 560, 600, 640, 701, 875, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
+
+    // A window's badge sits with its name and never runs into the meter or out of its row, just
+    // above the stacking breakpoint included (a badge does not shrink).
+    await expect(page.locator(".subscription-window .status").first()).toBeVisible();
+    const collisions = await page.evaluate(() => [...document.querySelectorAll(".subscription-window")].flatMap((row) => {
+      const badge = row.querySelector(".status")?.getBoundingClientRect();
+      if (!badge) return [];
+      const rowBox = row.getBoundingClientRect();
+      const meter = row.querySelector(".meter")?.getBoundingClientRect();
+      const overlapsMeter = meter !== undefined && badge.right > meter.left && badge.left < meter.right &&
+        badge.bottom > meter.top && badge.top < meter.bottom;
+      return overlapsMeter || badge.right > rowBox.right ? [row.textContent] : [];
+    }));
+    expect(collisions, `badges collide at ${width}px`).toEqual([]);
 
     const surface = codexAccount(page);
     const account = surface.locator(".subscription-plan-account");

@@ -22,8 +22,10 @@ export function usageLeftPercent(bucket: SubscriptionUsageBucket): number | unde
  * read it, so one window never reads differently in the two places.
  */
 export function usageWindowAttention(bucket: SubscriptionUsageBucket): "exhausted" | "approaching_limit" | null {
+  // Exhaustion reads the unrounded share: 0.4% left still has headroom, though it shows "0% left".
+  const raw = bucket.remainingPercent ?? (bucket.usedPercent === undefined ? undefined : 100 - bucket.usedPercent);
+  if (bucket.status === "exhausted" || (raw !== undefined && raw <= 0)) return "exhausted";
   const left = usageLeftPercent(bucket);
-  if (bucket.status === "exhausted" || left === 0) return "exhausted";
   if (bucket.status === "warning" || (left !== undefined && left < ACCOUNT_USAGE_WARNING_PERCENT)) return "approaching_limit";
   return null;
 }

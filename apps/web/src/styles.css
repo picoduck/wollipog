@@ -17468,9 +17468,10 @@ button.review-finding-location {
 }
 .subscription-window-name {
   display: flex;
+  flex-wrap: wrap;
   grid-column: 1;
   align-items: center;
-  gap: var(--space-2);
+  gap: var(--space-1) var(--space-2);
   min-width: 0;
 }
 .subscription-window-label {
@@ -17502,8 +17503,9 @@ button.review-finding-location {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* A narrow surface puts the name on its own line and the meter, figure and reset under it. */
-@container (max-width: 520px) {
+/* A narrow surface puts the name on its own line and the meter, figure and reset under it. Below
+   600px the fixed columns would leave the name and its badge too little room. */
+@container (max-width: 600px) {
   .subscription-window {
     grid-template-columns: minmax(0, 1fr) auto auto;
   }

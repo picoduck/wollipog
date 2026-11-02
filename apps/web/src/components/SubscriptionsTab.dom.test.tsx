@@ -176,6 +176,8 @@ test("the same windows read the same percentages and tones here and in Switch Ac
     ...THREE_WINDOWS,
     window_("warned", "Provider Warned", 60, { status: "warning" }),
     window_("edge", "Edge", 24.6),
+    // Headroom that rounds to "0% left" is still headroom: Exhausted needs nothing left.
+    window_("sliver", "Sliver", 0.4),
   ];
   const view = await renderTab({ subscriptionUsage: async () => response([source({ buckets })]) });
   const meters = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -193,19 +195,20 @@ test("the same windows read the same percentages and tones here and in Switch Ac
       ["0", "meter t-danger"],
       ["60", "meter t-warning"],
       ["25", "meter"],
+      ["0", "meter t-warning"],
     ]);
     // The figures beside them agree with the meters.
     assert.deepEqual(
       [...view.panel()!.querySelectorAll(".subscription-window-left")].map((node) => node.textContent),
-      ["58% left", "20% left", "0% left", "60% left", "25% left"],
+      ["58% left", "20% left", "0% left", "60% left", "25% left", "0% left"],
     );
     assert.deepEqual(
       [...meters.querySelectorAll(".account-usage-text")].map((node) => node.textContent?.replace(/^.* · /, "")),
-      ["58% left", "20% left", "0% left", "60% left", "25% left"],
+      ["58% left", "20% left", "0% left", "60% left", "25% left", "0% left"],
     );
     assert.deepEqual(
       [...view.panel()!.querySelectorAll(".subscription-window")].map((row) => row.querySelector(".status")?.textContent ?? null),
-      [null, "Approaching Limit", "Exhausted", "Approaching Limit", null],
+      [null, "Approaching Limit", "Exhausted", "Approaching Limit", null, "Approaching Limit"],
     );
   } finally {
     await act(async () => metersRoot.unmount());
